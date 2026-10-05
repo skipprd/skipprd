@@ -172,7 +172,6 @@ pub struct DataSinkClickhousePluginConfig {
     #[skippr(secret)]
     pub password: Option<String>,
     pub table: Option<String>,
-    pub format: Option<String>,
 }
 
 impl TryFrom<DataSinkPluginConfig> for DataSinkClickhousePluginConfig {

@@ -1560,6 +1560,12 @@ fn runtime_execution_context(
             order_fields,
             time_partition_granularity,
             time_partition_prefix,
+            format: match config.get_pipeline_output_plugin_config() {
+                Ok(entry) => entry
+                    .resolved_output_format()
+                    .expect("output format was already validated"),
+                Err(_) => None,
+            },
         },
         inject_fields,
     }
@@ -4277,7 +4283,10 @@ mod tests {
         .await
         .unwrap();
         let err = accept.await.unwrap().unwrap_err();
-        assert!(err.to_string().contains("host=19 child=16"));
+        assert!(err.to_string().contains(&format!(
+            "host={} child=16",
+            crate::runtime_plugins::protocol::RUNTIME_PROTOCOL_VERSION
+        )));
     }
 
     #[test]

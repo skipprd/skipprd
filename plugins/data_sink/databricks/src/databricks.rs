@@ -42,7 +42,6 @@ pub struct DataSinkDatabricksPluginConfig {
     pub catalog: Option<String>,
     pub schema: Option<String>,
     pub table: Option<String>,
-    pub format: Option<String>,
     pub delta_table_uri: Option<String>,
     #[serde(default)]
     pub storage_options: Option<HashMap<String, String>>,

@@ -6,6 +6,7 @@ publish = false
 description = "Backend-agnostic bounded streaming object writer for Skippr sinks"
 
 [dependencies]
+arrow = { version = "58.3.0", default-features = false, features = ["json"] }
 arrow-array.workspace = true
 arrow-schema.workspace = true
 async-trait.workspace = true

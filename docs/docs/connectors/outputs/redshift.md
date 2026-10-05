@@ -46,7 +46,6 @@ data_sinks:
 | `staging_s3_bucket` | | S3 bucket for COPY staging |
 | `staging_s3_prefix` | `skippr-staging` | S3 prefix for staged files |
 | `iam_role_arn` | | IAM role for Redshift COPY |
-| `format` | `parquet` | Data format |
 
 ## Authentication
 

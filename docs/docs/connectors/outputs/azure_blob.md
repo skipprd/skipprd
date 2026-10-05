@@ -1,11 +1,11 @@
 # Azure Blob Storage Output
 
-Writes Parquet files to Azure Blob Storage.
+Writes Parquet or JSON Lines objects to Azure Blob Storage.
 
 ## How it works
 
-1. Serializes record batches to Parquet.
-2. Uploads to the configured container with optional prefix, namespace, and time partitioning.
+1. Serializes record batches as Parquet (default) or JSON Lines.
+2. Uploads to the configured container with optional prefix, namespace, Hive partitions, and time partitioning.
 
 ## Configuration
 
@@ -28,7 +28,7 @@ data_sinks:
 | `sas_token` | | SAS token |
 | `container` | *(required)* | Blob container name |
 | `prefix` | | Key prefix for uploaded objects |
-| `format` | `parquet` | Output format |
+| `format` | `parquet` | `parquet` or `jsonl` |
 
 ## Authentication
 

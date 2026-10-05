@@ -14,8 +14,7 @@ use skippr_object_writer::{
 };
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
-use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
-use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::serdes::output_format::OutputFormat;
 use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, manifest_object_name, persisted_object_write_matches,
     GroupedWriteReceipt, ObjectWriteManifest,
@@ -268,36 +267,17 @@ impl DataSinkAzureBlobPlugin {
     }
 
     fn object_key_for_filename(&self, filename: &str, object_stem: &str) -> String {
-        let namespace = BufferChunker::decode_file_namespace(filename);
-        let prefix = self
-            .config
-            .prefix
-            .as_deref()
-            .unwrap_or("")
-            .trim_matches('/');
-
-        let mut full_key = if namespace.is_empty() {
-            prefix.to_string()
-        } else if prefix.is_empty() {
-            namespace
-        } else {
-            format!("{}/{}", prefix, namespace)
-        };
-
-        let partition_path = BufferChunker::decode_file_partition(filename);
-        if !partition_path.is_empty() {
-            full_key = format!("{}/{}", full_key, partition_path);
-        }
-
-        let filename_owned = filename.to_string();
-        if let Ok(k) = TimePartitioner::new(&filename_owned).process_from_layout(
-            self.output_layout.time_partition_granularity.as_deref(),
-            self.output_layout.time_partition_prefix.as_deref(),
-        ) {
-            full_key = format!("{}/{}", full_key, k);
-        }
-
-        format!("{}/{}.parquet", full_key, object_stem)
+        self.output_layout
+            .hive_object_key(
+                self.config
+                    .prefix
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim_matches('/'),
+                filename,
+                object_stem,
+            )
+            .expect("object sink requires RuntimeOutputLayout.format")
     }
 
     fn legacy_chunk_manifest(
@@ -428,17 +408,31 @@ impl DataSinkAzureBlobPlugin {
             skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&batch, &order_fields)
                 .map_err(ObjectWriteError::input)
         });
+        let format = self
+            .output_layout
+            .required_format()
+            .map_err(io::Error::other)?;
         let session = ObjectWriteSession::new(
             self.object_backend.clone(),
-            ObjectWriteRequest::new(final_key),
+            ObjectWriteRequest::new(final_key).with_content_type(format.content_type()),
             ObjectWriterConfig::default(),
         )
         .map_err(|error| io::Error::other(error.to_string()))?;
 
         counters::inc_uploads_in_flight();
-        let result = session
-            .write_parquet(schema, writer_properties, batches)
-            .await;
+        let result = match format {
+            OutputFormat::Parquet => {
+                session
+                    .write_parquet(schema, writer_properties, batches)
+                    .await
+            }
+            OutputFormat::Jsonl => session.write_jsonl(batches).await,
+            OutputFormat::Native => {
+                return Err(io::Error::other(
+                    OutputFormat::FILE_SINK_NEEDS_PARQUET_OR_JSONL,
+                ));
+            }
+        };
         counters::dec_uploads_in_flight();
         let receipt = result.map_err(|error| io::Error::other(error.to_string()))?;
         counters::add_parquet_rows(receipt.rows);
@@ -510,11 +504,55 @@ mod tests {
                 prefix: Some("/root/".to_string()),
                 format: None,
             },
+            output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                format: Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Parquet),
+                ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+            },
         };
 
         assert_eq!(
             plugin.object_key_for_filename("namespace=events", "apply-0001"),
             "root/events/apply-0001.parquet"
+        );
+    }
+
+    #[test]
+    fn hive_object_key_keeps_namespace_partition_and_time() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let plugin = DataSinkAzureBlobPlugin {
+            store: store.clone(),
+            object_backend: Arc::new(ObjectStoreBackend::new(store)),
+            config: DataSinkAzureBlobPluginConfig {
+                account_name: "account".to_string(),
+                account_key: None,
+                sas_token: None,
+                container: "container".to_string(),
+                prefix: Some("/root/".to_string()),
+                format: None,
+            },
+            output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                format: Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Parquet),
+                time_partition_granularity: Some("day".into()),
+                time_partition_prefix: Some("p_".into()),
+                ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+            },
+        };
+        assert_eq!(
+            plugin.object_key_for_filename(
+                "buffer=test&namespace=events&partition=p_rmc=EU1&time=1645296045",
+                "apply-0001",
+            ),
+            "root/events/p_rmc=EU1/p_year=2022/p_month=2/p_day=19/apply-0001.parquet"
+        );
+        let mut jsonl = plugin;
+        jsonl.output_layout.format =
+            Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Jsonl);
+        assert_eq!(
+            jsonl.object_key_for_filename(
+                "buffer=test&namespace=events&partition=region%252Dus&time=1645296045",
+                "apply-0001",
+            ),
+            "root/events/region/us/p_year=2022/p_month=2/p_day=19/apply-0001.jsonl"
         );
     }
 }

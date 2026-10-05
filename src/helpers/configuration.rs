@@ -1598,6 +1598,16 @@ impl Config {
 
         violations.extend(self.skippr_lake_namespace_violations());
         violations.extend(self.duckdb_namespace_violations());
+        if let Ok(entry) = self.get_pipeline_output_plugin_config() {
+            if let Err(err) = entry.resolved_output_format() {
+                violations.push(err);
+            }
+        }
+        if let Ok(Some(entry)) = self.get_pipeline_deadletter_plugin_config() {
+            if let Err(err) = entry.resolved_output_format() {
+                violations.push(err);
+            }
+        }
 
         Self::validate_env_u64(self, "SYNC_FREQUENCY", &mut violations);
         Self::validate_env_u64(self, "BUFFER_THRESHOLD_BYTES", &mut violations);

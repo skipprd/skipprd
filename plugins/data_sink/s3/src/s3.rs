@@ -1,7 +1,6 @@
 use crate::helpers::configuration::DataSinkPluginConfig;
 use async_trait::async_trait;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
-use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client as S3Client;
@@ -14,7 +13,7 @@ use skippr_object_writer::{
 };
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
-use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
+use skippr_runtime_sdk::serdes::output_format::OutputFormat;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, persisted_object_write_matches, sidecar_manifest_object_key,
@@ -74,7 +73,7 @@ impl ObjectWriteBackend for S3ObjectBackend {
             }))
             .send()
             .await
-            .map_err(|error| io::Error::other(format!("Failed to begin S3 upload: {error}")))?;
+            .map_err(|error| io::Error::other(format!("Failed to begin S3 upload: {error:?}")))?;
         let upload_id = response
             .upload_id()
             .ok_or_else(|| io::Error::other("S3 multipart upload returned no upload id"))?
@@ -111,7 +110,7 @@ impl ObjectWriteBackend for S3ObjectBackend {
             .body(ByteStream::from(bytes))
             .send()
             .await
-            .map_err(|error| io::Error::other(format!("Failed to upload S3 part: {error}")))?;
+            .map_err(|error| io::Error::other(format!("Failed to upload S3 part: {error:?}")))?;
         Ok(PartMetadata {
             etag: response.e_tag().map(str::to_string),
             checksum: response.checksum_sha256().map(str::to_string),
@@ -152,7 +151,9 @@ impl ObjectWriteBackend for S3ObjectBackend {
             )
             .send()
             .await
-            .map_err(|error| io::Error::other(format!("Failed to complete S3 upload: {error}")))?;
+            .map_err(|error| {
+                io::Error::other(format!("Failed to complete S3 upload: {error:?}"))
+            })?;
         Ok(CompletionMetadata {
             etag: response.e_tag().map(str::to_string),
             checksum: response.checksum_sha256().map(str::to_string),
@@ -413,31 +414,13 @@ impl DataSinkS3Plugin {
     }
 
     fn object_key_for_filename(&self, filename: &str, object_stem: &str) -> String {
-        let namespace = BufferChunker::decode_file_namespace(filename);
-        let trimmed_key = self.config.s3_prefix.trim_matches('/').to_string();
-
-        let mut full_key = if namespace.is_empty() {
-            trimmed_key
-        } else if trimmed_key.is_empty() {
-            namespace
-        } else {
-            format!("{}/{}", trimmed_key, namespace)
-        };
-
-        let partition_path = BufferChunker::decode_file_partition(filename);
-        if !partition_path.is_empty() {
-            full_key = format!("{}/{}", full_key, partition_path);
-        }
-
-        let filename_owned = filename.to_string();
-        if let Ok(k) = TimePartitioner::new(&filename_owned).process_from_layout(
-            self.output_layout.time_partition_granularity.as_deref(),
-            self.output_layout.time_partition_prefix.as_deref(),
-        ) {
-            full_key = format!("{}/{}", full_key, k);
-        }
-
-        format!("{}/{}.parquet", full_key, object_stem)
+        self.output_layout
+            .hive_object_key(
+                self.config.s3_prefix.trim_matches('/'),
+                filename,
+                object_stem,
+            )
+            .expect("object sink requires RuntimeOutputLayout.format")
     }
 
     fn legacy_chunk_manifest(
@@ -478,8 +461,8 @@ impl DataSinkS3Plugin {
             .await
         {
             Ok(_) => Ok(true),
-            Err(error) if is_s3_not_found_error_text(&error.to_string()) => Ok(false),
-            Err(error) => Err(io::Error::other(error.to_string())),
+            Err(error) if is_s3_sdk_not_found(&error) => Ok(false),
+            Err(error) => Err(io::Error::other(format!("{error:?}"))),
         }
     }
 
@@ -513,7 +496,7 @@ impl DataSinkS3Plugin {
                     .key(&final_key)
                     .send()
                     .await
-                    .map_err(|error| io::Error::other(error.to_string()))?;
+                    .map_err(|error| io::Error::other(format!("{error:?}")))?;
                 (
                     u64::try_from(head.content_length().unwrap_or_default()).unwrap_or_default(),
                     1,
@@ -595,17 +578,31 @@ impl DataSinkS3Plugin {
             skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&batch, &order_fields)
                 .map_err(ObjectWriteError::input)
         });
+        let format = self
+            .output_layout
+            .required_format()
+            .map_err(io::Error::other)?;
         let session = ObjectWriteSession::new(
             self.object_backend.clone(),
-            ObjectWriteRequest::new(final_key),
+            ObjectWriteRequest::new(final_key).with_content_type(format.content_type()),
             ObjectWriterConfig::default(),
         )
         .map_err(|error| io::Error::other(error.to_string()))?;
 
         counters::inc_uploads_in_flight();
-        let result = session
-            .write_parquet(schema, writer_properties, batches)
-            .await;
+        let result = match format {
+            OutputFormat::Parquet => {
+                session
+                    .write_parquet(schema, writer_properties, batches)
+                    .await
+            }
+            OutputFormat::Jsonl => session.write_jsonl(batches).await,
+            OutputFormat::Native => {
+                return Err(io::Error::other(
+                    OutputFormat::FILE_SINK_NEEDS_PARQUET_OR_JSONL,
+                ));
+            }
+        };
         counters::dec_uploads_in_flight();
         let receipt = result.map_err(|error| io::Error::other(error.to_string()))?;
         counters::add_parquet_rows(receipt.rows);
@@ -629,12 +626,12 @@ impl DataSinkS3Plugin {
         {
             Ok(response) => response,
             Err(err) => {
-                if is_s3_get_object_not_found_error(&err) {
+                if is_s3_sdk_not_found(&err) {
                     return Ok(false);
                 }
                 return Err(io::Error::other(format!(
-                    "Failed to read S3 idempotency manifest {}: {}",
-                    manifest_key, err
+                    "Failed to read S3 idempotency manifest {}: {err:?}",
+                    manifest_key
                 )));
             }
         };
@@ -682,25 +679,29 @@ impl DataSinkS3Plugin {
     }
 }
 
-fn is_s3_get_object_not_found_error(err: &SdkError<GetObjectError>) -> bool {
-    if err
-        .raw_response()
-        .is_some_and(|response| response.status().as_u16() == 404)
-    {
-        return true;
-    }
-    if let Some(service_error) = err.as_service_error() {
-        if is_s3_not_found_code(service_error.code()) {
-            return true;
-        }
-        if service_error
-            .message()
-            .is_some_and(is_s3_not_found_error_text)
-        {
-            return true;
-        }
-    }
-    is_s3_not_found_error_text(&err.to_string())
+fn is_s3_sdk_not_found<E>(err: &SdkError<E>) -> bool
+where
+    E: ProvideErrorMetadata + std::fmt::Display,
+{
+    is_s3_missing_object(
+        err.raw_response()
+            .map(|response| response.status().as_u16()),
+        err.as_service_error().and_then(|error| error.code()),
+        err.as_service_error().and_then(|error| error.message()),
+        &err.to_string(),
+    )
+}
+
+fn is_s3_missing_object(
+    status: Option<u16>,
+    code: Option<&str>,
+    message: Option<&str>,
+    display: &str,
+) -> bool {
+    status == Some(404)
+        || is_s3_not_found_code(code)
+        || message.is_some_and(is_s3_not_found_error_text)
+        || is_s3_not_found_error_text(display)
 }
 
 fn is_s3_not_found_code(code: Option<&str>) -> bool {
@@ -722,6 +723,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn minio_head_404_is_missing_even_when_display_is_service_error() {
+        assert!(is_s3_missing_object(Some(404), None, None, "service error"));
+        assert!(is_s3_missing_object(
+            None,
+            Some("NotFound"),
+            None,
+            "service error"
+        ));
+        assert!(!is_s3_missing_object(None, None, None, "service error"));
+    }
+
+    #[test]
     fn deterministic_object_path_is_unchanged() {
         let client = S3Client::from_conf(
             aws_sdk_s3::config::Builder::new()
@@ -741,11 +754,51 @@ mod tests {
                 bucket: config.s3_bucket.clone(),
             }),
             config,
+            output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                format: Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Parquet),
+                ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+            },
         };
 
         assert_eq!(
             plugin.object_key_for_filename("namespace=events", "apply-0001"),
             "root/events/apply-0001.parquet"
+        );
+    }
+
+    #[test]
+    fn hive_object_key_keeps_namespace_partition_and_time() {
+        let client = S3Client::from_conf(
+            aws_sdk_s3::config::Builder::new()
+                .behavior_version(aws_config::BehaviorVersion::latest())
+                .build(),
+        );
+        let config = DataSinkS3PluginConfig {
+            format: None,
+            endpoint_url: None,
+            s3_bucket: "bucket".to_string(),
+            s3_prefix: "/root/".to_string(),
+        };
+        let plugin = DataSinkS3Plugin {
+            s3_client: client.clone(),
+            object_backend: Arc::new(S3ObjectBackend {
+                client,
+                bucket: config.s3_bucket.clone(),
+            }),
+            config,
+            output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                format: Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Parquet),
+                time_partition_granularity: Some("day".into()),
+                time_partition_prefix: Some("p_".into()),
+                ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+            },
+        };
+        assert_eq!(
+            plugin.object_key_for_filename(
+                "buffer=test&namespace=events&partition=p_rmc=EU1&time=1645296045",
+                "apply-0001",
+            ),
+            "root/events/p_rmc=EU1/p_year=2022/p_month=2/p_day=19/apply-0001.parquet"
         );
     }
 }

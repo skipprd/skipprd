@@ -25,7 +25,6 @@ pub struct DataSinkBigqueryPluginConfig {
     pub location: Option<String>,
     #[skippr(secret_path)]
     pub credentials_path: Option<String>,
-    pub format: Option<String>,
     /// Query/model only; ignored at ingest.
     #[serde(default)]
     #[allow(dead_code)]

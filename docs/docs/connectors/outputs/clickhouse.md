@@ -31,7 +31,6 @@ data_sinks:
 | `user` | | Username |
 | `password` | | Password |
 | `table` | (from namespace) | Target table name |
-| `format` | `json` | Data format |
 
 ## Authentication
 

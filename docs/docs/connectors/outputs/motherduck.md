@@ -30,7 +30,6 @@ data_sinks:
 | `motherduck_token` | *(required)* | MotherDuck auth token |
 | `database` | | MotherDuck database name |
 | `table` | (from namespace) | Target table name |
-| `format` | `json` | Data format |
 
 ## Authentication
 

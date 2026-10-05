@@ -102,7 +102,7 @@ Writes batches to PostgreSQL with automatic schema and table creation.
 | `POSTGRES_SCHEMA` | `public` | Target schema |
 | `POSTGRES_SSLMODE` | | SSL mode (e.g. `disable`, `require`, `prefer`) |
 
-YAML equivalents: `host`, `port`, `user`, `password`, `database`, `schema`, `sslmode`, `format`. See the [Postgres connector docs](../connectors/outputs/postgres.md) for full details.
+YAML equivalents: `host`, `port`, `user`, `password`, `database`, `schema`, `sslmode`. See the [Postgres connector docs](../connectors/outputs/postgres.md) for full details.
 
 ## Stdout output
 

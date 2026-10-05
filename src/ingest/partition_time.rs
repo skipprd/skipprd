@@ -176,6 +176,47 @@ impl TimePartitioner {
     }
 }
 
+/// Hive-style object key: `{prefix}/{namespace}/{p_field=...}/{p_year=...}/{stem}.{ext}`.
+pub fn hive_object_relative_path(
+    prefix: &str,
+    filename: &str,
+    object_stem: &str,
+    extension: &str,
+    time_partition_granularity: Option<&str>,
+    time_partition_prefix: Option<&str>,
+) -> String {
+    let namespace = BufferChunker::decode_file_namespace(filename);
+    let prefix = prefix.trim_matches('/');
+    let mut parts = Vec::new();
+    if !prefix.is_empty() {
+        parts.push(prefix.to_string());
+    }
+    if !namespace.is_empty() {
+        parts.push(namespace);
+    }
+    let partition_path = BufferChunker::decode_file_partition(filename);
+    if !partition_path.is_empty() {
+        parts.push(partition_path);
+    }
+    let filename_owned = filename.to_string();
+    if let Ok(time_key) = TimePartitioner::new(&filename_owned)
+        .process_from_layout(time_partition_granularity, time_partition_prefix)
+    {
+        let time_key = time_key.trim_matches('/');
+        if !time_key.is_empty() {
+            parts.push(time_key.to_string());
+        }
+    }
+    let extension = extension.trim_start_matches('.');
+    let file = if extension.is_empty() {
+        object_stem.to_string()
+    } else {
+        format!("{object_stem}.{extension}")
+    };
+    parts.push(file);
+    parts.join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +237,84 @@ mod tests {
             .process_from_layout(None, None)
             .unwrap_err();
         assert!(err.to_string().contains("granularity is empty"));
+    }
+
+    #[test]
+    fn hive_object_relative_path_covers_namespace_partition_time_and_edges() {
+        let hive = "buffer=test&namespace=events&partition=p_rmc=EU1&time=1645296045";
+        let encoded_partition =
+            "buffer=test&namespace=events&partition=region%252Dus&time=1645296045";
+        let cases = [
+            (
+                "warehouse",
+                hive,
+                "apply-0001",
+                "jsonl",
+                Some("day"),
+                Some("p_"),
+                "warehouse/events/p_rmc=EU1/p_year=2022/p_month=2/p_day=19/apply-0001.jsonl",
+            ),
+            (
+                "/root/",
+                "namespace=events",
+                "apply-0001",
+                "parquet",
+                None,
+                None,
+                "root/events/apply-0001.parquet",
+            ),
+            (
+                "",
+                hive,
+                "apply-0001",
+                "parquet",
+                Some("day"),
+                Some("p_"),
+                "events/p_rmc=EU1/p_year=2022/p_month=2/p_day=19/apply-0001.parquet",
+            ),
+            (
+                "warehouse",
+                "buffer=test&namespace=&partition=&time=1645296045",
+                "apply-0001",
+                "parquet",
+                Some("day"),
+                None,
+                "warehouse/year=2022/month=2/day=19/apply-0001.parquet",
+            ),
+            (
+                "warehouse",
+                hive,
+                "apply-0001",
+                "parquet",
+                None,
+                None,
+                "warehouse/events/p_rmc=EU1/apply-0001.parquet",
+            ),
+            (
+                "exports",
+                encoded_partition,
+                "apply-0001",
+                "parquet",
+                None,
+                None,
+                "exports/events/region/us/apply-0001.parquet",
+            ),
+            (
+                "",
+                "namespace=",
+                "apply-0001",
+                "jsonl",
+                None,
+                None,
+                "apply-0001.jsonl",
+            ),
+        ];
+        for (prefix, filename, stem, ext, gran, time_prefix, expected) in cases {
+            assert_eq!(
+                hive_object_relative_path(prefix, filename, stem, ext, gran, time_prefix),
+                expected,
+                "prefix={prefix:?} filename={filename:?} ext={ext}"
+            );
+        }
     }
 }

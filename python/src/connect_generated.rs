@@ -5033,8 +5033,6 @@ pub struct PyDataSinkBigquery {
     #[serde(skip_serializing_if = "Option::is_none")]
     credentials_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     max_concurrency: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     discovery_cache_ttl_secs: Option<i64>,
@@ -5043,13 +5041,12 @@ pub struct PyDataSinkBigquery {
 #[pymethods]
 impl PyDataSinkBigquery {
     #[new]
-    #[pyo3(signature = (*, project=None, dataset=None, location=None, credentials_path=None, format=None, max_concurrency=None, discovery_cache_ttl_secs=None))]
+    #[pyo3(signature = (*, project=None, dataset=None, location=None, credentials_path=None, max_concurrency=None, discovery_cache_ttl_secs=None))]
     fn new(
         project: Option<String>,
         dataset: Option<String>,
         location: Option<String>,
         credentials_path: Option<String>,
-        format: Option<String>,
         max_concurrency: Option<i64>,
         discovery_cache_ttl_secs: Option<i64>,
     ) -> Self {
@@ -5058,7 +5055,6 @@ impl PyDataSinkBigquery {
             dataset,
             location,
             credentials_path,
-            format,
             max_concurrency,
             discovery_cache_ttl_secs,
         }
@@ -5078,21 +5074,18 @@ pub struct PyDataSinkClickhouse {
     password: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     table: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
 }
 
 #[pymethods]
 impl PyDataSinkClickhouse {
     #[new]
-    #[pyo3(signature = (*, url=None, database=None, user=None, password=None, table=None, format=None))]
+    #[pyo3(signature = (*, url=None, database=None, user=None, password=None, table=None))]
     fn new(
         url: Option<String>,
         database: Option<String>,
         user: Option<String>,
         password: Option<String>,
         table: Option<String>,
-        format: Option<String>,
     ) -> Self {
         Self {
             url,
@@ -5100,7 +5093,6 @@ impl PyDataSinkClickhouse {
             user,
             password,
             table,
-            format,
         }
     }
 }
@@ -5121,8 +5113,6 @@ pub struct PyDataSinkDatabricks {
     #[serde(skip_serializing_if = "Option::is_none")]
     table: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     delta_table_uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     storage_options: Option<BTreeMap<String, String>>,
@@ -5131,7 +5121,7 @@ pub struct PyDataSinkDatabricks {
 #[pymethods]
 impl PyDataSinkDatabricks {
     #[new]
-    #[pyo3(signature = (*, workspace_url=None, token=None, warehouse_id=None, catalog=None, schema=None, table=None, format=None, delta_table_uri=None, storage_options=None))]
+    #[pyo3(signature = (*, workspace_url=None, token=None, warehouse_id=None, catalog=None, schema=None, table=None, delta_table_uri=None, storage_options=None))]
     fn new(
         workspace_url: Option<String>,
         token: Option<String>,
@@ -5139,7 +5129,6 @@ impl PyDataSinkDatabricks {
         catalog: Option<String>,
         schema: Option<String>,
         table: Option<String>,
-        format: Option<String>,
         delta_table_uri: Option<String>,
         storage_options: Option<BTreeMap<String, String>>,
     ) -> Self {
@@ -5150,7 +5139,6 @@ impl PyDataSinkDatabricks {
             catalog,
             schema,
             table,
-            format,
             delta_table_uri,
             storage_options,
         }
@@ -5238,27 +5226,23 @@ pub struct PyDataSinkMotherduck {
     #[serde(skip_serializing_if = "Option::is_none")]
     table: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     schema: Option<String>,
 }
 
 #[pymethods]
 impl PyDataSinkMotherduck {
     #[new]
-    #[pyo3(signature = (*, motherduck_token=None, database=None, table=None, format=None, schema=None))]
+    #[pyo3(signature = (*, motherduck_token=None, database=None, table=None, schema=None))]
     fn new(
         motherduck_token: Option<String>,
         database: Option<String>,
         table: Option<String>,
-        format: Option<String>,
         schema: Option<String>,
     ) -> Self {
         Self {
             motherduck_token,
             database,
             table,
-            format,
             schema,
         }
     }
@@ -5281,14 +5265,12 @@ pub struct PyDataSinkPostgres {
     schema: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sslmode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
 }
 
 #[pymethods]
 impl PyDataSinkPostgres {
     #[new]
-    #[pyo3(signature = (*, host=None, port=None, user=None, password=None, database=None, schema=None, sslmode=None, format=None))]
+    #[pyo3(signature = (*, host=None, port=None, user=None, password=None, database=None, schema=None, sslmode=None))]
     fn new(
         host: Option<String>,
         port: Option<i64>,
@@ -5297,7 +5279,6 @@ impl PyDataSinkPostgres {
         database: Option<String>,
         schema: Option<String>,
         sslmode: Option<String>,
-        format: Option<String>,
     ) -> Self {
         Self {
             host,
@@ -5307,7 +5288,6 @@ impl PyDataSinkPostgres {
             database,
             schema,
             sslmode,
-            format,
         }
     }
 }
@@ -5334,15 +5314,13 @@ pub struct PyDataSinkRedshift {
     #[serde(skip_serializing_if = "Option::is_none")]
     iam_role_arn: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     schema: Option<String>,
 }
 
 #[pymethods]
 impl PyDataSinkRedshift {
     #[new]
-    #[pyo3(signature = (*, cluster_identifier=None, workgroup_name=None, database=None, db_user=None, table=None, region=None, staging_s3_bucket=None, staging_s3_prefix=None, iam_role_arn=None, format=None, schema=None))]
+    #[pyo3(signature = (*, cluster_identifier=None, workgroup_name=None, database=None, db_user=None, table=None, region=None, staging_s3_bucket=None, staging_s3_prefix=None, iam_role_arn=None, schema=None))]
     fn new(
         cluster_identifier: Option<String>,
         workgroup_name: Option<String>,
@@ -5353,7 +5331,6 @@ impl PyDataSinkRedshift {
         staging_s3_bucket: Option<String>,
         staging_s3_prefix: Option<String>,
         iam_role_arn: Option<String>,
-        format: Option<String>,
         schema: Option<String>,
     ) -> Self {
         Self {
@@ -5366,7 +5343,6 @@ impl PyDataSinkRedshift {
             staging_s3_bucket,
             staging_s3_prefix,
             iam_role_arn,
-            format,
             schema,
         }
     }
@@ -5548,8 +5524,6 @@ pub struct PyDataSinkSnowflake {
     #[serde(skip_serializing_if = "Option::is_none")]
     stage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     private_key_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     staging_uri: Option<String>,
@@ -5570,7 +5544,7 @@ pub struct PyDataSinkSnowflake {
 #[pymethods]
 impl PyDataSinkSnowflake {
     #[new]
-    #[pyo3(signature = (*, account=None, user=None, password=None, warehouse=None, database=None, schema=None, role=None, stage=None, format=None, private_key_path=None, staging_uri=None, staging_storage_integration=None, staging_azure_sas_token=None, staging_azure_account_key=None, staging_gcs_service_account_key_path=None, max_concurrency=None, discovery_cache_ttl_secs=None))]
+    #[pyo3(signature = (*, account=None, user=None, password=None, warehouse=None, database=None, schema=None, role=None, stage=None, private_key_path=None, staging_uri=None, staging_storage_integration=None, staging_azure_sas_token=None, staging_azure_account_key=None, staging_gcs_service_account_key_path=None, max_concurrency=None, discovery_cache_ttl_secs=None))]
     fn new(
         account: Option<String>,
         user: Option<String>,
@@ -5580,7 +5554,6 @@ impl PyDataSinkSnowflake {
         schema: Option<String>,
         role: Option<String>,
         stage: Option<String>,
-        format: Option<String>,
         private_key_path: Option<String>,
         staging_uri: Option<String>,
         staging_storage_integration: Option<String>,
@@ -5599,7 +5572,6 @@ impl PyDataSinkSnowflake {
             schema,
             role,
             stage,
-            format,
             private_key_path,
             staging_uri,
             staging_storage_integration,
@@ -5633,25 +5605,21 @@ pub struct PyDataSinkSynapse {
     schema: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     table: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
 }
 
 #[pymethods]
 impl PyDataSinkSynapse {
     #[new]
-    #[pyo3(signature = (*, connection_string=None, schema=None, table=None, format=None))]
+    #[pyo3(signature = (*, connection_string=None, schema=None, table=None))]
     fn new(
         connection_string: Option<String>,
         schema: Option<String>,
         table: Option<String>,
-        format: Option<String>,
     ) -> Self {
         Self {
             connection_string,
             schema,
             table,
-            format,
         }
     }
 }
@@ -5756,8 +5724,6 @@ pub struct PySchemaSinkBigquery {
     #[serde(skip_serializing_if = "Option::is_none")]
     credentials_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     max_concurrency: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     discovery_cache_ttl_secs: Option<i64>,
@@ -5766,13 +5732,12 @@ pub struct PySchemaSinkBigquery {
 #[pymethods]
 impl PySchemaSinkBigquery {
     #[new]
-    #[pyo3(signature = (*, project=None, dataset=None, location=None, credentials_path=None, format=None, max_concurrency=None, discovery_cache_ttl_secs=None))]
+    #[pyo3(signature = (*, project=None, dataset=None, location=None, credentials_path=None, max_concurrency=None, discovery_cache_ttl_secs=None))]
     fn new(
         project: Option<String>,
         dataset: Option<String>,
         location: Option<String>,
         credentials_path: Option<String>,
-        format: Option<String>,
         max_concurrency: Option<i64>,
         discovery_cache_ttl_secs: Option<i64>,
     ) -> Self {
@@ -5781,7 +5746,6 @@ impl PySchemaSinkBigquery {
             dataset,
             location,
             credentials_path,
-            format,
             max_concurrency,
             discovery_cache_ttl_secs,
         }
@@ -5801,21 +5765,18 @@ pub struct PySchemaSinkClickhouse {
     password: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     table: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
 }
 
 #[pymethods]
 impl PySchemaSinkClickhouse {
     #[new]
-    #[pyo3(signature = (*, url=None, database=None, user=None, password=None, table=None, format=None))]
+    #[pyo3(signature = (*, url=None, database=None, user=None, password=None, table=None))]
     fn new(
         url: Option<String>,
         database: Option<String>,
         user: Option<String>,
         password: Option<String>,
         table: Option<String>,
-        format: Option<String>,
     ) -> Self {
         Self {
             url,
@@ -5823,7 +5784,6 @@ impl PySchemaSinkClickhouse {
             user,
             password,
             table,
-            format,
         }
     }
 }
@@ -5915,27 +5875,23 @@ pub struct PySchemaSinkMotherduck {
     #[serde(skip_serializing_if = "Option::is_none")]
     table: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     schema: Option<String>,
 }
 
 #[pymethods]
 impl PySchemaSinkMotherduck {
     #[new]
-    #[pyo3(signature = (*, motherduck_token=None, database=None, table=None, format=None, schema=None))]
+    #[pyo3(signature = (*, motherduck_token=None, database=None, table=None, schema=None))]
     fn new(
         motherduck_token: Option<String>,
         database: Option<String>,
         table: Option<String>,
-        format: Option<String>,
         schema: Option<String>,
     ) -> Self {
         Self {
             motherduck_token,
             database,
             table,
-            format,
             schema,
         }
     }
@@ -5958,14 +5914,12 @@ pub struct PySchemaSinkPostgres {
     schema: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sslmode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
 }
 
 #[pymethods]
 impl PySchemaSinkPostgres {
     #[new]
-    #[pyo3(signature = (*, host=None, port=None, user=None, password=None, database=None, schema=None, sslmode=None, format=None))]
+    #[pyo3(signature = (*, host=None, port=None, user=None, password=None, database=None, schema=None, sslmode=None))]
     fn new(
         host: Option<String>,
         port: Option<i64>,
@@ -5974,7 +5928,6 @@ impl PySchemaSinkPostgres {
         database: Option<String>,
         schema: Option<String>,
         sslmode: Option<String>,
-        format: Option<String>,
     ) -> Self {
         Self {
             host,
@@ -5984,7 +5937,6 @@ impl PySchemaSinkPostgres {
             database,
             schema,
             sslmode,
-            format,
         }
     }
 }
@@ -6011,15 +5963,13 @@ pub struct PySchemaSinkRedshift {
     #[serde(skip_serializing_if = "Option::is_none")]
     iam_role_arn: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     schema: Option<String>,
 }
 
 #[pymethods]
 impl PySchemaSinkRedshift {
     #[new]
-    #[pyo3(signature = (*, cluster_identifier=None, workgroup_name=None, database=None, db_user=None, table=None, region=None, staging_s3_bucket=None, staging_s3_prefix=None, iam_role_arn=None, format=None, schema=None))]
+    #[pyo3(signature = (*, cluster_identifier=None, workgroup_name=None, database=None, db_user=None, table=None, region=None, staging_s3_bucket=None, staging_s3_prefix=None, iam_role_arn=None, schema=None))]
     fn new(
         cluster_identifier: Option<String>,
         workgroup_name: Option<String>,
@@ -6030,7 +5980,6 @@ impl PySchemaSinkRedshift {
         staging_s3_bucket: Option<String>,
         staging_s3_prefix: Option<String>,
         iam_role_arn: Option<String>,
-        format: Option<String>,
         schema: Option<String>,
     ) -> Self {
         Self {
@@ -6043,7 +5992,6 @@ impl PySchemaSinkRedshift {
             staging_s3_bucket,
             staging_s3_prefix,
             iam_role_arn,
-            format,
             schema,
         }
     }
@@ -6149,8 +6097,6 @@ pub struct PySchemaSinkSnowflake {
     #[serde(skip_serializing_if = "Option::is_none")]
     stage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     private_key_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     staging_uri: Option<String>,
@@ -6171,7 +6117,7 @@ pub struct PySchemaSinkSnowflake {
 #[pymethods]
 impl PySchemaSinkSnowflake {
     #[new]
-    #[pyo3(signature = (*, account=None, user=None, password=None, warehouse=None, database=None, schema=None, role=None, stage=None, format=None, private_key_path=None, staging_uri=None, staging_storage_integration=None, staging_azure_sas_token=None, staging_azure_account_key=None, staging_gcs_service_account_key_path=None, max_concurrency=None, discovery_cache_ttl_secs=None))]
+    #[pyo3(signature = (*, account=None, user=None, password=None, warehouse=None, database=None, schema=None, role=None, stage=None, private_key_path=None, staging_uri=None, staging_storage_integration=None, staging_azure_sas_token=None, staging_azure_account_key=None, staging_gcs_service_account_key_path=None, max_concurrency=None, discovery_cache_ttl_secs=None))]
     fn new(
         account: Option<String>,
         user: Option<String>,
@@ -6181,7 +6127,6 @@ impl PySchemaSinkSnowflake {
         schema: Option<String>,
         role: Option<String>,
         stage: Option<String>,
-        format: Option<String>,
         private_key_path: Option<String>,
         staging_uri: Option<String>,
         staging_storage_integration: Option<String>,
@@ -6200,7 +6145,6 @@ impl PySchemaSinkSnowflake {
             schema,
             role,
             stage,
-            format,
             private_key_path,
             staging_uri,
             staging_storage_integration,

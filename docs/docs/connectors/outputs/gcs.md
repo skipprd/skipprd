@@ -1,11 +1,11 @@
 # Google Cloud Storage Output
 
-Writes Parquet files to a GCS bucket.
+Writes Parquet or JSON Lines objects to a GCS bucket.
 
 ## How it works
 
-1. Serializes record batches to Parquet.
-2. Uploads to the configured bucket with optional prefix, namespace, and time partitioning.
+1. Serializes record batches as Parquet (default) or JSON Lines.
+2. Uploads to the configured bucket with optional prefix, namespace, Hive partitions, and time partitioning.
 
 ## Configuration
 
@@ -25,7 +25,7 @@ data_sinks:
 | `bucket` | *(required)* | GCS bucket name |
 | `prefix` | | Key prefix for uploaded objects |
 | `service_account_key_path` | | Path to service account JSON key |
-| `format` | `parquet` | Output format |
+| `format` | `parquet` | `parquet` or `jsonl` |
 
 ## Authentication
 

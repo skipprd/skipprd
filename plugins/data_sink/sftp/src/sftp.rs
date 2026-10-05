@@ -50,7 +50,7 @@ impl TryFrom<DataSinkPluginConfig> for DataSinkSftpPluginConfig {
 pub struct DataSinkSftpPlugin {
     config: DataSinkSftpPluginConfig,
     object_backend: Arc<SftpObjectBackend>,
-    order_fields: Vec<String>,
+    output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout,
 }
 
 #[derive(Clone)]
@@ -246,7 +246,7 @@ impl DataSink for DataSinkSftpPlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let remote_file_path = self.remote_file_path(&object_stem);
+        let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
         let remote_manifest_path = format!(
             "{}/{}",
             self.config.remote_path.trim_end_matches('/'),
@@ -318,7 +318,7 @@ impl DataSink for DataSinkSftpPlugin {
                 "",
             )?
         };
-        let remote_file_path = self.remote_file_path(&object_stem);
+        let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
         self.write_stream(stream, &remote_file_path).await?;
 
         info!("SFTP: uploaded to {}", remote_file_path);
@@ -340,7 +340,7 @@ impl DataSink for DataSinkSftpPlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let remote_file_path = self.remote_file_path(&object_stem);
+        let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
         let remote_manifest_path = format!(
             "{}/{}",
             self.config.remote_path.trim_end_matches('/'),
@@ -382,7 +382,7 @@ impl DataSink for DataSinkSftpPlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let remote_file_path = self.remote_file_path(&object_stem);
+        let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
         let remote_manifest_path = format!(
             "{}/{}",
             self.config.remote_path.trim_end_matches('/'),
@@ -431,7 +431,7 @@ impl DataSinkSftpPlugin {
     pub async fn new_with_config(
         _buffer_name: String,
         config: DataSinkSftpPluginConfig,
-        order_fields: Vec<String>,
+        output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout,
     ) -> Self {
         let object_backend = Arc::new(SftpObjectBackend {
             config: config.clone(),
@@ -443,16 +443,24 @@ impl DataSinkSftpPlugin {
         Self {
             config,
             object_backend,
-            order_fields,
+            output_layout,
         }
     }
 
-    fn remote_file_path(&self, object_stem: &str) -> String {
-        format!(
-            "{}/{}.parquet",
-            self.config.remote_path.trim_end_matches('/'),
-            object_stem
-        )
+    fn remote_file_path(&self, filename: &str, object_stem: &str) -> String {
+        let relative = self
+            .output_layout
+            .hive_object_key(
+                self.config.remote_path.trim_matches('/'),
+                filename,
+                object_stem,
+            )
+            .expect("object sink requires RuntimeOutputLayout.format");
+        if self.config.remote_path.starts_with('/') {
+            format!("/{relative}")
+        } else {
+            relative
+        }
     }
 
     fn legacy_chunk_manifest(
@@ -461,7 +469,7 @@ impl DataSinkSftpPlugin {
         chunk_index: u64,
     ) -> (String, String, ObjectWriteManifest) {
         let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
-        let remote_file_path = self.remote_file_path(&object_stem);
+        let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
         let remote_manifest_path = format!(
             "{}/{}",
             self.config.remote_path.trim_end_matches('/'),
@@ -582,10 +590,14 @@ impl DataSinkSftpPlugin {
         use skippr_runtime_sdk::metrics::counters;
 
         let schema = stream.schema();
+        let format = self
+            .output_layout
+            .required_format()
+            .map_err(std::io::Error::other)?;
         let order_fields =
             skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
                 &schema,
-                &self.order_fields,
+                &self.output_layout.order_fields,
             );
         let writer_properties =
             skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
@@ -601,15 +613,27 @@ impl DataSinkSftpPlugin {
         });
         let session = ObjectWriteSession::new(
             self.object_backend.clone(),
-            ObjectWriteRequest::new(remote_file_path),
+            ObjectWriteRequest::new(remote_file_path).with_content_type(format.content_type()),
             ObjectWriterConfig::default(),
         )
         .map_err(|error| std::io::Error::other(error.to_string()))?;
 
         counters::inc_uploads_in_flight();
-        let result = session
-            .write_parquet(schema, writer_properties, batches)
-            .await;
+        let result = match format {
+            skippr_runtime_sdk::serdes::output_format::OutputFormat::Parquet => {
+                session
+                    .write_parquet(schema, writer_properties, batches)
+                    .await
+            }
+            skippr_runtime_sdk::serdes::output_format::OutputFormat::Jsonl => {
+                session.write_jsonl(batches).await
+            }
+            skippr_runtime_sdk::serdes::output_format::OutputFormat::Native => {
+                return Err(std::io::Error::other(
+                    skippr_runtime_sdk::serdes::output_format::OutputFormat::FILE_SINK_NEEDS_PARQUET_OR_JSONL,
+                ));
+            }
+        };
         counters::dec_uploads_in_flight();
         let receipt = result.map_err(|error| std::io::Error::other(error.to_string()))?;
         counters::add_parquet_rows(receipt.rows);
@@ -701,15 +725,48 @@ mod tests {
                 uploads: Mutex::new(HashMap::new()),
                 next_upload_id: AtomicU64::new(1),
             }),
+            output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                format: Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Parquet),
+                ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+            },
         };
 
         assert_eq!(
-            plugin.remote_file_path("apply-0001"),
+            plugin.remote_file_path("", "apply-0001"),
             "/exports/root/apply-0001.parquet"
         );
         assert!(plugin
             .object_backend
             .spool_root
             .ends_with("skippr-object-writer/sftp"));
+    }
+
+    #[test]
+    fn hive_remote_path_keeps_namespace_partition_and_time() {
+        let config = test_config();
+        let spool_root = std::env::temp_dir().join("skippr-object-writer/sftp");
+        let plugin = DataSinkSftpPlugin {
+            config: config.clone(),
+            object_backend: Arc::new(SftpObjectBackend {
+                config,
+                spool_backend: Arc::new(AtomicFileBackend::new()),
+                spool_root,
+                uploads: Mutex::new(HashMap::new()),
+                next_upload_id: AtomicU64::new(1),
+            }),
+            output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                format: Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Parquet),
+                time_partition_granularity: Some("day".into()),
+                time_partition_prefix: Some("p_".into()),
+                ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+            },
+        };
+        assert_eq!(
+            plugin.remote_file_path(
+                "buffer=test&namespace=events&partition=p_rmc=EU1&time=1645296045",
+                "apply-0001",
+            ),
+            "/exports/root/events/p_rmc=EU1/p_year=2022/p_month=2/p_day=19/apply-0001.parquet"
+        );
     }
 }

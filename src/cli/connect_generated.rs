@@ -3396,9 +3396,6 @@ pub struct DataSinkBigqueryArgs {
     pub credentials_path: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3434,9 +3431,6 @@ pub struct DataSinkClickhouseArgs {
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
 }
 
 impl DataSinkClickhouseArgs {
@@ -3471,9 +3465,6 @@ pub struct DataSinkDatabricksArgs {
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta_table_uri: Option<String>,
@@ -3579,9 +3570,6 @@ pub struct DataSinkMotherduckArgs {
     pub table: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
 }
 
@@ -3620,9 +3608,6 @@ pub struct DataSinkPostgresArgs {
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sslmode: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
 }
 
 impl DataSinkPostgresArgs {
@@ -3666,9 +3651,6 @@ pub struct DataSinkRedshiftArgs {
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iam_role_arn: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
@@ -3825,9 +3807,6 @@ pub struct DataSinkSnowflakeArgs {
     pub stage: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub private_key_path: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3891,9 +3870,6 @@ pub struct DataSinkSynapseArgs {
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
 }
 
 impl DataSinkSynapseArgs {
@@ -3976,9 +3952,6 @@ pub struct SchemaSinkBigqueryArgs {
     pub credentials_path: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4014,9 +3987,6 @@ pub struct SchemaSinkClickhouseArgs {
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
 }
 
 impl SchemaSinkClickhouseArgs {
@@ -4112,9 +4082,6 @@ pub struct SchemaSinkMotherduckArgs {
     pub table: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
 }
 
@@ -4153,9 +4120,6 @@ pub struct SchemaSinkPostgresArgs {
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sslmode: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
 }
 
 impl SchemaSinkPostgresArgs {
@@ -4199,9 +4163,6 @@ pub struct SchemaSinkRedshiftArgs {
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iam_role_arn: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
@@ -4291,9 +4252,6 @@ pub struct SchemaSinkSnowflakeArgs {
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private_key_path: Option<String>,

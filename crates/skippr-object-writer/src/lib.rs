@@ -46,6 +46,24 @@ impl ObjectWriteRequest {
             metadata: BTreeMap::new(),
         }
     }
+
+    pub fn with_content_type(mut self, content_type: impl Into<String>) -> Self {
+        self.content_type = content_type.into();
+        self
+    }
+}
+
+pub fn encode_jsonl_batch(batch: &RecordBatch) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut writer =
+        arrow::json::WriterBuilder::new().build::<_, arrow::json::writer::LineDelimited>(&mut buf);
+    writer
+        .write(batch)
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    writer
+        .finish()
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    Ok(buf)
 }
 
 /// Opaque resumable/multipart upload identity returned by a backend.
@@ -323,8 +341,27 @@ where
             self.backend,
             self.request,
             self.config,
-            schema,
-            writer_properties,
+            EncodeMode::Parquet {
+                schema,
+                writer_properties,
+            },
+            batches,
+            cancel.clone(),
+            cancel_rx,
+        ));
+        ObjectWriteOperation { cancel, task }
+    }
+
+    pub fn write_jsonl<S>(self, batches: S) -> ObjectWriteOperation
+    where
+        S: Stream<Item = Result<RecordBatch, ObjectWriteError>> + Send + 'static,
+    {
+        let (cancel, cancel_rx) = watch::channel(false);
+        let task = tokio::spawn(coordinate_write(
+            self.backend,
+            self.request,
+            self.config,
+            EncodeMode::Jsonl,
             batches,
             cancel.clone(),
             cancel_rx,
@@ -375,12 +412,19 @@ struct ProducerStats {
     rows: u64,
 }
 
+enum EncodeMode {
+    Parquet {
+        schema: SchemaRef,
+        writer_properties: WriterProperties,
+    },
+    Jsonl,
+}
+
 async fn coordinate_write<B, S>(
     backend: Arc<B>,
     request: ObjectWriteRequest,
     config: ObjectWriterConfig,
-    schema: SchemaRef,
-    writer_properties: WriterProperties,
+    encode: EncodeMode,
     batches: S,
     cancel: watch::Sender<bool>,
     mut cancel_rx: watch::Receiver<bool>,
@@ -400,8 +444,7 @@ where
         &upload,
         &request,
         &config,
-        schema,
-        writer_properties,
+        encode,
         batches,
         cancel,
         cancel_rx,
@@ -421,8 +464,7 @@ async fn write_started_upload<B, S>(
     upload: &MultipartUpload,
     request: &ObjectWriteRequest,
     config: &ObjectWriterConfig,
-    schema: SchemaRef,
-    writer_properties: WriterProperties,
+    encode: EncodeMode,
     batches: S,
     cancel: watch::Sender<bool>,
     mut cancel_rx: watch::Receiver<bool>,
@@ -439,8 +481,12 @@ where
         tokio::spawn(feed_batches(batches, batch_tx, feeder_cancel));
     let part_size = config.part_size;
     let producer: JoinHandle<Result<ProducerStats, ObjectWriteError>> =
-        tokio::task::spawn_blocking(move || {
-            produce_parquet(schema, writer_properties, batch_rx, byte_tx, part_size)
+        tokio::task::spawn_blocking(move || match encode {
+            EncodeMode::Parquet {
+                schema,
+                writer_properties,
+            } => produce_parquet(schema, writer_properties, batch_rx, byte_tx, part_size),
+            EncodeMode::Jsonl => produce_jsonl(batch_rx, byte_tx, part_size),
         });
 
     let mut uploads = FuturesUnordered::new();
@@ -609,6 +655,26 @@ fn produce_parquet(
         parquet_writer.write(&batch)?;
     }
     parquet_writer.close()?;
+    Ok(ProducerStats { rows })
+}
+
+fn produce_jsonl(
+    mut batch_rx: mpsc::Receiver<RecordBatch>,
+    byte_tx: mpsc::Sender<Bytes>,
+    part_size: usize,
+) -> Result<ProducerStats, ObjectWriteError> {
+    let mut writer = ChannelPartWriter::new(byte_tx, part_size);
+    let mut rows = 0_u64;
+    while let Some(batch) = batch_rx.blocking_recv() {
+        rows = rows
+            .checked_add(batch.num_rows() as u64)
+            .ok_or(ObjectWriteError::StatisticsOverflow)?;
+        let encoded = encode_jsonl_batch(&batch).map_err(ObjectWriteError::input)?;
+        writer
+            .write_all(&encoded)
+            .map_err(ObjectWriteError::input)?;
+    }
+    writer.flush().map_err(ObjectWriteError::input)?;
     Ok(ProducerStats { rows })
 }
 
@@ -1051,5 +1117,23 @@ mod tests {
         assert_eq!(backend.begins.load(Ordering::SeqCst), 1);
         assert_eq!(backend.aborts.load(Ordering::SeqCst), 1);
         assert_eq!(backend.completes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn encode_jsonl_batch_writes_one_object_per_line() {
+        let encoded = String::from_utf8(encode_jsonl_batch(&test_batch(2, 4)).unwrap()).unwrap();
+        assert_eq!(encoded.lines().count(), 2);
+        assert!(encoded.contains("\"id\":0"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_jsonl_commits_row_count() {
+        let backend = Arc::new(MockBackend::default());
+        let receipt = session(backend.clone(), config(256))
+            .write_jsonl(stream::iter(vec![Ok(test_batch(2, 4))]))
+            .await
+            .unwrap();
+        assert_eq!(receipt.rows, 2);
+        assert_eq!(backend.completes.load(Ordering::SeqCst), 1);
     }
 }

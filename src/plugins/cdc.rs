@@ -1,3 +1,4 @@
+use crate::serdes::output_format::OutputFormat;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -434,6 +435,21 @@ pub struct SinkCapability {
     pub supports_transactions: bool,
     pub retry_semantics: crate::buffer::compaction_transaction::SinkRetrySemantics,
     pub grouping_support: crate::buffer::compaction_transaction::SinkGroupingSupport,
+    #[serde(skip, default = "OutputFormat::native_formats")]
+    pub supported_formats: &'static [OutputFormat],
+    #[serde(skip, default)]
+    pub default_format: Option<OutputFormat>,
+}
+
+impl SinkCapability {
+    pub fn resolve_format(&self, configured: Option<&str>) -> Result<Option<OutputFormat>, String> {
+        crate::serdes::output_format::resolve_output_format(
+            self.name,
+            self.supported_formats,
+            self.default_format,
+            configured,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -998,6 +1014,8 @@ pub mod sink_capabilities {
         supports_transactions: true,
         retry_semantics: Retry::FinalStateIdempotent,
         grouping_support: Grouping::FinalStateBatches,
+        supported_formats: &[OutputFormat::Native],
+        default_format: None,
     };
 
     pub const SNOWFLAKE: SinkCapability = SinkCapability {
@@ -1010,6 +1028,8 @@ pub mod sink_capabilities {
         supports_transactions: true,
         retry_semantics: Retry::FinalStateIdempotent,
         grouping_support: Grouping::FinalStateBatches,
+        supported_formats: &[OutputFormat::Native],
+        default_format: None,
     };
 
     pub const BIGQUERY: SinkCapability = SinkCapability {
@@ -1022,6 +1042,8 @@ pub mod sink_capabilities {
         supports_transactions: true,
         retry_semantics: Retry::FinalStateIdempotent,
         grouping_support: Grouping::FinalStateBatches,
+        supported_formats: &[OutputFormat::Native],
+        default_format: None,
     };
 
     pub const REDSHIFT: SinkCapability = SinkCapability {
@@ -1034,6 +1056,8 @@ pub mod sink_capabilities {
         supports_transactions: true,
         retry_semantics: Retry::FinalStateIdempotent,
         grouping_support: Grouping::FinalStateBatches,
+        supported_formats: &[OutputFormat::Native],
+        default_format: None,
     };
 
     pub const DATABRICKS: SinkCapability = SinkCapability {
@@ -1046,6 +1070,8 @@ pub mod sink_capabilities {
         supports_transactions: true,
         retry_semantics: Retry::FinalStateIdempotent,
         grouping_support: Grouping::FinalStateBatches,
+        supported_formats: &[OutputFormat::Native],
+        default_format: None,
     };
 
     pub const MOTHERDUCK: SinkCapability = SinkCapability {
@@ -1058,6 +1084,8 @@ pub mod sink_capabilities {
         supports_transactions: true,
         retry_semantics: Retry::FinalStateIdempotent,
         grouping_support: Grouping::FinalStateBatches,
+        supported_formats: &[OutputFormat::Native],
+        default_format: None,
     };
 
     pub const CLICKHOUSE: SinkCapability = SinkCapability {
@@ -1070,6 +1098,8 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::AtLeastOnce,
         grouping_support: Grouping::CdcEncodedBatches,
+        supported_formats: &[OutputFormat::Native],
+        default_format: None,
     };
 
     pub const SYNAPSE: SinkCapability = SinkCapability {
@@ -1082,6 +1112,8 @@ pub mod sink_capabilities {
         supports_transactions: true,
         retry_semantics: Retry::FinalStateIdempotent,
         grouping_support: Grouping::FinalStateBatches,
+        supported_formats: &[OutputFormat::Native],
+        default_format: None,
     };
 
     pub const ATHENA: SinkCapability = SinkCapability {
@@ -1094,6 +1126,8 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::DeterministicOverwrite,
         grouping_support: Grouping::CdcEncodedBatches,
+        supported_formats: &[OutputFormat::Parquet],
+        default_format: Some(OutputFormat::Parquet),
     };
 
     pub const SKIPPRLAKE: SinkCapability = SinkCapability {
@@ -1106,6 +1140,8 @@ pub mod sink_capabilities {
         supports_transactions: true,
         retry_semantics: Retry::TransactionalIdempotent,
         grouping_support: Grouping::FinalStateBatches,
+        supported_formats: &[OutputFormat::Native],
+        default_format: None,
     };
 
     pub const ATHENA_ICEBERG: SinkCapability = SinkCapability {
@@ -1118,6 +1154,8 @@ pub mod sink_capabilities {
         supports_transactions: true,
         retry_semantics: Retry::TransactionalIdempotent,
         grouping_support: Grouping::FinalStateBatches,
+        supported_formats: &[OutputFormat::Native],
+        default_format: None,
     };
 
     pub const DUCKDB: SinkCapability = SinkCapability {
@@ -1130,6 +1168,8 @@ pub mod sink_capabilities {
         supports_transactions: true,
         retry_semantics: Retry::TransactionalIdempotent,
         grouping_support: Grouping::FinalStateBatches,
+        supported_formats: &[OutputFormat::Native],
+        default_format: None,
     };
 
     pub const S3: SinkCapability = SinkCapability {
@@ -1142,6 +1182,8 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::DeterministicOverwrite,
         grouping_support: Grouping::CdcEncodedBatches,
+        supported_formats: &[OutputFormat::Parquet, OutputFormat::Jsonl],
+        default_format: Some(OutputFormat::Parquet),
     };
 
     pub const GCS: SinkCapability = SinkCapability {
@@ -1154,6 +1196,8 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::DeterministicOverwrite,
         grouping_support: Grouping::CdcEncodedBatches,
+        supported_formats: &[OutputFormat::Parquet, OutputFormat::Jsonl],
+        default_format: Some(OutputFormat::Parquet),
     };
 
     pub const AZURE_BLOB: SinkCapability = SinkCapability {
@@ -1166,6 +1210,8 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::DeterministicOverwrite,
         grouping_support: Grouping::CdcEncodedBatches,
+        supported_formats: &[OutputFormat::Parquet, OutputFormat::Jsonl],
+        default_format: Some(OutputFormat::Parquet),
     };
 
     pub const FILE: SinkCapability = SinkCapability {
@@ -1178,6 +1224,8 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::DeterministicOverwrite,
         grouping_support: Grouping::CdcEncodedBatches,
+        supported_formats: &[OutputFormat::Parquet, OutputFormat::Jsonl],
+        default_format: Some(OutputFormat::Parquet),
     };
 
     pub const SFTP: SinkCapability = SinkCapability {
@@ -1190,6 +1238,8 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::DeterministicOverwrite,
         grouping_support: Grouping::CdcEncodedBatches,
+        supported_formats: &[OutputFormat::Parquet, OutputFormat::Jsonl],
+        default_format: Some(OutputFormat::Parquet),
     };
 
     pub const AMQP: SinkCapability = SinkCapability {
@@ -1202,6 +1252,8 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::AtLeastOnce,
         grouping_support: Grouping::CdcEncodedBatches,
+        supported_formats: &[OutputFormat::Jsonl],
+        default_format: Some(OutputFormat::Jsonl),
     };
 
     pub const STDOUT: SinkCapability = SinkCapability {
@@ -1214,6 +1266,8 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::AtLeastOnce,
         grouping_support: Grouping::CdcEncodedBatches,
+        supported_formats: &[OutputFormat::Jsonl],
+        default_format: Some(OutputFormat::Jsonl),
     };
 
     /// Look up a sink capability by plugin name.
@@ -1778,5 +1832,56 @@ mod tests {
         .unwrap();
         let err = envelope.into_payload::<KafkaCheckpoint>();
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn file_defaults_parquet_and_accepts_jsonl() {
+        assert_eq!(
+            sink_capabilities::FILE.resolve_format(None).unwrap(),
+            Some(crate::serdes::output_format::OutputFormat::Parquet)
+        );
+        assert_eq!(
+            sink_capabilities::FILE
+                .resolve_format(Some("jsonl"))
+                .unwrap(),
+            Some(crate::serdes::output_format::OutputFormat::Jsonl)
+        );
+    }
+
+    #[test]
+    fn warehouse_sinks_reject_configured_format() {
+        let err = sink_capabilities::POSTGRES
+            .resolve_format(Some("jsonl"))
+            .unwrap_err();
+        assert!(err.contains("writes rows into tables"));
+        assert!(err.contains("Remove `format: jsonl`"));
+        assert_eq!(
+            sink_capabilities::POSTGRES.resolve_format(None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn athena_defaults_parquet_and_rejects_jsonl() {
+        assert_eq!(
+            sink_capabilities::ATHENA.resolve_format(None).unwrap(),
+            Some(crate::serdes::output_format::OutputFormat::Parquet)
+        );
+        let err = sink_capabilities::ATHENA
+            .resolve_format(Some("jsonl"))
+            .unwrap_err();
+        assert!(err.contains("does not support format 'jsonl'"));
+    }
+
+    #[test]
+    fn stdout_and_amqp_default_jsonl() {
+        assert_eq!(
+            sink_capabilities::STDOUT.resolve_format(None).unwrap(),
+            Some(crate::serdes::output_format::OutputFormat::Jsonl)
+        );
+        assert_eq!(
+            sink_capabilities::AMQP.resolve_format(None).unwrap(),
+            Some(crate::serdes::output_format::OutputFormat::Jsonl)
+        );
     }
 }

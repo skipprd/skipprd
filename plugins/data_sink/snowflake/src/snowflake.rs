@@ -50,7 +50,6 @@ pub struct DataSinkSnowflakePluginConfig {
     pub schema: String,
     pub role: Option<String>,
     pub stage: Option<String>,
-    pub format: Option<String>,
     #[serde(default)]
     #[skippr(secret_path)]
     pub private_key_path: Option<String>,
@@ -2870,7 +2869,6 @@ mod tests {
             schema: "public".to_string(),
             role: None,
             stage: Some("@~".to_string()),
-            format: None,
             private_key_path: None,
             staging_uri: None,
             staging_storage_integration: None,

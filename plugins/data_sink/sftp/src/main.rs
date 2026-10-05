@@ -23,7 +23,7 @@ skippr_runtime_sdk::runtime_main!(async {
             Ok(DataSinkSftpPlugin::new_with_config(
                 buffer_name_for_runtime_binding(install.binding),
                 config,
-                install.context.output_layout.order_fields,
+                install.context.output_layout,
             )
             .await)
         },

@@ -10,11 +10,13 @@ use crate::discover::OutputMetadata;
 use crate::helpers::configuration::{DataSinkPluginConfig, DataSourcePluginConfig};
 use crate::helpers::offsets::{OffsetKey, RuntimeOffsetRpcRequest, RuntimeOffsetRpcResponse};
 use crate::plugins::cdc::{
-    CheckpointEnvelope, EventIdSemantics, SinkCapability, SinkGuaranteeTier, SourceBootstrapStyle,
-    SourceCapability, SourceCheckpointStyle, SourceGuaranteeTier, SourceOrderModel, SyncContext,
+    sink_capabilities, CheckpointEnvelope, EventIdSemantics, SinkCapability, SinkGuaranteeTier,
+    SourceBootstrapStyle, SourceCapability, SourceCheckpointStyle, SourceGuaranteeTier,
+    SourceOrderModel, SyncContext,
 };
 use crate::plugins::source_contract::{SinkWritePolicySupport, SourceNamespaceContract};
 use crate::plugins::SinkWriteOutcome;
+use crate::serdes::output_format::OutputFormat;
 use crate::sink_apply_identity::SinkApplyEnvelopeV2;
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +24,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 19;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 20;
 pub const COMMIT_RECEIPT_VERSION: u32 = 1;
 pub const CATALOG_INTENT_VERSION: u32 = 2;
 pub const GLUE_PARTITION_CATALOG_INTENT_VERSION: u32 = 1;
@@ -183,6 +185,11 @@ impl RuntimeSinkCapabilityDescriptor {
             supports_transactions: self.supports_transactions,
             retry_semantics: self.retry_semantics,
             grouping_support: self.grouping_support,
+            supported_formats: sink_capabilities::by_name(&self.name)
+                .map(|known| known.supported_formats)
+                .unwrap_or_else(OutputFormat::native_formats),
+            default_format: sink_capabilities::by_name(&self.name)
+                .and_then(|known| known.default_format),
         }
     }
 }
@@ -269,6 +276,40 @@ pub struct RuntimeOutputLayout {
     pub time_partition_granularity: Option<String>,
     #[serde(default)]
     pub time_partition_prefix: Option<String>,
+    #[serde(default)]
+    pub format: Option<OutputFormat>,
+}
+
+impl RuntimeOutputLayout {
+    pub fn required_format(&self) -> Result<OutputFormat, String> {
+        let format = self
+            .format
+            .ok_or_else(|| "object sink requires RuntimeOutputLayout.format".to_string())?;
+        if format.is_native() {
+            return Err("this sink writes files and needs format parquet or jsonl. Table sinks such as Postgres insert rows and have no file format.".to_string());
+        }
+        Ok(format)
+    }
+
+    pub fn object_extension(&self) -> Result<&'static str, String> {
+        Ok(self.required_format()?.extension())
+    }
+
+    pub fn hive_object_key(
+        &self,
+        prefix: &str,
+        filename: &str,
+        object_stem: &str,
+    ) -> Result<String, String> {
+        Ok(crate::ingest::partition_time::hive_object_relative_path(
+            prefix,
+            filename,
+            object_stem,
+            self.object_extension()?,
+            self.time_partition_granularity.as_deref(),
+            self.time_partition_prefix.as_deref(),
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1169,8 +1210,50 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_hard_cut_to_v19() {
-        assert_eq!(RUNTIME_PROTOCOL_VERSION, 19);
+    fn protocol_version_is_hard_cut_to_v20() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 20);
+    }
+
+    #[test]
+    fn object_layout_requires_format() {
+        let missing = RuntimeOutputLayout::default();
+        assert!(missing.required_format().is_err());
+        assert!(missing.object_extension().is_err());
+        assert!(missing
+            .hive_object_key("warehouse", "namespace=events", "apply-0001")
+            .is_err());
+        let native = RuntimeOutputLayout {
+            format: Some(OutputFormat::Native),
+            ..RuntimeOutputLayout::default()
+        };
+        assert!(native.required_format().is_err());
+        let layout = RuntimeOutputLayout {
+            format: Some(OutputFormat::Jsonl),
+            ..RuntimeOutputLayout::default()
+        };
+        assert_eq!(layout.required_format().unwrap(), OutputFormat::Jsonl);
+        assert_eq!(layout.object_extension().unwrap(), "jsonl");
+        assert_eq!(
+            layout
+                .hive_object_key("warehouse", "namespace=events", "apply-0001")
+                .unwrap(),
+            "warehouse/events/apply-0001.jsonl"
+        );
+        let hive = RuntimeOutputLayout {
+            format: Some(OutputFormat::Parquet),
+            time_partition_granularity: Some("day".into()),
+            time_partition_prefix: Some("p_".into()),
+            ..RuntimeOutputLayout::default()
+        };
+        assert_eq!(
+            hive.hive_object_key(
+                "warehouse",
+                "buffer=test&namespace=events&partition=p_rmc=EU1&time=1645296045",
+                "apply-0001",
+            )
+            .unwrap(),
+            "warehouse/events/p_rmc=EU1/p_year=2022/p_month=2/p_day=19/apply-0001.parquet"
+        );
     }
 
     #[test]

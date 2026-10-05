@@ -73,7 +73,6 @@ pub struct DataSinkSynapsePluginConfig {
     pub connection_string: String,
     pub schema: Option<String>,
     pub table: Option<String>,
-    pub format: Option<String>,
 }
 
 impl TryFrom<DataSinkPluginConfig> for DataSinkSynapsePluginConfig {
