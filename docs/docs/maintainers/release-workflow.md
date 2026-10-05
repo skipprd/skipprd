@@ -73,7 +73,8 @@ Bump `pyproject.toml` and `python/Cargo.toml` together, merge to `main` (or tag 
 
 - `linux_test_suite` — full `cargo test -p skipprd`, lease/query-ballista/hla_cluster, cloud-tables validation, postgres sink tests, and source-plugin lib tests
 - `linux_x86` — `rust-build-release` (`cargo build --release -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables`)
-- `chaos_mode_test` — `bike_hire_many` via `e2e/runtime_scenario` against the linux x86 artifact
+- `chaos_mode_test` — `bike_hire_many` via `e2e/runtime_scenario` against the linux x86 artifact. It depends on `linux_x86` only; AWS cleanup must not skip chaos or publish.
+- `cleanup` — best-effort post-chaos wipe of e2e S3/Glue leftovers (`continue-on-error`)
 - `publish_skipprd` — on engine tags, upload `skipprd-linux_x86.tar.gz` to the install CDN and create the GitHub release
 
 `check_host_dependency_boundaries.py` and `test_runtime_e2e_harness.py` run on that test lane. macOS and Windows compile jobs stay commented.

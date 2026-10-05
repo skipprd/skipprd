@@ -49,6 +49,7 @@ class RustCiTests(unittest.TestCase):
         chaos = text.split("\n  chaos_mode_test:", 1)[1].split("\n  cleanup:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", chaos)
         self.assertIn("linux_x86", chaos)
+        self.assertNotIn("- cleanup", chaos)
         self.assertIn("secrets.AWS_ACCESS_KEY_ID", chaos)
         self.assertIn("secrets.AWS_SECRET_ACCESS_KEY", chaos)
         publish = text.split("\n  publish_skipprd:", 1)[1]
