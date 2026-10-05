@@ -743,8 +743,16 @@ mod tests {
     #[test]
     fn clustered_flight_channel_is_always_https() {
         let src = include_str!("lib.rs");
-        assert!(src.contains("https://{endpoint}"));
-        assert!(!src.contains("format!(\"http://{endpoint}\")"));
+        let start = src
+            .find("fn flight_channel(endpoint: &str)")
+            .expect("clustered flight_channel");
+        let clustered = src[start..]
+            .split("\nfn attach_session")
+            .next()
+            .expect("attach_session follows flight_channel");
+        assert!(clustered.contains("https://{endpoint}"));
+        assert!(!clustered.contains("http://{endpoint}"));
+        assert!(clustered.contains("cluster_client_tls"));
         assert!(src.contains("domain_name(\"skippr-cluster\")"));
     }
 
