@@ -103,7 +103,6 @@ jobs:
     name: Chaos Mode (linux x86)
     needs:
       - linux_x86
-      - cleanup
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
@@ -129,11 +128,12 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   cleanup:
-    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+    if: always() && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request')
     name: cleanup e2e AWS resources
     needs:
-      - linux_x86
+      - chaos_mode_test
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - name: Configure AWS and clean resources
         env:
@@ -142,8 +142,8 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
         run: |
           set -euo pipefail
-          aws s3 rm s3://skippr-e2e-sample-data-output --recursive
-          aws s3 rm s3://skippr-metadata-test --recursive
+          aws s3 rm s3://skippr-e2e-sample-data-output --recursive || true
+          aws s3 rm s3://skippr-metadata-test --recursive || true
           aws glue delete-database --catalog-id 353855562591 --name bikehire || true
           aws glue delete-database --catalog-id 353855562591 --name deadletters || true
 
