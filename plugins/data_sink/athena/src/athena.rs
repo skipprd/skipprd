@@ -2575,7 +2575,7 @@ impl AwsAthena {
                 None => format!("p_{}", field_dot),
             };
             let clean_field_name = Helpers::clean_field_name(
-                &crate::helpers::configuration::Config::new(),
+                &crate::helpers::configuration::runtime_child_config(),
                 entity_name.to_string(),
             );
 

@@ -16,7 +16,7 @@ use zip::ZipArchive;
 
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::serdes::input_format::InputFormat;
-use skippr_runtime_sdk::helpers::configuration::Config;
+use skippr_runtime_sdk::helpers::configuration::runtime_child_config;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
@@ -203,7 +203,7 @@ impl DataSourceLocalFilePlugin {
     ) -> Result<impl futures::Stream<Item = Vec<Vec<IngestBatch>>>, std::io::Error> {
         let (tx, rx) = futures::channel::mpsc::unbounded();
         let input_format = InputFormat::from_option(self.config.format.as_deref());
-        let ingest_config = Config::new();
+        let ingest_config = runtime_child_config();
         for path in collect_source_files(Path::new(&source_dir)) {
             let offset_key = OffsetKey {
                 namespace: file_source_namespace(&source_dir),

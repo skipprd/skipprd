@@ -10,7 +10,7 @@ use tokio_postgres::{NoTls, Row};
 use tracing::{info, warn};
 
 use crate::pgoutput::{self, PgColumn, PgOutputMessage};
-use skippr_runtime_sdk::helpers::configuration::Config;
+use skippr_runtime_sdk::helpers::configuration::runtime_child_config;
 use skippr_runtime_sdk::plugins::cdc::{
     source_capabilities, MutationKind, PostgresCheckpoint, WalRowMeta,
 };
@@ -203,7 +203,7 @@ impl DataSourcePostgresPlugin {
     }
 
     async fn sync_snapshot(&mut self, ctx: Arc<dyn SourceSyncContext>) -> io::Result<()> {
-        let ingest_config = Config::new();
+        let ingest_config = runtime_child_config();
         let conn_str = self.connection_string();
         let (client, conn) = tokio_postgres::connect(&conn_str, NoTls)
             .await
@@ -305,7 +305,7 @@ impl DataSourcePostgresPlugin {
             info!("Created publication {}", pub_name);
         }
 
-        let ingest_config = Config::new();
+        let ingest_config = runtime_child_config();
         let stored_lsn = self.stored_resume_lsn(ctx.as_ref(), &slot_name)?;
         let resume_mode = stored_lsn.is_some();
 

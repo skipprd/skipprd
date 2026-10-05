@@ -21,7 +21,7 @@ use skippr_runtime_sdk::source_sync::offset_validation_entry;
 
 use crate::helpers::Helpers;
 use futures::stream::{self, StreamExt};
-use skippr_runtime_sdk::helpers::configuration::Config;
+use skippr_runtime_sdk::helpers::configuration::runtime_child_config;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::protocol::RuntimeExecutionContext;
 use std::io::BufRead as _;
@@ -168,7 +168,7 @@ impl DataSourceS3Plugin {
         let s3_bucket_dl = s3_bucket.clone();
         let s3_bucket_outer = s3_bucket_dl.clone();
         let s3_bucket_ns = s3_bucket.clone();
-        let ingest_config = Config::new();
+        let ingest_config = runtime_child_config();
         let delimiter = "/".to_string();
         let inventory_prefix = self.config.s3_prefix.clone();
         let total_cpus = num_cpus::get();
