@@ -283,7 +283,36 @@ impl RuntimeEnvGuard {
         let previous = std::env::var(key).ok();
         Config::setenv(key, value);
         Config::reset_envcache();
+        pin_runtime_sink_env(key, value);
         Self { key, previous }
+    }
+}
+
+fn pin_runtime_sink_env(key: &str, value: &str) {
+    let parsed = value.parse::<usize>().unwrap_or(0);
+    match key {
+        "RUNTIME_SINK_SESSIONS_PER_CHILD" => {
+            skipprd::metrics::counters::RUNTIME_SINK_SESSIONS_PER_CHILD_PIN
+                .store(parsed, Ordering::SeqCst);
+        }
+        "RUNTIME_SINK_CONNECTION_POOL_SIZE" => {
+            skipprd::metrics::counters::RUNTIME_SINK_PROCESS_CAP_PIN
+                .store(parsed, Ordering::SeqCst);
+        }
+        _ => {}
+    }
+}
+
+fn unpin_runtime_sink_env(key: &str) {
+    match key {
+        "RUNTIME_SINK_SESSIONS_PER_CHILD" => {
+            skipprd::metrics::counters::RUNTIME_SINK_SESSIONS_PER_CHILD_PIN
+                .store(0, Ordering::SeqCst);
+        }
+        "RUNTIME_SINK_CONNECTION_POOL_SIZE" => {
+            skipprd::metrics::counters::RUNTIME_SINK_PROCESS_CAP_PIN.store(0, Ordering::SeqCst);
+        }
+        _ => {}
     }
 }
 
@@ -291,9 +320,11 @@ impl Drop for RuntimeEnvGuard {
     fn drop(&mut self) {
         if let Some(value) = self.previous.as_deref() {
             Config::setenv(self.key, value);
+            pin_runtime_sink_env(self.key, value);
         } else {
             std::env::remove_var(self.key);
             Config::set_evncache(self.key, "");
+            unpin_runtime_sink_env(self.key);
         }
         Config::reset_envcache();
     }
@@ -490,9 +521,12 @@ async fn runtime_sink_does_not_reinstall_unchanged_schema_between_writes() {
     assert_eq!(schema_install_count(&marker_path), startup_installs);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn runtime_sink_pool_growth_installs_latest_schema_once_on_new_worker() {
+    let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
+    let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "4");
+    let _process_cap = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16");
     let _pool_target = RuntimeSinkPoolTargetGuard::set(1);
     let temp = tempdir().unwrap();
     let marker_path = temp.path().join("schema-installs.log");
@@ -515,14 +549,29 @@ async fn runtime_sink_pool_growth_installs_latest_schema_once_on_new_worker() {
     )
     .await
     .unwrap();
+    assert_eq!(sink.session_capacity_for_test(), 2);
     let startup_installs = schema_install_count(&marker_path);
     assert_eq!(startup_installs, 1);
+    skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET_PIN.store(4, Ordering::SeqCst);
     skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(4, Ordering::SeqCst);
 
+    let overlap = std::time::Duration::from_millis(400);
     let (first, second, third) = tokio::join!(
-        sink.sync(sample_stream(), "pool-growth-1".to_string(), None),
-        sink.sync(sample_stream(), "pool-growth-2".to_string(), None),
-        sink.sync(sample_stream(), "pool-growth-3".to_string(), None),
+        sink.sync(
+            delayed_sample_stream(overlap),
+            "pool-growth-1".to_string(),
+            None
+        ),
+        sink.sync(
+            delayed_sample_stream(overlap),
+            "pool-growth-2".to_string(),
+            None
+        ),
+        sink.sync(
+            delayed_sample_stream(overlap),
+            "pool-growth-3".to_string(),
+            None
+        ),
     );
     first.unwrap();
     second.unwrap();
@@ -821,6 +870,7 @@ async fn session_target_uses_ceiling_process_count_without_eager_growth() {
         "runtime_host_session_demand",
     )
     .await;
+    assert_eq!(sink.session_capacity_for_test(), 2);
     assert_eq!(sink.worker_count_for_test(), 1);
 
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -923,6 +973,7 @@ async fn runtime_sink_pool_shrinks_only_fully_idle_workers() {
         "runtime_host_session_shrink",
     )
     .await;
+    assert_eq!(sink.session_capacity_for_test(), 2);
 
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let sample_peak = async {
