@@ -267,6 +267,11 @@ pub struct Config {
     pub active_pipeline: Option<String>,
 }
 
+/// Empty in-memory config for runtime plugin children. Does not load skippr.yml.
+pub fn runtime_child_config() -> Config {
+    Config::new()
+}
+
 #[allow(dead_code)]
 impl Config {
     const ALLOWED_BATCH_TIME_UNITS: [&'static str; 5] = ["year", "month", "day", "hour", "minute"];
