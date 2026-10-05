@@ -7,7 +7,7 @@ Writes record batches to PostgreSQL. Schemas and tables are created automaticall
 1. Receives batches from the WAL / sink pipeline.
 2. Ensures the target schema exists (`CREATE SCHEMA IF NOT EXISTS`).
 3. Creates or alters tables to match the incoming schema.
-4. Inserts rows using the configured output format.
+4. Inserts rows into PostgreSQL tables.
 
 ## Configuration
 
@@ -35,7 +35,6 @@ data_sinks:
       database: "analytics"
       schema: "public"
       sslmode: "prefer"
-      format: json
 ```
 
 ## Configuration variables
@@ -49,7 +48,7 @@ data_sinks:
 | `POSTGRES_DATABASE` | | Target database name |
 | `POSTGRES_SCHEMA` | `public` | Target schema for tables |
 | `POSTGRES_SSLMODE` | | Libpq-style SSL mode (e.g. `disable`, `require`, `prefer`) |
-| `host`, `port`, `user`, `password`, `database`, `schema`, `sslmode`, `format` | | YAML equivalents / overrides |
+| `host`, `port`, `user`, `password`, `database`, `schema`, `sslmode` | | YAML equivalents / overrides |
 
 Connection parameters can be split between environment variables and YAML as supported by your pipeline configuration.
 

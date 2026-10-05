@@ -21,8 +21,7 @@ use skippr_object_writer::{
 use skippr_runtime_sdk::plugins::cdc;
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
-use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
-use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::serdes::output_format::OutputFormat;
 use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, manifest_object_name, persisted_object_write_matches,
     GroupedWriteReceipt, ObjectWriteManifest,
@@ -70,6 +69,7 @@ impl DataSink for FileSinkRuntimePlugin {
         )?;
         let output_file = output_file_path(
             &self.data_dir,
+            self.config.output_dir.as_deref(),
             &ctx.filename,
             &object_stem,
             &self.output_layout,
@@ -78,7 +78,7 @@ impl DataSink for FileSinkRuntimePlugin {
             output_file
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("output.parquet"),
+                .unwrap_or("output"),
         ));
         let expected_manifest = ObjectWriteManifest::from_context(
             ctx.compaction_id,
@@ -171,6 +171,7 @@ impl DataSink for FileSinkRuntimePlugin {
         )?;
         let output_file = output_file_path(
             &self.data_dir,
+            self.config.output_dir.as_deref(),
             &ctx.filename,
             &object_stem,
             &self.output_layout,
@@ -179,7 +180,7 @@ impl DataSink for FileSinkRuntimePlugin {
             output_file
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("output.parquet"),
+                .unwrap_or("output"),
         ));
         let expected_manifest = ObjectWriteManifest::from_context(
             ctx.compaction_id.clone(),
@@ -223,6 +224,7 @@ impl DataSink for FileSinkRuntimePlugin {
         )?;
         let output_file = output_file_path(
             &self.data_dir,
+            self.config.output_dir.as_deref(),
             &ctx.filename,
             &object_stem,
             &self.output_layout,
@@ -231,7 +233,7 @@ impl DataSink for FileSinkRuntimePlugin {
             output_file
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("output.parquet"),
+                .unwrap_or("output"),
         ));
         let expected_manifest = ObjectWriteManifest::from_context(
             ctx.compaction_id.clone(),
@@ -349,7 +351,14 @@ async fn sync_file_sink(
     let object_stem = object_stem
         .map(str::to_string)
         .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
-    let output_file = output_file_path(data_dir, &filename, &object_stem, output_layout)?;
+    let output_file = output_file_path(
+        data_dir,
+        config.output_dir.as_deref(),
+        &filename,
+        &object_stem,
+        output_layout,
+    )?;
+    let format = output_layout.required_format().map_err(io::Error::other)?;
     let schema = stream.schema();
     let effective_order =
         skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
@@ -369,15 +378,26 @@ async fn sync_file_sink(
     });
     let session = ObjectWriteSession::new(
         object_backend,
-        ObjectWriteRequest::new(output_file.to_string_lossy()),
+        ObjectWriteRequest::new(output_file.to_string_lossy())
+            .with_content_type(format.content_type()),
         ObjectWriterConfig::default(),
     )
     .map_err(|error| io::Error::other(error.to_string()))?;
 
     counters::inc_uploads_in_flight();
-    let result = session
-        .write_parquet(schema, writer_properties, batches)
-        .await;
+    let result = match format {
+        OutputFormat::Parquet => {
+            session
+                .write_parquet(schema, writer_properties, batches)
+                .await
+        }
+        OutputFormat::Jsonl => session.write_jsonl(batches).await,
+        OutputFormat::Native => {
+            return Err(io::Error::other(
+                OutputFormat::FILE_SINK_NEEDS_PARQUET_OR_JSONL,
+            ));
+        }
+    };
     counters::dec_uploads_in_flight();
     let receipt = result.map_err(|error| io::Error::other(error.to_string()))?;
     counters::add_parquet_rows(receipt.rows);
@@ -394,7 +414,8 @@ fn legacy_file_chunk_manifest(
 ) -> io::Result<(PathBuf, PathBuf, ObjectWriteManifest)> {
     let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
     let chunk_filename = ctx.chunk_filename(chunk_index, false);
-    let output_file = output_file_path(data_dir, &chunk_filename, &object_stem, output_layout)?;
+    let output_file =
+        output_file_path(data_dir, None, &chunk_filename, &object_stem, output_layout)?;
     let manifest_file = output_file.with_file_name(manifest_object_name(
         output_file
             .file_name()
@@ -519,34 +540,25 @@ async fn write_local_receipt(
     Ok(())
 }
 
+fn lake_root(data_dir: &str, output_dir: Option<&str>) -> PathBuf {
+    match output_dir.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => Path::new(data_dir).join("output"),
+    }
+}
+
 fn output_file_path(
     data_dir: &str,
+    output_dir: Option<&str>,
     filename: &str,
     object_stem: &str,
     output_layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
 ) -> io::Result<std::path::PathBuf> {
-    let namespace = BufferChunker::decode_file_namespace(filename);
-    let mut full_key = if namespace.is_empty() {
-        String::new()
-    } else {
-        namespace
-    };
-
-    let partition = BufferChunker::decode_file_partition(filename);
-    if !partition.is_empty() {
-        full_key = format!("{}/{}", full_key, partition);
-    }
-
-    let filename_owned = filename.to_string();
-    if let Ok(time_key) = TimePartitioner::new(&filename_owned).process_from_layout(
-        output_layout.time_partition_granularity.as_deref(),
-        output_layout.time_partition_prefix.as_deref(),
-    ) {
-        full_key = format!("{}/{}", full_key, time_key);
-    }
-
-    let output_name = format!("{}/{}", full_key, object_stem);
-    Ok(Path::new(&format!("{}/output/{}.parquet", data_dir, output_name)).to_path_buf())
+    Ok(lake_root(data_dir, output_dir).join(
+        output_layout
+            .hive_object_key("", filename, object_stem)
+            .map_err(io::Error::other)?,
+    ))
 }
 
 #[cfg(test)]
@@ -558,12 +570,56 @@ mod tests {
         assert_eq!(
             output_file_path(
                 "/data",
+                None,
                 "namespace=events",
                 "apply-0001",
-                &skippr_runtime_sdk::protocol::RuntimeOutputLayout::default(),
+                &skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                    format: Some(OutputFormat::Parquet),
+                    ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+                },
             )
             .unwrap(),
             PathBuf::from("/data/output/events/apply-0001.parquet")
+        );
+    }
+
+    #[test]
+    fn jsonl_uses_output_dir_and_jsonl_extension() {
+        let mut layout = skippr_runtime_sdk::protocol::RuntimeOutputLayout::default();
+        layout.format = Some(OutputFormat::Jsonl);
+        assert_eq!(
+            output_file_path(
+                "/data",
+                Some("/lake"),
+                "namespace=events",
+                "apply-0001",
+                &layout,
+            )
+            .unwrap(),
+            PathBuf::from("/lake/events/apply-0001.jsonl")
+        );
+    }
+
+    #[test]
+    fn hive_output_path_keeps_namespace_partition_and_time() {
+        let layout = skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+            format: Some(OutputFormat::Parquet),
+            time_partition_granularity: Some("day".into()),
+            time_partition_prefix: Some("p_".into()),
+            ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+        };
+        assert_eq!(
+            output_file_path(
+                "/data",
+                Some("/lake"),
+                "buffer=test&namespace=events&partition=p_rmc=EU1&time=1645296045",
+                "apply-0001",
+                &layout,
+            )
+            .unwrap(),
+            PathBuf::from(
+                "/lake/events/p_rmc=EU1/p_year=2022/p_month=2/p_day=19/apply-0001.parquet"
+            )
         );
     }
 }

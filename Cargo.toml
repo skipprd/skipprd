@@ -38,7 +38,7 @@ members = [
 async-trait = "0.1.77"
 arrow-array = "58.3.0"
 base64 = "0.22.1"
-arrow = { version = "58.3.0", features = ["ipc_compression"] }
+arrow = { version = "58.3.0", features = ["ipc_compression", "json"] }
 arrow-flight = { version = "58.3.0", default-features = false, features = ["flight-sql"] }
 arrow-schema = "58.3.0"
 arrow-buffer = "58.3.0"
@@ -104,6 +104,7 @@ skippr-offset-store-dynamodb = { path = "crates/skippr-offset-store-dynamodb", o
 skippr-lease = { path = "crates/skippr-lease" }
 skippr-lease-store-dynamodb = { path = "crates/skippr-lease-store-dynamodb", optional = true }
 skippr-iceberg-catalog = { path = "crates/skippr-iceberg-catalog" }
+skippr-object-writer.workspace = true
 skippr-iceberg-catalog-fs = { path = "crates/skippr-iceberg-catalog-fs" }
 skippr-iceberg-catalog-glue = { path = "crates/skippr-iceberg-catalog-glue" }
 skippr-iceberg-rest = { path = "crates/skippr-iceberg-rest" }
@@ -129,7 +130,7 @@ clap = { version = "4.0.32", features = ["derive"] }
 yaml-rust = "0.4.5"
 once_cell = "1.17.0"
 parquet = "58.3.0"
-arrow = { version = "58.3.0", features = ["ipc_compression"] }
+arrow = { version = "58.3.0", features = ["ipc_compression", "json"] }
 arrow-flight = { workspace = true }
 arrow-schema = "58.3.0"
 arrow-buffer = "58.3.0"

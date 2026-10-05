@@ -22,7 +22,7 @@ data_sinks:
     Stdout: {}
 ```
 
-No additional fields are required. This sink is useful for debugging pipelines and for piping Skipprd output into other tools.
+Optional `format: jsonl` is accepted; `parquet` is rejected. The default is JSON Lines. This sink is useful for debugging pipelines and for piping Skipprd output into other tools.
 
 ## Configuration variables
 

@@ -11820,6 +11820,7 @@ dependencies = [
 name = "skippr-object-writer"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "arrow-array",
  "arrow-schema",
  "async-trait",
@@ -12262,6 +12263,7 @@ dependencies = [
  "futures",
  "hex",
  "parquet",
+ "skippr-object-writer",
  "skippr-runtime-sdk",
  "tokio",
 ]
@@ -13611,6 +13613,7 @@ dependencies = [
  "skippr-lease",
  "skippr-lease-store-cloud-tables",
  "skippr-lease-store-dynamodb",
+ "skippr-object-writer",
  "skippr-offset-store-cloud-tables",
  "skippr-offset-store-dynamodb",
  "skippr-query-ballista",

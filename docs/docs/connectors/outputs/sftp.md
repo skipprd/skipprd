@@ -1,11 +1,11 @@
 # SFTP Output
 
-Uploads Parquet files to a remote SFTP server.
+Uploads Parquet or JSON Lines objects to a remote SFTP server.
 
 ## How it works
 
-1. Serializes record batches to Parquet.
-2. Connects via SSH and uploads to the configured remote path.
+1. Serializes record batches as Parquet (default) or JSON Lines.
+2. Connects via SSH and uploads to the configured remote path, including Hive partitions when present.
 
 ## Configuration
 
@@ -30,7 +30,7 @@ data_sinks:
 | `password` | | Password authentication |
 | `private_key_path` | | Path to SSH private key |
 | `remote_path` | *(required)* | Remote directory for uploads |
-| `format` | `parquet` | Output format |
+| `format` | `parquet` | `parquet` or `jsonl` |
 
 ## Authentication
 

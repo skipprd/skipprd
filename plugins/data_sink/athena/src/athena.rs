@@ -3517,6 +3517,7 @@ mod contract_schema_tests {
                 order_fields: vec![],
                 time_partition_granularity: Some("day".to_string()),
                 time_partition_prefix: None,
+                format: None,
             },
             inject_fields: Default::default(),
         };

@@ -25,7 +25,6 @@ data_sinks:
 | `connection_string` | *(required)* | ADO-style connection string |
 | `schema` | `dbo` | Target schema |
 | `table` | `data` | Target table |
-| `format` | `json` | Data format |
 
 ## Authentication
 

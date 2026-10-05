@@ -5,4 +5,5 @@ pub mod json;
 pub mod json_benchmarks;
 pub mod ndjson_fast;
 pub mod optimized_json;
+pub mod output_format;
 pub mod xml;

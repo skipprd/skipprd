@@ -15,7 +15,6 @@ pub struct DataSinkPostgresPluginConfig {
     #[serde(default = "default_postgres_schema")]
     pub schema: String,
     pub sslmode: Option<String>,
-    pub format: Option<String>,
 }
 
 fn default_postgres_host() -> String {

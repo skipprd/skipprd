@@ -11,6 +11,7 @@ path = "src/main.rs"
 clap.workspace = true
 tokio.workspace = true
 skippr-runtime-sdk.workspace = true
+skippr-object-writer.workspace = true
 bytes.workspace = true
 hex.workspace = true
 parquet.workspace = true

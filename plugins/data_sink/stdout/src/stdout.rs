@@ -1,8 +1,7 @@
 use async_trait::async_trait;
-use datafusion::arrow::json::writer::LineDelimited;
-use datafusion::arrow::json::WriterBuilder;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
+use skippr_object_writer::encode_jsonl_batch;
 
 use skippr_runtime_sdk::plugins::DataSink;
 
@@ -35,14 +34,7 @@ impl DataSink for DataSinkStdoutPlugin {
         };
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.map_err(|e| std::io::Error::other(e.to_string()))?;
-            let mut buf = Vec::new();
-            let mut writer = WriterBuilder::new().build::<_, LineDelimited>(&mut buf);
-            writer
-                .write(&batch)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            writer
-                .finish()
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let buf = encode_jsonl_batch(&batch)?;
             let output = String::from_utf8_lossy(&buf);
             print!("{}", output);
         }

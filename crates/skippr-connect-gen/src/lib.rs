@@ -1678,6 +1678,61 @@ mod tests {
             }),
             "removed Iceberg keys must not appear on AthenaIceberg"
         );
+        for plugin_name in [
+            "AthenaIceberg",
+            "SkipprLake",
+            "Duckdb",
+            "Postgres",
+            "Snowflake",
+            "Bigquery",
+            "Clickhouse",
+            "Databricks",
+            "Motherduck",
+            "Redshift",
+            "Synapse",
+        ] {
+            let plugin = plugins
+                .iter()
+                .find(|p| p.kind == PluginKind::DataSink && p.plugin_name == plugin_name)
+                .unwrap_or_else(|| panic!("{plugin_name} data sink"));
+            assert!(
+                !plugin.fields.iter().any(|f| f.ident == "format"),
+                "{plugin_name} writes rows into tables (SQL or Iceberg), not Parquet or JSON Lines files, so it has no `format` field. Remove `format` from the plugin config struct."
+            );
+        }
+        for plugin_name in ["Athena", "File", "S3", "Gcs", "AzureBlob", "Sftp", "Amqp"] {
+            let plugin = plugins
+                .iter()
+                .find(|p| p.kind == PluginKind::DataSink && p.plugin_name == plugin_name)
+                .unwrap_or_else(|| panic!("{plugin_name} data sink"));
+            assert!(
+                plugin.fields.iter().any(|f| f.ident == "format"),
+                "{plugin_name} writes Parquet or JSON Lines files and must expose a `format` field so users can set parquet (default) or jsonl where supported. Add `format: Option<String>` to the plugin config struct."
+            );
+        }
+        let kinds = emit_kinds_rs(&plugins);
+        for variant in [
+            "DataSinkAthenaIceberg",
+            "DataSinkSkipprLake",
+            "DataSinkDuckdb",
+            "DataSinkPostgres",
+            "DataSinkSnowflake",
+            "DataSinkBigquery",
+            "DataSinkClickhouse",
+            "DataSinkDatabricks",
+            "DataSinkMotherduck",
+            "DataSinkRedshift",
+            "DataSinkSynapse",
+        ] {
+            assert!(
+                !kinds.contains(&format!("(Self::{variant}, \"format\")")),
+                "{variant} writes rows into tables (SQL or Iceberg), not files, so connect must not generate `format`. Remove `format` from the plugin config struct."
+            );
+        }
+        assert!(
+            kinds.contains("(Self::DataSinkAthena, \"format\") => Some(\"format\")"),
+            "Athena writes Parquet files and must map `format` so users can set parquet (jsonl is not supported yet)."
+        );
         let duckdb = plugins
             .iter()
             .find(|p| p.kind == PluginKind::DataSink && p.plugin_name == "Duckdb")

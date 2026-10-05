@@ -56,7 +56,6 @@ data_sinks:
 | `catalog` | `main` | Unity Catalog name (COPY mode) |
 | `schema` | `default` | Schema name (COPY mode) |
 | `table` | `data` | Target table name (COPY mode) |
-| `format` | `parquet` | Output format |
 
 ## Authentication
 

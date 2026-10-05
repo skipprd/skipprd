@@ -45,7 +45,6 @@ pub struct DataSinkRedshiftPluginConfig {
     pub staging_s3_bucket: Option<String>,
     pub staging_s3_prefix: Option<String>,
     pub iam_role_arn: Option<String>,
-    pub format: Option<String>,
     /// Query/model only; ignored at ingest.
     #[serde(default)]
     #[allow(dead_code)]

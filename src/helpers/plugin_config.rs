@@ -5,6 +5,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
 use crate::serdes::input_format::InputFormat;
+use crate::serdes::output_format::OutputFormat;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginConfigEntry {
@@ -18,20 +19,27 @@ impl PluginConfigEntry {
     }
 
     pub fn input_format(&self) -> InputFormat {
-        InputFormat::from(self.format().as_str())
+        InputFormat::from_option(self.string_field("format").as_deref())
+    }
+
+    pub fn resolved_output_format(&self) -> Result<Option<OutputFormat>, String> {
+        match crate::plugins::cdc::sink_capabilities::by_name(&self.plugin_name) {
+            Some(capability) => capability.resolve_format(self.string_field("format").as_deref()),
+            None => Ok(None),
+        }
     }
 
     pub fn format(&self) -> String {
-        match crate::connect::DataSink::parse(&self.plugin_name) {
-            Some(
-                crate::connect::DataSink::SkipprLake
-                | crate::connect::DataSink::AthenaIceberg
-                | crate::connect::DataSink::Duckdb,
-            ) => return String::new(),
-            _ => {}
+        if crate::connect::DataSink::parse(&self.plugin_name).is_some() {
+            return self
+                .resolved_output_format()
+                .ok()
+                .flatten()
+                .map(|format| format.to_string())
+                .unwrap_or_default();
         }
         self.string_field("format")
-            .unwrap_or_else(|| default_format_for_plugin(&self.plugin_name).to_string())
+            .unwrap_or_else(|| InputFormat::default().as_str().to_string())
     }
 
     pub fn batch_size_bytes(&self) -> Option<i64> {
@@ -158,27 +166,11 @@ fn plugin_entry_from_map(
     }
 }
 
-fn default_format_for_plugin(plugin_name: &str) -> &'static str {
-    if let Some(crate::connect::DataSource::Mssql) = crate::connect::DataSource::parse(plugin_name)
-    {
-        return "row";
-    }
-    match crate::connect::DataSink::parse(plugin_name) {
-        Some(
-            crate::connect::DataSink::Snowflake
-            | crate::connect::DataSink::AzureBlob
-            | crate::connect::DataSink::Gcs
-            | crate::connect::DataSink::Sftp
-            | crate::connect::DataSink::Databricks
-            | crate::connect::DataSink::Redshift,
-        ) => "parquet",
-        _ => "json",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    use crate::serdes::output_format::OutputFormat;
 
     use super::PluginConfigEntry;
 
@@ -208,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn skipprlake_does_not_invent_a_format() {
+    fn skipprlake_does_not_accept_format() {
         let src = include_str!("plugin_config.rs");
         assert!(
             !src.contains("is_plugin_name(name) => \"parquet\""),
@@ -223,11 +215,51 @@ mod tests {
                 "table_namespace": "bronze"
             }),
         };
+        assert_eq!(entry.resolved_output_format().unwrap(), None);
         assert_eq!(entry.format(), "");
     }
 
     #[test]
-    fn athena_iceberg_does_not_invent_a_format() {
+    fn athena_defaults_parquet_and_rejects_jsonl() {
+        let entry = PluginConfigEntry {
+            plugin_name: crate::plugins::cdc::sink_capabilities::ATHENA
+                .name
+                .to_string(),
+            config: serde_json::json!({
+                "s3_bucket": "output",
+                "s3_prefix": "warehouse",
+                "athena_workgroup_name": "primary",
+                "athena_results_s3_bucket": "results"
+            }),
+        };
+        assert_eq!(
+            entry.resolved_output_format().unwrap(),
+            Some(OutputFormat::Parquet)
+        );
+
+        let parquet = PluginConfigEntry {
+            plugin_name: crate::plugins::cdc::sink_capabilities::ATHENA
+                .name
+                .to_string(),
+            config: serde_json::json!({ "format": "parquet" }),
+        };
+        assert_eq!(
+            parquet.resolved_output_format().unwrap(),
+            Some(OutputFormat::Parquet)
+        );
+
+        let rejected = PluginConfigEntry {
+            plugin_name: crate::plugins::cdc::sink_capabilities::ATHENA
+                .name
+                .to_string(),
+            config: serde_json::json!({ "format": "jsonl" }),
+        };
+        let err = rejected.resolved_output_format().unwrap_err();
+        assert!(err.contains("does not support format 'jsonl'"));
+    }
+
+    #[test]
+    fn athena_iceberg_does_not_accept_format() {
         let entry = PluginConfigEntry {
             plugin_name: crate::plugins::cdc::sink_capabilities::ATHENA_ICEBERG
                 .name
@@ -239,11 +271,12 @@ mod tests {
                 "athena_results_s3_bucket": "results"
             }),
         };
+        assert_eq!(entry.resolved_output_format().unwrap(), None);
         assert_eq!(entry.format(), "");
     }
 
     #[test]
-    fn duckdb_does_not_invent_a_format() {
+    fn duckdb_does_not_accept_format() {
         let entry = PluginConfigEntry {
             plugin_name: crate::plugins::cdc::sink_capabilities::DUCKDB
                 .name
@@ -253,6 +286,42 @@ mod tests {
                 "table_namespace": "bronze"
             }),
         };
+        assert_eq!(entry.resolved_output_format().unwrap(), None);
         assert_eq!(entry.format(), "");
+    }
+
+    #[test]
+    fn file_omitted_format_is_parquet() {
+        let entry = PluginConfigEntry {
+            plugin_name: "File".to_string(),
+            config: json!({}),
+        };
+        assert_eq!(
+            entry.resolved_output_format().unwrap(),
+            Some(OutputFormat::Parquet)
+        );
+    }
+
+    #[test]
+    fn file_accepts_jsonl() {
+        let entry = PluginConfigEntry {
+            plugin_name: "File".to_string(),
+            config: json!({ "format": "jsonl" }),
+        };
+        assert_eq!(
+            entry.resolved_output_format().unwrap(),
+            Some(OutputFormat::Jsonl)
+        );
+    }
+
+    #[test]
+    fn postgres_rejects_configured_format() {
+        let entry = PluginConfigEntry {
+            plugin_name: "Postgres".to_string(),
+            config: json!({ "format": "jsonl" }),
+        };
+        let err = entry.resolved_output_format().unwrap_err();
+        assert!(err.contains("writes rows into tables"));
+        assert!(err.contains("Remove `format: jsonl`"));
     }
 }

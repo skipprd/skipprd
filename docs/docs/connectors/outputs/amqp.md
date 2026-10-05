@@ -27,7 +27,7 @@ data_sinks:
 | `exchange` | *(required)* | Exchange name |
 | `routing_key` | `""` | Routing key |
 | `exchange_type` | `direct` | Exchange type (direct, fanout, topic, headers) |
-| `format` | `json` | Data format |
+| `format` | `jsonl` | Optional. AMQP is JSON Lines only; `parquet` is rejected. |
 
 ## Authentication
 
