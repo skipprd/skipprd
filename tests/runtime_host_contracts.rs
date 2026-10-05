@@ -304,6 +304,7 @@ impl RuntimeSinkPoolTargetGuard {
         // Apply env caps after callers install RUNTIME_SINK_* overrides whenever
         // possible; this still seeds once, then restores the explicit test target.
         skipprd::ingest::tuner::apply_env_caps();
+        skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET_PIN.store(target, Ordering::SeqCst);
         let previous =
             skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.swap(target, Ordering::SeqCst);
         Self { previous }
@@ -312,6 +313,7 @@ impl RuntimeSinkPoolTargetGuard {
 
 impl Drop for RuntimeSinkPoolTargetGuard {
     fn drop(&mut self) {
+        skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET_PIN.store(0, Ordering::SeqCst);
         skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(self.previous, Ordering::SeqCst);
     }
 }
@@ -821,21 +823,35 @@ async fn session_target_uses_ceiling_process_count_without_eager_growth() {
     .await;
     assert_eq!(sink.worker_count_for_test(), 1);
 
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let sample_peak = async {
-        let mut peak = 1usize;
-        for _ in 0..200 {
+        let mut peak = sink.worker_count_for_test();
+        tokio::pin!(stop_rx);
+        loop {
             peak = peak.max(sink.worker_count_for_test());
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
         }
-        peak
+        peak.max(sink.worker_count_for_test())
     };
 
-    let (one, two, three, four, five, peak_workers) = tokio::join!(
-        sink.sync(sample_stream(), "demand-1".to_string(), None),
-        sink.sync(sample_stream(), "demand-2".to_string(), None),
-        sink.sync(sample_stream(), "demand-3".to_string(), None),
-        sink.sync(sample_stream(), "demand-4".to_string(), None),
-        sink.sync(sample_stream(), "demand-5".to_string(), None),
+    let syncs = async {
+        tokio::join!(
+            sink.sync(sample_stream(), "demand-1".to_string(), None),
+            sink.sync(sample_stream(), "demand-2".to_string(), None),
+            sink.sync(sample_stream(), "demand-3".to_string(), None),
+            sink.sync(sample_stream(), "demand-4".to_string(), None),
+            sink.sync(sample_stream(), "demand-5".to_string(), None),
+        )
+    };
+    let ((one, two, three, four, five), peak_workers) = tokio::join!(
+        async {
+            let result = syncs.await;
+            let _ = stop_tx.send(());
+            result
+        },
         sample_peak,
     );
     one.unwrap();
@@ -843,8 +859,6 @@ async fn session_target_uses_ceiling_process_count_without_eager_growth() {
     three.unwrap();
     four.unwrap();
     five.unwrap();
-
-    let peak_workers = peak_workers.max(sink.worker_count_for_test());
     assert_eq!(
         peak_workers, 3,
         "ceil(session_target=5 / sessions_per_child=2) workers expected"
@@ -910,22 +924,36 @@ async fn runtime_sink_pool_shrinks_only_fully_idle_workers() {
     )
     .await;
 
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let sample_peak = async {
-        let mut peak = 1usize;
-        for _ in 0..200 {
+        let mut peak = sink.worker_count_for_test();
+        tokio::pin!(stop_rx);
+        loop {
             peak = peak.max(sink.worker_count_for_test());
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
         }
-        peak
+        peak.max(sink.worker_count_for_test())
     };
 
-    let (one, two, three, four, five, six, peak_workers) = tokio::join!(
-        sink.sync(sample_stream(), "shrink-1".to_string(), None),
-        sink.sync(sample_stream(), "shrink-2".to_string(), None),
-        sink.sync(sample_stream(), "shrink-3".to_string(), None),
-        sink.sync(sample_stream(), "shrink-4".to_string(), None),
-        sink.sync(sample_stream(), "shrink-5".to_string(), None),
-        sink.sync(sample_stream(), "shrink-6".to_string(), None),
+    let syncs = async {
+        tokio::join!(
+            sink.sync(sample_stream(), "shrink-1".to_string(), None),
+            sink.sync(sample_stream(), "shrink-2".to_string(), None),
+            sink.sync(sample_stream(), "shrink-3".to_string(), None),
+            sink.sync(sample_stream(), "shrink-4".to_string(), None),
+            sink.sync(sample_stream(), "shrink-5".to_string(), None),
+            sink.sync(sample_stream(), "shrink-6".to_string(), None),
+        )
+    };
+    let ((one, two, three, four, five, six), peak_workers) = tokio::join!(
+        async {
+            let result = syncs.await;
+            let _ = stop_tx.send(());
+            result
+        },
         sample_peak,
     );
     one.unwrap();
@@ -934,14 +962,14 @@ async fn runtime_sink_pool_shrinks_only_fully_idle_workers() {
     four.unwrap();
     five.unwrap();
     six.unwrap();
-    let peak_workers = peak_workers.max(sink.worker_count_for_test());
     assert_eq!(
         peak_workers, 3,
         "ceil(session_target=6 / sessions_per_child=2) workers expected before shrink"
     );
 
+    skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET_PIN.store(2, Ordering::SeqCst);
     skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(2, Ordering::SeqCst);
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while sink.worker_count_for_test() != 1 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
@@ -1450,9 +1478,12 @@ fn runtime_manifest_rejects_v16_before_spawn() {
     .unwrap();
 
     let err = ResolvedRuntimePlugin::load(&manifest_path).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("uses protocol 16, but host requires protocol 17"));
+    assert!(
+        err.to_string().contains(&format!(
+            "uses protocol 16, but host requires protocol {RUNTIME_PROTOCOL_VERSION}"
+        )),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]

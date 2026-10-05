@@ -1646,8 +1646,13 @@ fn runtime_sink_global_session_budget() -> usize {
 fn runtime_sink_session_target() -> usize {
     // Compatibility mirror of the authoritative FlushBudgetSnapshot.
     crate::ingest::tuner::apply_env_caps();
-    crate::metrics::counters::RUNTIME_SINK_POOL_TARGET
-        .load(Ordering::Relaxed)
+    let pinned = crate::metrics::counters::RUNTIME_SINK_POOL_TARGET_PIN.load(Ordering::Relaxed);
+    let target = if pinned > 0 {
+        pinned
+    } else {
+        crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.load(Ordering::Relaxed)
+    };
+    target
         .clamp(1, 256)
         .min(runtime_sink_global_session_budget())
 }
