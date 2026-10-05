@@ -854,7 +854,7 @@ async fn per_child_session_capacity_bounds_in_flight_applies() {
     assert_eq!(state["run_count"], 3);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[serial]
 async fn session_target_uses_ceiling_process_count_without_eager_growth() {
     let _process_cap = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16");
@@ -887,13 +887,15 @@ async fn session_target_uses_ceiling_process_count_without_eager_growth() {
         peak.max(sink.worker_count_for_test())
     };
 
+    // Hold leases across child spawn; a ready stream can finish before worker 3 starts.
+    let overlap = std::time::Duration::from_secs(8);
     let syncs = async {
         tokio::join!(
-            sink.sync(sample_stream(), "demand-1".to_string(), None),
-            sink.sync(sample_stream(), "demand-2".to_string(), None),
-            sink.sync(sample_stream(), "demand-3".to_string(), None),
-            sink.sync(sample_stream(), "demand-4".to_string(), None),
-            sink.sync(sample_stream(), "demand-5".to_string(), None),
+            sink.sync(delayed_sample_stream(overlap), "demand-1".to_string(), None),
+            sink.sync(delayed_sample_stream(overlap), "demand-2".to_string(), None),
+            sink.sync(delayed_sample_stream(overlap), "demand-3".to_string(), None),
+            sink.sync(delayed_sample_stream(overlap), "demand-4".to_string(), None),
+            sink.sync(delayed_sample_stream(overlap), "demand-5".to_string(), None),
         )
     };
     let ((one, two, three, four, five), peak_workers) = tokio::join!(
@@ -957,7 +959,7 @@ async fn adapter_capability_limits_effective_per_child_sessions() {
     assert_eq!(postgres_sink.session_capacity_for_test(), 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[serial]
 async fn runtime_sink_pool_shrinks_only_fully_idle_workers() {
     let _process_cap = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16");
@@ -989,14 +991,15 @@ async fn runtime_sink_pool_shrinks_only_fully_idle_workers() {
         peak.max(sink.worker_count_for_test())
     };
 
+    let overlap = std::time::Duration::from_secs(8);
     let syncs = async {
         tokio::join!(
-            sink.sync(sample_stream(), "shrink-1".to_string(), None),
-            sink.sync(sample_stream(), "shrink-2".to_string(), None),
-            sink.sync(sample_stream(), "shrink-3".to_string(), None),
-            sink.sync(sample_stream(), "shrink-4".to_string(), None),
-            sink.sync(sample_stream(), "shrink-5".to_string(), None),
-            sink.sync(sample_stream(), "shrink-6".to_string(), None),
+            sink.sync(delayed_sample_stream(overlap), "shrink-1".to_string(), None),
+            sink.sync(delayed_sample_stream(overlap), "shrink-2".to_string(), None),
+            sink.sync(delayed_sample_stream(overlap), "shrink-3".to_string(), None),
+            sink.sync(delayed_sample_stream(overlap), "shrink-4".to_string(), None),
+            sink.sync(delayed_sample_stream(overlap), "shrink-5".to_string(), None),
+            sink.sync(delayed_sample_stream(overlap), "shrink-6".to_string(), None),
         )
     };
     let ((one, two, three, four, five, six), peak_workers) = tokio::join!(
