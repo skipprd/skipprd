@@ -1658,6 +1658,10 @@ fn runtime_sink_session_target() -> usize {
 }
 
 fn runtime_sink_process_cap() -> usize {
+    let pinned = crate::metrics::counters::RUNTIME_SINK_PROCESS_CAP_PIN.load(Ordering::Relaxed);
+    if pinned > 0 {
+        return pinned.min(16);
+    }
     Config::getenv("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16")
         .parse::<usize>()
         .ok()
@@ -1667,12 +1671,18 @@ fn runtime_sink_process_cap() -> usize {
 }
 
 fn runtime_sink_session_capacity(adapter_limit: usize) -> usize {
-    let requested = Config::getenv("RUNTIME_SINK_SESSIONS_PER_CHILD", "2")
-        .parse::<usize>()
-        .ok()
-        .filter(|value| *value > 0)
-        .unwrap_or(2)
-        .min(16);
+    let pinned =
+        crate::metrics::counters::RUNTIME_SINK_SESSIONS_PER_CHILD_PIN.load(Ordering::Relaxed);
+    let requested = if pinned > 0 {
+        pinned.min(16)
+    } else {
+        Config::getenv("RUNTIME_SINK_SESSIONS_PER_CHILD", "2")
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(2)
+            .min(16)
+    };
     requested
         .min(adapter_limit.max(1))
         .min(runtime_sink_global_session_budget())

@@ -169,6 +169,12 @@ pub static RUNTIME_SINK_POOL_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
 /// Test pin that wins over tuner mirrors. Zero means "no pin".
 pub static RUNTIME_SINK_POOL_TARGET_PIN: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
+/// Test pin for per-child sessions. Zero means "no pin".
+pub static RUNTIME_SINK_SESSIONS_PER_CHILD_PIN: Lazy<std::sync::atomic::AtomicUsize> =
+    Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
+/// Test pin for the hard process cap. Zero means "no pin".
+pub static RUNTIME_SINK_PROCESS_CAP_PIN: Lazy<std::sync::atomic::AtomicUsize> =
+    Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
 /// Athena Glue control-plane concurrency (auto-tuned in plugin; env ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY overrides).
 pub static ATHENA_GLUE_CP_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(2));
