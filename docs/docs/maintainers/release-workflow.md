@@ -1,6 +1,6 @@
 # Release Workflow
 
-Python wheels publish from `.github/workflows/ci.yml`. Host binary and runtime plugin registry publishing use the scripts and composite actions under `.github/`.
+Python wheels publish from `.github/workflows/ci.yml`. Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`). `publish_skipprd` runs on engine tags after `chaos_mode_test`. Darwin / Windows / extra e2e stay commented out for now.
 
 ## High-level flow
 
@@ -69,14 +69,14 @@ Bump `pyproject.toml` and `python/Cargo.toml` together, merge to `main` (or tag 
 
 ## 3. Compile and test the important boundaries
 
-The workflow currently uses:
+`.github/workflows/rust.yml` (**Rust CI/CD Pipeline**) is the GitHub-hosted linux x86 lane:
 
-- full host test execution on Linux
-- postgres sink tests on Linux
-- compile-only validation for the same host and postgres plugin targets on macOS and Windows
-- `check_host_dependency_boundaries.py` on all major build/test lanes
+- `linux_test_suite` — full `cargo test -p skipprd`, lease/query-ballista/hla_cluster, cloud-tables validation, postgres sink tests, and source-plugin lib tests
+- `linux_x86` — `rust-build-release` (`cargo build --release -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables`)
+- `chaos_mode_test` — `bike_hire_many` via `e2e/runtime_scenario` against the linux x86 artifact
+- `publish_skipprd` — on engine tags, upload `skipprd-linux_x86.tar.gz` to the install CDN and create the GitHub release
 
-This combination keeps CI focused on the host/package boundary and catches the common refactor regressions without having to execute the full runtime e2e matrix everywhere.
+`check_host_dependency_boundaries.py` and `test_runtime_e2e_harness.py` run on that test lane. macOS and Windows compile jobs stay commented.
 
 ## 4. Publish runtime plugin manifests and binaries
 

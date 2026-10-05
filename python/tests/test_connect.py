@@ -240,6 +240,15 @@ def test_athena_iceberg_schema_sink_persist(tmp_path):
     path = tmp_path / "skippr.yml"
     skippr.workspace("demo", config=str(path))
     s = skippr.Session(pipeline="p", config_file=str(path))
+    s.connect().data_sink(
+        skippr.DataSink.AthenaIceberg,
+        skippr.DataSinkAthenaIceberg(
+            warehouse="s3://wh/",
+            glue_database_name="analytics",
+            athena_workgroup_name="primary",
+            athena_results_s3_bucket="results",
+        ),
+    ).name("warehouse")
     s.connect().schema_sink(
         skippr.SchemaSink.AthenaIceberg,
         skippr.SchemaSinkAthenaIceberg(
@@ -279,6 +288,13 @@ def test_duckdb_schema_sink_persist(tmp_path):
     path = tmp_path / "skippr.yml"
     skippr.workspace("demo", config=str(path))
     s = skippr.Session(pipeline="p", config_file=str(path))
+    s.connect().data_sink(
+        skippr.DataSink.Duckdb,
+        skippr.DataSinkDuckdb(
+            warehouse="file:///tmp/lake",
+            table_namespace="bronze",
+        ),
+    ).name("lake")
     s.connect().schema_sink(
         skippr.SchemaSink.Duckdb,
         skippr.SchemaSinkDuckdb(

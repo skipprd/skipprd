@@ -11,6 +11,9 @@ export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/opt/homebrew/bin:/usr/local/bin:${
 echo "precommit: python3 .github/scripts/test_python_bindings_ci.py"
 python3 .github/scripts/test_python_bindings_ci.py
 
+echo "precommit: python3 .github/scripts/test_rust_ci.py"
+python3 .github/scripts/test_rust_ci.py
+
 echo "precommit: python3 .github/scripts/test_publish_runtime_plugins.py"
 python3 .github/scripts/test_publish_runtime_plugins.py
 

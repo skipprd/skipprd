@@ -42,6 +42,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertEqual(CI.name, "ci.yml")
         self.assertIn("scripts/test-python.sh", text)
         self.assertIn("test_python_bindings_ci.py", text)
+        self.assertIn("test_rust_ci.py", text)
         self.assertIn("test_publish_runtime_plugins.py", text)
         self.assertIn("cargo test -p skipprd --lib", text)
         self.assertIn("skippr-connect-gen", text)
@@ -204,6 +205,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("cargo test -p skipprd --lib", script)
         self.assertIn("skippr-connect-gen", script)
         self.assertIn("test_python_bindings_ci.py", script)
+        self.assertIn("test_rust_ci.py", script)
         self.assertIn("test_publish_runtime_plugins.py", script)
         self.assertIn(".githooks/pre-commit", installer)
 
