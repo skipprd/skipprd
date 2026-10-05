@@ -49,11 +49,11 @@ On tag builds, `set_root_package_version.py` stamps the root host package versio
 
 Python has its own semver in `pyproject.toml` and `python/Cargo.toml` (`0.1.0` today). It is not the skipprd git tag.
 
-`.github/workflows/ci.yml` **always** builds and tests the `skippr` wheel on Skippr Cloud runners (`skippr-linux-x64-16`, `skippr-darwin-arm64-8`).
+`.github/workflows/ci.yml` **always** builds and tests the `skippr` wheel on GitHub-hosted Linux x86 (`ubuntu-latest`). Darwin / macOS arm64 is commented out for now.
 
 `python-publish` runs on `main` or `python-v*` tags (not engine unprefixed host tags, not `python-v0.0.0`). It publishes only when that Python semver is absent from PyPI.
 
-Publish uses **PyPI Trusted Publishing** (GitHub OIDC), not a pip login or `PYPI_API_TOKEN`. The job sets `id-token: write` and calls `pypa/gh-action-pypi-publish` with `attestations: false` (self-hosted Skippr Cloud runners). GitHub mints a short-lived token; PyPI accepts it because this repo's GitHub publisher is registered.
+Publish uses **PyPI Trusted Publishing** (GitHub OIDC), not a pip login or `PYPI_API_TOKEN`. The job sets `id-token: write` and calls `pypa/gh-action-pypi-publish` with `attestations: false` (GitHub-hosted `ubuntu-latest`). GitHub mints a short-lived token; PyPI accepts it because this repo's GitHub publisher is registered.
 
 Registered publisher on [pypi.org](https://pypi.org):
 
