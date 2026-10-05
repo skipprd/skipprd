@@ -1,6 +1,6 @@
 # Release Workflow
 
-Python wheels publish from `.github/workflows/ci.yml`. Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`). `publish_skipprd` runs on engine tags after `chaos_mode_test`. Darwin / Windows / extra e2e stay commented out for now.
+Python wheels publish from `.github/workflows/ci.yml`. Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`). It runs on engine tags (and `workflow_dispatch`), not on `main` / master pushes. `publish_skipprd` runs after `chaos_mode_test`. Darwin / Windows / extra e2e stay commented out for now.
 
 ## High-level flow
 
@@ -69,7 +69,7 @@ Bump `pyproject.toml` and `python/Cargo.toml` together, merge to `main` (or tag 
 
 ## 3. Compile and test the important boundaries
 
-`.github/workflows/rust.yml` (**Rust CI/CD Pipeline**) is the GitHub-hosted linux x86 lane:
+`.github/workflows/rust.yml` (**Rust CI/CD Pipeline**) is the GitHub-hosted linux x86 lane. It runs on unprefixed engine tags (`17.0.0`) and `workflow_dispatch`, not on `main` or master branch pushes.
 
 - `linux_test_suite` — full `cargo test -p skipprd`, lease/query-ballista/hla_cluster, cloud-tables validation, postgres sink tests, and source-plugin lib tests
 - `linux_x86` — `rust-build-release` (`cargo build --release -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables`)

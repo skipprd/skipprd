@@ -60,6 +60,17 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("gh release", publish)
         self.assertIn("secrets.GITHUB_TOKEN", publish)
 
+    def test_rust_ci_runs_only_on_engine_tags(self) -> None:
+        text = RUST.read_text(encoding="utf-8")
+        header = text.split("\njobs:", 1)[0]
+        self.assertIn("tags:", header)
+        self.assertIn('- "[0-9]*"', header)
+        self.assertNotIn("branches:", header)
+        self.assertNotIn("main", header)
+        self.assertNotIn("master", header)
+        self.assertNotIn("pull_request:", header)
+        self.assertIn("workflow_dispatch:", header)
+
     def test_rust_build_release_accepts_skipprd_workspace_root(self) -> None:
         action = BUILD_RELEASE.read_text(encoding="utf-8")
         self.assertIn("workspace-root:", action)
@@ -77,6 +88,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("chaos_mode_test", text)
         self.assertIn("bike_hire_many", text)
         self.assertIn("publish_skipprd", text)
+        self.assertIn("engine tags", text)
+        self.assertIn("not on `main`", text)
 
 
 if __name__ == "__main__":
