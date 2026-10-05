@@ -92,13 +92,18 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("export CARGO=", script)
         self.assertNotIn("/usr/local/cargo/bin/cargo", script)
 
-    def test_ci_builds_on_skippr_cloud_runners(self):
+    def test_ci_builds_on_github_linux_x86(self):
         text = CI.read_text(encoding="utf-8")
-        self.assertIn("skippr-linux-x64-16", text)
-        self.assertIn("skippr-darwin-arm64-8", text)
-        self.assertNotIn("ubuntu-latest", text)
+        self.assertRegex(text, r"(?m)^    runs-on: ubuntu-latest$")
+        self.assertNotRegex(text, r"(?m)^    runs-on: \[self-hosted")
+        self.assertNotRegex(text, r"(?m)^  darwin:")
+        self.assertRegex(text, r"(?m)^  # darwin:")
         self.assertNotIn("macos-latest", text)
+        self.assertNotIn("windows-latest", text)
         self.assertNotIn("depot", text)
+        linux = text.split("\n  linux:", 1)[1].split("\n  python-publish:", 1)[0]
+        self.assertIn("runs-on: ubuntu-latest", linux)
+        self.assertNotIn("skippr-linux-x64-16", linux)
         self.assertIn("working-directory: skipprd", text)
         self.assertIn("path: skipprd", text)
         self.assertIn("skipprd/target/wheels/*.whl", text)
@@ -123,10 +128,13 @@ class PythonBindingsCiTests(unittest.TestCase):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("`0.0.0`", agents)
         self.assertNotIn("`v0.0.0`", agents)
-        publish = text.split("python-publish:", 1)[1]
+        publish = text.split("python-publish:", 1)[1].split("\n  # Disabled for now:", 1)[0]
         self.assertNotIn("environment:", publish)
         self.assertIn("attestations: false", publish)
-        self.assertIn("skippr-linux-x64-16", publish)
+        self.assertIn("runs-on: ubuntu-latest", publish)
+        self.assertIn("needs: [linux]", publish)
+        self.assertNotIn("darwin", publish)
+        self.assertNotIn("skippr-linux-x64-16", publish)
         self.assertIn("refs/heads/main", publish)
         self.assertIn("refs/tags/python-v", publish)
         self.assertIn("python_wheel_version.py", publish)
