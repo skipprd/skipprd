@@ -42,6 +42,7 @@ jobs:
         with:
           workspaces: skipprd
       - run: python3 .github/scripts/test_rust_ci.py
+      - run: python3 .github/scripts/test_host_dependency_boundaries.py
       - run: python3 .github/scripts/check_host_dependency_boundaries.py
       - run: python3 .github/scripts/test_runtime_e2e_harness.py
       - run: cargo run -p skippr-connect-gen -- --check

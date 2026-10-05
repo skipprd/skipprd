@@ -15,8 +15,14 @@ PLUGIN_SOURCE_FILES = sorted(
     if path.is_file() and path.suffix in {".rs", ".toml"}
 )
 
-# These crates are connector-specific and must not leak back into the host
-# dependency closure for the root `skipprd` crate, including test-only edges.
+# Connector plugin packages must not leak back into the host dependency
+# closure for the root `skipprd` crate, including test-only edges.
+# `skippr-plugin-macros` is a shared proc-macro used by the host catalog and
+# runtime SDK as well as plugins; it is not a connector.
+ALLOWED_HOST_PLUGIN_PREFIX_PACKAGES = {
+    "skippr-plugin-macros",
+}
+
 FORBIDDEN_PACKAGES = {
     "aws-sdk-athena",
     "aws-sdk-dynamodb",
@@ -81,6 +87,8 @@ def collect_leaked_host_packages(*, widest_features: bool) -> set[str]:
         if not match:
             continue
         package_name = match.group(1)
+        if package_name in ALLOWED_HOST_PLUGIN_PREFIX_PACKAGES:
+            continue
         if package_name in FORBIDDEN_PACKAGES or package_name.startswith("skippr-plugin-"):
             leaked.add(package_name)
     return leaked
