@@ -10,8 +10,8 @@ pipelines:
   bike_hire_many:
     auto_approve: yes
     env: test
-    buffer_threshold_bytes: 2000000
-    buffer_threshold_seconds: 30
+    buffer_threshold_bytes: 4000000000
+    buffer_threshold_seconds: 7200
     transform:
       batch_order_fields: bike_id
     data_source: data_sources.s3_bike_hire

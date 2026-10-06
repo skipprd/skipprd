@@ -153,7 +153,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("postgres", text)
         self.assertIn("5,100,000", text)
         self.assertIn("WAL_COMPACTION_GROUP_MAX_PARTS", text)
-        self.assertIn("2 MiB", text)
+        self.assertIn("4 GiB", text)
         self.assertIn("schema evolution", text)
         self.assertIn("Python workflow contracts", text)
         self.assertNotIn("full `cargo test -p skipprd`", text)
