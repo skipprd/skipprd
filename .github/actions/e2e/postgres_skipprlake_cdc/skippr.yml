@@ -1,0 +1,51 @@
+skippr:
+  workspace: test
+  skipprd_el_storage_mode: local
+  store:
+    type: dynamodb
+    name: skippr-postgres-cdc-catalog
+
+pipelines:
+  postgres_skipprlake_cdc:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 60
+    data_source: data_sources.postgres_cdc
+    data_sink: data_sinks.lake
+    cdc:
+      default:
+        business_key_columns: ["id"]
+
+data_sources:
+  postgres_cdc:
+    Postgres:
+      host: 127.0.0.1
+      port: 5432
+      user: postgres
+      password: postgres
+      database: skippr_cdc
+      tables: ["orders"]
+      cdc_mode: snapshot_then_cdc
+      cdc_idle_timeout_seconds: 5
+
+data_sinks:
+  lake:
+    SkipprLake:
+      warehouse: LAKE_WAREHOUSE_PLACEHOLDER
+      catalog_table: skippr-postgres-cdc-catalog
+      region: us-east-1
+      table_namespace: bronze
+      object_store:
+        type: file
+    schema_sink: schema_sinks.lake_schema
+
+schema_sinks:
+  lake_schema:
+    SkipprLake:
+      warehouse: LAKE_WAREHOUSE_PLACEHOLDER
+      catalog_table: skippr-postgres-cdc-catalog
+      region: us-east-1
+      table_namespace: bronze
+      object_store:
+        type: file

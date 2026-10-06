@@ -992,6 +992,46 @@ schema_sinks:
 
         assert_downloaded.assert_not_called()
 
+    def test_bike_hire_many_syncs_r2_into_skipprlake(self) -> None:
+        scenario = runtime_e2e_harness.SCENARIOS["bike_hire_many"]
+        config = scenario.config_path.read_text(encoding="utf-8")
+        self.assertIn("skipprd_el_storage_mode: local", config)
+        self.assertIn("\n    S3:\n", config)
+        self.assertIn("R2_S3_ENDPOINT_PLACEHOLDER", config)
+        self.assertIn("s3_bucket: skippr-e2e-sample-data", config)
+        self.assertIn("s3_prefix: bike-hire/", config)
+        self.assertIn("\n    SkipprLake:\n", config)
+        self.assertIn("LAKE_WAREHOUSE_PLACEHOLDER", config)
+        self.assertIn("object_store:\n        type: file", config)
+        self.assertNotIn("\n    Athena:\n", config)
+        self.assertNotIn("\n    Glue:\n", config)
+        self.assertNotIn("skippr_s3_bucket:", config)
+        self.assertEqual(scenario.smoke_verifiers, ("bike_hire_many_rows",))
+        self.assertEqual(scenario.full_verifiers, ("bike_hire_many_rows",))
+        self.assertEqual(
+            runtime_e2e_harness.SCENARIO_RUNTIME_VERSION_ANCHORS["bike_hire_many"],
+            (
+                ("  s3_bike_hire:\n    S3:\n", "S3"),
+                ("  lake:\n    SkipprLake:\n", "SkipprLake"),
+                ("  lake_schema:\n    SkipprLake:\n", "SkipprLake"),
+            ),
+        )
+
+    def test_apply_github_local_lake_rewrites_placeholders(self) -> None:
+        text = "endpoint_url: R2_S3_ENDPOINT_PLACEHOLDER\nwarehouse: LAKE_WAREHOUSE_PLACEHOLDER\n"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SKIPPR_E2E_R2_ENDPOINT": "https://example.r2.cloudflarestorage.com",
+                "SKIPPR_E2E_LAKE_WAREHOUSE": "file:///tmp/lake",
+            },
+            clear=False,
+        ):
+            rewritten = runtime_e2e_harness.apply_github_local_lake(text)
+        self.assertIn("https://example.r2.cloudflarestorage.com", rewritten)
+        self.assertIn("file:///tmp/lake", rewritten)
+        self.assertNotIn("R2_S3_ENDPOINT_PLACEHOLDER", rewritten)
+
 
 if __name__ == "__main__":
     unittest.main()

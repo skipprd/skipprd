@@ -43,6 +43,7 @@ jobs:
       - run: python3 .github/scripts/test_host_dependency_boundaries.py
       - run: python3 .github/scripts/check_host_dependency_boundaries.py
       - run: python3 .github/scripts/test_runtime_e2e_harness.py
+      - run: python3 .github/scripts/test_seed_bike_hire_r2.py
       - run: cargo run -p skippr-connect-gen -- --check
       - name: Run root host test suite
         run: |
@@ -97,6 +98,7 @@ jobs:
           rust-version: "1.92.0"
           architecture_name: linux_x86
           workspace-root: skipprd
+          runtime_plugin_packages_json: '["skippr-plugin-data-source-s3","skippr-plugin-data-source-file","skippr-plugin-data-source-postgres","skippr-plugin-data-sink-skipprlake","skippr-plugin-schema-sink-skipprlake","skippr-plugin-data-sink-duckdb","skippr-plugin-schema-sink-duckdb"]'
 
   chaos_mode_test:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
@@ -112,11 +114,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Download Artifacts
+      - name: Download skipprd
         uses: actions/download-artifact@v4
         with:
           name: skipprd-linux_x86
           path: skipprd-linux_x86
+      - name: Download runtime plugins
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-plugin-binaries-linux_x86
+          path: runtime-plugin-binaries-linux_x86
       - name: Make skipprd executable
         run: chmod +x ./skipprd-linux_x86/skipprd
       - name: Test linux x86 release
@@ -124,34 +131,145 @@ jobs:
         with:
           scenario: bike_hire_many
           architecture_name: linux_x86
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          skipprd_path: ./skipprd-linux_x86/skipprd
+          plugin_binaries_dir: ./runtime-plugin-binaries-linux_x86
+          r2_account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          r2_access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          r2_secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
-  cleanup:
-    if: always() && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request')
-    name: cleanup e2e AWS resources
+  e2e_file_duckdb:
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+    name: File to Duckdb (linux x86)
     needs:
-      - chaos_mode_test
+      - linux_x86
     runs-on: ubuntu-latest
-    continue-on-error: true
+    timeout-minutes: 60
     steps:
-      - name: Configure AWS and clean resources
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download skipprd
+        uses: actions/download-artifact@v4
+        with:
+          name: skipprd-linux_x86
+          path: skipprd-linux_x86
+      - name: Download runtime plugins
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-plugin-binaries-linux_x86
+          path: runtime-plugin-binaries-linux_x86
+      - name: File append into Duckdb Iceberg
         run: |
           set -euo pipefail
-          aws s3 rm s3://skippr-e2e-sample-data-output --recursive || true
-          aws s3 rm s3://skippr-metadata-test --recursive || true
-          aws glue delete-database --catalog-id 353855562591 --name bikehire || true
-          aws glue delete-database --catalog-id 353855562591 --name deadletters || true
+          chmod +x ./skipprd-linux_x86/skipprd
+          if ! command -v duckdb >/dev/null 2>&1; then
+            curl -fsSL https://install.duckdb.org | sh
+            export PATH="${HOME}/.duckdb/cli/latest:${PATH}"
+          fi
+          work="${RUNNER_TEMP:-/tmp}/skippr-file-duckdb-append"
+          mkdir -p "${work}/source" "${work}/warehouse" "${work}/data" "${work}/manifests" target/release
+          cp runtime-plugin-binaries-linux_x86/* target/release/
+          cp tests/fixtures/formats/people.csv "${work}/source/people.csv"
+          warehouse_uri="file://${work}/warehouse"
+          sed \
+            -e "s|SOURCE_DIR|${work}/source|" \
+            -e "s|WAREHOUSE_URI|${warehouse_uri}|" \
+            .github/actions/e2e/file_duckdb_append/skippr.yml \
+            > "${work}/skippr.yml"
+          python3 .github/scripts/local_runtime_plugins.py \
+            --config "${work}/skippr.yml" \
+            --pipeline file_duckdb_append \
+            --output-dir "${work}/manifests" \
+            --release \
+            --skip-cargo-build
+          USE_LOCAL_PLUGIN_CODE=1 \
+          SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests" \
+          DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+            ./skipprd-linux_x86/skipprd --config "${work}/skippr.yml" \
+            sync --log --pipeline file_duckdb_append --once
+          count="$(duckdb -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${work}/warehouse/bronze/file_duckdb_append');")"
+          echo "${count}"
+          echo "${count}" | grep -q '2'
+
+  e2e_skipprlake:
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+    name: File to SkipprLake (linux x86)
+    needs:
+      - linux_x86
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download skipprd
+        uses: actions/download-artifact@v4
+        with:
+          name: skipprd-linux_x86
+          path: skipprd-linux_x86
+      - name: Download runtime plugins
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-plugin-binaries-linux_x86
+          path: runtime-plugin-binaries-linux_x86
+      - name: SkipprLake north-star harness
+        env:
+          SKIPPRD_BIN: ${{ github.workspace }}/skipprd-linux_x86/skipprd
+          SKIP_CARGO_BUILD: "1"
+        run: |
+          set -euo pipefail
+          chmod +x "$SKIPPRD_BIN"
+          python3 -m pip install --quiet boto3
+          mkdir -p target/release
+          cp runtime-plugin-binaries-linux_x86/* target/release/
+          python3 tests/skipprlake_e2e/run.py
+
+  e2e_postgres_cdc:
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+    name: Postgres CDC to SkipprLake (linux x86)
+    needs:
+      - linux_x86
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download skipprd
+        uses: actions/download-artifact@v4
+        with:
+          name: skipprd-linux_x86
+          path: skipprd-linux_x86
+      - name: Download runtime plugins
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-plugin-binaries-linux_x86
+          path: runtime-plugin-binaries-linux_x86
+      - name: Make skipprd executable
+        run: chmod +x ./skipprd-linux_x86/skipprd
+      - name: Postgres snapshot-then-CDC into SkipprLake
+        uses: ./.github/actions/e2e/postgres_skipprlake_cdc
+        with:
+          skipprd_path: ./skipprd-linux_x86/skipprd
+          plugin_binaries_dir: ./runtime-plugin-binaries-linux_x86
 
   publish_skipprd:
     if: startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test')
     name: Publish skipprd Release
     needs:
       - chaos_mode_test
+      - e2e_file_duckdb
+      - e2e_skipprlake
+      - e2e_postgres_cdc
       - linux_x86
     runs-on: ubuntu-latest
     permissions:

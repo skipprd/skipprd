@@ -1,0 +1,126 @@
+name: Postgres CDC into SkipprLake
+description: Snapshot-then-CDC from Postgres on GitHub-hosted Docker into a local SkipprLake warehouse.
+inputs:
+  skipprd_path:
+    required: true
+  plugin_binaries_dir:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install Python deps and DuckDB
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install --quiet boto3
+        if ! command -v duckdb >/dev/null 2>&1; then
+          curl -fsSL https://install.duckdb.org | sh
+          echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
+        fi
+    - name: Start Postgres with logical decoding
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker rm -f skippr-postgres-cdc >/dev/null 2>&1 || true
+        docker run -d --name skippr-postgres-cdc \
+          -e POSTGRES_PASSWORD=postgres \
+          -e POSTGRES_DB=skippr_cdc \
+          -p 5432:5432 \
+          postgres:16-alpine \
+          postgres -c wal_level=logical
+        for _ in $(seq 1 30); do
+          if docker exec skippr-postgres-cdc pg_isready -U postgres >/dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+        docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c \
+          "CREATE TABLE IF NOT EXISTS orders (id integer PRIMARY KEY, name text NOT NULL);
+           INSERT INTO orders (id, name) VALUES (1, 'alpha'), (2, 'beta')
+           ON CONFLICT (id) DO NOTHING;"
+    - name: Start DynamoDB Local
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker rm -f skippr-postgres-cdc-ddb >/dev/null 2>&1 || true
+        docker run -d --name skippr-postgres-cdc-ddb -p 18011:8000 amazon/dynamodb-local \
+          -jar DynamoDBLocal.jar -sharedDb -inMemory
+        python3 - <<'PY'
+        import time
+        import boto3
+        from botocore.config import Config as BotoConfig
+        from botocore.exceptions import ClientError
+        client = boto3.client(
+            "dynamodb",
+            endpoint_url="http://127.0.0.1:18011",
+            region_name="us-east-1",
+            aws_access_key_id="local",
+            aws_secret_access_key="local",
+            config=BotoConfig(retries={"max_attempts": 8}),
+        )
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                client.list_tables()
+                break
+            except Exception:
+                time.sleep(0.5)
+        else:
+            raise SystemExit("DynamoDB Local did not become ready")
+        name = "skippr-postgres-cdc-catalog"
+        try:
+            client.delete_table(TableName=name)
+            client.get_waiter("table_not_exists").wait(TableName=name)
+        except ClientError:
+            pass
+        client.create_table(
+            TableName=name,
+            AttributeDefinitions=[
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+            ],
+            KeySchema=[
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        client.get_waiter("table_exists").wait(TableName=name)
+        PY
+    - name: Sync Postgres CDC into SkipprLake
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: local
+        AWS_SECRET_ACCESS_KEY: local
+        AWS_DEFAULT_REGION: us-east-1
+        AWS_EC2_METADATA_DISABLED: "true"
+        AWS_ENDPOINT_URL_DYNAMODB: http://127.0.0.1:18011
+        USE_LOCAL_PLUGIN_CODE: "1"
+      run: |
+        set -euo pipefail
+        work="${RUNNER_TEMP:-/tmp}/skippr-postgres-cdc"
+        mkdir -p "${work}/warehouse" "${work}/data" "${work}/manifests" target/release
+        cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
+        chmod +x target/release/skippr-plugin-* || true
+        warehouse_uri="file://${work}/warehouse"
+        sed "s|LAKE_WAREHOUSE_PLACEHOLDER|${warehouse_uri}|" \
+          .github/actions/e2e/postgres_skipprlake_cdc/skippr.yml \
+          > "${work}/skippr.yml"
+        python3 .github/scripts/local_runtime_plugins.py \
+          --config "${work}/skippr.yml" \
+          --pipeline postgres_skipprlake_cdc \
+          --output-dir "${work}/manifests" \
+          --release \
+          --skip-cargo-build
+        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+          "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
+          sync --log --pipeline postgres_skipprlake_cdc --once
+        docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c \
+          "INSERT INTO orders (id, name) VALUES (3, 'gamma');"
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+          "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
+          sync --log --pipeline postgres_skipprlake_cdc --once
+        count="$(duckdb -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${work}/warehouse/bronze/orders');")"
+        echo "${count}"
+        echo "${count}" | grep -Eq '[3-9]|[1-9][0-9]'

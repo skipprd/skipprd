@@ -177,15 +177,18 @@ def build_skipprd() -> Path:
 
 
 def stage_plugins(config_path: Path) -> str:
+    cmd = [
+        sys.executable,
+        str(REPO_ROOT / ".github" / "scripts" / "local_runtime_plugins.py"),
+        "--config",
+        str(config_path),
+        "--pipeline",
+        PIPELINE,
+    ]
+    if os.environ.get("SKIP_CARGO_BUILD", "").strip() in {"1", "true", "yes"}:
+        cmd.extend(["--skip-cargo-build", "--release"])
     result = subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / ".github" / "scripts" / "local_runtime_plugins.py"),
-            "--config",
-            str(config_path),
-            "--pipeline",
-            PIPELINE,
-        ],
+        cmd,
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
