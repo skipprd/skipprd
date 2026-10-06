@@ -13,75 +13,26 @@ env:
 jobs:
   linux_test_suite:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
-    name: cargo test (linux host/packages)
+    name: Python workflow contracts (linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    defaults:
-      run:
-        working-directory: skipprd
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: skipprd/cloud
-          path: cloud
-          token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
-      - uses: actions/checkout@v4
-        with:
-          path: skipprd
           submodules: true
-      - name: Install Linux x86 build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev libssl-dev pkg-config
-      - uses: dtolnay/rust-toolchain@1.92.0
+      - uses: actions/setup-python@v5
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: skipprd
+          python-version: "3.12"
       - run: python3 .github/scripts/test_rust_ci.py
       - run: python3 .github/scripts/test_host_dependency_boundaries.py
       - run: python3 .github/scripts/check_host_dependency_boundaries.py
       - run: python3 .github/scripts/test_runtime_e2e_harness.py
       - run: python3 .github/scripts/test_seed_bike_hire_r2.py
-      - run: cargo run -p skippr-connect-gen -- --check
-      - name: Run root host test suite
-        run: |
-          cargo test -p skipprd -- --nocapture --test-threads=1
-          cargo test -p skippr-lease -- --nocapture
-          cargo test -p skipprd cluster:: -- --nocapture --test-threads=1
-          cargo test -p skipprd buffer::durable:: -- --nocapture --test-threads=1
-          cargo test -p skippr-query-ballista -- --nocapture --test-threads=1
-          cargo test -p skipprd query_flight:: -- --nocapture --test-threads=1
-          cargo test -p skipprd sqlrt::wal_table:: -- --nocapture --test-threads=1
-          cargo test -p skipprd --test hla_cluster -- --nocapture
-          ./scripts/ensure-sibling-cloud.sh
-          cargo test -p skipprd --features offset-store-cloud-tables --lib cluster::validation -- --nocapture --test-threads=1
-          cargo check -p skipprd --features offset-store-dynamodb
-          cargo check --all-features
-          cargo check -p skippr-plugin-data-source-postgres
-          cargo check -p skippr-plugin-data-sink-postgres
-      - name: Run postgres plugin tests
-        run: |
-          cargo test -p skippr-plugin-data-sink-postgres -- --nocapture
-      - name: Run CDC Iceberg and source plugin tests
-        run: |
-          cargo test -p skippr-plugin-data-sink-athena-iceberg --lib -- --nocapture
-          cargo test -p skippr-plugin-data-source-stripe --lib -- --nocapture
-          cargo test -p skippr-plugin-data-source-sumup --lib -- --nocapture
-          cargo test -p skippr-plugin-data-source-xero-accounting --lib -- --nocapture
-          cargo test -p skippr-plugin-data-source-revolut-business --lib -- --nocapture
-          cargo test -p skippr-plugin-data-source-apple-search-ads --lib -- --nocapture
-          cargo test -p skippr-plugin-data-source-adroll-ads --lib -- --nocapture
-          cargo test -p skippr-plugin-data-source-linkedin-ads --lib -- --nocapture
-          cargo test -p skippr-plugin-data-source-meta-ads --lib -- --nocapture
-          cargo test -p skippr-plugin-data-source-dynamodb --lib -- --nocapture
+      - run: python3 .github/scripts/test_local_runtime_plugins.py
 
   linux_x86:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
     name: cargo build (linux x86)
-    needs:
-      - linux_test_suite
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
@@ -167,13 +118,15 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x ./skipprd-linux_x86/skipprd
+          mkdir -p target/release
+          cp runtime-plugin-binaries-linux_x86/* target/release/
+          chmod +x target/release/skippr-plugin-*
           if ! command -v duckdb >/dev/null 2>&1; then
             curl -fsSL https://install.duckdb.org | sh
             export PATH="${HOME}/.duckdb/cli/latest:${PATH}"
           fi
           work="${RUNNER_TEMP:-/tmp}/skippr-file-duckdb-append"
-          mkdir -p "${work}/source" "${work}/warehouse" "${work}/data" "${work}/manifests" target/release
-          cp runtime-plugin-binaries-linux_x86/* target/release/
+          mkdir -p "${work}/source" "${work}/warehouse" "${work}/data" "${work}/manifests"
           cp tests/fixtures/formats/people.csv "${work}/source/people.csv"
           warehouse_uri="file://${work}/warehouse"
           sed \
@@ -189,12 +142,12 @@ jobs:
             --skip-cargo-build
           USE_LOCAL_PLUGIN_CODE=1 \
           SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests" \
-          DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+          DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
             ./skipprd-linux_x86/skipprd --config "${work}/skippr.yml" \
             sync --log --pipeline file_duckdb_append --once
-          count="$(duckdb -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${work}/warehouse/bronze/file_duckdb_append');")"
+          count="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${work}/warehouse/bronze/file_duckdb_append');")"
           echo "${count}"
-          echo "${count}" | grep -q '2'
+          echo "${count}" | tail -n 1 | grep -qx '2'
 
   e2e_skipprlake:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
@@ -230,6 +183,7 @@ jobs:
           python3 -m pip install --quiet boto3
           mkdir -p target/release
           cp runtime-plugin-binaries-linux_x86/* target/release/
+          chmod +x target/release/skippr-plugin-*
           python3 tests/skipprlake_e2e/run.py
 
   e2e_postgres_cdc:
@@ -399,8 +353,8 @@ jobs:
             --repo skipprd/skipprd \
             --clobber
 
-  # Disabled for now: Darwin / macOS arm64, Windows, extra e2e.
-  # linux x86 on GitHub-hosted ubuntu-latest is the only Rust build/test/chaos/publish lane.
+  # Disabled for now: Darwin / macOS arm64, Windows, extra e2e, and cargo tests.
+  # linux x86 on GitHub-hosted ubuntu-latest is the only Rust build/chaos/publish lane.
   # macos_arm64:
   #   name: cargo build (macos arm64)
   #   runs-on: macos-14

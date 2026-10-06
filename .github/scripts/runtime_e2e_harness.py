@@ -33,6 +33,9 @@ from runtime_plugin_targets import published_runtime_plugin_targets, resolve_tar
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BIKE_HIRE_MANY_EXPECTED_ROWS = 5_100_000
+DUCKDB_ICEBERG_PREAMBLE = (
+    "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg;"
+)
 DEFAULT_AWS_REGION = "us-east-1"
 STRIPE_FIXTURE_DIR = REPO_ROOT / "plugins/data_source/stripe/tests/fixtures"
 STRIPE_FIXTURE_TWO_CHARGES_DIR = (
@@ -996,6 +999,8 @@ def base_environment(
     env["SKIPPR_RUNTIME_PLUGIN_DIR"] = str(runtime_plugin_dir)
     env["SKIPPR_RUNTIME_LOG_LEVEL"] = env.get("SKIPPR_RUNTIME_LOG_LEVEL", "info")
     env["SKIPPR_E2E_SKIPPRD_BIN"] = str(skipprd)
+    env.setdefault("DATA_DIR_MIN_FREE_BYTES", "0")
+    env.setdefault("DATA_DIR_HIGH_WATERMARK_PCT", "0")
     if extra_env:
         env.update(extra_env)
     return env
@@ -2347,6 +2352,10 @@ def parse_duckdb_csv_count(stdout: str) -> int:
         raise HarnessError(f"duckdb count was not an integer: {stdout!r}") from err
 
 
+def duckdb_iceberg_sql(sql: str) -> str:
+    return f"{DUCKDB_ICEBERG_PREAMBLE} {sql}"
+
+
 def verify_bike_hire_many_rows(context: ScenarioContext) -> None:
     warehouse = context.base_env.get("SKIPPR_E2E_LAKE_WAREHOUSE", "").strip()
     if not warehouse:
@@ -2365,7 +2374,7 @@ def verify_bike_hire_many_rows(context: ScenarioContext) -> None:
             duckdb,
             "-csv",
             "-c",
-            f"INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('{scan}');",
+            duckdb_iceberg_sql(f"SELECT count(*) FROM iceberg_scan('{scan}');"),
         ],
         capture_output=True,
         text=True,

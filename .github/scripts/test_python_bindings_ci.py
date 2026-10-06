@@ -136,7 +136,8 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("needs: [linux]", publish)
         self.assertNotIn("darwin", publish)
         self.assertNotIn("skippr-linux-x64-16", publish)
-        self.assertIn("refs/heads/main", publish)
+        self.assertNotIn("refs/heads/main", publish)
+        self.assertNotIn("refs/heads/master", publish)
         self.assertIn("refs/tags/python-v", publish)
         self.assertIn("python_wheel_version.py", publish)
         self.assertNotIn("github.ref != 'refs/tags/v0.0.0'", publish)
@@ -146,6 +147,18 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("path: skipprd", text)
         self.assertIn("SKIPPR_CLOUD_CHECKOUT_TOKEN", text)
 
+    def test_python_ci_runs_only_on_tags(self):
+        text = CI.read_text(encoding="utf-8")
+        header = text.split("\njobs:", 1)[0]
+        self.assertIn("tags:", header)
+        self.assertIn('- "[0-9]*"', header)
+        self.assertIn('- "python-v*"', header)
+        self.assertNotIn("branches:", header)
+        self.assertNotIn("main", header)
+        self.assertNotIn("master", header)
+        self.assertNotIn("pull_request:", header)
+        self.assertIn("workflow_dispatch:", header)
+
     def test_release_workflow_registers_pypi_project_skippr(self):
         text = (ROOT / "docs" / "docs" / "maintainers" / "release-workflow.md").read_text(
             encoding="utf-8"
@@ -154,6 +167,8 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("- Workflow name: `ci.yml`", text)
         self.assertNotIn("- Project: `skipprd`", text)
         self.assertIn("not engine unprefixed host tags", text)
+        self.assertIn("`python-v*`", text)
+        self.assertNotIn("runs on `main` or `python-v*`", text)
         self.assertIn("`0.0.0`", text)
         self.assertIn("from the tag name (`1.2.3`)", text)
         self.assertNotIn("optionally with a `v` prefix", text)

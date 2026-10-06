@@ -104,13 +104,13 @@ runs:
             -e "s|S3_PREFIX_PLACEHOLDER|${prefix}|" \
             .github/actions/e2e/s3_skipprlake_evolve/skippr.yml \
             > "${work}/skippr.yml"
-          DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+          DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
             "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
             sync --log --pipeline bike_hire_evolve --once
         done
         scan="${work}/warehouse/bronze/bike_hire_evolve"
-        count="$(duckdb -csv -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}');")"
-        evolved="$(duckdb -csv -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}') WHERE firmware_revision IS NOT NULL;")"
+        count="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}');")"
+        evolved="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}') WHERE firmware_revision IS NOT NULL OR firmware_revision_decimal IS NOT NULL;")"
         echo "count=${count}"
         echo "evolved=${evolved}"
         echo "${count}" | tail -n 1 | grep -qx '2000'
