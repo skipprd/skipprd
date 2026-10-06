@@ -430,8 +430,9 @@ BIKE_HIRE_CHAOS_ENV = BIKE_HIRE_BASE_ENV + (
 BIKE_HIRE_STEADY_ENV = BIKE_HIRE_BASE_ENV + (("SKIPPR_CHAOS_MODE", "no"),)
 
 # GitHub-hosted ubuntu-latest is 4 cores / 16 GB. skipprd is GitHub Free, so
-# larger 8-core runners are not available. Cap SkipprLake compact groups so a
-# 128-part Iceberg write cannot pin the runtime for hours.
+# larger 8-core runners are not available. Hold WAL until --once drain, then
+# compact in 16-part / 8 MiB groups so R2 ingest is not competing with Iceberg
+# writes (overlapping compact starved GET concurrency and failed part-07).
 BIKE_HIRE_MANY_STEADY_ENV = (
     ("RUST_BACKTRACE", "1"),
     ("SKIPPR_CHAOS_MODE", "no"),
