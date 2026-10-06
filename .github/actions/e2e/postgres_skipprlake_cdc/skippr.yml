@@ -3,34 +3,37 @@ skippr:
   skipprd_el_storage_mode: local
   store:
     type: dynamodb
-    name: skippr-chaos-catalog
+    name: skippr-postgres-cdc-catalog
 
 pipelines:
-
-  bike_hire_many:
+  postgres_skipprlake_cdc:
     auto_approve: yes
     env: test
-    buffer_threshold_bytes: 10000000
-    buffer_threshold_seconds: 600
-    transform:
-      batch_order_fields: bike_id
-    data_source: data_sources.s3_bike_hire
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 60
+    data_source: data_sources.postgres_cdc
     data_sink: data_sinks.lake
+    cdc:
+      default:
+        business_key_columns: ["id"]
 
 data_sources:
-  s3_bike_hire:
-    S3:
-      batch_size_bytes: 2048000
-      s3_bucket: skippr-e2e-sample-data
-      s3_prefix: bike-hire/
-      endpoint_url: R2_S3_ENDPOINT_PLACEHOLDER
-      region: auto
+  postgres_cdc:
+    Postgres:
+      host: 127.0.0.1
+      port: 5432
+      user: postgres
+      password: postgres
+      database: skippr_cdc
+      tables: ["orders"]
+      cdc_mode: snapshot_then_cdc
+      cdc_idle_timeout_seconds: 5
 
 data_sinks:
   lake:
     SkipprLake:
       warehouse: LAKE_WAREHOUSE_PLACEHOLDER
-      catalog_table: skippr-chaos-catalog
+      catalog_table: skippr-postgres-cdc-catalog
       region: us-east-1
       table_namespace: bronze
       object_store:
@@ -41,7 +44,7 @@ schema_sinks:
   lake_schema:
     SkipprLake:
       warehouse: LAKE_WAREHOUSE_PLACEHOLDER
-      catalog_table: skippr-chaos-catalog
+      catalog_table: skippr-postgres-cdc-catalog
       region: us-east-1
       table_namespace: bronze
       object_store:

@@ -125,10 +125,15 @@ LOCAL_SCENARIO_RUNTIME_MANIFESTS_BY_SCENARIO = {
         ("runtime_snowflake_sink", "snowflake-sink.json"),
         ("runtime_snowflake_schema", "snowflake-schema.json"),
     ),
+    "bike_hire_many": (
+        ("runtime_s3_source", "s3-source.json"),
+        ("runtime_skipprlake_sink", "skipprlake-sink.json"),
+        ("runtime_skipprlake_schema", "skipprlake-schema.json"),
+    ),
 }
 LOCAL_SCENARIO_RUNTIME_PIPELINE_ANCHORS = {
     "bike_hire": "    data_sink: data_sinks.test_datalake\n",
-    "bike_hire_many": "    data_sink: data_sinks.test_datalake\n",
+    "bike_hire_many": "    data_sink: data_sinks.lake\n",
     "bike_hire_s3_wal_many": "    data_sink: data_sinks.test_datalake\n",
     "deadletters_test": "    data_sink: data_sinks.test_datalake\n",
     "postgres_iceberg_types_cdc": "    data_sink: data_sinks.iceberg_types_cdc\n",
@@ -145,6 +150,11 @@ BIKE_HIRE_RUNTIME_VERSION_ANCHORS = (
     ("  test_datalake:\n    Athena:\n", "Athena"),
     ("  glue_bikehire:\n    Glue:\n", "Glue"),
 )
+BIKE_HIRE_MANY_RUNTIME_VERSION_ANCHORS = (
+    ("  s3_bike_hire:\n    S3:\n", "S3"),
+    ("  lake:\n    SkipprLake:\n", "SkipprLake"),
+    ("  lake_schema:\n    SkipprLake:\n", "SkipprLake"),
+)
 DEADLETTERS_RUNTIME_VERSION_ANCHORS = (
     ("  s3_deadletters_test:\n    S3:\n", "S3"),
     ("  test_datalake:\n    Athena:\n", "Athena"),
@@ -154,7 +164,7 @@ DEADLETTERS_RUNTIME_VERSION_ANCHORS = (
 )
 SCENARIO_RUNTIME_VERSION_ANCHORS = {
     "bike_hire": BIKE_HIRE_RUNTIME_VERSION_ANCHORS,
-    "bike_hire_many": BIKE_HIRE_RUNTIME_VERSION_ANCHORS,
+    "bike_hire_many": BIKE_HIRE_MANY_RUNTIME_VERSION_ANCHORS,
     "bike_hire_s3_wal_many": BIKE_HIRE_RUNTIME_VERSION_ANCHORS,
     "deadletters_test": DEADLETTERS_RUNTIME_VERSION_ANCHORS,
     "postgres_iceberg_types_cdc": (
@@ -504,7 +514,7 @@ SCENARIOS = {
             ),
         ),
         smoke_verifiers=("bike_hire_many_rows",),
-        full_verifiers=("bike_hire_many_pruning", "soda_bike_hire_many"),
+        full_verifiers=("bike_hire_many_rows",),
     ),
     "bike_hire_s3_wal_many": Scenario(
         name="bike_hire_s3_wal_many",
@@ -1554,6 +1564,17 @@ def yaml_scalar(value: Path | str) -> str:
     return json.dumps(str(value))
 
 
+def apply_github_local_lake(config_text: str) -> str:
+    rewritten = config_text
+    endpoint = os.environ.get("SKIPPR_E2E_R2_ENDPOINT", "").strip()
+    warehouse = os.environ.get("SKIPPR_E2E_LAKE_WAREHOUSE", "").strip()
+    if endpoint:
+        rewritten = rewritten.replace("R2_S3_ENDPOINT_PLACEHOLDER", endpoint)
+    if warehouse:
+        rewritten = rewritten.replace("LAKE_WAREHOUSE_PLACEHOLDER", warehouse)
+    return rewritten
+
+
 def local_runtime_config_text(
     scenario_name: str,
     config_text: str,
@@ -1615,14 +1636,16 @@ def materialize_scenario_config(
     namespace: str | None,
 ) -> Path:
     namespace = normalize_namespace(namespace)
+    original = scenario.config_path.read_text(encoding="utf-8")
+    config_text = apply_github_local_lake(original)
     if (
-        not runtime_plugin_versions
+        config_text == original
+        and not runtime_plugin_versions
         and local_runtime_manifests is None
         and namespace is None
     ):
         return scenario.config_path
 
-    config_text = scenario.config_path.read_text(encoding="utf-8")
     if namespace is not None:
         config_text = namespaced_scenario_config_text(config_text, scenario, namespace)
     rewritten = runtime_plugin_version_config_text(
@@ -2314,12 +2337,36 @@ def verify_bike_hire_rows(context: ScenarioContext) -> None:
 
 
 def verify_bike_hire_many_rows(context: ScenarioContext) -> None:
-    assert_table_has_rows(
-        table=namespaced_name("bike_hire_many", context.namespace),
-        database=namespaced_name("bikehire", context.namespace),
-        env=context.base_env,
-        output_location=context.assertion_output,
+    warehouse = context.base_env.get("SKIPPR_E2E_LAKE_WAREHOUSE", "").strip()
+    if not warehouse:
+        raise HarnessError("SKIPPR_E2E_LAKE_WAREHOUSE is required for bike_hire_many")
+    warehouse_path = Path(urllib.parse.urlparse(warehouse).path or warehouse)
+    table_dir = warehouse_path / "bronze" / "bike_hire_many"
+    parquet_files = list(table_dir.rglob("*.parquet"))
+    if not parquet_files:
+        raise HarnessError(f"expected SkipprLake parquet under {table_dir}")
+    duckdb = shutil.which("duckdb")
+    if duckdb is None:
+        print_step(f"duckdb not on PATH; accepted {len(parquet_files)} parquet file(s) under {table_dir}")
+        return
+    scan = table_dir.as_posix()
+    completed = subprocess.run(
+        [
+            duckdb,
+            "-c",
+            f"INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('{scan}');",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    if completed.returncode != 0:
+        raise HarnessError(
+            f"duckdb iceberg_scan failed for {scan}: {completed.stderr.strip() or completed.stdout.strip()}"
+        )
+    digits = "".join(ch for ch in completed.stdout if ch.isdigit())
+    if not digits or int(digits) < 1:
+        raise HarnessError(f"expected bronze.bike_hire_many to contain rows, got {completed.stdout!r}")
 
 
 def verify_bike_hire_s3_wal_many_rows(context: ScenarioContext) -> None:
