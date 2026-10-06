@@ -189,6 +189,11 @@ impl PipelineDurableStore {
         super::snapshot::clustered_compaction_sot(&self.paths, &log, &self.key)
     }
 
+    pub async fn write_transfer_pack(&self) -> Result<super::snapshot::TransferPack, DurableError> {
+        let log = self.log.lock().await;
+        super::snapshot::write_transfer_pack(&self.paths, &log, &self.key)
+    }
+
     pub async fn commit_put_compaction(
         &self,
         transaction: CompactionTransaction,

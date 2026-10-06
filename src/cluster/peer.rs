@@ -24,7 +24,9 @@ use crate::buffer::durable::codec::{
 };
 use crate::buffer::durable::log::MutationLog;
 use crate::buffer::durable::mutation::{EntryComparison, MutationEnvelope};
-use crate::buffer::durable::snapshot::install_snapshot_from_stream;
+use crate::buffer::durable::snapshot::{
+    install_snapshot_from_stream, write_transfer_pack, TransferPack,
+};
 
 static RPC_CLOCK: OnceLock<StdRwLock<Option<(Arc<dyn Clock>, Arc<dyn Sleeper>)>>> = OnceLock::new();
 static PROCESS_REGISTRY: OnceLock<StdRwLock<Option<Arc<ReplicaRegistry>>>> = OnceLock::new();
@@ -172,22 +174,11 @@ async fn durable_state_for_rpc(
     Ok(MutationLog::open(replica_paths(session))?.state())
 }
 
-async fn rpc_base_index(session: &ReplicaSession) -> u64 {
-    durable_state_for_rpc(session)
-        .await
-        .map(|state| state.base_index.get())
-        .unwrap_or(0)
-}
-
 async fn rpc_committed_index(session: &ReplicaSession) -> u64 {
     durable_state_for_rpc(session)
         .await
         .map(|state| state.committed_index.get())
         .unwrap_or(0)
-}
-
-fn snapshot_path_for_rpc(session: &ReplicaSession) -> std::path::PathBuf {
-    replica_paths(session).snapshot_current()
 }
 
 async fn commit_segment_payload_file(
@@ -818,44 +809,38 @@ async fn handle_fetch_snapshot(
         .get(&key)
         .await
         .ok_or_else(|| DurableError::ProtocolMismatch("unknown pipeline".into()))?;
-    let path = snapshot_path_for_rpc(&session);
-    if !path.exists() {
-        return write_nack(
-            stream,
-            ReplicaNack::NoSnapshot,
-            rpc_base_index(&session).await,
-        )
-        .await;
-    }
-    let bytes = tokio::fs::read(&path).await?;
-    if !crate::buffer::durable::snapshot::is_live_snapshot_pack(&bytes) {
-        return write_nack(
-            stream,
-            ReplicaNack::EmptySnapshot,
-            rpc_base_index(&session).await,
-        )
-        .await;
-    }
-    let hash = {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        hasher.finalize()
+    let pack = match crate::buffer::durable::durable_store_for(&key) {
+        Some(store) => store.write_transfer_pack().await?,
+        None => {
+            let log = session.log.lock().await;
+            write_transfer_pack(&session.paths, &log, &session.key)?
+        }
     };
-    let state = durable_state_for_rpc(&session).await?;
+    let streamed = stream_transfer_pack(stream, &key, &pack).await;
+    let _ = tokio::fs::remove_file(&pack.path).await;
+    streamed
+}
+
+async fn stream_transfer_pack(
+    stream: &mut MaybeTlsStream,
+    key: &PipelineKey,
+    pack: &TransferPack,
+) -> Result<(), DurableError> {
+    let payload_bytes = tokio::fs::metadata(&pack.path).await?.len();
+    let hash = sha256_path(&pack.path).await?;
     let header = proto::ControlFrame {
         msg: Some(proto::control_frame::Msg::Install(
             proto::InstallSnapshotHeader {
-                pipeline: Some(pipeline_to_proto(&key)),
-                base_index: state.base_index.get(),
-                base_hash: state.head_hash.to_vec(),
-                payload_bytes: bytes.len() as u64,
+                pipeline: Some(pipeline_to_proto(key)),
+                base_index: pack.base_index,
+                base_hash: pack.base_hash.to_vec(),
+                payload_bytes,
                 snapshot_sha256: hash.to_vec(),
             },
         )),
     };
     write_frame(stream, &encode_control(&header)?).await?;
-    stream_payload_from_path(stream, &path).await
+    stream_payload_from_path(stream, &pack.path).await
 }
 
 async fn handle_fetch(
@@ -1841,6 +1826,84 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("snapshot unavailable"));
         assert_eq!(FETCH_ENTRIES_MAX_COUNT, 8);
+        server.drain().await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn fetch_snapshot_installs_donor_payload_at_head_and_drops_transfer_pack() {
+        let donor_dir = tempfile::tempdir().unwrap();
+        let key = PipelineKey::new("t", "w", "fetch-snapshot").unwrap();
+        let paths = PipelinePaths::new(donor_dir.path(), &key).unwrap();
+        std::fs::create_dir_all(&paths.segs).unwrap();
+        let id = SegmentId::new("live").unwrap();
+        std::fs::write(paths.segment(&id), b"live-segment-bytes").unwrap();
+        let mut log = MutationLog::open(paths.clone()).unwrap();
+        let envelope = MutationEnvelope {
+            protocol_version: 1,
+            pipeline: key.clone(),
+            epoch: LeaseEpoch::new(1),
+            index: CommitIndex::new(1),
+            previous_hash: GENESIS_HASH,
+            payload_sha256: [7u8; 32],
+            body: DurableMutation::CommitSegment {
+                descriptor: crate::buffer::durable::mutation::SegmentDescriptor {
+                    segment_id: "live".into(),
+                    payload_len: 18,
+                    payload_sha256: [7u8; 32],
+                    num_partitions: 1,
+                    total_bytes: 18,
+                    created_at_secs: 0,
+                    schema_fingerprints: Vec::new(),
+                },
+                offsets: Vec::new(),
+                checkpoints: Vec::new(),
+            },
+        };
+        log.append_prepared(&envelope).unwrap();
+        log.append_committed(envelope.index, envelope.entry_hash().unwrap())
+            .unwrap();
+        let head_hash = log.head_hash();
+        let session = ReplicaSession::new(
+            key.clone(),
+            paths.clone(),
+            LeaseGuard::replica(
+                key.clone(),
+                LeaseEpoch::new(1),
+                Arc::new(SystemClock::new()),
+            ),
+            log,
+        );
+        let identity = identity();
+        let registry = ReplicaRegistry::new(identity.clone());
+        registry.insert(session).await;
+        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
+            .await
+            .unwrap();
+        let replica_dir = tempfile::tempdir().unwrap();
+        let replica = PipelinePaths::new(replica_dir.path(), &key).unwrap();
+        std::fs::create_dir_all(&replica.durable).unwrap();
+
+        fetch_snapshot_from(server.bind_addr(), &key, &identity, &replica)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(replica.segment(&id)).unwrap(),
+            b"live-segment-bytes"
+        );
+        let installed = MutationLog::open(replica.clone()).unwrap();
+        assert_eq!(installed.base_index(), CommitIndex::new(1));
+        assert_eq!(installed.head_hash(), head_hash);
+        let leftover: Vec<_> = std::fs::read_dir(&paths.snapshots)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "transfer pack left behind: {leftover:?}"
+        );
         server.drain().await;
     }
 

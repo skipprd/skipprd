@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_derive::{Deserialize, Serialize};
@@ -66,11 +66,25 @@ pub fn snapshot_staging_dir(root: &Path, uuid: &str) -> PathBuf {
     ))
 }
 
+/// Retained snapshot = metadata only. Live payloads stay in place under the
+/// pipeline root; [`write_transfer_pack`] materializes them for a replica.
 pub fn write_snapshot(
     paths: &PipelinePaths,
     snapshot: &StateSnapshot,
 ) -> Result<PathBuf, DurableError> {
-    write_live_snapshot_pack(paths, snapshot)
+    fs::create_dir_all(&paths.snapshots)?;
+    let json = serde_json::to_vec(snapshot).map_err(|err| DurableError::Io(err.to_string()))?;
+    let digest: [u8; 32] = Sha256::digest(&json).into();
+    let mut bytes = Vec::with_capacity(4 + json.len() + digest.len());
+    bytes.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&json);
+    bytes.extend_from_slice(&digest);
+    let staging = paths.snapshots.join("current.tmp");
+    DirectIoFile::write_path_sync(&staging, &bytes)?;
+    let dest = paths.snapshot_current();
+    fs::rename(&staging, &dest)?;
+    crate::helpers::fsync::fsync_dir(&paths.snapshots)?;
+    Ok(dest)
 }
 
 pub fn read_snapshot(paths: &PipelinePaths) -> Result<Option<StateSnapshot>, DurableError> {
@@ -78,10 +92,13 @@ pub fn read_snapshot(paths: &PipelinePaths) -> Result<Option<StateSnapshot>, Dur
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = DirectIoFile::read_path(&path)?;
-    if bytes.starts_with(PACK_MAGIC) {
-        return Ok(Some(meta_from_pack(&bytes)?));
+    let mut file = fs::File::open(&path)?;
+    let mut magic = [0u8; PACK_MAGIC.len()];
+    if file.read_exact(&mut magic).is_ok() && &magic == PACK_MAGIC {
+        return read_pack_meta(&mut file).map(Some);
     }
+    drop(file);
+    let bytes = DirectIoFile::read_path(&path)?;
     if bytes.len() < 4 + 32 {
         return Err(DurableError::Io("corrupt snapshot".into()));
     }
@@ -208,8 +225,9 @@ pub fn build_live_snapshot(
     })
 }
 
-/// Pack live payloads + metadata, then prune the mutation log through the
-/// committed head. In-flight scans skip missing files; reclaim is not delayed.
+/// Persist live metadata, then prune the mutation log through the committed
+/// head. Runs on every segment reclaim, so it must stay O(metadata) — never
+/// O(live WAL bytes).
 pub fn retain_live_snapshot(
     log: &mut MutationLog,
     paths: &PipelinePaths,
@@ -222,7 +240,7 @@ pub fn retain_live_snapshot(
         .map(|txn| txn.id.clone())
         .collect();
     prune_orphan_compaction_json(paths, &live_ids);
-    write_live_snapshot_pack(paths, &snapshot)?;
+    write_snapshot(paths, &snapshot)?;
     log.prune_through(log.committed_index())?;
     tracing::info!(
         pipeline = %key.pipeline(),
@@ -233,34 +251,60 @@ pub fn retain_live_snapshot(
     Ok(snapshot)
 }
 
-pub fn write_live_snapshot_pack(
+#[derive(Debug)]
+pub struct TransferPack {
+    pub path: PathBuf,
+    pub base_index: u64,
+    pub base_hash: [u8; 32],
+}
+
+/// Pack live payloads + metadata at the committed head for a replica that is
+/// behind the retained base. The caller holds the log lock for the whole copy
+/// so reclaim cannot delete a payload the pack metadata still lists.
+pub fn write_transfer_pack(
+    paths: &PipelinePaths,
+    log: &MutationLog,
+    key: &PipelineKey,
+) -> Result<TransferPack, DurableError> {
+    let snapshot = build_live_snapshot(paths, log, key)?;
+    fs::create_dir_all(&paths.snapshots)?;
+    let path = paths
+        .snapshots
+        .join(format!("transfer-{}.pack", uuid::Uuid::new_v4()));
+    let written = write_pack(&path, paths, &snapshot);
+    if written.is_err() {
+        let _ = fs::remove_file(&path);
+    }
+    written?;
+    Ok(TransferPack {
+        path,
+        base_index: snapshot.base_index,
+        base_hash: snapshot.base_hash,
+    })
+}
+
+fn write_pack(
+    dest: &Path,
     paths: &PipelinePaths,
     snapshot: &StateSnapshot,
-) -> Result<PathBuf, DurableError> {
-    fs::create_dir_all(&paths.snapshots)?;
+) -> Result<(), DurableError> {
     let json = serde_json::to_vec(snapshot).map_err(|err| DurableError::Io(err.to_string()))?;
-    let staging = paths.snapshots.join("current.tmp");
-    {
-        let mut file = DirectIoFile::create(&staging)?;
-        file.write_all(PACK_MAGIC)?;
-        file.write_all(&(json.len() as u32).to_le_bytes())?;
-        file.write_all(&json)?;
-        let files = collect_live_files(paths)?;
-        file.write_all(&(files.len() as u32).to_le_bytes())?;
-        for (rel, abs) in files {
-            let bytes = DirectIoFile::read_path(&abs)?;
-            let rel_bytes = rel.as_bytes();
-            file.write_all(&(rel_bytes.len() as u16).to_le_bytes())?;
-            file.write_all(rel_bytes)?;
-            file.write_all(&(bytes.len() as u64).to_le_bytes())?;
-            file.write_all(&bytes)?;
-        }
-        file.sync_data()?;
+    let mut file = DirectIoFile::create(dest)?;
+    file.write_all(PACK_MAGIC)?;
+    file.write_all(&(json.len() as u32).to_le_bytes())?;
+    file.write_all(&json)?;
+    let files = collect_live_files(paths)?;
+    file.write_all(&(files.len() as u32).to_le_bytes())?;
+    for (rel, abs) in files {
+        let bytes = DirectIoFile::read_path(&abs)?;
+        let rel_bytes = rel.as_bytes();
+        file.write_all(&(rel_bytes.len() as u16).to_le_bytes())?;
+        file.write_all(rel_bytes)?;
+        file.write_all(&(bytes.len() as u64).to_le_bytes())?;
+        file.write_all(&bytes)?;
     }
-    let dest = paths.snapshot_current();
-    fs::rename(&staging, &dest)?;
-    crate::helpers::fsync::fsync_dir(&paths.snapshots)?;
-    Ok(dest)
+    file.sync_data()?;
+    Ok(())
 }
 
 fn prune_orphan_compaction_json(paths: &PipelinePaths, live_ids: &HashSet<String>) {
@@ -351,22 +395,14 @@ fn rel_path(root: &Path, path: &Path) -> Result<String, DurableError> {
     Ok(text)
 }
 
-fn meta_from_pack(bytes: &[u8]) -> Result<StateSnapshot, DurableError> {
-    if bytes.len() < PACK_MAGIC.len() + 4 {
-        return Err(DurableError::Io("truncated snapshot pack".into()));
-    }
-    let json_len = u32::from_le_bytes(
-        bytes[PACK_MAGIC.len()..PACK_MAGIC.len() + 4]
-            .try_into()
-            .unwrap(),
-    ) as usize;
-    let json_start = PACK_MAGIC.len() + 4;
-    let json_end = json_start + json_len;
-    if bytes.len() < json_end {
-        return Err(DurableError::Io("truncated snapshot json".into()));
-    }
-    serde_json::from_slice(&bytes[json_start..json_end])
-        .map_err(|err| DurableError::Io(err.to_string()))
+fn read_pack_meta(file: &mut fs::File) -> Result<StateSnapshot, DurableError> {
+    let mut len = [0u8; 4];
+    file.read_exact(&mut len)
+        .map_err(|_| DurableError::Io("truncated snapshot pack".into()))?;
+    let mut json = vec![0u8; u32::from_le_bytes(len) as usize];
+    file.read_exact(&mut json)
+        .map_err(|_| DurableError::Io("truncated snapshot json".into()))?;
+    serde_json::from_slice(&json).map_err(|err| DurableError::Io(err.to_string()))
 }
 
 fn unpack_pack(bytes: &[u8], staging_root: &Path) -> Result<StateSnapshot, DurableError> {
@@ -459,8 +495,7 @@ pub async fn install_snapshot_from_stream(
         snapshots: staging_root.join("segment_buffer/durable/snapshots"),
         root: staging_root.clone(),
     };
-    fs::create_dir_all(&staging_paths.snapshots)?;
-    fs::write(staging_paths.snapshot_current(), snapshot_bytes)?;
+    write_snapshot(&staging_paths, &snapshot)?;
     let quarantine = live.root.with_extension("quarantine");
     if live.root.exists() {
         fs::rename(&live.root, &quarantine)?;
@@ -541,45 +576,139 @@ mod tests {
         assert_eq!(loaded.schema_fingerprints, vec!["fp".to_string()]);
     }
 
-    #[tokio::test]
-    async fn pack_includes_live_payload_and_install_restores_it() {
+    fn append_reclaim(log: &mut MutationLog, key: &PipelineKey, segment_id: &str) {
+        append_body(
+            log,
+            key,
+            DurableMutation::ReclaimSegment {
+                segment_id: segment_id.into(),
+            },
+        );
+    }
+
+    #[test]
+    fn retain_prunes_log_without_copying_segment_payloads() {
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "p").unwrap();
         let paths = PipelinePaths::new(dir.path(), &key).unwrap();
         fs::create_dir_all(&paths.segs).unwrap();
-        let seg = paths.segs.join("live.seg");
-        fs::write(&seg, b"segment-bytes").unwrap();
+        let id = skippr_lease::SegmentId::new("live-seg").unwrap();
+        let payload = vec![7u8; 1 << 20];
+        fs::write(paths.segment(&id), &payload).unwrap();
         let mut log = MutationLog::open(paths.clone()).unwrap();
-        let envelope = MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key.clone(),
-            epoch: LeaseEpoch::new(1),
-            index: skippr_lease::CommitIndex::new(1),
-            previous_hash: GENESIS_HASH,
-            payload_sha256: [9u8; 32],
-            body: DurableMutation::ReclaimSegment {
-                segment_id: "other".into(),
+        append_body(
+            &mut log,
+            &key,
+            DurableMutation::CommitSegment {
+                descriptor: test_descriptor("live-seg"),
+                offsets: Vec::new(),
+                checkpoints: Vec::new(),
             },
-        };
-        log.append_prepared(&envelope).unwrap();
-        log.append_committed(envelope.index, envelope.entry_hash().unwrap())
-            .unwrap();
-        retain_live_snapshot(&mut log, &paths, &key).unwrap();
-        assert!(log.committed_envelopes().is_empty());
-        assert_eq!(log.base_index(), log.committed_index());
+        );
+        append_reclaim(&mut log, &key, "other");
 
+        let retained = retain_live_snapshot(&mut log, &paths, &key).unwrap();
+
+        assert!(log.committed_envelopes().is_empty());
+        assert_eq!(retained.segments.len(), 1);
+        let on_disk = fs::metadata(paths.snapshot_current()).unwrap().len();
+        assert!(
+            on_disk < payload.len() as u64,
+            "retained snapshot copied segment payloads ({on_disk} bytes)"
+        );
+        let loaded = read_snapshot(&paths).unwrap().unwrap();
+        assert_eq!(loaded.base_index, log.committed_index().get());
+        assert_eq!(loaded.segments[0].segment_id, "live-seg");
+    }
+
+    #[tokio::test]
+    async fn transfer_pack_at_head_installs_live_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
+        fs::create_dir_all(&paths.segs).unwrap();
+        let retained_id = skippr_lease::SegmentId::new("retained-seg").unwrap();
+        fs::write(paths.segment(&retained_id), b"retained-bytes").unwrap();
+        let mut log = MutationLog::open(paths.clone()).unwrap();
+        append_body(
+            &mut log,
+            &key,
+            DurableMutation::CommitSegment {
+                descriptor: test_descriptor("retained-seg"),
+                offsets: Vec::new(),
+                checkpoints: Vec::new(),
+            },
+        );
+        append_reclaim(&mut log, &key, "other");
+        retain_live_snapshot(&mut log, &paths, &key).unwrap();
+        let suffix_id = skippr_lease::SegmentId::new("suffix-seg").unwrap();
+        fs::write(paths.segment(&suffix_id), b"suffix-bytes").unwrap();
+        append_body(
+            &mut log,
+            &key,
+            DurableMutation::CommitSegment {
+                descriptor: test_descriptor("suffix-seg"),
+                offsets: Vec::new(),
+                checkpoints: Vec::new(),
+            },
+        );
+        let head = log.committed_index().get();
+
+        let pack = write_transfer_pack(&paths, &log, &key).unwrap();
+
+        assert_eq!(pack.base_index, head);
+        assert_eq!(pack.base_hash, log.head_hash());
+        let bytes = fs::read(&pack.path).unwrap();
         let dest = tempfile::tempdir().unwrap();
         let dest_paths = PipelinePaths::new(dest.path(), &key).unwrap();
-        let pack = fs::read(paths.snapshot_current()).unwrap();
-        install_snapshot_from_stream(&dest_paths, "inst", &pack)
+        install_snapshot_from_stream(&dest_paths, "inst", &bytes)
             .await
             .unwrap();
-        let installed = dest_paths.segs.join("live.seg");
-        assert_eq!(fs::read(installed).unwrap(), b"segment-bytes");
-        let reopened = MutationLog::open(dest_paths).unwrap();
-        assert_eq!(reopened.committed_index().get(), 1);
-        assert_eq!(reopened.base_index().get(), 1);
+        assert_eq!(
+            fs::read(dest_paths.segment(&retained_id)).unwrap(),
+            b"retained-bytes"
+        );
+        assert_eq!(
+            fs::read(dest_paths.segment(&suffix_id)).unwrap(),
+            b"suffix-bytes"
+        );
+        let reopened = MutationLog::open(dest_paths.clone()).unwrap();
+        assert_eq!(reopened.committed_index().get(), head);
+        assert_eq!(reopened.base_index().get(), head);
         assert!(reopened.committed_envelopes().is_empty());
+        let installed = read_snapshot(&dest_paths).unwrap().unwrap();
+        assert_eq!(installed.base_index, head);
+        assert_eq!(installed.segments.len(), 2);
+        assert!(
+            fs::metadata(dest_paths.snapshot_current()).unwrap().len() < bytes.len() as u64,
+            "installed snapshot kept the transfer payload"
+        );
+    }
+
+    #[test]
+    fn read_snapshot_accepts_pack_retained_by_previous_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
+        fs::create_dir_all(&paths.segs).unwrap();
+        let id = skippr_lease::SegmentId::new("live-seg").unwrap();
+        fs::write(paths.segment(&id), b"seg!").unwrap();
+        let mut log = MutationLog::open(paths.clone()).unwrap();
+        append_body(
+            &mut log,
+            &key,
+            DurableMutation::CommitSegment {
+                descriptor: test_descriptor("live-seg"),
+                offsets: Vec::new(),
+                checkpoints: Vec::new(),
+            },
+        );
+        let pack = write_transfer_pack(&paths, &log, &key).unwrap();
+        fs::rename(&pack.path, paths.snapshot_current()).unwrap();
+
+        let loaded = read_snapshot(&paths).unwrap().unwrap();
+
+        assert_eq!(loaded.segments[0].segment_id, "live-seg");
     }
 
     #[tokio::test]
