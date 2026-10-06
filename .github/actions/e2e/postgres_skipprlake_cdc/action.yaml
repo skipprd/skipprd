@@ -25,15 +25,22 @@ runs:
         docker run -d --name skippr-postgres-cdc \
           -e POSTGRES_PASSWORD=postgres \
           -e POSTGRES_DB=skippr_cdc \
-          -p 5432:5432 \
+          -p 5434:5432 \
           postgres:16-alpine \
           postgres -c wal_level=logical
-        for _ in $(seq 1 30); do
-          if docker exec skippr-postgres-cdc pg_isready -U postgres >/dev/null 2>&1; then
+        ready=0
+        for _ in $(seq 1 60); do
+          if docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c 'SELECT 1' >/dev/null 2>&1; then
+            ready=1
             break
           fi
           sleep 1
         done
+        if [ "${ready}" != "1" ]; then
+          echo "postgres CDC container did not accept SQL" >&2
+          docker logs skippr-postgres-cdc >&2 || true
+          exit 1
+        fi
         docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c \
           "CREATE TABLE IF NOT EXISTS orders (id integer PRIMARY KEY, name text NOT NULL);
            INSERT INTO orders (id, name) VALUES (1, 'alpha'), (2, 'beta')
@@ -113,22 +120,22 @@ runs:
           --release \
           --skip-cargo-build
         export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
-        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
           "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
           sync --log --pipeline postgres_skipprlake_cdc --once
         docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c \
           "INSERT INTO orders (id, name) VALUES (3, 'gamma');"
-        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
           "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
           sync --log --pipeline postgres_skipprlake_cdc --once
         docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c \
           "UPDATE orders SET name = 'alpha-prime' WHERE id = 1;"
-        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
           "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
           sync --log --pipeline postgres_skipprlake_cdc --once
-        scan="${work}/warehouse/bronze/orders"
-        count="$(duckdb -csv -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}');")"
-        updated="$(duckdb -csv -c "INSTALL iceberg; LOAD iceberg; SELECT name FROM iceberg_scan('${scan}') WHERE id = 1;")"
+        scan="${work}/warehouse/bronze/postgres_orders"
+        count="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(DISTINCT id) FROM iceberg_scan('${scan}');")"
+        updated="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT name FROM iceberg_scan('${scan}') WHERE id = 1 ORDER BY _skippr_order_token DESC LIMIT 1;")"
         echo "count=${count}"
         echo "updated=${updated}"
         echo "${count}" | tail -n 1 | grep -qx '3'

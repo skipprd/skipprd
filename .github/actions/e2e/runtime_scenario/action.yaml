@@ -161,4 +161,5 @@ runs:
         fi
         export DATA_DIR="${work}/data"
         export DATA_DIR_MIN_FREE_BYTES=0
+        export DATA_DIR_HIGH_WATERMARK_PCT=0
         python3 .github/scripts/runtime_e2e_harness.py run "${{ inputs.scenario }}" --mode "${{ inputs.mode }}" --skipprd "${skipprd_path}" "${namespace_args[@]}" "${runtime_plugin_args[@]}"

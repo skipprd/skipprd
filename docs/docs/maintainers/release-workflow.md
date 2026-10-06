@@ -1,6 +1,6 @@
 # Release Workflow
 
-Python wheels publish from `.github/workflows/ci.yml`. Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`). It runs on engine tags (and `workflow_dispatch`), not on `main` / master pushes. `publish_skipprd` runs after `chaos_mode_test` plus the GitHub runner e2e jobs (file/Duckdb, SkipprLake, Postgres CDC upsert, S3 schema evolution, file/Postgres). Darwin / Windows stay commented out for now.
+Python wheels publish from `.github/workflows/ci.yml` (**Python CI/CD Pipeline**). Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`). Both pipelines run on tags (and `workflow_dispatch`), not on `main` / master pushes. `publish_skipprd` runs after `chaos_mode_test` plus the GitHub runner e2e jobs (file/Duckdb, SkipprLake, Postgres CDC upsert, S3 schema evolution, file/Postgres). Darwin / Windows stay commented out for now.
 
 ## High-level flow
 
@@ -49,9 +49,9 @@ On tag builds, `set_root_package_version.py` stamps the root host package versio
 
 Python has its own semver in `pyproject.toml` and `python/Cargo.toml` (`0.1.0` today). It is not the skipprd git tag.
 
-`.github/workflows/ci.yml` **always** builds and tests the `skippr` wheel on GitHub-hosted Linux x86 (`ubuntu-latest`). Darwin / macOS arm64 is commented out for now.
+`.github/workflows/ci.yml` (**Python CI/CD Pipeline**) builds and tests the `skippr` wheel on GitHub-hosted Linux x86 (`ubuntu-latest`) for engine tags (`[0-9]*`) and `python-v*` tags, plus `workflow_dispatch`. It does not run on `main` / master or pull requests. Darwin / macOS arm64 is commented out for now.
 
-`python-publish` runs on `main` or `python-v*` tags (not engine unprefixed host tags, not `python-v0.0.0`). It publishes only when that Python semver is absent from PyPI.
+`python-publish` runs on `python-v*` tags (not engine unprefixed host tags, not `python-v0.0.0`). It publishes only when that Python semver is absent from PyPI.
 
 Publish uses **PyPI Trusted Publishing** (GitHub OIDC), not a pip login or `PYPI_API_TOKEN`. The job sets `id-token: write` and calls `pypa/gh-action-pypi-publish` with `attestations: false` (GitHub-hosted `ubuntu-latest`). GitHub mints a short-lived token; PyPI accepts it because this repo's GitHub publisher is registered.
 
@@ -65,14 +65,14 @@ Registered publisher on [pypi.org](https://pypi.org):
 
 Do not create a PyPI API token. Do not put `TWINE_PASSWORD` in GitHub secrets.
 
-Bump `pyproject.toml` and `python/Cargo.toml` together, merge to `main` (or tag `python-vX.Y.Z`). Scratch `python-v0.0.0` does not publish.
+Bump `pyproject.toml` and `python/Cargo.toml` together, then tag `python-vX.Y.Z`. Scratch `python-v0.0.0` does not publish.
 
 ## 3. Compile and test the important boundaries
 
 `.github/workflows/rust.yml` (**Rust CI/CD Pipeline**) is the GitHub-hosted linux x86 lane. It runs on unprefixed engine tags (`17.0.0`) and `workflow_dispatch`, not on `main` or master branch pushes.
 
-- `linux_test_suite` — full `cargo test -p skipprd`, lease/query-ballista/hla_cluster, cloud-tables validation, postgres sink tests, and source-plugin lib tests
-- `linux_x86` — `rust-build-release` of skipprd plus the GitHub runner plugins (`s3`, `file`, `postgres` source+sink, `skipprlake`, `duckdb`)
+- `linux_test_suite` — Python workflow contracts (`test_rust_ci.py`, harness/plugin/host-boundary scripts). Cargo tests are skipped for now because they take too long on GitHub-hosted runners.
+- `linux_x86` — `rust-build-release` of skipprd plus the GitHub runner plugins (`s3`, `file`, `postgres` source+sink, `skipprlake`, `duckdb`); starts in parallel with `linux_test_suite`
 - `chaos_mode_test` — `bike_hire_many` reads 5,100,000 mixed-size bike-hire JSON objects from R2 (`skippr-e2e-sample-data/bike-hire/`) into SkipprLake on the runner (DynamoDB Local catalog, `file://` warehouse) and asserts that exact row count after chaos crashes. R2 secrets only; no AWS.
 - `e2e_file_duckdb` — File source append into Duckdb Iceberg
 - `e2e_skipprlake` — File source into SkipprLake (`tests/skipprlake_e2e`), including atomic dbt replace

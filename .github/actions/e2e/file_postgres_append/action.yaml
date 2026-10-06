@@ -18,12 +18,19 @@ runs:
           -e POSTGRES_DB=skippr_sink \
           -p 5433:5432 \
           postgres:16-alpine
-        for _ in $(seq 1 30); do
-          if docker exec skippr-file-postgres pg_isready -U postgres >/dev/null 2>&1; then
+        ready=0
+        for _ in $(seq 1 60); do
+          if docker exec skippr-file-postgres psql -U postgres -d skippr_sink -c 'SELECT 1' >/dev/null 2>&1; then
+            ready=1
             break
           fi
           sleep 1
         done
+        if [ "${ready}" != "1" ]; then
+          echo "postgres sink container did not accept SQL" >&2
+          docker logs skippr-file-postgres >&2 || true
+          exit 1
+        fi
     - name: Sync CSV into Postgres
       shell: bash
       env:
@@ -45,10 +52,10 @@ runs:
           --release \
           --skip-cargo-build
         export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
-        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
           "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
           sync --log --pipeline file_postgres_append --once
         count="$(docker exec skippr-file-postgres psql -U postgres -d skippr_sink -Atc \
-          "SELECT count(*) FROM public.people;")"
+          "SELECT count(*) FROM public.file_postgres_append;")"
         echo "count=${count}"
         test "${count}" = "2"

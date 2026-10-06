@@ -33,19 +33,22 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("linux_x86:", text)
         self.assertIn("chaos_mode_test:", text)
         self.assertIn("publish_skipprd:", text)
-        self.assertIn("cargo test -p skipprd -- --nocapture --test-threads=1", text)
+        self.assertNotIn("cargo test -p skipprd", text)
+        self.assertNotIn("cargo test -p skippr-lease", text)
+        self.assertNotIn("cargo check --all-features", text)
         self.assertIn("check_host_dependency_boundaries.py", text)
         self.assertIn("test_runtime_e2e_harness.py", text)
+        self.assertIn("test_local_runtime_plugins.py", text)
         self.assertIn("rust-build-release", text)
         self.assertIn("architecture_name: linux_x86", text)
         self.assertIn("scenario: bike_hire_many", text)
         self.assertIn("e2e/runtime_scenario", text)
         linux_test = text.split("\n  linux_test_suite:", 1)[1].split("\n  linux_x86:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", linux_test)
+        self.assertNotIn("dtolnay/rust-toolchain", linux_test)
         linux_build = text.split("\n  linux_x86:", 1)[1].split("\n  chaos_mode_test:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", linux_build)
-        self.assertIn("needs:", linux_build)
-        self.assertIn("linux_test_suite", linux_build)
+        self.assertNotIn("linux_test_suite", linux_build)
         chaos = text.split("\n  chaos_mode_test:", 1)[1].split("\n  e2e_file_duckdb:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", chaos)
         self.assertIn("linux_x86", chaos)
@@ -62,17 +65,39 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_file_postgres:", text)
         self.assertIn("s3_skipprlake_evolve", text)
         self.assertIn("file_postgres_append", text)
-        postgres_cdc = (
-            ROOT / ".github" / "actions" / "e2e" / "postgres_skipprlake_cdc" / "action.yaml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("UPDATE orders SET name = 'alpha-prime'", postgres_cdc)
         self.assertIn("skippr-plugin-data-source-s3", text)
         self.assertIn("skippr-plugin-data-source-file", text)
         self.assertIn("skippr-plugin-data-source-postgres", text)
         self.assertIn("skippr-plugin-data-sink-skipprlake", text)
         self.assertIn("skippr-plugin-data-sink-duckdb", text)
         self.assertIn("skippr-plugin-data-sink-postgres", text)
-        self.assertIn("cargo check -p skippr-plugin-data-source-postgres", text)
+        file_duckdb = text.split("\n  e2e_file_duckdb:", 1)[1].split("\n  e2e_skipprlake:", 1)[0]
+        self.assertIn("chmod +x target/release/skippr-plugin-*", file_duckdb)
+        self.assertIn("unsafe_enable_version_guessing", file_duckdb)
+        self.assertIn("DATA_DIR_HIGH_WATERMARK_PCT=0", file_duckdb)
+        skipprlake = text.split("\n  e2e_skipprlake:", 1)[1].split("\n  e2e_postgres_cdc:", 1)[0]
+        self.assertIn("chmod +x target/release/skippr-plugin-*", skipprlake)
+        postgres_cdc = (
+            ROOT / ".github" / "actions" / "e2e" / "postgres_skipprlake_cdc" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("UPDATE orders SET name = 'alpha-prime'", postgres_cdc)
+        self.assertIn("-p 5434:5432", postgres_cdc)
+        self.assertIn("SELECT 1", postgres_cdc)
+        self.assertIn("unsafe_enable_version_guessing", postgres_cdc)
+        self.assertIn("bronze/postgres_orders", postgres_cdc)
+        self.assertIn("count(DISTINCT id)", postgres_cdc)
+        self.assertIn("_skippr_order_token", postgres_cdc)
+        evolve = (
+            ROOT / ".github" / "actions" / "e2e" / "s3_skipprlake_evolve" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("unsafe_enable_version_guessing", evolve)
+        self.assertIn("firmware_revision_decimal", evolve)
+        file_postgres = (
+            ROOT / ".github" / "actions" / "e2e" / "file_postgres_append" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("SELECT 1", file_postgres)
+        self.assertIn("public.file_postgres_append", file_postgres)
+        self.assertNotIn("public.people", file_postgres)
         self.assertNotRegex(text, r"(?m)^  cleanup:")
         publish = text.split("\n  publish_skipprd:", 1)[1]
         self.assertIn("runs-on: ubuntu-latest", publish)
@@ -124,6 +149,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("postgres", text)
         self.assertIn("5,100,000", text)
         self.assertIn("schema evolution", text)
+        self.assertIn("Python workflow contracts", text)
+        self.assertNotIn("full `cargo test -p skipprd`", text)
 
 
 if __name__ == "__main__":

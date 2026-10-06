@@ -90,6 +90,11 @@ def target_binary_name(binary_name: str, target_triple: str) -> str:
     return binary_name
 
 
+def ensure_executable(path: Path) -> None:
+    mode = path.stat().st_mode
+    path.chmod(mode | 0o111)
+
+
 def strip_inline_comment(line: str) -> str:
     in_single = False
     in_double = False
@@ -274,6 +279,7 @@ def build_local_runtime_plugins(
             raise LocalRuntimePluginError(
                 f"expected built runtime plugin binary at {binary} for {entry['plugin_name']}"
             )
+        ensure_executable(binary)
         executable = str(binary.resolve())
         manifest = manifest_payload_for_catalog_entry(
             entry,

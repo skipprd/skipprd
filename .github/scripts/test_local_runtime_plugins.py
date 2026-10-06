@@ -198,6 +198,77 @@ data_sinks:
             self.assertTrue((output_dir / "mssql-source.json").exists())
             self.assertTrue((output_dir / "snowflake-sink.json").exists())
             self.assertFalse((output_dir / "athena-sink.json").exists())
+            self.assertTrue(
+                os.access(target_dir / "debug" / "skippr-plugin-data-source-mssql", os.X_OK)
+            )
+            self.assertTrue(
+                os.access(target_dir / "debug" / "skippr-plugin-data-sink-snowflake", os.X_OK)
+            )
+
+    def test_skip_cargo_build_makes_copied_plugin_binaries_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = root / "skippr.yml"
+            output_dir = root / "manifests"
+            target_dir = root / "target"
+            plugin = target_dir / "release" / "skippr-plugin-data-source-mssql"
+            plugin.parent.mkdir(parents=True)
+            plugin.write_bytes(b"plugin")
+            plugin.chmod(0o644)
+            config.write_text(
+                """pipelines:
+  p1:
+    data_source: data_sources.mssql
+data_sources:
+  mssql:
+    Mssql: {}
+""",
+                encoding="utf-8",
+            )
+            fake_catalog = [
+                {
+                    "package_name": "skippr-plugin-data-source-mssql",
+                    "package_version": "0.1.2",
+                    "sdk_build_fingerprint": "sdk123",
+                    "checksum": "mssql-checksum",
+                    "binary_name": "skippr-plugin-data-source-mssql",
+                    "manifest_filename": "mssql-source.json",
+                    "manifest_kind": "DataSource",
+                    "manifest_name": "mssql-runtime-source",
+                    "plugin_name": "Mssql",
+                    "supports_schema": False,
+                    "config_schema_version": 1,
+                    "args": [],
+                    "source_capability": {"name": "mssql"},
+                    "sink_capability": None,
+                },
+            ]
+            with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target_dir)}, clear=False):
+                with mock.patch.object(
+                    local_runtime_plugins,
+                    "load_workspace_plugin_catalog",
+                    return_value=fake_catalog,
+                ), mock.patch.object(
+                    local_runtime_plugins,
+                    "workspace_runtime_protocol_version",
+                    return_value=1,
+                ), mock.patch.object(
+                    local_runtime_plugins,
+                    "current_rust_target_triple",
+                    return_value="x86_64-unknown-linux-gnu",
+                ), mock.patch.object(
+                    local_runtime_plugins,
+                    "run_command",
+                ) as run_command:
+                    local_runtime_plugins.build_local_runtime_plugins(
+                        config_path=config,
+                        pipeline="p1",
+                        output_dir=output_dir,
+                        release=True,
+                        skip_cargo_build=True,
+                    )
+            run_command.assert_not_called()
+            self.assertTrue(os.access(plugin, os.X_OK))
 
 
 if __name__ == "__main__":

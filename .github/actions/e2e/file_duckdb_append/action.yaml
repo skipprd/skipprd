@@ -1,5 +1,5 @@
 name: File Duckdb append e2e
-description: File source to Duckdb Iceberg on file://, then DuckDB iceberg_scan without version guessing.
+description: File source to Duckdb Iceberg on file://, then DuckDB iceberg_scan with version guessing.
 runs:
   using: composite
   steps:
@@ -67,9 +67,9 @@ runs:
         work="${{ steps.local_runtime.outputs.work }}"
         warehouse="${{ steps.local_runtime.outputs.warehouse }}"
         export PATH="${HOME}/.duckdb/cli/latest:${PATH}"
-        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
           target/debug/skipprd sync --log --pipeline file_duckdb_append --once \
           --config "${work}/skippr.yml"
-        count="$(duckdb -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${warehouse}/bronze/file_duckdb_append');")"
+        count="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${warehouse}/bronze/file_duckdb_append');")"
         echo "${count}"
-        echo "${count}" | grep -q '2'
+        echo "${count}" | tail -n 1 | grep -qx '2'

@@ -1015,6 +1015,16 @@ schema_sinks:
             ),
             5_100_000,
         )
+        self.assertIn(
+            "SET unsafe_enable_version_guessing=true",
+            runtime_e2e_harness.DUCKDB_ICEBERG_PREAMBLE,
+        )
+        self.assertIn(
+            "unsafe_enable_version_guessing",
+            runtime_e2e_harness.duckdb_iceberg_sql(
+                "SELECT count(*) FROM iceberg_scan('/tmp/table')"
+            ),
+        )
         self.assertEqual(
             runtime_e2e_harness.SCENARIO_RUNTIME_VERSION_ANCHORS["bike_hire_many"],
             (

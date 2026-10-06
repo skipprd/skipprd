@@ -154,6 +154,7 @@ def lake_env(config_path: Path, data_dir: Path, manifests: str) -> dict[str, str
             "USE_LOCAL_PLUGIN_CODE": "1",
             "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR": manifests,
             "DATA_DIR": str(data_dir),
+            "DATA_DIR_MIN_FREE_BYTES": "0",
             "DATA_DIR_HIGH_WATERMARK_PCT": "0",
             "SKIPPRLAKE_TOKEN": TOKEN,
             "RUST_LOG": "info",
