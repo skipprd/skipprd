@@ -121,6 +121,15 @@ runs:
         DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
           "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
           sync --log --pipeline postgres_skipprlake_cdc --once
-        count="$(duckdb -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${work}/warehouse/bronze/orders');")"
-        echo "${count}"
-        echo "${count}" | grep -Eq '[3-9]|[1-9][0-9]'
+        docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c \
+          "UPDATE orders SET name = 'alpha-prime' WHERE id = 1;"
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+          "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
+          sync --log --pipeline postgres_skipprlake_cdc --once
+        scan="${work}/warehouse/bronze/orders"
+        count="$(duckdb -csv -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}');")"
+        updated="$(duckdb -csv -c "INSTALL iceberg; LOAD iceberg; SELECT name FROM iceberg_scan('${scan}') WHERE id = 1;")"
+        echo "count=${count}"
+        echo "updated=${updated}"
+        echo "${count}" | tail -n 1 | grep -qx '3'
+        echo "${updated}" | tail -n 1 | grep -qx 'alpha-prime'

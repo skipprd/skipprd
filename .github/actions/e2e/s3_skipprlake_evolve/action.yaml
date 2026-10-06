@@ -1,0 +1,117 @@
+name: S3 schema evolution into SkipprLake
+description: Two-wave R2 sync of backward-compatible bike-hire schemas into a local SkipprLake warehouse.
+inputs:
+  skipprd_path:
+    required: true
+  plugin_binaries_dir:
+    required: true
+  r2_account_id:
+    required: true
+  r2_access_key_id:
+    required: true
+  r2_secret_access_key:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install Python deps and DuckDB
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install --quiet boto3
+        if ! command -v duckdb >/dev/null 2>&1; then
+          curl -fsSL https://install.duckdb.org | sh
+          echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
+        fi
+    - name: Start DynamoDB Local
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker rm -f skippr-evolve-ddb >/dev/null 2>&1 || true
+        docker run -d --name skippr-evolve-ddb -p 18012:8000 amazon/dynamodb-local \
+          -jar DynamoDBLocal.jar -sharedDb -inMemory
+        python3 - <<'PY'
+        import time
+        import boto3
+        from botocore.config import Config as BotoConfig
+        from botocore.exceptions import ClientError
+        client = boto3.client(
+            "dynamodb",
+            endpoint_url="http://127.0.0.1:18012",
+            region_name="us-east-1",
+            aws_access_key_id="local",
+            aws_secret_access_key="local",
+            config=BotoConfig(retries={"max_attempts": 8}),
+        )
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                client.list_tables()
+                break
+            except Exception:
+                time.sleep(0.5)
+        else:
+            raise SystemExit("DynamoDB Local did not become ready")
+        name = "skippr-evolve-catalog"
+        try:
+            client.delete_table(TableName=name)
+            client.get_waiter("table_not_exists").wait(TableName=name)
+        except ClientError:
+            pass
+        client.create_table(
+            TableName=name,
+            AttributeDefinitions=[
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+            ],
+            KeySchema=[
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        client.get_waiter("table_exists").wait(TableName=name)
+        PY
+    - name: Sync v1 then v2 bike-hire into SkipprLake
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.r2_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.r2_secret_access_key }}
+        AWS_DEFAULT_REGION: auto
+        AWS_EC2_METADATA_DISABLED: "true"
+        AWS_ENDPOINT_URL_DYNAMODB: http://127.0.0.1:18012
+        USE_LOCAL_PLUGIN_CODE: "1"
+        R2_ACCOUNT_ID: ${{ inputs.r2_account_id }}
+      run: |
+        set -euo pipefail
+        work="${RUNNER_TEMP:-/tmp}/skippr-s3-evolve"
+        mkdir -p "${work}/warehouse" "${work}/data" "${work}/manifests" target/release
+        cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
+        chmod +x target/release/skippr-plugin-* || true
+        warehouse_uri="file://${work}/warehouse"
+        endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+        python3 .github/scripts/local_runtime_plugins.py \
+          --config .github/actions/e2e/s3_skipprlake_evolve/skippr.yml \
+          --pipeline bike_hire_evolve \
+          --output-dir "${work}/manifests" \
+          --release \
+          --skip-cargo-build
+        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
+        for prefix in bike-hire-evolve/v1/ bike-hire-evolve/v2/; do
+          sed \
+            -e "s|LAKE_WAREHOUSE_PLACEHOLDER|${warehouse_uri}|" \
+            -e "s|R2_S3_ENDPOINT_PLACEHOLDER|${endpoint}|" \
+            -e "s|S3_PREFIX_PLACEHOLDER|${prefix}|" \
+            .github/actions/e2e/s3_skipprlake_evolve/skippr.yml \
+            > "${work}/skippr.yml"
+          DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+            "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
+            sync --log --pipeline bike_hire_evolve --once
+        done
+        scan="${work}/warehouse/bronze/bike_hire_evolve"
+        count="$(duckdb -csv -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}');")"
+        evolved="$(duckdb -csv -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}') WHERE firmware_revision IS NOT NULL;")"
+        echo "count=${count}"
+        echo "evolved=${evolved}"
+        echo "${count}" | tail -n 1 | grep -qx '2000'
+        echo "${evolved}" | tail -n 1 | grep -qx '1000'

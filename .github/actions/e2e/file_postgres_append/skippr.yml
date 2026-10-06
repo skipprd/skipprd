@@ -1,0 +1,39 @@
+skippr:
+  workspace: test
+  skipprd_el_storage_mode: local
+
+pipelines:
+  file_postgres_append:
+    auto_approve: yes
+    env: test
+    data_source: data_sources.people
+    data_sink: data_sinks.pg
+
+data_sources:
+  people:
+    File:
+      path: SOURCE_DIR
+      format: csv
+
+data_sinks:
+  pg:
+    Postgres:
+      host: 127.0.0.1
+      port: 5433
+      user: postgres
+      password: postgres
+      database: skippr_sink
+      schema: public
+      sslmode: disable
+    schema_sink: schema_sinks.pg
+
+schema_sinks:
+  pg:
+    Postgres:
+      host: 127.0.0.1
+      port: 5433
+      user: postgres
+      password: postgres
+      database: skippr_sink
+      schema: public
+      sslmode: disable

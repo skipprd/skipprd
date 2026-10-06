@@ -10,7 +10,7 @@ use tokio_postgres::{NoTls, Row};
 use tracing::{info, warn};
 
 use crate::pgoutput::{self, PgColumn, PgOutputMessage};
-use skippr_runtime_sdk::helpers::configuration::runtime_child_config;
+use skippr_runtime_sdk::helpers::configuration::{runtime_child_config, Config};
 use skippr_runtime_sdk::plugins::cdc::{
     source_capabilities, MutationKind, PostgresCheckpoint, WalRowMeta,
 };
