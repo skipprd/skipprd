@@ -1952,6 +1952,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
             let tx = Transaction::new(&table);
             let tx = tx
                 .fast_append()
+                .with_check_duplicate(false)
                 .set_snapshot_properties(grouped_snapshot_properties(manifest))
                 .add_data_files(data_files.clone())
                 .apply(tx)
@@ -2013,6 +2014,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
             let tx = Transaction::new(&table);
             let mut action = tx
                 .equality_delta_append()
+                .with_check_duplicate(false)
                 .set_snapshot_properties(grouped_snapshot_properties(manifest))
                 .add_delete_files(delete_files.clone());
             if !data_files.is_empty() {
@@ -2909,6 +2911,8 @@ fn grouped_snapshot_properties(manifest: &ObjectWriteManifest) -> HashMap<String
     ])
 }
 
+/// Sole idempotency gate for grouped commits (the O(manifests) duplicate-file
+/// scan is disabled), so snapshots carrying these properties must not expire.
 fn table_has_grouped_snapshot(
     table: &iceberg::table::Table,
     manifest: &ObjectWriteManifest,
@@ -4515,6 +4519,138 @@ mod tests {
 
         let ident = TableIdent::from_strs(["lake", "orders"]).unwrap();
         assert!(catalog.table_exists(&ident).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn grouped_append_commit_reads_only_the_current_manifest_list() {
+        let catalog: Arc<dyn Catalog> = Arc::new(
+            MemoryCatalogBuilder::default()
+                .load(
+                    "test",
+                    HashMap::from([(
+                        MEMORY_CATALOG_WAREHOUSE.to_string(),
+                        "memory://warehouse".to_string(),
+                    )]),
+                )
+                .await
+                .unwrap(),
+        );
+        let namespace = NamespaceIdent::from_strs(["lake"]).unwrap();
+        catalog
+            .create_namespace(&namespace, HashMap::new())
+            .await
+            .unwrap();
+        let table = catalog
+            .create_table(
+                &namespace,
+                TableCreation::builder()
+                    .name("orders".to_string())
+                    .schema(
+                        Schema::builder()
+                            .with_schema_id(1)
+                            .with_fields(vec![NestedField::required(
+                                1,
+                                "id",
+                                Type::Primitive(PrimitiveType::Int),
+                            )
+                            .into()])
+                            .build()
+                            .unwrap(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
+        let writer = IcebergWriter::<TestIcebergSpec>::new(
+            skippr_runtime_sdk::protocol::RuntimeExecutionContext {
+                pipeline_name: "p".to_string(),
+                workspace_name: "w".to_string(),
+                data_dir: "/tmp".to_string(),
+                execution_mode: Default::default(),
+                output_layout: Default::default(),
+                inject_fields: BTreeMap::new(),
+            },
+            skippr_runtime_sdk::protocol::RuntimeBinding::Primary,
+            "lake".to_string(),
+            Arc::clone(&catalog),
+            IcebergWriterConfig {
+                policies: SinkWritePolicySupport {
+                    supports_merge_by_key: true,
+                    supports_replace_partition: true,
+                    supports_replace_table: true,
+                },
+                table_namespace: "lake".to_string(),
+                location_root: "memory://warehouse/lake".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let ident = TableIdent::from_strs(["lake", "orders"]).unwrap();
+        let data_file = |path: &str| {
+            DataFileBuilder::default()
+                .content(DataContentType::Data)
+                .file_path(path.to_string())
+                .file_format(DataFileFormat::Parquet)
+                .file_size_in_bytes(100)
+                .record_count(1)
+                .partition_spec_id(table.metadata().default_partition_spec_id())
+                .partition(Struct::empty())
+                .build()
+                .unwrap()
+        };
+        for id in ["1", "2"] {
+            let committed = writer
+                .commit_grouped_data_append_with_retries(
+                    catalog.as_ref(),
+                    ident.clone(),
+                    vec![data_file(&format!(
+                        "memory://warehouse/lake/data-{id}.parquet"
+                    ))],
+                    &grouped_manifest(id),
+                )
+                .await
+                .unwrap();
+            assert!(!committed.already_committed);
+        }
+        let current = catalog.load_table(&ident).await.unwrap();
+        let first = current
+            .metadata()
+            .snapshots()
+            .min_by_key(|snapshot| snapshot.sequence_number())
+            .unwrap();
+        let first_manifests = first
+            .load_manifest_list(current.file_io(), &current.metadata_ref())
+            .await
+            .unwrap();
+        for manifest in first_manifests.entries() {
+            current
+                .file_io()
+                .delete(&manifest.manifest_path)
+                .await
+                .unwrap();
+        }
+
+        let third = writer
+            .commit_grouped_data_append_with_retries(
+                catalog.as_ref(),
+                ident.clone(),
+                vec![data_file("memory://warehouse/lake/data-3.parquet")],
+                &grouped_manifest("3"),
+            )
+            .await
+            .unwrap();
+        assert!(!third.already_committed);
+        let replay = writer
+            .commit_grouped_data_append_with_retries(
+                catalog.as_ref(),
+                ident.clone(),
+                vec![data_file("memory://warehouse/lake/data-1.parquet")],
+                &grouped_manifest("1"),
+            )
+            .await
+            .unwrap();
+        assert!(replay.already_committed);
+        assert_eq!(replay.table.metadata().snapshots().count(), 3);
     }
 
     #[tokio::test]

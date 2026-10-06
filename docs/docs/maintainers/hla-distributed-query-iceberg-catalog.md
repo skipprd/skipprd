@@ -349,17 +349,16 @@ Live replicate Timeout, I/O, or other non-definite errors keep the Prepared reco
 
 Catch-up: if local `committed_index` is ahead of the donor, fail `DurableError::Diverged` (do not treat “ahead” as success). Empty `head_hash` is genesis; non-empty must be 32 bytes (`replica_status_hash`). Install a snapshot when the requester predates donor `base_index`.
 
-Reclaimed payloads prevent infinite log replay. A state snapshot contains:
+Reclaimed payloads prevent infinite log replay. Every segment reclaim retains a metadata-only state snapshot and prunes the log through the committed head. Retention is O(metadata); it never copies live payloads. A state snapshot contains:
 
 - base index/hash;
 - live segment inventory and hashes;
-- live payloads;
 - non-tombstoned compaction transactions;
 - completion bitmaps and compaction/ref mapping for live segments;
 - latest offset/checkpoint values with commit tuples;
 - schema fingerprints on live segment descriptors (coverage against `metadata.json` at promote; not a second schema SoT).
 
-If a requested index predates retained history, bootstrap installs a verified state snapshot and live payloads in a staging directory, fsyncs, then atomically replaces pipeline state. Incremental entries follow. After prune, that snapshot is the mutation log; the compaction planner reads the same snapshot-plus-suffix-log SoT.
+If a requested index predates retained history, the donor builds a transfer pack under its log lock: the state snapshot at its committed head plus the live payloads. Bootstrap installs that pack in a staging directory, fsyncs, then atomically replaces pipeline state. Incremental entries follow. After prune, that snapshot is the mutation log; the compaction planner reads the same snapshot-plus-suffix-log SoT.
 
 A corrupt/unusable replica stops advertising and purges only that pipeline. A healthy replica does not voluntarily leave until replacement is caught up.
 
