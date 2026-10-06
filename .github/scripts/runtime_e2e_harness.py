@@ -32,6 +32,7 @@ from runtime_plugin_targets import published_runtime_plugin_targets, resolve_tar
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+BIKE_HIRE_MANY_EXPECTED_ROWS = 5_100_000
 DEFAULT_AWS_REGION = "us-east-1"
 STRIPE_FIXTURE_DIR = REPO_ROOT / "plugins/data_source/stripe/tests/fixtures"
 STRIPE_FIXTURE_TWO_CHARGES_DIR = (
@@ -2336,6 +2337,16 @@ def verify_bike_hire_rows(context: ScenarioContext) -> None:
     )
 
 
+def parse_duckdb_csv_count(stdout: str) -> int:
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        raise HarnessError(f"duckdb count output missing data row: {stdout!r}")
+    try:
+        return int(lines[-1].split(",")[0])
+    except ValueError as err:
+        raise HarnessError(f"duckdb count was not an integer: {stdout!r}") from err
+
+
 def verify_bike_hire_many_rows(context: ScenarioContext) -> None:
     warehouse = context.base_env.get("SKIPPR_E2E_LAKE_WAREHOUSE", "").strip()
     if not warehouse:
@@ -2347,12 +2358,12 @@ def verify_bike_hire_many_rows(context: ScenarioContext) -> None:
         raise HarnessError(f"expected SkipprLake parquet under {table_dir}")
     duckdb = shutil.which("duckdb")
     if duckdb is None:
-        print_step(f"duckdb not on PATH; accepted {len(parquet_files)} parquet file(s) under {table_dir}")
-        return
+        raise HarnessError("duckdb is required to count bronze.bike_hire_many")
     scan = table_dir.as_posix()
     completed = subprocess.run(
         [
             duckdb,
+            "-csv",
             "-c",
             f"INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('{scan}');",
         ],
@@ -2364,9 +2375,11 @@ def verify_bike_hire_many_rows(context: ScenarioContext) -> None:
         raise HarnessError(
             f"duckdb iceberg_scan failed for {scan}: {completed.stderr.strip() or completed.stdout.strip()}"
         )
-    digits = "".join(ch for ch in completed.stdout if ch.isdigit())
-    if not digits or int(digits) < 1:
-        raise HarnessError(f"expected bronze.bike_hire_many to contain rows, got {completed.stdout!r}")
+    row_count = parse_duckdb_csv_count(completed.stdout)
+    if row_count != BIKE_HIRE_MANY_EXPECTED_ROWS:
+        raise HarnessError(
+            f"expected bronze.bike_hire_many to contain {BIKE_HIRE_MANY_EXPECTED_ROWS} rows, got {row_count}"
+        )
 
 
 def verify_bike_hire_s3_wal_many_rows(context: ScenarioContext) -> None:

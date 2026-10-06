@@ -1,0 +1,54 @@
+name: File append into Postgres
+description: CSV file source into a Docker Postgres sink on GitHub-hosted runners.
+inputs:
+  skipprd_path:
+    required: true
+  plugin_binaries_dir:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Start Postgres sink
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker rm -f skippr-file-postgres >/dev/null 2>&1 || true
+        docker run -d --name skippr-file-postgres \
+          -e POSTGRES_PASSWORD=postgres \
+          -e POSTGRES_DB=skippr_sink \
+          -p 5433:5432 \
+          postgres:16-alpine
+        for _ in $(seq 1 30); do
+          if docker exec skippr-file-postgres pg_isready -U postgres >/dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+    - name: Sync CSV into Postgres
+      shell: bash
+      env:
+        USE_LOCAL_PLUGIN_CODE: "1"
+      run: |
+        set -euo pipefail
+        work="${RUNNER_TEMP:-/tmp}/skippr-file-postgres"
+        mkdir -p "${work}/people" "${work}/data" "${work}/manifests" target/release
+        cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
+        chmod +x target/release/skippr-plugin-* || true
+        cp tests/fixtures/formats/people.csv "${work}/people/people.csv"
+        sed "s|SOURCE_DIR|${work}/people|" \
+          .github/actions/e2e/file_postgres_append/skippr.yml \
+          > "${work}/skippr.yml"
+        python3 .github/scripts/local_runtime_plugins.py \
+          --config "${work}/skippr.yml" \
+          --pipeline file_postgres_append \
+          --output-dir "${work}/manifests" \
+          --release \
+          --skip-cargo-build
+        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+          "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
+          sync --log --pipeline file_postgres_append --once
+        count="$(docker exec skippr-file-postgres psql -U postgres -d skippr_sink -Atc \
+          "SELECT count(*) FROM public.people;")"
+        echo "count=${count}"
+        test "${count}" = "2"

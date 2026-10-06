@@ -1,6 +1,6 @@
 # Release Workflow
 
-Python wheels publish from `.github/workflows/ci.yml`. Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`). It runs on engine tags (and `workflow_dispatch`), not on `main` / master pushes. `publish_skipprd` runs after `chaos_mode_test` plus the GitHub runner e2e jobs (file/Duckdb, SkipprLake, Postgres CDC). Darwin / Windows stay commented out for now.
+Python wheels publish from `.github/workflows/ci.yml`. Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`). It runs on engine tags (and `workflow_dispatch`), not on `main` / master pushes. `publish_skipprd` runs after `chaos_mode_test` plus the GitHub runner e2e jobs (file/Duckdb, SkipprLake, Postgres CDC upsert, S3 schema evolution, file/Postgres). Darwin / Windows stay commented out for now.
 
 ## High-level flow
 
@@ -72,11 +72,13 @@ Bump `pyproject.toml` and `python/Cargo.toml` together, merge to `main` (or tag 
 `.github/workflows/rust.yml` (**Rust CI/CD Pipeline**) is the GitHub-hosted linux x86 lane. It runs on unprefixed engine tags (`17.0.0`) and `workflow_dispatch`, not on `main` or master branch pushes.
 
 - `linux_test_suite` — full `cargo test -p skipprd`, lease/query-ballista/hla_cluster, cloud-tables validation, postgres sink tests, and source-plugin lib tests
-- `linux_x86` — `rust-build-release` of skipprd plus the GitHub runner plugins (`s3`, `file`, `postgres`, `skipprlake`, `duckdb`)
-- `chaos_mode_test` — `bike_hire_many` reads bike-hire JSON from R2 (`skippr-e2e-sample-data/bike-hire/`) into SkipprLake on the runner (DynamoDB Local catalog, `file://` warehouse). R2 secrets only; no AWS.
+- `linux_x86` — `rust-build-release` of skipprd plus the GitHub runner plugins (`s3`, `file`, `postgres` source+sink, `skipprlake`, `duckdb`)
+- `chaos_mode_test` — `bike_hire_many` reads 5,100,000 mixed-size bike-hire JSON objects from R2 (`skippr-e2e-sample-data/bike-hire/`) into SkipprLake on the runner (DynamoDB Local catalog, `file://` warehouse) and asserts that exact row count after chaos crashes. R2 secrets only; no AWS.
 - `e2e_file_duckdb` — File source append into Duckdb Iceberg
-- `e2e_skipprlake` — File source into SkipprLake (`tests/skipprlake_e2e`)
-- `e2e_postgres_cdc` — Postgres snapshot-then-CDC into SkipprLake
+- `e2e_skipprlake` — File source into SkipprLake (`tests/skipprlake_e2e`), including atomic dbt replace
+- `e2e_postgres_cdc` — Postgres snapshot-then-CDC upsert into SkipprLake
+- `e2e_s3_schema_evolution` — S3 v1 then backward-compatible v2 into SkipprLake
+- `e2e_file_postgres` — File source append into Docker Postgres
 - `publish_skipprd` — on engine tags, after chaos and the GitHub e2e jobs, upload `skipprd-linux_x86.tar.gz` to the install CDN and create the GitHub release
 
 `check_host_dependency_boundaries.py` and `test_runtime_e2e_harness.py` run on that test lane. macOS and Windows compile jobs stay commented.

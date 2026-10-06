@@ -58,11 +58,21 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_file_duckdb:", text)
         self.assertIn("e2e_skipprlake:", text)
         self.assertIn("e2e_postgres_cdc:", text)
+        self.assertIn("e2e_s3_schema_evolution:", text)
+        self.assertIn("e2e_file_postgres:", text)
+        self.assertIn("s3_skipprlake_evolve", text)
+        self.assertIn("file_postgres_append", text)
+        postgres_cdc = (
+            ROOT / ".github" / "actions" / "e2e" / "postgres_skipprlake_cdc" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("UPDATE orders SET name = 'alpha-prime'", postgres_cdc)
         self.assertIn("skippr-plugin-data-source-s3", text)
         self.assertIn("skippr-plugin-data-source-file", text)
         self.assertIn("skippr-plugin-data-source-postgres", text)
         self.assertIn("skippr-plugin-data-sink-skipprlake", text)
         self.assertIn("skippr-plugin-data-sink-duckdb", text)
+        self.assertIn("skippr-plugin-data-sink-postgres", text)
+        self.assertIn("cargo check -p skippr-plugin-data-source-postgres", text)
         self.assertNotRegex(text, r"(?m)^  cleanup:")
         publish = text.split("\n  publish_skipprd:", 1)[1]
         self.assertIn("runs-on: ubuntu-latest", publish)
@@ -70,6 +80,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_file_duckdb", publish)
         self.assertIn("e2e_skipprlake", publish)
         self.assertIn("e2e_postgres_cdc", publish)
+        self.assertIn("e2e_s3_schema_evolution", publish)
+        self.assertIn("e2e_file_postgres", publish)
         self.assertIn("refs/tags/", publish)
         self.assertIn("configure-r2-releases", publish)
         self.assertIn("skipprd-linux_x86.tar.gz", publish)
@@ -110,6 +122,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("skipprlake", text)
         self.assertIn("file_duckdb", text)
         self.assertIn("postgres", text)
+        self.assertIn("5,100,000", text)
+        self.assertIn("schema evolution", text)
 
 
 if __name__ == "__main__":
