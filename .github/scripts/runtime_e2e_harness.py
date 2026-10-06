@@ -429,6 +429,16 @@ BIKE_HIRE_CHAOS_ENV = BIKE_HIRE_BASE_ENV + (
 
 BIKE_HIRE_STEADY_ENV = BIKE_HIRE_BASE_ENV + (("SKIPPR_CHAOS_MODE", "no"),)
 
+# GitHub-hosted ubuntu-latest is 4 cores / 16 GB. skipprd is GitHub Free, so
+# larger 8-core runners are not available. Cap SkipprLake compact groups so a
+# 128-part Iceberg write cannot pin the runtime for hours.
+BIKE_HIRE_MANY_STEADY_ENV = (
+    ("RUST_BACKTRACE", "1"),
+    ("SKIPPR_CHAOS_MODE", "no"),
+    ("WAL_COMPACTION_GROUP_MAX_PARTS", "16"),
+    ("WAL_COMPACTION_GROUP_TARGET_BYTES", "8388608"),
+)
+
 
 SCENARIOS = {
     "bike_hire": Scenario(
@@ -475,19 +485,13 @@ SCENARIOS = {
         smoke_runs=(
             SyncRun(
                 pipeline="bike_hire_many",
-                extra_env=(
-                    ("RUST_BACKTRACE", "1"),
-                    ("SKIPPR_CHAOS_MODE", "no"),
-                ),
+                extra_env=BIKE_HIRE_MANY_STEADY_ENV,
             ),
         ),
         full_runs=(
             SyncRun(
                 pipeline="bike_hire_many",
-                extra_env=(
-                    ("RUST_BACKTRACE", "1"),
-                    ("SKIPPR_CHAOS_MODE", "no"),
-                ),
+                extra_env=BIKE_HIRE_MANY_STEADY_ENV,
                 timeout_seconds=10000,
             ),
         ),

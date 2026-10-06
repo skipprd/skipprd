@@ -1009,10 +1009,18 @@ schema_sinks:
         self.assertEqual(scenario.smoke_verifiers, ("bike_hire_many_rows",))
         self.assertEqual(scenario.full_verifiers, ("bike_hire_many_rows",))
         self.assertEqual(len(scenario.full_runs), 1)
-        self.assertEqual(
-            dict(scenario.full_runs[0].extra_env)["SKIPPR_CHAOS_MODE"],
-            "no",
-        )
+        self.assertIn("buffer_threshold_bytes: 2000000", config)
+        self.assertIn("buffer_threshold_seconds: 30", config)
+        self.assertNotIn("buffer_threshold_bytes: 10000000", config)
+        self.assertNotIn("buffer_threshold_seconds: 600", config)
+        full_env = dict(scenario.full_runs[0].extra_env)
+        smoke_env = dict(scenario.smoke_runs[0].extra_env)
+        self.assertEqual(full_env["SKIPPR_CHAOS_MODE"], "no")
+        self.assertEqual(full_env["WAL_COMPACTION_GROUP_MAX_PARTS"], "16")
+        self.assertEqual(full_env["WAL_COMPACTION_GROUP_TARGET_BYTES"], "8388608")
+        self.assertEqual(smoke_env["WAL_COMPACTION_GROUP_MAX_PARTS"], "16")
+        self.assertEqual(smoke_env["WAL_COMPACTION_GROUP_TARGET_BYTES"], "8388608")
+        self.assertEqual(scenario.full_runs[0].timeout_seconds, 10000)
         self.assertEqual(runtime_e2e_harness.BIKE_HIRE_MANY_EXPECTED_ROWS, 5_100_000)
         self.assertEqual(
             runtime_e2e_harness.parse_duckdb_csv_count(
