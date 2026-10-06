@@ -52,6 +52,8 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("linux_test_suite", linux_build)
         chaos = text.split("\n  chaos_mode_test:", 1)[1].split("\n  e2e_file_duckdb:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", chaos)
+        self.assertNotIn("ubuntu-latest-8-cores", chaos)
+        self.assertNotIn("[self-hosted", chaos)
         self.assertIn("timeout-minutes: 240", chaos)
         self.assertIn("linux_x86", chaos)
         self.assertNotIn("- cleanup", chaos)
@@ -150,6 +152,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("file_duckdb", text)
         self.assertIn("postgres", text)
         self.assertIn("5,100,000", text)
+        self.assertIn("WAL_COMPACTION_GROUP_MAX_PARTS", text)
+        self.assertIn("2 MiB", text)
         self.assertIn("schema evolution", text)
         self.assertIn("Python workflow contracts", text)
         self.assertNotIn("full `cargo test -p skipprd`", text)

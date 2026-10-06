@@ -73,7 +73,7 @@ Bump `pyproject.toml` and `python/Cargo.toml` together, then tag `python-vX.Y.Z`
 
 - `linux_test_suite` — Python workflow contracts (`test_rust_ci.py`, harness/plugin/host-boundary scripts). Cargo tests are skipped for now because they take too long on GitHub-hosted runners.
 - `linux_x86` — `rust-build-release` of skipprd plus the GitHub runner plugins (`s3`, `file`, `postgres` source+sink, `skipprlake`, `duckdb`); starts in parallel with `linux_test_suite`
-- `chaos_mode_test` — `bike_hire_many` reads 5,100,000 mixed-size bike-hire JSON objects from R2 (`skippr-e2e-sample-data/bike-hire/`) into SkipprLake on the runner (DynamoDB Local catalog, `file://` warehouse) and asserts that exact row count. Mid-sync SIGKILL chaos is off on GitHub-hosted runners so the 5.1M ingest can finish. R2 secrets only; no AWS.
+- `chaos_mode_test` — `bike_hire_many` reads 5,100,000 mixed-size bike-hire JSON objects from R2 (`skippr-e2e-sample-data/bike-hire/`) into SkipprLake on the runner (DynamoDB Local catalog, `file://` warehouse) and asserts that exact row count. Mid-sync SIGKILL chaos is off on GitHub-hosted runners so the 5.1M ingest can finish. Pipeline buffers flush every 2 MiB or 30s, and compact groups are capped at `WAL_COMPACTION_GROUP_MAX_PARTS=16` / 8 MiB so SkipprLake Iceberg writes finish on GitHub-hosted `ubuntu-latest` (4 cores / 16 GB). The skipprd org is GitHub Free, so larger 8-core hosted runners are not available. R2 secrets only; no AWS.
 - `e2e_file_duckdb` — File source append into Duckdb Iceberg
 - `e2e_skipprlake` — File source into SkipprLake (`tests/skipprlake_e2e`), including atomic dbt replace
 - `e2e_postgres_cdc` — Postgres snapshot-then-CDC upsert into SkipprLake
