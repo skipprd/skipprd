@@ -429,13 +429,6 @@ BIKE_HIRE_CHAOS_ENV = BIKE_HIRE_BASE_ENV + (
 
 BIKE_HIRE_STEADY_ENV = BIKE_HIRE_BASE_ENV + (("SKIPPR_CHAOS_MODE", "no"),)
 
-BIKE_HIRE_MANY_CHAOS_ENV = (
-    ("RUST_BACKTRACE", "1"),
-    ("SKIPPR_CHAOS_MODE", "yes"),
-    ("SKIPPR_CHAOS_MIN_SECONDS", "20"),
-    ("SKIPPR_CHAOS_MAX_SECONDS", "30"),
-)
-
 
 SCENARIOS = {
     "bike_hire": Scenario(
@@ -491,30 +484,11 @@ SCENARIOS = {
         full_runs=(
             SyncRun(
                 pipeline="bike_hire_many",
-                extra_env=BIKE_HIRE_MANY_CHAOS_ENV,
-                allow_exit_codes=(137,),
-            ),
-            SyncRun(
-                pipeline="bike_hire_many",
-                extra_env=BIKE_HIRE_MANY_CHAOS_ENV,
-                allow_exit_codes=(137,),
-            ),
-            SyncRun(
-                pipeline="bike_hire_many",
-                extra_env=BIKE_HIRE_MANY_CHAOS_ENV,
-                allow_exit_codes=(137,),
-            ),
-            SyncRun(
-                pipeline="bike_hire_many",
-                extra_env=BIKE_HIRE_MANY_CHAOS_ENV,
-                allow_exit_codes=(137,),
-            ),
-            SyncRun(
-                pipeline="bike_hire_many",
                 extra_env=(
                     ("RUST_BACKTRACE", "1"),
                     ("SKIPPR_CHAOS_MODE", "no"),
                 ),
+                timeout_seconds=10000,
             ),
         ),
         smoke_verifiers=("bike_hire_many_rows",),

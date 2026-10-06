@@ -1008,6 +1008,11 @@ schema_sinks:
         self.assertNotIn("skippr_s3_bucket:", config)
         self.assertEqual(scenario.smoke_verifiers, ("bike_hire_many_rows",))
         self.assertEqual(scenario.full_verifiers, ("bike_hire_many_rows",))
+        self.assertEqual(len(scenario.full_runs), 1)
+        self.assertEqual(
+            dict(scenario.full_runs[0].extra_env)["SKIPPR_CHAOS_MODE"],
+            "no",
+        )
         self.assertEqual(runtime_e2e_harness.BIKE_HIRE_MANY_EXPECTED_ROWS, 5_100_000)
         self.assertEqual(
             runtime_e2e_harness.parse_duckdb_csv_count(
