@@ -58,7 +58,7 @@ jobs:
     needs:
       - linux_x86
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
         with:

@@ -52,6 +52,7 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("linux_test_suite", linux_build)
         chaos = text.split("\n  chaos_mode_test:", 1)[1].split("\n  e2e_file_duckdb:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", chaos)
+        self.assertIn("timeout-minutes: 240", chaos)
         self.assertIn("linux_x86", chaos)
         self.assertNotIn("- cleanup", chaos)
         self.assertNotIn("secrets.AWS_ACCESS_KEY_ID", chaos)
