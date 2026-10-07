@@ -168,6 +168,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("!startsWith(github.ref, 'refs/tags/python-')", publish)
         self.assertNotIn("startsWith(github.ref, 'refs/tags/python-v')", publish)
         self.assertIn("python_wheel_version.py", publish)
+        self.assertIn("SKIPPR_WHEEL_DIST", publish)
         self.assertNotIn("github.ref != 'refs/tags/v0.0.0'", publish)
         self.assertNotRegex(publish, r"startsWith\(github\.ref, 'refs/tags/v'\)")
         self.assertIn("skipprd/cloud", text)
@@ -256,9 +257,28 @@ class PythonBindingsCiTests(unittest.TestCase):
     def test_python_semver_is_independent_of_engine_tags(self):
         module = load_wheel_version()
         self.assertEqual(module.python_semver(), "17.0.0")
-        self.assertTrue(module.should_publish("17.0.0", published=False))
-        self.assertFalse(module.should_publish("17.0.0", published=True))
-        self.assertFalse(module.should_publish("0.0.0", published=False))
+        self.assertTrue(
+            module.should_publish(
+                "17.0.0", unpublished=["skippr-17.0.0-cp310-abi3-macosx_11_0_arm64.whl"]
+            )
+        )
+        self.assertFalse(module.should_publish("17.0.0", unpublished=[]))
+        self.assertFalse(module.should_publish("0.0.0", unpublished=["skippr-0.0.0-any.whl"]))
+
+    def test_publish_uploads_only_wheels_missing_from_pypi(self):
+        module = load_wheel_version()
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp)
+            linux = dist / "skippr-17.0.0-cp310-abi3-manylinux_2_39_x86_64.whl"
+            darwin = dist / "skippr-17.0.0-cp310-abi3-macosx_11_0_arm64.whl"
+            linux.write_bytes(b"linux")
+            darwin.write_bytes(b"darwin")
+            published = {linux.name}
+            missing = module.unpublished_wheels(dist, published)
+            self.assertEqual([p.name for p in missing], [darwin.name])
+            module.prune_published_wheels(dist, missing)
+            self.assertFalse(linux.exists())
+            self.assertTrue(darwin.exists())
 
     def test_set_root_package_version_does_not_stamp_python(self):
         with tempfile.TemporaryDirectory() as tmp:
