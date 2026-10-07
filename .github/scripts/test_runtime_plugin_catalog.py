@@ -637,6 +637,26 @@ skipprd = { path = "../.." }
         self.assertIn("Duckdb", named)
         self.assertNotIn("Iceberg", named)
 
+    def test_catalog_package_names_lists_every_workspace_plugin(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        names = runtime_plugin_catalog.catalog_package_names(repo)
+        self.assertGreater(len(names), 20)
+        self.assertEqual(names, sorted(set(names)))
+        for package in (
+            "skippr-plugin-data-source-s3",
+            "skippr-plugin-data-source-file",
+            "skippr-plugin-data-sink-file",
+            "skippr-plugin-data-sink-s3",
+            "skippr-plugin-data-sink-athena-iceberg",
+            "skippr-plugin-schema-sink-athena-iceberg",
+            "skippr-plugin-data-sink-skipprlake",
+            "skippr-plugin-schema-sink-skipprlake",
+        ):
+            self.assertIn(package, names)
+        targets = (repo / "runtime_plugins" / "targets.json").read_text(encoding="utf-8")
+        self.assertIn('"runner_baseline": "skippr-darwin-arm64"', targets)
+        self.assertNotIn("skippr-darwin-arm64-8", targets)
+
     def test_workspace_runtime_protocol_version_supports_legacy_sdk_location(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)

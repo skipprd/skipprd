@@ -1,6 +1,6 @@
 # Release Workflow
 
-Python wheels publish from `.github/workflows/ci.yml` (**Python CI/CD Pipeline**). Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`). Both pipelines run on tags (and `workflow_dispatch`), not on `main` / master pushes. `publish_skipprd` runs after `chaos_mode_test` plus the GitHub runner e2e jobs (file/Duckdb, SkipprLake, Postgres CDC upsert, S3 schema evolution, file/Postgres). Darwin / Windows stay commented out for now.
+Python wheels publish from `.github/workflows/ci.yml` (**Python CI/CD Pipeline**). Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`) plus macOS arm64 on the self-hosted `skippr-darwin-arm64` runner. Both pipelines run on tags (and `workflow_dispatch`), not on `main` / master pushes. `publish_runtime_plugins` uploads the workspace plugin catalog after both architecture builds. `publish_skipprd` runs after `chaos_mode_test`, the GitHub runner e2e jobs (file/Duckdb, SkipprLake, Postgres CDC upsert, S3 schema evolution, file/Postgres), the Darwin host build, and plugin publish. Windows is not a publish target.
 
 ## High-level flow
 
@@ -37,11 +37,12 @@ This is why plugin versions live in each plugin crate's `Cargo.toml`, not in a s
 
 ## 2. Build the selected host and plugin artifacts
 
-Platform build jobs produce the host binary plus the runtime plugin binaries needed for release staging:
+Platform build jobs compile the host binary plus **every** workspace catalog plugin (not an e2e subset):
 
-- `linux_x86`
-- `macos_arm64`
-- `windows_x86`
+- `linux_x86` on GitHub-hosted `ubuntu-latest`
+- `macos_arm64` on the self-hosted `skippr-darwin-arm64` runner
+
+`rust-build-release` loads that catalog via `catalog_package_names`. Windows is not a publish target.
 
 On tag builds, `set_root_package_version.py` stamps the root host package version from the tag name (`1.2.3`) before packaging. It does not stamp `skipprd-python` or `pyproject.toml`. Engine tags are unprefixed (`0.0.0`, `0.1.0`).
 
@@ -49,7 +50,7 @@ On tag builds, `set_root_package_version.py` stamps the root host package versio
 
 Python has its own semver in `pyproject.toml` and `python/Cargo.toml` (`17.0.0` today). It is not the skipprd git tag.
 
-`.github/workflows/ci.yml` (**Python CI/CD Pipeline**) builds and tests the `skippr` wheel on GitHub-hosted Linux x86 (`ubuntu-latest`) for engine tags (`[0-9]*`) and `python-v*` tags, plus `workflow_dispatch`. It does not run on `main` / master or pull requests. Darwin / macOS arm64 is commented out for now. Release `cdylib` builds use `[profile.release]` `debug = false` and `strip = "symbols"` so the wheel stays under the PyPI project file limit of 100 MB (`scripts/test-python.sh` fails the job if a wheel is larger).
+`.github/workflows/ci.yml` (**Python CI/CD Pipeline**) builds and tests the `skippr` wheel on GitHub-hosted Linux x86 (`ubuntu-latest`) and macOS arm64 (`skippr-darwin-arm64`) for engine tags (`[0-9]*`) and `python-v*` tags, plus `workflow_dispatch`. It does not run on `main` / master or pull requests. Release `cdylib` builds use `[profile.release]` `debug = false` and `strip = "symbols"` so the wheel stays under the PyPI project file limit of 100 MB (`scripts/test-python.sh` fails the job if a wheel is larger).
 
 `python-publish` runs on the same unprefixed engine tags as `publish_skipprd` (not `0.0.0`, not `test*`, not `python-v*`). It publishes only when that Python semver is absent from PyPI.
 
@@ -69,19 +70,21 @@ Bump `pyproject.toml` and `python/Cargo.toml` together, then tag the engine (`17
 
 ## 3. Compile and test the important boundaries
 
-`.github/workflows/rust.yml` (**Rust CI/CD Pipeline**) is the GitHub-hosted linux x86 lane. It runs on unprefixed engine tags (`17.0.0`) and `workflow_dispatch`, not on `main` or master branch pushes.
+`.github/workflows/rust.yml` (**Rust CI/CD Pipeline**) is the linux x86 plus Darwin arm64 release lane. It runs on unprefixed engine tags (`17.0.0`) and `workflow_dispatch`, not on `main` or master branch pushes.
 
 - `linux_test_suite` — Python workflow contracts (`test_rust_ci.py`, harness/plugin/host-boundary scripts). Cargo tests are skipped for now because they take too long on GitHub-hosted runners.
-- `linux_x86` — `rust-build-release` of skipprd plus the GitHub runner plugins (`s3`, `file`, `postgres` source+sink, `skipprlake`, `duckdb`); starts in parallel with `linux_test_suite`
+- `linux_x86` — `rust-build-release` of skipprd plus the full workspace plugin catalog; starts in parallel with `linux_test_suite`
+- `macos_arm64` — the same catalog build on the self-hosted `skippr-darwin-arm64` runner
 - `chaos_mode_test` — `bike_hire_many` reads 5,100,000 mixed-size bike-hire JSON objects from R2 (`skippr-e2e-sample-data/bike-hire/`) into SkipprLake on the runner (DynamoDB Local catalog, `file://` warehouse) and asserts that exact row count. Mid-sync SIGKILL chaos is off on GitHub-hosted runners so the 5.1M ingest can finish. Pipeline buffers hold until 4 GiB or 7200s so R2 ingest is not overlapping SkipprLake compact; drain then compact in `WAL_COMPACTION_GROUP_MAX_PARTS=16` / 8 MiB groups on GitHub-hosted `ubuntu-latest` (4 cores / 16 GB). The skipprd org is GitHub Free, so larger 8-core hosted runners are not available. R2 secrets only; no AWS.
 - `e2e_file_duckdb` — File source append into Duckdb Iceberg
 - `e2e_skipprlake` — File source into SkipprLake (`tests/skipprlake_e2e`), including atomic dbt replace
 - `e2e_postgres_cdc` — Postgres snapshot-then-CDC upsert into SkipprLake
 - `e2e_s3_schema_evolution` — S3 v1 then backward-compatible v2 into SkipprLake
 - `e2e_file_postgres` — File source append into Docker Postgres
-- `publish_skipprd` — on engine tags, after chaos and the GitHub e2e jobs, upload `skipprd-linux_x86.tar.gz` to the install CDN and create the GitHub release
+- `publish_runtime_plugins` — on engine tags, after linux and Darwin catalog builds, stage and upload protocol-matching manifests plus binaries
+- `publish_skipprd` — on engine tags, after chaos, the GitHub e2e jobs, Darwin, and plugin publish, upload `skipprd-linux_x86.tar.gz` and `skipprd-macos_arm64.tar.gz` to the install CDN and create the GitHub release
 
-`check_host_dependency_boundaries.py` and `test_runtime_e2e_harness.py` run on that test lane. macOS and Windows compile jobs stay commented.
+`check_host_dependency_boundaries.py` and `test_runtime_e2e_harness.py` run on that test lane. Windows is not a publish target.
 
 ## 4. Publish runtime plugin manifests and binaries
 
@@ -122,8 +125,8 @@ The post-publish acceptance path verifies artifact download behavior with `artif
 
 `publish_skipprd` then:
 
-- uploads host archives plus `install.sh` to the GitHub release
-- copies host tarballs into the install releases bucket
+- uploads linux and Darwin host archives plus `install.sh` to the GitHub release
+- copies those host tarballs into the install releases bucket
 - updates the latest host pointer
 
 Host publishing is intentionally separate from runtime plugin manifest publishing. The host is not stamped with plugin versions and should resolve runtime plugins from the published registry by default.

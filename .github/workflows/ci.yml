@@ -37,6 +37,7 @@ jobs:
       - run: python3 .github/scripts/test_rust_ci.py
       - run: python3 .github/scripts/test_host_dependency_boundaries.py
       - run: python3 .github/scripts/test_publish_runtime_plugins.py
+      - run: python3 .github/scripts/test_runtime_plugin_catalog.py
       - run: ./scripts/test-python.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -47,9 +48,45 @@ jobs:
           cd docs
           npm install
           npx vitepress build
+  darwin:
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+    runs-on: [self-hosted, skippr-darwin-arm64]
+    defaults:
+      run:
+        working-directory: skipprd
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/cloud
+          path: cloud
+          token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
+      - name: Install macOS build deps
+        run: |
+          if ! command -v protoc >/dev/null 2>&1; then
+            brew install protobuf
+          fi
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: skipprd
+      - run: cargo run -p skippr-connect-gen -- --check
+      - run: python3 .github/scripts/test_python_bindings_ci.py
+      - run: python3 .github/scripts/test_rust_ci.py
+      - run: python3 .github/scripts/test_publish_runtime_plugins.py
+      - run: ./scripts/test-python.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-darwin
+          path: skipprd/target/wheels/*.whl
+          if-no-files-found: error
   python-publish:
     if: github.repository == 'skipprd/skipprd' && startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test') && !startsWith(github.ref, 'refs/tags/python-')
-    needs: [linux]
+    needs: [linux, darwin]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -71,31 +108,3 @@ jobs:
         with:
           packages-dir: dist
           attestations: false
-
-  # Disabled for now: darwin / macOS arm64 (self-hosted Skippr Cloud runner).
-  # linux x86 on GitHub-hosted ubuntu-latest is the only build/test/publish lane.
-  # darwin:
-  #   if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
-  #   runs-on: [self-hosted, skippr-darwin-arm64-8]
-  #   defaults:
-  #     run:
-  #       working-directory: skipprd
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #       with:
-  #         repository: skipprd/cloud
-  #         path: cloud
-  #         token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
-  #     - uses: actions/checkout@v4
-  #       with:
-  #         path: skipprd
-  #     - run: cargo run -p skippr-connect-gen -- --check
-  #     - run: cargo test -p skipprd --lib
-  #     - run: python3 .github/scripts/test_python_bindings_ci.py
-  #     - run: python3 .github/scripts/test_publish_runtime_plugins.py
-  #     - run: ./scripts/test-python.sh
-  #     - uses: actions/upload-artifact@v4
-  #       with:
-  #         name: wheels-darwin
-  #         path: skipprd/target/wheels/*.whl
-  #         if-no-files-found: error

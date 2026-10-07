@@ -687,6 +687,10 @@ def validate_manifest_index_sdk_build_fingerprint(
             )
 
 
+def catalog_package_names(workspace: Path) -> list[str]:
+    return sorted(entry["package_name"] for entry in load_workspace_plugin_catalog(workspace))
+
+
 def load_workspace_plugin_catalog(workspace: Path) -> list[dict]:
     packages = load_plugin_packages(workspace)
     packages_by_name = {package["name"]: package for package in packages}

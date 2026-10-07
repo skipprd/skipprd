@@ -112,15 +112,20 @@ class PythonBindingsCiTests(unittest.TestCase):
     def test_ci_builds_on_github_linux_x86(self):
         text = CI.read_text(encoding="utf-8")
         self.assertRegex(text, r"(?m)^    runs-on: ubuntu-latest$")
-        self.assertNotRegex(text, r"(?m)^    runs-on: \[self-hosted")
-        self.assertNotRegex(text, r"(?m)^  darwin:")
-        self.assertRegex(text, r"(?m)^  # darwin:")
+        self.assertRegex(text, r"(?m)^  darwin:")
+        self.assertNotRegex(text, r"(?m)^  # darwin:")
         self.assertNotIn("macos-latest", text)
         self.assertNotIn("windows-latest", text)
         self.assertNotIn("depot", text)
-        linux = text.split("\n  linux:", 1)[1].split("\n  python-publish:", 1)[0]
+        linux = text.split("\n  linux:", 1)[1].split("\n  darwin:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", linux)
         self.assertNotIn("skippr-linux-x64-16", linux)
+        self.assertNotIn("[self-hosted", linux)
+        darwin = text.split("\n  darwin:", 1)[1].split("\n  python-publish:", 1)[0]
+        self.assertIn("runs-on: [self-hosted, skippr-darwin-arm64]", darwin)
+        self.assertNotIn("skippr-darwin-arm64-8", darwin)
+        self.assertIn("name: wheels-darwin", darwin)
+        self.assertIn("scripts/test-python.sh", darwin)
         self.assertIn("working-directory: skipprd", text)
         self.assertIn("path: skipprd", text)
         self.assertIn("skipprd/target/wheels/*.whl", text)
@@ -145,12 +150,12 @@ class PythonBindingsCiTests(unittest.TestCase):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("`0.0.0`", agents)
         self.assertNotIn("`v0.0.0`", agents)
-        publish = text.split("python-publish:", 1)[1].split("\n  # Disabled for now:", 1)[0]
+        publish = text.split("python-publish:", 1)[1]
         self.assertNotIn("environment:", publish)
         self.assertIn("attestations: false", publish)
         self.assertIn("runs-on: ubuntu-latest", publish)
-        self.assertIn("needs: [linux]", publish)
-        self.assertNotIn("darwin", publish)
+        self.assertIn("needs: [linux, darwin]", publish)
+        self.assertNotIn("skippr-darwin-arm64-8", publish)
         self.assertNotIn("skippr-linux-x64-16", publish)
         self.assertNotIn("refs/heads/main", publish)
         self.assertNotIn("refs/heads/master", publish)
