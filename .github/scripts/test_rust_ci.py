@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GitHub-hosted Rust CI/CD must build, test, and chaos-test skipprd on linux x86."""
+"""Rust CI/CD must ship the host plus the full plugin catalog on linux x86 and darwin arm64."""
 
 from __future__ import annotations
 
@@ -22,16 +22,16 @@ class RustCiTests(unittest.TestCase):
     def test_rust_ci_builds_tests_and_chaos_on_github_linux_x86(self) -> None:
         text = RUST.read_text(encoding="utf-8")
         self.assertRegex(text, r"(?m)^    runs-on: ubuntu-latest$")
-        self.assertNotRegex(text, r"(?m)^    runs-on: \[self-hosted")
         self.assertNotIn("skippr-linux-x64-16", text)
         self.assertNotIn("macos-latest", text)
         self.assertNotIn("windows-latest", text)
         self.assertNotRegex(text, r"(?m)^  darwin:")
-        self.assertNotRegex(text, r"(?m)^  macos_arm64:")
         self.assertNotRegex(text, r"(?m)^  windows_x86:")
         self.assertIn("linux_test_suite:", text)
         self.assertIn("linux_x86:", text)
+        self.assertIn("macos_arm64:", text)
         self.assertIn("chaos_mode_test:", text)
+        self.assertIn("publish_runtime_plugins:", text)
         self.assertIn("publish_skipprd:", text)
         self.assertNotIn("cargo test -p skipprd", text)
         self.assertNotIn("cargo test -p skippr-lease", text)
@@ -42,14 +42,22 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("check_host_dependency_boundaries.py", text)
         self.assertIn("rust-build-release", text)
         self.assertIn("architecture_name: linux_x86", text)
+        self.assertIn("architecture_name: macos_arm64", text)
         self.assertIn("scenario: bike_hire_many", text)
         self.assertIn("e2e/runtime_scenario", text)
         linux_test = text.split("\n  linux_test_suite:", 1)[1].split("\n  linux_x86:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", linux_test)
         self.assertNotIn("dtolnay/rust-toolchain", linux_test)
-        linux_build = text.split("\n  linux_x86:", 1)[1].split("\n  chaos_mode_test:", 1)[0]
+        linux_build = text.split("\n  linux_x86:", 1)[1].split("\n  macos_arm64:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", linux_build)
         self.assertNotIn("linux_test_suite", linux_build)
+        self.assertNotIn("[self-hosted", linux_build)
+        self.assertNotIn("runtime_plugin_packages_json", linux_build)
+        macos_build = text.split("\n  macos_arm64:", 1)[1].split("\n  chaos_mode_test:", 1)[0]
+        self.assertIn("runs-on: [self-hosted, skippr-darwin-arm64]", macos_build)
+        self.assertNotIn("skippr-darwin-arm64-8", macos_build)
+        self.assertNotIn("macos-14", macos_build)
+        self.assertNotIn("runtime_plugin_packages_json", macos_build)
         chaos = text.split("\n  chaos_mode_test:", 1)[1].split("\n  e2e_file_duckdb:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", chaos)
         self.assertNotIn("ubuntu-latest-8-cores", chaos)
@@ -69,12 +77,10 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_file_postgres:", text)
         self.assertIn("s3_skipprlake_evolve", text)
         self.assertIn("file_postgres_append", text)
-        self.assertIn("skippr-plugin-data-source-s3", text)
-        self.assertIn("skippr-plugin-data-source-file", text)
-        self.assertIn("skippr-plugin-data-source-postgres", text)
-        self.assertIn("skippr-plugin-data-sink-skipprlake", text)
-        self.assertIn("skippr-plugin-data-sink-duckdb", text)
-        self.assertIn("skippr-plugin-data-sink-postgres", text)
+        self.assertNotIn(
+            '["skippr-plugin-data-source-s3","skippr-plugin-data-source-file"',
+            text,
+        )
         file_duckdb = text.split("\n  e2e_file_duckdb:", 1)[1].split("\n  e2e_skipprlake:", 1)[0]
         self.assertIn("chmod +x target/release/skippr-plugin-*", file_duckdb)
         self.assertIn("unsafe_enable_version_guessing", file_duckdb)
@@ -103,6 +109,17 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("public.file_postgres_append", file_postgres)
         self.assertNotIn("public.people", file_postgres)
         self.assertNotRegex(text, r"(?m)^  cleanup:")
+        plugins = text.split("\n  publish_runtime_plugins:", 1)[1].split(
+            "\n  publish_skipprd:", 1
+        )[0]
+        self.assertIn("runs-on: ubuntu-latest", plugins)
+        self.assertIn("linux_x86", plugins)
+        self.assertIn("macos_arm64", plugins)
+        self.assertIn("publish_runtime_plugins.py", plugins)
+        self.assertIn("runtime-plugin-binaries-linux_x86", plugins)
+        self.assertIn("runtime-plugin-binaries-macos_arm64", plugins)
+        self.assertIn("configure-r2-releases", plugins)
+        self.assertIn("s3://${BUCKET}/releases/${RELEASE_SUBDIR}/", plugins)
         publish = text.split("\n  publish_skipprd:", 1)[1]
         self.assertIn("runs-on: ubuntu-latest", publish)
         self.assertIn("chaos_mode_test", publish)
@@ -111,9 +128,12 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_postgres_cdc", publish)
         self.assertIn("e2e_s3_schema_evolution", publish)
         self.assertIn("e2e_file_postgres", publish)
+        self.assertIn("macos_arm64", publish)
+        self.assertIn("publish_runtime_plugins", publish)
         self.assertIn("refs/tags/", publish)
         self.assertIn("configure-r2-releases", publish)
         self.assertIn("skipprd-linux_x86.tar.gz", publish)
+        self.assertIn("skipprd-macos_arm64.tar.gz", publish)
         self.assertIn("gh release", publish)
         self.assertIn("secrets.GITHUB_TOKEN", publish)
 
@@ -131,6 +151,9 @@ class RustCiTests(unittest.TestCase):
     def test_rust_build_release_accepts_skipprd_workspace_root(self) -> None:
         action = BUILD_RELEASE.read_text(encoding="utf-8")
         self.assertIn("workspace-root:", action)
+        self.assertIn("catalog_package_names", action)
+        self.assertRegex(action, r"(?m)^    default: catalog$")
+        self.assertIn("if-no-files-found: error", action)
         workflow = RUST.read_text(encoding="utf-8")
         self.assertIn("workspace-root: skipprd", workflow)
         self.assertIn("path: skipprd", workflow)
@@ -142,8 +165,12 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("`.github/workflows/rust.yml`", text)
         self.assertIn("Rust CI/CD Pipeline", text)
         self.assertIn("ubuntu-latest", text)
+        self.assertIn("skippr-darwin-arm64", text)
+        self.assertIn("macos_arm64", text)
+        self.assertIn("catalog", text)
         self.assertIn("chaos_mode_test", text)
         self.assertIn("bike_hire_many", text)
+        self.assertIn("publish_runtime_plugins", text)
         self.assertIn("publish_skipprd", text)
         self.assertIn("engine tags", text)
         self.assertIn("not on `main`", text)
@@ -157,6 +184,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("schema evolution", text)
         self.assertIn("Python workflow contracts", text)
         self.assertNotIn("full `cargo test -p skipprd`", text)
+        self.assertNotIn("commented out for now", text)
+        self.assertNotIn("stay commented", text)
 
 
 if __name__ == "__main__":
