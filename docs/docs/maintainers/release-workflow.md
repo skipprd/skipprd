@@ -47,7 +47,7 @@ On tag builds, `set_root_package_version.py` stamps the root host package versio
 
 ## Python wheels (PyPI)
 
-Python has its own semver in `pyproject.toml` and `python/Cargo.toml` (`0.1.0` today). It is not the skipprd git tag.
+Python has its own semver in `pyproject.toml` and `python/Cargo.toml` (`17.0.0` today). It is not the skipprd git tag.
 
 `.github/workflows/ci.yml` (**Python CI/CD Pipeline**) builds and tests the `skippr` wheel on GitHub-hosted Linux x86 (`ubuntu-latest`) for engine tags (`[0-9]*`) and `python-v*` tags, plus `workflow_dispatch`. It does not run on `main` / master or pull requests. Darwin / macOS arm64 is commented out for now.
 
