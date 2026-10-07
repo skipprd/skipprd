@@ -102,6 +102,8 @@ jobs:
           merge-multiple: true
       - id: pypi
         working-directory: skipprd
+        env:
+          SKIPPR_WHEEL_DIST: ${{ github.workspace }}/dist
         run: python3 .github/scripts/python_wheel_version.py --skip-if-published
       - if: steps.pypi.outputs.needed == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import urllib.error
@@ -38,23 +39,60 @@ def python_semver(pyproject: Path = PYPROJECT, cargo: Path = PYTHON_CARGO) -> st
     return pyproject_version
 
 
+def pypi_filenames(
+    version: str,
+    project: str = PYPI_PROJECT,
+    urlopen=urllib.request.urlopen,
+) -> set[str] | None:
+    url = f"https://pypi.org/pypi/{project}/{version}/json"
+    try:
+        with urlopen(url, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    return {item["filename"] for item in payload.get("urls", []) if "filename" in item}
+
+
+def wheel_dist_dir() -> Path:
+    configured = os.environ.get("SKIPPR_WHEEL_DIST")
+    if configured:
+        return Path(configured)
+    sibling = Path("../dist")
+    if sibling.is_dir():
+        return sibling
+    return Path("dist")
+
+
+def local_wheels(dist: Path) -> list[Path]:
+    return sorted(path for path in dist.glob("*.whl") if path.is_file())
+
+
+def unpublished_wheels(dist: Path, published: set[str] | None) -> list[Path]:
+    wheels = local_wheels(dist)
+    if published is None:
+        return wheels
+    return [path for path in wheels if path.name not in published]
+
+
+def prune_published_wheels(dist: Path, unpublished: list[Path]) -> None:
+    keep = {path.resolve() for path in unpublished}
+    for path in local_wheels(dist):
+        if path.resolve() not in keep:
+            path.unlink()
+
+
+def should_publish(version: str, *, unpublished: list[str] | list[Path]) -> bool:
+    return version != "0.0.0" and len(unpublished) > 0
+
+
 def pypi_has_version(
     version: str,
     project: str = PYPI_PROJECT,
     urlopen=urllib.request.urlopen,
 ) -> bool:
-    url = f"https://pypi.org/pypi/{project}/{version}/json"
-    try:
-        with urlopen(url, timeout=30) as response:
-            return getattr(response, "status", 200) == 200
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return False
-        raise
-
-
-def should_publish(version: str, *, published: bool) -> bool:
-    return version != "0.0.0" and not published
+    return pypi_filenames(version, project=project, urlopen=urlopen) is not None
 
 
 def main() -> None:
@@ -62,20 +100,24 @@ def main() -> None:
     parser.add_argument(
         "--skip-if-published",
         action="store_true",
-        help="Write needed=true/false for GitHub Actions when this version is new on PyPI.",
+        help="Write needed=true/false when any local wheel filename is new on PyPI.",
     )
     args = parser.parse_args()
     version = python_semver()
     if not args.skip_if_published:
         print(version)
         return
-    needed = should_publish(version, published=pypi_has_version(version))
+    dist = wheel_dist_dir()
+    published = pypi_filenames(version)
+    missing = unpublished_wheels(dist, published)
+    prune_published_wheels(dist, missing)
+    needed = should_publish(version, unpublished=missing)
     output = os.environ.get("GITHUB_OUTPUT")
     if output:
         with open(output, "a", encoding="utf-8") as handle:
             handle.write(f"needed={str(needed).lower()}\n")
             handle.write(f"version={version}\n")
-    print(f"python {version} publish needed={needed}")
+    print(f"python {version} publish needed={needed} unpublished={len(missing)}")
 
 
 if __name__ == "__main__":
