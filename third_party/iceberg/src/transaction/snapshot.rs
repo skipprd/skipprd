@@ -87,25 +87,12 @@ pub(crate) trait SnapshotProduceOperation: Send + Sync {
     ) -> impl Future<Output = Result<Vec<ManifestFile>>> + Send;
 }
 
-pub(crate) struct DefaultManifestProcess;
-
-impl ManifestProcess for DefaultManifestProcess {
-    fn process_manifests(
-        &self,
-        _snapshot_produce: &SnapshotProducer<'_>,
-        manifests: Vec<ManifestFile>,
-    ) -> Vec<ManifestFile> {
-        manifests
-    }
-}
-
-pub(crate) trait ManifestProcess: Send + Sync {
-    fn process_manifests(
-        &self,
-        snapshot_produce: &SnapshotProducer<'_>,
-        manifests: Vec<ManifestFile>,
-    ) -> Vec<ManifestFile>;
-}
+/// Above this many manifests of one content type, the existing ones are
+/// rewritten into fewer, larger manifests in the same commit, so the manifest
+/// list a reader opens stays bounded no matter how many commits a table takes.
+const MANIFEST_MERGE_THRESHOLD: usize = 100;
+/// Bin size for merged manifests.
+const MANIFEST_MERGE_TARGET_BYTES: i64 = 8 * 1024 * 1024;
 
 pub(crate) struct SnapshotProducer<'a> {
     pub(crate) table: &'a Table,
@@ -115,6 +102,7 @@ pub(crate) struct SnapshotProducer<'a> {
     snapshot_properties: HashMap<String, String>,
     added_data_files: Vec<DataFile>,
     added_delete_files: Vec<DataFile>,
+    removed_files: Vec<DataFile>,
     // A counter used to generate unique manifest file names.
     // It starts from 0 and increments for each new manifest file.
     // Note: This counter is limited to the range of (0..u64::MAX).
@@ -155,8 +143,15 @@ impl<'a> SnapshotProducer<'a> {
             snapshot_properties,
             added_data_files,
             added_delete_files,
+            removed_files: vec![],
             manifest_counter: (0..),
         }
+    }
+
+    /// Files this snapshot marks DELETED; every one MUST be live in the current snapshot.
+    pub(crate) fn with_removed_files(mut self, removed_files: Vec<DataFile>) -> Self {
+        self.removed_files = removed_files;
+        self
     }
 
     pub(crate) fn validate_added_data_files(&self) -> Result<()> {
@@ -389,10 +384,9 @@ impl<'a> SnapshotProducer<'a> {
         writer.write_manifest_file().await
     }
 
-    async fn manifest_file<OP: SnapshotProduceOperation, MP: ManifestProcess>(
+    async fn manifest_file<OP: SnapshotProduceOperation>(
         &mut self,
         snapshot_produce_operation: &OP,
-        manifest_process: &MP,
     ) -> Result<Vec<ManifestFile>> {
         // Assert current snapshot producer contains new content to add to new snapshot.
         //
@@ -401,6 +395,7 @@ impl<'a> SnapshotProducer<'a> {
         // For details, please refer to https://github.com/apache/iceberg-rust/issues/1548
         if self.added_data_files.is_empty()
             && self.added_delete_files.is_empty()
+            && self.removed_files.is_empty()
             && self.snapshot_properties.is_empty()
         {
             return Err(Error::new(
@@ -410,7 +405,7 @@ impl<'a> SnapshotProducer<'a> {
         }
 
         let existing_manifests = snapshot_produce_operation.existing_manifest(self).await?;
-        let mut manifest_files = existing_manifests;
+        let mut manifest_files = self.remove_files_from(existing_manifests).await?;
 
         if !self.added_delete_files.is_empty() {
             let added_delete_manifest = self.write_added_delete_manifest().await?;
@@ -423,8 +418,130 @@ impl<'a> SnapshotProducer<'a> {
             manifest_files.push(added_manifest);
         }
 
-        let manifest_files = manifest_process.process_manifests(self, manifest_files);
-        Ok(manifest_files)
+        self.merge_manifests(manifest_files).await
+    }
+
+    /// Rewrites each manifest that lists a removed file into a manifest this
+    /// snapshot adds, with the removed entries DELETED and the rest EXISTING.
+    async fn remove_files_from(
+        &mut self,
+        manifests: Vec<ManifestFile>,
+    ) -> Result<Vec<ManifestFile>> {
+        if self.removed_files.is_empty() {
+            return Ok(manifests);
+        }
+        let mut pending: HashSet<String> = self
+            .removed_files
+            .iter()
+            .map(|file| file.file_path.clone())
+            .collect();
+        let mut out = Vec::with_capacity(manifests.len());
+        for manifest in manifests {
+            let loaded = manifest.load_manifest(self.table.file_io()).await?;
+            let lists_removed = loaded
+                .entries()
+                .iter()
+                .any(|entry| entry.is_alive() && pending.contains(entry.file_path()));
+            if !lists_removed {
+                out.push(manifest);
+                continue;
+            }
+            let mut writer = self.new_manifest_writer(manifest.content)?;
+            for entry in loaded.entries() {
+                if !entry.is_alive() {
+                    continue;
+                }
+                if pending.remove(entry.file_path()) {
+                    writer.add_delete_entry(entry.as_ref().clone())?;
+                } else {
+                    writer.add_existing_entry(entry.as_ref().clone())?;
+                }
+            }
+            out.push(writer.write_manifest_file().await?);
+        }
+        if !pending.is_empty() {
+            let mut missing: Vec<String> = pending.into_iter().collect();
+            missing.sort();
+            return Err(Error::new(
+                ErrorKind::PreconditionFailed,
+                format!(
+                    "Cannot remove files that are not live: {}",
+                    missing.join(", ")
+                ),
+            ));
+        }
+        Ok(out)
+    }
+
+    async fn merge_manifests(&mut self, manifests: Vec<ManifestFile>) -> Result<Vec<ManifestFile>> {
+        if self.table.metadata().format_version() != FormatVersion::V2 {
+            return Ok(manifests);
+        }
+        let (data, deletes): (Vec<_>, Vec<_>) = manifests
+            .into_iter()
+            .partition(|manifest| manifest.content == ManifestContentType::Data);
+        let mut merged = self.merge_content(ManifestContentType::Data, data).await?;
+        merged.extend(
+            self.merge_content(ManifestContentType::Deletes, deletes)
+                .await?,
+        );
+        Ok(merged)
+    }
+
+    async fn merge_content(
+        &mut self,
+        content: ManifestContentType,
+        manifests: Vec<ManifestFile>,
+    ) -> Result<Vec<ManifestFile>> {
+        if manifests.len() <= MANIFEST_MERGE_THRESHOLD {
+            return Ok(manifests);
+        }
+        let spec_id = self.table.metadata().default_partition_spec_id();
+        let snapshot_id = self.snapshot_id;
+        let (mergeable, mut out): (Vec<_>, Vec<_>) = manifests.into_iter().partition(|manifest| {
+            manifest.partition_spec_id == spec_id && manifest.added_snapshot_id != snapshot_id
+        });
+        let mut bin: Vec<ManifestFile> = Vec::new();
+        let mut bin_bytes = 0_i64;
+        for manifest in mergeable {
+            if !bin.is_empty() && bin_bytes + manifest.manifest_length > MANIFEST_MERGE_TARGET_BYTES
+            {
+                out.extend(self.rewrite_bin(content, std::mem::take(&mut bin)).await?);
+                bin_bytes = 0;
+            }
+            bin_bytes += manifest.manifest_length;
+            bin.push(manifest);
+        }
+        out.extend(self.rewrite_bin(content, bin).await?);
+        Ok(out)
+    }
+
+    /// Rewrite a bin of existing manifests as one manifest of EXISTING entries
+    /// that keep their snapshot ids and sequence numbers. Entries deleted by
+    /// earlier snapshots are dropped; a single-manifest bin is kept as is.
+    async fn rewrite_bin(
+        &mut self,
+        content: ManifestContentType,
+        bin: Vec<ManifestFile>,
+    ) -> Result<Option<ManifestFile>> {
+        if bin.len() <= 1 {
+            return Ok(bin.into_iter().next());
+        }
+        let mut writer = self.new_manifest_writer(content)?;
+        let mut alive = 0_usize;
+        for manifest in &bin {
+            let loaded = manifest.load_manifest(self.table.file_io()).await?;
+            for entry in loaded.entries() {
+                if entry.is_alive() {
+                    writer.add_existing_entry(entry.as_ref().clone())?;
+                    alive += 1;
+                }
+            }
+        }
+        if alive == 0 {
+            return Ok(None);
+        }
+        writer.write_manifest_file().await.map(Some)
     }
 
     // Returns a `Summary` of the current snapshot
@@ -464,11 +581,17 @@ impl<'a> SnapshotProducer<'a> {
                 table_metadata.default_partition_spec().clone(),
             );
         }
+        for removed_file in &self.removed_files {
+            summary_collector.remove_file(
+                removed_file,
+                table_metadata.current_schema().clone(),
+                table_metadata.default_partition_spec().clone(),
+            );
+        }
 
-        let previous_snapshot = table_metadata
-            .snapshot_by_id(self.snapshot_id)
-            .and_then(|snapshot| snapshot.parent_snapshot_id())
-            .and_then(|parent_id| table_metadata.snapshot_by_id(parent_id));
+        // The snapshot being produced is not in the metadata yet; its parent
+        // is the current main snapshot this producer commits on top of.
+        let previous_snapshot = table_metadata.current_snapshot();
 
         let mut additional_properties = summary_collector.build();
         additional_properties.extend(self.snapshot_properties.clone());
@@ -478,11 +601,8 @@ impl<'a> SnapshotProducer<'a> {
             additional_properties,
         };
 
-        update_snapshot_summaries(
-            summary,
-            previous_snapshot.map(|s| s.summary()),
-            snapshot_produce_operation.operation() == Operation::Overwrite,
-        )
+        // No producer replaces the whole table, so totals always carry forward.
+        update_snapshot_summaries(summary, previous_snapshot.map(|s| s.summary()), false)
     }
 
     fn generate_manifest_list_file_path(&self, attempt: i64) -> String {
@@ -498,10 +618,9 @@ impl<'a> SnapshotProducer<'a> {
     }
 
     /// Finished building the action and return the [`ActionCommit`] to the transaction.
-    pub(crate) async fn commit<OP: SnapshotProduceOperation, MP: ManifestProcess>(
+    pub(crate) async fn commit<OP: SnapshotProduceOperation>(
         mut self,
         snapshot_produce_operation: OP,
-        process: MP,
     ) -> Result<ActionCommit> {
         let manifest_list_path = self.generate_manifest_list_file_path(0);
         let next_seq_num = self.table.metadata().next_sequence_number();
@@ -540,9 +659,7 @@ impl<'a> SnapshotProducer<'a> {
             Error::new(ErrorKind::Unexpected, "Failed to create snapshot summary.").with_source(err)
         })?;
 
-        let new_manifests = self
-            .manifest_file(&snapshot_produce_operation, &process)
-            .await?;
+        let new_manifests = self.manifest_file(&snapshot_produce_operation).await?;
 
         manifest_list_writer.add_manifests(new_manifests.into_iter())?;
         let writer_next_row_id = manifest_list_writer.next_row_id();

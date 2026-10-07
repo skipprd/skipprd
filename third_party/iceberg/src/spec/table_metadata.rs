@@ -33,12 +33,12 @@ use uuid::Uuid;
 use super::snapshot::SnapshotReference;
 pub use super::table_metadata_builder::{TableMetadataBuildResult, TableMetadataBuilder};
 use super::{
-    DEFAULT_PARTITION_SPEC_ID, PartitionSpecRef, PartitionStatisticsFile, SchemaId, SchemaRef,
-    SnapshotRef, SnapshotRetention, SortOrder, SortOrderRef, StatisticsFile, StructType,
-    TableProperties,
+    PartitionSpecRef, PartitionStatisticsFile, SchemaId, SchemaRef, SnapshotRef, SnapshotRetention,
+    SortOrder, SortOrderRef, StatisticsFile, StructType, TableProperties,
+    DEFAULT_PARTITION_SPEC_ID,
 };
 use crate::compression::CompressionCodec;
-use crate::error::{Result, timestamp_ms_to_utc};
+use crate::error::{timestamp_ms_to_utc, Result};
 use crate::io::FileIO;
 use crate::spec::EncryptedKey;
 use crate::{Error, ErrorKind};
@@ -328,6 +328,12 @@ impl TableMetadata {
         })
     }
 
+    /// Snapshot ids targeted by a branch or tag.
+    #[inline]
+    pub fn referenced_snapshot_ids(&self) -> impl Iterator<Item = i64> + '_ {
+        self.refs.values().map(|reference| reference.snapshot_id)
+    }
+
     /// Return all sort orders.
     #[inline]
     pub fn sort_orders_iter(&self) -> impl ExactSizeIterator<Item = &SortOrderRef> {
@@ -400,15 +406,17 @@ impl TableMetadata {
         if let Some(current_snapshot_id) = self.current_snapshot_id
             && !self.refs.contains_key(MAIN_BRANCH)
         {
-            self.refs
-                .insert(MAIN_BRANCH.to_string(), SnapshotReference {
+            self.refs.insert(
+                MAIN_BRANCH.to_string(),
+                SnapshotReference {
                     snapshot_id: current_snapshot_id,
                     retention: SnapshotRetention::Branch {
                         min_snapshots_to_keep: None,
                         max_snapshot_age_ms: None,
                         max_ref_age_ms: None,
                     },
-                });
+                },
+            );
         }
     }
 
@@ -724,15 +732,15 @@ pub(super) mod _serde {
     use uuid::Uuid;
 
     use super::{
-        DEFAULT_PARTITION_SPEC_ID, FormatVersion, MAIN_BRANCH, MetadataLog, SnapshotLog,
-        TableMetadata,
+        FormatVersion, MetadataLog, SnapshotLog, TableMetadata, DEFAULT_PARTITION_SPEC_ID,
+        MAIN_BRANCH,
     };
     use crate::spec::schema::_serde::{SchemaV1, SchemaV2};
     use crate::spec::snapshot::_serde::{SnapshotV1, SnapshotV2, SnapshotV3};
     use crate::spec::{
-        EncryptedKey, INITIAL_ROW_ID, PartitionField, PartitionSpec, PartitionSpecRef,
-        PartitionStatisticsFile, Schema, SchemaRef, Snapshot, SnapshotReference, SnapshotRetention,
-        SortOrder, StatisticsFile,
+        EncryptedKey, PartitionField, PartitionSpec, PartitionSpecRef, PartitionStatisticsFile,
+        Schema, SchemaRef, Snapshot, SnapshotReference, SnapshotRetention, SortOrder,
+        StatisticsFile, INITIAL_ROW_ID,
     };
     use crate::{Error, ErrorKind};
 
@@ -849,7 +857,9 @@ pub(super) mod _serde {
 
     impl Serialize for TableMetadata {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where S: serde::Serializer {
+        where
+            S: serde::Serializer,
+        {
             // we must do a clone here
             let table_metadata_enum: TableMetadataEnum =
                 self.clone().try_into().map_err(serde::ser::Error::custom)?;
@@ -860,14 +870,18 @@ pub(super) mod _serde {
 
     impl<const V: u8> Serialize for VersionNumber<V> {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where S: serde::Serializer {
+        where
+            S: serde::Serializer,
+        {
             serializer.serialize_u8(V)
         }
     }
 
     impl<'de, const V: u8> Deserialize<'de> for VersionNumber<V> {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where D: serde::Deserializer<'de> {
+        where
+            D: serde::Deserializer<'de>,
+        {
             let value = u8::deserialize(deserializer)?;
             if value == V {
                 Ok(VersionNumber::<V>)
@@ -990,14 +1004,17 @@ pub(super) mod _serde {
                 default_sort_order_id: value.default_sort_order_id,
                 refs: value.refs.unwrap_or_else(|| {
                     if let Some(snapshot_id) = current_snapshot_id {
-                        HashMap::from_iter(vec![(MAIN_BRANCH.to_string(), SnapshotReference {
-                            snapshot_id,
-                            retention: SnapshotRetention::Branch {
-                                min_snapshots_to_keep: None,
-                                max_snapshot_age_ms: None,
-                                max_ref_age_ms: None,
+                        HashMap::from_iter(vec![(
+                            MAIN_BRANCH.to_string(),
+                            SnapshotReference {
+                                snapshot_id,
+                                retention: SnapshotRetention::Branch {
+                                    min_snapshots_to_keep: None,
+                                    max_snapshot_age_ms: None,
+                                    max_ref_age_ms: None,
+                                },
                             },
-                        })])
+                        )])
                     } else {
                         HashMap::new()
                     }
@@ -1103,14 +1120,17 @@ pub(super) mod _serde {
                 default_sort_order_id: value.default_sort_order_id,
                 refs: value.refs.unwrap_or_else(|| {
                     if let Some(snapshot_id) = current_snapshot_id {
-                        HashMap::from_iter(vec![(MAIN_BRANCH.to_string(), SnapshotReference {
-                            snapshot_id,
-                            retention: SnapshotRetention::Branch {
-                                min_snapshots_to_keep: None,
-                                max_snapshot_age_ms: None,
-                                max_ref_age_ms: None,
+                        HashMap::from_iter(vec![(
+                            MAIN_BRANCH.to_string(),
+                            SnapshotReference {
+                                snapshot_id,
+                                retention: SnapshotRetention::Branch {
+                                    min_snapshots_to_keep: None,
+                                    max_snapshot_age_ms: None,
+                                    max_ref_age_ms: None,
+                                },
                             },
-                        })])
+                        )])
                     } else {
                         HashMap::new()
                     }
@@ -1259,14 +1279,17 @@ pub(super) mod _serde {
                     .default_sort_order_id
                     .unwrap_or(SortOrder::UNSORTED_ORDER_ID),
                 refs: if let Some(snapshot_id) = current_snapshot_id {
-                    HashMap::from_iter(vec![(MAIN_BRANCH.to_string(), SnapshotReference {
-                        snapshot_id,
-                        retention: SnapshotRetention::Branch {
-                            min_snapshots_to_keep: None,
-                            max_snapshot_age_ms: None,
-                            max_ref_age_ms: None,
+                    HashMap::from_iter(vec![(
+                        MAIN_BRANCH.to_string(),
+                        SnapshotReference {
+                            snapshot_id,
+                            retention: SnapshotRetention::Branch {
+                                min_snapshots_to_keep: None,
+                                max_snapshot_age_ms: None,
+                                max_ref_age_ms: None,
+                            },
                         },
-                    })])
+                    )])
                 } else {
                     HashMap::new()
                 },
@@ -1571,10 +1594,10 @@ mod tests {
     use crate::io::FileIO;
     use crate::spec::table_metadata::TableMetadata;
     use crate::spec::{
-        BlobMetadata, EncryptedKey, INITIAL_ROW_ID, Literal, NestedField, NullOrder, Operation,
-        PartitionSpec, PartitionStatisticsFile, PrimitiveLiteral, PrimitiveType, Schema, Snapshot,
+        BlobMetadata, EncryptedKey, Literal, NestedField, NullOrder, Operation, PartitionSpec,
+        PartitionStatisticsFile, PrimitiveLiteral, PrimitiveType, Schema, Snapshot,
         SnapshotReference, SnapshotRetention, SortDirection, SortField, SortOrder, StatisticsFile,
-        Summary, Transform, Type, UnboundPartitionField,
+        Summary, Transform, Type, UnboundPartitionField, INITIAL_ROW_ID,
     };
     use crate::{ErrorKind, TableCreation};
 
@@ -2284,10 +2307,9 @@ mod tests {
     "#;
 
         let err = serde_json::from_str::<TableMetadata>(data).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Current snapshot id does not match main branch")
-        );
+        assert!(err
+            .to_string()
+            .contains("Current snapshot id does not match main branch"));
     }
 
     #[test]
@@ -2376,10 +2398,9 @@ mod tests {
     "#;
 
         let err = serde_json::from_str::<TableMetadata>(data).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Current snapshot is not set, but main branch exists")
-        );
+        assert!(err
+            .to_string()
+            .contains("Current snapshot is not set, but main branch exists"));
     }
 
     #[test]
@@ -2472,11 +2493,9 @@ mod tests {
     "#;
 
         let err = serde_json::from_str::<TableMetadata>(data).unwrap_err();
-        assert!(
-            err.to_string().contains(
-                "Snapshot for reference foo does not exist in the existing snapshots list"
-            )
-        );
+        assert!(err
+            .to_string()
+            .contains("Snapshot for reference foo does not exist in the existing snapshots list"));
     }
 
     #[test]
@@ -2684,29 +2703,35 @@ mod tests {
             properties: HashMap::new(),
             snapshot_log: Vec::new(),
             metadata_log: Vec::new(),
-            statistics: HashMap::from_iter(vec![(3055729675574597004, StatisticsFile {
-                snapshot_id: 3055729675574597004,
-                statistics_path: "s3://a/b/stats.puffin".to_string(),
-                file_size_in_bytes: 413,
-                file_footer_size_in_bytes: 42,
-                key_metadata: None,
-                blob_metadata: vec![BlobMetadata {
+            statistics: HashMap::from_iter(vec![(
+                3055729675574597004,
+                StatisticsFile {
                     snapshot_id: 3055729675574597004,
-                    sequence_number: 1,
-                    fields: vec![1],
-                    r#type: "ndv".to_string(),
-                    properties: HashMap::new(),
-                }],
-            })]),
-            partition_statistics: HashMap::new(),
-            refs: HashMap::from_iter(vec![("main".to_string(), SnapshotReference {
-                snapshot_id: 3055729675574597004,
-                retention: SnapshotRetention::Branch {
-                    min_snapshots_to_keep: None,
-                    max_snapshot_age_ms: None,
-                    max_ref_age_ms: None,
+                    statistics_path: "s3://a/b/stats.puffin".to_string(),
+                    file_size_in_bytes: 413,
+                    file_footer_size_in_bytes: 42,
+                    key_metadata: None,
+                    blob_metadata: vec![BlobMetadata {
+                        snapshot_id: 3055729675574597004,
+                        sequence_number: 1,
+                        fields: vec![1],
+                        r#type: "ndv".to_string(),
+                        properties: HashMap::new(),
+                    }],
                 },
-            })]),
+            )]),
+            partition_statistics: HashMap::new(),
+            refs: HashMap::from_iter(vec![(
+                "main".to_string(),
+                SnapshotReference {
+                    snapshot_id: 3055729675574597004,
+                    retention: SnapshotRetention::Branch {
+                        min_snapshots_to_keep: None,
+                        max_snapshot_age_ms: None,
+                        max_ref_age_ms: None,
+                    },
+                },
+            )]),
             encryption_keys: HashMap::new(),
             next_row_id: INITIAL_ROW_ID,
         };
@@ -2835,14 +2860,17 @@ mod tests {
                     file_size_in_bytes: 43,
                 },
             )]),
-            refs: HashMap::from_iter(vec![("main".to_string(), SnapshotReference {
-                snapshot_id: 3055729675574597004,
-                retention: SnapshotRetention::Branch {
-                    min_snapshots_to_keep: None,
-                    max_snapshot_age_ms: None,
-                    max_ref_age_ms: None,
+            refs: HashMap::from_iter(vec![(
+                "main".to_string(),
+                SnapshotReference {
+                    snapshot_id: 3055729675574597004,
+                    retention: SnapshotRetention::Branch {
+                        min_snapshots_to_keep: None,
+                        max_snapshot_age_ms: None,
+                        max_ref_age_ms: None,
+                    },
                 },
-            })]),
+            )]),
             encryption_keys: HashMap::new(),
             next_row_id: INITIAL_ROW_ID,
         };
@@ -3085,14 +3113,17 @@ mod tests {
                 },
             ],
             metadata_log: Vec::new(),
-            refs: HashMap::from_iter(vec![("main".to_string(), SnapshotReference {
-                snapshot_id: 3055729675574597004,
-                retention: SnapshotRetention::Branch {
-                    min_snapshots_to_keep: None,
-                    max_snapshot_age_ms: None,
-                    max_ref_age_ms: None,
+            refs: HashMap::from_iter(vec![(
+                "main".to_string(),
+                SnapshotReference {
+                    snapshot_id: 3055729675574597004,
+                    retention: SnapshotRetention::Branch {
+                        min_snapshots_to_keep: None,
+                        max_snapshot_age_ms: None,
+                        max_ref_age_ms: None,
+                    },
                 },
-            })]),
+            )]),
             statistics: HashMap::new(),
             partition_statistics: HashMap::new(),
             encryption_keys: HashMap::new(),
@@ -3656,9 +3687,12 @@ mod tests {
     fn test_partition_name_exists_empty_specs() {
         // Create metadata with no partition specs (unpartitioned table)
         let schema = Schema::builder()
-            .with_fields(vec![
-                NestedField::required(1, "data", Type::Primitive(PrimitiveType::String)).into(),
-            ])
+            .with_fields(vec![NestedField::required(
+                1,
+                "data",
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into()])
             .build()
             .unwrap();
 
@@ -3874,9 +3908,12 @@ mod tests {
         use crate::spec::TableProperties;
 
         let schema = Schema::builder()
-            .with_fields(vec![
-                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
-            ])
+            .with_fields(vec![NestedField::required(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Long),
+            )
+            .into()])
             .build()
             .unwrap();
 
@@ -3910,9 +3947,12 @@ mod tests {
         use crate::spec::TableProperties;
 
         let schema = Schema::builder()
-            .with_fields(vec![
-                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
-            ])
+            .with_fields(vec![NestedField::required(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Long),
+            )
+            .into()])
             .build()
             .unwrap();
 
@@ -3949,9 +3989,12 @@ mod tests {
     #[test]
     fn test_table_properties_with_invalid_value() {
         let schema = Schema::builder()
-            .with_fields(vec![
-                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
-            ])
+            .with_fields(vec![NestedField::required(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Long),
+            )
+            .into()])
             .build()
             .unwrap();
 
@@ -3982,9 +4025,12 @@ mod tests {
     fn test_v2_to_v3_upgrade_preserves_existing_snapshots_without_row_lineage() {
         // Create a v2 table metadata
         let schema = Schema::builder()
-            .with_fields(vec![
-                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
-            ])
+            .with_fields(vec![NestedField::required(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Long),
+            )
+            .into()])
             .build()
             .unwrap();
 
@@ -4021,14 +4067,17 @@ mod tests {
             .into_builder(Some("s3://bucket/test/metadata/v00001.json".to_string()))
             .add_snapshot(snapshot)
             .unwrap()
-            .set_ref("main", SnapshotReference {
-                snapshot_id: 1,
-                retention: SnapshotRetention::Branch {
-                    min_snapshots_to_keep: None,
-                    max_snapshot_age_ms: None,
-                    max_ref_age_ms: None,
+            .set_ref(
+                "main",
+                SnapshotReference {
+                    snapshot_id: 1,
+                    retention: SnapshotRetention::Branch {
+                        min_snapshots_to_keep: None,
+                        max_snapshot_age_ms: None,
+                        max_ref_age_ms: None,
+                    },
                 },
-            })
+            )
             .unwrap()
             .build()
             .unwrap()
@@ -4082,9 +4131,12 @@ mod tests {
     fn test_v3_snapshot_with_row_lineage_serialization() {
         // Create a v3 table metadata
         let schema = Schema::builder()
-            .with_fields(vec![
-                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
-            ])
+            .with_fields(vec![NestedField::required(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Long),
+            )
+            .into()])
             .build()
             .unwrap();
 
@@ -4122,14 +4174,17 @@ mod tests {
             .into_builder(Some("s3://bucket/test/metadata/v00001.json".to_string()))
             .add_snapshot(snapshot)
             .unwrap()
-            .set_ref("main", SnapshotReference {
-                snapshot_id: 1,
-                retention: SnapshotRetention::Branch {
-                    min_snapshots_to_keep: None,
-                    max_snapshot_age_ms: None,
-                    max_ref_age_ms: None,
+            .set_ref(
+                "main",
+                SnapshotReference {
+                    snapshot_id: 1,
+                    retention: SnapshotRetention::Branch {
+                        min_snapshots_to_keep: None,
+                        max_snapshot_age_ms: None,
+                        max_ref_age_ms: None,
+                    },
                 },
-            })
+            )
             .unwrap()
             .build()
             .unwrap()

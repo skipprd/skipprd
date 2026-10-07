@@ -205,7 +205,6 @@ enum SliceState {
     Ready,
     Reserved,
     Fenced,
-    DeferredOversize,
 }
 
 struct SliceRecord {
@@ -455,7 +454,6 @@ pub(crate) struct CompactionPlan {
     pub segments_examined: u64,
     pub slices_examined: u64,
     pub ready_queue_depth: usize,
-    pub oversized_slices_deferred: usize,
 }
 
 /// Process-local WAL compaction index. Segment registration is the only path
@@ -468,13 +466,11 @@ pub(crate) struct CompactionIndex {
     lanes: BTreeMap<CompactionLaneKey, LaneState>,
     waiting: BTreeSet<CompactionSliceId>,
     waiting_by_age: BinaryHeap<Reverse<WaitingEntry>>,
-    deferred_oversize: BTreeSet<CompactionSliceId>,
     force_only_ready: BTreeSet<CompactionSliceId>,
     ready_count: usize,
     ready_group_count: usize,
     byte_threshold: Option<u64>,
     time_threshold_secs: Option<u64>,
-    target_bytes: Option<u64>,
     service_ticket: u64,
     manifests: ManifestIndex,
     manifests_loaded: bool,
@@ -722,7 +718,6 @@ impl CompactionIndex {
         blocked_lanes: HashSet<CompactionLaneKey>,
     ) -> CompactionPlan {
         self.configure_thresholds(byte_threshold, time_threshold_secs, now_secs);
-        self.requeue_deferred_if_target_changed(target_bytes, now_secs);
         if force {
             self.promote_all_waiting(now_secs);
         } else {
@@ -792,13 +787,7 @@ impl CompactionIndex {
                 else {
                     break;
                 };
-                if bytes > target_bytes && selected.is_empty() {
-                    self.defer_oversize(&next_id);
-                    plan.oversized_slices_deferred =
-                        plan.oversized_slices_deferred.saturating_add(1);
-                    break;
-                }
-                if selected_bytes.saturating_add(bytes) > target_bytes {
+                if !selected.is_empty() && selected_bytes.saturating_add(bytes) > target_bytes {
                     break;
                 }
                 let Some(slice) = self.reserve_ready_slice(&next_id) else {
@@ -937,7 +926,6 @@ impl CompactionIndex {
             return;
         }
         self.waiting.remove(id);
-        self.deferred_oversize.remove(id);
         self.force_only_ready.remove(id);
         let Some(slice) = self.slices.get(id).map(|record| record.slice.clone()) else {
             return;
@@ -972,15 +960,6 @@ impl CompactionIndex {
         }
     }
 
-    fn defer_oversize(&mut self, id: &CompactionSliceId) {
-        self.remove_from_current_queue(id);
-        self.force_only_ready.remove(id);
-        if let Some(record) = self.slices.get_mut(id) {
-            record.state = SliceState::DeferredOversize;
-        }
-        self.deferred_oversize.insert(id.clone());
-    }
-
     fn reserve_ready_slice(&mut self, id: &CompactionSliceId) -> Option<IndexedCompactionSlice> {
         if !matches!(
             self.slices.get(id).map(|record| record.state),
@@ -997,7 +976,6 @@ impl CompactionIndex {
 
     fn remove_from_current_queue(&mut self, id: &CompactionSliceId) {
         self.waiting.remove(id);
-        self.deferred_oversize.remove(id);
         let Some((slice, state)) = self
             .slices
             .get(id)
@@ -1086,24 +1064,6 @@ impl CompactionIndex {
             .unwrap_or(false)
     }
 
-    fn requeue_deferred_if_target_changed(&mut self, target_bytes: u64, now_secs: u64) {
-        if self.target_bytes == Some(target_bytes) {
-            return;
-        }
-        self.target_bytes = Some(target_bytes);
-        let ids = self.deferred_oversize.iter().cloned().collect::<Vec<_>>();
-        for id in ids {
-            let fits = self
-                .slices
-                .get(&id)
-                .map(|record| record.slice.index_entry.bytes <= target_bytes)
-                .unwrap_or(false);
-            if fits {
-                self.classify_available(&id, now_secs);
-            }
-        }
-    }
-
     fn remove_slice(&mut self, id: &CompactionSliceId) -> bool {
         let Some(record) = self.slices.get(id) else {
             return false;
@@ -1111,7 +1071,6 @@ impl CompactionIndex {
         let segment_key = record.slice.segment_key();
         self.remove_from_current_queue(id);
         self.waiting.remove(id);
-        self.deferred_oversize.remove(id);
         self.force_only_ready.remove(id);
         self.slices.remove(id);
 
@@ -1265,6 +1224,55 @@ mod tests {
         assert_eq!(index.indexed_slice_count(), 3);
         assert_eq!(index.ready_queue_depth(), 3);
         assert_eq!(plan(&mut index, 3, false).groups.len(), 3);
+    }
+
+    #[test]
+    fn slice_larger_than_the_group_target_is_planned_alone() {
+        let mut index = CompactionIndex::default();
+        index.register_segment(
+            "seg",
+            vec![
+                slice(
+                    "seg",
+                    "sink.a",
+                    "ns",
+                    "v1",
+                    CompactionKind::Append,
+                    0,
+                    400,
+                    1,
+                ),
+                slice(
+                    "seg",
+                    "sink.a",
+                    "ns",
+                    "v1",
+                    CompactionKind::Append,
+                    1,
+                    100,
+                    1,
+                ),
+            ],
+            100,
+            100,
+            1_000,
+        );
+
+        let planned = plan(&mut index, 4, true);
+
+        let sizes = planned
+            .groups
+            .iter()
+            .map(|group| {
+                group
+                    .slices
+                    .iter()
+                    .map(|slice| slice.index_entry.bytes)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sizes, vec![vec![400], vec![100]]);
+        assert_eq!(index.reclaimable_slice_count(true, 1_000, 60, 10), 0);
     }
 
     #[test]

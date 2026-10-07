@@ -2,7 +2,7 @@ use skippr_lease::{PipelineKey, SegmentId};
 use std::collections::HashSet;
 
 use crate::buffer::durable::log::MutationLog;
-use crate::buffer::durable::mutation::DurableMutation;
+use crate::buffer::durable::snapshot::live_segment_ids;
 use crate::buffer::segment_file::SegmentFile;
 
 #[derive(Clone, Debug)]
@@ -21,30 +21,14 @@ pub fn select_live_ordinals(
     exclude_segment_ids: &[String],
 ) -> Vec<(String, u32)> {
     let exclude: HashSet<&str> = exclude_segment_ids.iter().map(String::as_str).collect();
-    let mut live: Vec<String> = Vec::new();
-    let mut seen = HashSet::new();
-    let mut reclaimed = HashSet::new();
-    if let Ok(Some(snapshot)) = crate::buffer::durable::snapshot::read_snapshot(log.paths()) {
-        for descriptor in snapshot.segments {
-            if seen.insert(descriptor.segment_id.clone()) {
-                live.push(descriptor.segment_id);
-            }
+    let mut live = match live_segment_ids(log) {
+        Ok(live) => live,
+        Err(err) => {
+            tracing::warn!("live WAL scan skipped unreadable durable state: {err}");
+            return Vec::new();
         }
-    }
-    for envelope in log.committed_envelopes() {
-        match &envelope.body {
-            DurableMutation::CommitSegment { descriptor, .. } => {
-                if seen.insert(descriptor.segment_id.clone()) {
-                    live.push(descriptor.segment_id.clone());
-                }
-            }
-            DurableMutation::ReclaimSegment { segment_id } => {
-                reclaimed.insert(segment_id.clone());
-            }
-            DurableMutation::PutCompaction { .. } | DurableMutation::CompleteSlices { .. } => {}
-        }
-    }
-    live.retain(|id| !reclaimed.contains(id) && !exclude.contains(id.as_str()));
+    };
+    live.retain(|id| !exclude.contains(id.as_str()));
 
     let mut out = Vec::new();
     for id in live {
@@ -65,6 +49,7 @@ pub fn select_live_ordinals(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::durable::mutation::DurableMutation;
     use skippr_lease::{CommitIndex, PipelineKey, GENESIS_HASH};
 
     fn commit_segment_envelope(
@@ -238,6 +223,51 @@ mod tests {
             select_live_ordinals(&log, &[]),
             vec![("live".to_string(), 0)]
         );
+    }
+
+    #[test]
+    fn live_segment_ids_span_snapshot_and_suffix_minus_reclaimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
+        write_segment(&paths, "old", &["evt-old"]);
+        let mut log = crate::buffer::durable::log::MutationLog::open(paths.clone()).unwrap();
+        let first = commit_segment_envelope(&key, 1, GENESIS_HASH, "old");
+        commit(&mut log, &first);
+        crate::buffer::durable::snapshot::retain_live_snapshot(&mut log, &paths, &key).unwrap();
+        let second = commit_segment_envelope(&key, 2, first.entry_hash().unwrap(), "new");
+        commit(&mut log, &second);
+        let third = commit_segment_envelope(&key, 3, second.entry_hash().unwrap(), "gone");
+        commit(&mut log, &third);
+        let reclaim = crate::buffer::durable::mutation::MutationEnvelope {
+            protocol_version: 1,
+            pipeline: key,
+            epoch: skippr_lease::LeaseEpoch::new(1),
+            index: CommitIndex::new(4),
+            previous_hash: third.entry_hash().unwrap(),
+            payload_sha256: [0u8; 32],
+            body: DurableMutation::ReclaimSegment {
+                segment_id: "gone".into(),
+            },
+        };
+        commit(&mut log, &reclaim);
+
+        assert_eq!(
+            crate::buffer::durable::snapshot::live_segment_ids(&log).unwrap(),
+            vec!["old".to_string(), "new".to_string()]
+        );
+    }
+
+    #[test]
+    fn live_segment_ids_fail_closed_on_a_corrupt_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
+        std::fs::create_dir_all(&paths.snapshots).unwrap();
+        std::fs::write(paths.snapshot_current(), b"not a snapshot").unwrap();
+        let log = crate::buffer::durable::log::MutationLog::open(paths).unwrap();
+
+        assert!(crate::buffer::durable::snapshot::live_segment_ids(&log).is_err());
     }
 
     #[test]

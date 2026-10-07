@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use iceberg::io::FileIO;
-use iceberg::spec::{TableMetadata, TableMetadataBuilder};
+use iceberg::spec::TableMetadataBuilder;
 use iceberg::table::Table;
 use iceberg::{
     Catalog, Error, ErrorKind, Namespace, NamespaceIdent, Result, TableCommit, TableCreation,
@@ -14,7 +14,8 @@ use iceberg::{
 use serde_json::json;
 use skippr_cloud::{attr_n, attr_s, n, s, Client};
 use skippr_iceberg_catalog::{
-    decode_name, encode_name, iceberg_file_io_for_warehouse, warehouse_hash, SkipprLakeConfig,
+    decode_name, encode_name, iceberg_file_io_for_warehouse, warehouse_hash, MetadataCache,
+    SkipprLakeConfig,
 };
 use uuid::Uuid;
 
@@ -27,6 +28,7 @@ pub struct CloudTablesCatalog {
     warehouse: String,
     warehouse_pk: String,
     file_io: FileIO,
+    metadata: MetadataCache,
 }
 
 impl std::fmt::Debug for CloudTablesCatalog {
@@ -53,6 +55,7 @@ impl CloudTablesCatalog {
             warehouse: warehouse.clone(),
             warehouse_pk: format!("catalog#{}", warehouse_hash(warehouse)),
             file_io: iceberg_file_io_for_warehouse(config)?,
+            metadata: MetadataCache::default(),
         })
     }
 
@@ -82,7 +85,7 @@ impl CloudTablesCatalog {
         ident: TableIdent,
         metadata_location: &str,
     ) -> Result<Table> {
-        let metadata = TableMetadata::read_from(&self.file_io, metadata_location).await?;
+        let metadata = self.metadata.read(&self.file_io, metadata_location).await?;
         Table::builder()
             .file_io(self.file_io.clone())
             .metadata_location(metadata_location.to_string())
@@ -472,15 +475,19 @@ impl Catalog for CloudTablesCatalog {
     async fn update_table(&self, commit: TableCommit) -> Result<Table> {
         let ident = commit.identifier().clone();
         let (expected_location, mut generation) = self.pointer(&ident).await?;
-        let current = self.load_table(&ident).await?;
-        let staged = commit.apply(current)?;
+        let current = self
+            .table_from_location(ident.clone(), &expected_location)
+            .await?;
+        let staged = commit.apply(current.clone())?;
         let new_location = staged.metadata_location_result()?.to_string();
         staged
             .metadata()
             .write_to(staged.file_io(), &new_location)
             .await?;
+        self.metadata
+            .insert_written(&new_location, staged.metadata_ref());
         let mut attempt = 0;
-        loop {
+        let committed = loop {
             attempt += 1;
             match self
                 .client
@@ -500,7 +507,7 @@ impl Catalog for CloudTablesCatalog {
                 )
                 .await
             {
-                Ok(_) => return Ok(staged),
+                Ok(_) => break staged,
                 Err(err) => {
                     let msg = err.to_string();
                     if attempt >= CATALOG_MAX_RETRIES {
@@ -509,7 +516,7 @@ impl Catalog for CloudTablesCatalog {
                     if err.is_conditional_check_failed() {
                         skippr_iceberg_catalog::record_cas_conflict();
                         match self.pointer(&ident).await {
-                            Ok((loc, _)) if loc == new_location => return Ok(staged),
+                            Ok((loc, _)) if loc == new_location => break staged,
                             Ok((loc, gen)) if loc == expected_location => {
                                 generation = gen;
                                 continue;
@@ -527,6 +534,15 @@ impl Catalog for CloudTablesCatalog {
                     }
                 }
             }
-        }
+        };
+        skippr_iceberg_catalog::delete_superseded_metadata(
+            committed.file_io(),
+            current.metadata(),
+            &expected_location,
+            committed.metadata(),
+            &new_location,
+        )
+        .await;
+        Ok(committed)
     }
 }

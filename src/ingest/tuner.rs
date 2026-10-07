@@ -77,6 +77,9 @@ const RETRY_BACKOFF_X100: u64 = 50;
 const HIGH_UPLOAD_LATENCY_MS: u64 = 30_000;
 const HIGH_SINK_COMMIT_MS: u64 = 60_000;
 const HIGH_SINK_WAIT_MS: u64 = 1_000;
+/// A single grouped sink write older than this means the remote sink is not
+/// keeping up; shed sink/upload concurrency before the job timeout fires.
+const HIGH_SINK_WRITE_AGE_MS: u64 = 120_000;
 const HIGH_WAL_ACK_MS: u64 = 250;
 const HIGH_WAL_PERSIST_MS: u64 = 500;
 /// Consecutive quiet one-second samples required before Ingest-mode growth.
@@ -111,6 +114,7 @@ pub enum BudgetReason {
     OpportunisticHeadroom,
     IngestPressure,
     BacklogGrace,
+    SinkWriteAge,
 }
 
 impl BudgetReason {
@@ -132,6 +136,7 @@ impl BudgetReason {
             Self::OpportunisticHeadroom => "opportunistic_headroom",
             Self::IngestPressure => "ingest_pressure",
             Self::BacklogGrace => "backlog_grace",
+            Self::SinkWriteAge => "sink_write_age",
         }
     }
 
@@ -153,6 +158,7 @@ impl BudgetReason {
             Self::OpportunisticHeadroom => 13,
             Self::IngestPressure => 14,
             Self::BacklogGrace => 15,
+            Self::SinkWriteAge => 16,
         }
     }
 }
@@ -300,6 +306,7 @@ pub struct FlushBudgetSignals {
     pub uploads_in_flight: usize,
     pub upload_latency_ms: Option<u64>,
     pub sink_commit_ms: Option<u64>,
+    pub oldest_sink_write_ms: Option<u64>,
     pub s3_retries: u64,
     pub s3_retry_ema_x100: u64,
     pub glue_retries: u64,
@@ -698,6 +705,18 @@ pub fn compute_flush_budget(
             current,
             multiplicative_backoff(current),
             BudgetReason::SinkContention,
+            policy,
+        );
+    }
+    if signals
+        .oldest_sink_write_ms
+        .is_some_and(|age| age >= HIGH_SINK_WRITE_AGE_MS)
+    {
+        mark_backoff_cooldown(&mut policy);
+        return finish_with_policy(
+            current,
+            multiplicative_sink_upload_backoff(current),
+            BudgetReason::SinkWriteAge,
             policy,
         );
     }
@@ -1186,6 +1205,8 @@ pub fn update_flush_budget(
             totals.sink_commit_ns,
             state.previous.sink_commit_ns,
         ),
+        oldest_sink_write_ms: crate::buffer::compaction_progress::oldest_sink_write_age()
+            .map(|age| u64::try_from(age.as_millis()).unwrap_or(u64::MAX)),
         s3_retries,
         s3_retry_ema_x100: state.s3_retry_ema_x100,
         glue_retries,
@@ -1216,7 +1237,7 @@ pub fn update_flush_budget(
             wal_write_bytes_per_sec,
         );
         info!(
-            "flush_budget generation={} reason={} pressure={} mode={:?} scheduler={}->{} decode={}->{} sink_sessions={}->{} upload_sessions={}->{} multipart_parts={}->{} catalog={}->{} ingest_reserved_cores={} quiet_streak={} cooldown={} backlog_grace={} active_ingest={} queued_ingest={} ready={} cpu_active_tasks={} run_queue={:?} rss_bytes={:?} total_memory_bytes={:?} available_memory_bytes={:?} decode_wait_ms={:?} sink_wait_ms={:?} upload_latency_ms={:?} sink_commit_ms={:?} wal_pending={} wal_ack_ms={:?} source_bps={} wal_write_bps={} s3_retries={} s3_retry_ema_x100={} glue_retries={} glue_retry_ema_x100={}",
+            "flush_budget generation={} reason={} pressure={} mode={:?} scheduler={}->{} decode={}->{} sink_sessions={}->{} upload_sessions={}->{} multipart_parts={}->{} catalog={}->{} ingest_reserved_cores={} quiet_streak={} cooldown={} backlog_grace={} active_ingest={} queued_ingest={} ready={} cpu_active_tasks={} run_queue={:?} rss_bytes={:?} total_memory_bytes={:?} available_memory_bytes={:?} decode_wait_ms={:?} sink_wait_ms={:?} upload_latency_ms={:?} sink_commit_ms={:?} oldest_sink_write_ms={:?} wal_pending={} wal_ack_ms={:?} source_bps={} wal_write_bps={} s3_retries={} s3_retry_ema_x100={} glue_retries={} glue_retry_ema_x100={}",
             next.generation,
             next.reason.as_str(),
             pressure.as_str(),
@@ -1249,6 +1270,7 @@ pub fn update_flush_budget(
             signals.sink_permit_wait_ms,
             signals.upload_latency_ms,
             signals.sink_commit_ms,
+            signals.oldest_sink_write_ms,
             signals.wal_writer_pending,
             signals.wal_ack_avg_ms,
             source_bytes_per_sec,
@@ -1698,6 +1720,24 @@ mod tuning_tests {
         assert_eq!(
             decide(current(), caps(), sink).reason,
             BudgetReason::SinkContention
+        );
+    }
+
+    #[test]
+    fn old_in_flight_sink_write_halves_sink_and_upload_sessions() {
+        let before = current();
+        let mut signals = healthy_drain();
+        signals.oldest_sink_write_ms = Some(super::HIGH_SINK_WRITE_AGE_MS);
+        let next = decide(before, caps(), signals);
+        assert_eq!(next.reason, BudgetReason::SinkWriteAge);
+        assert_eq!(next.sink_sessions, (before.sink_sessions / 2).max(1));
+        assert_eq!(next.upload_sessions, (before.upload_sessions / 2).max(1));
+        assert_eq!(next.scheduler_jobs, before.scheduler_jobs);
+
+        signals.oldest_sink_write_ms = Some(super::HIGH_SINK_WRITE_AGE_MS - 1);
+        assert_eq!(
+            decide(before, caps(), signals).reason,
+            BudgetReason::HealthyDrain
         );
     }
 

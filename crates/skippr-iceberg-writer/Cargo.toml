@@ -25,3 +25,7 @@ tracing.workspace = true
 aws-config = "1.5.1"
 aws-sdk-s3 = "1.32.0"
 iceberg = "0.9.1"
+
+[dev-dependencies]
+skippr-iceberg-catalog-fs = { path = "../skippr-iceberg-catalog-fs" }
+tempfile = "3"

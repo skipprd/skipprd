@@ -12,7 +12,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use iceberg::io::FileIO;
-use iceberg::spec::{TableMetadata, TableMetadataBuilder};
+use iceberg::spec::TableMetadataBuilder;
 use iceberg::table::Table;
 use iceberg::{
     Catalog, Error, ErrorKind, MetadataLocation, Namespace, NamespaceIdent, Result, TableCommit,
@@ -20,7 +20,8 @@ use iceberg::{
 };
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
+use skippr_iceberg_catalog::{CachedMetadata, MetadataCache};
 
 #[derive(Clone)]
 pub struct FsCatalog {
@@ -28,6 +29,7 @@ pub struct FsCatalog {
     warehouse_fs: PathBuf,
     file_io: FileIO,
     store: Arc<LocalFileSystem>,
+    metadata: MetadataCache,
 }
 
 impl fmt::Debug for FsCatalog {
@@ -56,6 +58,7 @@ impl FsCatalog {
             warehouse_fs,
             file_io,
             store: Arc::new(store),
+            metadata: MetadataCache::default(),
         })
     }
 
@@ -126,9 +129,15 @@ impl FsCatalog {
         version: i32,
     ) -> Result<()> {
         let bytes = self.file_io.new_input(uuid_location)?.read().await?;
-        let created = self
-            .put_if_absent(&Self::object_path(table, &Self::hadoop_rel(version)), bytes)
-            .await?;
+        // Superseded aliases are deleted after commit, so `Create` alone cannot
+        // reject a writer whose target version has already been passed.
+        let passed = self
+            .max_hadoop_version(table)
+            .is_some_and(|max| max >= version);
+        let created = !passed
+            && self
+                .put_if_absent(&Self::object_path(table, &Self::hadoop_rel(version)), bytes)
+                .await?;
         if !created {
             skippr_iceberg_catalog::record_cas_conflict();
             return Err(Error::new(
@@ -177,13 +186,56 @@ impl FsCatalog {
     }
 
     async fn table_from_uuid(&self, table: TableIdent, uuid_location: &str) -> Result<Table> {
-        let metadata = TableMetadata::read_from(&self.file_io, uuid_location).await?;
+        let metadata = self.metadata.read(&self.file_io, uuid_location).await?;
+        Self::build_table(&self.file_io, table, uuid_location, metadata)
+    }
+
+    fn build_table(
+        file_io: &FileIO,
+        table: TableIdent,
+        uuid_location: &str,
+        metadata: iceberg::spec::TableMetadataRef,
+    ) -> Result<Table> {
         Table::builder()
-            .file_io(self.file_io.clone())
+            .file_io(file_io.clone())
             .metadata_location(uuid_location.to_string())
             .metadata(metadata)
             .identifier(table)
             .build()
+    }
+
+    /// Hadoop `v{N}` is create-only, but drop + recreate reuses `N`; the stat
+    /// identity keeps a recreated alias from hitting the old entry.
+    fn hadoop_alias_key(&self, table: &TableIdent, version: i32) -> Option<String> {
+        let path = self
+            .table_fs(table)
+            .join("metadata")
+            .join(Self::hadoop_rel(version));
+        let stat = std::fs::metadata(&path).ok()?;
+        let modified = stat
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        Some(format!("{}#{}#{modified}", path.display(), stat.len()))
+    }
+
+    fn remember_published(
+        &self,
+        table: &TableIdent,
+        version: i32,
+        uuid_location: &str,
+        metadata: iceberg::spec::TableMetadataRef,
+    ) {
+        let entry = CachedMetadata {
+            location: uuid_location.to_string(),
+            metadata,
+        };
+        if let Some(key) = self.hadoop_alias_key(table, version) {
+            self.metadata.insert(key, entry.clone());
+        }
+        self.metadata.insert(uuid_location, entry);
     }
 
     fn uuid_location_for_version(&self, table: &TableIdent, version: i32) -> Result<String> {
@@ -406,14 +458,30 @@ impl Catalog for FsCatalog {
             .read_hint_version(table)
             .await?
             .ok_or_else(|| Error::new(ErrorKind::TableNotFound, format!("{table:?}")))?;
+        let alias = self.hadoop_alias_key(table, version);
+        if let Some(hit) = alias.as_deref().and_then(|key| self.metadata.get(key)) {
+            return Self::build_table(&self.file_io, table.clone(), &hit.location, hit.metadata);
+        }
         let uuid_location = self.uuid_location_for_version(table, version)?;
-        self.table_from_uuid(table.clone(), &uuid_location).await
+        let loaded = self.table_from_uuid(table.clone(), &uuid_location).await?;
+        if let Some(key) = alias {
+            self.metadata.insert(
+                key,
+                CachedMetadata {
+                    location: uuid_location,
+                    metadata: loaded.metadata_ref(),
+                },
+            );
+        }
+        Ok(loaded)
     }
 
     async fn drop_table(&self, table: &TableIdent) -> Result<()> {
         if !self.table_exists(table).await? {
             return Err(Error::new(ErrorKind::TableNotFound, format!("{table:?}")));
         }
+        self.metadata
+            .remove_prefix(&self.table_fs(table).join("metadata").display().to_string());
         std::fs::remove_dir_all(&self.table_fs(table))
             .map_err(|err| Error::new(ErrorKind::Unexpected, err.to_string()))
     }
@@ -443,7 +511,7 @@ impl Catalog for FsCatalog {
     async fn update_table(&self, commit: TableCommit) -> Result<Table> {
         let ident = commit.identifier().clone();
         let current = self.load_table(&ident).await?;
-        let staged = commit.apply(current)?;
+        let staged = commit.apply(current.clone())?;
         let uuid_location = staged.metadata_location_result()?.to_string();
         staged
             .metadata()
@@ -453,7 +521,24 @@ impl Catalog for FsCatalog {
         let table_uri = staged.metadata().location().to_string();
         self.publish_hadoop_alias(&ident, &table_uri, &uuid_location, version)
             .await?;
-        self.table_from_uuid(ident, &uuid_location).await
+        self.remember_published(&ident, version, &uuid_location, staged.metadata_ref());
+        let superseded = skippr_iceberg_catalog::delete_superseded_metadata(
+            &self.file_io,
+            current.metadata(),
+            current.metadata_location_result()?,
+            staged.metadata(),
+            &uuid_location,
+        )
+        .await;
+        for location in superseded {
+            if let Ok(old) = uuid_metadata_version(&location) {
+                let _ = self
+                    .store
+                    .delete(&Self::object_path(&ident, &Self::hadoop_rel(old)))
+                    .await;
+            }
+        }
+        Ok(staged)
     }
 }
 
@@ -588,6 +673,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_after_commit_keeps_only_the_metadata_log_window() {
+        let (catalog, _dir) = catalog().await;
+        let ident = create_orders(&catalog).await;
+        for i in 0..6 {
+            let table = catalog.load_table(&ident).await.unwrap();
+            let tx = Transaction::new(&table);
+            let tx = tx
+                .update_table_properties()
+                .set(
+                    "write.metadata.delete-after-commit.enabled".into(),
+                    "true".into(),
+                )
+                .set("write.metadata.previous-versions-max".into(), "2".into())
+                .set("k".into(), i.to_string())
+                .apply(tx)
+                .unwrap();
+            tx.commit_without_rebase(&catalog).await.unwrap();
+        }
+
+        let loaded = catalog.load_table(&ident).await.unwrap();
+        assert_eq!(loaded.metadata().properties().get("k").unwrap(), "5");
+        let metadata_dir = PathBuf::from(strip_file(loaded.metadata().location())).join("metadata");
+        let names: Vec<String> = std::fs::read_dir(&metadata_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".metadata.json"))
+            .collect();
+        let uuid_files = names.iter().filter(|n| !n.starts_with('v')).count();
+        let aliases = names.iter().filter(|n| n.starts_with('v')).count();
+        assert_eq!(uuid_files, 3, "{names:?}");
+        assert_eq!(aliases, 3, "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn alias_below_the_latest_version_is_a_conflict_even_when_deleted() {
+        let (catalog, _dir) = catalog().await;
+        let ident = create_orders(&catalog).await;
+        let table = catalog.load_table(&ident).await.unwrap();
+        let tx = Transaction::new(&table);
+        let tx = tx
+            .update_table_properties()
+            .set("k".into(), "v".into())
+            .apply(tx)
+            .unwrap();
+        tx.commit_without_rebase(&catalog).await.unwrap();
+        let table_fs = catalog.table_fs(&ident);
+        std::fs::remove_file(table_fs.join("metadata/v0.metadata.json")).unwrap();
+
+        let err = catalog
+            .publish_hadoop_alias(
+                &ident,
+                table.metadata().location(),
+                table.metadata_location().unwrap(),
+                0,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::CatalogCommitConflicts);
+        assert!(!table_fs.join("metadata/v0.metadata.json").exists());
+    }
+
+    #[tokio::test]
     async fn update_table_writes_next_hadoop_alias() {
         let (catalog, _dir) = catalog().await;
         let ident = create_orders(&catalog).await;
@@ -614,6 +762,50 @@ mod tests {
             "1"
         );
         assert!(table_fs.join("metadata/v1.metadata.json").is_file());
+    }
+
+    #[tokio::test]
+    async fn committed_metadata_is_served_without_rereading_or_scanning() {
+        let (catalog, _dir) = catalog().await;
+        let ident = create_orders(&catalog).await;
+        let table = catalog.load_table(&ident).await.unwrap();
+        let tx = Transaction::new(&table);
+        let tx = tx
+            .update_table_properties()
+            .set("k".into(), "v".into())
+            .apply(tx)
+            .unwrap();
+        let committed = tx.commit(&catalog).await.unwrap();
+        let uuid_location = committed.metadata_location().unwrap().to_string();
+        std::fs::remove_file(strip_file(&uuid_location)).unwrap();
+
+        let loaded = catalog.load_table(&ident).await.unwrap();
+        assert_eq!(loaded.metadata_location().unwrap(), uuid_location);
+        assert_eq!(
+            loaded.metadata().properties().get("k").map(String::as_str),
+            Some("v")
+        );
+    }
+
+    #[tokio::test]
+    async fn recreated_table_does_not_reuse_the_dropped_alias() {
+        let (catalog, _dir) = catalog().await;
+        let ident = create_orders(&catalog).await;
+        let first = catalog.load_table(&ident).await.unwrap();
+        catalog.drop_table(&ident).await.unwrap();
+        catalog
+            .create_table(
+                ident.namespace(),
+                TableCreation::builder()
+                    .name("orders".into())
+                    .schema(schema())
+                    .build(),
+            )
+            .await
+            .unwrap();
+        let second = catalog.load_table(&ident).await.unwrap();
+        assert_ne!(first.metadata().uuid(), second.metadata().uuid());
+        assert_ne!(first.metadata_location(), second.metadata_location());
     }
 
     #[tokio::test]

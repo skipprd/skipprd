@@ -87,117 +87,136 @@ impl LocalFsStorage {
     }
 }
 
+/// Runs filesystem syscalls on the blocking pool so slow disks never stall
+/// the async worker that drives commits, timeouts, and lane handoffs.
+async fn blocking<T, F>(f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    crate::runtime::spawn_blocking(f).await
+}
+
+fn create_parent_dirs(path: &std::path::Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            Error::new(
+                ErrorKind::Unexpected,
+                format!("Failed to create directory {}: {}", parent.display(), e),
+            )
+        })?;
+    }
+    Ok(())
+}
+
 #[async_trait]
 #[typetag::serde]
 impl Storage for LocalFsStorage {
     async fn exists(&self, path: &str) -> Result<bool> {
         let path = Self::normalize_path(path);
-        Ok(path.exists())
+        blocking(move || Ok(path.exists())).await
     }
 
     async fn metadata(&self, path: &str) -> Result<FileMetadata> {
         let path = Self::normalize_path(path);
-        let metadata = fs::metadata(&path).map_err(|e| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                format!("Failed to get metadata for {}: {}", path.display(), e),
-            )
-        })?;
-        Ok(FileMetadata {
-            size: metadata.len(),
+        blocking(move || {
+            let metadata = fs::metadata(&path).map_err(|e| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Failed to get metadata for {}: {}", path.display(), e),
+                )
+            })?;
+            Ok(FileMetadata {
+                size: metadata.len(),
+            })
         })
+        .await
     }
 
     async fn read(&self, path: &str) -> Result<Bytes> {
         let path = Self::normalize_path(path);
-        let content = fs::read(&path).map_err(|e| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                format!("Failed to read file {}: {}", path.display(), e),
-            )
-        })?;
-        Ok(Bytes::from(content))
+        blocking(move || {
+            let content = fs::read(&path).map_err(|e| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Failed to read file {}: {}", path.display(), e),
+                )
+            })?;
+            Ok(Bytes::from(content))
+        })
+        .await
     }
 
     async fn reader(&self, path: &str) -> Result<Box<dyn FileRead>> {
         let path = Self::normalize_path(path);
-        let file = fs::File::open(&path).map_err(|e| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                format!("Failed to open file {}: {}", path.display(), e),
-            )
-        })?;
+        let file = blocking(move || {
+            fs::File::open(&path).map_err(|e| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Failed to open file {}: {}", path.display(), e),
+                )
+            })
+        })
+        .await?;
         Ok(Box::new(LocalFsFileRead::new(file)))
     }
 
     async fn write(&self, path: &str, bs: Bytes) -> Result<()> {
         let path = Self::normalize_path(path);
-
-        // Create parent directories if they don't exist
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
+        blocking(move || {
+            create_parent_dirs(&path)?;
+            fs::write(&path, &bs).map_err(|e| {
                 Error::new(
                     ErrorKind::Unexpected,
-                    format!("Failed to create directory {}: {}", parent.display(), e),
+                    format!("Failed to write file {}: {}", path.display(), e),
                 )
-            })?;
-        }
-
-        fs::write(&path, &bs).map_err(|e| {
-            Error::new(
-                ErrorKind::Unexpected,
-                format!("Failed to write file {}: {}", path.display(), e),
-            )
-        })?;
-        Ok(())
+            })
+        })
+        .await
     }
 
     async fn writer(&self, path: &str) -> Result<Box<dyn FileWrite>> {
         let path = Self::normalize_path(path);
-
-        // Create parent directories if they don't exist
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
+        let file = blocking(move || {
+            create_parent_dirs(&path)?;
+            fs::File::create(&path).map_err(|e| {
                 Error::new(
                     ErrorKind::Unexpected,
-                    format!("Failed to create directory {}: {}", parent.display(), e),
+                    format!("Failed to create file {}: {}", path.display(), e),
                 )
-            })?;
-        }
-
-        let file = fs::File::create(&path).map_err(|e| {
-            Error::new(
-                ErrorKind::Unexpected,
-                format!("Failed to create file {}: {}", path.display(), e),
-            )
-        })?;
+            })
+        })
+        .await?;
         Ok(Box::new(LocalFsFileWrite::new(file)))
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
         let path = Self::normalize_path(path);
-        if path.exists() {
-            fs::remove_file(&path).map_err(|e| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    format!("Failed to delete file {}: {}", path.display(), e),
-                )
-            })?;
-        }
-        Ok(())
+        blocking(move || match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::new(
+                ErrorKind::Unexpected,
+                format!("Failed to delete file {}: {}", path.display(), e),
+            )),
+        })
+        .await
     }
 
     async fn delete_prefix(&self, path: &str) -> Result<()> {
         let path = Self::normalize_path(path);
-        if path.is_dir() {
-            fs::remove_dir_all(&path).map_err(|e| {
-                Error::new(
-                    ErrorKind::Unexpected,
-                    format!("Failed to delete directory {}: {}", path.display(), e),
-                )
-            })?;
-        }
-        Ok(())
+        blocking(move || {
+            if path.is_dir() {
+                fs::remove_dir_all(&path).map_err(|e| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        format!("Failed to delete directory {}: {}", path.display(), e),
+                    )
+                })?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     fn new_input(&self, path: &str) -> Result<InputFile> {
@@ -212,14 +231,14 @@ impl Storage for LocalFsStorage {
 /// File reader for local filesystem storage.
 #[derive(Debug)]
 pub struct LocalFsFileRead {
-    file: std::sync::Mutex<fs::File>,
+    file: Arc<std::sync::Mutex<fs::File>>,
 }
 
 impl LocalFsFileRead {
     /// Create a new `LocalFsFileRead` with the given file.
     pub fn new(file: fs::File) -> Self {
         Self {
-            file: std::sync::Mutex::new(file),
+            file: Arc::new(std::sync::Mutex::new(file)),
         }
     }
 }
@@ -227,30 +246,34 @@ impl LocalFsFileRead {
 #[async_trait]
 impl FileRead for LocalFsFileRead {
     async fn read(&self, range: Range<u64>) -> Result<Bytes> {
-        let mut file = self.file.lock().map_err(|e| {
-            Error::new(
-                ErrorKind::Unexpected,
-                format!("Failed to acquire file lock: {e}"),
-            )
-        })?;
+        let file = self.file.clone();
+        blocking(move || {
+            let mut file = file.lock().map_err(|e| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    format!("Failed to acquire file lock: {e}"),
+                )
+            })?;
 
-        file.seek(SeekFrom::Start(range.start)).map_err(|e| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                format!("Failed to seek to position {}: {}", range.start, e),
-            )
-        })?;
+            file.seek(SeekFrom::Start(range.start)).map_err(|e| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Failed to seek to position {}: {}", range.start, e),
+                )
+            })?;
 
-        let len = (range.end - range.start) as usize;
-        let mut buffer = vec![0u8; len];
-        file.read_exact(&mut buffer).map_err(|e| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                format!("Failed to read {len} bytes: {e}"),
-            )
-        })?;
+            let len = (range.end - range.start) as usize;
+            let mut buffer = vec![0u8; len];
+            file.read_exact(&mut buffer).map_err(|e| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!("Failed to read {len} bytes: {e}"),
+                )
+            })?;
 
-        Ok(Bytes::from(buffer))
+            Ok(Bytes::from(buffer))
+        })
+        .await
     }
 }
 
@@ -272,19 +295,23 @@ impl LocalFsFileWrite {
 #[async_trait]
 impl FileWrite for LocalFsFileWrite {
     async fn write(&mut self, bs: Bytes) -> Result<()> {
-        let file = self
+        let mut file = self
             .file
-            .as_mut()
+            .take()
             .ok_or_else(|| Error::new(ErrorKind::DataInvalid, "Cannot write to closed file"))?;
 
-        file.write_all(&bs).map_err(|e| {
-            Error::new(
-                ErrorKind::Unexpected,
-                format!("Failed to write to file: {e}"),
-            )
-        })?;
-
-        Ok(())
+        let (file, result) = crate::runtime::spawn_blocking(move || {
+            let result = file.write_all(&bs).map_err(|e| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    format!("Failed to write to file: {e}"),
+                )
+            });
+            (file, result)
+        })
+        .await;
+        self.file = Some(file);
+        result
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -293,10 +320,11 @@ impl FileWrite for LocalFsFileWrite {
             .take()
             .ok_or_else(|| Error::new(ErrorKind::DataInvalid, "File already closed"))?;
 
-        file.sync_all()
-            .map_err(|e| Error::new(ErrorKind::Unexpected, format!("Failed to sync file: {e}")))?;
-
-        Ok(())
+        blocking(move || {
+            file.sync_all()
+                .map_err(|e| Error::new(ErrorKind::Unexpected, format!("Failed to sync file: {e}")))
+        })
+        .await
     }
 }
 

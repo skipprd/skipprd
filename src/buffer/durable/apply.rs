@@ -1,5 +1,7 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use skippr_lease::{DurableError, PipelinePaths, SegmentId};
 
@@ -7,7 +9,7 @@ use super::mutation::{DurableMutation, MutationEnvelope};
 use crate::buffer::compaction_transaction::{CompactionTransaction, CompactionTransactionState};
 use crate::buffer::completion_ledger::{SegmentCompletionLedger, SegmentCompletionUpdate};
 use crate::buffer::ingest_buffer::Buffers;
-use crate::buffer::segment_file::SegmentFile;
+use crate::buffer::segment_file::{SegmentFile, SegmentFileMetadata};
 
 pub struct DurableApplicator {
     paths: PipelinePaths,
@@ -52,16 +54,19 @@ impl DurableApplicator {
             }
             DurableMutation::CompleteSlices { entries, .. } => {
                 let ledger = SegmentCompletionLedger::new(self.paths.completions.clone());
-                let mut owned: Vec<(
-                    String,
-                    Vec<crate::buffer::segment_file::SegmentPartitionIndexEntry>,
-                    Vec<usize>,
-                )> = Vec::new();
+                let mut by_segment: BTreeMap<&str, BTreeSet<usize>> = BTreeMap::new();
                 for entry in entries {
-                    let id = SegmentId::new(&entry.segment_id)
+                    by_segment
+                        .entry(entry.segment_id.as_str())
+                        .or_default()
+                        .extend(entry.ordinals.iter().map(|ordinal| *ordinal as usize));
+                }
+                let mut owned: Vec<(&str, Arc<SegmentFileMetadata>, Vec<usize>)> =
+                    Vec::with_capacity(by_segment.len());
+                for (segment_id, ordinals) in by_segment {
+                    let id = SegmentId::new(segment_id)
                         .map_err(|err| DurableError::Io(err.to_string()))?;
-                    let seg = SegmentFile::new(&self.paths.segs, id.as_str())?;
-                    let meta = match SegmentFile::admit_owned_pair_path(&seg.path) {
+                    let meta = match Buffers::segment_index(&self.paths.segment(&id)) {
                         Ok(meta) => meta,
                         Err(err)
                             if matches!(mode, ApplyMode::CatchUp)
@@ -71,18 +76,13 @@ impl DurableApplicator {
                         }
                         Err(err) => return Err(err.into()),
                     };
-                    let ordinals: Vec<usize> = entry
-                        .ordinals
-                        .iter()
-                        .map(|ordinal| *ordinal as usize)
-                        .collect();
-                    owned.push((entry.segment_id.clone(), meta.index, ordinals));
+                    owned.push((segment_id, meta, ordinals.into_iter().collect()));
                 }
                 let updates: Vec<SegmentCompletionUpdate<'_>> = owned
                     .iter()
-                    .map(|(segment_id, index, ordinals)| SegmentCompletionUpdate {
+                    .map(|(segment_id, meta, ordinals)| SegmentCompletionUpdate {
                         segment_id,
-                        index,
+                        index: &meta.index,
                         ordinals,
                     })
                     .collect();
@@ -98,15 +98,13 @@ impl DurableApplicator {
                 let id =
                     SegmentId::new(segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
                 let path = self.paths.segment(&id);
-                let index = match SegmentFile::admit_owned_pair_path(&path) {
-                    Ok(meta) => meta.index,
-                    Err(_) => Vec::new(),
-                };
+                let meta = Buffers::segment_index(&path).ok();
+                let index = meta.as_ref().map_or(&[][..], |meta| meta.index.as_slice());
                 SegmentFile::reclaim_local_pair(&path)
                     .map_err(|err| DurableError::Io(err.to_string()))?;
                 let ledger = SegmentCompletionLedger::new(self.paths.completions.clone());
                 ledger
-                    .remove_segment(segment_id, &index)
+                    .remove_segment(segment_id, index)
                     .map_err(|err| DurableError::Io(err.to_string()))?;
                 Buffers::forget_reclaimed_segment(segment_id);
                 Ok(())
@@ -234,6 +232,108 @@ mod tests {
             },
         };
         applicator.apply_catch_up(&envelope).unwrap();
+    }
+
+    fn envelope(key: &PipelineKey, index: u64, body: DurableMutation) -> MutationEnvelope {
+        MutationEnvelope {
+            protocol_version: 1,
+            pipeline: key.clone(),
+            epoch: skippr_lease::LeaseEpoch::new(1),
+            index: skippr_lease::CommitIndex::new(index),
+            previous_hash: skippr_lease::GENESIS_HASH,
+            payload_sha256: [0u8; 32],
+            body,
+        }
+    }
+
+    fn committed_two_part_segment(paths: &PipelinePaths, name: &str) -> std::path::PathBuf {
+        use crate::buffer::segment_file::PartitionKey;
+        use arrow::array::{Int32Array, RecordBatch};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let seg = SegmentFile::new(&paths.segs, name).unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
+        let mut batches = HashMap::new();
+        let mut parts_meta = HashMap::new();
+        for part in 0..2 {
+            let key = PartitionKey {
+                sink_ref: "out".into(),
+                namespace: "ns".into(),
+                partition: format!("p{part}"),
+                time: Some(0),
+                schema_fingerprint: "schema".into(),
+            };
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+            )
+            .unwrap();
+            batches.insert(key.clone(), vec![batch]);
+            parts_meta.insert(key, (0, std::time::SystemTime::UNIX_EPOCH));
+        }
+        let (meta, _rows, sha) = seg
+            .write_snapshot(&HashMap::new(), &batches, &parts_meta, &HashMap::new())
+            .unwrap();
+        Buffers::write_seg_commit(&seg.path, &sha, meta.num_partitions, meta.total_bytes).unwrap();
+        seg.path
+    }
+
+    #[test]
+    fn complete_and_reclaim_read_the_segment_index_once_without_hashing_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
+        fs::create_dir_all(&paths.segs).unwrap();
+        let path = committed_two_part_segment(&paths, "seg-index-only");
+        let meta = SegmentFile::read_index_path(&path).unwrap();
+        let mut body = fs::read(&path).unwrap();
+        body[meta.index[0].start as usize + 1] ^= 0xff;
+        fs::write(&path, &body).unwrap();
+        assert!(
+            SegmentFile::admit_owned_pair_path(&path).is_err(),
+            "startup reconcile and catch-up admission must still reject the payload"
+        );
+
+        let applicator = DurableApplicator::new(paths.clone());
+        let reads_before = SegmentFile::index_read_count();
+        let entries = (0..16u32)
+            .map(|i| crate::buffer::durable::mutation::CompletedOrdinals {
+                segment_id: "seg-index-only".into(),
+                ordinals: vec![i % 2],
+            })
+            .collect();
+        applicator
+            .apply(&envelope(
+                &key,
+                1,
+                DurableMutation::CompleteSlices {
+                    compaction_id: "c1".into(),
+                    entries,
+                },
+            ))
+            .unwrap();
+        assert_eq!(SegmentFile::index_read_count() - reads_before, 1);
+        let ledger = SegmentCompletionLedger::new(paths.completions.clone());
+        assert!(ledger.all_complete("seg-index-only", &meta.index).unwrap());
+
+        applicator
+            .apply(&envelope(
+                &key,
+                2,
+                DurableMutation::ReclaimSegment {
+                    segment_id: "seg-index-only".into(),
+                },
+            ))
+            .unwrap();
+        assert!(!path.exists());
+        assert!(!ledger.bitmap_path("seg-index-only").exists());
+        for entry in &meta.index {
+            assert!(!ledger
+                .legacy_tombstone_path("seg-index-only", &entry.key)
+                .exists());
+        }
     }
 
     fn test_txn(id: &str, state: CompactionTransactionState) -> CompactionTransaction {

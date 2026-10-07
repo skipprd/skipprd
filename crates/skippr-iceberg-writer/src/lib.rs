@@ -35,6 +35,7 @@ use datafusion::physical_plan::RecordBatchStream;
 use futures::stream::FuturesUnordered;
 use futures::Stream;
 use futures::StreamExt;
+use futures::TryStreamExt;
 use iceberg::spec::{
     DataContentType, DataFileBuilder, DataFileFormat, ListType, Literal, MapType, NestedField,
     PrimitiveLiteral, PrimitiveType, Schema, Struct, Transform, Type, UnboundPartitionSpec,
@@ -51,6 +52,10 @@ use skippr_object_writer::{
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
+mod history;
+mod maintenance;
+use history::SNAPSHOT_WAL_SEGMENT_IDS;
+
 const ICEBERG_FILE_MAX_ROWS: usize = 100_000;
 const ICEBERG_FILE_MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 const ICEBERG_MAX_FILE_WRITES_IN_FLIGHT: usize = 4;
@@ -58,7 +63,6 @@ const ICEBERG_CDC_STATE_SHARDS: u8 = 64;
 const ICEBERG_MAX_ENVELOPE_KEYS: usize = 1_000_000;
 const ICEBERG_GROUPED_PENDING_VERSION: u32 = 2;
 const SNAPSHOT_COMPACTION_ID: &str = "skippr.compaction-id";
-const SNAPSHOT_WAL_SEGMENT_IDS: &str = "skippr.wal-segment-ids";
 const SNAPSHOT_IDEMPOTENCY_KEY: &str = "skippr.idempotency-key";
 const SNAPSHOT_SCHEMA_FINGERPRINT: &str = "skippr.schema-fingerprint";
 const SNAPSHOT_WAL_FINGERPRINT: &str = "skippr.wal-refs-fingerprint-v2";
@@ -71,10 +75,11 @@ use skippr_runtime_sdk::plugins::source_contract::{
     FieldPath, SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
 };
 use skippr_runtime_sdk::plugins::{
-    DataSink, SchemaSink, SinkPreflightOutcome, SinkSpec, SinkWriteContext, SinkWriteOutcome,
+    DataSink, SchemaSink, SinkCallResult, SinkPreflightOutcome, SinkSpec, SinkWriteContext,
+    SinkWriteOutcome,
 };
 use skippr_runtime_sdk::protocol::{
-    RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState, SchemaDelta,
+    RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState, SchemaDelta, SinkWriteStats,
 };
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
@@ -168,6 +173,9 @@ pub struct IcebergWriter<S: SinkSpec> {
     catalog: Arc<dyn Catalog>,
     table_cache: RwLock<HashMap<String, CachedIcebergTable>>,
     table_lanes: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    maintenance_idle: Mutex<HashMap<String, maintenance::TableTotals>>,
+    /// Epoch milliseconds; injected so history expiry is deterministic in tests.
+    now_ms: fn() -> i64,
     _spec: PhantomData<fn() -> S>,
 }
 
@@ -211,6 +219,21 @@ struct IcebergGroupedPending {
     files: Vec<PendingIcebergFile>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     state_delta: BTreeMap<String, String>,
+}
+
+/// Outputs uploaded for one maintenance plan, kept until its commit lands.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct MaintenanceReceipt {
+    starting_snapshot_id: i64,
+    fingerprint: String,
+    files: Vec<PendingIcebergFile>,
+}
+
+struct MaintenanceOutputs<'a> {
+    namespace: &'a str,
+    identity_prefix: String,
+    date_fields: Arc<HashSet<String>>,
+    iceberg_schema: Arc<Schema>,
 }
 
 struct GroupedCommitResult {
@@ -501,6 +524,17 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
         reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, io::Error> {
+        self.sync_grouped_call_result(reader, ctx)
+            .await
+            .map(|result| result.outcome)
+    }
+
+    async fn sync_grouped_call_result(
+        &self,
+        reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
+        ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+    ) -> Result<SinkCallResult, io::Error> {
+        let already_applied = || Ok(SinkCallResult::outcome(SinkWriteOutcome::AlreadyApplied));
         ctx.to_sink_write_context()
             .validate_grouped::<S::WriteSupport>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
@@ -515,7 +549,7 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
         let (manifest_bucket, manifest_key) = location.parts();
         if let Some(existing) = self.read_manifest(&manifest_bucket, &manifest_key).await? {
             if existing.matches_manifest(&manifest) {
-                return Ok(SinkWriteOutcome::AlreadyApplied);
+                return already_applied();
             }
             return Err(io::Error::other(format!(
                 "Iceberg grouped manifest mismatch for compaction '{}'",
@@ -531,18 +565,22 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
             let _lane_guard = lane.lock().await;
             if let Some(existing) = self.read_manifest(&manifest_bucket, &manifest_key).await? {
                 if existing.matches_manifest(&manifest) {
-                    return Ok(SinkWriteOutcome::AlreadyApplied);
+                    return already_applied();
                 }
                 return Err(io::Error::other(format!(
                     "Iceberg grouped manifest mismatch for compaction '{}'",
                     ctx.compaction_id
                 )));
             }
-            return self.sync_grouped_legacy_chunks(reader, ctx).await;
+            return self
+                .sync_grouped_legacy_chunks(reader, ctx)
+                .await
+                .map(SinkCallResult::outcome);
         }
 
         let pending_key = grouped_pending_key(&manifest_key);
         let mut reader = Some(reader);
+        let mut upload_duration = None;
         let mut prepared = self
             .read_grouped_pending(&manifest_bucket, &pending_key)
             .await?;
@@ -550,6 +588,7 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
             validate_grouped_pending(pending, &namespace, &manifest, &ctx.compaction_id)?;
         }
         if prepared.is_none() && !grouped_preparation_requires_lane(&ctx, &namespace) {
+            let started = std::time::Instant::now();
             prepared = Some(
                 self.produce_grouped_pending(
                     reader
@@ -561,13 +600,14 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
                 )
                 .await?,
             );
+            upload_duration = Some(started.elapsed());
         }
 
         let lane = self.table_lane(&namespace).await;
         let _lane_guard = lane.lock().await;
         if let Some(existing) = self.read_manifest(&manifest_bucket, &manifest_key).await? {
             if existing.matches_manifest(&manifest) {
-                return Ok(SinkWriteOutcome::AlreadyApplied);
+                return already_applied();
             }
             return Err(io::Error::other(format!(
                 "Iceberg grouped manifest mismatch for compaction '{}'",
@@ -586,15 +626,19 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
                 let pending = match prepared {
                     Some(pending) => pending,
                     None => {
-                        self.produce_grouped_pending(
-                            reader.take().ok_or_else(|| {
-                                io::Error::other("grouped reader was already consumed")
-                            })?,
-                            &ctx,
-                            &namespace,
-                            manifest.clone(),
-                        )
-                        .await?
+                        let started = std::time::Instant::now();
+                        let pending = self
+                            .produce_grouped_pending(
+                                reader.take().ok_or_else(|| {
+                                    io::Error::other("grouped reader was already consumed")
+                                })?,
+                                &ctx,
+                                &namespace,
+                                manifest.clone(),
+                            )
+                            .await?;
+                        upload_duration = Some(started.elapsed());
+                        pending
                     }
                 };
                 self.write_grouped_pending(&manifest_bucket, &pending_key, &pending)
@@ -602,14 +646,19 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
                 pending
             }
         };
-        let already_committed = self.apply_grouped_pending(&namespace, &pending).await?;
+        let commit_started = std::time::Instant::now();
+        let committed = self.apply_grouped_pending(&namespace, &pending).await?;
         self.write_manifest(&manifest_bucket, &manifest_key, &manifest)
             .await?;
-        Ok(if already_committed {
-            SinkWriteOutcome::AlreadyApplied
-        } else {
-            SinkWriteOutcome::Applied
-        })
+        if committed.already_committed {
+            return already_applied();
+        }
+        let table = self.maintain(&namespace, committed.table).await;
+        self.expire_history(&namespace, table, ctx.live_wal_segments.as_ref())
+            .await;
+        let mut result = SinkCallResult::outcome(SinkWriteOutcome::Applied);
+        result.stats = grouped_write_stats(&pending, upload_duration, commit_started.elapsed());
+        Ok(result)
     }
 
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
@@ -713,6 +762,8 @@ impl<S: SinkSpec> IcebergWriter<S> {
             catalog,
             table_cache: RwLock::new(HashMap::new()),
             table_lanes: Mutex::new(HashMap::new()),
+            maintenance_idle: Mutex::new(HashMap::new()),
+            now_ms: wall_clock_ms,
             _spec: PhantomData,
         })
     }
@@ -964,7 +1015,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
         &self,
         namespace: &str,
         pending: &IcebergGroupedPending,
-    ) -> Result<bool, io::Error> {
+    ) -> Result<GroupedCommitResult, io::Error> {
         let (installed_version, metadata) = self.namespace_schema_state(namespace).await?;
         let table = self
             .table_for_write(namespace, installed_version, &metadata)
@@ -992,6 +1043,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
             .commit_grouped_append_with_retries(
                 catalog.as_ref(),
                 table.identifier().clone(),
+                Some(table),
                 commit_files,
                 &pending.manifest,
             )
@@ -1004,10 +1056,430 @@ impl<S: SinkSpec> IcebergWriter<S> {
             namespace.to_string(),
             CachedIcebergTable {
                 schema_version: installed_version,
-                table: committed.table,
+                table: committed.table.clone(),
             },
         );
-        Ok(committed.already_committed)
+        Ok(committed)
+    }
+
+    /// Runs under the table lane after a grouped commit. Failure keeps history
+    /// and never fails the write that already committed.
+    async fn expire_history(
+        &self,
+        namespace: &str,
+        table: iceberg::table::Table,
+        live: Option<&skippr_runtime_sdk::plugins::LiveWalSegments>,
+    ) {
+        let Some(live) = live else {
+            return;
+        };
+        let fence = history::ExpiryFence {
+            pipeline: &self.context.pipeline_name,
+            live,
+            now_ms: (self.now_ms)(),
+        };
+        let expired = history::expirable_snapshot_ids(table.metadata(), &fence);
+        if expired.is_empty() {
+            return;
+        }
+        let tx = Transaction::new(&table);
+        let tx = match tx.expire_snapshots(expired.clone()).apply(tx) {
+            Ok(tx)
+                if table
+                    .metadata()
+                    .properties()
+                    .contains_key(history::DELETE_AFTER_COMMIT) =>
+            {
+                Ok(tx)
+            }
+            Ok(tx) => tx
+                .update_table_properties()
+                .set(history::DELETE_AFTER_COMMIT.to_string(), "true".to_string())
+                .apply(tx),
+            Err(err) => Err(err),
+        };
+        let committed = match tx {
+            Ok(tx) => tx.commit_without_rebase(self.catalog.as_ref()).await,
+            Err(err) => Err(err),
+        };
+        let committed = match committed {
+            Ok(committed) => committed,
+            Err(err) => {
+                warn!(
+                    "Iceberg history expiry skipped for {}: {}",
+                    table.identifier(),
+                    err
+                );
+                return;
+            }
+        };
+        if let Some(cached) = self.table_cache.write().await.get_mut(namespace) {
+            cached.table = committed;
+        }
+        match history::delete_expired_files(table.file_io(), table.metadata(), &expired).await {
+            Ok(stats) => info!(
+                "Iceberg history expired {} snapshots for {} (manifest_lists={} manifests={} files={})",
+                expired.len(),
+                table.identifier(),
+                stats.manifest_lists,
+                stats.manifests,
+                stats.files
+            ),
+            Err(err) => warn!(
+                "Iceberg history expired {} snapshots for {} but left files behind: {}",
+                expired.len(),
+                table.identifier(),
+                err
+            ),
+        }
+    }
+
+    /// Runs under the table lane after a grouped commit. Failure keeps the
+    /// files as they are and never fails the write that already committed.
+    async fn maintain(
+        &self,
+        namespace: &str,
+        table: iceberg::table::Table,
+    ) -> iceberg::table::Table {
+        match self.maintenance_pass(namespace, &table).await {
+            Ok(Some(committed)) => committed,
+            Ok(None) => table,
+            Err(err) => {
+                warn!(
+                    "Iceberg maintenance skipped for {}: {}",
+                    table.identifier(),
+                    err
+                );
+                if let Some(snapshot) = table.metadata().current_snapshot() {
+                    self.maintenance_idle.lock().await.insert(
+                        namespace.to_string(),
+                        maintenance::TableTotals::of(snapshot.summary()),
+                    );
+                }
+                table
+            }
+        }
+    }
+
+    /// One bounded rewrite planned from `table`'s current snapshot, committed
+    /// only if that snapshot is still current. `None` when nothing is due.
+    async fn maintenance_pass(
+        &self,
+        namespace: &str,
+        table: &iceberg::table::Table,
+    ) -> io::Result<Option<iceberg::table::Table>> {
+        let Some(snapshot) = table.metadata().current_snapshot() else {
+            return Ok(None);
+        };
+        let totals = maintenance::TableTotals::of(snapshot.summary());
+        let last_idle = self.maintenance_idle.lock().await.get(namespace).copied();
+        if !totals.worth_planning(last_idle) {
+            return Ok(None);
+        }
+        let plan = self.plan_maintenance(table).await?;
+        for partition in &plan.too_large {
+            warn!(
+                "lake_maintenance_partition_too_large table={} partition={} ceiling_bytes={} ceiling_files={}",
+                table.identifier(),
+                partition,
+                maintenance::PASS_MAX_INPUT_BYTES,
+                maintenance::PASS_MAX_INPUT_FILES
+            );
+        }
+        if plan.is_empty() {
+            self.maintenance_idle
+                .lock()
+                .await
+                .insert(namespace.to_string(), totals);
+            return Ok(None);
+        }
+        let receipt = self.prepare_maintenance(namespace, table, &plan).await?;
+        let committed = self.commit_maintenance(table, &plan, &receipt).await?;
+        self.maintenance_idle.lock().await.remove(namespace);
+        if let Some(cached) = self.table_cache.write().await.get_mut(namespace) {
+            cached.table = committed.clone();
+        }
+        let (bucket, key) = self
+            .maintenance_receipt_location(namespace, &receipt.fingerprint)?
+            .parts();
+        if let Err(err) = self.delete_object(&bucket, &key).await {
+            warn!("Iceberg maintenance receipt {key} left behind: {err}");
+        }
+        info!(
+            "lake_maintenance table={} partitions={} inputs={} removed_deletes={} outputs={}",
+            table.identifier(),
+            plan.partitions.len(),
+            plan.partitions
+                .iter()
+                .map(|p| p.inputs.len())
+                .sum::<usize>(),
+            plan.partitions
+                .iter()
+                .map(|p| p.removed_deletes.len())
+                .sum::<usize>(),
+            receipt.files.len()
+        );
+        Ok(Some(committed))
+    }
+
+    async fn plan_maintenance(
+        &self,
+        table: &iceberg::table::Table,
+    ) -> io::Result<maintenance::MaintenancePlan> {
+        let Some(snapshot) = table.metadata().current_snapshot() else {
+            return Ok(maintenance::MaintenancePlan::default());
+        };
+        let to_io = |err: iceberg::Error| io::Error::other(err.to_string());
+        let spec_id = table.metadata().default_partition_spec_id();
+        let list = snapshot
+            .load_manifest_list(table.file_io(), table.metadata())
+            .await
+            .map_err(to_io)?;
+        let mut files = Vec::new();
+        let mut foreign_partitions = HashSet::new();
+        for manifest in list.entries() {
+            let loaded = manifest
+                .load_manifest(table.file_io())
+                .await
+                .map_err(to_io)?;
+            for entry in loaded.entries() {
+                if !entry.is_alive() {
+                    continue;
+                }
+                let file = entry.data_file();
+                let partition_key = format!("{:?}", file.partition());
+                if file.partition_spec_id() != spec_id
+                    || entry.content_type() == DataContentType::PositionDeletes
+                {
+                    foreign_partitions.insert(partition_key);
+                    continue;
+                }
+                files.push(maintenance::LiveFile {
+                    partition_key,
+                    file: file.clone(),
+                });
+            }
+        }
+        files.retain(|live| !foreign_partitions.contains(&live.partition_key));
+        Ok(maintenance::plan(files))
+    }
+
+    /// Rewrites the planned partitions with every live delete applied, or
+    /// reuses the receipt an interrupted pass over the same snapshot left.
+    async fn prepare_maintenance(
+        &self,
+        namespace: &str,
+        table: &iceberg::table::Table,
+        plan: &maintenance::MaintenancePlan,
+    ) -> io::Result<MaintenanceReceipt> {
+        let starting_snapshot_id = table
+            .metadata()
+            .current_snapshot_id()
+            .ok_or_else(|| io::Error::other("maintenance requires a current snapshot"))?;
+        let fingerprint = plan.fingerprint(starting_snapshot_id);
+        let (bucket, key) = self
+            .maintenance_receipt_location(namespace, &fingerprint)?
+            .parts();
+        if let Some(bytes) = self.get_object_bytes(&bucket, &key).await? {
+            let receipt: MaintenanceReceipt =
+                serde_json::from_slice(&bytes).map_err(|err| io::Error::other(err.to_string()))?;
+            if receipt.starting_snapshot_id == starting_snapshot_id
+                && receipt.fingerprint == fingerprint
+            {
+                return Ok(receipt);
+            }
+        }
+        let to_io = |err: iceberg::Error| io::Error::other(err.to_string());
+        let (_, metadata) = self.namespace_schema_state(namespace).await?;
+        let outputs = MaintenanceOutputs {
+            namespace,
+            identity_prefix: format!("maintenance-{fingerprint}"),
+            date_fields: Arc::new(iceberg_date_field_names(&metadata)),
+            iceberg_schema: table.metadata().current_schema().clone(),
+        };
+        let mut tasks: HashMap<String, iceberg::scan::FileScanTask> = table
+            .scan()
+            .snapshot_id(starting_snapshot_id)
+            .select_all()
+            .build()
+            .map_err(to_io)?
+            .plan_files()
+            .await
+            .map_err(to_io)?
+            .map_ok(|task| (task.data_file_path.clone(), task))
+            .try_collect()
+            .await
+            .map_err(to_io)?;
+        let mut roll_index = 0u64;
+        let mut files = Vec::new();
+        for partition in &plan.partitions {
+            let partition_tasks = partition
+                .inputs
+                .iter()
+                .map(|input| {
+                    tasks.remove(input.file_path()).ok_or_else(|| {
+                        io::Error::other(format!(
+                            "maintenance input {} is not in the scan",
+                            input.file_path()
+                        ))
+                    })
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            // One file at a time keeps the rewritten bytes identical across
+            // retries, so a replayed upload never changes a named output.
+            let mut batches = iceberg::arrow::ArrowReaderBuilder::new(table.file_io().clone())
+                .with_data_file_concurrency_limit(1)
+                .build()
+                .read(Box::pin(futures::stream::iter(
+                    partition_tasks.into_iter().map(Ok),
+                )))
+                .map_err(to_io)?;
+            let mut pending_batches = Vec::new();
+            let mut pending_rows = 0usize;
+            let mut pending_bytes = 0usize;
+            while let Some(batch) = batches.try_next().await.map_err(to_io)? {
+                pending_rows += batch.num_rows();
+                pending_bytes += record_batch_memory_size(&batch);
+                pending_batches.push(batch);
+                if pending_rows >= ICEBERG_FILE_MAX_ROWS
+                    || pending_bytes >= ICEBERG_FILE_MAX_INPUT_BYTES
+                {
+                    let rolls = roll_record_batches(std::mem::take(&mut pending_batches));
+                    files.extend(
+                        self.upload_maintenance_rolls(&outputs, rolls, &mut roll_index)
+                            .await?,
+                    );
+                    pending_rows = 0;
+                    pending_bytes = 0;
+                }
+            }
+            files.extend(
+                self.upload_maintenance_rolls(
+                    &outputs,
+                    roll_record_batches(pending_batches),
+                    &mut roll_index,
+                )
+                .await?,
+            );
+        }
+        let receipt = MaintenanceReceipt {
+            starting_snapshot_id,
+            fingerprint,
+            files,
+        };
+        let bytes =
+            serde_json::to_vec(&receipt).map_err(|err| io::Error::other(err.to_string()))?;
+        self.put_object_bytes(&bucket, &key, bytes.into()).await?;
+        Ok(receipt)
+    }
+
+    async fn upload_maintenance_rolls(
+        &self,
+        outputs: &MaintenanceOutputs<'_>,
+        rolls: Vec<Vec<RecordBatch>>,
+        roll_index: &mut u64,
+    ) -> io::Result<Vec<PendingIcebergFile>> {
+        let mut files = Vec::with_capacity(rolls.len());
+        for roll in rolls {
+            let identity = grouped_file_identity(
+                &outputs.identity_prefix,
+                PendingFileContent::Data,
+                *roll_index,
+            );
+            *roll_index += 1;
+            files.push(
+                self.upload_grouped_file(
+                    outputs.namespace.to_string(),
+                    PendingFileContent::Data,
+                    identity,
+                    roll,
+                    outputs.date_fields.clone(),
+                    outputs.iceberg_schema.clone(),
+                    Vec::new(),
+                )
+                .await?,
+            );
+        }
+        Ok(files)
+    }
+
+    async fn commit_maintenance(
+        &self,
+        table: &iceberg::table::Table,
+        plan: &maintenance::MaintenancePlan,
+        receipt: &MaintenanceReceipt,
+    ) -> io::Result<iceberg::table::Table> {
+        let to_io = |err: iceberg::Error| io::Error::other(err.to_string());
+        let added = receipt
+            .files
+            .iter()
+            .map(|file| {
+                self.build_data_file(
+                    table,
+                    DataContentType::Data,
+                    file.file_uri.clone(),
+                    file.rows,
+                    file.bytes,
+                    None,
+                    stored_partition_to_struct(&file.partition),
+                )
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let removed = plan
+            .partitions
+            .iter()
+            .flat_map(|partition| partition.inputs.iter().chain(&partition.removed_deletes))
+            .cloned();
+        let properties = HashMap::from([
+            (
+                history::SNAPSHOT_PIPELINE.to_string(),
+                self.context.pipeline_name.clone(),
+            ),
+            (
+                maintenance::SNAPSHOT_MAINTENANCE.to_string(),
+                receipt.fingerprint.clone(),
+            ),
+        ]);
+        let tx = Transaction::new(table);
+        let tx = tx
+            .rewrite_files()
+            .add_data_files(added)
+            .remove_files(removed)
+            .set_snapshot_properties(properties)
+            .apply(tx)
+            .map_err(to_io)?;
+        tx.commit_without_rebase(self.catalog.as_ref())
+            .await
+            .map_err(to_io)
+    }
+
+    fn maintenance_receipt_location(
+        &self,
+        namespace: &str,
+        fingerprint: &str,
+    ) -> io::Result<ObjectLocation> {
+        Ok(
+            parse_object_location(&self.table_location(namespace))?.join(&format!(
+                "metadata/skippr-maintenance/{fingerprint}.pending.json"
+            )),
+        )
+    }
+
+    async fn delete_object(&self, bucket: &str, key: &str) -> io::Result<()> {
+        if bucket.is_empty() {
+            return match tokio::fs::remove_file(key).await {
+                Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+                _ => Ok(()),
+            };
+        }
+        self.s3_client
+            .delete_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|err| io::Error::other(err.to_string()))
     }
 
     async fn produce_grouped_pending(
@@ -1907,42 +2379,37 @@ impl<S: SinkSpec> IcebergWriter<S> {
             .await
     }
 
+    /// The snapshot-property gate is the sole idempotency check, so a commit
+    /// is never rebased onto a table the gate has not seen: a stale base fails
+    /// its `RefSnapshotIdMatch` requirement and the next attempt reloads and
+    /// re-gates. The first attempt reuses the caller's (cached) table.
     async fn commit_grouped_append_with_retries(
         &self,
         catalog: &dyn Catalog,
         table_ident: TableIdent,
+        base: Option<iceberg::table::Table>,
         commit_files: Vec<iceberg::spec::DataFile>,
         manifest: &ObjectWriteManifest,
     ) -> Result<GroupedCommitResult, io::Error> {
         let (data_files, delete_files) = partition_commit_files(commit_files);
-        if delete_files.is_empty() {
-            return self
-                .commit_grouped_data_append_with_retries(catalog, table_ident, data_files, manifest)
-                .await;
-        }
-        self.commit_grouped_equality_delta_with_retries(
-            catalog,
-            table_ident,
-            data_files,
-            delete_files,
-            manifest,
-        )
-        .await
-    }
-
-    async fn commit_grouped_data_append_with_retries(
-        &self,
-        catalog: &dyn Catalog,
-        table_ident: TableIdent,
-        data_files: Vec<iceberg::spec::DataFile>,
-        manifest: &ObjectWriteManifest,
-    ) -> Result<GroupedCommitResult, io::Error> {
+        let kind = if delete_files.is_empty() {
+            "append"
+        } else {
+            "equality-delta"
+        };
+        let mut base = base;
         let mut last_err = None;
-        for attempt in 1..=3 {
-            let table = catalog
-                .load_table(&table_ident)
-                .await
-                .map_err(|err| io::Error::other(err.to_string()))?;
+        for attempt in 1..=GROUPED_COMMIT_ATTEMPTS {
+            if attempt > 2 {
+                tokio::time::sleep(grouped_commit_backoff(attempt)).await;
+            }
+            let table = match base.take() {
+                Some(table) => table,
+                None => catalog
+                    .load_table(&table_ident)
+                    .await
+                    .map_err(|err| io::Error::other(err.to_string()))?,
+            };
             if table_has_grouped_snapshot(&table, manifest) {
                 return Ok(GroupedCommitResult {
                     table,
@@ -1950,14 +2417,25 @@ impl<S: SinkSpec> IcebergWriter<S> {
                 });
             }
             let tx = Transaction::new(&table);
-            let tx = tx
-                .fast_append()
-                .with_check_duplicate(false)
-                .set_snapshot_properties(grouped_snapshot_properties(manifest))
-                .add_data_files(data_files.clone())
-                .apply(tx)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            match tx.commit(catalog).await {
+            let tx = if delete_files.is_empty() {
+                tx.fast_append()
+                    .with_check_duplicate(false)
+                    .set_snapshot_properties(self.grouped_commit_properties(manifest))
+                    .add_data_files(data_files.clone())
+                    .apply(tx)
+            } else {
+                let mut action = tx
+                    .equality_delta_append()
+                    .with_check_duplicate(false)
+                    .set_snapshot_properties(self.grouped_commit_properties(manifest))
+                    .add_delete_files(delete_files.clone());
+                if !data_files.is_empty() {
+                    action = action.add_data_files(data_files.clone());
+                }
+                action.apply(tx)
+            }
+            .map_err(|err| io::Error::other(err.to_string()))?;
+            match tx.commit_without_rebase(catalog).await {
                 Ok(table) => {
                     return Ok(GroupedCommitResult {
                         table,
@@ -1965,93 +2443,17 @@ impl<S: SinkSpec> IcebergWriter<S> {
                     })
                 }
                 Err(err) => {
-                    let message = err.to_string();
-                    if is_duplicate_iceberg_file_error(&message) {
-                        let table = catalog
-                            .load_table(&table_ident)
-                            .await
-                            .map_err(|err| io::Error::other(err.to_string()))?;
-                        return Ok(GroupedCommitResult {
-                            table,
-                            already_committed: true,
-                        });
-                    }
                     warn!(
-                        "Iceberg grouped append commit attempt {} failed for {}: {}",
-                        attempt, table_ident, message
+                        "Iceberg grouped {} commit attempt {} failed for {}: {}",
+                        kind, attempt, table_ident, err
                     );
-                    last_err = Some(message);
+                    last_err = Some(err.to_string());
                 }
             }
         }
         Err(io::Error::other(format!(
-            "Iceberg grouped append commit failed after retries for {}: {}",
-            table_ident,
-            last_err.unwrap_or_else(|| "unknown error".to_string())
-        )))
-    }
-
-    async fn commit_grouped_equality_delta_with_retries(
-        &self,
-        catalog: &dyn Catalog,
-        table_ident: TableIdent,
-        data_files: Vec<iceberg::spec::DataFile>,
-        delete_files: Vec<iceberg::spec::DataFile>,
-        manifest: &ObjectWriteManifest,
-    ) -> Result<GroupedCommitResult, io::Error> {
-        let mut last_err = None;
-        for attempt in 1..=3 {
-            let table = catalog
-                .load_table(&table_ident)
-                .await
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            if table_has_grouped_snapshot(&table, manifest) {
-                return Ok(GroupedCommitResult {
-                    table,
-                    already_committed: true,
-                });
-            }
-            let tx = Transaction::new(&table);
-            let mut action = tx
-                .equality_delta_append()
-                .with_check_duplicate(false)
-                .set_snapshot_properties(grouped_snapshot_properties(manifest))
-                .add_delete_files(delete_files.clone());
-            if !data_files.is_empty() {
-                action = action.add_data_files(data_files.clone());
-            }
-            let tx = action
-                .apply(tx)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            match tx.commit(catalog).await {
-                Ok(table) => {
-                    return Ok(GroupedCommitResult {
-                        table,
-                        already_committed: false,
-                    })
-                }
-                Err(err) => {
-                    let message = err.to_string();
-                    if is_duplicate_iceberg_file_error(&message) {
-                        let table = catalog
-                            .load_table(&table_ident)
-                            .await
-                            .map_err(|err| io::Error::other(err.to_string()))?;
-                        return Ok(GroupedCommitResult {
-                            table,
-                            already_committed: true,
-                        });
-                    }
-                    warn!(
-                        "Iceberg grouped equality-delta commit attempt {} failed for {}: {}",
-                        attempt, table_ident, message
-                    );
-                    last_err = Some(message);
-                }
-            }
-        }
-        Err(io::Error::other(format!(
-            "Iceberg grouped equality-delta commit failed after retries for {}: {}",
+            "Iceberg grouped {} commit failed after retries for {}: {}",
+            kind,
             table_ident,
             last_err.unwrap_or_else(|| "unknown error".to_string())
         )))
@@ -2493,6 +2895,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
             self.context.pipeline_name.clone(),
         );
         properties.insert("skippr.binding".to_string(), format!("{:?}", self.binding));
+        properties.insert(history::DELETE_AFTER_COMMIT.to_string(), "true".to_string());
 
         let partition_spec = identity_partition_spec(&iceberg_schema)?;
         let creation = TableCreation::builder()
@@ -2583,6 +2986,33 @@ impl<S: SinkSpec> IcebergWriter<S> {
 
 fn grouped_pending_key(manifest_key: &str) -> String {
     format!("{manifest_key}.pending-v2.json")
+}
+
+/// `upload_duration` is `None` when a crash-recovered pending receipt skipped encode/upload.
+/// Covers the stale-cache first attempt plus contended retries; the vendored
+/// in-transaction retry is bypassed so this is the only loop.
+const GROUPED_COMMIT_ATTEMPTS: u32 = 8;
+
+fn grouped_commit_backoff(attempt: u32) -> Duration {
+    Duration::from_millis(100 << attempt.saturating_sub(3).min(5))
+}
+
+fn grouped_write_stats(
+    pending: &IcebergGroupedPending,
+    upload_duration: Option<Duration>,
+    commit_duration: Duration,
+) -> SinkWriteStats {
+    let millis = |duration: Duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    SinkWriteStats {
+        // The host reconciles accepted rows against source messages; final-state
+        // collapse writes fewer, so the transport reports the payload row count.
+        rows: None,
+        bytes: Some(pending.files.iter().map(|file| file.bytes).sum()),
+        objects: Some(pending.files.len() as u64),
+        encode_duration_ms: None,
+        upload_duration_ms: upload_duration.map(millis),
+        commit_duration_ms: Some(millis(commit_duration)),
+    }
 }
 
 fn schema_version_invalidates_table_cache(installed: u64, incoming: u64) -> bool {
@@ -2877,6 +3307,27 @@ fn equality_ids_for_columns(
                 })
         })
         .collect()
+}
+
+/// Before the epoch reads as 0, which expires nothing.
+fn wall_clock_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+impl<S: SinkSpec> IcebergWriter<S> {
+    /// The idempotency gate plus the owning pipeline, which history expiry uses.
+    fn grouped_commit_properties(&self, manifest: &ObjectWriteManifest) -> HashMap<String, String> {
+        let mut properties = grouped_snapshot_properties(manifest);
+        properties.insert(
+            history::SNAPSHOT_PIPELINE.to_string(),
+            self.context.pipeline_name.clone(),
+        );
+        properties
+    }
 }
 
 fn grouped_snapshot_properties(manifest: &ObjectWriteManifest) -> HashMap<String, String> {
@@ -3723,6 +4174,11 @@ fn glue_already_exists(err: &iceberg::Error) -> bool {
     err.kind() == iceberg::ErrorKind::Unexpected
         && err.to_string().contains("AlreadyExistsException")
 }
+
+#[cfg(test)]
+mod grouped_tests;
+#[cfg(test)]
+mod maintenance_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4600,9 +5056,10 @@ mod tests {
         };
         for id in ["1", "2"] {
             let committed = writer
-                .commit_grouped_data_append_with_retries(
+                .commit_grouped_append_with_retries(
                     catalog.as_ref(),
                     ident.clone(),
+                    None,
                     vec![data_file(&format!(
                         "memory://warehouse/lake/data-{id}.parquet"
                     ))],
@@ -4631,9 +5088,10 @@ mod tests {
         }
 
         let third = writer
-            .commit_grouped_data_append_with_retries(
+            .commit_grouped_append_with_retries(
                 catalog.as_ref(),
                 ident.clone(),
+                None,
                 vec![data_file("memory://warehouse/lake/data-3.parquet")],
                 &grouped_manifest("3"),
             )
@@ -4641,9 +5099,10 @@ mod tests {
             .unwrap();
         assert!(!third.already_committed);
         let replay = writer
-            .commit_grouped_data_append_with_retries(
+            .commit_grouped_append_with_retries(
                 catalog.as_ref(),
                 ident.clone(),
+                None,
                 vec![data_file("memory://warehouse/lake/data-1.parquet")],
                 &grouped_manifest("1"),
             )

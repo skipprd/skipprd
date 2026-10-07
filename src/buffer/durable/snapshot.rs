@@ -119,6 +119,36 @@ pub fn read_snapshot(paths: &PipelinePaths) -> Result<Option<StateSnapshot>, Dur
         .map_err(|err| DurableError::Io(err.to_string()))
 }
 
+/// Committed, unreclaimed segment ids in commit order: the retained snapshot's
+/// segments, then suffix `CommitSegment`s, minus suffix `ReclaimSegment`s.
+pub fn live_segment_ids(log: &MutationLog) -> Result<Vec<String>, DurableError> {
+    let mut live = Vec::new();
+    let mut seen = HashSet::new();
+    let mut reclaimed = HashSet::new();
+    if let Some(snapshot) = read_snapshot(log.paths())? {
+        for descriptor in snapshot.segments {
+            if seen.insert(descriptor.segment_id.clone()) {
+                live.push(descriptor.segment_id);
+            }
+        }
+    }
+    for envelope in log.committed_envelopes() {
+        match &envelope.body {
+            DurableMutation::CommitSegment { descriptor, .. } => {
+                if seen.insert(descriptor.segment_id.clone()) {
+                    live.push(descriptor.segment_id.clone());
+                }
+            }
+            DurableMutation::ReclaimSegment { segment_id } => {
+                reclaimed.insert(segment_id.clone());
+            }
+            DurableMutation::PutCompaction { .. } | DurableMutation::CompleteSlices { .. } => {}
+        }
+    }
+    live.retain(|id| !reclaimed.contains(id));
+    Ok(live)
+}
+
 /// Compaction planner and log retention share this snapshot+suffix-log view.
 pub fn clustered_compaction_sot(
     paths: &PipelinePaths,

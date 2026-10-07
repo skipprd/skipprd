@@ -702,6 +702,9 @@ pub struct SinkRunRequest {
     pub source_contract: Option<SourceNamespaceContract>,
     #[serde(default)]
     pub payload_mode: RuntimeSinkPayloadMode,
+    /// Always present on the bincode wire; `None` when the host sent no fence.
+    #[serde(default)]
+    pub live_wal_segments: Option<crate::plugins::LiveWalSegments>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -916,6 +919,7 @@ mod tests {
             cdc_ctx: None,
             source_contract: None,
             payload_mode: RuntimeSinkPayloadMode::FullStream,
+            live_wal_segments: None,
         })
         .unwrap();
         let decoded: SinkRunRequest = bincode::deserialize(&bytes).unwrap();
@@ -1038,6 +1042,7 @@ mod tests {
             cdc_ctx: None,
             source_contract: Some(contract.clone()),
             payload_mode: RuntimeSinkPayloadMode::FullStream,
+            live_wal_segments: None,
         })
         .unwrap();
         let decoded: SinkRunRequest = bincode::deserialize(&bytes).unwrap();
@@ -1125,6 +1130,37 @@ mod tests {
         assert_eq!(decoded.stats.rows, Some(42));
         assert_eq!(decoded.stats.objects, None);
         assert_eq!(decoded.stats.commit_duration_ms, None);
+    }
+
+    #[test]
+    fn sink_ack_phase_latencies_roundtrip() {
+        let stats = SinkWriteStats {
+            rows: Some(3),
+            bytes: Some(4096),
+            objects: Some(2),
+            encode_duration_ms: None,
+            upload_duration_ms: Some(1_250),
+            commit_duration_ms: Some(80),
+        };
+        let frame = PluginFrame::SinkAck(SinkAck {
+            request_id: 12,
+            outcome: SinkWriteOutcome::Applied,
+            receipt: CommitReceipt {
+                version: COMMIT_RECEIPT_VERSION,
+                compaction_id: "c2".into(),
+                idempotency_key: "k2".into(),
+                wal_refs_fingerprint: "refs".into(),
+                authority: CommitReceiptAuthority::SinkWrite,
+            },
+            stats: stats.clone(),
+            catalog_intents: Vec::new(),
+        });
+        let decoded: PluginFrame =
+            bincode::deserialize(&bincode::serialize(&frame).unwrap()).unwrap();
+        let PluginFrame::SinkAck(decoded) = decoded else {
+            panic!("expected SinkAck");
+        };
+        assert_eq!(decoded.stats, stats);
     }
 
     #[test]

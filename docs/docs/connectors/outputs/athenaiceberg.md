@@ -53,6 +53,15 @@ object_store:
 | `replace_partition` | Yes |
 | `replace_table` | Yes |
 
+## Table history and maintenance
+
+The sink maintains its own tables, the same way as [SkipprLake](skipprlake.md#table-history-and-maintenance):
+
+- Snapshots older than 24 hours are expired once the newest 100 commits are kept. Do not rely on Athena time travel (`FOR TIMESTAMP AS OF`) beyond that window.
+- Small files are bin-packed, and partitions with more than 16 equality-delete files are rewritten with the deletes applied.
+
+You do not need to run Athena `OPTIMIZE` or `VACUUM` for tables this sink writes.
+
 ## Related
 
 - [AthenaIceberg schema sink](../schema_sinks/athenaiceberg.md)

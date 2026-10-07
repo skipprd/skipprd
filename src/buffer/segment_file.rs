@@ -124,6 +124,11 @@ pub struct SegmentFile {
 #[cfg(test)]
 static FULL_PART_META_SCANS: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(test)]
+thread_local! {
+    static INDEX_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -269,6 +274,26 @@ impl SegmentFile {
         let mut body = Vec::new();
         body_file.read_to_end(&mut body)?;
         Self::admit_owned_pair_bytes(&body, &buf)
+    }
+
+    /// SEGF/PART headers of an owned pair, bound to its SEGC marker. Seeks past
+    /// payloads and never hashes the body: payload integrity is proven once at
+    /// admission, startup reconcile, catch-up install, and by readers.
+    pub fn read_index_path(seg_path: &Path) -> io::Result<SegmentFileMetadata> {
+        #[cfg(test)]
+        INDEX_READS.with(|reads| reads.set(reads.get() + 1));
+        let mut buf = [0u8; COMMIT_HEADER_LEN];
+        fs::File::open(Self::commit_path_for_seg(seg_path))?.read_exact(&mut buf)?;
+        let commit = Self::parse_commit_header(&buf)?;
+        let mut reader = io::BufReader::new(fs::File::open(seg_path)?);
+        let meta = Self::read_metadata_from_reader(&mut reader)?;
+        Self::bind_commit(&commit, &meta)?;
+        Ok(meta)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_read_count() -> usize {
+        INDEX_READS.with(std::cell::Cell::get)
     }
 
     pub fn reclaim_local_pair(seg_path: &Path) -> io::Result<WalPairReclaim> {
@@ -1075,6 +1100,44 @@ mod tests_wal_writer {
         let err = SegmentFile::admit_owned_pair_path(&seg.path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("FOOT sha256"));
+    }
+
+    #[test]
+    fn read_index_path_binds_segc_without_hashing_the_body() {
+        let (_dir, seg, sha, meta) = snapshot_one_part("index-only");
+        let commit =
+            SegmentFile::build_commit_header_bytes(meta.num_partitions, meta.total_bytes, &sha);
+        fs::write(SegmentFile::commit_path_for_seg(&seg.path), commit).unwrap();
+        let mut body = fs::read(&seg.path).unwrap();
+        let flip_at = body.len() - FOOTER_LEN - 1;
+        body[flip_at] ^= 0xff;
+        fs::write(&seg.path, &body).unwrap();
+
+        let indexed = SegmentFile::read_index_path(&seg.path).unwrap();
+        assert_eq!(indexed.body_sha256, sha);
+        assert_eq!(indexed.index.len(), meta.index.len());
+        assert_eq!(indexed.index[0].start, meta.index[0].start);
+        assert!(SegmentFile::admit_owned_pair_path(&seg.path).is_err());
+    }
+
+    #[test]
+    fn read_index_path_refuses_segc_naming_another_body() {
+        let (_dir, seg, _sha, meta) = snapshot_one_part("index-mismatch");
+        let commit = SegmentFile::build_commit_header_bytes(
+            meta.num_partitions,
+            meta.total_bytes,
+            &[7u8; 32],
+        );
+        fs::write(SegmentFile::commit_path_for_seg(&seg.path), commit).unwrap();
+        let err = SegmentFile::read_index_path(&seg.path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_index_path_requires_the_commit_marker() {
+        let (_dir, seg, _sha, _meta) = snapshot_one_part("index-unowned");
+        let err = SegmentFile::read_index_path(&seg.path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

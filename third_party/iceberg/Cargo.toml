@@ -173,7 +173,7 @@ features = ["derive"]
 
 [dependencies.tokio]
 version = "1.47"
-features = ["sync"]
+features = ["sync", "rt"]
 optional = false
 default-features = false
 

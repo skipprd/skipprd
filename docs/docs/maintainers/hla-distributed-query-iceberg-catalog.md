@@ -443,6 +443,42 @@ Catalog requirements:
 
 Iceberg snapshot summaries preserve Skippr compaction ID, idempotency key, schema fingerprint, WAL-ref fingerprint, and ref count.
 
+### Table history and the live-WAL fence
+
+Every grouped commit also records `skippr.pipeline` and `skippr.wal-segment-ids`. Those snapshot properties are two things at once: the replay gate for a crash between the lake commit and the WAL completion quorum (`already_committed`), and the exclude set the live-WAL selector subtracts. Expiry therefore MUST NOT remove a snapshot whose segments the host still holds.
+
+The host sends the live set on every grouped sink request as `live_wal_segments`: `StateSnapshot.segments` ∪ suffix `CommitSegment`, minus `ReclaimSegment`, the same derivation as `select_live_ordinals`. An unreadable snapshot sends `None`, and `None` expires nothing.
+
+Under the table lane, after the commit and its idempotency manifest, the writer expires a snapshot only when all of these hold:
+
+- it is not `main`, a branch or tag head, or among the newest 100 snapshots;
+- it is at least 24 hours old (injected clock);
+- its `skippr.pipeline` is this pipeline, and none of its `skippr.wal-segment-ids` is live;
+- if it removed files (`deleted-data-files` or `removed-delete-files`), no older snapshot is retained.
+
+Expiry commits at least 16 and at most 256 snapshots, asserts the current `main`, and never fails the write: a conflict or error keeps history. Retention is a code ceiling, not configuration. It is not a time-travel promise.
+
+After the expiry commit, the writer deletes what only expired snapshots referenced. History on `main` is linear, so a manifest lives on a contiguous run of snapshots; it is deleted once neither retained neighbour of an expired snapshot lists it. Expired manifest lists go too, and so do files a file-removing expired snapshot marked DELETED. Tables are created with `write.metadata.delete-after-commit.enabled`. The Skippr catalogs (DynamoDB, Cloud Tables, filesystem) honour it: after a successful pointer swap they drop `metadata.json` files that fell out of `metadata-log`. The filesystem catalog also drops the matching `v{N}.metadata.json` aliases and refuses an alias at or below the latest listed version. The upstream Glue catalog (AthenaIceberg) keeps superseded `metadata.json` objects. They cost storage only; a commit never reads them, and expiry bounds the size of each one. A crash between a commit and its deletes leaks orphans, never live data.
+
+### Automatic maintenance
+
+The same pass runs a bounded rewrite before expiry. The snapshot-summary totals gate planning: more than 32 data files averaging under 16 MiB, or more than 16 delete files. A plan that finds nothing records those totals, and planning waits for 32 more data files or 16 more delete files. A failed pass records them too.
+
+Per partition of the default spec:
+
+- more than 16 delete files, and the partition fits the pass ceiling: rewrite every data file and remove every delete file (`Overwrite`);
+- more than 16 delete files, too large: log `lake_maintenance_partition_too_large` and fall through to bin-packing;
+- more than 32 data files averaging under 16 MiB: bin-pack the files under 16 MiB (`Replace`).
+
+One pass reads at most 512 MiB or 64 data files. Partitions written under another spec, or with position deletes, are skipped whole.
+
+Invariants:
+
+- Rewritten rows are read through the Iceberg reader with every live equality delete applied. The outputs take the new snapshot's sequence number, so deletes older than it no longer apply to them. That is only correct because the commit asserts the starting snapshot (`RewriteFilesAction`, `RefSnapshotIdMatch`). A conflict aborts; the next pass replans.
+- Output names are a hash of the starting snapshot id and the input and removed file set. Inputs are read one file at a time, so a retried upload rewrites identical bytes under the same name.
+- A receipt (`metadata/skippr-maintenance/{hash}.pending.json`) records the uploaded outputs. A retry from the same snapshot commits the receipt without rewriting. The receipt is deleted after the commit.
+- Maintenance snapshots carry `skippr.pipeline` and `skippr.maintenance`, and no WAL segment ids. They never satisfy the grouped replay gate and never change the live-WAL exclude set.
+
 ## Query architecture
 
 ### Iceberg cold provider

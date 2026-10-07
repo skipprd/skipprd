@@ -212,7 +212,7 @@ static SWEEP_CYCLE_COUNTER: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 /// Entries are removed when all partitions in a segment have been compacted.
 struct CachedSegment {
     source: SegmentSource,
-    meta: SegmentFileMetadata,
+    meta: Arc<SegmentFileMetadata>,
 }
 
 static SEGMENT_CACHE: OnceLazy<DashMap<String, CachedSegment>> = OnceLazy::new(DashMap::new);
@@ -228,7 +228,7 @@ fn compaction_index() -> std::sync::MutexGuard<'static, CompactionIndex> {
 #[derive(Clone)]
 struct CompactionEntry {
     source: SegmentSource,
-    meta: SegmentFileMetadata,
+    meta: Arc<SegmentFileMetadata>,
     ordinal: usize,
     idx: SegmentPartitionIndexEntry,
     wal_ref: WalPartRef,
@@ -1652,39 +1652,16 @@ impl Buffers {
             let namespace = work.txn.namespace.clone();
             let compaction_id = work.txn.id.clone();
             let target = work.txn.target_filename.clone();
-            let wal_parts = work.entries.len();
-            let timeout = Self::grouped_compaction_timeout();
             // From the first poll onward compact_grouped_work owns release through
             // its WorkGuard. Before that, this future owns the planner reservation.
             reservation.handoff();
-            match tokio::time::timeout(
-                timeout,
-                Self::compact_grouped_work(&config, work, shared_output, budget),
-            )
-            .await
-            {
-                Ok(Ok(compacted)) => compacted,
-                Ok(Err(err)) => {
+            match Self::compact_grouped_work(&config, work, shared_output, budget).await {
+                Ok(compacted) => compacted,
+                Err(err) => {
                     error!(
                         "Compactor: grouped compaction failed sink_ref={} namespace={} compaction_id={} target={} err={}",
                         sink_ref, namespace, compaction_id, target, err
                     );
-                    false
-                }
-                Err(_) => {
-                    let active = format_in_flight_grouped_compactions();
-                    error!(
-                        "Compactor: grouped compaction timed out sink_ref={} namespace={} compaction_id={} target={} wal_parts={} timeout_secs={} active_grouped=[{}]",
-                        sink_ref,
-                        namespace,
-                        compaction_id,
-                        target,
-                        wal_parts,
-                        timeout.as_secs(),
-                        active,
-                    );
-                    COMPACT_FAILURES.insert(format!("{}:{}", sink_ref, compaction_id), 1);
-                    crate::metrics::counters::add_wal_compaction_transaction_failed(1);
                     false
                 }
             }
@@ -1784,7 +1761,13 @@ impl Buffers {
                 wal_ref,
             });
         }
-        SEGMENT_CACHE.insert(id.clone(), CachedSegment { source, meta });
+        SEGMENT_CACHE.insert(
+            id.clone(),
+            CachedSegment {
+                source,
+                meta: Arc::new(meta),
+            },
+        );
         let mut index = compaction_index();
         index.register_segment(
             &id,
@@ -1806,6 +1789,23 @@ impl Buffers {
 
     pub(crate) fn forget_reclaimed_segment(segment_id: &str) {
         Self::segment_cache_remove(segment_id);
+    }
+
+    /// Index of a committed local segment: the cached registration when it names
+    /// this path, else a SEGC-bound header scan. Never hashes the body.
+    pub(crate) fn segment_index(seg_path: &Path) -> io::Result<Arc<SegmentFileMetadata>> {
+        if let Some(cached) = seg_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|id| SEGMENT_CACHE.get(id))
+        {
+            if let SegmentSource::Disk(path) | SegmentSource::Wal { path, .. } = &cached.source {
+                if path == seg_path {
+                    return Ok(cached.meta.clone());
+                }
+            }
+        }
+        SegmentFile::read_index_path(seg_path).map(Arc::new)
     }
 
     pub(crate) fn planner_apply_compaction(txn: &CompactionTransaction) {
@@ -2030,14 +2030,15 @@ impl Buffers {
         }
     }
 
-    fn persist_compaction_manifest(config: &Config, txn: &CompactionTransaction) -> io::Result<()> {
+    async fn persist_compaction_manifest(
+        config: &Config,
+        txn: &CompactionTransaction,
+    ) -> io::Result<()> {
         if let Some(store) = crate::buffer::wal_store::ingest_durable_store() {
-            crate::buffer::wal_store::block_on_async(async move {
-                store
-                    .commit_put_compaction(txn.clone())
-                    .await
-                    .map_err(|err| io::Error::other(err.to_string()))
-            })?;
+            store
+                .commit_put_compaction(txn.clone())
+                .await
+                .map_err(|err| io::Error::other(err.to_string()))?;
         } else {
             persist_manifest(config, txn)?;
         }
@@ -2139,12 +2140,6 @@ impl Buffers {
         planner_metrics.slices_examined = planner_metrics
             .slices_examined
             .saturating_add(plan.slices_examined);
-        if plan.oversized_slices_deferred > 0 {
-            warn!(
-                "Compactor: deferred {} indivisible WAL slices larger than WAL_COMPACTION_GROUP_TARGET_BYTES={}",
-                plan.oversized_slices_deferred, target_bytes
-            );
-        }
         for planned in plan.groups {
             let refs = planned
                 .slices
@@ -2681,7 +2676,7 @@ impl Buffers {
                 if !commit.exists() {
                     continue;
                 }
-                if let Ok(m) = SegmentFile::admit_owned_pair_path(&p) {
+                if let Ok(m) = Self::segment_index(&p) {
                     let segment_id = p
                         .file_stem()
                         .and_then(|value| value.to_str())
@@ -3523,7 +3518,7 @@ impl Buffers {
 
     fn tombstone_grouped_work(config: &Config, work: &CompactionWork) -> io::Result<()> {
         let ledger = Self::completion_ledger(config);
-        let mut grouped: HashMap<String, (SegmentSource, SegmentFileMetadata, Vec<usize>)> =
+        let mut grouped: HashMap<String, (SegmentSource, Arc<SegmentFileMetadata>, Vec<usize>)> =
             HashMap::new();
         for entry in work.entries.iter() {
             let group = grouped
@@ -3654,7 +3649,7 @@ impl Buffers {
                 .map(|entry| entry.source.segment_id().to_string()),
         );
 
-        Self::persist_compaction_manifest(&config, &work.txn)?;
+        Self::persist_compaction_manifest(config, &work.txn).await?;
         let _decode_permit = budget.acquire_decode().await?;
         let stream_started = std::time::Instant::now();
         let (batch_stream, cdc_ctx, rows, row_counter, rows_known_at_build) =
@@ -3679,7 +3674,8 @@ impl Buffers {
                         let _ = Self::persist_compaction_manifest(
                             config,
                             &work.txn.clone().mark_tombstoned(),
-                        );
+                        )
+                        .await;
                         return Ok(true);
                     }
                     let err_str = err.to_string();
@@ -3742,7 +3738,8 @@ impl Buffers {
             source_contract: source_contract.as_ref(),
         };
         let grouped_ctx = crate::plugins::GroupedSinkWriteContext::try_from(sink_ctx)
-            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?
+            .with_live_wal_segments(crate::buffer::wal_store::live_wal_segments(config).await);
         if work.entries.len() >= 100
             && (grouped_ctx.grouping_key.partition.is_empty()
                 || grouped_ctx.grouping_key.time.is_none())
@@ -3766,7 +3763,7 @@ impl Buffers {
             crate::buffer::sink_conflict::acquire_exact_once_commit_lane(&work.txn).await;
         let sink_permit = budget.acquire_sink().await?;
         let sent_txn = work.txn.clone().mark_sent();
-        Self::persist_compaction_manifest(config, &sent_txn)?;
+        Self::persist_compaction_manifest(config, &sent_txn).await?;
         if let Some(store) = crate::buffer::wal_store::ingest_durable_store() {
             crate::cluster::failpoint::hit_async(
                 crate::cluster::failpoint::FailpointName::HoldBeforeCompactionSink,
@@ -3789,9 +3786,23 @@ impl Buffers {
             work.txn.target_filename,
         );
         let upload_started = std::time::Instant::now();
-        let sink_result = shared_output
-            .sync_grouped(grouped_reader, grouped_ctx)
-            .await;
+        let sink_result = match tokio::time::timeout(
+            timeout,
+            shared_output.sync_grouped(grouped_reader, grouped_ctx),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "grouped sink write timed out wal_parts={} timeout_secs={} active_grouped=[{}]",
+                    work.entries.len(),
+                    timeout.as_secs(),
+                    format_in_flight_grouped_compactions(),
+                ),
+            )),
+        };
         drop(sink_permit);
         metrics_hot::record_sink_apply(upload_started.elapsed());
         if let Some(store) = crate::buffer::wal_store::ingest_durable_store() {
@@ -3829,7 +3840,7 @@ impl Buffers {
         observe_grouped_compaction_test_event(GroupedCompactionTestEvent::SinkSucceeded);
         let final_rows = row_counter.load(AtomicOrdering::Relaxed);
         progress.set_rows(final_rows);
-        Self::persist_compaction_manifest(config, &sent_txn.clone().mark_acked())?;
+        Self::persist_compaction_manifest(config, &sent_txn.clone().mark_acked()).await?;
         #[cfg(test)]
         observe_grouped_compaction_test_event(GroupedCompactionTestEvent::ManifestAcked);
         Self::tombstone_grouped_work(config, &work)?;
@@ -3846,24 +3857,14 @@ impl Buffers {
                 .collect();
             let compaction_id = work.txn.id.clone();
             let tombstoned = sent_txn.clone().mark_tombstoned();
-            crate::buffer::wal_store::block_on_async({
-                let store = store.clone();
-                async move {
-                    store
-                        .commit_complete_slices(compaction_id, entries)
-                        .await
-                        .map_err(|err| std::io::Error::other(err.to_string()))
-                }
-            })?;
-            crate::buffer::wal_store::block_on_async({
-                let store = store.clone();
-                async move {
-                    store
-                        .commit_put_compaction(tombstoned)
-                        .await
-                        .map_err(|err| std::io::Error::other(err.to_string()))
-                }
-            })?;
+            store
+                .commit_complete_slices(compaction_id, entries)
+                .await
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+            store
+                .commit_put_compaction(tombstoned)
+                .await
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
             let ledger = crate::buffer::completion_ledger::SegmentCompletionLedger::new(
                 store.paths().completions.clone(),
             );
@@ -3877,20 +3878,17 @@ impl Buffers {
                     continue;
                 };
                 let path = store.paths().segment(&id);
-                let index =
-                    match crate::buffer::segment_file::SegmentFile::admit_owned_pair_path(&path) {
-                        Ok(meta) => meta.index,
-                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-                        Err(err) => return Err(err),
-                    };
-                if ledger.all_complete(&segment_id, &index)? {
-                    let store = store.clone();
-                    crate::buffer::wal_store::block_on_async(async move {
-                        store
-                            .commit_reclaim_segment(segment_id)
-                            .await
-                            .map_err(|err| std::io::Error::other(err.to_string()))
-                    })?;
+                let meta = match Self::segment_index(&path) {
+                    Ok(meta) => Some(meta),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(err) => return Err(err),
+                };
+                let index = meta.as_ref().map_or(&[][..], |meta| meta.index.as_slice());
+                if ledger.all_complete(&segment_id, index)? {
+                    store
+                        .commit_reclaim_segment(segment_id)
+                        .await
+                        .map_err(|err| std::io::Error::other(err.to_string()))?;
                 }
             }
         }
@@ -4632,6 +4630,7 @@ mod tests_wal_commit {
         Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes).unwrap();
 
         let source = SegmentSource::Disk(segf.path.clone());
+        let shared_meta = Arc::new(meta.clone());
         let entries = meta
             .index
             .iter()
@@ -4650,7 +4649,7 @@ mod tests_wal_commit {
                 };
                 CompactionEntry {
                     source: source.clone(),
-                    meta: meta.clone(),
+                    meta: shared_meta.clone(),
                     ordinal,
                     idx,
                     wal_ref,
@@ -4665,8 +4664,15 @@ mod tests_wal_commit {
         }
     }
 
+    enum SyntheticGroupedBehavior {
+        Apply,
+        Fail(&'static str),
+        ApplyAfter(TokioDuration),
+        Hang,
+    }
+
     struct SyntheticGroupedSink {
-        failure: Option<&'static str>,
+        behavior: SyntheticGroupedBehavior,
     }
 
     #[async_trait]
@@ -4686,9 +4692,14 @@ mod tests_wal_commit {
             _ctx: crate::plugins::GroupedSinkWriteContext<'_>,
         ) -> io::Result<SinkWriteOutcome> {
             while reader.next_chunk().await?.is_some() {}
-            match self.failure {
-                Some(message) => Err(io::Error::other(message)),
-                None => Ok(SinkWriteOutcome::Applied),
+            match self.behavior {
+                SyntheticGroupedBehavior::Apply => Ok(SinkWriteOutcome::Applied),
+                SyntheticGroupedBehavior::Fail(message) => Err(io::Error::other(message)),
+                SyntheticGroupedBehavior::ApplyAfter(delay) => {
+                    tokio::time::sleep(delay).await;
+                    Ok(SinkWriteOutcome::Applied)
+                }
+                SyntheticGroupedBehavior::Hang => std::future::pending().await,
             }
         }
 
@@ -5067,7 +5078,9 @@ mod tests_wal_commit {
         );
 
         SegmentFile::reset_full_part_meta_scan_count();
-        let sink = SyntheticGroupedSink { failure: None };
+        let sink = SyntheticGroupedSink {
+            behavior: SyntheticGroupedBehavior::Apply,
+        };
         let works = Buffers::next_compaction_transactions(
             &Config::new(),
             PARTS,
@@ -5287,8 +5300,9 @@ mod tests_wal_commit {
                 }
             }
         });
-        let sink: Arc<Box<dyn DataSink + Send + Sync>> =
-            Arc::new(Box::new(SyntheticGroupedSink { failure: None }));
+        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(SyntheticGroupedSink {
+            behavior: SyntheticGroupedBehavior::Apply,
+        }));
         let budget = Arc::new(FlushExecutionBudget::new(1, 1));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -5333,7 +5347,7 @@ mod tests_wal_commit {
             observed_for_hook.lock().unwrap().push(event);
         });
         let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(SyntheticGroupedSink {
-            failure: Some("synthetic sink failure"),
+            behavior: SyntheticGroupedBehavior::Fail("synthetic sink failure"),
         }));
         let budget = Arc::new(FlushExecutionBudget::new(1, 1));
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -5359,6 +5373,80 @@ mod tests_wal_commit {
         );
         COMPACT_FAILURES.remove(&failure_key);
         fs::remove_file(manifest_path).unwrap();
+        reset_in_memory_segments();
+    }
+
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    #[serial]
+    fn hung_grouped_sink_times_out_at_the_deadline_and_keeps_slices() {
+        let (base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let backlog = synthetic_disk_backlog(&base, "hung-group", &["data_sinks.ds_datalake"]);
+        let work = backlog.work_for_sink("data_sinks.ds_datalake");
+        let failure_key = format!("{}:{}", work.txn.sink_ref, work.txn.id);
+        let manifest_path = crate::buffer::compaction_transaction::manifest_path_for(
+            &crate::buffer::compaction_transaction::manifest_dir(&Config::new()),
+            &work.txn.id,
+        );
+        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(SyntheticGroupedSink {
+            behavior: SyntheticGroupedBehavior::Hang,
+        }));
+        let budget = Arc::new(FlushExecutionBudget::new(1, 1));
+        let timeout = Buffers::grouped_compaction_timeout();
+
+        let (error, elapsed) = paused_runtime().block_on(async {
+            let started = tokio::time::Instant::now();
+            let error = Buffers::compact_grouped_work(&Config::new(), work, sink, budget)
+                .await
+                .unwrap_err();
+            (error, started.elapsed())
+        });
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(elapsed >= timeout && elapsed < timeout + TokioDuration::from_secs(1));
+        assert!(backlog.segment_path.exists());
+        assert!(commit_exists(&backlog.segment_path));
+        assert!(backlog.tombstone_paths().iter().all(|path| !path.exists()));
+        assert_eq!(
+            manifest_state(&manifest_path),
+            CompactionTransactionState::Sent
+        );
+        COMPACT_FAILURES.remove(&failure_key);
+        fs::remove_file(manifest_path).unwrap();
+        reset_in_memory_segments();
+    }
+
+    #[test]
+    #[serial]
+    fn grouped_sink_finishing_inside_the_deadline_completes_bookkeeping() {
+        let (base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let backlog = synthetic_disk_backlog(&base, "slow-group", &["data_sinks.ds_datalake"]);
+        let work = backlog.work_for_sink("data_sinks.ds_datalake");
+        let timeout = Buffers::grouped_compaction_timeout();
+        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(SyntheticGroupedSink {
+            behavior: SyntheticGroupedBehavior::ApplyAfter(timeout - TokioDuration::from_millis(1)),
+        }));
+        let budget = Arc::new(FlushExecutionBudget::new(1, 1));
+
+        let compacted = paused_runtime().block_on(Buffers::compaction_job_future(
+            Config::new(),
+            work,
+            sink,
+            budget,
+        ));
+
+        assert!(compacted);
+        assert!(!backlog.segment_path.exists());
+        assert!(!commit_exists(&backlog.segment_path));
         reset_in_memory_segments();
     }
 }
@@ -5443,14 +5531,14 @@ mod compaction_semantics_tests {
         };
         CompactionEntry {
             source: SegmentSource::Disk(PathBuf::from("/tmp/test.seg")),
-            meta: SegmentFileMetadata {
+            meta: Arc::new(SegmentFileMetadata {
                 created_at_secs: 0,
                 total_bytes: 100,
                 num_partitions: 1,
                 offsets: HashMap::new(),
                 index: vec![idx.clone()],
                 body_sha256: [0u8; 32],
-            },
+            }),
             ordinal: 0,
             idx,
             wal_ref,
@@ -5600,14 +5688,14 @@ mod planner_sot_tests {
             "gone".into(),
             CachedSegment {
                 source: SegmentSource::Disk(PathBuf::from("/tmp/gone.seg")),
-                meta: SegmentFileMetadata {
+                meta: Arc::new(SegmentFileMetadata {
                     created_at_secs: 0,
                     total_bytes: 1,
                     num_partitions: 0,
                     offsets: HashMap::new(),
                     index: Vec::new(),
                     body_sha256: [0u8; 32],
-                },
+                }),
             },
         );
         compaction_index().upsert_manifest(CompactionTransaction {

@@ -10,6 +10,7 @@ Skipprd is not a warehouse product. Warehouses you already use (Athena, Snowflak
 
 1. **ELT** ingest writes a durable WAL, then compact to Iceberg Parquet in object storage.
 2. **SkipprLake**, **AthenaIceberg**, and **Duckdb** each write an Iceberg catalog skipprd can query. SkipprLake pointers live in DynamoDB or Cloud Tables (`catalog_table`). AthenaIceberg uses Glue. Duckdb uses a filesystem catalog on `file://`.
-3. The lake identity is Iceberg `namespace.table`. `skipprd serve` Flight SQL and REST expose that name. `skipprd query` also registers `pipeline.namespace` as the local Iceberg ∪ WAL view of ingest. Hive Athena stays WAL-only for skipprd SQL. That clustered path is documented in [maintainer architecture](../maintainers/hla-distributed-query-iceberg-catalog.md).
+3. Those sinks maintain their Iceberg tables automatically. They expire snapshots older than 24 hours once the newest 100 commits are kept, rewrite small files, and remove equality-delete files. Commit cost and table metadata stay flat as history grows. Older snapshots are not a time-travel promise.
+4. The lake identity is Iceberg `namespace.table`. `skipprd serve` Flight SQL and REST expose that name. `skipprd query` also registers `pipeline.namespace` as the local Iceberg ∪ WAL view of ingest. Hive Athena stays WAL-only for skipprd SQL. That clustered path is documented in [maintainer architecture](../maintainers/hla-distributed-query-iceberg-catalog.md).
 
 See also [How Skipprd Works](how-it-works.md), [SkipprLake](../connectors/outputs/skipprlake.md), [AthenaIceberg](../connectors/outputs/athenaiceberg.md), and [Duckdb](../connectors/outputs/duckdb.md).

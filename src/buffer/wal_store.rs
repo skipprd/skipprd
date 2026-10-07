@@ -69,6 +69,22 @@ fn ingest_primary_store(
     crate::buffer::durable::durable_store_for(&key).filter(|store| ingest_writer_store(store))
 }
 
+/// Fence for sink history expiry. Only this config's own pipeline store
+/// answers; any other store or a read error yields `None` (keep all history).
+pub(crate) async fn live_wal_segments(config: &Config) -> Option<crate::plugins::LiveWalSegments> {
+    let store = ingest_primary_store(config)?;
+    match store.live_wal_segments().await {
+        Ok(live) => Some(live),
+        Err(err) => {
+            tracing::warn!(
+                "WAL live-segment fence unavailable for pipeline {:?}: {err}",
+                store.key()
+            );
+            None
+        }
+    }
+}
+
 /// Ingest-path lookup: this process's writer store for the pipeline (ActivePrimary,
 /// OwnerElect, or Idle after fence). Replica stores are not ingest writers.
 /// Replica/query code must use [`crate::buffer::durable::durable_store_for`].
