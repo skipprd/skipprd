@@ -11678,6 +11678,8 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "skippr-plugin-macros",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -11770,8 +11772,10 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "skippr-iceberg-catalog",
+ "skippr-iceberg-catalog-fs",
  "skippr-object-writer",
  "skippr-runtime-sdk",
+ "tempfile",
  "tokio",
  "tracing",
 ]

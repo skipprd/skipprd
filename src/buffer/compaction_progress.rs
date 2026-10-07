@@ -119,6 +119,15 @@ pub fn sink_work_in_flight_count() -> usize {
         .count()
 }
 
+/// Age of the longest-running grouped write currently inside a sink call.
+pub fn oldest_sink_write_age() -> Option<Duration> {
+    GROUPED_COMPACTION_JOBS
+        .iter()
+        .filter(|entry| entry.value().phase == GroupedCompactionPhase::UploadingToSink)
+        .map(|entry| entry.value().phase_started_at.elapsed())
+        .max()
+}
+
 pub fn format_in_flight_grouped_compactions() -> String {
     if GROUPED_COMPACTION_JOBS.is_empty() {
         return "none".to_string();

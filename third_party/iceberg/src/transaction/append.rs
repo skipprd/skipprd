@@ -24,9 +24,7 @@ use uuid::Uuid;
 use crate::error::Result;
 use crate::spec::{DataFile, ManifestEntry, ManifestFile, Operation};
 use crate::table::Table;
-use crate::transaction::snapshot::{
-    DefaultManifestProcess, SnapshotProduceOperation, SnapshotProducer,
-};
+use crate::transaction::snapshot::{SnapshotProduceOperation, SnapshotProducer};
 use crate::transaction::{ActionCommit, TransactionAction};
 
 /// FastAppendAction is a transaction action for fast append data files to the table.
@@ -100,9 +98,7 @@ impl TransactionAction for FastAppendAction {
             snapshot_producer.validate_duplicate_files().await?;
         }
 
-        snapshot_producer
-            .commit(FastAppendOperation, DefaultManifestProcess)
-            .await
+        snapshot_producer.commit(FastAppendOperation).await
     }
 }
 
@@ -150,7 +146,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::spec::{
-        DataContentType, DataFileBuilder, DataFileFormat, Literal, MAIN_BRANCH, Struct,
+        DataContentType, DataFileBuilder, DataFileFormat, Literal, Struct, MAIN_BRANCH,
     };
     use crate::transaction::tests::make_v2_minimal_table;
     use crate::transaction::{Transaction, TransactionAction};

@@ -24,9 +24,7 @@ use uuid::Uuid;
 use crate::error::Result;
 use crate::spec::{DataFile, ManifestFile, Operation};
 use crate::table::Table;
-use crate::transaction::snapshot::{
-    DefaultManifestProcess, SnapshotProduceOperation, SnapshotProducer,
-};
+use crate::transaction::snapshot::{SnapshotProduceOperation, SnapshotProducer};
 use crate::transaction::{ActionCommit, TransactionAction};
 
 /// Commits new data files and equality-delete files in a single MoR snapshot.
@@ -118,9 +116,7 @@ impl TransactionAction for EqualityDeltaAppendAction {
             snapshot_producer.validate_duplicate_files().await?;
         }
 
-        snapshot_producer
-            .commit(EqualityDeltaOperation, DefaultManifestProcess)
-            .await
+        snapshot_producer.commit(EqualityDeltaOperation).await
     }
 }
 

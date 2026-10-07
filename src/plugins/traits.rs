@@ -221,6 +221,22 @@ impl GroupedWalPartitionKey {
     }
 }
 
+/// WAL segments of one pipeline that are committed and not yet reclaimed, read
+/// from its durable state. A sink snapshot naming one of them is still needed
+/// for replay idempotency and live-WAL query dedupe.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LiveWalSegments(std::collections::BTreeSet<String>);
+
+impl LiveWalSegments {
+    pub fn new(segment_ids: impl IntoIterator<Item = String>) -> Self {
+        Self(segment_ids.into_iter().collect())
+    }
+
+    pub fn contains(&self, segment_id: &str) -> bool {
+        self.0.contains(segment_id)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GroupedSinkWriteContext<'a> {
     pub filename: String,
@@ -232,6 +248,9 @@ pub struct GroupedSinkWriteContext<'a> {
     pub schema_fingerprint: String,
     pub cdc_ctx: Option<&'a SyncContext>,
     pub source_contract: Option<&'a SourceNamespaceContract>,
+    /// `None` when the host could not read its durable state; sinks then keep
+    /// all history.
+    pub live_wal_segments: Option<LiveWalSegments>,
 }
 
 impl<'a> TryFrom<SinkWriteContext<'a>> for GroupedSinkWriteContext<'a> {
@@ -254,11 +273,17 @@ impl<'a> TryFrom<SinkWriteContext<'a>> for GroupedSinkWriteContext<'a> {
             schema_fingerprint: ctx.schema_fingerprint,
             cdc_ctx: ctx.cdc_ctx,
             source_contract: ctx.source_contract,
+            live_wal_segments: None,
         })
     }
 }
 
 impl<'a> GroupedSinkWriteContext<'a> {
+    pub fn with_live_wal_segments(mut self, live: Option<LiveWalSegments>) -> Self {
+        self.live_wal_segments = live;
+        self
+    }
+
     pub fn to_sink_write_context(&self) -> SinkWriteContext<'a> {
         SinkWriteContext {
             filename: self.filename.clone(),

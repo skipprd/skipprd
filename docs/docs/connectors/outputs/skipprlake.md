@@ -57,6 +57,15 @@ object_store:
 
 See [Source landing semantics](../../concepts/source-landing-semantics.md).
 
+## Table history and maintenance
+
+The sink maintains its own tables. Nothing needs scheduling.
+
+- **Snapshot retention.** Snapshots older than 24 hours are expired once the newest 100 commits are kept, along with the manifests and metadata files only they used. Do not rely on time travel or rollback to older snapshots. Retention is fixed, not configurable.
+- **Small files and deletes.** After a commit, the sink may rewrite a partition's small files into larger ones. When a partition collects more than 16 equality-delete files (from `merge_by_key` or CDC), it rewrites that partition with the deletes applied and drops them. A pass is bounded, so large tables are maintained over several commits.
+
+Query results do not change: maintenance commits replace files without changing rows. External engines that read the table (Athena, Snowflake, DuckDB, Spark) see ordinary Iceberg `replace` and `overwrite` snapshots.
+
 ## Pipeline wiring
 
 ```yaml

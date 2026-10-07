@@ -1349,6 +1349,7 @@ where
         schema_fingerprint,
         cdc_ctx,
         source_contract,
+        live_wal_segments,
         ..
     } = request;
     let ctx = skippr_core::plugins::SinkWriteContext {
@@ -1364,7 +1365,8 @@ where
     ctx.validate_grouped::<<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport>()
         .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
     let grouped_ctx = skippr_core::plugins::GroupedSinkWriteContext::try_from(ctx)
-        .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+        .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?
+        .with_live_wal_segments(live_wal_segments);
     let replay_safe =
         <<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport as skippr_core::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
 
@@ -1864,6 +1866,7 @@ mod tests {
             cdc_ctx: None,
             source_contract: None,
             payload_mode: RuntimeSinkPayloadMode::GroupedChunks,
+            live_wal_segments: None,
         }
     }
 
@@ -2018,6 +2021,7 @@ mod tests {
             cdc_ctx: None,
             source_contract: None,
             payload_mode: RuntimeSinkPayloadMode::GroupedChunks,
+            live_wal_segments: None,
         };
         let manifest = ObjectWriteManifest::from_context("c9", "k9", "schema", &request.wal_refs);
         write_local_idempotency_manifest(&manifest).unwrap();

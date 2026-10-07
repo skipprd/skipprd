@@ -189,6 +189,11 @@ impl PipelineDurableStore {
         super::snapshot::clustered_compaction_sot(&self.paths, &log, &self.key)
     }
 
+    pub async fn live_wal_segments(&self) -> Result<crate::plugins::LiveWalSegments, DurableError> {
+        let log = self.log.lock().await;
+        super::snapshot::live_segment_ids(&log).map(crate::plugins::LiveWalSegments::new)
+    }
+
     pub async fn write_transfer_pack(&self) -> Result<super::snapshot::TransferPack, DurableError> {
         let log = self.log.lock().await;
         super::snapshot::write_transfer_pack(&self.paths, &log, &self.key)

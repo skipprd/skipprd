@@ -55,6 +55,8 @@ mod action;
 pub use action::*;
 mod append;
 mod equality_delta;
+mod expire_snapshots;
+mod rewrite_files;
 mod snapshot;
 mod sort_order;
 mod update_location;
@@ -74,6 +76,8 @@ use crate::table::Table;
 use crate::transaction::action::BoxedTransactionAction;
 use crate::transaction::append::FastAppendAction;
 use crate::transaction::equality_delta::EqualityDeltaAppendAction;
+use crate::transaction::expire_snapshots::ExpireSnapshotsAction;
+use crate::transaction::rewrite_files::RewriteFilesAction;
 use crate::transaction::sort_order::ReplaceSortOrderAction;
 use crate::transaction::update_location::UpdateLocationAction;
 use crate::transaction::update_properties::UpdatePropertiesAction;
@@ -160,6 +164,16 @@ impl Transaction {
         EqualityDeltaAppendAction::new()
     }
 
+    /// Removes the given snapshots from table metadata, asserting the current `main`.
+    pub fn expire_snapshots(&self, snapshot_ids: Vec<i64>) -> ExpireSnapshotsAction {
+        ExpireSnapshotsAction::new(snapshot_ids)
+    }
+
+    /// Replaces live files with rewritten data files, asserting the current `main`.
+    pub fn rewrite_files(&self) -> RewriteFilesAction {
+        RewriteFilesAction::new()
+    }
+
     /// Creates replace sort order action.
     pub fn replace_sort_order(&self) -> ReplaceSortOrderAction {
         ReplaceSortOrderAction::new()
@@ -211,6 +225,17 @@ impl Transaction {
             .build())
     }
 
+    /// Commit once against this transaction's base table. Unlike [`Self::commit`],
+    /// a concurrent change is never rebased: the base's requirements fail and
+    /// the caller re-reads the table and re-decides whether to commit at all.
+    pub async fn commit_without_rebase(self, catalog: &dyn Catalog) -> Result<Table> {
+        if self.actions.is_empty() {
+            return Ok(self.table);
+        }
+        let table_commit = self.table_commit().await?;
+        catalog.update_table(table_commit).await
+    }
+
     async fn do_commit(&mut self, catalog: &dyn Catalog) -> Result<Table> {
         let refreshed = catalog.load_table(self.table.identifier()).await?;
 
@@ -221,6 +246,11 @@ impl Transaction {
             self.table = refreshed.clone();
         }
 
+        let table_commit = self.table_commit().await?;
+        catalog.update_table(table_commit).await
+    }
+
+    async fn table_commit(&self) -> Result<TableCommit> {
         let mut current_table = self.table.clone();
         let mut existing_updates: Vec<TableUpdate> = vec![];
         let mut existing_requirements: Vec<TableRequirement> = vec![];
@@ -236,13 +266,11 @@ impl Transaction {
             )?;
         }
 
-        let table_commit = TableCommit::builder()
+        Ok(TableCommit::builder()
             .ident(self.table.identifier().to_owned())
             .updates(existing_updates)
             .requirements(existing_requirements)
-            .build();
-
-        catalog.update_table(table_commit).await
+            .build())
     }
 }
 
@@ -251,8 +279,8 @@ mod tests {
     use std::collections::HashMap;
     use std::fs::File;
     use std::io::BufReader;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
 
     use crate::catalog::MockCatalog;
     use crate::io::FileIO;

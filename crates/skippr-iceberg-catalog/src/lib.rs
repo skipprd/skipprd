@@ -9,6 +9,9 @@ use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use skippr_plugin_macros::SkipprConfig;
 
+mod metadata_cache;
+pub use metadata_cache::{delete_superseded_metadata, CachedMetadata, MetadataCache};
+
 static ICEBERG_CAS_CONFLICTS: AtomicU64 = AtomicU64::new(0);
 
 pub fn record_cas_conflict() {

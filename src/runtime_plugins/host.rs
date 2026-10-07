@@ -50,8 +50,8 @@ use crate::runtime_plugins::protocol::{
     RuntimeSchemaInstallRequest, RuntimeSchemaState, RuntimeSchemaStateInstallRequest,
     RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkError, RuntimeSinkInstallRequest,
     RuntimeSinkPayloadMode, RuntimeSourceConfig, RuntimeSourceIngestWindow, SchemaDelta,
-    SchemaNamespaceDelta, SchemaRunRequest, SinkAck, SinkChunk, SinkRunRequest, SourceEvent,
-    SourceStartRequest, COMMIT_RECEIPT_VERSION, MAX_RUNTIME_SINK_CHUNK_BYTES,
+    SchemaNamespaceDelta, SchemaRunRequest, SinkAck, SinkChunk, SinkRunRequest, SinkWriteStats,
+    SourceEvent, SourceStartRequest, COMMIT_RECEIPT_VERSION, MAX_RUNTIME_SINK_CHUNK_BYTES,
     RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
@@ -279,6 +279,19 @@ fn validate_catalog_intents(
 fn validate_sink_ack(ack: &SinkAck, envelope: &SinkApplyEnvelopeV2) -> io::Result<()> {
     validate_commit_receipt(&ack.receipt, envelope)?;
     validate_catalog_intents(&ack.catalog_intents)
+}
+
+/// Plugin counters live in the plugin process; the host tuner only sees what
+/// the ack reports.
+fn record_sink_ack_stats(stats: &SinkWriteStats) {
+    use crate::metrics::counters;
+    if let Some(rows) = stats.rows {
+        counters::add_parquet_rows(rows);
+    }
+    if let Some(upload_ms) = stats.upload_duration_ms {
+        counters::add_upload(1);
+        counters::add_upload_latency_ns(upload_ms.saturating_mul(1_000_000));
+    }
 }
 
 impl RuntimeChildConnection {
@@ -3335,9 +3348,7 @@ impl RuntimeDataSinkPlugin {
                         return Err(err);
                     }
                     self.persist_catalog_intents(&ack.catalog_intents).await?;
-                    if let Some(rows) = ack.stats.rows {
-                        crate::metrics::counters::add_parquet_rows(rows);
-                    }
+                    record_sink_ack_stats(&ack.stats);
                     return Ok(ack.outcome);
                 }
                 PluginFrame::SinkError(RuntimeSinkError {
@@ -3622,9 +3633,7 @@ impl RuntimeDataSinkPlugin {
                         return Err(err);
                     }
                     self.persist_catalog_intents(&ack.catalog_intents).await?;
-                    if let Some(rows) = ack.stats.rows {
-                        crate::metrics::counters::add_parquet_rows(rows);
-                    }
+                    record_sink_ack_stats(&ack.stats);
                     return Ok(ack.outcome);
                 }
                 PluginFrame::SinkError(RuntimeSinkError {
@@ -3740,6 +3749,7 @@ impl DataSink for RuntimeDataSinkPlugin {
             cdc_ctx: ctx.cdc_ctx.cloned(),
             source_contract,
             payload_mode: RuntimeSinkPayloadMode::FullStream,
+            live_wal_segments: None,
         };
         self.send_sink_request(request, stream).await
     }
@@ -3797,6 +3807,7 @@ impl DataSink for RuntimeDataSinkPlugin {
             cdc_ctx: ctx.cdc_ctx.cloned(),
             source_contract,
             payload_mode: RuntimeSinkPayloadMode::GroupedChunks,
+            live_wal_segments: ctx.live_wal_segments,
         };
         self.send_grouped_sink_request(request, reader).await
     }
@@ -4248,6 +4259,23 @@ mod tests {
         let mut bytes = (payload.len() as u32).to_le_bytes().to_vec();
         bytes.extend_from_slice(&payload);
         bytes
+    }
+
+    #[test]
+    #[serial]
+    fn sink_ack_upload_phase_feeds_the_host_tuner_counters() {
+        use crate::metrics::counters::{UPLOADS_TOTAL, UPLOAD_LATENCY_NS_TOTAL};
+        use std::sync::atomic::Ordering;
+        let uploads = UPLOADS_TOTAL.load(Ordering::Relaxed);
+        let latency = UPLOAD_LATENCY_NS_TOTAL.load(Ordering::Relaxed);
+        super::record_sink_ack_stats(&super::SinkWriteStats {
+            rows: Some(3),
+            upload_duration_ms: Some(1_250),
+            commit_duration_ms: Some(80),
+            ..super::SinkWriteStats::default()
+        });
+        assert!(UPLOADS_TOTAL.load(Ordering::Relaxed) > uploads);
+        assert!(UPLOAD_LATENCY_NS_TOTAL.load(Ordering::Relaxed) >= latency + 1_250_000_000);
     }
 
     #[test]
