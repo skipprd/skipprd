@@ -231,9 +231,14 @@ skippr-runtime-sdk = { path = "crates/skippr-runtime-sdk" }
 [target.'cfg(unix)'.dependencies]
 nix = "0.26.2"
 
+[profile.release]
+debug = false
+strip = "symbols"
+
 [profile.profiling]
 inherits = "release"
 debug = true
+strip = "none"
 
 [patch.crates-io]
 iceberg = { path = "third_party/iceberg" }

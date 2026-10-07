@@ -34,14 +34,29 @@ EOF
   chmod +x "$ROOT/scripts/bin/cargo"
   export PATH="$ROOT/scripts/bin:$PATH"
   export CARGO="$ROOT/scripts/bin/cargo"
-  maturin develop -- -C link-arg=-undefined -C link-arg=dynamic_lookup
+  maturin develop --release -- -C link-arg=-undefined -C link-arg=dynamic_lookup
 else
-  maturin develop
+  maturin develop --release
 fi
 python -m pytest python/tests
 if [ "$(uname -s)" = Darwin ]; then
-  maturin build --out target/wheels -- -C link-arg=-undefined -C link-arg=dynamic_lookup
+  maturin build --release --out target/wheels -- -C link-arg=-undefined -C link-arg=dynamic_lookup
 else
-  maturin build --out target/wheels
+  maturin build --release --out target/wheels
 fi
-ls target/wheels/*.whl
+python - <<'PY'
+from pathlib import Path
+
+PYPI_WHEEL_MAX_BYTES = 100 * 1024 * 1024
+wheels = sorted(Path("target/wheels").glob("*.whl"))
+if not wheels:
+    raise SystemExit("maturin build --release produced no wheels under target/wheels")
+oversized = [path for path in wheels if path.stat().st_size > PYPI_WHEEL_MAX_BYTES]
+if oversized:
+    detail = ", ".join(f"{path.name}={path.stat().st_size}B" for path in oversized)
+    raise SystemExit(
+        f"skippr wheel exceeds PyPI project file limit ({PYPI_WHEEL_MAX_BYTES} bytes): {detail}"
+    )
+for path in wheels:
+    print(f"{path} {path.stat().st_size}B")
+PY

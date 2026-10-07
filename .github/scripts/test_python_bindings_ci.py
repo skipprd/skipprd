@@ -78,7 +78,9 @@ class PythonBindingsCiTests(unittest.TestCase):
         script = TEST_PYTHON.read_text(encoding="utf-8")
         self.assertIn("maturin develop", script)
         self.assertIn("python/tests", script)
-        self.assertIn("maturin build", script)
+        self.assertIn("maturin build --release", script)
+        self.assertIn("PYPI_WHEEL_MAX_BYTES", script)
+        self.assertIn("100 * 1024 * 1024", script)
         self.assertIn("Darwin", script)
         self.assertIn("CARGO_TARGET_DIR", script)
         self.assertIn('"$ROOT/target/maturin"', script)
@@ -92,6 +94,20 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("scripts/bin/cargo", script)
         self.assertIn("export CARGO=", script)
         self.assertNotIn("/usr/local/cargo/bin/cargo", script)
+
+    def test_release_profile_strips_debug_so_pypi_fits(self):
+        text = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        release = text.split("[profile.release]", 1)[1].split("[profile.", 1)[0]
+        self.assertIn("debug = false", release)
+        self.assertIn('strip = "symbols"', release)
+        profiling = text.split("[profile.profiling]", 1)[1]
+        self.assertIn("debug = true", profiling)
+        self.assertIn('strip = "none"', profiling)
+        docs = (ROOT / "docs" / "docs" / "maintainers" / "release-workflow.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("100 MB", docs)
+        self.assertIn("strip", docs)
 
     def test_ci_builds_on_github_linux_x86(self):
         text = CI.read_text(encoding="utf-8")

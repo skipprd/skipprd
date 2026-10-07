@@ -49,7 +49,7 @@ On tag builds, `set_root_package_version.py` stamps the root host package versio
 
 Python has its own semver in `pyproject.toml` and `python/Cargo.toml` (`17.0.0` today). It is not the skipprd git tag.
 
-`.github/workflows/ci.yml` (**Python CI/CD Pipeline**) builds and tests the `skippr` wheel on GitHub-hosted Linux x86 (`ubuntu-latest`) for engine tags (`[0-9]*`) and `python-v*` tags, plus `workflow_dispatch`. It does not run on `main` / master or pull requests. Darwin / macOS arm64 is commented out for now.
+`.github/workflows/ci.yml` (**Python CI/CD Pipeline**) builds and tests the `skippr` wheel on GitHub-hosted Linux x86 (`ubuntu-latest`) for engine tags (`[0-9]*`) and `python-v*` tags, plus `workflow_dispatch`. It does not run on `main` / master or pull requests. Darwin / macOS arm64 is commented out for now. Release `cdylib` builds use `[profile.release]` `debug = false` and `strip = "symbols"` so the wheel stays under the PyPI project file limit of 100 MB (`scripts/test-python.sh` fails the job if a wheel is larger).
 
 `python-publish` runs on the same unprefixed engine tags as `publish_skipprd` (not `0.0.0`, not `test*`, not `python-v*`). It publishes only when that Python semver is absent from PyPI.
 
