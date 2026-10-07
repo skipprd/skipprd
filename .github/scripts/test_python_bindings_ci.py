@@ -94,6 +94,9 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("scripts/bin/cargo", script)
         self.assertIn("export CARGO=", script)
         self.assertNotIn("/usr/local/cargo/bin/cargo", script)
+        self.assertIn("PIP_CONFIG_FILE=/dev/null", script)
+        self.assertIn("PIP_INDEX_URL=https://pypi.org/simple", script)
+        self.assertNotIn("codeartifact", script)
 
     def test_release_profile_strips_debug_so_pypi_fits(self):
         text = (ROOT / "Cargo.toml").read_text(encoding="utf-8")

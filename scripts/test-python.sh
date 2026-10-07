@@ -7,6 +7,10 @@ cd "$ROOT"
 python3 -m venv .venv-python
 # shellcheck source=/dev/null
 source .venv-python/bin/activate
+# Host pip.conf / PIP_INDEX_URL (CodeArtifact, private indexes) must not apply.
+unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST
+export PIP_CONFIG_FILE=/dev/null
+export PIP_INDEX_URL=https://pypi.org/simple
 python -m pip install -U pip
 python -m pip install "maturin>=1.7,<2" "pyarrow>=17" pytest
 # Maturin sets CARGO_ENCODED_RUSTFLAGS for the cdylib. Cargo applies those
