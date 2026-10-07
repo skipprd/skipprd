@@ -51,7 +51,7 @@ Python has its own semver in `pyproject.toml` and `python/Cargo.toml` (`17.0.0` 
 
 `.github/workflows/ci.yml` (**Python CI/CD Pipeline**) builds and tests the `skippr` wheel on GitHub-hosted Linux x86 (`ubuntu-latest`) for engine tags (`[0-9]*`) and `python-v*` tags, plus `workflow_dispatch`. It does not run on `main` / master or pull requests. Darwin / macOS arm64 is commented out for now.
 
-`python-publish` runs on `python-v*` tags (not engine unprefixed host tags, not `python-v0.0.0`). It publishes only when that Python semver is absent from PyPI.
+`python-publish` runs on the same unprefixed engine tags as `publish_skipprd` (not `0.0.0`, not `test*`, not `python-v*`). It publishes only when that Python semver is absent from PyPI.
 
 Publish uses **PyPI Trusted Publishing** (GitHub OIDC), not a pip login or `PYPI_API_TOKEN`. The job sets `id-token: write` and calls `pypa/gh-action-pypi-publish` with `attestations: false` (GitHub-hosted `ubuntu-latest`). GitHub mints a short-lived token; PyPI accepts it because this repo's GitHub publisher is registered.
 
@@ -65,7 +65,7 @@ Registered publisher on [pypi.org](https://pypi.org):
 
 Do not create a PyPI API token. Do not put `TWINE_PASSWORD` in GitHub secrets.
 
-Bump `pyproject.toml` and `python/Cargo.toml` together, then tag `python-vX.Y.Z`. Scratch `python-v0.0.0` does not publish.
+Bump `pyproject.toml` and `python/Cargo.toml` together, then tag the engine (`17.0.0`). Scratch `0.0.0` does not publish the wheel. `python-v*` still builds and tests the wheel; it does not publish.
 
 ## 3. Compile and test the important boundaries
 

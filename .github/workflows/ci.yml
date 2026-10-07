@@ -48,7 +48,7 @@ jobs:
           npm install
           npx vitepress build
   python-publish:
-    if: github.repository == 'skipprd/skipprd' && startsWith(github.ref, 'refs/tags/python-v') && github.ref != 'refs/tags/python-v0.0.0'
+    if: github.repository == 'skipprd/skipprd' && startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test') && !startsWith(github.ref, 'refs/tags/python-')
     needs: [linux]
     runs-on: ubuntu-latest
     permissions:
