@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "skippr"
-version = "0.2.0"
+version = "17.0.0"
 description = "skipprd ELT engine — Session, discover, sync, df, query"
 readme = "README.md"
 license = { file = "LICENSE" }
