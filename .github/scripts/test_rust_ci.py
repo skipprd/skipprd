@@ -12,6 +12,51 @@ BUILD_RELEASE = ROOT / ".github" / "actions" / "rust-build-release" / "action.ya
 RELEASE_DOCS = ROOT / "docs" / "docs" / "maintainers" / "release-workflow.md"
 
 
+class ReleaseNotesTests(unittest.TestCase):
+    def test_release_notes_are_the_tag_section_of_changelog_md(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(ROOT / ".github" / "scripts"))
+        from release_notes import section
+
+        changelog = "# Changelog\n\n## [2.0.0]\n\n### Breaking\n\n- b\n\n## [1.0.0] - 2024-01-01\n\n- a\n"
+        self.assertEqual(section(changelog, "2.0.0"), "### Breaking\n\n- b\n")
+        self.assertEqual(section(changelog, "1.0.0"), "- a\n")
+        with self.assertRaises(SystemExit):
+            section(changelog, "3.0.0")
+        with self.assertRaises(SystemExit):
+            section("## [4.0.0]\n\n## [3.0.0]\n- c\n", "4.0.0")
+
+    def test_github_release_reads_changelog_md_only(self) -> None:
+        text = RUST.read_text(encoding="utf-8")
+        self.assertNotIn("CHANGELOG.txt", text)
+        self.assertIn(
+            'python3 .github/scripts/release_notes.py "${{ github.ref_name }}" > release-notes.md', text
+        )
+        self.assertEqual(text.count("--notes-file release-notes.md"), 2)
+        self.assertFalse((ROOT / "CHANGELOG.txt").exists())
+
+    def test_missing_release_notes_stop_every_publish_job(self) -> None:
+        text = RUST.read_text(encoding="utf-8")
+        self.assertEqual(text.count("release_notes.py"), 1)
+        notes_job = text[text.index("  release_notes:") : text.index("  publish_runtime_plugins:")]
+        self.assertIn("release_notes.py", notes_job)
+        self.assertIn("github.ref != 'refs/tags/0.0.0'", notes_job)
+        self.assertIn("name: release-notes", notes_job)
+        for name in ("publish_runtime_plugins", "publish_skipprd"):
+            start = text.index(f"  {name}:")
+            job = text[start : text.index("    steps:", start)]
+            self.assertIn("- release_notes", job, name)
+        publish = text[text.index("  publish_skipprd:") :]
+        self.assertIn("name: release-notes", publish)
+
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        job = ci[ci.index("  python-publish:") :]
+        notes = job.index('python3 .github/scripts/release_notes.py "${{ github.ref_name }}"')
+        self.assertLess(notes, job.index("pypa/gh-action-pypi-publish"))
+        self.assertLess(notes, job.index("actions/download-artifact"))
+
+
 class RustCiTests(unittest.TestCase):
     def test_rust_workflow_exists_and_is_named(self) -> None:
         self.assertTrue(RUST.is_file(), "expected .github/workflows/rust.yml")

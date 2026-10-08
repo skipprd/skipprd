@@ -1,75 +1,51 @@
+import pyarrow as pa
 import pytest
 import skippr
-from skippr import StorageMode
+from skippr import Config, DataSourceS3, LocalStorage, Pipeline
 
 
-def _cfg(**overrides):
-    body = {
-        "skippr": {"workspace": "quickstart", "skipprd_el_storage_mode": "local"},
-        "pipelines": {
-            "p1": {"data_source": "data_sources.sample"},
-            "p2": {"data_source": "data_sources.sample"},
-        },
-        "data_sources": {"sample": {"S3": {"s3_bucket": "b", "s3_prefix": "p"}}},
-    }
-    body.update(overrides)
-    return skippr.Config(**body)
+def _config():
+    cfg = Config().workspace("quickstart").storage(LocalStorage())
+    src = cfg.data_source("sample", DataSourceS3(s3_bucket="b", s3_prefix="p"))
+    p1 = cfg.pipeline("p1", Pipeline(data_source=src))
+    p2 = cfg.pipeline("p2", Pipeline(data_source=src))
+    return cfg, p1, p2
 
 
-def test_session_requires_pipeline():
+def test_session_requires_a_pipeline_ref():
+    _, p1, _ = _config()
     with pytest.raises(TypeError):
-        skippr.Session()
-
-
-def test_session_rejects_string_config():
+        skippr.Session()  # type: ignore[call-arg]
     with pytest.raises(TypeError):
-        skippr.Session(pipeline="p1", config="skippr.yml")
+        skippr.Session("p1")  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        skippr.Session(pipeline="p1", config=p1.config)  # type: ignore[call-arg]
 
 
 def test_two_sessions_do_not_share_pipeline():
-    cfg = _cfg()
-    a = skippr.Session(pipeline="p1", config=cfg)
-    b = skippr.Session(pipeline="p2", config=cfg)
-    assert a.pipeline == "p1"
-    assert b.pipeline == "p2"
+    _, p1, p2 = _config()
+    assert skippr.Session(p1).pipeline == "p1"
+    assert skippr.Session(p2).pipeline == "p2"
 
 
 def test_session_pipeline_is_immutable():
-    s = skippr.Session(pipeline="p1", config=_cfg())
-    try:
-        s.pipeline = "p2"
-    except AttributeError:
-        assert s.pipeline == "p1"
-        return
-    raise AssertionError("Session.pipeline must be set only in the constructor")
+    _, p1, _ = _config()
+    s = skippr.Session(p1)
+    with pytest.raises(AttributeError):
+        s.pipeline = "p2"  # type: ignore[misc]
 
 
-def test_config_object_matches_yml_fields():
-    cfg = skippr.Config() \
-        .workspace("quickstart") \
-        .storage_mode(StorageMode.LOCAL) \
-        .pipelines({"p1": {"data_source": "data_sources.sample"}}) \
-        .data_sources({"sample": {"S3": {"s3_bucket": "b", "s3_prefix": "p"}}})
-    s = skippr.Session(pipeline="p1", config=cfg)
-    assert s.pipeline == "p1"
-    result = s.doctor()
+def test_session_doctor_reads_the_built_config():
+    _, p1, _ = _config()
+    result = skippr.Session(p1).doctor()
     assert result["ok"] is True
-    messages = [c["message"] for c in result["checks"]]
-    assert any("WAL is the dataset" in m for m in messages)
+    assert set(result) == {"ok", "checks"}
+    assert any("WAL is the dataset" in c["message"] for c in result["checks"])
 
 
-def test_session_config_chained_applies_on_run():
-    cfg = _cfg()
-    s = skippr.Session(pipeline="p1").config(cfg)
-    result = s.doctor()
-    assert result["ok"] is True
-    messages = [c["message"] for c in result["checks"]]
-    assert any("WAL is the dataset" in m for m in messages)
-
-
-def test_session_auto_discovers_yml(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "skippr.yml").write_text(
+def test_session_from_loaded_file(tmp_path):
+    path = tmp_path / "skippr.yml"
+    path.write_text(
         """
 skippr:
   workspace: quickstart
@@ -84,16 +60,39 @@ data_sources:
       s3_prefix: p
 """
     )
-    s = skippr.Session(pipeline="p1")
-    result = s.doctor()
+    result = skippr.Session(Config.load(path).get_pipeline("p1")).doctor()
     assert result["ok"] is True
 
 
-def test_df_and_query_return_pyarrow_table():
-    import pyarrow as pa
+def test_session_resolves_env_refs_and_fails_on_missing(monkeypatch):
+    monkeypatch.delenv("SKIPPR_TEST_MISSING_BUCKET", raising=False)
+    cfg = Config().workspace("quickstart").storage(LocalStorage())
+    cfg.wal_s3_bucket("${SKIPPR_TEST_MISSING_BUCKET}")
+    src = cfg.data_source("sample", DataSourceS3(s3_bucket="b", s3_prefix="p"))
+    ref = cfg.pipeline("p1", Pipeline(data_source=src))
+    with pytest.raises(ValueError, match="SKIPPR_TEST_MISSING_BUCKET"):
+        skippr.Session(ref)
+    monkeypatch.setenv("SKIPPR_TEST_MISSING_BUCKET", "wal")
+    assert skippr.Session(ref).pipeline == "p1"
 
-    s = skippr.Session(pipeline="p1", config=_cfg())
-    table = s.df()
-    assert isinstance(table, pa.Table)
-    queried = s.query("SELECT 1 AS n")
-    assert isinstance(queried, pa.Table)
+
+def test_df_and_query_return_pyarrow_table():
+    _, p1, _ = _config()
+    s = skippr.Session(p1)
+    assert isinstance(s.df(), pa.Table)
+    assert isinstance(s.query("SELECT 1 AS n"), pa.Table)
+
+
+def test_session_refuses_a_loaded_file_whose_sinks_share_a_namespace(tmp_path):
+    path = tmp_path / "skippr.yml"
+    sink = "    Duckdb:\n      warehouse: file:///tmp/w\n      table_namespace: main\n"
+    path.write_text(
+        "pipelines:\n"
+        "  p1:\n    data_source: data_sources.src\n    data_sink: data_sinks.a\n"
+        "  p2:\n    data_source: data_sources.src\n    data_sink: data_sinks.b\n"
+        "data_sources:\n  src:\n    S3:\n      s3_bucket: b\n      s3_prefix: p\n"
+        "data_sinks:\n  a:\n" + sink + "  b:\n" + sink
+    )
+    cfg = Config.load(path)
+    with pytest.raises(ValueError, match="reuses warehouse"):
+        skippr.Session(cfg.get_pipeline("p1"))

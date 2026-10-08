@@ -45,7 +45,7 @@ Cluster constants:
 - replica TCP, Flight SQL, and Ballista gRPC: ephemeral ports, **always mTLS** (SAN `skippr-cluster`);
 - gossip UDP: ephemeral port on the advertised IP (not `0.0.0.0` in `ChitchatId`).
 
-Unknown `WAL_STORAGE` values fail startup. `clustered` requires `SKIPPR_OFFSET_STORE` to be DynamoDB (self-hosted / HLA default) or `cloud-tables` (Skippr Cloud). Any other explicit offset backend fails startup.
+Unknown `WAL_STORAGE` values fail startup. `clustered` requires SkipprStore (`skippr.store.type` / `SKIPPR_STORE_TYPE`) to be DynamoDB (self-hosted / HLA default) or `cloud-tables` (Skippr Cloud). Any other explicit store fails startup.
 
 ### Cloud vs OSS catalog and control state
 

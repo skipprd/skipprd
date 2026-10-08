@@ -40,9 +40,17 @@ deadletter_sinks:
 schema_sinks:
   glue_analytics:
     Glue:
+      s3_bucket: my-main-bucket
+      s3_prefix: warehouse/events
+      athena_workgroup_name: analytics
+      athena_results_s3_bucket: my-query-results
       glue_database_name: analytics
   glue_analytics_deadletters:
     Glue:
+      s3_bucket: my-deadletter-bucket
+      s3_prefix: warehouse/deadletters
+      athena_workgroup_name: analytics
+      athena_results_s3_bucket: my-query-results
       glue_database_name: analytics_deadletters
 ```
 

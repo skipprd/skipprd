@@ -111,11 +111,12 @@ pub enum SkipprStoreKind {
 /// Durable Skippr KV store: offsets, checkpoints, leases, membership, and
 /// SkipprLake catalog pointers share one table via non-colliding PK/SK prefixes.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SkipprStore {
     #[serde(rename = "type")]
     pub kind: SkipprStoreKind,
     /// Table name for DynamoDB / Cloud Tables. Unused for sled.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
@@ -164,9 +165,6 @@ impl FromStr for SkipprStoreKind {
     }
 }
 
-/// Deprecated: `SKIPPR_OFFSET_STORE` / `skippr.offset_store`. Use `SkipprStoreKind`.
-pub type OffsetStoreKind = SkipprStoreKind;
-
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ConfigError {
     #[error("invalid WAL_STORAGE value '{0}'; expected disk, s3, or clustered")]
@@ -194,7 +192,7 @@ pub enum ConfigError {
     #[error(
         "WAL_STORAGE=clustered cannot be used with skippr.store.type={0}; clustered mode uses DynamoDB or Cloud tables"
     )]
-    ClusteredOffsetStoreConflict(String),
+    ClusteredStoreConflict(String),
     #[error(
         "WAL_STORAGE=clustered does not support sync --once; a quorum member must remain available"
     )]

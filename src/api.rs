@@ -3,118 +3,46 @@
 //! CLI and Python both call this type. Process statics are not the product API.
 
 use std::io;
-use std::path::{Path, PathBuf};
 
 use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 use datafusion::prelude::SessionConfig;
 
 use crate::cluster::validation::CliModeKind;
-use crate::connect;
 use crate::doctor::{self, DoctorResult};
 use crate::helpers::configuration::Config;
 use crate::helpers::wal_storage::WalStorage;
 use crate::sqlrt::session::{build_query_context, collect_user_sql};
 use crate::sqlrt::tables::register_namespace_view;
 
+/// `config` is the runnable (resolved) config. It is the session's only config authority.
 #[derive(Clone, Debug)]
 pub struct Session {
-    pub path: Option<PathBuf>,
-    document: serde_yaml::Value,
     pub config: Config,
     pub pipeline: Option<String>,
 }
 
 impl Session {
-    pub fn from_yml(path: impl AsRef<Path>, pipeline: Option<&str>) -> Result<Self, String> {
-        let path = path.as_ref();
-        let document = connect::load_document(path)?;
-        let config = if path.exists() {
-            Config::load_path(path)?
-        } else {
-            Config::new()
-        };
-        Ok(Self {
-            path: Some(path.to_path_buf()),
-            document,
+    pub fn from_config(config: Config, pipeline: Option<&str>) -> Self {
+        Self {
             config,
             pipeline: pipeline.map(str::to_string),
-        })
-    }
-
-    pub fn from_discovered(pipeline: Option<&str>) -> Result<Self, String> {
-        Self::from_yml(connect::discover_config_path(), pipeline)
-    }
-
-    pub fn from_config(config: Config, pipeline: Option<&str>) -> Result<Self, String> {
-        Ok(Self {
-            path: None,
-            document: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-            config,
-            pipeline: pipeline.map(str::to_string),
-        })
-    }
-
-    pub fn set_config(&mut self, config: Config) {
-        self.path = None;
-        self.document = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-        self.config = config;
-    }
-
-    pub fn document(&self) -> &serde_yaml::Value {
-        &self.document
-    }
-
-    pub fn connect_path(&self) -> PathBuf {
-        self.path
-            .clone()
-            .unwrap_or_else(connect::discover_config_path)
-    }
-
-    pub fn reload_from_document(
-        &mut self,
-        path: PathBuf,
-        document: serde_yaml::Value,
-    ) -> Result<(), String> {
-        self.path = Some(path.clone());
-        self.document = document;
-        if let Ok(config) = Config::load_path(&path) {
-            self.config = config;
         }
-        Ok(())
-    }
-
-    pub fn require_pipeline(&self) -> Result<&str, String> {
-        self.pipeline
-            .as_deref()
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| "connect requires a pipeline".to_string())
-    }
-
-    fn runtime_config(&self) -> Config {
-        if let Some(path) = &self.path {
-            if path.exists() {
-                if let Ok(config) = Config::load_path(path) {
-                    return config;
-                }
-            }
-        }
-        self.config.clone()
     }
 
     fn pipeline_names(&self) -> Vec<String> {
         match &self.pipeline {
             Some(name) => vec![name.clone()],
-            None => self.runtime_config().pipelines.keys().cloned().collect(),
+            None => self.config.pipelines.keys().cloned().collect(),
         }
     }
 
     fn bound(&self, pipeline: &str) -> Config {
-        self.runtime_config().bind_pipeline(pipeline)
+        self.config.bind_pipeline(pipeline)
     }
 
     pub async fn doctor(&self) -> DoctorResult {
-        doctor::run(&self.runtime_config())
+        doctor::run(&self.config)
     }
 
     pub async fn discover(&self, output_mode: &str) -> io::Result<()> {
@@ -127,8 +55,13 @@ impl Session {
     }
 
     pub async fn sync(&self, once: bool, output_mode: &str) -> io::Result<()> {
-        let config = self.runtime_config();
+        let config = self.config.clone();
         if config.get_wal_storage() == WalStorage::Clustered {
+            for name in config.pipelines.keys() {
+                config
+                    .validate_pipeline_for_run(name)
+                    .map_err(io::Error::other)?;
+            }
             let cluster = crate::cluster::validation::validate_clustered_mode(
                 &config,
                 WalStorage::Clustered,
@@ -152,7 +85,7 @@ impl Session {
     fn query_config(&self) -> Config {
         match &self.pipeline {
             Some(name) => self.bound(name),
-            None => self.runtime_config(),
+            None => self.config.clone(),
         }
     }
 
@@ -308,8 +241,8 @@ mod tests {
             }
         }))
         .unwrap();
-        let a = Session::from_config(config.clone(), Some("p1")).unwrap();
-        let b = Session::from_config(config, Some("p2")).unwrap();
+        let a = Session::from_config(config.clone(), Some("p1"));
+        let b = Session::from_config(config, Some("p2"));
         assert_eq!(a.pipeline.as_deref(), Some("p1"));
         assert_eq!(b.pipeline.as_deref(), Some("p2"));
         assert_eq!(a.config.bind_pipeline("p1").get_pipeline_name(), "p1");
@@ -334,7 +267,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let a = Session::from_config(config, Some("p1")).unwrap();
+        let a = Session::from_config(config, Some("p1"));
         assert_eq!(a.pipeline.as_deref(), Some("p1"));
         assert_eq!(a.config.bind_pipeline("p1").get_pipeline_name(), "p1");
         std::env::remove_var("PIPELINE_NAME");
@@ -354,8 +287,8 @@ mod tests {
             }
         }))
         .unwrap();
-        let a = Session::from_config(config.clone(), Some("p1")).unwrap();
-        let b = Session::from_config(config, Some("p2")).unwrap();
+        let a = Session::from_config(config.clone(), Some("p1"));
+        let b = Session::from_config(config, Some("p2"));
         let a_dir = a.config.bind_pipeline("p1").get_pipeline_data_dir();
         let b_dir = b.config.bind_pipeline("p2").get_pipeline_data_dir();
         assert_eq!(a_dir, "/tmp/skipprd-p1");
@@ -377,8 +310,8 @@ mod tests {
             }
         }))
         .unwrap();
-        let a = Session::from_config(config.clone(), Some("p1")).unwrap();
-        let b = Session::from_config(config, Some("p2")).unwrap();
+        let a = Session::from_config(config.clone(), Some("p1"));
+        let b = Session::from_config(config, Some("p2"));
         assert_eq!(
             a.config
                 .bind_pipeline("p1")
@@ -400,6 +333,12 @@ mod tests {
         assert!(
             session_impl.contains("run_clustered("),
             "Session.sync must dispatch clustered WAL through run_clustered"
+        );
+        let sync = &session_impl[session_impl.find("pub async fn sync(").unwrap()..];
+        assert!(
+            sync.find("validate_pipeline_for_run").unwrap()
+                < sync.find("validate_clustered_mode").unwrap(),
+            "Session.sync must check every pipeline before it starts a cluster"
         );
         assert!(
             session_impl.contains("clustered_query_collect"),

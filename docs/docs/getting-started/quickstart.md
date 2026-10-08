@@ -29,7 +29,6 @@ pipelines:
   bikehire:
     data_source: data_sources.sample
     data_sink: data_sinks.athena
-    schema_sink: schema_sinks.glue
 
 data_sources:
   sample:
@@ -39,6 +38,7 @@ data_sources:
 
 data_sinks:
   athena:
+    schema_sink: schema_sinks.glue
     Athena:
       s3_bucket: your-output-bucket
       s3_prefix: data/bikehire
@@ -49,6 +49,10 @@ data_sinks:
 schema_sinks:
   glue:
     Glue:
+      s3_bucket: your-output-bucket
+      s3_prefix: data/bikehire
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: your-athena-results
       glue_database_name: skippr_quickstart
 ```
 

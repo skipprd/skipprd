@@ -27,12 +27,6 @@ pub struct Cli {
     /// SkipprStore table name (also SKIPPR_STORE_NAME)
     #[arg(long, global = true)]
     pub store_name: Option<String>,
-    /// Deprecated: use --store-type
-    #[arg(long, global = true, value_enum, hide = true)]
-    pub offset_store: Option<SkipprStoreKind>,
-    /// Deprecated: use --store-name
-    #[arg(long, global = true, hide = true)]
-    pub offset_dynamodb_table: Option<String>,
     /// skippr.workspace
     #[arg(long, global = true)]
     pub workspace: Option<String>,

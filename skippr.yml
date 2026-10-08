@@ -13,8 +13,6 @@ skippr:
 
 pipelines:
 #  cloud_trail:
-##    reset_offsets: yes
-##    reset_metadata: yes
 #    auto_approve: yes
 #    env: dev
 #    buffer_threshold_bytes: 2000000
@@ -57,8 +55,6 @@ pipelines:
 ###    deadletter: data_deadletters.ccrussbucket
 #
 #  onebr:
-##    reset_offsets: yes
-##    reset_metadata: yes
 #    chaos_mode: no
 #    auto_approve: yes
 #    env: dev
@@ -117,8 +113,6 @@ pipelines:
 #    output: data_outputs.test_datalake
 #
 #  highres:
-##    reset_offsets: yes
-##    reset_metadata: yes
 #    chaos_mode: no
 #    auto_approve: yes
 #    env: dev
@@ -214,7 +208,6 @@ pipelines:
     auto_approve: yes
     buffer_threshold_bytes: 20000000
     buffer_threshold_seconds: 60
-    buffer_disk_threshold_bytes: 20000000
     transform:
       batch_time_fields: time
       batch_time_unit: day
@@ -268,8 +261,6 @@ pipelines:
     data_sink: data_sinks.picnic
 
 #  drvn:
-##    reset_offsets: yes
-##    reset_metadata: yes
 #    env: dev
 #    auto_approve: yes
 #    buffer_threshold_bytes: 200000000
@@ -278,8 +269,6 @@ pipelines:
 ##    output: data_outputs.ds_datalake
 #
 #  metrics:
-##    reset_offsets: yes
-##    reset_metadata: yes
 ##    env: dev
 #    auto_approve: yes
 #    buffer_threshold_bytes: 20000000

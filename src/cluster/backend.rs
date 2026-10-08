@@ -227,9 +227,9 @@ mod tests {
         .unwrap()
     }
 
-    fn yaml_offset_store(store: &str) -> Config {
+    fn yaml_skippr_store(store: &str) -> Config {
         serde_json::from_value(json!({
-            "skippr": { "workspace": "ws-a", "tenant": "ten-a", "offset_store": store },
+            "skippr": { "workspace": "ws-a", "tenant": "ten-a", "store": { "type": store } },
             "pipelines": {
                 "orders": { "data_source": "data_sources.sample" }
             },
@@ -278,14 +278,14 @@ mod tests {
     #[test]
     #[serial]
     fn yaml_cloud_tables_is_the_catalog_backend_and_plugin_env() {
-        let old_store = std::env::var("SKIPPR_OFFSET_STORE").ok();
+        let old_store = std::env::var("SKIPPR_STORE_TYPE").ok();
         let old_wal = std::env::var("WAL_STORAGE").ok();
-        std::env::remove_var("SKIPPR_OFFSET_STORE");
-        Config::set_evncache("SKIPPR_OFFSET_STORE", "");
+        std::env::remove_var("SKIPPR_STORE_TYPE");
+        Config::set_evncache("SKIPPR_STORE_TYPE", "");
         Config::set_wal_storage("disk");
-        let config = yaml_offset_store("cloud-tables");
+        let config = yaml_skippr_store("cloud-tables");
         assert_eq!(
-            crate::pipeline_backend::offset_store_env_value(&config),
+            crate::pipeline_backend::skippr_store_type_value(&config),
             "cloud-tables"
         );
         assert_eq!(
@@ -293,10 +293,10 @@ mod tests {
             skippr_iceberg_catalog::SkipprCatalogBackend::CloudTables
         );
         if let Some(value) = old_store {
-            Config::set_offset_store(&value);
+            Config::set_skippr_store_type(&value);
         } else {
-            std::env::remove_var("SKIPPR_OFFSET_STORE");
-            Config::set_evncache("SKIPPR_OFFSET_STORE", "");
+            std::env::remove_var("SKIPPR_STORE_TYPE");
+            Config::set_evncache("SKIPPR_STORE_TYPE", "");
         }
         if let Some(value) = old_wal {
             Config::set_wal_storage(&value);
@@ -309,10 +309,10 @@ mod tests {
     #[test]
     #[serial]
     fn disk_without_offset_store_is_sled_not_cloud_tables() {
-        let old_store = std::env::var("SKIPPR_OFFSET_STORE").ok();
+        let old_store = std::env::var("SKIPPR_STORE_TYPE").ok();
         let old_wal = std::env::var("WAL_STORAGE").ok();
-        std::env::remove_var("SKIPPR_OFFSET_STORE");
-        Config::set_evncache("SKIPPR_OFFSET_STORE", "");
+        std::env::remove_var("SKIPPR_STORE_TYPE");
+        Config::set_evncache("SKIPPR_STORE_TYPE", "");
         Config::set_wal_storage("disk");
         let config = disk_config();
         assert_eq!(
@@ -324,10 +324,10 @@ mod tests {
             "Disk YAML pipelines must not switch the registry to Cloud Tables"
         );
         if let Some(value) = old_store {
-            Config::set_offset_store(&value);
+            Config::set_skippr_store_type(&value);
         } else {
-            std::env::remove_var("SKIPPR_OFFSET_STORE");
-            Config::set_evncache("SKIPPR_OFFSET_STORE", "");
+            std::env::remove_var("SKIPPR_STORE_TYPE");
+            Config::set_evncache("SKIPPR_STORE_TYPE", "");
         }
         if let Some(value) = old_wal {
             Config::set_wal_storage(&value);

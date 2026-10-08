@@ -1,6 +1,6 @@
 ---
 title: skipprd connect
-description: Write skippr.yml from typed plugin configs. Same engine as Python Session.connect.
+description: Write skippr.yml from typed plugin configs. Same merge-writer as Python Config.save.
 ---
 
 # skipprd connect
@@ -27,24 +27,35 @@ skipprd --workspace bikehire --storage-mode local connect data-source s3 \
 | `connect data-sink` | `data_sinks` |
 | `connect schema-sink` | `schema_sinks` |
 
-`--pipeline` and `--name` are required. Existing `skippr.yml` or `skippr.yaml` is reused. A new file is created only when neither exists. The write is read → parse → merge → write, so sibling pipelines and extra keys on the same plugin survive.
+`--pipeline` and `--name` are required, and `connect` wires that entry into the pipeline. Existing `skippr.yml` or `skippr.yaml` is reused. A new file is created only when neither exists, and starts empty. The write reads the file, merges, and checks the result before it writes. If the check fails, nothing is written, including root flags such as `--workspace`:
 
-Plaintext secrets are rejected. Python takes `${ENV}` as a string. Quote it in the shell so the shell does not expand it.
+- Each field you pass replaces that field. A flattened nested flag such as `--object-store-type` replaces the whole `object_store` block.
+- Fields you did not pass, sibling pipelines, and other entries are kept.
+- An entry cannot change plugin kind.
+- `--store-name` requires `--store-type`.
+- A Duckdb, SkipprLake, or AthenaIceberg schema sink and every data or deadletter sink of that plugin that links it hold one config. The fields you pass to `connect data-sink` or `connect schema-sink` go to all of them, and a new or empty one starts as a copy. If they already differ, the write is refused and nothing is overwritten.
+- The check refuses plaintext secrets, two sinks on one namespace, a pair that differs, and a pipeline whose references do not resolve. An entry you are still filling in one field at a time is allowed until `discover`, `sync`, or a Session runs it. `skipprd doctor` reports the same findings.
+
+Python `data_sink` and `deadletter_sink` registration pairs the same way. `Config.save` merges only and never rewrites a pair: it refuses a file whose pair differs.
+
+Secrets must be exactly `${NAME}`; plaintext is rejected. Quote `${ENV}` in the shell so the shell does not expand it. Python secret fields take `skippr.EnvRef`:
 
 ```python
-import skippr
-from skippr import DataSink
+from skippr import Config, DataSinkPostgres, EnvRef, Pipeline
 
-s = skippr.Session(pipeline="bikehire")
-s.connect().data_sink(
-    DataSink.Postgres,
-    skippr.DataSinkPostgres(
+cfg = Config.discover()
+warehouse = cfg.data_sink(
+    "warehouse",
+    DataSinkPostgres(
         host="localhost",
         user="skippr",
-        password="${POSTGRES_PASSWORD}",
+        password=EnvRef("POSTGRES_PASSWORD"),
         database="analytics",
     ),
-).name("warehouse")
+)
+src = cfg.get_data_source("sample")
+cfg.pipeline("bikehire", Pipeline(data_source=src, data_sink=warehouse))
+cfg.save()
 ```
 
 ```bash
@@ -69,22 +80,15 @@ skipprd connect data-sink snowflake \
   --schema BRONZE
 ```
 
-Python uses the same persist path:
+Python `Config.save` uses the same merge-writer:
 
 ```python
-import skippr
-from skippr import DataSource, StorageMode
+from skippr import Config, DataSourceS3, LocalStorage, Pipeline
 
-(
-    skippr.workspace("bikehire")
-    .storage_mode(StorageMode.LOCAL)
-)
-
-s = skippr.Session(pipeline="bikehire")
-s.connect().data_source(
-    DataSource.S3,
-    skippr.DataSourceS3(s3_bucket="...", s3_prefix="..."),
-).name("sample")
+cfg = Config.discover().workspace("bikehire").storage(LocalStorage())
+src = cfg.data_source("sample", DataSourceS3(s3_bucket="...", s3_prefix="..."))
+cfg.pipeline("bikehire", Pipeline(data_source=src))
+cfg.save()
 ```
 
 See [Python](/python).

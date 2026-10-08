@@ -11,8 +11,12 @@ source .venv-python/bin/activate
 unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST
 export PIP_CONFIG_FILE=/dev/null
 export PIP_INDEX_URL=https://pypi.org/simple
-python -m pip install -U pip
-python -m pip install "maturin>=1.7,<2" "pyarrow>=17" pytest
+python -m pip install pip==26.2.1
+python -m pip install maturin==1.15.0 pyarrow==25.0.1 pyarrow-stubs==20.0.0.20260819 pytest==9.1.1 mypy==2.4.0
+if [ "$(uname -s)" = Linux ]; then
+  python -m pip install ziglang==0.15.2
+fi
+rm -rf target/wheels
 # Maturin sets CARGO_ENCODED_RUSTFLAGS for the cdylib. Cargo applies those
 # flags to build-scripts; Darwin then fails with `cannot execute binary file`.
 # Isolate the maturin target, wrap cargo to drop the encoded flags, and pass
@@ -38,17 +42,22 @@ EOF
   chmod +x "$ROOT/scripts/bin/cargo"
   export PATH="$ROOT/scripts/bin:$PATH"
   export CARGO="$ROOT/scripts/bin/cargo"
-  maturin develop --release -- -C link-arg=-undefined -C link-arg=dynamic_lookup
-else
-  maturin develop --release
-fi
-python -m pytest python/tests
-if [ "$(uname -s)" = Darwin ]; then
   maturin build --release --out target/wheels -- -C link-arg=-undefined -C link-arg=dynamic_lookup
 else
-  maturin build --release --out target/wheels
+  # manylinux_2_28 (glibc 2.28) installs on every current Linux, not only
+  # on hosts as new as the build runner.
+  maturin build --release --compatibility manylinux_2_28 --zig --out target/wheels
 fi
+python -m pip install --force-reinstall --no-deps target/wheels/*.whl
+python -m pytest python/tests
+# Type-check the installed wheel, not the source tree's `skippr.pyi`.
+(
+  cd "$(mktemp -d)"
+  python -m mypy.stubtest skippr --allowlist "$ROOT/python/stubtest-allowlist.txt"
+  python -m mypy --strict --warn-unused-ignores "$ROOT/python/tests/typing"
+)
 python - <<'PY'
+import zipfile
 from pathlib import Path
 
 PYPI_WHEEL_MAX_BYTES = 100 * 1024 * 1024
@@ -62,5 +71,12 @@ if oversized:
         f"skippr wheel exceeds PyPI project file limit ({PYPI_WHEEL_MAX_BYTES} bytes): {detail}"
     )
 for path in wheels:
+    with zipfile.ZipFile(path) as wheel:
+        names = set(wheel.namelist())
+    for required in ("skippr/__init__.pyi", "skippr/py.typed"):
+        if required not in names:
+            raise SystemExit(f"{path.name} is missing {required}")
+    if "linux" in path.name and "manylinux_2_28" not in path.name:
+        raise SystemExit(f"{path.name} must be tagged manylinux_2_28")
     print(f"{path} {path.stat().st_size}B")
 PY

@@ -83,24 +83,6 @@ When enabled, the process exits with SIGKILL at a random point between 15 and 60
 
 Automatically approve schema changes during discovery and evolution. When `false`, schema changes require manual approval.
 
-### RESET_OFFSETS
-
-| | |
-|---|---|
-| **Environment variable** | `RESET_OFFSETS` |
-| **Default** | `false` |
-
-Reset the offsets database on startup. This causes the pipeline to re-ingest all data from the beginning.
-
-### RESET_METADATA
-
-| | |
-|---|---|
-| **Environment variable** | `RESET_METADATA` |
-| **Default** | `false` |
-
-Reset pipeline metadata on startup. The schema will be re-discovered from scratch.
-
 ### SYNC_FREQUENCY
 
 | | |

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::fs;
 use std::fs::File;
@@ -17,7 +17,8 @@ use once_cell::sync::OnceCell;
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde::de::DeserializeOwned;
-use serde_derive::Deserialize;
+use serde::Deserialize as _;
+use serde_derive::{Deserialize, Serialize};
 
 use serde_json::Value;
 
@@ -35,12 +36,6 @@ use tracing::{debug, error, info, warn};
 lazy_static! {
     static ref ENV_CACHE: TimedRwLock<DashMap<String, String>> =
         TimedRwLock::new("env_cache".to_string(), DashMap::new());
-}
-
-fn warn_deprecated_skippr_store(key: &str) {
-    warn!(
-        "{key} is deprecated; use skippr.store.type and skippr.store.name (SKIPPR_STORE_TYPE / SKIPPR_STORE_NAME)"
-    );
 }
 
 const DEFAULT_CONFIG: &'static str = "NULL_VALUE";
@@ -120,59 +115,339 @@ static PRIMARY_SCHEMA_PLUGIN_INIT: Lazy<tokio::sync::Mutex<()>> =
 static SCHEMA_COORDINATOR: Lazy<crate::schema_coordinator::SchemaCoordinator> =
     Lazy::new(crate::schema_coordinator::SchemaCoordinator::new);
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Skippr {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skippr_s3_bucket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipprd_el_storage_mode: Option<ElStorageMode>,
     /// Dedicated S3 bucket for WAL segments (falls back to skippr_s3_bucket).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_s3_bucket: Option<String>,
     /// SkipprStore: KV backend for offsets, checkpoints, leases, membership, catalog pointers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<SkipprStore>,
-    /// Deprecated: use `store.type`. Still parsed for old skippr.yml.
-    pub offset_store: Option<SkipprStoreKind>,
-    /// Deprecated: use `store.name`. Still parsed for old skippr.yml.
-    pub offset_dynamodb_table: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+/// The one boolean-flag grammar for YAML and env: true/t/yes/1 and false/f/no/0,
+/// case-insensitive. Anything else is not a flag.
+pub fn parse_flag(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "t" | "yes" | "1" => Some(true),
+        "false" | "f" | "no" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn deserialize_flag<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RawFlag {
+        Bool(bool),
+        Int(i64),
+        Text(String),
+    }
+    match Option::<RawFlag>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(RawFlag::Bool(value)) => Ok(Some(value)),
+        Some(RawFlag::Int(1)) => Ok(Some(true)),
+        Some(RawFlag::Int(0)) => Ok(Some(false)),
+        Some(RawFlag::Int(other)) => Err(serde::de::Error::custom(format!(
+            "invalid flag {other}; expected true/false, yes/no, or 1/0"
+        ))),
+        Some(RawFlag::Text(text)) => parse_flag(&text).map(Some).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "invalid flag '{text}'; expected true/false, yes/no, or 1/0"
+            ))
+        }),
+    }
+}
+
+/// A whole-config check result. `Undecodable` entries are not yet complete
+/// enough to compare, so only `Conflict` blocks a write.
+enum ConfigFinding {
+    Conflict(String),
+    Undecodable(String),
+}
+
+impl ConfigFinding {
+    fn message(self) -> String {
+        match self {
+            Self::Conflict(message) | Self::Undecodable(message) => message,
+        }
+    }
+}
+
+/// Time partition granularity for `transform.batch_time_unit`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase", try_from = "String")]
+pub enum BatchTimeUnit {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+}
+
+impl BatchTimeUnit {
+    pub const ALL: [BatchTimeUnit; 5] = [
+        BatchTimeUnit::Year,
+        BatchTimeUnit::Month,
+        BatchTimeUnit::Day,
+        BatchTimeUnit::Hour,
+        BatchTimeUnit::Minute,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Year => "year",
+            Self::Month => "month",
+            Self::Day => "day",
+            Self::Hour => "hour",
+            Self::Minute => "minute",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        Self::ALL
+            .into_iter()
+            .find(|unit| unit.as_str().eq_ignore_ascii_case(raw))
+    }
+}
+
+impl TryFrom<String> for BatchTimeUnit {
+    type Error = String;
+
+    fn try_from(raw: String) -> Result<Self, String> {
+        Self::parse(&raw).ok_or_else(|| {
+            format!(
+                "unknown batch_time_unit '{raw}'; expected one of {:?}",
+                Self::ALL.map(Self::as_str)
+            )
+        })
+    }
+}
+
+/// A top-level plugin registry. Pipelines and data sinks reference entries as
+/// `<registry>.<name>`; this enum is the only spelling of those prefixes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Registry {
+    DataSources,
+    DataSinks,
+    DeadletterSinks,
+    SchemaSinks,
+}
+
+impl Registry {
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::DataSources => "data_sources",
+            Self::DataSinks => "data_sinks",
+            Self::DeadletterSinks => "deadletter_sinks",
+            Self::SchemaSinks => "schema_sinks",
+        }
+    }
+
+    pub fn reference(self, name: &str) -> String {
+        format!("{}.{}", self.key(), name)
+    }
+}
+
+/// When a whole-config check runs. A write may leave an entry that does not
+/// decode yet, because `skipprd connect` writes an entry a field at a time; a
+/// run refuses it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WholeConfigCheck {
+    Write,
+    Run,
+}
+
+/// Data sinks whose schema sink must carry the identical config (same plugin,
+/// equal config). Python registers both from one config object; the variant
+/// names are the plugin names, read by `skippr-connect-gen`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairedSink {
+    AthenaIceberg,
+    SkipprLake,
+    Duckdb,
+}
+
+impl PairedSink {
+    pub fn of(kind: crate::connect::DataSink) -> Option<Self> {
+        use crate::connect::DataSink;
+        match kind {
+            DataSink::AthenaIceberg => Some(Self::AthenaIceberg),
+            DataSink::SkipprLake => Some(Self::SkipprLake),
+            DataSink::Duckdb => Some(Self::Duckdb),
+            DataSink::Amqp
+            | DataSink::Athena
+            | DataSink::AzureBlob
+            | DataSink::Bigquery
+            | DataSink::Clickhouse
+            | DataSink::Databricks
+            | DataSink::File
+            | DataSink::Gcs
+            | DataSink::Motherduck
+            | DataSink::Postgres
+            | DataSink::Redshift
+            | DataSink::S3
+            | DataSink::Sftp
+            | DataSink::Snowflake
+            | DataSink::Stdout
+            | DataSink::Synapse => None,
+        }
+    }
+
+    pub fn of_schema(kind: crate::connect::SchemaSink) -> Option<Self> {
+        use crate::connect::SchemaSink;
+        match kind {
+            SchemaSink::AthenaIceberg => Some(Self::AthenaIceberg),
+            SchemaSink::SkipprLake => Some(Self::SkipprLake),
+            SchemaSink::Duckdb => Some(Self::Duckdb),
+            SchemaSink::Bigquery
+            | SchemaSink::Clickhouse
+            | SchemaSink::Glue
+            | SchemaSink::Motherduck
+            | SchemaSink::Postgres
+            | SchemaSink::Redshift
+            | SchemaSink::Snowflake => None,
+        }
+    }
+
+    pub fn data_sink(self) -> crate::connect::DataSink {
+        use crate::connect::DataSink;
+        match self {
+            Self::AthenaIceberg => DataSink::AthenaIceberg,
+            Self::SkipprLake => DataSink::SkipprLake,
+            Self::Duckdb => DataSink::Duckdb,
+        }
+    }
+
+    pub fn schema_sink(self) -> crate::connect::SchemaSink {
+        use crate::connect::SchemaSink;
+        match self {
+            Self::AthenaIceberg => SchemaSink::AthenaIceberg,
+            Self::SkipprLake => SchemaSink::SkipprLake,
+            Self::Duckdb => SchemaSink::Duckdb,
+        }
+    }
+
+    pub fn plugin_name(self) -> &'static str {
+        self.data_sink().plugin_name()
+    }
+
+    /// Whether a namespace check already decodes data sinks of this plugin
+    /// and reports the ones that fail.
+    fn data_sink_decoded_elsewhere(self) -> bool {
+        match self {
+            Self::SkipprLake | Self::Duckdb => true,
+            Self::AthenaIceberg => false,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Transform {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_time_fields: Option<String>,
-    pub batch_time_unit: Option<String>,
-    pub flatten_events: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_time_unit: Option<BatchTimeUnit>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_flag",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub flatten_events: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_field_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_partition_fields: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition_allowed_values: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace_fields: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_partition_prefix: Option<String>,
-    pub enable_single_quote_parsing: Option<String>,
-    pub enable_unicode_parsing: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_flag",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enable_single_quote_parsing: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_flag",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enable_unicode_parsing: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_order_fields: Option<String>,
     /// Static field names and JSON values merged onto each source record before ingest.
-    pub inject_fields: Option<HashMap<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inject_fields: Option<BTreeMap<String, Value>>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Stats {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hll_precision: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub histogram_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flush_seconds: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SemanticLayerSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_debounce_ms: Option<u64>,
 }
 
 /// Product CLI dbt naming. Ignored by the engine runtime.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ProductDbtConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub silver_suffix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gold_suffix: Option<String>,
+}
+
+/// The one environment variable name grammar, as error messages print it.
+pub const ENV_NAME_GRAMMAR: &str = "[A-Za-z_][A-Za-z0-9_]*";
+
+/// Whether `name` matches [`ENV_NAME_GRAMMAR`].
+pub fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `${NAME}` with a valid name, and nothing else.
+pub fn is_env_ref(raw: &str) -> bool {
+    raw.strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .is_some_and(is_env_name)
 }
 
 pub type DataSourcePluginConfig = PluginConfigEntry;
@@ -180,88 +455,95 @@ pub type DataSourcePluginConfig = PluginConfigEntry;
 pub type DataSinkPluginConfig = PluginConfigEntry;
 pub type SchemaSinkConfig = PluginConfigEntry;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Pipeline {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
-    #[allow(dead_code)]
-    pub reset_offsets: Option<String>,
-    #[allow(dead_code)]
-    pub reset_metadata: Option<String>,
-    pub auto_approve: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_flag",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auto_approve: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer_threshold_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer_threshold_seconds: Option<u64>,
-    #[allow(dead_code)]
-    buffer_disk_threshold_bytes: Option<u64>,
-    pub chaos_mode: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_flag",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub chaos_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_frequency_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transform: Option<Transform>,
-    #[serde(alias = "input")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_source: Option<String>,
-    #[serde(alias = "output")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_sink: Option<String>,
-    #[serde(alias = "deadletters", alias = "deadletter")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadletter_sink: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<Stats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_layer: Option<SemanticLayerSettings>,
     /// CDC configuration. When present, the pipeline runs in CDC mode and
     /// validates source/sink compatibility at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cdc: Option<CdcPipelineConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CdcPipelineConfig {
     /// Default CDC contract used for dynamically discovered namespaces.
     #[serde(default)]
     pub default: CdcNamespaceConfig,
-    /// Legacy default business key columns. Prefer `cdc.default.business_key_columns`.
-    #[serde(default)]
-    pub business_key_columns: Vec<String>,
     /// Namespace/table-specific CDC contracts. Keys are Skippr namespaces.
-    #[serde(default)]
-    pub namespaces: HashMap<String, CdcNamespaceConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub namespaces: BTreeMap<String, CdcNamespaceConfig>,
 }
 
-impl CdcPipelineConfig {
-    pub fn default_contract(&self) -> CdcNamespaceConfig {
-        let mut default = self.default.clone();
-        if default.business_key_columns.is_empty() && !self.business_key_columns.is_empty() {
-            default.business_key_columns = self.business_key_columns.clone();
-        }
-        default
-    }
-}
-
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CdcNamespaceConfig {
     /// Business key columns used for upsert/delete identity in the target.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub business_key_columns: Vec<String>,
     /// How exact-final-state sinks should handle rows with null business keys.
     /// The default is to reject them for sinks that require deterministic keys.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub null_key_policy: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skippr: Option<Skippr>,
-    #[serde(default)]
-    pub pipelines: HashMap<String, Pipeline>,
-    #[serde(alias = "data_inputs")]
-    pub data_sources: Option<HashMap<String, DataSourcePluginConfig>>,
-    #[serde(alias = "data_outputs")]
-    pub data_sinks: Option<HashMap<String, DataSinkEntry>>,
-    #[serde(alias = "data_deadletters")]
-    pub deadletter_sinks: Option<HashMap<String, DataSinkEntry>>,
-    #[serde(alias = "schema_outputs")]
-    pub schema_sinks: Option<HashMap<String, SchemaSinkConfig>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pipelines: BTreeMap<String, Pipeline>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_sources: Option<BTreeMap<String, DataSourcePluginConfig>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_sinks: Option<BTreeMap<String, DataSinkEntry>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadletter_sinks: Option<BTreeMap<String, DataSinkEntry>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_sinks: Option<BTreeMap<String, SchemaSinkConfig>>,
     /// Product CLI dbt naming. Ignored by the engine runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dbt: Option<ProductDbtConfig>,
     /// Product CLI vector source settings. Ignored by the engine runtime.
-    pub vector_sources: Option<HashMap<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_sources: Option<BTreeMap<String, Value>>,
     /// Bound pipeline for this session. Not YAML. Set by Session / CLI loop.
     #[serde(skip)]
     pub active_pipeline: Option<String>,
@@ -274,8 +556,6 @@ pub fn runtime_child_config() -> Config {
 
 #[allow(dead_code)]
 impl Config {
-    const ALLOWED_BATCH_TIME_UNITS: [&'static str; 5] = ["year", "month", "day", "hour", "minute"];
-
     // Reserved pipeline/table names that cannot be used
     pub fn reserved_pipeline_names() -> &'static [&'static str] {
         &["deadletters", "wal", "_skippr", "skippr", "metadata"]
@@ -291,20 +571,85 @@ impl Config {
         self.active_pipeline.as_deref().unwrap_or("")
     }
 
-    // Validate current pipeline name against reserved list
-    pub fn assert_pipeline_not_reserved(&self) {
-        let name = self.get_pipeline_name();
-        let cleaned = Helpers::clean_field_name(self, name.clone());
-        for r in Self::reserved_pipeline_names().iter() {
-            if name.eq_ignore_ascii_case(r) || cleaned.eq_ignore_ascii_case(r) {
-                error!(
-                    "Invalid pipeline name '{}': reserved. Choose a different name. Reserved: {:?}",
-                    name,
-                    Self::reserved_pipeline_names()
-                );
-                std::process::exit(1);
-            }
+    fn check_pipeline_not_reserved(&self, name: &str) -> Result<(), String> {
+        let cleaned = Helpers::clean_field_name(self, name.to_string());
+        let reserved = Self::reserved_pipeline_names();
+        if reserved
+            .iter()
+            .any(|r| name.eq_ignore_ascii_case(r) || cleaned.eq_ignore_ascii_case(r))
+        {
+            return Err(format!(
+                "Invalid pipeline name '{name}': reserved. Choose a different name. Reserved: {reserved:?}"
+            ));
         }
+        Ok(())
+    }
+
+    /// The one pipeline admission check: name not reserved, pipeline defined,
+    /// and every registry reference (including paired schema sinks) resolves.
+    pub fn validate_pipeline(&self, name: &str) -> Result<(), String> {
+        self.check_pipeline_not_reserved(name)?;
+        let pipeline = self
+            .pipelines
+            .get(name)
+            .ok_or_else(|| format!("Invalid configuration: pipeline '{name}' is not defined."))?;
+        Self::validate_pipeline_registry_refs_for(self, name, pipeline)
+    }
+
+    /// What a pipeline must satisfy before it runs: its references resolve
+    /// and the whole config passes, including entries that must decode.
+    pub fn validate_pipeline_for_run(&self, name: &str) -> Result<(), String> {
+        self.validate_pipeline(name)?;
+        self.check_whole_config(WholeConfigCheck::Run)
+    }
+
+    /// This config narrowed to pipeline `name` and the registry entries it
+    /// references (its source, sinks, and their schema sinks). A Session runs
+    /// and resolves `${ENV}` for this scope only; `dbt` and `vector_sources`
+    /// are product settings the engine does not read.
+    pub fn scoped_to(&self, name: &str) -> Result<Config, String> {
+        fn pick<T: Clone>(
+            entries: Option<&BTreeMap<String, T>>,
+            names: &[String],
+        ) -> Option<BTreeMap<String, T>> {
+            let picked: BTreeMap<String, T> = entries
+                .into_iter()
+                .flatten()
+                .filter(|(entry, _)| names.contains(entry))
+                .map(|(entry, value)| (entry.clone(), value.clone()))
+                .collect();
+            (!picked.is_empty()).then_some(picked)
+        }
+        self.validate_pipeline_for_run(name)?;
+        let pipeline = self.pipelines[name].clone();
+        let entry = |reference: Option<&String>, registry| {
+            reference
+                .map(|reference| Self::parse_registry_ref(reference, registry))
+                .transpose()
+        };
+        let source = entry(pipeline.data_source.as_ref(), Registry::DataSources)?;
+        let sink = entry(pipeline.data_sink.as_ref(), Registry::DataSinks)?;
+        let deadletter = entry(pipeline.deadletter_sink.as_ref(), Registry::DeadletterSinks)?;
+        let data_sinks = pick(self.data_sinks.as_ref(), sink.as_slice());
+        let deadletter_sinks = pick(self.deadletter_sinks.as_ref(), deadletter.as_slice());
+        let schemas = data_sinks
+            .iter()
+            .chain(deadletter_sinks.iter())
+            .flat_map(BTreeMap::values)
+            .filter_map(|sink| sink.schema_sink.as_deref())
+            .map(|reference| Self::parse_registry_ref(reference, Registry::SchemaSinks))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Config {
+            skippr: self.skippr.clone(),
+            pipelines: BTreeMap::from([(name.to_string(), pipeline)]),
+            data_sources: pick(self.data_sources.as_ref(), source.as_slice()),
+            data_sinks,
+            deadletter_sinks,
+            schema_sinks: pick(self.schema_sinks.as_ref(), &schemas),
+            dbt: None,
+            vector_sources: None,
+            active_pipeline: Some(name.to_string()),
+        })
     }
 
     // LLM configuration accessors
@@ -389,26 +734,7 @@ impl Config {
     }
 
     pub fn new() -> Config {
-        Config {
-            skippr: Some(Skippr {
-                workspace: None,
-                tenant: None,
-                skippr_s3_bucket: None,
-                skipprd_el_storage_mode: None,
-                wal_s3_bucket: None,
-                store: None,
-                offset_store: None,
-                offset_dynamodb_table: None,
-            }),
-            pipelines: HashMap::new(),
-            data_sources: None,
-            data_sinks: None,
-            deadletter_sinks: None,
-            schema_sinks: None,
-            dbt: None,
-            vector_sources: None,
-            active_pipeline: None,
-        }
+        Config::default()
     }
 
     pub fn find_config_file() -> String {
@@ -462,8 +788,47 @@ impl Config {
         Ok(config)
     }
 
+    /// Load a config file for running: the authored parse, then [`Config::resolved`].
+    /// The unresolved file must parse, so `${ENV}` only fills string fields.
     pub fn load_path(path: &std::path::Path) -> Result<Config, String> {
-        crate::helpers::dotenv::load_dotenv_for_config_yaml_path(path);
+        Self::parse_unresolved(path)?
+            .resolved(Some(path))
+            .map_err(|err| format!("{}: {err}", path.display()))
+    }
+
+    /// Parse a config file for authoring. `${ENV}` references stay literal.
+    pub fn parse_unresolved(path: &std::path::Path) -> Result<Config, String> {
+        let file_path = path.to_string_lossy().to_string();
+        Self::parse_value(Self::read_config_value(path)?, &file_path)
+    }
+
+    fn parse_value(value: Value, file_path: &str) -> Result<Config, String> {
+        serde_json::from_value(value)
+            .map_err(|err| format!("Invalid Skippr configuration in '{}': {}", file_path, err))
+    }
+
+    /// The runnable form of an authored config: `${ENV}` references resolved.
+    /// `origin` is the file the config was loaded from, for its `.env`.
+    pub fn resolved(&self, origin: Option<&std::path::Path>) -> Result<Config, String> {
+        if let Some(path) = origin {
+            crate::helpers::dotenv::load_dotenv_for_config_yaml_path(path);
+        }
+        let mut value = serde_json::to_value(self)
+            .map_err(|err| format!("Failed to normalize config: {err}"))?;
+        Config::resolve_env_refs_in_json_value(&mut value)
+            .map_err(|err| format!("Invalid environment reference in config: {err}"))?;
+        let mut resolved: Config = serde_json::from_value(value)
+            .map_err(|err| format!("Invalid Skippr configuration: {err}"))?;
+        resolved.active_pipeline = self.active_pipeline.clone();
+        Ok(resolved)
+    }
+
+    /// Deterministic YAML for this config (registries are ordered maps).
+    pub fn to_yaml_string(&self) -> Result<String, String> {
+        serde_yaml::to_string(self).map_err(|err| format!("Failed to render config YAML: {err}"))
+    }
+
+    fn read_config_value(path: &std::path::Path) -> Result<Value, String> {
         let file_path = path.to_string_lossy().to_string();
         let mut file = File::open(path)
             .map_err(|err| format!("Config file '{}' could not be opened: {err}", file_path))?;
@@ -489,18 +854,8 @@ impl Config {
 
         let string_val = serde_json::to_string(&config)
             .map_err(|err| format!("Failed to normalize config '{}': {}", file_path, err))?;
-        let mut config: Value = serde_json::from_str(&string_val)
-            .map_err(|err| format!("Failed to normalize config '{}': {}", file_path, err))?;
-        Config::resolve_env_refs_in_json_value(&mut config).map_err(|err| {
-            format!(
-                "Invalid environment reference in config '{}': {}",
-                file_path, err
-            )
-        })?;
-        let string_val = serde_json::to_string(&config)
-            .map_err(|err| format!("Failed to normalize config '{}': {}", file_path, err))?;
         serde_json::from_str(&string_val)
-            .map_err(|err| format!("Invalid Skippr configuration in '{}': {}", file_path, err))
+            .map_err(|err| format!("Failed to normalize config '{}': {}", file_path, err))
     }
 
     fn merge_env_vars(val: &mut Value, prefix: String) {
@@ -535,22 +890,18 @@ impl Config {
         if !(trimmed.starts_with("${") && trimmed.ends_with('}')) {
             return Ok(None);
         }
-        if trimmed.len() <= 3 || trimmed[2..trimmed.len() - 1].contains("${") {
-            return Err(format!(
-                "invalid environment reference '{}' at {}",
-                value, path
-            ));
-        }
         if trimmed != value {
             return Err(format!(
                 "environment reference '{}' at {} must be the entire scalar value",
                 value, path
             ));
         }
-        let var_name = &trimmed[2..trimmed.len() - 1];
-        if var_name.trim().is_empty() {
-            return Err(format!("empty environment reference at {}", path));
+        if !is_env_ref(trimmed) {
+            return Err(format!(
+                "invalid environment reference '{value}' at {path}; names are {ENV_NAME_GRAMMAR}"
+            ));
         }
+        let var_name = &trimmed[2..trimmed.len() - 1];
         let env_value = std::env::var(var_name).map_err(|_| {
             format!(
                 "skippr.yml references ${{{}}} at {}, but that environment variable is not set",
@@ -597,35 +948,38 @@ impl Config {
         walk(value, String::new())
     }
 
-    pub(crate) fn parse_registry_ref(
-        reference: &str,
-        expected_prefix: &str,
-    ) -> Result<String, String> {
-        let parts: Vec<&str> = reference.split('.').collect();
-        if parts.len() != 2 || parts[0] != expected_prefix || parts[1].is_empty() {
-            return Err(format!(
+    pub fn parse_registry_ref(reference: &str, registry: Registry) -> Result<String, String> {
+        match reference
+            .strip_prefix(registry.key())
+            .and_then(|rest| rest.strip_prefix('.'))
+        {
+            Some(name) if !name.is_empty() && !name.contains('.') => Ok(name.to_string()),
+            _ => Err(format!(
                 "Invalid registry reference '{}'. Expected '{}.<name>'.",
-                reference, expected_prefix
-            ));
+                reference,
+                registry.key()
+            )),
         }
-        Ok(parts[1].to_string())
     }
 
     fn validate_registry_ref_exists<T>(
-        registry: Option<&HashMap<String, T>>,
+        entries: Option<&BTreeMap<String, T>>,
         reference: &str,
-        expected_prefix: &str,
+        registry: Registry,
         pipeline_name: &str,
         field_name: &str,
     ) -> Result<String, String> {
-        let entry_name = Self::parse_registry_ref(reference, expected_prefix).map_err(|err| {
+        let entry_name = Self::parse_registry_ref(reference, registry).map_err(|err| {
             format!(
                 "Invalid configuration for pipeline '{}': {} must be a {} reference. {}",
-                pipeline_name, field_name, expected_prefix, err
+                pipeline_name,
+                field_name,
+                registry.key(),
+                err
             )
         })?;
 
-        if registry.is_some_and(|entries| entries.contains_key(&entry_name)) {
+        if entries.is_some_and(|entries| entries.contains_key(&entry_name)) {
             Ok(entry_name)
         } else {
             Err(format!(
@@ -649,7 +1003,7 @@ impl Config {
         Self::validate_registry_ref_exists(
             config.data_sources.as_ref(),
             data_source_ref,
-            "data_sources",
+            Registry::DataSources,
             pipeline_name,
             "data_source",
         )?;
@@ -658,7 +1012,7 @@ impl Config {
             let data_sink_name = Self::validate_registry_ref_exists(
                 config.data_sinks.as_ref(),
                 data_sink_ref,
-                "data_sinks",
+                Registry::DataSinks,
                 pipeline_name,
                 "data_sink",
             )?;
@@ -667,7 +1021,7 @@ impl Config {
                 .as_ref()
                 .and_then(|sinks| sinks.get(&data_sink_name))
             {
-                Self::validate_paired_schema_sink(
+                Self::validate_schema_sink_ref(
                     config,
                     pipeline_name,
                     "data_sink.schema_sink",
@@ -680,7 +1034,7 @@ impl Config {
             let deadletter_name = Self::validate_registry_ref_exists(
                 config.deadletter_sinks.as_ref(),
                 deadletter_ref,
-                "deadletter_sinks",
+                Registry::DeadletterSinks,
                 pipeline_name,
                 "deadletter_sink",
             )?;
@@ -689,7 +1043,7 @@ impl Config {
                 .as_ref()
                 .and_then(|sinks| sinks.get(&deadletter_name))
             {
-                Self::validate_paired_schema_sink(
+                Self::validate_schema_sink_ref(
                     config,
                     pipeline_name,
                     "deadletter_sink.schema_sink",
@@ -701,7 +1055,8 @@ impl Config {
         Ok(())
     }
 
-    fn validate_paired_schema_sink(
+    /// A linked schema sink must exist. Pairing is a whole-config check.
+    fn validate_schema_sink_ref(
         config: &Config,
         pipeline_name: &str,
         field_name: &str,
@@ -713,39 +1068,11 @@ impl Config {
         Self::validate_registry_ref_exists(
             config.schema_sinks.as_ref(),
             schema_ref,
-            "schema_sinks",
+            Registry::SchemaSinks,
             pipeline_name,
             field_name,
-        )?;
-        let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks")?;
-        let schema_cfg = config
-            .schema_sinks
-            .as_ref()
-            .and_then(|sinks| sinks.get(&schema_name))
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "Invalid configuration for pipeline '{pipeline_name}': {field_name} references '{schema_ref}', but '{schema_name}' is not defined in schema_sinks."
-                )
-            })?;
-        Self::inherit_schema_install_config(&sink_entry.config, schema_cfg)
-            .map_err(|err| format!("Invalid configuration for pipeline '{pipeline_name}': {err}"))
-            .map(|_| ())
-    }
-
-    pub fn validate_current_pipeline_registry_refs(&self) -> Result<(), String> {
-        let config = self.clone();
-        let pipeline_name = self.get_pipeline_name();
-        let pipeline = config
-            .pipelines
-            .get(pipeline_name.as_str())
-            .ok_or_else(|| {
-                format!(
-                    "Invalid configuration: pipeline '{}' is not defined.",
-                    pipeline_name
-                )
-            })?;
-        Self::validate_pipeline_registry_refs_for(&config, &pipeline_name, pipeline)
+        )
+        .map(|_| ())
     }
 
     /// Resolve the schema sink for a `DataSinkEntry` and merge inherited
@@ -755,7 +1082,7 @@ impl Config {
     fn inherit_schema_sink_fields(config: &Config, entry: &DataSinkEntry) -> DataSinkPluginConfig {
         let mut plugin_config = entry.config.clone();
         let schema_cfg = entry.schema_sink.as_ref().and_then(|schema_ref| {
-            let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks").ok()?;
+            let schema_name = Self::parse_registry_ref(schema_ref, Registry::SchemaSinks).ok()?;
             config.schema_sinks.as_ref()?.get(&schema_name).cloned()
         });
         if let Some(schema_cfg) = schema_cfg {
@@ -774,69 +1101,82 @@ impl Config {
         plugin_config
     }
 
-    /// Schema-sink install config. SkipprLake and AthenaIceberg data_sinks must
-    /// pair with the same plugin and equal config.
+    /// Schema-sink install config. A [`PairedSink`] data sink must pair with a
+    /// schema sink of the same plugin and an equal config.
     pub(crate) fn inherit_schema_install_config(
         data_sink: &PluginConfigEntry,
         schema: SchemaSinkConfig,
     ) -> Result<SchemaSinkConfig, String> {
+        Self::check_pairing(("data_sink", data_sink), ("schema_sink", &schema))
+            .map_err(ConfigFinding::message)?;
+        Ok(schema)
+    }
+
+    /// `data_sink` and `schema` are labelled so a finding names the entry it
+    /// is about.
+    fn check_pairing(
+        (data_label, data_sink): (&str, &PluginConfigEntry),
+        (schema_label, schema): (&str, &SchemaSinkConfig),
+    ) -> Result<(), ConfigFinding> {
         use crate::connect::{DataSink, SchemaSink};
-        let schema_label = |parsed: Option<SchemaSink>| {
-            parsed
-                .map(|kind| kind.plugin_name().to_string())
-                .unwrap_or_else(|| schema.plugin_name.clone())
+        let Some(paired) = DataSink::parse(&data_sink.plugin_name).and_then(PairedSink::of) else {
+            return Ok(());
         };
-        match (
-            DataSink::parse(&data_sink.plugin_name),
-            SchemaSink::parse(&schema.plugin_name),
-        ) {
-            (Some(DataSink::SkipprLake), Some(SchemaSink::SkipprLake)) => {
-                let data_cfg: skippr_iceberg_catalog::SkipprLakeConfig = data_sink.deserialize()?;
-                let schema_cfg: skippr_iceberg_catalog::SkipprLakeConfig = schema.deserialize()?;
-                if data_cfg != schema_cfg {
-                    return Err(
-                        "paired SkipprLake data_sink and schema_sink configs must be equal".into(),
-                    );
-                }
-                Ok(schema)
-            }
-            (Some(DataSink::SkipprLake), other) => Err(format!(
-                "SkipprLake data sink must pair with schema_sinks.*.SkipprLake, not {}",
-                schema_label(other)
-            )),
-            (Some(DataSink::AthenaIceberg), Some(SchemaSink::AthenaIceberg)) => {
-                let data_cfg: AthenaIcebergPairing = data_sink.deserialize()?;
-                let schema_cfg: AthenaIcebergPairing = schema.deserialize()?;
-                if data_cfg != schema_cfg {
-                    return Err(
-                        "paired AthenaIceberg data_sink and schema_sink configs must be equal"
-                            .into(),
-                    );
-                }
-                Ok(schema)
-            }
-            (Some(DataSink::AthenaIceberg), other) => Err(format!(
-                "AthenaIceberg data sink must pair with schema_sinks.*.AthenaIceberg, not {}",
-                schema_label(other)
-            )),
-            (Some(DataSink::Duckdb), Some(SchemaSink::Duckdb)) => {
-                let data_cfg: DuckdbPairing = data_sink.deserialize()?;
-                let schema_cfg: DuckdbPairing = schema.deserialize()?;
-                data_cfg.validate()?;
-                schema_cfg.validate()?;
-                if data_cfg != schema_cfg {
-                    return Err(
-                        "paired Duckdb data_sink and schema_sink configs must be equal".into(),
-                    );
-                }
-                Ok(schema)
-            }
-            (Some(DataSink::Duckdb), other) => Err(format!(
-                "Duckdb data sink must pair with schema_sinks.*.Duckdb, not {}",
-                schema_label(other)
-            )),
-            _ => Ok(schema),
+        let name = paired.plugin_name();
+        let schema_kind = SchemaSink::parse(&schema.plugin_name);
+        if schema_kind != Some(paired.schema_sink()) {
+            let label = schema_kind
+                .map(|kind| kind.plugin_name().to_string())
+                .unwrap_or_else(|| schema.plugin_name.clone());
+            return Err(ConfigFinding::Conflict(format!(
+                "{data_label}: {name} data sink must pair with schema_sinks.*.{name}, not {label}"
+            )));
         }
+        fn decode<T: serde::de::DeserializeOwned>(
+            entry: &PluginConfigEntry,
+            validate: fn(&T) -> Result<(), String>,
+        ) -> Result<T, String> {
+            let cfg = entry.deserialize::<T>()?;
+            validate(&cfg)?;
+            Ok(cfg)
+        }
+        fn pair<T: serde::de::DeserializeOwned + PartialEq>(
+            paired: PairedSink,
+            (data_label, data_sink): (&str, &PluginConfigEntry),
+            (schema_label, schema): (&str, &SchemaSinkConfig),
+            validate: fn(&T) -> Result<(), String>,
+        ) -> Result<bool, ConfigFinding> {
+            let data = decode(data_sink, validate);
+            let schema = decode(schema, validate)
+                .map_err(|err| ConfigFinding::Undecodable(format!("{schema_label}: {err}")))?;
+            match data {
+                Ok(data) => Ok(data == schema),
+                Err(_) if paired.data_sink_decoded_elsewhere() => Ok(true),
+                Err(err) => Err(ConfigFinding::Undecodable(format!("{data_label}: {err}"))),
+            }
+        }
+        let data = (data_label, data_sink);
+        let schema_entry = (schema_label, schema);
+        let equal = match paired {
+            PairedSink::SkipprLake => pair::<skippr_iceberg_catalog::SkipprLakeConfig>(
+                paired,
+                data,
+                schema_entry,
+                |_| Ok(()),
+            )?,
+            PairedSink::AthenaIceberg => {
+                pair::<AthenaIcebergPairing>(paired, data, schema_entry, |_| Ok(()))?
+            }
+            PairedSink::Duckdb => {
+                pair::<DuckdbPairing>(paired, data, schema_entry, DuckdbPairing::validate)?
+            }
+        };
+        if !equal {
+            return Err(ConfigFinding::Conflict(format!(
+                "{data_label}: paired {name} data_sink and {schema_label} configs must be equal"
+            )));
+        }
+        Ok(())
     }
 
     pub fn get_pipeline_input_plugin_name(&self) -> String {
@@ -846,7 +1186,8 @@ impl Config {
         let Some(data_source_ref) = pipeline.data_source.as_ref() else {
             return Config::getenv("DATA_SOURCE_PLUGIN_NAME", "");
         };
-        let Ok(entry_name) = Self::parse_registry_ref(data_source_ref, "data_sources") else {
+        let Ok(entry_name) = Self::parse_registry_ref(data_source_ref, Registry::DataSources)
+        else {
             return Config::getenv("DATA_SOURCE_PLUGIN_NAME", "");
         };
         self.data_sources
@@ -864,7 +1205,7 @@ impl Config {
         let Some(data_sink_ref) = pipeline.data_sink.as_ref() else {
             return Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
         };
-        let Ok(entry_name) = Self::parse_registry_ref(data_sink_ref, "data_sinks") else {
+        let Ok(entry_name) = Self::parse_registry_ref(data_sink_ref, Registry::DataSinks) else {
             return Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
         };
         self.data_sinks
@@ -888,7 +1229,7 @@ impl Config {
             Some(reference) => reference,
             None => return Ok(None),
         };
-        let deadletter_name = Self::parse_registry_ref(reference, "deadletter_sinks")?;
+        let deadletter_name = Self::parse_registry_ref(reference, Registry::DeadletterSinks)?;
 
         match config
             .deadletter_sinks
@@ -925,7 +1266,7 @@ impl Config {
         pipeline
             .data_sink
             .clone()
-            .unwrap_or_else(|| "data_sinks.__default__".to_string())
+            .unwrap_or_else(|| Registry::DataSinks.reference("__default__"))
     }
 
     pub fn get_pipeline_deadletter_plugin_name(&self) -> Result<Option<String>, String> {
@@ -975,7 +1316,7 @@ impl Config {
             return Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
         };
         let schema_sink_ref = pipeline.data_sink.as_ref().and_then(|sink_ref| {
-            let sink_name = Self::parse_registry_ref(sink_ref, "data_sinks").ok()?;
+            let sink_name = Self::parse_registry_ref(sink_ref, Registry::DataSinks).ok()?;
             self.data_sinks
                 .as_ref()?
                 .get(&sink_name)?
@@ -985,7 +1326,7 @@ impl Config {
         let Some(schema_ref) = schema_sink_ref else {
             return Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
         };
-        let Ok(schema_name) = Self::parse_registry_ref(&schema_ref, "schema_sinks") else {
+        let Ok(schema_name) = Self::parse_registry_ref(&schema_ref, Registry::SchemaSinks) else {
             return Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
         };
         self.schema_sinks
@@ -1007,20 +1348,24 @@ impl Config {
 
     /// Controls where skipprd extract/load metadata and stats are persisted.
     pub fn get_storage_mode(&self) -> ElStorageMode {
-        if let Some(mode) = self.skippr.as_ref().and_then(|s| s.skipprd_el_storage_mode) {
-            return mode;
-        }
-        let v = Config::getenv("SKIPPRD_EL_STORAGE_MODE", "s3");
-        if v.is_empty() || v == DEFAULT_CONFIG {
-            return ElStorageMode::S3;
-        }
-        match v.parse::<ElStorageMode>() {
+        match self.try_storage_mode() {
             Ok(mode) => mode,
             Err(err) => {
                 eprintln!("[skippr] config failed: {err}");
                 std::process::exit(1);
             }
         }
+    }
+
+    pub fn try_storage_mode(&self) -> Result<ElStorageMode, String> {
+        if let Some(mode) = self.skippr.as_ref().and_then(|s| s.skipprd_el_storage_mode) {
+            return Ok(mode);
+        }
+        let v = Config::getenv("SKIPPRD_EL_STORAGE_MODE", "s3");
+        if v.is_empty() || v == DEFAULT_CONFIG {
+            return Ok(ElStorageMode::S3);
+        }
+        v.parse::<ElStorageMode>().map_err(|err| err.to_string())
     }
 
     /// Raw `WAL_STORAGE` string before parse. Empty means unset (default disk).
@@ -1055,42 +1400,22 @@ impl Config {
         Config::set_evncache("WAL_STORAGE", value);
     }
 
-    /// `Some` when `skippr.store.type`, deprecated `skippr.offset_store`,
-    /// `SKIPPR_STORE_TYPE`, or deprecated `SKIPPR_OFFSET_STORE` is set.
+    /// `Some` when `skippr.store.type` or `SKIPPR_STORE_TYPE` is set.
     pub fn configured_skippr_store(
         &self,
     ) -> Result<Option<SkipprStoreKind>, crate::helpers::wal_storage::ConfigError> {
-        if let Some(root) = self.skippr.as_ref() {
-            if let Some(store) = root.store.as_ref() {
-                if root.offset_store.is_some() || root.offset_dynamodb_table.is_some() {
-                    warn_deprecated_skippr_store(
-                        "skippr.offset_store / skippr.offset_dynamodb_table",
-                    );
-                }
-                return Ok(Some(store.kind));
-            }
-        }
-        if let Some(kind) = self.skippr.as_ref().and_then(|skippr| skippr.offset_store) {
-            warn_deprecated_skippr_store("skippr.offset_store");
-            return Ok(Some(kind));
+        if let Some(store) = self
+            .skippr
+            .as_ref()
+            .and_then(|skippr| skippr.store.as_ref())
+        {
+            return Ok(Some(store.kind));
         }
         let from_env = std::env::var("SKIPPR_STORE_TYPE").unwrap_or_default();
         if !from_env.is_empty() {
             return from_env.parse().map(Some);
         }
-        let deprecated = std::env::var("SKIPPR_OFFSET_STORE").unwrap_or_default();
-        if !deprecated.is_empty() {
-            warn_deprecated_skippr_store("SKIPPR_OFFSET_STORE");
-            return deprecated.parse().map(Some);
-        }
         Ok(None)
-    }
-
-    /// Deprecated name for [`Self::configured_skippr_store`].
-    pub fn configured_offset_store(
-        &self,
-    ) -> Result<Option<SkipprStoreKind>, crate::helpers::wal_storage::ConfigError> {
-        self.configured_skippr_store()
     }
 
     /// S3 bucket for WAL segments. Prefer skippr.wal_s3_bucket, then env, then datalake bucket.
@@ -1120,12 +1445,6 @@ impl Config {
         Config::set_evncache("SKIPPR_STORE_TYPE", value);
     }
 
-    /// Deprecated: sets `SKIPPR_OFFSET_STORE`. Use [`Self::set_skippr_store_type`].
-    pub fn set_offset_store(value: &str) {
-        Config::setenv("SKIPPR_OFFSET_STORE", value);
-        Config::set_evncache("SKIPPR_OFFSET_STORE", value);
-    }
-
     pub fn get_skippr_store_name(&self) -> String {
         if let Some(name) = self
             .skippr
@@ -1136,40 +1455,12 @@ impl Config {
         {
             return name.clone();
         }
-        if let Some(table) = self
-            .skippr
-            .as_ref()
-            .and_then(|skippr| skippr.offset_dynamodb_table.as_ref())
-            .filter(|table| !table.is_empty())
-        {
-            warn_deprecated_skippr_store("skippr.offset_dynamodb_table");
-            return table.clone();
-        }
-        let from_env = Config::getenv("SKIPPR_STORE_NAME", "");
-        if !from_env.is_empty() {
-            return from_env;
-        }
-        let deprecated = Config::getenv("SKIPPR_OFFSET_DYNAMODB_TABLE", "");
-        if !deprecated.is_empty() {
-            warn_deprecated_skippr_store("SKIPPR_OFFSET_DYNAMODB_TABLE");
-        }
-        deprecated
-    }
-
-    /// Deprecated name for [`Self::get_skippr_store_name`].
-    pub fn get_offset_dynamodb_table(&self) -> String {
-        self.get_skippr_store_name()
+        Config::getenv("SKIPPR_STORE_NAME", "")
     }
 
     pub fn set_skippr_store_name(value: &str) {
         Config::setenv("SKIPPR_STORE_NAME", value);
         Config::set_evncache("SKIPPR_STORE_NAME", value);
-    }
-
-    /// Deprecated: sets `SKIPPR_OFFSET_DYNAMODB_TABLE`. Use [`Self::set_skippr_store_name`].
-    pub fn set_offset_dynamodb_table(value: &str) {
-        Config::setenv("SKIPPR_OFFSET_DYNAMODB_TABLE", value);
-        Config::set_evncache("SKIPPR_OFFSET_DYNAMODB_TABLE", value);
     }
 
     /// Derived identity for DynamoDB offset rows: tenant#workspace#pipeline.
@@ -1253,60 +1544,17 @@ impl Config {
     }
 
     pub fn get_pipeline_config(&self) -> Pipeline {
-        let config = self.clone();
-
-        let pipeline = match config.pipelines.get(self.pipeline_key()) {
-            Some(pipeline) => pipeline,
-            None => {
-                return Pipeline {
-                    r#type: None,
-                    reset_offsets: None,
-                    reset_metadata: None,
-                    auto_approve: None,
-                    env: None,
-                    buffer_threshold_bytes: None,
-                    buffer_threshold_seconds: None,
-                    buffer_disk_threshold_bytes: None,
-                    chaos_mode: None,
-                    sync_frequency_seconds: None,
-                    data_dir: None,
-                    transform: None,
-                    data_source: None,
-                    data_sink: None,
-                    deadletter_sink: None,
-                    stats: None,
-                    semantic_layer: None,
-                    cdc: None,
-                }
-            }
-        };
-
-        pipeline.clone()
+        self.pipelines
+            .get(self.pipeline_key())
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn get_transform_config(&self) -> Transform {
-        let pipline = self.get_pipeline_config();
-
-        match pipline.transform.as_ref() {
-            Some(transform) => transform.clone(),
-            None => Transform {
-                batch_time_fields: None,
-                batch_time_unit: None,
-                flatten_events: None,
-                record_field_path: None,
-                batch_partition_fields: None,
-                partition_allowed_values: None,
-                namespace_fields: None,
-                time_partition_prefix: None,
-                enable_single_quote_parsing: None,
-                enable_unicode_parsing: None,
-                batch_order_fields: None,
-                inject_fields: None,
-            },
-        }
+        self.get_pipeline_config().transform.unwrap_or_default()
     }
 
-    pub fn get_transform_inject_fields(&self) -> HashMap<String, Value> {
+    pub fn get_transform_inject_fields(&self) -> BTreeMap<String, Value> {
         self.get_transform_config()
             .inject_fields
             .unwrap_or_default()
@@ -1326,16 +1574,7 @@ impl Config {
     }
 
     pub fn get_stats_config(&self) -> Stats {
-        let pipeline = self.get_pipeline_config();
-        match pipeline.stats.as_ref() {
-            Some(stats) => stats.clone(),
-            None => Stats {
-                enabled: None,
-                hll_precision: None,
-                histogram_enabled: None,
-                flush_seconds: None,
-            },
-        }
+        self.get_pipeline_config().stats.unwrap_or_default()
     }
 
     pub fn get_transform_batch_partition_fields(&self) -> String {
@@ -1374,9 +1613,9 @@ impl Config {
 
     pub fn get_transform_flatten_events(&self) -> bool {
         Self::yaml_bool_or_env(
-            self.get_transform_config().flatten_events.as_ref(),
+            self.get_transform_config().flatten_events,
             "TRANSFORM_FLATTEN_EVENTS",
-            DEFAULT_CONFIG,
+            "false",
         )
     }
 
@@ -1396,18 +1635,16 @@ impl Config {
         )
     }
 
+    /// Lowercase granularity name, or empty when unset. YAML is typed; the
+    /// `TRANSFORM_BATCH_TIME_UNIT` fallback is validated in dependency checks.
     pub fn get_transform_batch_time_unit(&self) -> String {
-        Self::yaml_or_env(
-            self.get_transform_config().batch_time_unit.as_ref(),
-            "TRANSFORM_BATCH_TIME_UNIT",
-            DEFAULT_CONFIG,
-        )
-    }
-
-    fn is_valid_batch_time_unit(unit: &str) -> bool {
-        Self::ALLOWED_BATCH_TIME_UNITS
-            .iter()
-            .any(|allowed| unit.eq_ignore_ascii_case(allowed))
+        match self.get_transform_config().batch_time_unit {
+            Some(unit) => unit.as_str().to_string(),
+            None => {
+                let raw = Self::yaml_or_env(None, "TRANSFORM_BATCH_TIME_UNIT", DEFAULT_CONFIG);
+                BatchTimeUnit::parse(&raw).map_or(raw, |unit| unit.as_str().to_string())
+            }
+        }
     }
 
     fn normalize_optional_config_value(value: String) -> String {
@@ -1470,7 +1707,74 @@ impl Config {
         entry.deserialize().map(Some)
     }
 
-    fn skippr_lake_namespace_violations(&self) -> Vec<String> {
+    /// Checks that span every sink, not one pipeline: no two sinks share a
+    /// SkipprLake or Duckdb namespace, and every sink pairs with the schema
+    /// sink it links.
+    fn whole_config_findings(&self) -> Vec<ConfigFinding> {
+        let mut findings = self.skippr_lake_namespace_findings();
+        findings.extend(self.duckdb_namespace_findings());
+        findings.extend(self.paired_schema_findings());
+        findings
+    }
+
+    pub fn whole_config_violations(&self) -> Vec<String> {
+        self.whole_config_findings()
+            .into_iter()
+            .map(ConfigFinding::message)
+            .collect()
+    }
+
+    pub fn check_whole_config(&self, check: WholeConfigCheck) -> Result<(), String> {
+        let refused: Vec<String> = self
+            .whole_config_findings()
+            .into_iter()
+            .filter_map(|finding| match (check, finding) {
+                (_, ConfigFinding::Conflict(message))
+                | (WholeConfigCheck::Run, ConfigFinding::Undecodable(message)) => Some(message),
+                (WholeConfigCheck::Write, ConfigFinding::Undecodable(_)) => None,
+            })
+            .collect();
+        if refused.is_empty() {
+            Ok(())
+        } else {
+            Err(refused.join("\n"))
+        }
+    }
+
+    /// The one pairing check. A link to a missing schema sink is left to
+    /// pipeline validation.
+    fn paired_schema_findings(&self) -> Vec<ConfigFinding> {
+        [
+            (Registry::DataSinks, self.data_sinks.as_ref()),
+            (Registry::DeadletterSinks, self.deadletter_sinks.as_ref()),
+        ]
+        .into_iter()
+        .flat_map(|(registry, sinks)| {
+            sinks
+                .into_iter()
+                .flatten()
+                .map(move |(name, entry)| (registry, name, entry))
+        })
+        .filter_map(|(registry, name, entry)| {
+            let reference = entry.schema_sink.as_deref()?;
+            let data_label = format!("{}.{name}", registry.key());
+            Self::parse_registry_ref(reference, Registry::SchemaSinks)
+                .map_err(|err| ConfigFinding::Conflict(format!("{data_label}: {err}")))
+                .and_then(|schema_name| {
+                    match self.schema_sinks.as_ref().and_then(|s| s.get(&schema_name)) {
+                        Some(schema) => Self::check_pairing(
+                            (&data_label, &entry.config),
+                            (&Registry::SchemaSinks.reference(&schema_name), schema),
+                        ),
+                        None => Ok(()),
+                    }
+                })
+                .err()
+        })
+        .collect()
+    }
+
+    fn skippr_lake_namespace_findings(&self) -> Vec<ConfigFinding> {
         use std::collections::HashMap;
         let mut seen: HashMap<(String, String), String> = HashMap::new();
         let mut out = Vec::new();
@@ -1480,16 +1784,18 @@ impl Config {
                     Ok(Some(cfg)) => {
                         let key = (cfg.catalog_table.clone(), cfg.table_namespace.clone());
                         if let Some(first) = seen.get(&key) {
-                            out.push(format!(
+                            out.push(ConfigFinding::Conflict(format!(
                         "SkipprLake {kind} '{name}' reuses catalog_table '{}' table_namespace '{}' already used by {first}",
                         cfg.catalog_table, cfg.table_namespace
-                    ));
+                    )));
                         } else {
                             seen.insert(key, format!("{kind} '{name}'"));
                         }
                     }
                     Ok(None) => {}
-                    Err(err) => out.push(format!("SkipprLake {kind} '{name}': {err}")),
+                    Err(err) => out.push(ConfigFinding::Undecodable(format!(
+                        "SkipprLake {kind} '{name}': {err}"
+                    ))),
                 }
             };
         if let Some(sinks) = &self.data_sinks {
@@ -1518,7 +1824,7 @@ impl Config {
         Ok(Some(cfg))
     }
 
-    fn duckdb_namespace_violations(&self) -> Vec<String> {
+    fn duckdb_namespace_findings(&self) -> Vec<ConfigFinding> {
         use std::collections::HashMap;
         let mut seen: HashMap<(String, String), String> = HashMap::new();
         let mut out = Vec::new();
@@ -1528,16 +1834,18 @@ impl Config {
                     Ok(Some(cfg)) => {
                         let key = (cfg.warehouse_key(), cfg.table_namespace.clone());
                         if let Some(first) = seen.get(&key) {
-                            out.push(format!(
+                            out.push(ConfigFinding::Conflict(format!(
                         "Duckdb {kind} '{name}' reuses warehouse '{}' table_namespace '{}' already used by {first}",
                         cfg.warehouse_key(), cfg.table_namespace
-                    ));
+                    )));
                         } else {
                             seen.insert(key, format!("{kind} '{name}'"));
                         }
                     }
                     Ok(None) => {}
-                    Err(err) => out.push(format!("Duckdb {kind} '{name}': {err}")),
+                    Err(err) => out.push(ConfigFinding::Undecodable(format!(
+                        "Duckdb {kind} '{name}': {err}"
+                    ))),
                 }
             };
         if let Some(sinks) = &self.data_sinks {
@@ -1566,12 +1874,8 @@ impl Config {
             Self::normalize_optional_config_value(self.get_partition_allowed_values());
 
         if !batch_time_unit.is_empty() {
-            if !Self::is_valid_batch_time_unit(&batch_time_unit) {
-                violations.push(format!(
-                    "Invalid 'TRANSFORM_BATCH_TIME_UNIT' value '{}'. Allowed values: {:?}.",
-                    batch_time_unit,
-                    Self::ALLOWED_BATCH_TIME_UNITS
-                ));
+            if let Err(err) = BatchTimeUnit::try_from(batch_time_unit.clone()) {
+                violations.push(format!("TRANSFORM_BATCH_TIME_UNIT: {err}"));
             }
 
             if batch_time_fields.is_empty() {
@@ -1579,6 +1883,27 @@ impl Config {
                     "Config dependency missing: 'TRANSFORM_BATCH_TIME_FIELDS' is required when 'TRANSFORM_BATCH_TIME_UNIT' is set."
                         .to_string(),
                 );
+            }
+        }
+
+        if let Err(err) = self.try_storage_mode() {
+            violations.push(err);
+        }
+        if let Err(err) = Self::parse_wal_storage() {
+            violations.push(err.to_string());
+        }
+        if let Err(err) = self.configured_skippr_store() {
+            violations.push(err.to_string());
+        }
+        if let Err(err) = self.check_pipeline_not_reserved(&self.get_pipeline_name()) {
+            violations.push(err.to_string());
+        }
+
+        for removed in ["SKIPPR_OFFSET_STORE", "SKIPPR_OFFSET_DYNAMODB_TABLE"] {
+            if !std::env::var(removed).unwrap_or_default().is_empty() {
+                violations.push(format!(
+                    "{removed} was removed; set SKIPPR_STORE_TYPE and SKIPPR_STORE_NAME (or skippr.store) instead."
+                ));
             }
         }
 
@@ -1601,8 +1926,7 @@ impl Config {
             }
         }
 
-        violations.extend(self.skippr_lake_namespace_violations());
-        violations.extend(self.duckdb_namespace_violations());
+        violations.extend(self.whole_config_violations());
         if let Ok(entry) = self.get_pipeline_output_plugin_config() {
             if let Err(err) = entry.resolved_output_format() {
                 violations.push(err);
@@ -1667,7 +1991,7 @@ impl Config {
 
     pub fn get_pipeline_chaos_mode(&self) -> bool {
         Self::yaml_bool_or_env(
-            self.get_pipeline_config().chaos_mode.as_ref(),
+            self.get_pipeline_config().chaos_mode,
             "SKIPPR_CHAOS_MODE",
             "no",
         )
@@ -1697,25 +2021,9 @@ impl Config {
 
     pub fn get_auto_approve(&self) -> bool {
         Self::yaml_bool_or_env(
-            self.get_pipeline_config().auto_approve.as_ref(),
+            self.get_pipeline_config().auto_approve,
             "SCHEMA_AUTO_APPROVE",
             "true",
-        )
-    }
-
-    pub fn get_reset_offsets(&self) -> bool {
-        Self::yaml_bool_or_env(
-            self.get_pipeline_config().reset_offsets.as_ref(),
-            "RESET_OFFSETS",
-            "false",
-        )
-    }
-
-    pub fn get_reset_metadata(&self) -> bool {
-        Self::yaml_bool_or_env(
-            self.get_pipeline_config().reset_metadata.as_ref(),
-            "RESET_METADATA",
-            "false",
         )
     }
 
@@ -1772,7 +2080,7 @@ impl Config {
         let config = self.clone();
         let pipeline_name = self.get_pipeline_name();
         let input_name = match pipeline_config.data_source.as_ref() {
-            Some(input) => Self::parse_registry_ref(input, "data_sources").map_err(|err| {
+            Some(input) => Self::parse_registry_ref(input, Registry::DataSources).map_err(|err| {
                 format!(
                     "Invalid configuration for pipeline '{}': data_source must reference data_sources.<name>. {}",
                     pipeline_name, err
@@ -1804,7 +2112,7 @@ impl Config {
         let config = self.clone();
         let pipeline_name = self.get_pipeline_name();
         let output_name = match pipeline_config.data_sink.as_ref() {
-            Some(output) => Self::parse_registry_ref(output, "data_sinks").map_err(|err| {
+            Some(output) => Self::parse_registry_ref(output, Registry::DataSinks).map_err(|err| {
                 format!(
                     "Invalid configuration for pipeline '{}': data_sink must reference data_sinks.<name>. {}",
                     pipeline_name, err
@@ -1851,7 +2159,7 @@ impl Config {
                 pipeline_name
             )
         })?;
-        let sink_name = Self::parse_registry_ref(sink_ref, "data_sinks").map_err(|err| {
+        let sink_name = Self::parse_registry_ref(sink_ref, Registry::DataSinks).map_err(|err| {
             format!(
                 "Invalid configuration for pipeline '{}': data_sink must reference data_sinks.<name>. {}",
                 pipeline_name, err
@@ -1878,7 +2186,7 @@ impl Config {
                     pipeline_name, sink_ref
                 )
             })?;
-        let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks").map_err(|err| {
+        let schema_name = Self::parse_registry_ref(schema_ref, Registry::SchemaSinks).map_err(|err| {
             format!(
                 "Invalid configuration for pipeline '{}': data sink '{}' schema_sink must reference schema_sinks.<name>. {}",
                 pipeline_name, sink_ref, err
@@ -1910,7 +2218,7 @@ impl Config {
                 pipeline_name
             )
         })?;
-        let sink_name = Self::parse_registry_ref(sink_ref, "deadletter_sinks").map_err(|err| {
+        let sink_name = Self::parse_registry_ref(sink_ref, Registry::DeadletterSinks).map_err(|err| {
             format!(
                 "Invalid configuration for pipeline '{}': deadletter_sink must reference deadletter_sinks.<name>. {}",
                 pipeline_name, err
@@ -1937,7 +2245,7 @@ impl Config {
                     pipeline_name, sink_ref
                 )
             })?;
-        let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks").map_err(|err| {
+        let schema_name = Self::parse_registry_ref(schema_ref, Registry::SchemaSinks).map_err(|err| {
             format!(
                 "Invalid configuration for pipeline '{}': deadletter sink '{}' schema_sink must reference schema_sinks.<name>. {}",
                 pipeline_name, sink_ref, err
@@ -2032,8 +2340,11 @@ impl Config {
             .unwrap_or(default)
     }
 
-    fn yaml_bool_or_env(yaml: Option<&String>, env: &str, default: &str) -> bool {
-        Config::truth_value(&Self::yaml_or_env(yaml, env, default))
+    fn yaml_bool_or_env(yaml: Option<bool>, env: &str, default: &str) -> bool {
+        match yaml {
+            Some(value) => value,
+            None => Config::truth_value(&Self::yaml_or_env(None, env, default)),
+        }
     }
 
     pub fn list_dir_contents<P: AsRef<Path>>(path: P) -> std::io::Result<()> {
@@ -2055,6 +2366,17 @@ impl Config {
     }
 
     pub fn get_data_dir(&self) -> String {
+        match self.try_data_dir() {
+            Ok(data_dir) => data_dir,
+            Err(err) => {
+                eprintln!("[skippr] config failed: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    /// The pipeline's data directory, created if missing.
+    pub fn try_data_dir(&self) -> Result<String, String> {
         let mut data_dir = self.get_pipeline_data_dir();
         if data_dir.ends_with('/') {
             data_dir.pop();
@@ -2064,32 +2386,14 @@ impl Config {
             let pipeline_name = self.get_full_namespace_name();
             data_dir = format!("{}/{}", data_dir, pipeline_name);
         }
-        match fs::create_dir_all(&data_dir) {
-            Ok(_g) => {}
-            Err(err) => {
-                eprintln!(
-                    "[skippr] config failed: failed to create data directory '{}': {}",
-                    data_dir, err
-                );
-                std::process::exit(1);
-            }
-        }
-
-        data_dir
+        fs::create_dir_all(&data_dir)
+            .map_err(|err| format!("failed to create data directory '{data_dir}': {err}"))?;
+        Ok(data_dir)
     }
 
+    /// Env-var flag value via [`parse_flag`]; anything that is not a flag is false.
     pub fn truth_value(condition: &str) -> bool {
-        match condition {
-            "true" => true,
-            "t" => true,
-            "false" => false,
-            "f" => false,
-            "yes" => true,
-            "no" => false,
-            "1" => true,
-            "0" => false,
-            _ => false,
-        }
+        parse_flag(condition).unwrap_or(false)
     }
 
     pub fn get_pipeline_name(&self) -> String {
@@ -2140,10 +2444,7 @@ impl Config {
     }
 
     fn inject_flatten_flag(&self, metadata: &mut PipelineMetadata) {
-        match &self.get_transform_config().flatten_events {
-            Some(val) => metadata.flattened = Config::truth_value(val),
-            None => metadata.flattened = false,
-        }
+        metadata.flattened = self.get_transform_flatten_events();
     }
 
     pub async fn get_metadata(&self) -> Result<PipelineMetadata, bool> {
@@ -2908,8 +3209,6 @@ impl Config {
     }
 
     pub async fn init(&self) {
-        // Enforce reserved name policy early
-        self.assert_pipeline_not_reserved();
         // Enforce config dependency rules before pipeline runtime starts.
         self.assert_config_dependencies_valid();
 
@@ -2936,50 +3235,24 @@ impl Config {
         }
     }
 
+    /// Env `SKIPPR_ENABLE_SINGLE_QUOTE_PARSING` forces on; otherwise the transform flag.
     pub fn get_enable_single_quote_parsing(&self) -> bool {
-        let env_value = Config::getenv("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING", "false");
-
-        if env_value.to_lowercase() == "true" {
-            return true;
-        }
-
-        let config = self.clone();
-
-        let pipeline = match config.pipelines.get(self.pipeline_key()) {
-            Some(pipeline) => pipeline,
-            None => return false,
-        };
-
-        if let Some(transform) = &pipeline.transform {
-            if let Some(enable_single_quote_parsing) = &transform.enable_single_quote_parsing {
-                return enable_single_quote_parsing.to_lowercase() == "true";
-            }
-        }
-
-        false
+        Config::truth_value(&Config::getenv(
+            "SKIPPR_ENABLE_SINGLE_QUOTE_PARSING",
+            "false",
+        )) || self
+            .get_transform_config()
+            .enable_single_quote_parsing
+            .unwrap_or(false)
     }
 
+    /// Env `SKIPPR_ENABLE_UNICODE_PARSING` forces on; otherwise the transform flag.
     pub fn get_enable_unicode_parsing(&self) -> bool {
-        let env_value = Config::getenv("SKIPPR_ENABLE_UNICODE_PARSING", "false");
-
-        if env_value.to_lowercase() == "true" {
-            return true;
-        }
-
-        let config = self.clone();
-
-        let pipeline = match config.pipelines.get(self.pipeline_key()) {
-            Some(pipeline) => pipeline,
-            None => return false,
-        };
-
-        if let Some(transform) = &pipeline.transform {
-            if let Some(enable_unicode_parsing) = &transform.enable_unicode_parsing {
-                return enable_unicode_parsing.to_lowercase() == "true";
-            }
-        }
-
-        false
+        Config::truth_value(&Config::getenv("SKIPPR_ENABLE_UNICODE_PARSING", "false"))
+            || self
+                .get_transform_config()
+                .enable_unicode_parsing
+                .unwrap_or(false)
     }
 
     pub fn debug_enabled() -> bool {
@@ -3084,6 +3357,330 @@ mod tests {
 
     use super::*;
 
+    const AUTHORED_YAML: &str = r#"
+skippr:
+  workspace: ws
+  tenant: acme
+  skipprd_el_storage_mode: s3
+  skippr_s3_bucket: lake-bucket
+  store:
+    type: dynamodb
+    name: offsets
+data_sources:
+  firehose:
+    S3:
+      s3_bucket: raw
+      s3_prefix: events/
+      format: jsonl
+data_sinks:
+  iceberg:
+    AthenaIceberg:
+      warehouse: s3://lake/
+      glue_database_name: lake
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: results
+    schema_sink: schema_sinks.iceberg
+schema_sinks:
+  iceberg:
+    AthenaIceberg:
+      warehouse: s3://lake/
+      glue_database_name: lake
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: results
+pipelines:
+  events:
+    data_source: data_sources.firehose
+    data_sink: data_sinks.iceberg
+    transform:
+      flatten_events: yes
+      batch_time_fields: time
+      batch_time_unit: day
+      enable_single_quote_parsing: "true"
+    chaos_mode: 0
+"#;
+
+    #[test]
+    fn flags_accept_the_one_grammar_and_reject_the_rest() {
+        let config: Config = serde_yaml::from_str(AUTHORED_YAML).unwrap();
+        let pipeline = &config.pipelines["events"];
+        let transform = pipeline.transform.as_ref().unwrap();
+        assert_eq!(transform.flatten_events, Some(true));
+        assert_eq!(transform.enable_single_quote_parsing, Some(true));
+        assert_eq!(pipeline.chaos_mode, Some(false));
+        for bad in ["maybe", "2", "on"] {
+            let yaml = format!("pipelines:\n  p:\n    transform:\n      flatten_events: {bad}\n");
+            assert!(
+                serde_yaml::from_str::<Config>(&yaml).is_err(),
+                "flatten_events: {bad} must be rejected"
+            );
+        }
+        assert_eq!(parse_flag(" YES "), Some(true));
+        assert_eq!(parse_flag("f"), Some(false));
+        assert!(!Config::truth_value("garbage"));
+    }
+
+    #[test]
+    fn batch_time_unit_is_typed() {
+        let config: Config = serde_yaml::from_str(AUTHORED_YAML).unwrap();
+        let bound = config.bind_pipeline("events");
+        assert_eq!(
+            bound.get_transform_config().batch_time_unit,
+            Some(BatchTimeUnit::Day)
+        );
+        assert_eq!(bound.get_transform_batch_time_unit(), "day");
+        let err = serde_yaml::from_str::<Config>(
+            "pipelines:\n  p:\n    transform:\n      batch_time_unit: week\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("week"), "{err}");
+        assert_eq!(BatchTimeUnit::parse("Hour"), Some(BatchTimeUnit::Hour));
+    }
+
+    #[test]
+    #[serial]
+    fn batch_time_unit_has_one_grammar_for_yaml_and_env() {
+        let config: Config = serde_yaml::from_str(
+            "pipelines:\n  p:\n    transform:\n      batch_time_unit: ' Day '\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.bind_pipeline("p").get_transform_batch_time_unit(),
+            "day"
+        );
+        std::env::set_var("TRANSFORM_BATCH_TIME_UNIT", " Hour ");
+        let unit = Config::new().get_transform_batch_time_unit();
+        std::env::remove_var("TRANSFORM_BATCH_TIME_UNIT");
+        assert_eq!(unit, "hour");
+    }
+
+    #[test]
+    fn config_yaml_round_trips_and_is_deterministic() {
+        let config: Config = serde_yaml::from_str(AUTHORED_YAML).unwrap();
+        let first = config.to_yaml_string().unwrap();
+        let reparsed: Config = serde_yaml::from_str(&first).unwrap();
+        assert_eq!(reparsed, config);
+        assert_eq!(reparsed.to_yaml_string().unwrap(), first);
+        assert!(first.contains("flatten_events: true"), "{first}");
+        assert!(
+            first.contains("schema_sink: schema_sinks.iceberg"),
+            "{first}"
+        );
+        assert!(!first.contains("active_pipeline"));
+        let mut many = config.clone();
+        for name in ["zeta", "alpha", "mid"] {
+            let events = many.pipelines["events"].clone();
+            many.pipelines.insert(name.into(), events);
+        }
+        let yaml = many.to_yaml_string().unwrap();
+        let order: Vec<usize> = ["alpha:", "events:", "mid:", "zeta:"]
+            .iter()
+            .map(|key| yaml.find(&format!("\n  {key}")).unwrap())
+            .collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{yaml}");
+    }
+
+    #[test]
+    #[serial]
+    fn parse_unresolved_keeps_env_refs_and_resolved_expands_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skippr.yml");
+        std::fs::write(
+            &path,
+            "data_sources:\n  pg:\n    Postgres:\n      password: ${SKIPPR_TEST_ROUNDTRIP_PW}\npipelines:\n  p:\n    data_source: data_sources.pg\n",
+        )
+        .unwrap();
+        std::env::set_var("SKIPPR_TEST_ROUNDTRIP_PW", "s3cret");
+        let authored = Config::parse_unresolved(&path).unwrap();
+        let password = |config: &Config| {
+            config.data_sources.as_ref().unwrap()["pg"].config["password"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(password(&authored), "${SKIPPR_TEST_ROUNDTRIP_PW}");
+        let runnable = authored.bind_pipeline("p").resolved(Some(&path)).unwrap();
+        assert_eq!(password(&runnable), "s3cret");
+        assert_eq!(runnable.pipeline_key(), "p");
+        assert_eq!(password(&Config::load_path(&path).unwrap()), "s3cret");
+        std::env::remove_var("SKIPPR_TEST_ROUNDTRIP_PW");
+        let err = authored.resolved(None).unwrap_err();
+        assert!(err.contains("SKIPPR_TEST_ROUNDTRIP_PW"), "{err}");
+    }
+
+    #[test]
+    fn registry_references_have_one_spelling() {
+        for registry in [
+            Registry::DataSources,
+            Registry::DataSinks,
+            Registry::DeadletterSinks,
+            Registry::SchemaSinks,
+        ] {
+            let reference = registry.reference("x");
+            assert_eq!(
+                Config::parse_registry_ref(&reference, registry).unwrap(),
+                "x"
+            );
+        }
+        assert!(Config::parse_registry_ref("data_sinks.x", Registry::DataSources).is_err());
+        assert!(Config::parse_registry_ref("data_sinks.", Registry::DataSinks).is_err());
+        assert!(Config::parse_registry_ref("data_sinks.a.b", Registry::DataSinks).is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn env_refs_in_typed_fields_are_rejected_at_runtime_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skippr.yml");
+        std::fs::write(
+            &path,
+            "pipelines:\n  p:\n    sync_frequency_seconds: ${SKIPPR_TEST_SYNC}\n",
+        )
+        .unwrap();
+        std::env::set_var("SKIPPR_TEST_SYNC", "60");
+        let runtime = Config::load_path(&path);
+        std::env::remove_var("SKIPPR_TEST_SYNC");
+        assert!(runtime.is_err(), "runtime accepted a typed env ref");
+        assert!(Config::parse_unresolved(&path).is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn env_ref_names_use_the_one_grammar() {
+        std::env::set_var("A-B", "x");
+        let mut value = json!({ "k": "${A-B}" });
+        let err = Config::resolve_env_refs_in_json_value(&mut value);
+        std::env::remove_var("A-B");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn scoped_to_keeps_only_the_pipelines_entries() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+pipelines:
+  mine:
+    data_source: data_sources.src
+    data_sink: data_sinks.lake
+  other:
+    data_source: data_sources.src
+    data_sink: data_sinks.pg
+data_sources:
+  src:
+    File:
+      path: /tmp/in
+  unused:
+    File:
+      path: /tmp/unused
+data_sinks:
+  lake:
+    schema_sink: schema_sinks.lake
+    Duckdb:
+      warehouse: file:///tmp/lake
+      table_namespace: main
+  pg:
+    Postgres:
+      user: u
+      database: d
+      password: ${UNRELATED_SECRET}
+schema_sinks:
+  lake:
+    Duckdb:
+      warehouse: file:///tmp/lake
+      table_namespace: main
+  glue:
+    Glue:
+      glue_database_name: g
+dbt:
+  target_schema: ${UNRELATED_DBT}
+vector_sources:
+  docs:
+    path: ${UNRELATED_DOCS}
+"#,
+        )
+        .unwrap();
+        let scoped = config.scoped_to("mine").unwrap();
+        assert_eq!(scoped.pipelines.keys().collect::<Vec<_>>(), ["mine"]);
+        assert_eq!(
+            scoped.data_sources.unwrap().keys().collect::<Vec<_>>(),
+            ["src"]
+        );
+        assert_eq!(
+            scoped.data_sinks.unwrap().keys().collect::<Vec<_>>(),
+            ["lake"]
+        );
+        assert_eq!(
+            scoped.schema_sinks.unwrap().keys().collect::<Vec<_>>(),
+            ["lake"]
+        );
+        assert!(scoped.deadletter_sinks.is_none());
+        assert_eq!(scoped.active_pipeline.as_deref(), Some("mine"));
+        assert!(scoped.dbt.is_none() && scoped.vector_sources.is_none());
+        assert!(config.scoped_to("missing").is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn removed_store_env_is_a_dependency_violation() {
+        std::env::set_var("SKIPPR_OFFSET_STORE", "dynamodb");
+        let violations = Config::new().get_config_dependency_violations();
+        std::env::remove_var("SKIPPR_OFFSET_STORE");
+        assert!(
+            violations.iter().any(|v| v.contains("SKIPPR_STORE_TYPE")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_pipeline_returns_errors_instead_of_exiting() {
+        let config: Config = serde_yaml::from_str(AUTHORED_YAML).unwrap();
+        config.validate_pipeline("events").unwrap();
+        let err = config.validate_pipeline("missing").unwrap_err();
+        assert!(err.contains("'missing' is not defined"), "{err}");
+        let mut reserved = config.clone();
+        let events = reserved.pipelines["events"].clone();
+        reserved.pipelines.insert("deadletters".into(), events);
+        let err = reserved.validate_pipeline("deadletters").unwrap_err();
+        assert!(err.contains("reserved"), "{err}");
+    }
+
+    #[test]
+    fn every_checked_in_config_yaml_parses() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut checked = 0;
+        for entry in walkdir::WalkDir::new(&root).into_iter().filter_entry(|e| {
+            !matches!(
+                e.file_name().to_str(),
+                Some(
+                    "target"
+                        | "node_modules"
+                        | ".git"
+                        | ".venv"
+                        | ".venv-python"
+                        | "data"
+                        | "third_party"
+                )
+            )
+        }) {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy();
+            if !(name.ends_with(".yml") || name.ends_with(".yaml")) {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            if !text.lines().any(|line| line.starts_with("pipelines:")) {
+                continue;
+            }
+            if let Err(err) = Config::parse_unresolved(path) {
+                panic!("{}: {err}", path.display());
+            }
+            checked += 1;
+        }
+        assert!(checked > 10, "only {checked} config YAML files found");
+    }
+
     fn schema_sync_test_config(data_dir: &str) -> Config {
         let config: Config = serde_json::from_value(serde_json::json!({
             "skippr": { "workspace": "quickstart" },
@@ -3150,6 +3747,36 @@ mod tests {
                 && v.contains("cat")),
             "{violations:?}"
         );
+    }
+
+    #[test]
+    fn scoped_to_refuses_sinks_that_share_a_namespace_with_another_pipeline() {
+        let mut config: Config = serde_yaml::from_str(
+            "pipelines:\n  p1:\n    data_source: data_sources.src\n    data_sink: data_sinks.a\n  p2:\n    data_source: data_sources.src\n    data_sink: data_sinks.b\ndata_sources:\n  src:\n    S3:\n      s3_bucket: b\n      s3_prefix: p\n",
+        )
+        .unwrap();
+        config.data_sinks = Some(
+            [
+                ("a".into(), skippr_lake_sink("cat", "bronze")),
+                ("b".into(), skippr_lake_sink("cat", "bronze")),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let err = config.scoped_to("p1").unwrap_err();
+        assert!(err.contains("reuses catalog_table"), "{err}");
+    }
+
+    #[test]
+    fn scoped_to_refuses_a_paired_schema_sink_that_does_not_decode() {
+        let config: Config = serde_yaml::from_str(
+            "pipelines:\n  p:\n    data_source: data_sources.src\n    data_sink: data_sinks.lake\ndata_sources:\n  src:\n    File:\n      path: /tmp/in\ndata_sinks:\n  lake:\n    schema_sink: schema_sinks.lake\n    Duckdb:\n      warehouse: file:///tmp/w\n      table_namespace: main\nschema_sinks:\n  lake:\n    Duckdb:\n      warehouse: file:///tmp/w\n",
+        )
+        .unwrap();
+        let err = config.scoped_to("p").unwrap_err();
+        assert!(err.contains("table_namespace"), "{err}");
+        let err = config.validate_pipeline_for_run("p").unwrap_err();
+        assert!(err.contains("table_namespace"), "{err}");
     }
 
     #[test]
@@ -3343,10 +3970,43 @@ mod tests {
         .unwrap()
         .bind_pipeline("orders");
         let violations = config.get_config_dependency_violations();
-        assert!(
-            violations.iter().any(|v| v.contains("must be equal")),
+        assert_eq!(
+            violations
+                .iter()
+                .filter(|v| v.contains("must be equal"))
+                .count(),
+            1,
             "{violations:?}"
         );
+    }
+
+    #[test]
+    fn a_pair_that_does_not_decode_is_reported_once_against_the_entry_that_failed() {
+        let parse = |yaml: &str| -> Vec<String> {
+            serde_yaml::from_str::<Config>(yaml)
+                .unwrap()
+                .whole_config_violations()
+        };
+        let head = "data_sinks:\n  d:\n    schema_sink: schema_sinks.s\n    Duckdb:\n";
+        let schema = "schema_sinks:\n  s:\n    Duckdb:\n";
+        let violations = parse(&format!(
+            "{head}      warehouse: file:///tmp/w\n      table_namespace: a\n{schema}      table_namespace: a\n"
+        ));
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(
+            violations[0].starts_with("schema_sinks.s: "),
+            "{violations:?}"
+        );
+        assert!(violations[0].contains("warehouse"), "{violations:?}");
+
+        let violations = parse(&format!(
+            "{head}      warehouse: /tmp/w\n      table_namespace: a\n{schema}      warehouse: /tmp/w\n      table_namespace: a\n"
+        ));
+        let data_sink = violations
+            .iter()
+            .filter(|v| v.contains("'d'") || v.starts_with("data_sinks.d"))
+            .count();
+        assert_eq!(data_sink, 1, "{violations:?}");
     }
 
     #[test]
@@ -3384,10 +4044,12 @@ mod tests {
         .unwrap()
         .bind_pipeline("orders");
         let violations = config.get_config_dependency_violations();
-        assert!(
+        assert_eq!(
             violations
                 .iter()
-                .any(|v| v.contains("AthenaIceberg") && v.contains("Glue")),
+                .filter(|v| v.contains("AthenaIceberg") && v.contains("Glue"))
+                .count(),
+            1,
             "{violations:?}"
         );
     }
@@ -3958,50 +4620,14 @@ pipelines: {}
     }
 
     #[test]
-    #[serial]
-    fn skippr_store_reads_deprecated_offset_store_yaml() {
-        ENV_CACHE.write().clear();
-        std::env::remove_var("SKIPPR_STORE_TYPE");
-        std::env::remove_var("SKIPPR_OFFSET_STORE");
-        Config::set_evncache("SKIPPR_STORE_TYPE", "");
-        Config::set_evncache("SKIPPR_OFFSET_STORE", "");
-        let config: Config = serde_yaml::from_str(
-            r#"
-skippr:
-  workspace: ws
-  offset_store: cloud-tables
-  offset_dynamodb_table: old-table
-pipelines: {}
-"#,
-        )
-        .unwrap();
-        assert_eq!(
-            config.configured_skippr_store().unwrap(),
-            Some(SkipprStoreKind::CloudTables)
-        );
-        assert_eq!(config.get_skippr_store_name(), "old-table");
-    }
-
-    #[test]
-    fn skippr_store_yaml_wins_over_deprecated_offset_keys() {
-        let config: Config = serde_yaml::from_str(
-            r#"
-skippr:
-  workspace: ws
-  store:
-    type: dynamodb
-    name: new-table
-  offset_store: sled
-  offset_dynamodb_table: old-table
-pipelines: {}
-"#,
-        )
-        .unwrap();
-        assert_eq!(
-            config.configured_skippr_store().unwrap(),
-            Some(SkipprStoreKind::DynamoDb)
-        );
-        assert_eq!(config.get_skippr_store_name(), "new-table");
+    fn removed_offset_store_keys_are_rejected() {
+        for key in ["offset_store: sled", "offset_dynamodb_table: old-table"] {
+            let yaml = format!("skippr:\n  workspace: ws\n  {key}\npipelines: {{}}\n");
+            let err = serde_yaml::from_str::<Config>(&yaml)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("unknown field"), "{key}: {err}");
+        }
     }
 
     #[test]
@@ -4012,14 +4638,8 @@ pipelines: {}
 
         let mut config = Config::new();
         config.skippr = Some(Skippr {
-            workspace: None,
-            tenant: None,
-            skippr_s3_bucket: None,
             skipprd_el_storage_mode: Some(ElStorageMode::Local),
-            wal_s3_bucket: None,
-            store: None,
-            offset_store: None,
-            offset_dynamodb_table: None,
+            ..Skippr::default()
         });
 
         assert_eq!(config.get_storage_mode(), ElStorageMode::Local);
@@ -4034,44 +4654,12 @@ pipelines: {}
     #[test]
     fn test_deadletter_config_unset_returns_none() {
         let pipeline = Pipeline {
-            r#type: None,
-            reset_offsets: None,
-            reset_metadata: None,
-            auto_approve: None,
-            env: None,
-            buffer_threshold_bytes: None,
-            buffer_threshold_seconds: None,
-            buffer_disk_threshold_bytes: None,
-            chaos_mode: None,
-            sync_frequency_seconds: None,
-            data_dir: None,
-            transform: None,
-            data_source: None,
             data_sink: Some("data_sinks.main".to_string()),
-            deadletter_sink: None,
-            stats: None,
-            semantic_layer: None,
-            cdc: None,
+            ..Pipeline::default()
         };
         let config = Config {
-            skippr: Some(Skippr {
-                workspace: None,
-                tenant: None,
-                skippr_s3_bucket: None,
-                skipprd_el_storage_mode: None,
-                wal_s3_bucket: None,
-                store: None,
-                offset_store: None,
-                offset_dynamodb_table: None,
-            }),
-            pipelines: HashMap::new(),
-            data_sources: None,
-            data_sinks: None,
-            deadletter_sinks: Some(HashMap::new()),
-            schema_sinks: None,
-            dbt: None,
-            vector_sources: None,
-            active_pipeline: None,
+            deadletter_sinks: Some(BTreeMap::new()),
+            ..Config::new()
         };
 
         assert!(
@@ -4084,44 +4672,13 @@ pipelines: {}
     #[test]
     fn test_deadletter_config_invalid_reference_is_rejected() {
         let pipeline = Pipeline {
-            r#type: None,
-            reset_offsets: None,
-            reset_metadata: None,
-            auto_approve: None,
-            env: None,
-            buffer_threshold_bytes: None,
-            buffer_threshold_seconds: None,
-            buffer_disk_threshold_bytes: None,
-            chaos_mode: None,
-            sync_frequency_seconds: None,
-            data_dir: None,
-            transform: None,
-            data_source: None,
             data_sink: Some("data_sinks.main".to_string()),
             deadletter_sink: Some("deadletter_sinks.missing".to_string()),
-            stats: None,
-            semantic_layer: None,
-            cdc: None,
+            ..Pipeline::default()
         };
         let config = Config {
-            skippr: Some(Skippr {
-                workspace: None,
-                tenant: None,
-                skippr_s3_bucket: None,
-                skipprd_el_storage_mode: None,
-                wal_s3_bucket: None,
-                store: None,
-                offset_store: None,
-                offset_dynamodb_table: None,
-            }),
-            pipelines: HashMap::new(),
-            data_sources: None,
-            data_sinks: None,
-            deadletter_sinks: Some(HashMap::new()),
-            schema_sinks: None,
-            dbt: None,
-            vector_sources: None,
-            active_pipeline: None,
+            deadletter_sinks: Some(BTreeMap::new()),
+            ..Config::new()
         };
 
         assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline).is_err());
@@ -4477,8 +5034,8 @@ schema_sinks:
         let yaml = "skippr:\nworkspace: platform\ntenant: system\n\npipelines:\notel-traces:\ndata_source: data_sources.otlp_traces\ndata_sink: data_sinks.lake\n";
         let err = parse_skippr_yml_like_skipprd(yaml).expect_err("stripped YAML must not parse");
         assert!(
-            err.contains("null") && err.contains("map"),
-            "expected null-map Config error, got {err}"
+            err.contains("unknown field `data_sink`"),
+            "expected unknown-field Config error, got {err}"
         );
     }
 

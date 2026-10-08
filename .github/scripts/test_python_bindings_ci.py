@@ -76,7 +76,8 @@ class PythonBindingsCiTests(unittest.TestCase):
 
     def test_python_script_builds_wheel_and_runs_session_tests(self):
         script = TEST_PYTHON.read_text(encoding="utf-8")
-        self.assertIn("maturin develop", script)
+        self.assertNotIn("maturin develop", script)
+        self.assertIn("pip install --force-reinstall --no-deps target/wheels/*.whl", script)
         self.assertIn("python/tests", script)
         self.assertIn("maturin build --release", script)
         self.assertIn("PYPI_WHEEL_MAX_BYTES", script)
@@ -97,6 +98,40 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("PIP_CONFIG_FILE=/dev/null", script)
         self.assertIn("PIP_INDEX_URL=https://pypi.org/simple", script)
         self.assertNotIn("codeartifact", script)
+
+    def test_python_script_type_checks_the_installed_wheel(self):
+        script = TEST_PYTHON.read_text(encoding="utf-8")
+        install = script.index("pip install --force-reinstall --no-deps")
+        stubtest = script.index("python -m mypy.stubtest skippr")
+        self.assertLess(install, stubtest)
+        self.assertIn('--allowlist "$ROOT/python/stubtest-allowlist.txt"', script)
+        self.assertIn('mypy --strict --warn-unused-ignores "$ROOT/python/tests/typing"', script)
+        self.assertIn('cd "$(mktemp -d)"', script)
+        self.assertIn("pyarrow-stubs", script)
+        self.assertTrue((ROOT / "python" / "tests" / "typing" / "ok.py").is_file())
+        self.assertTrue((ROOT / "python" / "tests" / "typing" / "bad.py").is_file())
+
+    def test_python_script_pins_every_tool(self):
+        script = TEST_PYTHON.read_text(encoding="utf-8")
+        installs = [
+            line.split("pip install", 1)[1].split()
+            for line in script.splitlines()
+            if "pip install" in line and "--force-reinstall" not in line
+        ]
+        specs = [arg.strip('"') for args in installs for arg in args if not arg.startswith("-")]
+        self.assertTrue(specs)
+        for spec in specs:
+            self.assertRegex(spec, r"^[A-Za-z0-9_.-]+==[0-9][A-Za-z0-9.]*$", spec)
+
+    def test_python_script_ships_stub_and_manylinux_2_28(self):
+        script = TEST_PYTHON.read_text(encoding="utf-8")
+        self.assertIn("--compatibility manylinux_2_28 --zig", script)
+        self.assertIn("ziglang", script)
+        self.assertIn('"skippr/__init__.pyi", "skippr/py.typed"', script)
+        self.assertIn("must be tagged manylinux_2_28", script)
+        self.assertIn("rm -rf target/wheels", script)
+        self.assertTrue((ROOT / "skippr.pyi").is_file(), "maturin ships the root stub")
+        self.assertFalse((ROOT / "python" / "skippr.pyi").exists())
 
     def test_release_profile_strips_debug_so_pypi_fits(self):
         text = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
@@ -256,21 +291,21 @@ class PythonBindingsCiTests(unittest.TestCase):
 
     def test_python_semver_is_independent_of_engine_tags(self):
         module = load_wheel_version()
-        self.assertEqual(module.python_semver(), "17.0.0")
+        self.assertEqual(module.python_semver(), "18.0.0")
         self.assertTrue(
             module.should_publish(
-                "17.0.0", unpublished=["skippr-17.0.0-cp310-abi3-macosx_11_0_arm64.whl"]
+                "18.0.0", unpublished=["skippr-18.0.0-cp310-abi3-macosx_11_0_arm64.whl"]
             )
         )
-        self.assertFalse(module.should_publish("17.0.0", unpublished=[]))
+        self.assertFalse(module.should_publish("18.0.0", unpublished=[]))
         self.assertFalse(module.should_publish("0.0.0", unpublished=["skippr-0.0.0-any.whl"]))
 
     def test_publish_uploads_only_wheels_missing_from_pypi(self):
         module = load_wheel_version()
         with tempfile.TemporaryDirectory() as tmp:
             dist = Path(tmp)
-            linux = dist / "skippr-17.0.0-cp310-abi3-manylinux_2_39_x86_64.whl"
-            darwin = dist / "skippr-17.0.0-cp310-abi3-macosx_11_0_arm64.whl"
+            linux = dist / "skippr-18.0.0-cp310-abi3-manylinux_2_28_x86_64.whl"
+            darwin = dist / "skippr-18.0.0-cp310-abi3-macosx_11_0_arm64.whl"
             linux.write_bytes(b"linux")
             darwin.write_bytes(b"darwin")
             published = {linux.name}
@@ -302,9 +337,9 @@ class PythonBindingsCiTests(unittest.TestCase):
             python_cargo = (root / "python" / "Cargo.toml").read_text(encoding="utf-8")
             lock = (root / "Cargo.lock").read_text(encoding="utf-8")
             self.assertRegex((root / "Cargo.toml").read_text(encoding="utf-8"), r'(?m)^version = "9\.8\.7"$')
-            self.assertRegex(pyproject, r'(?m)^version = "17\.0\.0"$')
-            self.assertRegex(python_cargo, r'(?m)^version = "17\.0\.0"$')
-            self.assertIn('name = "skipprd-python"\nversion = "17.0.0"', lock)
+            self.assertRegex(pyproject, r'(?m)^version = "18\.0\.0"$')
+            self.assertRegex(python_cargo, r'(?m)^version = "18\.0\.0"$')
+            self.assertIn('name = "skipprd-python"\nversion = "18.0.0"', lock)
 
     def test_normalize_semver_rejects_v_prefix(self):
         module = load_set_version()

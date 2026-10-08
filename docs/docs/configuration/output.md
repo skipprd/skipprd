@@ -6,10 +6,10 @@ Ingest outputs are configured under `data_sinks:` and optional `schema_sinks:` i
 pipelines:
   events:
     data_sink: data_sinks.landing
-    schema_sink: schema_sinks.catalog
 
 data_sinks:
   landing:
+    schema_sink: schema_sinks.catalog
     Athena:
       s3_bucket: my-warehouse-bucket
       s3_prefix: bronze/events
@@ -20,6 +20,10 @@ data_sinks:
 schema_sinks:
   catalog:
     Glue:
+      s3_bucket: my-warehouse-bucket
+      s3_prefix: bronze/events
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: athena-results
       glue_database_name: bronze_events
 ```
 

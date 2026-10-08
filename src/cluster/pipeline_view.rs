@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::buffer::compaction_transaction::SinkRetrySemantics;
 use crate::cluster::iceberg_lake::{FsCatalogConfig, GlueCatalogConfig, IcebergLake};
 use crate::connect::DataSink;
-use crate::helpers::configuration::{Config, Pipeline};
+use crate::helpers::configuration::{Config, Pipeline, Registry};
 use crate::helpers::wal_storage::{ConfigError, WalStorage};
 use crate::plugins::cdc::SinkCapability;
 use skippr_iceberg_catalog::SkipprLakeConfig;
@@ -27,7 +27,7 @@ impl QueryBackend {
         let Some(data_sink_ref) = pipeline_cfg.data_sink.as_ref() else {
             return Ok(Self::WalOnly);
         };
-        let name = Config::parse_registry_ref(data_sink_ref, "data_sinks")
+        let name = Config::parse_registry_ref(data_sink_ref, Registry::DataSinks)
             .map_err(ConfigError::InvalidIdentity)?;
         let Some(entry) = config
             .data_sinks
@@ -110,12 +110,9 @@ impl PipelineConfigView {
         let (sink_ref, sink_plugin, schema_plugin) = resolve_sink(config, pipeline_cfg);
         let source_plugin = resolve_source(config, pipeline_cfg);
         let backend = QueryBackend::for_pipeline(config, pipeline)?;
-        let flatten_events = pipeline_cfg
-            .transform
-            .as_ref()
-            .and_then(|transform| transform.flatten_events.as_ref())
-            .map(|value| Config::truth_value(value))
-            .unwrap_or(false);
+        let flatten_events = config
+            .bind_pipeline(pipeline)
+            .get_transform_flatten_events();
         Ok(Self {
             key,
             data_root,
@@ -221,7 +218,7 @@ fn resolve_source(config: &Config, pipeline: &Pipeline) -> String {
     let Some(data_source_ref) = pipeline.data_source.as_ref() else {
         return String::new();
     };
-    let name = Config::parse_registry_ref(data_source_ref, "data_sources")
+    let name = Config::parse_registry_ref(data_source_ref, Registry::DataSources)
         .unwrap_or_else(|_| data_source_ref.clone());
     config
         .data_sources
@@ -235,7 +232,7 @@ fn resolve_sink(config: &Config, pipeline: &Pipeline) -> (Option<String>, String
     let Some(data_sink_ref) = pipeline.data_sink.as_ref() else {
         return (None, String::new(), None);
     };
-    let name = Config::parse_registry_ref(data_sink_ref, "data_sinks")
+    let name = Config::parse_registry_ref(data_sink_ref, Registry::DataSinks)
         .unwrap_or_else(|_| data_sink_ref.clone());
     match config
         .data_sinks
