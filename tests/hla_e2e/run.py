@@ -293,7 +293,6 @@ pipelines:
     buffer_threshold_seconds: 1
     data_source: data_sources.local_events
     data_sink: data_sinks.iceberg_local
-    schema_sink: schema_sinks.iceberg_local
 
 data_sources:
   local_events:
@@ -2129,7 +2128,6 @@ pipelines:
     buffer_threshold_seconds: 1
     data_source: data_sources.local_events
     data_sink: data_sinks.iceberg_local
-    schema_sink: schema_sinks.iceberg_local
   hla_events_b:
     auto_approve: yes
     env: test
@@ -2137,7 +2135,6 @@ pipelines:
     buffer_threshold_seconds: 1
     data_source: data_sources.local_events_b
     data_sink: data_sinks.iceberg_b
-    schema_sink: schema_sinks.iceberg_b
 
 data_sources:
   local_events:
