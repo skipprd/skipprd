@@ -227,7 +227,7 @@ fn ensure_slow_ingest_worker(config: &Config) {
     handle.spawn(worker);
 }
 
-fn merge_inject_fields(record: &mut Value, fields: &HashMap<String, Value>) {
+fn merge_inject_fields(record: &mut Value, fields: &std::collections::BTreeMap<String, Value>) {
     if fields.is_empty() {
         return;
     }
@@ -2342,12 +2342,7 @@ impl Ingest {
                             };
                         }
 
-                        let flatten = Config::truth_value(
-                            &config
-                                .get_transform_config()
-                                .flatten_events
-                                .unwrap_or("false".to_string()),
-                        );
+                        let flatten = config.get_transform_flatten_events();
 
                         for (_namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
                             AnalyseSchema::determine_field_types(
@@ -3925,7 +3920,7 @@ mod transform_inject_fields_tests {
 
     #[test]
     fn merge_inject_fields_adds_configured_values() {
-        let fields = HashMap::from([
+        let fields = std::collections::BTreeMap::from([
             ("workspace_id".to_string(), json!("ws-1")),
             ("domain_id".to_string(), json!("dom-1")),
         ]);
@@ -3938,7 +3933,7 @@ mod transform_inject_fields_tests {
 
     #[test]
     fn merge_inject_fields_preserves_existing_non_empty_values() {
-        let fields = HashMap::from([("workspace_id".to_string(), json!("new"))]);
+        let fields = std::collections::BTreeMap::from([("workspace_id".to_string(), json!("new"))]);
         let mut record = json!({"workspace_id": "old", "event": "click"});
         merge_inject_fields(&mut record, &fields);
         assert_eq!(record["workspace_id"], "old");
@@ -3946,7 +3941,7 @@ mod transform_inject_fields_tests {
 
     #[test]
     fn merge_inject_fields_fills_missing_domain() {
-        let fields = HashMap::from([("domain".to_string(), json!("skippr.io"))]);
+        let fields = std::collections::BTreeMap::from([("domain".to_string(), json!("skippr.io"))]);
         let mut record = json!({"event": "click"});
         merge_inject_fields(&mut record, &fields);
         assert_eq!(record["domain"], "skippr.io");
@@ -3954,7 +3949,7 @@ mod transform_inject_fields_tests {
 
     #[test]
     fn merge_inject_fields_preserves_organic_serp_domain() {
-        let fields = HashMap::from([
+        let fields = std::collections::BTreeMap::from([
             ("workspace_id".to_string(), json!("ws-1")),
             ("domain_id".to_string(), json!("skippr.io")),
             ("domain".to_string(), json!("skippr.io")),

@@ -53,6 +53,4 @@ Start with:
 | `SKIPPR_CHAOS_MODE` | `no` | [Advanced](advanced.md) | Enable chaos mode (random SIGKILL for testing) |
 | `SKIPPR_ENV` | `prod` | [Advanced](advanced.md) | Environment label |
 | `SCHEMA_AUTO_APPROVE` | `true` | [Advanced](advanced.md) | Auto-approve schema changes |
-| `RESET_OFFSETS` | `false` | [Advanced](advanced.md) | Reset offsets on startup |
-| `RESET_METADATA` | `false` | [Advanced](advanced.md) | Reset metadata on startup |
 | `SYNC_FREQUENCY` | | [Advanced](advanced.md) | Sync frequency (seconds) |

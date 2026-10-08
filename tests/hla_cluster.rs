@@ -9,7 +9,7 @@ use skipprd::cluster::promote::{select_highest_hash_consistent, ClusterHead, Pee
 use skipprd::cluster::validation::{
     validate_clustered_backend, validate_wal_storage_for_mode, CliModeKind,
 };
-use skipprd::helpers::wal_storage::{ConfigError, OffsetStoreKind, WalStorage};
+use skipprd::helpers::wal_storage::{ConfigError, SkipprStoreKind, WalStorage};
 use skipprd::query_flight::live_wal::select_live_ordinals;
 use std::path::PathBuf;
 use std::sync::Once;
@@ -54,7 +54,7 @@ fn clustered_query_is_allowed() {
 fn clustered_requires_dynamodb_table() {
     let err = validate_clustered_backend(
         WalStorage::Clustered,
-        OffsetStoreKind::default_for_wal(WalStorage::Clustered),
+        SkipprStoreKind::default_for_wal(WalStorage::Clustered),
         "",
     )
     .unwrap_err();
@@ -66,13 +66,10 @@ fn clustered_requires_dynamodb_table() {
 
 #[test]
 fn clustered_rejects_explicit_sled_offset_store() {
-    let err = validate_clustered_backend(WalStorage::Clustered, OffsetStoreKind::Sled, "offsets")
+    let err = validate_clustered_backend(WalStorage::Clustered, SkipprStoreKind::Sled, "offsets")
         .unwrap_err();
     #[cfg(feature = "offset-store-dynamodb")]
-    assert_eq!(
-        err,
-        ConfigError::ClusteredOffsetStoreConflict("sled".into())
-    );
+    assert_eq!(err, ConfigError::ClusteredStoreConflict("sled".into()));
     #[cfg(not(feature = "offset-store-dynamodb"))]
     assert_eq!(err, ConfigError::ClusteredFeatureMissing);
 }

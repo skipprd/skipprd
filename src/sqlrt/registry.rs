@@ -79,18 +79,24 @@ pub async fn write_registry(config: &Config, mut reg: Registry) -> Result<(), St
     save_registry(config, &reg).await
 }
 
-pub async fn list_pipelines(config: &Config) -> Vec<String> {
-    if let Some(r) = read_registry(config).await {
-        if !r.pipelines.is_empty() {
-            let mut v = r.pipelines.clone();
-            v.sort();
-            v.dedup();
-            return v;
-        }
-    }
-    let mut v: Vec<String> = config.pipelines.keys().cloned().collect();
+/// The workspace registry is shared by every config in the workspace; only
+/// pipelines this config defines can be resolved into views.
+fn queryable_pipelines(registry: Option<&Registry>, config: &Config) -> Vec<String> {
+    let known: Vec<String> = match registry {
+        Some(r) if !r.pipelines.is_empty() => r.pipelines.clone(),
+        _ => config.pipelines.keys().cloned().collect(),
+    };
+    let mut v: Vec<String> = known
+        .into_iter()
+        .filter(|name| config.pipelines.contains_key(name))
+        .collect();
     v.sort();
+    v.dedup();
     v
+}
+
+pub async fn list_pipelines(config: &Config) -> Vec<String> {
+    queryable_pipelines(read_registry(config).await.as_ref(), config)
 }
 
 pub async fn list_namespaces(config: &Config, pipeline: &str) -> Vec<String> {
@@ -159,4 +165,37 @@ pub async fn set_embeddings_uri(config: &Config, pipeline: &str, uri: &str) -> R
     reg.embeddings_uri_by_pipeline
         .insert(pipeline.to_string(), uri.to_string());
     write_registry(config, reg).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with(pipelines: &[&str]) -> Config {
+        let mut config = Config::new();
+        for name in pipelines {
+            config
+                .pipelines
+                .insert(name.to_string(), serde_yaml::from_str("{}").unwrap());
+        }
+        config
+    }
+
+    #[test]
+    fn queryable_pipelines_are_the_configs_pipelines_the_registry_knows() {
+        let registry = Registry {
+            pipelines: vec!["b".into(), "gone".into(), "a".into(), "a".into()],
+            ..Registry::default()
+        };
+        let config = config_with(&["a", "b", "new"]);
+        assert_eq!(queryable_pipelines(Some(&registry), &config), ["a", "b"]);
+    }
+
+    #[test]
+    fn without_a_registry_every_config_pipeline_is_queryable() {
+        let config = config_with(&["b", "a"]);
+        assert_eq!(queryable_pipelines(None, &config), ["a", "b"]);
+        let empty = Registry::default();
+        assert_eq!(queryable_pipelines(Some(&empty), &config), ["a", "b"]);
+    }
 }

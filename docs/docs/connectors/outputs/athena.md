@@ -69,11 +69,24 @@ If Athena is used as a `deadletter_sink`, deadletters are written to the configu
 pipelines:
   events:
     data_sink: data_sinks.landing
+
+data_sinks:
+  landing:
     schema_sink: schema_sinks.catalog
+    Athena:
+      s3_bucket: my-output-bucket
+      s3_prefix: warehouse/events
+      glue_database_name: my_database
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: my-athena-results
 
 schema_sinks:
   catalog:
     Glue:
+      s3_bucket: my-output-bucket
+      s3_prefix: warehouse/events
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: my-athena-results
       glue_database_name: my_database
 ```
 

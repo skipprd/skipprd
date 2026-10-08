@@ -608,8 +608,9 @@ skipprd = { path = "../.." }
         self.assertIn("**SkipprLake**", datalake)
         self.assertNotIn("Skipprd catalog", datalake)
         python_md = (repo / "docs" / "docs" / "python.md").read_text(encoding="utf-8")
-        self.assertIn("DataSink.AthenaIceberg", python_md)
-        self.assertIn("DataSink.Duckdb", python_md)
+        self.assertIn("`AthenaIceberg`", python_md)
+        self.assertIn("`Duckdb`", python_md)
+        self.assertNotIn("DataSink.", python_md)
         self.assertNotIn("Athena Iceberg", python_md)
         self.assertNotIn("DuckDB Iceberg", python_md)
         otel_wbs = (

@@ -2,7 +2,6 @@ skippr:
   skippr_s3_bucket: upfoundry-prod-datalake
   tenant: local-dfs-hub-debug
   workspace: default
-  region: eu-west-1
   skipprd_el_storage_mode: local
 
 pipelines:
@@ -11,7 +10,6 @@ pipelines:
     env: test
     buffer_threshold_bytes: 10000000
     buffer_threshold_seconds: 600
-    reset_offsets: yes
     data_source: data_sources.dataforseo_seo_opportunities
     data_sink: data_sinks.tenant_athena
     deadletter_sink: deadletter_sinks.deadletters

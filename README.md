@@ -146,7 +146,6 @@ pipelines:
   bikehire:
     data_source: data_sources.source
     data_sink: data_sinks.landing
-    schema_sink: schema_sinks.glue
 
 data_sources:
   source:
@@ -156,6 +155,7 @@ data_sources:
 
 data_sinks:
   landing:
+    schema_sink: schema_sinks.glue
     Athena:
       s3_bucket: your-output-bucket
       s3_prefix: data/bikehire
@@ -166,6 +166,10 @@ data_sinks:
 schema_sinks:
   glue:
     Glue:
+      s3_bucket: your-output-bucket
+      s3_prefix: data/bikehire
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: your-athena-results
       glue_database_name: skippr_quickstart
 ```
 
@@ -179,7 +183,7 @@ Legacy and deployment environment variables include:
 
 | Variable | Default | Description |
 |---|---|---|
-| `PIPELINE_NAME` | | Maps onto `--pipeline` / `Session.pipeline` when the flag is omitted. Not process-wide identity. |
+| `PIPELINE_NAME` | | Maps onto `--pipeline` when the flag is omitted. Not process-wide identity. Python `Session` takes a `PipelineRef` and ignores it. |
 | `WORKSPACE_NAME` | `default` | Workspace/domain when `skippr.workspace` is unset |
 | `TENANT` | `default` | Tenant identifier when `skippr.tenant` is unset |
 | `SKIPPR_S3_BUCKET` | | State bucket (metadata, WAL, deadletters) |
@@ -233,8 +237,6 @@ Legacy and deployment environment variables include:
 |---|---|---|
 | `SKIPPR_CHAOS_MODE` | `no` | Random SIGKILL for testing exactly-once |
 | `SCHEMA_AUTO_APPROVE` | `true` | Auto-approve schema changes |
-| `RESET_OFFSETS` | `false` | Re-ingest from beginning |
-| `RESET_METADATA` | `false` | Re-discover schema from scratch |
 
 ### JSON parsing
 

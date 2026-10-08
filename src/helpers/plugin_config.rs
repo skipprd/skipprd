@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::serdes::input_format::InputFormat;
@@ -113,6 +114,14 @@ impl PluginConfigEntry {
     }
 }
 
+impl Serialize for PluginConfigEntry {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(&self.plugin_name, &self.config)?;
+        map.end()
+    }
+}
+
 impl<'de> Deserialize<'de> for PluginConfigEntry {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -128,6 +137,18 @@ impl<'de> Deserialize<'de> for PluginConfigEntry {
 pub struct DataSinkEntry {
     pub config: PluginConfigEntry,
     pub schema_sink: Option<String>,
+}
+
+impl Serialize for DataSinkEntry {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let len = 1 + usize::from(self.schema_sink.is_some());
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry(&self.config.plugin_name, &self.config.config)?;
+        if let Some(schema_sink) = &self.schema_sink {
+            map.serialize_entry("schema_sink", schema_sink)?;
+        }
+        map.end()
+    }
 }
 
 impl<'de> Deserialize<'de> for DataSinkEntry {

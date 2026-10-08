@@ -17,32 +17,42 @@ Bundled Athena ingest can create Glue objects on write; a dedicated schema sink 
 pipelines:
   events:
     data_sink: data_sinks.landing
-    schema_sink: schema_sinks.catalog
 
 data_sinks:
   landing:
+    schema_sink: schema_sinks.catalog
     Athena:
       s3_bucket: my-warehouse-bucket
       s3_prefix: bronze/events
       glue_database_name: bronze_events
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: athena-results
 
 schema_sinks:
   catalog:
     Glue:
+      s3_bucket: my-warehouse-bucket
+      s3_prefix: bronze/events
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: athena-results
       glue_database_name: bronze_events
 ```
 
 | Field | Required | Description |
 | --- | --- | --- |
 | `glue_database_name` | Yes | Glue database for table and partition DDL |
+| `s3_bucket` | Yes | Bucket the Athena sink lands data in; table locations point here |
+| `s3_prefix` | Yes | Prefix under `s3_bucket` for those table locations |
+| `athena_workgroup_name` | Yes | Athena workgroup used for catalog DDL |
+| `athena_results_s3_bucket` | Yes | Bucket for Athena query results |
 
 Environment variable equivalent: `SCHEMA_OUTPUT_GLUE_DATABASE_NAME`.
 
 ## Pipeline wiring
 
 1. Set `pipelines.<name>.data_sink` to a registry entry using the `Athena` plugin.
-2. Set `pipelines.<name>.schema_sink` to a registry entry using the `Glue` plugin.
-3. Use the same database name on both blocks unless you intentionally separate landing and catalog namespaces.
+2. Set `data_sinks.<name>.schema_sink` on that sink to a registry entry using the `Glue` plugin.
+3. Use the same database name, bucket, prefix, and workgroup on both blocks unless you intentionally separate landing and catalog namespaces.
 
 ## Query and model
 

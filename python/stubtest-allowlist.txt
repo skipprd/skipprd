@@ -1,0 +1,4 @@
+# maturin's generated `skippr/__init__.py` re-exports the native `skippr.skippr`
+# module and copies its PyO3 `__all__`. The stub describes the package surface.
+skippr.__all__
+skippr.skippr

@@ -555,7 +555,7 @@ pub async fn run_schema(config: &Config, pipeline: &str) {
 pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> {
     let pipeline_name = config.get_pipeline_name();
     config
-        .validate_current_pipeline_registry_refs()
+        .validate_pipeline_for_run(&pipeline_name)
         .map_err(io::Error::other)?;
     Ingest::reset_discovery_progress();
     let start_time = Instant::now();
@@ -655,12 +655,7 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
 
     info!("Reached end of source data, persisting discovered metadata");
 
-    let flatten = Config::truth_value(
-        &config
-            .get_transform_config()
-            .flatten_events
-            .unwrap_or("false".to_string()),
-    );
+    let flatten = config.get_transform_flatten_events();
 
     let mut updated_metadata = METADATA.load().as_ref().clone();
     let runtime_schema_state = current_runtime_schema_state();
@@ -786,7 +781,7 @@ pub async fn run_sync_pipeline(
 pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> io::Result<()> {
     let pipeline_name = config.get_pipeline_name();
     config
-        .validate_current_pipeline_registry_refs()
+        .validate_pipeline_for_run(&pipeline_name)
         .map_err(io::Error::other)?;
     let sync_started = Instant::now();
 
@@ -905,12 +900,7 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
     clear_runtime_source_schema_state();
     METADATA.store(Arc::new(pipeline_metadata.clone()));
     {
-        let flatten = Config::truth_value(
-            &config
-                .get_transform_config()
-                .flatten_events
-                .unwrap_or_else(|| "false".to_string()),
-        );
+        let flatten = config.get_transform_flatten_events();
         crate::ingest_work::warm_output_schemas_for_metadata(
             config,
             &pipeline_metadata.metadata,
@@ -1034,7 +1024,7 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
                 });
             if let (Some(src), Some(snk)) = (src_cap.as_ref(), sink_cap.as_ref()) {
                 let mut contracts = BTreeMap::new();
-                let default_contract = cdc_cfg.default_contract();
+                let default_contract = &cdc_cfg.default;
                 let source_contracts = METADATA.load().source_contracts.clone();
                 let mut namespace_configs = vec![(
                     "*".to_string(),

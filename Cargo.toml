@@ -205,8 +205,8 @@ prost-build = "0.13"
 stats_integration = []
 # Used only by crates/skipprd-dfs-hub-compat-tests (keeps plugin out of host dev-deps).
 dfs-hub-compat-tests = []
-# Release tarballs enable these so published skipprd can use SKIPPR_OFFSET_STORE=dynamodb
-# (Lambda) and SKIPPR_OFFSET_STORE=cloud-tables (Skippr Cloud elt guest) without pulling
+# Release tarballs enable these so published skipprd can use SKIPPR_STORE_TYPE=dynamodb
+# (Lambda) and SKIPPR_STORE_TYPE=cloud-tables (Skippr Cloud elt guest) without pulling
 # those stores into the default host dependency closure (CI boundary check).
 offset-store-dynamodb = [
     "dep:skippr-offset-store-dynamodb",

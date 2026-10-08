@@ -173,11 +173,6 @@ impl SkipprCatalogBackend {
             Self::DynamoDb
         }
     }
-
-    /// Deprecated: `SKIPPR_OFFSET_STORE`. Use [`Self::from_store_type`].
-    pub fn from_offset_store(raw: &str) -> Self {
-        Self::from_store_type(raw)
-    }
 }
 
 /// True when SkipprStore type selects Cloud Tables (same aliases as skipprd).
@@ -188,19 +183,9 @@ pub fn store_is_cloud_tables(raw: &str) -> bool {
     )
 }
 
-/// Deprecated: `SKIPPR_OFFSET_STORE`. Use [`store_is_cloud_tables`].
-pub fn offset_store_is_cloud_tables(raw: &str) -> bool {
-    store_is_cloud_tables(raw)
-}
-
-/// `SKIPPR_STORE_TYPE`, falling back to deprecated `SKIPPR_OFFSET_STORE`.
+/// `SKIPPR_STORE_TYPE` as injected by the host into runtime plugins.
 pub fn store_type_from_env() -> String {
-    let fresh = std::env::var("SKIPPR_STORE_TYPE").unwrap_or_default();
-    if !fresh.trim().is_empty() {
-        return fresh;
-    }
-    let deprecated = std::env::var("SKIPPR_OFFSET_STORE").unwrap_or_default();
-    deprecated
+    std::env::var("SKIPPR_STORE_TYPE").unwrap_or_default()
 }
 
 /// The `s3a://` scheme iceberg-rust/OpenDAL expects for an `s3://` location.

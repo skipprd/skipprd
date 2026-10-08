@@ -28,7 +28,7 @@ pub enum WalStorage {
 ```
 
 - Existing `WAL_STORAGE` / `--wal-storage` only.
-- `clustered` reuses existing `SKIPPR_OFFSET_DYNAMODB_TABLE` for offsets, leases, and membership.
+- `clustered` reuses the SkipprStore table (`skippr.store.name` / `SKIPPR_STORE_NAME`) for offsets, leases, and membership.
 - SkipprLake `catalog_table` is a separate customer-created catalog table. It MUST NOT be the offset table.
 - No lease/quorum/TTL/node/bind/peer-list knobs.
 - Quorum and replication factor are both two total copies.
@@ -569,8 +569,8 @@ No implicit majority on hash disagreement. Initialized head loss is fatal.
 
 **Create:** `crates/skippr-iceberg-catalog`.
 
-- Shared `SkipprLakeConfig { warehouse, catalog_table, region, object_store, table_namespace }` (IcebergCatalogConfig is deleted). `catalog_table` is a customer-created catalog table, distinct from `SKIPPR_OFFSET_DYNAMODB_TABLE`.
-- `SkipprLakeConfig { warehouse, catalog_table, region, object_store, table_namespace }`. `catalog_table` is a customer-created catalog table, distinct from `SKIPPR_OFFSET_DYNAMODB_TABLE`.
+- Shared `SkipprLakeConfig { warehouse, catalog_table, region, object_store, table_namespace }` (IcebergCatalogConfig is deleted). `catalog_table` MAY be the SkipprStore table (`SKIPPR_STORE_NAME`).
+- `SkipprLakeConfig { warehouse, catalog_table, region, object_store, table_namespace }`. `catalog_table` MAY be the SkipprStore table (`SKIPPR_STORE_NAME`).
 - Plugin and host share one serde contract.
 - `glue_catalog` becomes `Arc<dyn Catalog>` factory/cache.
 - Refactor Glue-concrete commit helpers.

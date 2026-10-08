@@ -76,11 +76,6 @@ pub fn skippr_store_type_value(config: &Config) -> String {
     }
 }
 
-/// Deprecated name for [`skippr_store_type_value`].
-pub fn offset_store_env_value(config: &Config) -> String {
-    skippr_store_type_value(config)
-}
-
 pub fn pipeline_key(config: &Config) -> Result<PipelineKey, String> {
     PipelineKey::new(
         config.get_tenant(),
@@ -165,10 +160,10 @@ mod tests {
     #[test]
     #[serial]
     fn disk_without_offset_store_kind_is_sled() {
-        let old_store = std::env::var("SKIPPR_OFFSET_STORE").ok();
+        let old_store = std::env::var("SKIPPR_STORE_TYPE").ok();
         let old_wal = std::env::var("WAL_STORAGE").ok();
-        std::env::remove_var("SKIPPR_OFFSET_STORE");
-        Config::set_evncache("SKIPPR_OFFSET_STORE", "");
+        std::env::remove_var("SKIPPR_STORE_TYPE");
+        Config::set_evncache("SKIPPR_STORE_TYPE", "");
         Config::set_wal_storage("disk");
         let config: Config = serde_json::from_value(json!({
             "skippr": { "workspace": "ws-a", "tenant": "ten-a" },
@@ -182,10 +177,10 @@ mod tests {
         .unwrap();
         assert_eq!(configured_kind(&config).unwrap(), SkipprStoreKind::Sled);
         if let Some(value) = old_store {
-            Config::set_offset_store(&value);
+            Config::set_skippr_store_type(&value);
         } else {
-            std::env::remove_var("SKIPPR_OFFSET_STORE");
-            Config::set_evncache("SKIPPR_OFFSET_STORE", "");
+            std::env::remove_var("SKIPPR_STORE_TYPE");
+            Config::set_evncache("SKIPPR_STORE_TYPE", "");
         }
         if let Some(value) = old_wal {
             Config::set_wal_storage(&value);

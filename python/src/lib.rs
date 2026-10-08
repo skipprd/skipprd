@@ -1,19 +1,19 @@
 //! PyO3 `skippr` module. `Session` is the same engine as the CLI.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+mod config;
+
 use std::sync::OnceLock;
 
 use ::skipprd::api::Session as EngineSession;
-use ::skipprd::connect::{self, ConnectPlugin};
 use ::skipprd::helpers::configuration::Config;
-use ::skipprd::helpers::wal_storage::{ElStorageMode, SkipprStoreKind};
 use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 use arrow::pyarrow::ToPyArrow;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule};
+
+use config::PyPipelineRef;
 
 fn runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -23,12 +23,6 @@ fn runtime() -> &'static tokio::runtime::Runtime {
             .build()
             .expect("tokio runtime")
     })
-}
-
-fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
-    let json = obj.py().import("json")?;
-    let dumped: String = json.call_method1("dumps", (obj,))?.extract()?;
-    serde_json::from_str(&dumped).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 fn value_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
@@ -56,406 +50,53 @@ fn batches_to_table(py: Python<'_>, batches: Vec<RecordBatch>) -> PyResult<Py<Py
         .unbind())
 }
 
-fn config_path(config: Option<String>) -> PathBuf {
-    config
-        .map(PathBuf::from)
-        .unwrap_or_else(connect::discover_config_path)
-}
-
-#[pyclass(eq, eq_int, from_py_object, name = "StorageMode", module = "skippr")]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum PyStorageMode {
-    #[pyo3(name = "LOCAL")]
-    Local,
-    #[pyo3(name = "S3")]
-    S3,
-}
-
-impl From<PyStorageMode> for ElStorageMode {
-    fn from(value: PyStorageMode) -> Self {
-        match value {
-            PyStorageMode::Local => Self::Local,
-            PyStorageMode::S3 => Self::S3,
-        }
-    }
-}
-
-#[pyclass(eq, eq_int, from_py_object, name = "SkipprStore", module = "skippr")]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum PySkipprStore {
-    #[pyo3(name = "SLED")]
-    Sled,
-    #[pyo3(name = "DYNAMODB")]
-    DynamoDb,
-    #[pyo3(name = "CLOUD_TABLES")]
-    CloudTables,
-}
-
-impl From<PySkipprStore> for SkipprStoreKind {
-    fn from(value: PySkipprStore) -> Self {
-        match value {
-            PySkipprStore::Sled => Self::Sled,
-            PySkipprStore::DynamoDb => Self::DynamoDb,
-            PySkipprStore::CloudTables => Self::CloudTables,
-        }
-    }
-}
-
-#[pyclass(name = "SkipprRoot", module = "skippr")]
-struct PySkipprRoot {
-    path: PathBuf,
-}
-
-impl PySkipprRoot {
-    fn persist(
-        &self,
-        workspace: Option<&str>,
-        storage_mode: Option<ElStorageMode>,
-        wal_s3_bucket: Option<&str>,
-        store: Option<SkipprStoreKind>,
-        store_name: Option<&str>,
-        skippr_s3_bucket: Option<&str>,
-        tenant: Option<&str>,
-    ) -> PyResult<()> {
-        connect::persist_skippr_keys(
-            &self.path,
-            workspace,
-            storage_mode,
-            wal_s3_bucket,
-            store,
-            store_name,
-            skippr_s3_bucket,
-            tenant,
-        )
-        .map(|_| ())
-        .map_err(PyValueError::new_err)
-    }
-}
-
-#[pymethods]
-impl PySkipprRoot {
-    fn workspace(slf: Bound<'_, Self>, value: String) -> PyResult<Py<Self>> {
-        slf.borrow()
-            .persist(Some(&value), None, None, None, None, None, None)?;
-        Ok(slf.unbind())
-    }
-
-    fn storage_mode(slf: Bound<'_, Self>, value: PyStorageMode) -> PyResult<Py<Self>> {
-        slf.borrow()
-            .persist(None, Some(value.into()), None, None, None, None, None)?;
-        Ok(slf.unbind())
-    }
-
-    #[pyo3(signature = (kind, name = None))]
-    fn store(
-        slf: Bound<'_, Self>,
-        kind: PySkipprStore,
-        name: Option<String>,
-    ) -> PyResult<Py<Self>> {
-        slf.borrow().persist(
-            None,
-            None,
-            None,
-            Some(kind.into()),
-            name.as_deref(),
-            None,
-            None,
-        )?;
-        Ok(slf.unbind())
-    }
-
-    /// Deprecated: use `store`. Still writes `skippr.store.type`.
-    fn offset_store(slf: Bound<'_, Self>, value: PySkipprStore) -> PyResult<Py<Self>> {
-        slf.borrow()
-            .persist(None, None, None, Some(value.into()), None, None, None)?;
-        Ok(slf.unbind())
-    }
-
-    fn wal_s3_bucket(slf: Bound<'_, Self>, value: String) -> PyResult<Py<Self>> {
-        slf.borrow()
-            .persist(None, None, Some(&value), None, None, None, None)?;
-        Ok(slf.unbind())
-    }
-
-    /// Deprecated: use `store`. Still writes `skippr.store.name`.
-    fn offset_dynamodb_table(slf: Bound<'_, Self>, value: String) -> PyResult<Py<Self>> {
-        slf.borrow()
-            .persist(None, None, None, None, Some(&value), None, None)?;
-        Ok(slf.unbind())
-    }
-
-    fn skippr_s3_bucket(slf: Bound<'_, Self>, value: String) -> PyResult<Py<Self>> {
-        slf.borrow()
-            .persist(None, None, None, None, None, Some(&value), None)?;
-        Ok(slf.unbind())
-    }
-
-    fn tenant(slf: Bound<'_, Self>, value: String) -> PyResult<Py<Self>> {
-        slf.borrow()
-            .persist(None, None, None, None, None, None, Some(&value))?;
-        Ok(slf.unbind())
-    }
-}
-
-fn skippr_root(config: Option<String>) -> PySkipprRoot {
-    PySkipprRoot {
-        path: config_path(config),
-    }
-}
-
-#[pyfunction]
-#[pyo3(signature = (value, config = None))]
-fn workspace(py: Python<'_>, value: String, config: Option<String>) -> PyResult<Py<PySkipprRoot>> {
-    let root = skippr_root(config);
-    root.persist(Some(&value), None, None, None, None, None, None)?;
-    Bound::new(py, root).map(|b| b.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (value, config = None))]
-fn storage_mode(
-    py: Python<'_>,
-    value: PyStorageMode,
-    config: Option<String>,
-) -> PyResult<Py<PySkipprRoot>> {
-    let root = skippr_root(config);
-    root.persist(None, Some(value.into()), None, None, None, None, None)?;
-    Bound::new(py, root).map(|b| b.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (kind, name = None, config = None))]
-fn store(
-    py: Python<'_>,
-    kind: PySkipprStore,
-    name: Option<String>,
-    config: Option<String>,
-) -> PyResult<Py<PySkipprRoot>> {
-    let root = skippr_root(config);
-    root.persist(
-        None,
-        None,
-        None,
-        Some(kind.into()),
-        name.as_deref(),
-        None,
-        None,
-    )?;
-    Bound::new(py, root).map(|b| b.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (value, config = None))]
-fn offset_store(
-    py: Python<'_>,
-    value: PySkipprStore,
-    config: Option<String>,
-) -> PyResult<Py<PySkipprRoot>> {
-    let root = skippr_root(config);
-    root.persist(None, None, None, Some(value.into()), None, None, None)?;
-    Bound::new(py, root).map(|b| b.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (value, config = None))]
-fn wal_s3_bucket(
-    py: Python<'_>,
-    value: String,
-    config: Option<String>,
-) -> PyResult<Py<PySkipprRoot>> {
-    let root = skippr_root(config);
-    root.persist(None, None, Some(&value), None, None, None, None)?;
-    Bound::new(py, root).map(|b| b.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (value, config = None))]
-fn offset_dynamodb_table(
-    py: Python<'_>,
-    value: String,
-    config: Option<String>,
-) -> PyResult<Py<PySkipprRoot>> {
-    let root = skippr_root(config);
-    root.persist(None, None, None, None, Some(&value), None, None)?;
-    Bound::new(py, root).map(|b| b.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (value, config = None))]
-fn skippr_s3_bucket(
-    py: Python<'_>,
-    value: String,
-    config: Option<String>,
-) -> PyResult<Py<PySkipprRoot>> {
-    let root = skippr_root(config);
-    root.persist(None, None, None, None, None, Some(&value), None)?;
-    Bound::new(py, root).map(|b| b.unbind())
-}
-
-#[pyfunction]
-#[pyo3(signature = (value, config = None))]
-fn tenant(py: Python<'_>, value: String, config: Option<String>) -> PyResult<Py<PySkipprRoot>> {
-    let root = skippr_root(config);
-    root.persist(None, None, None, None, None, None, Some(&value))?;
-    Bound::new(py, root).map(|b| b.unbind())
-}
-
-#[pyclass(name = "Config", module = "skippr")]
-#[derive(Clone)]
-struct PyConfig {
-    inner: Config,
-}
-
-impl PyConfig {
-    fn skippr_mut(&mut self) -> &mut ::skipprd::helpers::configuration::Skippr {
-        self.inner
-            .skippr
-            .get_or_insert_with(|| ::skipprd::helpers::configuration::Skippr {
-                workspace: None,
-                tenant: None,
-                skippr_s3_bucket: None,
-                skipprd_el_storage_mode: None,
-                wal_s3_bucket: None,
-                store: None,
-                offset_store: None,
-                offset_dynamodb_table: None,
-            })
-    }
-
-    fn set_json_field<T: serde::de::DeserializeOwned>(
-        &mut self,
-        obj: &Bound<'_, PyAny>,
-        write: impl FnOnce(&mut Config, T),
-    ) -> PyResult<()> {
-        let value = py_to_value(obj)?;
-        let parsed =
-            serde_json::from_value(value).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        write(&mut self.inner, parsed);
-        Ok(())
-    }
-}
-
-#[pymethods]
-impl PyConfig {
-    #[new]
-    #[pyo3(signature = (**kwargs))]
-    fn new(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let inner = match kwargs {
-            Some(kwargs) if !kwargs.is_empty() => {
-                let value = py_to_value(kwargs.as_any())?;
-                serde_json::from_value(value).map_err(|e| PyValueError::new_err(e.to_string()))?
-            }
-            _ => Config::new(),
-        };
-        Ok(Self { inner })
-    }
-
-    fn workspace(slf: Bound<'_, Self>, value: String) -> Py<Self> {
-        slf.borrow_mut().skippr_mut().workspace = Some(value);
-        slf.unbind()
-    }
-
-    fn storage_mode(slf: Bound<'_, Self>, value: PyStorageMode) -> Py<Self> {
-        slf.borrow_mut().skippr_mut().skipprd_el_storage_mode = Some(value.into());
-        slf.unbind()
-    }
-
-    fn pipelines(slf: Bound<'_, Self>, value: Bound<'_, PyAny>) -> PyResult<Py<Self>> {
-        slf.borrow_mut()
-            .set_json_field(&value, |cfg, parsed| cfg.pipelines = parsed)?;
-        Ok(slf.unbind())
-    }
-
-    fn data_sources(slf: Bound<'_, Self>, value: Bound<'_, PyAny>) -> PyResult<Py<Self>> {
-        slf.borrow_mut()
-            .set_json_field(&value, |cfg, parsed| cfg.data_sources = Some(parsed))?;
-        Ok(slf.unbind())
-    }
-
-    fn data_sinks(slf: Bound<'_, Self>, value: Bound<'_, PyAny>) -> PyResult<Py<Self>> {
-        slf.borrow_mut()
-            .set_json_field(&value, |cfg, parsed| cfg.data_sinks = Some(parsed))?;
-        Ok(slf.unbind())
-    }
-
-    fn schema_sinks(slf: Bound<'_, Self>, value: Bound<'_, PyAny>) -> PyResult<Py<Self>> {
-        slf.borrow_mut()
-            .set_json_field(&value, |cfg, parsed| cfg.schema_sinks = Some(parsed))?;
-        Ok(slf.unbind())
-    }
-}
-
+/// The engine bound to one pipeline of a `Config`, with `${ENV}` resolved.
 #[pyclass(name = "Session", module = "skippr")]
 struct PySession {
     inner: EngineSession,
+    config: Config,
+    pipeline: String,
+}
+
+impl PySession {
+    /// The engine's startup checks, raised instead of exiting the interpreter.
+    /// Run before every engine call. Process env settings such as `WAL_STORAGE`
+    /// are cached on first read, so a change after that is not seen.
+    fn admit(&self) -> PyResult<()> {
+        let mut violations = self.config.get_config_dependency_violations();
+        if let Err(err) = self.config.try_data_dir() {
+            violations.push(err);
+        }
+        if violations.is_empty() {
+            return Ok(());
+        }
+        Err(PyValueError::new_err(violations.join("\n")))
+    }
 }
 
 #[pymethods]
 impl PySession {
     #[new]
-    #[pyo3(signature = (pipeline, config = None, *, config_file = None))]
-    fn new(
-        pipeline: String,
-        config: Option<Bound<'_, PyConfig>>,
-        config_file: Option<String>,
-    ) -> PyResult<Self> {
-        if pipeline.trim().is_empty() {
-            return Err(PyValueError::new_err("Session requires pipeline="));
-        }
-        let inner = match (config, config_file) {
-            (Some(_), Some(_)) => {
-                return Err(PyValueError::new_err(
-                    "Session accepts config= or config_file=, not both",
-                ));
-            }
-            (Some(cfg), None) => {
-                EngineSession::from_config(cfg.borrow().inner.clone(), Some(pipeline.as_str()))
-                    .map_err(PyValueError::new_err)?
-            }
-            (None, Some(path)) => EngineSession::from_yml(path, Some(pipeline.as_str()))
-                .map_err(PyValueError::new_err)?,
-            (None, None) => EngineSession::from_discovered(Some(pipeline.as_str()))
-                .map_err(PyValueError::new_err)?,
+    fn new(py: Python<'_>, pipeline: PyRef<'_, PyPipelineRef>) -> PyResult<Self> {
+        let name = pipeline.pipeline_name();
+        let config = pipeline.resolved_config(py)?.bind_pipeline(name);
+        let inner = EngineSession::from_config(config.clone(), Some(name));
+        let session = Self {
+            inner,
+            config,
+            pipeline: name.to_string(),
         };
-        Ok(Self { inner })
-    }
-
-    fn config(slf: Bound<'_, Self>, config: Bound<'_, PyConfig>) -> Py<Self> {
-        slf.borrow_mut()
-            .inner
-            .set_config(config.borrow().inner.clone());
-        slf.unbind()
+        session.admit()?;
+        Ok(session)
     }
 
     #[getter]
-    fn pipeline(&self) -> Option<String> {
-        self.inner.pipeline.clone()
-    }
-
-    fn connect(slf: Bound<'_, Self>) -> PyResult<Py<PyConnect>> {
-        let session = slf.borrow();
-        let pipeline = session
-            .inner
-            .require_pipeline()
-            .map_err(PyValueError::new_err)?
-            .to_string();
-        let path = session.inner.connect_path();
-        drop(session);
-        Bound::new(
-            slf.py(),
-            PyConnect {
-                session: slf.unbind(),
-                path,
-                pipeline,
-                plugin: None,
-                name: None,
-                fields: BTreeMap::new(),
-            },
-        )
-        .map(|b| b.unbind())
+    fn pipeline(&self) -> String {
+        self.pipeline.clone()
     }
 
     fn doctor(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.admit()?;
         let result = py.detach(|| runtime().block_on(self.inner.doctor()));
         let value =
             serde_json::to_value(&result).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -463,6 +104,7 @@ impl PySession {
     }
 
     fn discover(&self, py: Python<'_>) -> PyResult<()> {
+        self.admit()?;
         py.detach(|| {
             runtime()
                 .block_on(self.inner.discover("text"))
@@ -472,6 +114,7 @@ impl PySession {
 
     #[pyo3(signature = (once = false))]
     fn sync(&self, py: Python<'_>, once: bool) -> PyResult<()> {
+        self.admit()?;
         py.detach(|| {
             runtime()
                 .block_on(self.inner.sync(once, "text"))
@@ -480,6 +123,7 @@ impl PySession {
     }
 
     fn query(&self, py: Python<'_>, sql: &str) -> PyResult<Py<PyAny>> {
+        self.admit()?;
         let sql = sql.to_string();
         let batches = py.detach(|| {
             runtime()
@@ -491,6 +135,7 @@ impl PySession {
 
     #[pyo3(signature = (name = None))]
     fn df(&self, py: Python<'_>, name: Option<&str>) -> PyResult<Py<PyAny>> {
+        self.admit()?;
         let name = name.map(str::to_string);
         let batches = py.detach(|| {
             runtime()
@@ -501,78 +146,8 @@ impl PySession {
     }
 }
 
-#[pyclass(name = "Connect", module = "skippr")]
-struct PyConnect {
-    session: Py<PySession>,
-    path: PathBuf,
-    pipeline: String,
-    plugin: Option<ConnectPlugin>,
-    name: Option<String>,
-    fields: BTreeMap<String, serde_yaml::Value>,
-}
-
-impl PyConnect {
-    fn maybe_persist(&mut self) -> PyResult<()> {
-        let Some(plugin) = self.plugin else {
-            return Ok(());
-        };
-        let Some(name) = self.name.as_deref() else {
-            return Ok(());
-        };
-        if name.trim().is_empty() {
-            return Ok(());
-        }
-        let required = plugin.required_fields();
-        let secrets = plugin.secret_fields();
-        let complete = required
-            .iter()
-            .all(|field| connect::yaml_get_path(&self.fields, field).is_some());
-        let has_secret = secrets
-            .iter()
-            .any(|field| connect::yaml_get_path(&self.fields, field).is_some());
-        if !complete && !has_secret {
-            return Ok(());
-        }
-        let doc = connect::persist_plugin(
-            &self.path,
-            &self.pipeline,
-            plugin,
-            name,
-            self.fields.clone(),
-        )
-        .map_err(PyValueError::new_err)?;
-        Python::attach(|py| {
-            let mut session = self.session.borrow_mut(py);
-            session
-                .inner
-                .reload_from_document(self.path.clone(), doc)
-                .map_err(PyValueError::new_err)
-        })
-    }
-}
-
-include!("connect_generated.rs");
-
 #[pymodule]
 fn skippr(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyConfig>()?;
     m.add_class::<PySession>()?;
-    m.add_class::<PyConnect>()?;
-    m.add_class::<PySkipprRoot>()?;
-    m.add_class::<PyStorageMode>()?;
-    m.add_class::<PySkipprStore>()?;
-    m.add("OffsetStore", m.py().get_type::<PySkipprStore>())?;
-    m.add_class::<PyDataSource>()?;
-    m.add_class::<PyDataSink>()?;
-    m.add_class::<PySchemaSink>()?;
-    register_connect_plugin_classes(m)?;
-    m.add_function(wrap_pyfunction!(workspace, m)?)?;
-    m.add_function(wrap_pyfunction!(storage_mode, m)?)?;
-    m.add_function(wrap_pyfunction!(store, m)?)?;
-    m.add_function(wrap_pyfunction!(offset_store, m)?)?;
-    m.add_function(wrap_pyfunction!(wal_s3_bucket, m)?)?;
-    m.add_function(wrap_pyfunction!(offset_dynamodb_table, m)?)?;
-    m.add_function(wrap_pyfunction!(skippr_s3_bucket, m)?)?;
-    m.add_function(wrap_pyfunction!(tenant, m)?)?;
-    Ok(())
+    config::register(m)
 }

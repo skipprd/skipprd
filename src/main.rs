@@ -139,24 +139,10 @@ async fn async_main() {
     if let Some(bucket) = &cli.wal_s3_bucket {
         Config::set_wal_s3_bucket(bucket);
     }
-    if let Some(store) = cli.store_type.as_ref().or(cli.offset_store.as_ref()) {
-        if cli.offset_store.is_some() && cli.store_type.is_none() {
-            tracing::warn!(
-                "--offset-store is deprecated; use --store-type (skippr.store.type / SKIPPR_STORE_TYPE)"
-            );
-        }
+    if let Some(store) = cli.store_type.as_ref() {
         Config::set_skippr_store_type(store.as_str());
     }
-    if let Some(table) = cli
-        .store_name
-        .as_deref()
-        .or(cli.offset_dynamodb_table.as_deref())
-    {
-        if cli.offset_dynamodb_table.is_some() && cli.store_name.is_none() {
-            tracing::warn!(
-                "--offset-dynamodb-table is deprecated; use --store-name (skippr.store.name / SKIPPR_STORE_NAME)"
-            );
-        }
+    if let Some(table) = cli.store_name.as_deref() {
         Config::set_skippr_store_name(table);
     }
 
@@ -176,11 +162,7 @@ async fn async_main() {
             let run_once = options.once;
             let named = cli_named_pipeline(options.pipeline.as_deref());
             if storage == WalStorage::Clustered {
-                let session =
-                    Session::from_config(loaded, named.as_deref()).unwrap_or_else(|err| {
-                        error!("{err}");
-                        process::exit(1);
-                    });
+                let session = Session::from_config(loaded, named.as_deref());
                 if let Err(err) = session.sync(run_once, &output_mode).await {
                     error!("clustered sync failed: {err}");
                     process::exit(1);
@@ -191,11 +173,7 @@ async fn async_main() {
             Metrics::init_send_loop(&loaded);
 
             if let Some(pipeline_name) = named {
-                let session =
-                    Session::from_config(loaded, Some(&pipeline_name)).unwrap_or_else(|err| {
-                        error!("{err}");
-                        process::exit(1);
-                    });
+                let session = Session::from_config(loaded, Some(&pipeline_name));
                 if let Err(err) = session.sync(run_once, &output_mode).await {
                     error!("Pipeline '{}' sync failed: {}", pipeline_name, err);
                     process::exit(1);
@@ -205,11 +183,7 @@ async fn async_main() {
                 let pipelines = loaded.get_pipelines();
                 loop {
                     for pipeline_name in pipelines.iter() {
-                        let session = Session::from_config(loaded.clone(), Some(pipeline_name))
-                            .unwrap_or_else(|err| {
-                                error!("{err}");
-                                process::exit(1);
-                            });
+                        let session = Session::from_config(loaded.clone(), Some(pipeline_name));
                         let bound = loaded.bind_pipeline(pipeline_name);
                         bound.init().await;
 
@@ -254,10 +228,7 @@ async fn async_main() {
             let named = cli_named_pipeline(options.pipeline.as_deref());
 
             if let Some(pipeline) = named {
-                let session = Session::from_config(loaded, Some(&pipeline)).unwrap_or_else(|err| {
-                    error!("{err}");
-                    process::exit(1);
-                });
+                let session = Session::from_config(loaded, Some(&pipeline));
                 if let Err(err) = session.discover(&output_mode).await {
                     error!("Pipeline '{}' discover failed: {}", pipeline, err);
                     process::exit(1);
@@ -286,10 +257,7 @@ async fn async_main() {
             let loaded = Config::build_config();
             let storage = reject_invalid_wal_storage();
             reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Query);
-            let session = Session::from_config(loaded, None).unwrap_or_else(|err| {
-                error!("{err}");
-                process::exit(1);
-            });
+            let session = Session::from_config(loaded, None);
             if let Some(sql) = options.sql {
                 let collect_plain = skipprd::sqlrt::query::sql_uses_record_batch_collect(&sql)
                     && (storage == WalStorage::Clustered
@@ -367,10 +335,7 @@ async fn async_main() {
         }
         Mode::Doctor(options) => {
             let loaded = Config::build_config();
-            let session = Session::from_config(loaded, None).unwrap_or_else(|err| {
-                error!("{err}");
-                process::exit(1);
-            });
+            let session = Session::from_config(loaded, None);
             let result = session.doctor().await;
             if options.output == "json" {
                 println!("{}", serde_json::to_string_pretty(&result).unwrap());
@@ -386,10 +351,7 @@ async fn async_main() {
             let loaded = Config::build_config();
             let storage = reject_invalid_wal_storage();
             reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Query);
-            let session = Session::from_config(loaded, named.as_deref()).unwrap_or_else(|err| {
-                error!("{err}");
-                process::exit(1);
-            });
+            let session = Session::from_config(loaded, named.as_deref());
             match session.df(options.namespace.as_deref()).await {
                 Ok(batches) => {
                     skipprd::sqlrt::query::print_query_plain_json(&batches);
@@ -530,33 +492,22 @@ async fn async_main() {
                 .config
                 .clone()
                 .unwrap_or_else(skipprd::connect::discover_config_path);
-            if cli.workspace.is_some()
-                || cli.storage_mode.is_some()
-                || cli.wal_s3_bucket.is_some()
-                || cli.store_type.is_some()
-                || cli.store_name.is_some()
-                || cli.offset_store.is_some()
-                || cli.offset_dynamodb_table.is_some()
-                || cli.skippr_s3_bucket.is_some()
-                || cli.tenant.is_some()
-            {
-                if let Err(err) = skipprd::connect::persist_skippr_keys(
-                    &path,
-                    cli.workspace.as_deref(),
-                    cli.storage_mode,
-                    cli.wal_s3_bucket.as_deref(),
-                    cli.store_type.or(cli.offset_store),
-                    cli.store_name
-                        .as_deref()
-                        .or(cli.offset_dynamodb_table.as_deref()),
-                    cli.skippr_s3_bucket.as_deref(),
-                    cli.tenant.as_deref(),
-                ) {
+            let skippr = match skipprd::connect::skippr_keys(
+                cli.workspace.as_deref(),
+                cli.storage_mode,
+                cli.wal_s3_bucket.as_deref(),
+                cli.store_type,
+                cli.store_name.as_deref(),
+                cli.skippr_s3_bucket.as_deref(),
+                cli.tenant.as_deref(),
+            ) {
+                Ok(skippr) => skippr,
+                Err(err) => {
                     error!("{err}");
                     eprintln!("{err}");
                     process::exit(1);
                 }
-            }
+            };
             let plugin = args.role.plugin();
             let pipeline = match args.role.pipeline() {
                 Some(value) if !value.is_empty() => value.to_string(),
@@ -580,6 +531,7 @@ async fn async_main() {
             };
             if let Err(err) = skipprd::connect::persist_plugin(
                 &path,
+                skippr.as_ref(),
                 &pipeline,
                 plugin,
                 &name,

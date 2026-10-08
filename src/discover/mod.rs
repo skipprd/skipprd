@@ -305,13 +305,7 @@ impl crate::discover::PipelineMetadata {
     #[must_use]
     pub fn new(config: &Config) -> Self {
         let pipeline_name = config.get_pipeline_name();
-        let flatten = Config::truth_value(
-            &config
-                .get_transform_config()
-                .flatten_events
-                .or(Some("no".to_string()))
-                .unwrap(),
-        );
+        let flatten = config.get_transform_flatten_events();
 
         Self {
             name: pipeline_name,
@@ -330,13 +324,7 @@ impl crate::discover::PipelineMetadata {
         metadata: HashMap<String, Metadata>,
     ) -> Result<Self, bool> {
         let pipeline_name = config.get_pipeline_name();
-        let flatten = Config::truth_value(
-            &config
-                .get_transform_config()
-                .flatten_events
-                .or(Some("no".to_string()))
-                .unwrap(),
-        );
+        let flatten = config.get_transform_flatten_events();
 
         Ok(Self {
             name: pipeline_name,
@@ -1345,14 +1333,6 @@ impl AnalyseSchema {
         let pipeline_name = namespace_override
             .map(|s| s.to_string())
             .unwrap_or_else(|| config.get_pipeline_name());
-
-        let _flatten = Config::truth_value(
-            &config
-                .get_transform_config()
-                .flatten_events
-                .or(Some("no".to_string()))
-                .unwrap(),
-        );
 
         let mut records: Vec<Value> = SerdeJson::deserialize(config, str);
 

@@ -332,7 +332,7 @@ def common_env(harness: Harness, node: Node | None = None) -> dict[str, str]:
     env.update(
         {
             "WAL_STORAGE": "clustered",
-            "SKIPPR_OFFSET_DYNAMODB_TABLE": OFFSET_TABLE,
+            "SKIPPR_STORE_NAME": OFFSET_TABLE,
             "AWS_ENDPOINT_URL_DYNAMODB": DDB_ENDPOINT,
             "AWS_ENDPOINT_URL": DDB_ENDPOINT,
             "AWS_ACCESS_KEY_ID": "local",

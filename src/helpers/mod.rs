@@ -64,9 +64,7 @@ impl IngestTransformSnapshot {
             namespace_fields,
             time_fields,
             record_field_path: transform.record_field_path.unwrap_or_default(),
-            flatten: Config::truth_value(
-                &transform.flatten_events.unwrap_or_else(|| "no".to_string()),
-            ),
+            flatten: config.get_transform_flatten_events(),
         }
     }
 }

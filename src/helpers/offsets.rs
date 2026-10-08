@@ -238,12 +238,12 @@ impl Offsets {
                     crate::helpers::wal_storage::WalStorage::Disk => true,
                 };
                 let remote: Arc<dyn OffsetStore> = match remote_kind {
-                    crate::helpers::wal_storage::OffsetStoreKind::CloudTables => {
+                    crate::helpers::wal_storage::SkipprStoreKind::CloudTables => {
                         #[cfg(feature = "offset-store-cloud-tables")]
                         {
                             Arc::new(
                                 CloudTablesOffsetStore::open(
-                                    config.get_offset_dynamodb_table(),
+                                    config.get_skippr_store_name(),
                                     config.offset_store_partition_key(),
                                     warn_without_s3_wal,
                                 )
@@ -257,12 +257,12 @@ impl Offsets {
                             ));
                         }
                     }
-                    crate::helpers::wal_storage::OffsetStoreKind::DynamoDb => {
+                    crate::helpers::wal_storage::SkipprStoreKind::DynamoDb => {
                         #[cfg(feature = "offset-store-dynamodb")]
                         {
                             Arc::new(
                                 DynamoDbOffsetStore::open(
-                                    config.get_offset_dynamodb_table(),
+                                    config.get_skippr_store_name(),
                                     config.offset_store_partition_key(),
                                     warn_without_s3_wal,
                                 )
@@ -276,7 +276,7 @@ impl Offsets {
                             ));
                         }
                     }
-                    crate::helpers::wal_storage::OffsetStoreKind::Sled => {
+                    crate::helpers::wal_storage::SkipprStoreKind::Sled => {
                         return Err(OffsetsError::AlreadyOpenError(
                             "clustered offsets require dynamodb or cloud-tables".into(),
                         ));

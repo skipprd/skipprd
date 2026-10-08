@@ -95,6 +95,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: skipprd
+      - name: Release notes from CHANGELOG.md
+        working-directory: skipprd
+        run: python3 .github/scripts/release_notes.py "${{ github.ref_name }}" > /dev/null
       - uses: actions/download-artifact@v4
         with:
           pattern: wheels-*

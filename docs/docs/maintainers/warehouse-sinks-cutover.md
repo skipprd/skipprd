@@ -521,7 +521,7 @@ pub struct SkipprLakeConfig {
     /// Iceberg warehouse root: `s3://bucket/path`, `file:///abs/path`.
     pub warehouse: String,
     /// DynamoDB table (or Cloud Tables namespace) that holds catalog pointers.
-    /// MUST NOT be the offset/lease table (`SKIPPR_OFFSET_DYNAMODB_TABLE`).
+    /// MAY be the SkipprStore table (`SKIPPR_STORE_NAME`).
     pub catalog_table: String,
     #[serde(default)]
     pub region: Option<String>,
@@ -629,9 +629,7 @@ use skippr_iceberg_catalog::{SkipprCatalogBackend, SkipprLakeConfig};
 use skippr_iceberg_writer::{IcebergWriter, IcebergWriterConfig};
 
 pub async fn open_catalog(cfg: &SkipprLakeConfig) -> io::Result<Arc<dyn Catalog>> {
-    match SkipprCatalogBackend::from_offset_store(
-        &std::env::var("SKIPPR_OFFSET_STORE").unwrap_or_default(),
-    ) {
+    match SkipprCatalogBackend::from_store_type(&skippr_iceberg_catalog::store_type_from_env()) {
         SkipprCatalogBackend::CloudTables => { /* CloudTablesCatalog::new */ }
         SkipprCatalogBackend::DynamoDb => { /* DynamoDbCatalog::new */ }
     }
@@ -646,7 +644,7 @@ pub fn writer_config(cfg: &SkipprLakeConfig) -> IcebergWriterConfig {
 }
 ```
 
-The host is the one Config authority: `configured_kind` → `offset_store_env_value`. Runtime plugin spawn injects that string as `SKIPPR_OFFSET_STORE`. Query (`catalog_backend`) and the plugin (`open_catalog`) both call `SkipprCatalogBackend::from_offset_store` on that same string. YAML `skippr.offset_store` without a process env var MUST still reach the plugin.
+The host is the one Config authority: `configured_skippr_store` → `skippr_store_type_value`. Runtime plugin spawn injects that string as `SKIPPR_STORE_TYPE` (and the table as `SKIPPR_STORE_NAME`). Query (`catalog_backend`) and the plugin (`open_catalog`) both call `SkipprCatalogBackend::from_store_type` on that same string. YAML `skippr.store.type` without a process env var MUST still reach the plugin.
 
 `main.rs` builds the writer inside the install closure:
 
