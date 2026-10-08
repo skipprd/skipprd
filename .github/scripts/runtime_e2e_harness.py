@@ -1825,7 +1825,7 @@ data_sinks:
       user: postgres
       password: testpass
       database: skippr_test
-      schema_sink: schema_sinks.postgres_schema
+    schema_sink: schema_sinks.postgres_schema
 
 schema_sinks:
   postgres_schema:

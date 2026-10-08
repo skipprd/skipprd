@@ -4620,6 +4620,22 @@ pipelines: {}
     }
 
     #[test]
+    fn schema_sink_belongs_on_the_data_sink_not_the_pipeline() {
+        let err = serde_yaml::from_str::<Config>(
+            r#"
+pipelines:
+  p:
+    data_source: data_sources.s
+    data_sink: data_sinks.d
+    schema_sink: schema_sinks.g
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown field `schema_sink`"), "{err}");
+    }
+
+    #[test]
     fn removed_offset_store_keys_are_rejected() {
         for key in ["offset_store: sled", "offset_dynamodb_table: old-table"] {
             let yaml = format!("skippr:\n  workspace: ws\n  {key}\npipelines: {{}}\n");

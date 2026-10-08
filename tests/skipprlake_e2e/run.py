@@ -104,7 +104,6 @@ pipelines:
     env: test
     data_source: data_sources.orders
     data_sink: data_sinks.lake
-    schema_sink: schema_sinks.lake
 
 data_sources:
   orders:
