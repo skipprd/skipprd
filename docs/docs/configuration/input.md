@@ -1,117 +1,134 @@
-# Input Source
+---
+title: Sources
+description: Choose a data source, add it to a pipeline in skippr.yml, keep its credentials out of the file, and check that Skipprd can read it.
+---
 
-Input connectors are configured under `data_sources:` in `skippr.yml`.
+# Sources
 
-```yaml
-pipelines:
-  events:
-    data_source: data_sources.events
+A source is where a pipeline reads data: a database, files in object storage, a stream, or a SaaS API. You declare sources under `data_sources:` in `skippr.yml`, give each one a name, and point a pipeline at it.
 
-data_sources:
-  events:
-    S3:
-      s3_bucket: my-source-bucket
-      s3_prefix: events/
+## Choose a source
+
+| Kind | Connectors |
+|---|---|
+| Databases | [ClickHouse](/connectors/inputs/clickhouse), [Delta Lake](/connectors/inputs/delta_lake), [DynamoDB](/connectors/inputs/dynamodb), [MongoDB](/connectors/inputs/mongodb), [MotherDuck](/connectors/inputs/motherduck), [MySQL](/connectors/inputs/mysql), [PostgreSQL](/connectors/inputs/postgres), [Redshift](/connectors/inputs/redshift), [SQL Server](/connectors/inputs/mssql) |
+| Files and object stores | [Local file](/connectors/inputs/file), [S3](/connectors/inputs/s3), [SFTP](/connectors/inputs/sftp) |
+| Streaming | [AMQP](/connectors/inputs/amqp), [EventBridge](/connectors/inputs/eventbridge), [Kafka](/connectors/inputs/kafka), [Kinesis](/connectors/inputs/kinesis), [MQTT](/connectors/inputs/mqtt), [SNS](/connectors/inputs/sns), [SQS](/connectors/inputs/sqs), [WebSocket](/connectors/inputs/websocket) |
+| HTTP and network | [HTTP client](/connectors/inputs/http_client), [HTTP server](/connectors/inputs/http_server), [OTLP](/connectors/inputs/otlp), [PCAP](/connectors/inputs/pcap), [Socket](/connectors/inputs/socket), [StatsD](/connectors/inputs/statsd), [Stdin](/connectors/inputs/stdin) |
+| Marketing and ads | [AdRoll Ads](/connectors/inputs/adroll_ads), [Apple Search Ads](/connectors/inputs/apple_search_ads), [Bing Webmaster Tools](/connectors/inputs/bing_webmaster_tools), [Google Ads](/connectors/inputs/google_ads), [Google Analytics (GA4)](/connectors/inputs/google_analytics), [Google Search Console](/connectors/inputs/google_search_console), [LinkedIn Ads](/connectors/inputs/linkedin_ads), [Meta Ads](/connectors/inputs/meta_ads), [Meta Instagram Ads](/connectors/inputs/meta_instagram_ads), [X Ads](/connectors/inputs/x_ads) |
+| Commerce, finance, and CRM | [HubSpot CRM](/connectors/inputs/hubspot_crm), [Revolut Business](/connectors/inputs/revolut_business), [Shopify Admin](/connectors/inputs/shopify_admin), [Stripe](/connectors/inputs/stripe), [SumUp](/connectors/inputs/sumup), [Xero Accounting](/connectors/inputs/xero_accounting) |
+
+Each connector page lists the fields you can set, what Skipprd reads, and how to troubleshoot it.
+
+## Add a source to a pipeline
+
+This example reads two Postgres tables into a pipeline called `orders`.
+
+1. Write the source entry and the pipeline that uses it:
+
+   ::: code-group
+
+   ```python [Python]
+   from skippr import Config, DataSourcePostgres, EnvRef, LocalStorage, Pipeline
+
+   cfg = Config().workspace("analytics").storage(LocalStorage())
+   app_db = cfg.data_source(
+       "app_db",
+       DataSourcePostgres(
+           host="db.internal",
+           user="skippr_reader",
+           password=EnvRef("APP_DB_PASSWORD"),
+           database="app",
+           tables=["orders", "customers"],
+       ),
+   )
+   cfg.pipeline("orders", Pipeline(data_source=app_db))
+   cfg.save("skippr.yml")
+   ```
+
+   ```bash [CLI]
+   skipprd --workspace analytics --storage-mode local connect data-source postgres \
+     --pipeline orders \
+     --name app_db \
+     --host db.internal \
+     --user skippr_reader \
+     --password '${APP_DB_PASSWORD}' \
+     --database app \
+     --tables orders \
+     --tables customers
+   ```
+
+   ```yaml [YAML]
+   skippr:
+     workspace: analytics
+     skipprd_el_storage_mode: local
+
+   pipelines:
+     orders:
+       data_source: data_sources.app_db
+
+   data_sources:
+     app_db:
+       Postgres:
+         host: db.internal
+         user: skippr_reader
+         password: ${APP_DB_PASSWORD}
+         database: app
+         tables: [orders, customers]
+   ```
+
+   :::
+
+   `app_db` is a logical name. `Postgres` is the connector type; write it with the casing shown on the connector page. `skipprd connect` creates the `orders` pipeline if it does not exist and sets its `data_source`.
+
+2. Provide the secret:
+
+   ```bash
+   export APP_DB_PASSWORD='your-postgres-password'
+   ```
+
+3. Discover the source's schema:
+
+   ::: code-group
+
+   ```python [Python]
+   import skippr
+
+   session = skippr.Session(skippr.Config.discover().get_pipeline("orders"))
+   session.discover()
+   ```
+
+   ```bash [CLI]
+   skipprd discover --pipeline orders
+   ```
+
+   :::
+
+## Check it worked
+
+Show the schema `discover` saved for the pipeline:
+
+```bash
+skipprd metadata show --pipeline orders
 ```
 
-Environment variables are best kept for secrets and deployment overrides.
+You should see the `orders` and `customers` tables with their columns. If they are missing or the command fails, see the Troubleshooting section of the connector page and [Troubleshooting](/operations/troubleshooting).
 
-## Environment overrides
+The pipeline has no destination yet, so a sync keeps the data in the write-ahead log, where `skipprd query` can read it. Add a destination next.
 
-## DATA_SOURCE_PLUGIN_NAME
+## Credentials
 
-The input connector to use for reading data.
+- Put every secret in `skippr.yml` as a `${NAME}` reference. Secret fields reject plaintext. The [skippr.yml reference](/configuration/skippr-yml) covers the rules and `.env` files.
+- AWS sources (S3, DynamoDB, Kinesis, SQS, SNS, EventBridge) use the standard AWS credential chain: environment variables, a shared profile, or the instance or task role.
+- Give Skipprd a read-only account where the source supports one.
 
-| | |
-|---|---|
-| **Environment variable** | `DATA_SOURCE_PLUGIN_NAME` |
-| **Required** | Yes |
-| **Values** | Connector-specific. See the input connector reference for the currently supported runtime plugins. |
+## One source, several pipelines
 
-In YAML config, each connector block can also include an optional `version` field to pin a published runtime plugin version instead of following the latest registry entry.
+Several pipelines can reference the same `data_sources` entry. Each pipeline keeps its own progress, so each reads the source independently.
 
-## S3 source options
+## Next steps
 
-| Variable | Default | Description |
-|---|---|---|
-| `DATA_SOURCE_S3_BUCKET` | *(required)* | Source S3 bucket name |
-| `DATA_SOURCE_S3_PREFIX` | | Key prefix to filter source objects |
-| `DATA_SOURCE_S3_DELIMITER` | `/` | S3 delimiter for listing |
-| `DATA_SOURCE_S3_PREFIX_ORDERED_DEPTH` | `0` | Depth for ordered prefix scanning |
-| `DATA_SOURCE_BATCH_SIZE_BYTES` | `1024000` | Batch size in bytes per read |
-| `DATA_SOURCE_BATCH_SIZE_SECONDS` | `600` | Max seconds per batch |
-
-### AWS credentials
-
-S3 access uses the standard AWS credential chain:
-
-- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
-- `AWS_DEFAULT_REGION` (required)
-- Or an instance profile / IAM role when running on EC2/ECS
-
-## File source options
-
-| Variable | Default | Description |
-|---|---|---|
-| `DATA_SOURCE_PATH` | *(required)* | Path to the directory or file to ingest |
-
-Supports JSON, CSV, and Parquet input files.
-
-## MSSQL source options
-
-| Variable | Default | Description |
-|---|---|---|
-| `MSSQL_CONNECTION_STRING` | *(required)* | ADO.NET-style connection string for MSSQL |
-
-Additional MSSQL-specific options (available in YAML config): `tables`, `batch_size_rows`, `query_timeout_seconds`. See the [MSSQL connector docs](../connectors/inputs/mssql.md) for details.
-
-## MySQL source options
-
-| Variable | Default | Description |
-|---|---|---|
-| `MYSQL_CONNECTION_STRING` | *(required)* | MySQL connection string (`mysql_async`) |
-
-Additional MySQL-specific options (YAML): `tables`, `batch_size_rows`, `batch_size_bytes`, `batch_size_seconds`. See the [MySQL connector docs](../connectors/inputs/mysql.md) for details.
-
-## DynamoDB source options
-
-| Variable | Default | Description |
-|---|---|---|
-| `DYNAMODB_TABLE_NAME` | *(required)* | DynamoDB table to scan |
-| `AWS_DEFAULT_REGION` | | AWS region for DynamoDB |
-
-Optional YAML: `table_name`, `region`. See the [DynamoDB connector docs](../connectors/inputs/dynamodb.md) for details.
-
-## Kinesis source options
-
-| Variable | Default | Description |
-|---|---|---|
-| `KINESIS_STREAM_NAME` | *(required)* | Kinesis Data Stream name |
-| `AWS_DEFAULT_REGION` | | AWS region for Kinesis |
-
-Optional YAML: `stream_name`, `region`, `mode` (`batch` or `stream`). See the [Kinesis connector docs](../connectors/inputs/kinesis.md) for details.
-
-## SQS source options
-
-| Variable | Default | Description |
-|---|---|---|
-| `SQS_QUEUE_URL` | *(required)* | Full URL of the SQS queue |
-| `AWS_DEFAULT_REGION` | | AWS region for SQS |
-
-Optional YAML: `queue_url`, `region`, `mode` (`batch` or `stream`). See the [SQS connector docs](../connectors/inputs/sqs.md) for details.
-
-## HTTP source options
-
-| Variable | Default | Description |
-|---|---|---|
-| `DATA_SOURCE_HTTP_URL` | *(required)* | URL to download via HTTP GET |
-
-Optional YAML: `url`, `format`, `batch_size_bytes`, `batch_size_seconds`. Gzip-compressed responses are supported. See the [HTTP Client connector docs](../connectors/inputs/http_client.md) and [HTTP Server connector docs](../connectors/inputs/http_server.md) for details.
-
-## Stdin source options
-
-| Variable | Default | Description |
-|---|---|---|
-| *(none required)* | | Reads from standard input |
-
-Optional YAML: `mode` (`batch`, read until EOF — default; `stream`, continuous) and `format`. Typical use: pipe data into Skipprd, e.g. `cat data.json | skipprd sync --pipeline my_pipeline`. See the [Stdin connector docs](../connectors/inputs/stdin.md) for details.
+- [Destinations](/configuration/output) — land the data in a warehouse or lake.
+- [Transforms](/configuration/transforms) — split, partition, or flatten records.
+- [Schema discovery and evolution](/concepts/schema) — what `discover` records and how changes are handled.
+- [How sources land](/concepts/source-landing-semantics)

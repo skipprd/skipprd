@@ -1,49 +1,97 @@
-# X Ads Input
+---
+title: X Ads
+description: Land daily X (Twitter) Ads reports in your warehouse.
+---
 
-Daily X (Twitter) Ads analytics at campaign and line-item grains.
+# X Ads
 
-## Configuration
+Reads daily Ads reports from the X Ads API. Provide the ads account id and either a bearer token or OAuth 1.0a user credentials. Pair with Athena, Athena Iceberg, or SkipprLake.
 
-```yaml
+## Before you begin
+
+1. Create an app in the X developer portal with Ads API access.
+2. Copy `account_id` / `ad_account_id` from Ads Manager.
+3. Export a bearer token **or** the four OAuth 1.0a values.
+
+```bash
+export X_ADS_BEARER_TOKEN="..."
+```
+
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSourceXAds, EnvRef, Pipeline
+
+cfg = Config.discover()
+src = cfg.data_source(
+    "x_ads",
+    DataSourceXAds(
+        account_id="18ce54...",
+        start_date="2024-01-01",
+        bearer_token=EnvRef("X_ADS_BEARER_TOKEN"),
+        stream_profile="full",
+    ),
+)
+cfg.pipeline("x", Pipeline(data_source=src, data_sink=cfg.get_data_sink("lake")))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-source x-ads \
+  --pipeline x \
+  --name x_ads \
+  --account-id 18ce54... \
+  --start-date 2024-01-01 \
+  --bearer-token '${X_ADS_BEARER_TOKEN}' \
+  --stream-profile full
+```
+
+```yaml [YAML]
 data_sources:
   x_ads:
     XAds:
-      account_id: "abc123"
+      account_id: 18ce54...
       start_date: "2024-01-01"
       stream_profile: full
-      lookback_days: 3
-      processing_lag_days: 1
-      oauth_consumer_key: ${X_ADS_CONSUMER_KEY}
-      oauth_consumer_secret: ${X_ADS_CONSUMER_SECRET}
-      oauth_token: ${X_ADS_ACCESS_TOKEN}
-      oauth_token_secret: ${X_ADS_ACCESS_TOKEN_SECRET}
+      bearer_token: ${X_ADS_BEARER_TOKEN}
 ```
 
-| Field | Default | Description |
-| --- | --- | --- |
-| `account_id` | *(required)* | X Ads account ID |
-| `ad_account_id` | | Alias for `account_id` when only the ads account is known |
-| `start_date` | *(required)* | First report date (`YYYY-MM-DD`) |
-| `end_date` | | Last report date |
-| `lookback_days` | `3` | Mature days to re-fetch |
-| `processing_lag_days` | `1` | Skip trailing immature days |
-| `stream_profile` | `full` | `minimal`, `standard`, or `full` |
-| `streams` | profile set | Explicit namespace list |
-| `bearer_token` / `access_token` | | Bearer token (alternative to OAuth 1.0a) |
-| `oauth_consumer_key` | | OAuth 1.0a consumer key |
-| `oauth_consumer_secret` | | OAuth 1.0a consumer secret |
-| `oauth_token` | | OAuth 1.0a access token |
-| `oauth_token_secret` | | OAuth 1.0a access token secret |
+:::
 
-## Pipeline wiring
+## Options
 
-```yaml
-pipelines:
-  x_ads:
-    data_source: data_sources.x_ads
-    data_sink: data_sinks.landing
-```
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `account_id` | string | Required | Ads account id |
+| `start_date` | string | Required | First report date |
+| `ad_account_id` | string | Not set | Alias some accounts show in the UI |
+| `bearer_token` | secret | Not set | App bearer token |
+| `access_token` | secret | Not set | User access token |
+| `oauth_consumer_key` | string | Not set | OAuth 1.0a consumer key |
+| `oauth_consumer_secret` | secret | Not set | Consumer secret |
+| `oauth_token` | secret | Not set | User token |
+| `oauth_token_secret` | secret | Not set | User token secret |
+| `end_date` | string | Not set | Last report date |
+| `lookback_days` | integer | Not set | Days to re-fetch |
+| `stream_profile` | string | Not set | `minimal`, `standard`, or `full` |
+| `processing_lag_days` | integer | Not set | Skip immature days |
+| `streams` | list | Profile set | Exact stream list |
 
-## Authentication
+## What gets synced
 
-X Ads accepts OAuth 1.0a (`oauth_consumer_key`, `oauth_consumer_secret`, `oauth_token`, `oauth_token_secret`) or a bearer `access_token`. Store those values in the environment.
+Daily campaign reports in the selected profile. Each run rewrites recent days.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| 401 | Check bearer vs OAuth 1.0a — do not mix half-configured sets |
+| 403 | Confirm the app has Ads API access |
+| Empty reports | Check `account_id` and the date window |
+
+## Next steps
+
+- [Meta Ads](/connectors/inputs/meta_ads)
+- [How sources land](/concepts/source-landing-semantics)

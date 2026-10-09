@@ -4,7 +4,9 @@
   "scripts": {
     "dev": "vitepress dev",
     "build": "vitepress build",
-    "preview": "vitepress preview"
+    "preview": "vitepress preview",
+    "check": "node scripts/check-public-docs.mjs",
+    "test": "node --test scripts/*.test.mjs"
   },
   "dependencies": {
     "@skippr/vitepress-theme": "github:skipprd/vitepress-theme"

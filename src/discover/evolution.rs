@@ -8,7 +8,6 @@ use serde_derive::{Deserialize, Serialize};
 use serde_json::value::Value;
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
-use std::str::FromStr;
 use tracing::info;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -16,43 +15,6 @@ pub struct Evolution {
     pub type_string: SkipprDataType,
     pub new_field: String,
     pub sovled: bool,
-}
-
-#[derive(Clone, Debug)]
-enum EvolutionType {
-    // Cast,
-    New,
-    Rename,
-    Merge,
-    Default,
-}
-
-impl FromStr for EvolutionType {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            // "cast" => Ok(EvolutionType::Cast),
-            "new" => Ok(EvolutionType::New),
-            "rename" => Ok(EvolutionType::Rename),
-            "merge" => Ok(EvolutionType::Merge),
-            "default" => Ok(EvolutionType::Default),
-            _ => Err(()),
-        }
-    }
-}
-
-impl EvolutionType {
-    #[allow(dead_code)]
-    fn to_string(&self) -> String {
-        match *self {
-            // EvolutionType::Cast => "cast",
-            EvolutionType::New => "new".to_string(),
-            EvolutionType::Rename => "rename".to_string(),
-            EvolutionType::Merge => "merge".to_string(),
-            EvolutionType::Default => "default".to_string(),
-        }
-    }
 }
 
 impl Evolution {

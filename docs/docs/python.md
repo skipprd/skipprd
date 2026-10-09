@@ -1,19 +1,28 @@
 ---
 title: Python
-description: skippr Config and Session — typed config builder, discover, sync, df, and query. Same engine as the CLI.
+description: Build a typed Skipprd config in Python, then discover, sync, and query a pipeline with Session. Same engine and skippr.yml as the CLI.
 ---
 
 # Python
 
-`import skippr` is the engine. `Config` describes the pipelines. `Session` runs one. You get Arrow. dbt and Soda stay warehouse tools.
+The `skippr` package runs the Skipprd engine inside Python. You build a pipeline with `Config`, run it with `Session`, and read the results as Arrow tables. It is the same engine as the `skipprd` command, and both read and write the same `skippr.yml`, so you can build a config in a notebook and run it from cron with the CLI.
+
+## Before you begin
+
+- Python 3.10 or later on **macOS arm64** or **Linux x86_64**.
+- Install the package, and the pandas extra if you want `.to_pandas()`:
 
 ```bash
 pip install skippr
+pip install "skippr[pandas]"   # optional
+python -c "import skippr; print(skippr.Session)"
 ```
 
-The wheel and the CLI are the same engine. Connector plugins download on first use from `install.skippr.io`. The wheel ships type stubs, so editors, `mypy`, and coding agents see every plugin class, field, and doc comment.
+The package ships type stubs, so your editor, `mypy`, and coding assistants see every connector class, field, and docstring. Connectors download on first use from `install.skippr.io`. See [Install](/getting-started/install) for details.
 
-## Session
+## Run a pipeline
+
+`Session` binds the engine to one pipeline. Each Python call has a CLI equivalent.
 
 ::: code-group
 
@@ -30,22 +39,26 @@ s.df()
 
 ```bash [CLI]
 skipprd doctor
-skipprd discover --pipeline bikehire --log
-skipprd sync --pipeline bikehire --once --log
+skipprd discover --pipeline bikehire
+skipprd sync --pipeline bikehire --once
 skipprd df --pipeline bikehire
 ```
 
 :::
 
-`Session` takes a `PipelineRef`, never a name string. `Config.discover()` loads the discovered `skippr.yml`. `Config.load(path)` loads a specific file. Another pipeline is another `Session`. There is no process-wide pipeline name.
+- `Config.discover()` loads `skippr.yml` from the current directory, or starts an empty config that saves there. `Config.load(path)` loads a specific file.
+- `Session` takes a `PipelineRef` from a `Config`, never a name string. To run another pipeline, open another `Session`.
+- `discover()` samples the source and records the schema. `sync(once=True)` runs one pass and returns. `sync()` keeps running, one pass every `sync_frequency_seconds` (900 by default).
 
-A `Session` snapshots its pipeline's entries when it is created, with `${ENV}` references resolved. Other pipelines' entries are not read. A missing variable or a failed startup check raises `ValueError` there, not mid-sync.
+When you create a `Session`, it takes a snapshot of its pipeline's config and resolves every `${NAME}` reference from the environment, including a `.env` file next to `skippr.yml`. A missing variable raises `ValueError` there, before any data moves, not halfway through a sync.
 
 ## Build a config
 
-Every plugin is a typed class named for its role: `DataSourceS3`, `DataSinkPostgres`, `SchemaSinkGlue`. Required fields are required keyword arguments. Registration returns a typed ref, and `Pipeline` takes refs, not `"data_sources.x"` strings.
+Every connector is a typed class named for its role: `DataSourceS3`, `DataSinkPostgres`, `SchemaSinkGlue`. Required fields are required keyword arguments. Registering a connector returns a typed ref, and `Pipeline` takes refs, not `"data_sources.x"` strings, so a typo is an error in your editor.
 
-```python
+::: code-group
+
+```python [Python]
 import skippr
 from skippr import Config, DataSourceS3, LocalStorage, Pipeline
 
@@ -55,39 +68,102 @@ src = cfg.data_source(
     DataSourceS3(s3_bucket="skippr-public-sample-data", s3_prefix="bike-hire"),
 )
 bikehire = cfg.pipeline("bikehire", Pipeline(data_source=src, sync_frequency_seconds=60))
+cfg.save("skippr.yml")
 
 s = skippr.Session(bikehire)
 s.discover()
 ```
 
-Engine state is a class too: `LocalStorage()` or `S3Storage(bucket)`. SkipprStore is `SledStore()`, `DynamoDbStore(table)`, or `CloudTablesStore(table)`.
+```bash [CLI]
+skipprd --workspace bikehire --storage-mode local connect data-source s3 \
+  --pipeline bikehire \
+  --name sample \
+  --s3-bucket skippr-public-sample-data \
+  --s3-prefix bike-hire
 
-`cfg.to_yaml()` renders the config. `cfg.save()` writes it back to the file it was loaded from; `cfg.save(path)` writes elsewhere.
+skipprd discover --pipeline bikehire
+```
 
-## Registration merges like `skipprd connect`
+```yaml [YAML]
+skippr:
+  workspace: bikehire
+  skipprd_el_storage_mode: local
 
-Re-registering a name, `save`, and [`skipprd connect`](/cli/connect) share one merge rule. For a `Config` loaded from a file, `cfg.to_yaml()` before `save` loads to the same config as that file after it:
+pipelines:
+  bikehire:
+    data_source: data_sources.sample
+    sync_frequency_seconds: 60
+
+data_sources:
+  sample:
+    S3:
+      s3_bucket: skippr-public-sample-data
+      s3_prefix: bike-hire
+```
+
+:::
+
+Where Skipprd keeps its own state is a class too:
+
+- `LocalStorage()` keeps state in the local data directory (`./data` by default). Good for trying things out and single-machine runs.
+- `S3Storage("your-state-bucket")` keeps state in an S3 bucket instead of on local disk.
+
+`cfg.store(...)` chooses where read progress is tracked: `SledStore()` (the local on-disk state store, the default) or `DynamoDbStore("table")`. See [State store](/configuration/skippr-store).
+
+`cfg.to_yaml()` shows the config as YAML without writing it. `cfg.save()` writes back to the file the config was loaded from; `cfg.save(path)` writes somewhere else. `save` writes YAML only and refuses `.json` and `.toml` paths.
+
+## Update an existing config
+
+Registering a name again, `save`, and [`skipprd connect`](/cli/connect) all merge the same way, so Python and the CLI never fight over a file:
 
 - Each top-level field you set replaces that field. A nested field such as `object_store` is replaced whole.
-- Fields you did not set, sibling pipelines, and other entries are kept.
-- An entry cannot change plugin kind. Re-registering `sample` as `DataSourceFile` when the file has `S3` is an error.
-- `LocalStorage()` removes `skippr_s3_bucket`.
+- Fields you did not set, other pipelines, and other entries are kept.
+- An entry cannot change connector type. Re-registering `sample` as `DataSourceFile` when the file has `S3` is an error.
+- `LocalStorage()` removes any `skippr_s3_bucket`.
 
-```python
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSourceS3
+
 disk = Config.discover()
 disk.data_source("sample", DataSourceS3(s3_bucket="skippr-public-sample-data", s3_prefix="bike-hire-2026"))
 disk.save()
 ```
 
-Unknown keys outside plugin blocks are a load error. In engine settings outside plugin blocks, `${ENV}` references go in string fields only. `save` writes YAML; it refuses `.json` and `.toml` paths. Registration and `save` check the whole merged config: every entry must name a known plugin, every secret must be `${NAME}`, every pipeline with a source must validate, no two sinks may share a SkipprLake or Duckdb namespace, and every sink must pair with the schema sink it links. A plaintext secret already in the file fails registration and `save` until it is replaced.
+```bash [CLI]
+skipprd connect data-source s3 \
+  --pipeline bikehire \
+  --name sample \
+  --s3-bucket skippr-public-sample-data \
+  --s3-prefix bike-hire-2026
+```
 
-## Secrets
+:::
 
-Secret fields take `EnvRef`, never a string. Plaintext cannot reach `skippr.yml`.
+Registration and `save` check the whole merged config, so you find problems when you write the file rather than when a pipeline runs:
 
-```python
-from skippr import DataSinkPostgres, EnvRef
+- every entry names a known connector, and unknown keys outside connector blocks are an error;
+- every secret is a `${NAME}` reference — a plaintext secret already in the file blocks `save` until you replace it;
+- every pipeline with a source is valid;
+- no two SkipprLake or DuckDB destinations write to the same table namespace;
+- every destination matches the schema sink it links to.
 
+## Keep secrets out of the file
+
+Secret fields accept only `EnvRef`, never a plain string, so a password cannot reach `skippr.yml`. Export the variable before you create the `Session`:
+
+```bash
+export POSTGRES_PASSWORD="your-password"
+```
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkPostgres, EnvRef, Pipeline
+
+cfg = Config.discover()
+src = cfg.get_data_source("sample")
 warehouse = cfg.data_sink(
     "warehouse",
     DataSinkPostgres(
@@ -98,9 +174,10 @@ warehouse = cfg.data_sink(
     ),
 )
 cfg.pipeline("bikehire", Pipeline(data_source=src, data_sink=warehouse))
+cfg.save()
 ```
 
-```bash
+```bash [CLI]
 skipprd connect data-sink postgres \
   --pipeline bikehire \
   --name warehouse \
@@ -110,15 +187,28 @@ skipprd connect data-sink postgres \
   --database analytics
 ```
 
-Both write `password: ${POSTGRES_PASSWORD}`.
+```yaml [YAML]
+data_sinks:
+  warehouse:
+    Postgres:
+      host: localhost
+      user: skippr
+      password: ${POSTGRES_PASSWORD}
+      database: analytics
+```
+
+:::
+
+All three write `password: ${POSTGRES_PASSWORD}`. Path-like fields typed as `str`, such as Snowflake `private_key_path`, take the `"${NAME}"` string directly.
 
 ## Nested and tagged fields
 
-Nested structs are frozen classes named after their plugin. A tagged field takes one class per variant. SkipprLake `object_store` on R2:
+Nested settings are their own frozen classes, named after their connector. A field that accepts one of several shapes takes one class per variant. For example, a SkipprLake destination whose files live in Cloudflare R2:
 
 ```python
-from skippr import DataSinkSkipprLake, DataSinkSkipprLakeWarehouseObjectStoreR2, EnvRef
+from skippr import Config, DataSinkSkipprLake, DataSinkSkipprLakeWarehouseObjectStoreR2, EnvRef
 
+cfg = Config.discover()
 lake = cfg.data_sink(
     "lake",
     DataSinkSkipprLake(
@@ -134,68 +224,104 @@ lake = cfg.data_sink(
 )
 ```
 
-String enums are `Literal` types. `DataSourceGoogleSerpRanks(keywords=[], targets=[], device="tablet")` is a type error in the editor and a `ValueError` at runtime.
+Fields with a fixed set of values are `Literal` types. `DataSourceGoogleSerpRanks(keywords=[], targets=[], device="tablet")` is a type error in your editor and a `ValueError` at runtime, because `device` accepts only `"desktop"` or `"mobile"`.
 
 ## Schema sinks
 
-`SkipprLake`, `AthenaIceberg`, and `Duckdb` share one config between the data sink and the schema sink. Pass `schema_sink=` as a name and the same config is registered under `schema_sinks.<name>`.
+A schema sink is where Skipprd writes table definitions. How you attach one depends on the destination.
 
-Other sinks link a schema sink you registered first:
+`SkipprLake`, `AthenaIceberg`, and `Duckdb` use one config for both roles. Pass `schema_sink=` a name, and the same config is registered under `schema_sinks.<name>`, as in the example above.
+
+Other destinations link a schema sink you registered first. Athena with Glue:
 
 ```python
-from skippr import DataSinkAthena, SchemaSinkGlue
+from skippr import Config, DataSinkAthena, Pipeline, SchemaSinkGlue
 
+cfg = Config.discover()
+src = cfg.get_data_source("sample")
 glue = cfg.schema_sink(
     "glue",
     SchemaSinkGlue(
-        s3_bucket="out",
+        s3_bucket="your-output-bucket",
         s3_prefix="bikehire",
-        athena_workgroup_name="bikehire",
-        athena_results_s3_bucket="out",
+        athena_workgroup_name="primary",
+        athena_results_s3_bucket="your-output-bucket",
         glue_database_name="bikehire",
     ),
 )
 athena = cfg.data_sink(
     "athena",
     DataSinkAthena(
-        s3_bucket="out",
+        s3_bucket="your-output-bucket",
         s3_prefix="bikehire",
-        athena_workgroup_name="bikehire",
-        athena_results_s3_bucket="out",
+        athena_workgroup_name="primary",
+        athena_results_s3_bucket="your-output-bucket",
     ),
     schema_sink=glue,
 )
 cfg.pipeline("bikehire", Pipeline(data_source=src, data_sink=athena))
+cfg.save()
 ```
 
-Refs belong to the `Config` that returned them. Using a ref from another `Config` is an error.
+Refs belong to the `Config` that returned them. Passing a ref from one `Config` to another is an error.
 
-## df and query
+## Read data with df and query
 
-This pipeline's views, the same ones `skipprd query` shows for it. Live WAL, unioned with Iceberg when the pipeline sink is SkipprLake, AthenaIceberg, or Duckdb. No Iceberg sink → WAL only.
+`df()` and `query()` read the data Skipprd holds for this pipeline — the same views [`skipprd query`](/cli/query) shows. They read the WAL, combined with the destination's Iceberg tables when the destination is SkipprLake, AthenaIceberg, or DuckDB. For any other destination they read the WAL only.
+
+::: code-group
+
+```python [Python]
+import skippr
+
+s = skippr.Session(skippr.Config.discover().get_pipeline("bikehire"))
+s.df()                                          # every namespace in this pipeline
+s.df("rides")                                   # one namespace: bikehire.rides
+s.query("SELECT count(*) FROM bikehire.rides")  # any SQL over this pipeline's views
+s.df().schema                                   # the Arrow schema
+s.df("rides").to_pandas()                       # needs skippr[pandas]
+```
+
+```bash [CLI]
+skipprd df --pipeline bikehire
+skipprd df --pipeline bikehire --namespace rides
+skipprd query --sql "SELECT count(*) FROM bikehire.rides"
+```
+
+:::
+
+A **namespace** is one table's worth of records. By default a pipeline has one namespace, named after the pipeline; [transforms](/configuration/transforms) can split records into several. The examples assume a transform has split out a `rides` namespace. Both methods return a `pyarrow.Table`.
+
+## Check a config before a long run
+
+`doctor()` (or `skipprd doctor`) checks that the config is complete and consistent: at least one pipeline and source, every reference points at an entry that exists, the storage mode, and the whole-config rules above. It returns a dict with `ok` and a list of `checks`. It does not connect to your source or destination; `discover()` is the first call that does.
 
 ```python
-s.df()                          # every namespace for this pipeline
-s.df("rides")                   # SELECT * FROM bikehire.rides
-s.query("SELECT count(*) FROM bikehire.rides")
-s.df("rides").to_pandas()
-s.df().schema                   # Arrow schema
+import skippr
+
+s = skippr.Session(skippr.Config.discover().get_pipeline("bikehire"))
+result = s.doctor()
+if not result["ok"]:
+    for check in result["checks"]:
+        print(check)
 ```
 
-`df()` and `query()` return `pyarrow.Table`. Pandas is `.to_pandas()`.
+## Run without a destination
 
-`doctor()` checks config, env refs, source, sink if present, and WAL. Run it before a long sync.
-
-## Optional sink
-
-Leave `data_sink` out and `df()` still works. The WAL is the dataset. Add Snowflake or Postgres when you want a warehouse: register the sink, re-register the pipeline with `data_sink=`, and open a new `Session`. skipprd does not compact or reclaim that WAL until a sink exists.
+Leave out `data_sink` and the pipeline still syncs. The WAL is the dataset, and `df()` and `query()` read it. When you want a warehouse, register the destination, register the pipeline again with `data_sink=`, and open a new `Session`. Skipprd does not compact or reclaim the WAL until the pipeline has a destination, so plan disk space for long WAL-only runs.
 
 ## dbt and Soda
 
-Session loads bronze. It does not run dbt.
+`Session` loads raw (bronze) data. It does not run dbt.
 
-1. `s.sync(once=True)` lands bronze (WAL, then the sink if you set one).
-2. `dbt run` builds silver and gold in the warehouse.
-3. `dbt test` and `soda scan` check that warehouse.
+1. `s.sync(once=True)` lands bronze data in the WAL, and in the destination if you set one.
+2. `dbt run` builds your silver and gold models in the warehouse.
+3. `dbt test` and `soda scan` check the results in that warehouse.
 
-See [PostgreSQL](/getting-started/quickstart-postgres) and [Snowflake](/getting-started/quickstart-snowflake) for warehouse sinks.
+## Next steps
+
+- [Quickstart: PostgreSQL](/getting-started/quickstart-postgres) or [Snowflake](/getting-started/quickstart-snowflake) — land data in a warehouse from Python.
+- [`skippr.yml` reference](/configuration/skippr-yml) — every engine and pipeline setting.
+- [Data sources](/connectors/) — the connector classes and their options.
+- [Transforms](/configuration/transforms) — namespaces, partitions, and flattening.
+- [How Skipprd works](/concepts/how-it-works) — what happens between source and destination.

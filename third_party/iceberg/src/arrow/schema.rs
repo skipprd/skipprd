@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow_array::types::{Decimal128Type, validate_decimal_precision_and_scale};
+use arrow_array::types::{validate_decimal_precision_and_scale, Decimal128Type};
 use arrow_array::{
     BinaryArray, BooleanArray, Date32Array, Datum as ArrowDatum, Decimal128Array,
     FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array, Int64Array, Scalar, StringArray,
@@ -34,8 +34,8 @@ use uuid::Uuid;
 use crate::error::Result;
 use crate::spec::decimal_utils::i128_from_be_bytes;
 use crate::spec::{
-    Datum, FIRST_FIELD_ID, ListType, MapType, NestedField, NestedFieldRef, PrimitiveLiteral,
-    PrimitiveType, Schema, SchemaVisitor, StructType, Type,
+    Datum, ListType, MapType, NestedField, NestedFieldRef, PrimitiveLiteral, PrimitiveType, Schema,
+    SchemaVisitor, StructType, Type, FIRST_FIELD_ID,
 };
 use crate::{Error, ErrorKind};
 
@@ -455,7 +455,9 @@ impl ArrowSchemaVisitor for ArrowSchemaConverter {
             DataType::Time64(unit) if unit == &TimeUnit::Microsecond => {
                 Ok(Type::Primitive(PrimitiveType::Time))
             }
-            DataType::Timestamp(unit, None) if unit == &TimeUnit::Microsecond => {
+            DataType::Timestamp(unit, None)
+                if unit == &TimeUnit::Microsecond || unit == &TimeUnit::Millisecond =>
+            {
                 Ok(Type::Primitive(PrimitiveType::Timestamp))
             }
             DataType::Timestamp(unit, None) if unit == &TimeUnit::Nanosecond => {
@@ -2009,6 +2011,10 @@ mod tests {
             (DataType::UInt8, PrimitiveType::Int),
             (DataType::UInt16, PrimitiveType::Int),
             (DataType::UInt32, PrimitiveType::Long),
+            (
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                PrimitiveType::Timestamp,
+            ),
         ];
 
         for (arrow_type, expected_iceberg_type) in test_cases {
@@ -2035,12 +2041,10 @@ mod tests {
 
             let result = arrow_schema_to_schema(&arrow_schema);
             assert!(result.is_err());
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("UInt64 is not supported")
-            );
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("UInt64 is not supported"));
         }
     }
 

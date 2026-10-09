@@ -1,65 +1,119 @@
-# Glue Schema Sink
+---
+title: Glue schema sink
+description: Create and update Glue databases and tables so Athena can query what Skipprd writes.
+---
 
-Manages AWS Glue Data Catalog databases and tables for pipelines that land Parquet on S3 through the [Athena data sink](../outputs/athena.md).
+# Glue
 
-Use a schema sink when catalog DDL should be configured separately from the data sink, or when multiple pipelines share one Glue database.
+Pair this schema sink with the [Athena](/connectors/outputs/athena) destination. Skipprd creates the Glue database and tables, and keeps columns in step with discover. You do not run DDL in the AWS console.
 
-## When to use
+## Before you begin
 
-- **Athena ingest** — pair `data_sinks` → `Athena` with `schema_sinks` → `Glue` using the same `glue_database_name`.
-- **Partition semantics** — Glue partition keys follow discovered schema and [source landing semantics](../../concepts/source-landing-semantics.md) when the source declares `replace_partition`.
+- The same S3 prefix, Glue database, workgroup, and results bucket as the Athena destination.
+- IAM for Glue `CreateDatabase`, `CreateTable`, `UpdateTable`, and partition APIs.
 
-Bundled Athena ingest can create Glue objects on write; a dedicated schema sink keeps catalog configuration explicit in `skippr.yml`.
+## Configure
 
-## Configuration
+::: code-group
 
-```yaml
-pipelines:
-  events:
-    data_sink: data_sinks.landing
+```python [Python]
+from skippr import Config, DataSinkAthena, Pipeline, SchemaSinkGlue
 
-data_sinks:
-  landing:
-    schema_sink: schema_sinks.catalog
-    Athena:
-      s3_bucket: my-warehouse-bucket
-      s3_prefix: bronze/events
-      glue_database_name: bronze_events
-      athena_workgroup_name: primary
-      athena_results_s3_bucket: athena-results
+cfg = Config.discover()
+catalog = cfg.schema_sink(
+    "catalog",
+    SchemaSinkGlue(
+        s3_bucket="my-output-bucket",
+        s3_prefix="warehouse/events",
+        glue_database_name="my_database",
+        athena_workgroup_name="primary",
+        athena_results_s3_bucket="my-athena-results",
+        region="us-east-1",
+    ),
+)
+warehouse = cfg.data_sink(
+    "warehouse",
+    DataSinkAthena(
+        s3_bucket="my-output-bucket",
+        s3_prefix="warehouse/events",
+        athena_workgroup_name="primary",
+        athena_results_s3_bucket="my-athena-results",
+    ),
+    schema_sink=catalog,
+)
+cfg.pipeline("events", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=warehouse))
+cfg.save()
+```
 
+```bash [CLI]
+skipprd connect data-sink athena \
+  --pipeline events \
+  --name warehouse \
+  --s3-bucket my-output-bucket \
+  --s3-prefix warehouse/events \
+  --athena-workgroup-name primary \
+  --athena-results-s3-bucket my-athena-results
+
+skipprd connect schema-sink glue \
+  --pipeline events \
+  --name catalog \
+  --s3-bucket my-output-bucket \
+  --s3-prefix warehouse/events \
+  --glue-database-name my_database \
+  --athena-workgroup-name primary \
+  --athena-results-s3-bucket my-athena-results \
+  --region us-east-1
+```
+
+```yaml [YAML]
 schema_sinks:
   catalog:
     Glue:
-      s3_bucket: my-warehouse-bucket
-      s3_prefix: bronze/events
+      s3_bucket: my-output-bucket
+      s3_prefix: warehouse/events
+      glue_database_name: my_database
       athena_workgroup_name: primary
-      athena_results_s3_bucket: athena-results
-      glue_database_name: bronze_events
+      athena_results_s3_bucket: my-athena-results
+      region: us-east-1
+
+data_sinks:
+  warehouse:
+    Athena:
+      s3_bucket: my-output-bucket
+      s3_prefix: warehouse/events
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: my-athena-results
+    schema_sink: schema_sinks.catalog
 ```
 
-| Field | Required | Description |
-| --- | --- | --- |
-| `glue_database_name` | Yes | Glue database for table and partition DDL |
-| `s3_bucket` | Yes | Bucket the Athena sink lands data in; table locations point here |
-| `s3_prefix` | Yes | Prefix under `s3_bucket` for those table locations |
-| `athena_workgroup_name` | Yes | Athena workgroup used for catalog DDL |
-| `athena_results_s3_bucket` | Yes | Bucket for Athena query results |
+:::
 
-Environment variable equivalent: `SCHEMA_OUTPUT_GLUE_DATABASE_NAME`.
+Set `schema_sink` on the data sink, not on the pipeline.
 
-## Pipeline wiring
+## Options
 
-1. Set `pipelines.<name>.data_sink` to a registry entry using the `Athena` plugin.
-2. Set `data_sinks.<name>.schema_sink` on that sink to a registry entry using the `Glue` plugin.
-3. Use the same database name, bucket, prefix, and workgroup on both blocks unless you intentionally separate landing and catalog namespaces.
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `s3_bucket` | string | Required | Same bucket as the Athena destination |
+| `s3_prefix` | string | Required | Same prefix as the Athena destination |
+| `athena_workgroup_name` | string | Required | Athena workgroup |
+| `athena_results_s3_bucket` | string | Required | Results bucket name |
+| `glue_database_name` | string | Required | Glue database |
+| `format` | string | Not set | Table format override |
+| `region` | string | Not set | AWS region |
+| `catalog` | string | Not set | Glue catalog name |
+| `max_concurrency` | integer | Not set | Query/model only |
+| `discovery_cache_ttl_secs` | integer | Not set | Query/model only |
 
-## Query and model
+## Troubleshooting
 
-Ingest uses `data_sinks` / `schema_sinks`. The `Athena:` sink fields (`glue_database_name`, `athena_workgroup_name`, `athena_results_s3_bucket`) are the catalog and workgroup names. There is no separate warehouse block.
+| Symptom | Fix |
+|---|---|
+| `TABLE_NOT_FOUND` in Athena | Confirm this sink is referenced from the data sink and discover has run |
+| Glue `AccessDenied` | Grant database and table APIs |
+| Partition missing | Re-run sync — partitions register as files land |
 
-## Related
+## Next steps
 
-- [Athena output](../outputs/athena.md) — Parquet layout and S3 paths
-- [Output destination](../../configuration/output.md) — generic `data_sinks` / `schema_sinks` shape
-- [Source landing semantics](../../concepts/source-landing-semantics.md) — partition and write-policy behavior
+- [Athena](/connectors/outputs/athena)
+- [Quickstart: S3 to Athena](/getting-started/quickstart)

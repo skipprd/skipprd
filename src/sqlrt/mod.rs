@@ -5,6 +5,7 @@
 pub mod doc_parser;
 pub mod docs;
 pub mod flight_sql_table;
+pub mod iceberg_alter;
 pub mod iceberg_table;
 pub mod metadata;
 pub mod operators;

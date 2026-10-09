@@ -43,12 +43,20 @@ impl SqlDocParser {
                 PipelineToggle::Enable => docs.get("ENABLE PIPELINE").unwrap().clone(),
                 PipelineToggle::Disable => docs.get("DISABLE PIPELINE").unwrap().clone(),
             },
-            Statement::AlterSchemaDropColumn(_) => {
-                docs.get("ALTER SCHEMA DROP COLUMN").unwrap().clone()
-            }
-            Statement::AlterSchemaAlterColumnType(_) => {
-                docs.get("ALTER SCHEMA ALTER COLUMN").unwrap().clone()
-            }
+            Statement::AlterTable(stmt) => match stmt.op {
+                crate::discover::schema_alter::SchemaAlterOp::Drop { .. } => {
+                    docs.get("ALTER TABLE DROP COLUMN").unwrap().clone()
+                }
+                crate::discover::schema_alter::SchemaAlterOp::Promote { .. } => {
+                    docs.get("ALTER TABLE ALTER COLUMN").unwrap().clone()
+                }
+                crate::discover::schema_alter::SchemaAlterOp::Rename { .. } => {
+                    docs.get("ALTER TABLE RENAME COLUMN").unwrap().clone()
+                }
+                crate::discover::schema_alter::SchemaAlterOp::Merge { .. } => {
+                    docs.get("ALTER TABLE MERGE COLUMN").unwrap().clone()
+                }
+            },
             Statement::TableDrop(_) => docs.get("DROP TABLE").unwrap().clone(),
             Statement::ShowDocs => docs.get("SHOW DOCS").unwrap().clone(),
             Statement::ShowStats { .. } => docs.get("SHOW STATS").unwrap().clone(),

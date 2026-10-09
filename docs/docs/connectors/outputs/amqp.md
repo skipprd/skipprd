@@ -1,70 +1,89 @@
-# AMQP Output
+---
+title: AMQP destination
+description: Publish Skipprd batches to an AMQP exchange. Retries can duplicate messages.
+---
 
-Publishes records as JSON messages to an AMQP exchange (RabbitMQ compatible).
+# AMQP
 
-## How it works
+Publishes each batch to an exchange. Brokers such as RabbitMQ work. A retry can publish again, so consumers should be idempotent. See [Exactly-once delivery](/concepts/exactly-once).
 
-1. Connects to the AMQP broker and declares the exchange.
-2. Each row from the record batch is serialized to JSON and published.
+## Before you begin
 
-## Configuration
-
-```yaml
-data_sinks:
-  sink:
-    Amqp:
-      connection_string: "amqp://guest:guest@localhost:5672"
-      exchange: events
-      routing_key: output
-      exchange_type: direct
-```
-
-## Configuration variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `connection_string` | *(required)* | AMQP connection URI |
-| `exchange` | *(required)* | Exchange name |
-| `routing_key` | `""` | Routing key |
-| `exchange_type` | `direct` | Exchange type (direct, fanout, topic, headers) |
-| `format` | `jsonl` | Optional. AMQP is JSON Lines only; `parquet` is rejected. |
-
-## Authentication
-
-Authentication is provided through the AMQP connection URI. For security best practices, we strongly advise against storing the connection string in `skippr.yml`. Use environment variable interpolation instead: replace the `connection_string` value with your own `${ENV_VAR}` reference.
-
-The relevant part of `skippr.yml` looks like this:
-
-```yaml
-data_sinks:
-  warehouse:
-    Amqp:
-      connection_string: "${AMQP_CONNECTION_STRING}"
-```
-
-Set the env var before running `skipprd`:
-
-macOS / Linux
+- A connection string (`amqps://user:pass@host:5671/vhost`).
+- Store credentials in the environment.
 
 ```bash
-export AMQP_CONNECTION_STRING="amqp://guest:guest@localhost:5672"
+export AMQP_URL="amqps://skippr:${AMQP_PASSWORD}@rabbit.internal:5671/"
 ```
 
-Windows PowerShell
+## Configure
 
-```powershell
-$env:AMQP_CONNECTION_STRING = "amqp://guest:guest@localhost:5672"
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkAmqp, EnvRef, Pipeline
+
+cfg = Config.discover()
+q = cfg.data_sink(
+    "events",
+    DataSinkAmqp(
+        connection_string=EnvRef("AMQP_URL"),
+        exchange="skipprd",
+        routing_key="events",
+        exchange_type="topic",
+    ),
+)
+cfg.pipeline("events", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=q))
+cfg.save()
 ```
 
-Windows Command Prompt
-
-```cmd
-set AMQP_CONNECTION_STRING=amqp://guest:guest@localhost:5672
+```bash [CLI]
+skipprd connect data-sink amqp \
+  --pipeline events \
+  --name events \
+  --connection-string '${AMQP_URL}' \
+  --exchange skipprd \
+  --routing-key events \
+  --exchange-type topic
 ```
+
+```yaml [YAML]
+data_sinks:
+  events:
+    Amqp:
+      connection_string: ${AMQP_URL}
+      exchange: skipprd
+      routing_key: events
+      exchange_type: topic
+```
+
+:::
+
+## Options
+
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `connection_string` | secret | Required | AMQP URL as `${ENV}` |
+| `exchange` | string | Required | Exchange name |
+| `routing_key` | string | Required | Routing key |
+| `exchange_type` | string | Not set | `topic`, `direct`, `fanout`, … |
+| `format` | string | Not set | Payload format |
+| `max_in_flight` | integer | Not set | Max outstanding publishes |
+| `max_in_flight_bytes` | integer | Not set | Max outstanding bytes |
+
+## How data lands
+
+Each flushed batch is published to `exchange` with `routing_key`. Bind a queue on the broker to receive it.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| authentication or connection failures | Verify the AMQP URI, broker hostname, port, and vhost permissions. |
-| messages are not routed | Check the exchange name, exchange type, routing key, and downstream bindings. |
+| Connection refused | Check host, TLS, and vhost |
+| ACCESS_REFUSED | Grant publish on the exchange |
+| Duplicates after a crash | Expected — make consumers idempotent |
+
+## Next steps
+
+- [AMQP source](/connectors/inputs/amqp)
+- [Exactly-once delivery](/concepts/exactly-once)

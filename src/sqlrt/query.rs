@@ -2,11 +2,10 @@ use std::fs::OpenOptions;
 use std::io::BufReader;
 use std::{fs, process};
 // removed unused Write import
+use crate::discover::schema_alter;
 use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
 use crate::helpers::configuration::Config;
 use crate::sqlrt::docs::{print_categorized_sql_docs, SqlDocListingKind};
-use crate::sqlrt::operators::alter_column::alter_column_type;
-use crate::sqlrt::operators::drop_column::alter_column_drop;
 use crate::sqlrt::operators::drop_table::drop_table;
 use crate::sqlrt::operators::dump_schema::dump_schema;
 use crate::sqlrt::parser::{PipelineToggle, SParser, Statement};
@@ -64,6 +63,77 @@ pub struct QueryExecutionOptions {
     pub watch: Option<u64>,
 }
 
+async fn apply_alter_table(
+    config: &Config,
+    stmt: &crate::sqlrt::parser::AlterTableStatement,
+) -> Result<String, String> {
+    let mut skippr_metadata = config
+        .get_metadata()
+        .await
+        .map_err(|_| format!("No existing schema for {}", stmt.pipeline))?;
+
+    if skippr_metadata.enabled {
+        return Err(format!(
+            "Pipeline '{}' must be DISABLED before ALTER TABLE",
+            stmt.pipeline
+        ));
+    }
+
+    let namespace = stmt
+        .namespace
+        .as_ref()
+        .map(|n| format!("{n}"))
+        .unwrap_or_else(|| format!("{}", stmt.pipeline));
+    let metadata = skippr_metadata
+        .metadata
+        .get_mut(&namespace)
+        .ok_or_else(|| {
+            format!(
+                "Schema '{namespace}' not found for pipeline '{}'",
+                stmt.pipeline
+            )
+        })?;
+    let field_id = schema_alter::field_id_for_op(metadata, &stmt.op).map_err(|e| e.to_string())?;
+    schema_alter::apply(metadata, &stmt.op).map_err(|e| e.to_string())?;
+    crate::sqlrt::iceberg_alter::commit_schema_alter(
+        config,
+        &format!("{}", stmt.pipeline),
+        &namespace,
+        &stmt.op,
+        field_id,
+    )
+    .await?;
+
+    METADATA.store(Arc::new(skippr_metadata.clone()));
+    config.persist_pipeline_metadata(&skippr_metadata).await?;
+    Ok(format!(
+        "ALTER TABLE {}.{namespace} {:?}",
+        stmt.pipeline, stmt.op
+    ))
+}
+
+async fn apply_pipeline_toggle(
+    config: &Config,
+    stmt: &crate::sqlrt::parser::PipelineToggleStatement,
+) -> Result<String, String> {
+    let bound = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
+    bound.init().await;
+    let mut metadata = bound
+        .get_metadata()
+        .await
+        .map_err(|_| format!("Pipeline '{}' not found", stmt.pipeline))?;
+    metadata.enabled = match stmt.toggle {
+        PipelineToggle::Enable => true,
+        PipelineToggle::Disable => false,
+    };
+    METADATA.store(Arc::new(metadata.clone()));
+    bound.set_metadata(&metadata, false).await;
+    Ok(format!(
+        "Toggled pipeline '{}' to: {}d",
+        stmt.pipeline, stmt.toggle
+    ))
+}
+
 pub fn sql_uses_record_batch_collect(sql: &str) -> bool {
     let upper = sql.trim().to_uppercase();
     !(upper.starts_with("SHOW ")
@@ -78,6 +148,11 @@ pub fn sql_uses_record_batch_collect(sql: &str) -> bool {
         || upper.starts_with("DESCRIBE ")
         || upper.starts_with("DESC ")
         || upper.starts_with("LOAD "))
+}
+
+pub fn sql_uses_shared_extension_collect(sql: &str) -> bool {
+    let upper = sql.trim().to_uppercase();
+    upper.starts_with("ALTER ") || upper.starts_with("ENABLE ") || upper.starts_with("DISABLE ")
 }
 
 impl Default for QueryExecutionOptions {
@@ -268,11 +343,52 @@ pub async fn query(config: &Config, sql_str: &str) {
     query_with_options(&config, sql_str, QueryExecutionOptions::default()).await;
 }
 
+fn extension_message_batch(message: &str) -> Vec<arrow::array::RecordBatch> {
+    let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        "message",
+        DataType::Utf8,
+        false,
+    )]));
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        schema,
+        vec![Arc::new(StringArray::from(vec![message.to_string()])) as ArrayRef],
+    )
+    .expect("extension message batch");
+    vec![batch]
+}
+
 pub async fn query_collect(
     config: &Config,
     sql_str: &str,
 ) -> std::io::Result<Vec<arrow::array::RecordBatch>> {
     config.init().await;
+    if !sql_uses_record_batch_collect(sql_str) {
+        let mut parser = SParser::new(sql_str).map_err(|e| std::io::Error::other(e.to_string()))?;
+        match parser
+            .parse_statement()
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+        {
+            Statement::AlterTable(stmt) => {
+                let bound = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
+                bound.init().await;
+                let message = apply_alter_table(&bound, &stmt)
+                    .await
+                    .map_err(std::io::Error::other)?;
+                return Ok(extension_message_batch(&message));
+            }
+            Statement::PipelineToggle(stmt) => {
+                let message = apply_pipeline_toggle(config, &stmt)
+                    .await
+                    .map_err(std::io::Error::other)?;
+                return Ok(extension_message_batch(&message));
+            }
+            other => {
+                return Err(std::io::Error::other(format!(
+                    "Session.query does not run {other:?}; use skipprd query for this statement"
+                )));
+            }
+        }
+    }
     let ctx = new_context_all_namespaces(&config)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -292,6 +408,23 @@ pub async fn query_with_options(
 ) {
     let mut config = config.clone();
     let sql_trim = sql_str.trim();
+    if sql_uses_shared_extension_collect(sql_trim) {
+        match query_collect(&config, sql_trim).await {
+            Ok(batches) => match record_batches_to_plain_query(&batches) {
+                Ok(doc) => {
+                    if let Some(message) = doc.rows.first().and_then(|row| row.first()) {
+                        println!("{message}");
+                    }
+                }
+                Err(err) => println!("{err}"),
+            },
+            Err(err) => {
+                println!("{err}");
+                process::exit(1);
+            }
+        }
+        return;
+    }
     // Enforce fully-qualified table names: require <pipeline>.<namespace>, forbid default.*
     {
         let is_extension = !sql_uses_record_batch_collect(sql_trim);
@@ -706,26 +839,8 @@ pub async fn query_with_options(
                 }
             }
         }
-        Ok(Statement::PipelineToggle(stmt)) => {
-            config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
-            config.init().await;
-
-            let mut skippr_metadata = match config.get_metadata().await {
-                Ok(metadata) => metadata,
-                Err(_e) => {
-                    println!("Pipeline '{}' not found", stmt.pipeline);
-                    process::exit(1);
-                }
-            };
-
-            skippr_metadata.enabled = match stmt.toggle {
-                PipelineToggle::Enable => true,
-                PipelineToggle::Disable => false,
-            };
-
-            config.set_metadata(&skippr_metadata, false).await;
-
-            println!("Toggled pipeline '{}' to: {}d", stmt.pipeline, stmt.toggle);
+        Ok(Statement::PipelineToggle(_)) => {
+            unreachable!("ENABLE/DISABLE routed through query_collect");
         }
         Ok(Statement::SchemaDrop(stmt)) => {
             config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
@@ -877,81 +992,8 @@ pub async fn query_with_options(
                 Err(err) => println!("SCHEMA DUMP failed: {err}"),
             }
         }
-        Ok(Statement::AlterSchemaDropColumn(stmt)) => {
-            // println!("Alter table drop column: {}", stmt.column_name);
-
-            config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
-            config.init().await;
-
-            let mut skippr_metadata = match config.get_metadata().await {
-                Ok(metadata) => metadata,
-                Err(_e) => {
-                    println!("No existing schema for {}", &stmt.pipeline);
-                    return;
-                }
-            };
-
-            let schema = stmt.schema.clone().unwrap_or(stmt.pipeline.clone());
-
-            let mut metadata = skippr_metadata
-                .metadata
-                .get_mut(&format!("{}", &schema))
-                .expect(&format!(
-                    "Schema '{}' not found for pipeline: '{}'",
-                    schema, &stmt.pipeline
-                ));
-            match alter_column_drop(&mut metadata, &stmt) {
-                Ok(_) => {}
-                Err(e) => {
-                    println!("Failed to drop column: {}", e);
-                    return;
-                }
-            }
-
-            {
-                METADATA.store(Arc::new(skippr_metadata.clone()));
-            }
-
-            config.set_metadata(&skippr_metadata, true).await;
-
-            println!(
-                "Alter schema, dropped column '{}, on pipeline: '{}' of schema '{}'.",
-                stmt.column_name, stmt.pipeline, schema
-            );
-        }
-        Ok(Statement::AlterSchemaAlterColumnType(stmt)) => {
-            config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
-            config.init().await;
-
-            let schema = stmt.schema.clone().unwrap_or(stmt.pipeline.clone());
-
-            let mut skippr_metadata = match config.get_metadata().await {
-                Ok(metadata) => metadata,
-                Err(_e) => {
-                    println!("No existing schema for {}", stmt.pipeline);
-                    return;
-                }
-            };
-
-            let mut metadata = skippr_metadata
-                .metadata
-                .get_mut(&format!("{}", &schema))
-                .expect(&format!(
-                    "Schema '{}' not found for pipeline: '{}'",
-                    schema, &stmt.pipeline
-                ));
-            alter_column_type(&mut metadata, &stmt).expect("Failed to alter column type");
-
-            {
-                METADATA.store(Arc::new(skippr_metadata.clone()));
-            }
-
-            config.set_metadata(&skippr_metadata, false).await;
-
-            println!(
-                "Alter schema: {} column: '{}' type to {}",
-                schema, stmt.column_name, stmt.new_type
-            );
+        Ok(Statement::AlterTable(_)) => {
+            unreachable!("ALTER TABLE routed through query_collect");
         }
         Ok(Statement::TableDrop(stmt)) => {
             // Get the schema and table names
@@ -1881,9 +1923,75 @@ mod plain_query_document_tests {
         assert!(!super::sql_uses_record_batch_collect(
             "LOAD SCHEMA x INTO y"
         ));
+        assert!(!super::sql_uses_record_batch_collect(
+            "ALTER TABLE bikehire.trips MERGE COLUMN price_string INTO price"
+        ));
+        assert!(!super::sql_uses_record_batch_collect(
+            "DISABLE PIPELINE bikehire"
+        ));
         assert!(super::sql_uses_record_batch_collect(
             "SELECT 1 FROM pipe.ns"
         ));
+        assert!(super::sql_uses_shared_extension_collect(
+            "ALTER TABLE bikehire.trips MERGE COLUMN price_string INTO price"
+        ));
+        assert!(super::sql_uses_shared_extension_collect(
+            "DISABLE PIPELINE bikehire"
+        ));
+        assert!(!super::sql_uses_shared_extension_collect(
+            "SHOW PIPELINE bikehire"
+        ));
+    }
+
+    #[test]
+    fn query_with_options_does_not_apply_alter_directly() {
+        let src = include_str!("query.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let start = prod
+            .find("pub async fn query_with_options")
+            .expect("query_with_options");
+        let body = &prod[start..];
+        let body = body
+            .split("pub fn print_query_plain_json")
+            .next()
+            .expect("body before print_query_plain_json");
+        assert!(
+            body.contains("sql_uses_shared_extension_collect"),
+            "CLI ALTER/ENABLE/DISABLE must enter query_collect"
+        );
+        assert!(
+            !body.contains("apply_alter_table("),
+            "query_with_options must not call apply_alter_table"
+        );
+        assert!(
+            !body.contains("apply_pipeline_toggle("),
+            "query_with_options must not call apply_pipeline_toggle"
+        );
+    }
+
+    #[test]
+    fn alter_table_fails_closed_on_enabled_or_non_iceberg() {
+        let src = include_str!("query.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let start = prod
+            .find("async fn apply_alter_table")
+            .expect("apply_alter_table");
+        let body = prod[start..]
+            .split("async fn ")
+            .nth(1)
+            .expect("function body after signature");
+        assert!(
+            body.contains("must be DISABLED before ALTER TABLE"),
+            "enabled pipelines must be rejected"
+        );
+        assert!(
+            include_str!("iceberg_alter.rs").contains("ALTER TABLE requires an Iceberg sink"),
+            "non-Iceberg sinks must be rejected by QueryBackend"
+        );
+        assert!(
+            body.contains("persist_pipeline_metadata"),
+            "Iceberg commit must be followed by fail-closed metadata persist"
+        );
     }
 
     #[test]

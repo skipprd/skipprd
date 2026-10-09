@@ -91,6 +91,9 @@ impl Session {
 
     pub async fn query(&self, sql: &str) -> io::Result<Vec<RecordBatch>> {
         let bound = self.query_config();
+        if !crate::sqlrt::query::sql_uses_record_batch_collect(sql) {
+            return crate::sqlrt::query::query_collect(&bound, sql).await;
+        }
         if bound.get_wal_storage() == WalStorage::Clustered {
             return crate::cluster::scheduler::clustered_query_collect(&bound, sql)
                 .await
@@ -378,6 +381,10 @@ mod tests {
             "CLI Query collect path must not swallow SHOW/DDL into RecordBatch JSON"
         );
         assert!(
+            query_arm.contains("sql_uses_shared_extension_collect"),
+            "CLI ALTER/ENABLE/DISABLE must share Session.query with Python"
+        );
+        assert!(
             query_arm.contains(".query_with_options("),
             "CLI Query watch/TUI/REPL must call Session.query_with_options"
         );
@@ -406,10 +413,10 @@ mod tests {
         assert!(doctor.contains("skipprd doctor"));
         assert!(df.contains("skipprd df"));
         let overview = include_str!("../docs/docs/cli/overview.md");
-        assert!(overview.contains("](doctor.md)"));
-        assert!(overview.contains("](df.md)"));
+        assert!(overview.contains("](/cli/doctor)"));
+        assert!(overview.contains("](/cli/df)"));
         let connect = include_str!("../docs/docs/cli/connect.md");
         assert!(connect.contains("skipprd connect"));
-        assert!(overview.contains("](connect.md)"));
+        assert!(overview.contains("](/cli/connect)"));
     }
 }

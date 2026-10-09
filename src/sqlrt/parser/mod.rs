@@ -1,7 +1,7 @@
+use crate::discover::schema_alter::SchemaAlterOp;
+use crate::discover::SkipprDataType;
 use core::fmt;
-use datafusion::sql::sqlparser::ast::{
-    ArrayElemTypeDef, DataType, Ident, ObjectName, ObjectNamePart,
-};
+use datafusion::sql::sqlparser::ast::{DataType, Ident, ObjectName, ObjectNamePart};
 use datafusion::sql::sqlparser::dialect::{Dialect, GenericDialect};
 use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
@@ -195,28 +195,11 @@ pub struct PipelineToggleStatement {
     pub toggle: PipelineToggle,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AlterTableAddColumn {
-    pub(crate) table_name: ObjectName,
-    pub(crate) column_name: Ident,
-    pub(crate) data_type: DataType,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AlterSchemaDropColumn {
+pub struct AlterTableStatement {
     pub pipeline: ObjectName,
-    pub schema: Option<ObjectName>,
-    pub column_name: ObjectName,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AlterSchemaAlterColumnType {
-    pub pipeline: ObjectName,
-    pub schema: Option<ObjectName>,
-    pub column_name: ObjectName,
-    pub new_type: DataType,
-    pub values_new_type: Option<DataType>,
+    pub namespace: Option<ObjectName>,
+    pub op: SchemaAlterOp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,9 +228,7 @@ pub enum Statement {
     #[allow(dead_code)]
     SchemaLoad(SchemaLoadStatement),
     PipelineToggle(PipelineToggleStatement),
-    // AlterTableAddColumn(AlterTableAddColumn),
-    AlterSchemaDropColumn(AlterSchemaDropColumn),
-    AlterSchemaAlterColumnType(AlterSchemaAlterColumnType),
+    AlterTable(AlterTableStatement),
     TableDrop(TableDropStatement),
     /// Extension: `SHOW DOCS`
     ShowDocs,
@@ -466,7 +447,7 @@ impl<'a> SParser<'a> {
                                                     }
                                                     Keyword::TABLE => {
                                                         self.parser.next_token(); // TABLE
-                                                        self.parse_alter_schema()
+                                                        self.parse_alter_table()
                                                     }
                                                     _ => Err(ParserError::ParserError(
                                                         "Not implemented".to_string(),
@@ -494,15 +475,15 @@ impl<'a> SParser<'a> {
 
     // This is a simplified sketch and needs to be integrated with your existing parsing logic.
 
-    pub fn parse_alter_schema(&mut self) -> Result<Statement, ParserError> {
+    pub fn parse_alter_table(&mut self) -> Result<Statement, ParserError> {
         let pipeline = self.parser.next_token().token.to_string();
 
-        let schema = match self.parser.peek_token().token.to_string().as_str() {
+        let namespace = match self.parser.peek_token().token.to_string().as_str() {
             "." => {
-                self.parser.next_token(); // .
-                let schema = self.parser.next_token().token.to_string();
+                self.parser.next_token();
+                let namespace = self.parser.next_token().token.to_string();
                 Some(ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
-                    schema,
+                    namespace,
                 ))]))
             }
             _ => None,
@@ -510,71 +491,63 @@ impl<'a> SParser<'a> {
 
         match self.parser.next_token().token {
             Token::Word(w) => {
+                let pipeline = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(pipeline))]);
                 match w.keyword {
-                    Keyword::ADD => Err(ParserError::ParserError(
-                        "ALTER COLUMN ADD Not implemented".to_string(),
-                    )),
                     Keyword::DROP => {
                         self.parser.expect_keyword(Keyword::COLUMN)?;
-                        let column_name = self.parser.parse_object_name(false)?;
-                        Ok(Statement::AlterSchemaDropColumn(AlterSchemaDropColumn {
-                            pipeline: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
-                                pipeline,
-                            ))]),
-                            schema,
-                            column_name,
+                        let column = object_name_to_column(&self.parser.parse_object_name(false)?)?;
+                        Ok(Statement::AlterTable(AlterTableStatement {
+                            pipeline,
+                            namespace,
+                            op: SchemaAlterOp::Drop { column },
                         }))
                     }
                     Keyword::ALTER => {
                         self.parser.expect_keyword(Keyword::COLUMN)?;
-
-                        let column_name = self.parser.parse_object_name(false)?;
-
+                        let column = object_name_to_column(&self.parser.parse_object_name(false)?)?;
                         self.parser.expect_keyword(Keyword::TYPE)?;
-
-                        let column_new_type = self.parser.parse_data_type()?;
-
-                        match column_new_type {
-                            DataType::Array(value_type) => {
-                                match value_type {
-                                    ArrayElemTypeDef::AngleBracket(value) => {
-                                        Ok(Statement::AlterSchemaAlterColumnType(
-                                            AlterSchemaAlterColumnType {
-                                                pipeline: ObjectName(vec![
-                                                    ObjectNamePart::Identifier(Ident::new(
-                                                        pipeline,
-                                                    )),
-                                                ]),
-                                                schema,
-                                                column_name,
-                                                // strip the <value type> from ARRAY<value type> to support matching against `SkipprDataType`
-                                                new_type: DataType::Array(ArrayElemTypeDef::None),
-                                                values_new_type: Some(*value),
-                                            },
-                                        ))
-                                    }
-                                    _ => {
-                                        return Err(ParserError::ParserError(
-                                            "Expected values type for array, e.g. ARRAY<INT>"
-                                                .to_string(),
-                                        ));
-                                    }
-                                }
-                            }
-                            _ => Ok(Statement::AlterSchemaAlterColumnType(
-                                AlterSchemaAlterColumnType {
-                                    pipeline: ObjectName(vec![ObjectNamePart::Identifier(
-                                        Ident::new(pipeline),
-                                    )]),
-                                    schema,
-                                    column_name,
-                                    new_type: column_new_type,
-                                    values_new_type: None,
-                                },
-                            )),
-                        }
+                        let parsed = self.parser.parse_data_type()?;
+                        let to = skippr_type_from_sql(&parsed)?;
+                        Ok(Statement::AlterTable(AlterTableStatement {
+                            pipeline,
+                            namespace,
+                            op: SchemaAlterOp::Promote { column, to },
+                        }))
                     }
-                    _ => Err(ParserError::ParserError("Unexpected keyword".to_string())),
+                    Keyword::RENAME => {
+                        self.parser.expect_keyword(Keyword::COLUMN)?;
+                        let from = object_name_to_column(&self.parser.parse_object_name(false)?)?;
+                        self.parser.expect_keyword(Keyword::TO)?;
+                        let to = object_name_to_column(&self.parser.parse_object_name(false)?)?;
+                        Ok(Statement::AlterTable(AlterTableStatement {
+                            pipeline,
+                            namespace,
+                            op: SchemaAlterOp::Rename { from, to },
+                        }))
+                    }
+                    _ if w.value.eq_ignore_ascii_case("MERGE") => {
+                        self.parser.expect_keyword(Keyword::COLUMN)?;
+                        let src = object_name_to_column(&self.parser.parse_object_name(false)?)?;
+                        if !self.parser.parse_keyword(Keyword::INTO) {
+                            return Err(ParserError::ParserError(
+                                "Expected INTO after MERGE COLUMN".to_string(),
+                            ));
+                        }
+                        let dst = object_name_to_column(&self.parser.parse_object_name(false)?)?;
+                        Ok(Statement::AlterTable(AlterTableStatement {
+                            pipeline,
+                            namespace,
+                            op: SchemaAlterOp::Merge { src, dst },
+                        }))
+                    }
+                    Keyword::ADD => Err(ParserError::ParserError(
+                        "ALTER TABLE ADD COLUMN is not implemented; discover adds columns"
+                            .to_string(),
+                    )),
+                    _ => Err(ParserError::ParserError(
+                        "Expected DROP COLUMN, RENAME COLUMN, MERGE COLUMN, or ALTER COLUMN"
+                            .to_string(),
+                    )),
                 }
             }
             _ => Err(ParserError::ParserError(
@@ -773,9 +746,47 @@ impl<'a> SParser<'a> {
     }
 }
 
+fn object_name_to_column(name: &ObjectName) -> Result<String, ParserError> {
+    if name.0.is_empty() {
+        return Err(ParserError::ParserError("Expected column name".to_string()));
+    }
+    Ok(name
+        .0
+        .iter()
+        .map(|part| part.to_string())
+        .collect::<Vec<_>>()
+        .join("."))
+}
+
+fn skippr_type_from_sql(data_type: &DataType) -> Result<SkipprDataType, ParserError> {
+    let rendered = data_type.to_string();
+    SkipprDataType::from_string(&rendered)
+        .or_else(|| match data_type {
+            DataType::Int(_) | DataType::Integer(_) | DataType::Int4(_) => {
+                Some(SkipprDataType::Integer)
+            }
+            DataType::BigInt(_) | DataType::Int8(_) => Some(SkipprDataType::Long),
+            DataType::SmallInt(_) | DataType::Int2(_) => Some(SkipprDataType::Short),
+            DataType::Float(_) | DataType::Float4 | DataType::Real => Some(SkipprDataType::Float),
+            DataType::Double(_) | DataType::Float8 | DataType::DoublePrecision => {
+                Some(SkipprDataType::Double)
+            }
+            DataType::Decimal(_) | DataType::Numeric(_) => Some(SkipprDataType::Decimal),
+            DataType::Boolean => Some(SkipprDataType::Boolean),
+            DataType::Text | DataType::String(_) | DataType::Varchar(_) | DataType::Char(_) => {
+                Some(SkipprDataType::String)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            ParserError::ParserError(format!("No Skippr type equivalent for '{rendered}'"))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discover::schema_alter::SchemaAlterOp;
 
     #[test]
     fn show_pipeline_unquoted_hyphen_truncates_name() {
@@ -816,5 +827,66 @@ mod tests {
             }
             other => panic!("expected ShowPipeline, got {:?}", other),
         }
+    }
+
+    fn alter_op(sql: &str) -> SchemaAlterOp {
+        let mut parser = SParser::new(sql).unwrap();
+        match parser.parse_statement().unwrap() {
+            Statement::AlterTable(stmt) => stmt.op,
+            other => panic!("expected AlterTable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alter_table_rename_column() {
+        assert_eq!(
+            alter_op("ALTER TABLE cube_events.pour_start RENAME COLUMN price TO amount"),
+            SchemaAlterOp::Rename {
+                from: "price".into(),
+                to: "amount".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn alter_table_merge_column() {
+        assert_eq!(
+            alter_op("ALTER TABLE cube_events.pour_start MERGE COLUMN price_string INTO price"),
+            SchemaAlterOp::Merge {
+                src: "price_string".into(),
+                dst: "price".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn alter_table_drop_column() {
+        assert_eq!(
+            alter_op("ALTER TABLE cube_events.pour_start DROP COLUMN note"),
+            SchemaAlterOp::Drop {
+                column: "note".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn alter_table_promote_column() {
+        assert_eq!(
+            alter_op("ALTER TABLE cube_events.pour_start ALTER COLUMN n TYPE BIGINT"),
+            SchemaAlterOp::Promote {
+                column: "n".into(),
+                to: SkipprDataType::Long,
+            }
+        );
+    }
+
+    #[test]
+    fn alter_schema_is_rejected() {
+        let mut parser = SParser::new("ALTER SCHEMA bike_hire DROP COLUMN old_field").unwrap();
+        let err = parser.parse_statement().unwrap_err();
+        assert!(
+            err.to_string().contains("TABLE"),
+            "expected TABLE instruction, got {err}"
+        );
     }
 }

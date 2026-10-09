@@ -1,70 +1,116 @@
-# AthenaIceberg Output
+---
+title: Athena Iceberg
+description: Land Skipprd pipelines as Apache Iceberg tables in S3, registered in Glue, and queryable from Athena and skipprd query.
+---
 
-Writes compacted batches to Apache Iceberg tables in the AWS Glue catalog, on S3. Query those tables with `skipprd query` (Iceberg ∪ WAL) or Amazon Athena.
+# Athena Iceberg
 
-Pair with the [AthenaIceberg schema sink](../schema_sinks/athenaiceberg.md). Do not pair this sink with the Hive [Glue](../schema_sinks/glue.md) schema sink.
+Use Athena Iceberg when you want Iceberg tables that Athena can query: merge, replace a day, and schema evolution without rewriting Hive DDL yourself. Pair it with the [Athena Iceberg schema sink](/connectors/schema_sinks/athenaiceberg).
 
-## Configuration
+For Hive tables on S3, use [Athena](/connectors/outputs/athena). For a Skippr-managed catalog, use [SkipprLake](/connectors/outputs/skipprlake).
 
-```yaml
+## Before you begin
+
+- An S3 warehouse prefix Skipprd can write (`s3://bucket/path/`).
+- A Glue database and an Athena workgroup.
+- A results bucket name for Athena.
+- IAM for S3 on the warehouse prefix plus Glue Iceberg table APIs.
+
+```bash
+export AWS_ACCESS_KEY_ID="..."
+export AWS_SECRET_ACCESS_KEY="..."
+export AWS_DEFAULT_REGION="us-east-1"
+```
+
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkAthenaIceberg, Pipeline
+
+cfg = Config.discover()
+lake = cfg.data_sink(
+    "lake",
+    DataSinkAthenaIceberg(
+        warehouse="s3://my-iceberg-warehouse/",
+        glue_database_name="analytics",
+        athena_workgroup_name="primary",
+        athena_results_s3_bucket="my-athena-results",
+        region="us-east-1",
+    ),
+    schema_sink="lake_schema",
+)
+cfg.pipeline("reports", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=lake))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-sink athenaiceberg \
+  --pipeline reports \
+  --name lake \
+  --warehouse s3://my-iceberg-warehouse/ \
+  --glue-database-name analytics \
+  --athena-workgroup-name primary \
+  --athena-results-s3-bucket my-athena-results \
+  --region us-east-1
+
+skipprd connect schema-sink athenaiceberg \
+  --pipeline reports \
+  --name lake_schema
+```
+
+```yaml [YAML]
 data_sinks:
-  warehouse:
+  lake:
     AthenaIceberg:
-      warehouse: s3://my-bucket/warehouse/
+      warehouse: s3://my-iceberg-warehouse/
       glue_database_name: analytics
       athena_workgroup_name: primary
       athena_results_s3_bucket: my-athena-results
       region: us-east-1
-    schema_sink: schema_sinks.warehouse_schema
+    schema_sink: schema_sinks.lake_schema
+
+schema_sinks:
+  lake_schema:
+    AthenaIceberg:
+      warehouse: s3://my-iceberg-warehouse/
+      glue_database_name: analytics
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: my-athena-results
+      region: us-east-1
 ```
 
-Table location is `{warehouse}/{glue_database_name}/{table_name}`. Table names are unprefixed.
+:::
 
-`athena_results_s3_bucket` is a **bucket name**, not an `s3://` URI.
+## Options
 
-Object storage credentials are `object_store`. Omit it or set `type: s3` for the AWS default credential chain. Use `type: r2` for Cloudflare R2 (or other path-style S3-compatible stores).
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `warehouse` | URI | Required | Iceberg warehouse root (`s3://…`) |
+| `glue_database_name` | string | Required | Glue database |
+| `athena_workgroup_name` | string | Required | Athena workgroup |
+| `athena_results_s3_bucket` | string | Required | Athena results bucket name |
+| `region` | string | Not set | AWS region |
+| `catalog_id` | string | Not set | Glue catalog id when it is not the account default |
+| `object_store` | object | AWS S3 | Override the file store (see SkipprLake for `s3` / `r2` shapes) |
 
-```yaml
-object_store:
-  type: r2
-  endpoint: ${OBJECTS_S3_ENDPOINT}
-  region: auto
-  access_key_id: ${OBJECTS_ACCESS_KEY_ID}
-  secret_access_key: ${OBJECTS_SECRET_ACCESS_KEY}
-  path_style: true
-```
+## How data lands
 
-| Field | Default | Description |
-| --- | --- | --- |
-| `warehouse` | *(required)* | Iceberg warehouse root (`s3://…`) |
-| `glue_database_name` | *(required)* | Glue database; also the Iceberg namespace |
-| `athena_workgroup_name` | *(required)* | Athena workgroup for SQL |
-| `athena_results_s3_bucket` | *(required)* | Athena query-results bucket name |
-| `region` | | AWS region for Glue and Athena |
-| `catalog_id` | | Glue catalog ID when not the account default |
-| `object_store` | `s3` | Object-store credentials for Parquet |
+Each source namespace becomes an Iceberg table in `glue_database_name`. Skipprd maintains snapshots: recent commits are kept, older ones expire, and small files are rewritten. Do not rely on time travel to old snapshots.
 
-## Supported write policies
+Supports `append`, `merge_by_key`, `replace_partition`, and `replace_table`. `skipprd query` reads the Iceberg table plus in-flight WAL rows.
 
-| Policy | Supported |
-| --- | --- |
-| `append` | Yes |
-| `merge_by_key` | Yes |
-| `replace_partition` | Yes |
-| `replace_table` | Yes |
+## Troubleshooting
 
-## Table history and maintenance
+| Symptom | Fix |
+|---|---|
+| Glue / Iceberg permission errors | Grant Iceberg table APIs on the database, not only Hive `CreateTable` |
+| `AccessDenied` on the warehouse | Grant `s3:PutObject` and list on the warehouse prefix |
+| Source refuses to start (`replace_partition`) | You are on Hive Athena by mistake — this page is the Iceberg destination |
 
-The sink maintains its own tables, the same way as [SkipprLake](skipprlake.md#table-history-and-maintenance):
+## Next steps
 
-- Snapshots older than 24 hours are expired once the newest 100 commits are kept. Do not rely on Athena time travel (`FOR TIMESTAMP AS OF`) beyond that window.
-- Small files are bin-packed, and partitions with more than 16 equality-delete files are rewritten with the deletes applied.
-
-You do not need to run Athena `OPTIMIZE` or `VACUUM` for tables this sink writes.
-
-## Related
-
-- [AthenaIceberg schema sink](../schema_sinks/athenaiceberg.md)
-- [Athena Hive output](athena.md)
-- [SkipprLake](skipprlake.md)
-- [Output destination](../../configuration/output.md)
+- [Athena Iceberg schema sink](/connectors/schema_sinks/athenaiceberg)
+- [Datalake](/concepts/datalake)
+- [How sources land](/concepts/source-landing-semantics)

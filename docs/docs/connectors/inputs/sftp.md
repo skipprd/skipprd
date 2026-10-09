@@ -1,75 +1,97 @@
-# SFTP Input
+---
+title: SFTP source
+description: Pull JSON, CSV, or Parquet from a remote directory over SFTP.
+---
 
-Downloads files from an SFTP server and ingests their contents.
+# SFTP
 
-## How it works
+Reads files from `remote_path` on an SFTP server. Use it when a partner still drops files that way.
 
-1. Connects to the SFTP server via SSH.
-2. Lists files matching `remote_path` (supports glob patterns).
-3. Downloads each file and ingests its contents.
-4. Namespace convention: `sftp.{filename}`.
+## Before you begin
 
-## Configuration
-
-```yaml
-data_sources:
-  source:
-    Sftp:
-      host: sftp.example.com
-      port: 22
-      username: user
-      password: secret
-      remote_path: "/data/*.json"
-```
-
-## Configuration variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `host` | *(required)* | SFTP server hostname |
-| `port` | `22` | SSH port |
-| `username` | *(required)* | SSH username |
-| `password` | | Password authentication |
-| `private_key_path` | | Path to SSH private key |
-| `remote_path` | *(required)* | Remote file path or glob |
-| `format` | `json` | Data format |
-
-## Authentication
-
-Use either a password or an SSH private key. Prefer private-key auth for long-lived pipelines. For security best practices, we strongly advise against storing the password in `skippr.yml`. Use environment variable interpolation instead: replace the `password` value with your own `${ENV_VAR}` reference.
-
-The relevant part of `skippr.yml` looks like this:
-
-```yaml
-data_sources:
-  source:
-    Sftp:
-      password: "${SFTP_PASSWORD}"
-```
-
-Set the env var before running `skipprd`:
-
-macOS / Linux
+- Host, username, and a readable remote directory.
+- A password **or** a private key.
 
 ```bash
-export SFTP_PASSWORD="secret"
+export SFTP_PASSWORD="change-me"
 ```
 
-Windows PowerShell
+## Configure
 
-```powershell
-$env:SFTP_PASSWORD = "secret"
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSourceSftp, EnvRef, Pipeline
+
+cfg = Config.discover()
+src = cfg.data_source(
+    "partner",
+    DataSourceSftp(
+        host="sftp.partner.example",
+        username="skippr",
+        remote_path="/export/daily",
+        port=22,
+        password=EnvRef("SFTP_PASSWORD"),
+        format="csv",
+    ),
+)
+cfg.pipeline("partner", Pipeline(data_source=src))
+cfg.save()
 ```
 
-Windows Command Prompt
-
-```cmd
-set SFTP_PASSWORD=secret
+```bash [CLI]
+skipprd connect data-source sftp \
+  --pipeline partner \
+  --name partner \
+  --host sftp.partner.example \
+  --username skippr \
+  --remote-path /export/daily \
+  --port 22 \
+  --password '${SFTP_PASSWORD}' \
+  --format csv
 ```
+
+```yaml [YAML]
+data_sources:
+  partner:
+    Sftp:
+      host: sftp.partner.example
+      username: skippr
+      remote_path: /export/daily
+      port: 22
+      password: ${SFTP_PASSWORD}
+      format: csv
+```
+
+:::
+
+## Options
+
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `host` | string | Required | SFTP host |
+| `username` | string | Required | User |
+| `remote_path` | path | Required | Remote directory or file |
+| `port` | integer | Not set | Port (default 22) |
+| `password` | secret | Not set | Password as `${ENV}` |
+| `private_key_path` | path | Not set | Private key file |
+| `format` | string | Inferred | `json`, `csv`, or `parquet` |
+| `batch_size_bytes` | integer | Not set | Max bytes per batch |
+| `batch_size_seconds` | integer | Not set | Max seconds per batch |
+
+## What gets synced
+
+Each file becomes records. Progress is per remote file. A file that changes after a commit is read again.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| authentication failed | Verify the username, password or private key path, and any host-based access controls. |
-| no files found | Check `remote_path` and confirm the SSH user can list and read that location. |
+| Connection refused | Check `host`, `port`, and firewall |
+| Auth failed | Confirm password or key |
+| No files | Check `remote_path` and the user's directory listing rights |
+
+## Next steps
+
+- [S3 source](/connectors/inputs/s3)
+- [SFTP destination](/connectors/outputs/sftp)

@@ -1,68 +1,84 @@
-# Google Cloud Storage Output
+---
+title: GCS destination
+description: Write Skipprd batches as objects in a Google Cloud Storage prefix.
+---
 
-Writes Parquet or JSON Lines objects to a GCS bucket.
+# GCS
 
-## How it works
+Writes files to a bucket prefix. It does not create a BigQuery table — use [BigQuery](/connectors/outputs/bigquery) when you want SQL there.
 
-1. Serializes record batches as Parquet (default) or JSON Lines.
-2. Uploads to the configured bucket with optional prefix, namespace, Hive partitions, and time partitioning.
+## Before you begin
 
-## Configuration
-
-```yaml
-data_sinks:
-  sink:
-    Gcs:
-      bucket: my-bucket
-      prefix: "data/"
-      service_account_key_path: "/path/to/key.json"
-```
-
-## Configuration variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `bucket` | *(required)* | GCS bucket name |
-| `prefix` | | Key prefix for uploaded objects |
-| `service_account_key_path` | | Path to service account JSON key |
-| `format` | `parquet` | `parquet` or `jsonl` |
-
-## Authentication
-
-Authenticate with a Google Cloud service account key. For security best practices, we strongly advise against storing the service account key path in `skippr.yml`. Use environment variable interpolation instead: replace the `service_account_key_path` value with your own `${ENV_VAR}` reference.
-
-The relevant part of `skippr.yml` looks like this:
-
-```yaml
-data_sinks:
-  warehouse:
-    Gcs:
-      service_account_key_path: "${GCS_SERVICE_ACCOUNT_KEY_PATH}"
-```
-
-Set the env var before running `skipprd`:
-
-macOS / Linux
+- A bucket and prefix.
+- A service-account JSON with `storage.objects.create` (and list if you verify).
 
 ```bash
-export GCS_SERVICE_ACCOUNT_KEY_PATH="/path/to/key.json"
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/sa.json"
 ```
 
-Windows PowerShell
+## Configure
 
-```powershell
-$env:GCS_SERVICE_ACCOUNT_KEY_PATH = "C:\path\to\key.json"
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkGcs, Pipeline
+
+cfg = Config.discover()
+raw = cfg.data_sink(
+    "raw",
+    DataSinkGcs(
+        bucket="acme-landing",
+        prefix="skipprd/events",
+        service_account_key_path="${GOOGLE_APPLICATION_CREDENTIALS}",
+    ),
+)
+cfg.pipeline("events", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=raw))
+cfg.save()
 ```
 
-Windows Command Prompt
-
-```cmd
-set GCS_SERVICE_ACCOUNT_KEY_PATH=C:\path\to\key.json
+```bash [CLI]
+skipprd connect data-sink gcs \
+  --pipeline events \
+  --name raw \
+  --bucket acme-landing \
+  --prefix skipprd/events \
+  --service-account-key-path '${GOOGLE_APPLICATION_CREDENTIALS}'
 ```
+
+```yaml [YAML]
+data_sinks:
+  raw:
+    Gcs:
+      bucket: acme-landing
+      prefix: skipprd/events
+      service_account_key_path: ${GOOGLE_APPLICATION_CREDENTIALS}
+```
+
+:::
+
+## Options
+
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `bucket` | string | Required | Bucket name |
+| `prefix` | string | Required | Object prefix |
+| `service_account_key_path` | path | Not set | Service-account JSON. ADC is used when unset. |
+| `format` | string | Not set | Object format override |
+
+A retry overwrites the same object.
+
+## How data lands
+
+Objects land under `gs://<bucket>/<prefix>/<namespace>/`.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| authentication failed | Verify the service account key path and confirm the key still belongs to an active service account. |
-| writes fail | Check bucket permissions, object prefix settings, and any organization policies affecting the bucket. |
+| 403 | Grant object-create on the prefix |
+| Credentials missing | Export `GOOGLE_APPLICATION_CREDENTIALS` |
+
+## Next steps
+
+- [BigQuery](/connectors/outputs/bigquery)
+- [S3 destination](/connectors/outputs/s3)

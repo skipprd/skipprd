@@ -16,7 +16,7 @@ Always favour compile errors over runtime convention
 
 This repository contains **skipprd** — the self-hosted ELT engine (`discover`, `sync`, `query`). Cloud `skippr` lives in the private `cloud` repo.
 
-Public engineer docs: [elt.skippr.io](https://elt.skippr.io). Markdown is `docs/docs/`; VitePress config is `docs/.vitepress/`. Preview with `npm --prefix docs run dev`. Publish from a sibling `cloud` checkout: `HOST=elt DIST="$(pwd)/docs/.vitepress/dist" ./scripts/publish-product-docs.sh`.
+Public engineer docs: [skippr.io](https://skippr.io). Markdown is `docs/docs/`; VitePress config is `docs/.vitepress/`. Preview with `npm --prefix docs run dev`. The live apex site is composed in sibling `skippr-web` (`npm run docs:compose` copies this tree into `skippr-web/docs/`) and published with `cloud/scripts/publish-skippr-web.sh`. `https://elt.skippr.io` **301s** to `https://skippr.io`.
 
 ## System dependencies (already installed in snapshot)
 

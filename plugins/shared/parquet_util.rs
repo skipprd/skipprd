@@ -55,6 +55,33 @@ pub fn coerce_timestamp_dates_to_date32(
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
+/// Iceberg timestamp is microseconds. skipprd Arrow is millisecond.
+pub fn coerce_timestamps_to_microseconds(batch: RecordBatch) -> Result<RecordBatch, io::Error> {
+    let schema = batch.schema();
+    let mut new_columns = batch.columns().to_vec();
+    let mut new_fields: Vec<Arc<Field>> = schema.fields().iter().cloned().collect();
+    let mut changed = false;
+    for (idx, field) in schema.fields().iter().enumerate() {
+        if field.data_type() != &DataType::Timestamp(TimeUnit::Millisecond, None) {
+            continue;
+        }
+        let target = DataType::Timestamp(TimeUnit::Microsecond, None);
+        let casted = cast(new_columns[idx].as_ref(), &target)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        new_columns[idx] = casted;
+        new_fields[idx] = Arc::new(
+            Field::new(field.name(), target, field.is_nullable())
+                .with_metadata(field.metadata().clone()),
+        );
+        changed = true;
+    }
+    if !changed {
+        return Ok(batch);
+    }
+    RecordBatch::try_new(Arc::new(Schema::new(new_fields)), new_columns)
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
 async fn serialize_to_parquet_inner(
     mut batches: SendableRecordBatchStream,
     date_field_names: Option<&HashSet<String>>,
@@ -65,7 +92,10 @@ async fn serialize_to_parquet_inner(
         None => return Err(io::Error::other("No rows to write to parquet")),
     };
     let first_batch = match date_field_names {
-        Some(names) => coerce_timestamp_dates_to_date32(first_batch, names)?,
+        Some(names) => coerce_timestamps_to_microseconds(coerce_timestamp_dates_to_date32(
+            first_batch,
+            names,
+        )?)?,
         None => first_batch,
     };
     let schema = first_batch.schema();
@@ -88,7 +118,9 @@ async fn serialize_to_parquet_inner(
     while let Some(batch) = batches.next().await {
         let batch = batch.map_err(|err| io::Error::other(err.to_string()))?;
         let batch = match date_field_names {
-            Some(names) => coerce_timestamp_dates_to_date32(batch, names)?,
+            Some(names) => {
+                coerce_timestamps_to_microseconds(coerce_timestamp_dates_to_date32(batch, names)?)?
+            }
             None => batch,
         };
         let batch =
@@ -156,6 +188,27 @@ mod tests {
             .downcast_ref::<Date32Array>()
             .unwrap();
         assert_eq!(dates.value(0), days);
+    }
+
+    #[test]
+    fn coerce_timestamps_ms_to_us() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampMillisecondArray::from(vec![
+                1_700_000_000_000i64,
+            ]))],
+        )
+        .unwrap();
+        let coerced = coerce_timestamps_to_microseconds(batch).unwrap();
+        assert_eq!(
+            coerced.schema().field(0).data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
     }
 
     #[test]

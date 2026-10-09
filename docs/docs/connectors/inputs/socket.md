@@ -1,42 +1,81 @@
-# Socket Input
+---
+title: Socket
+description: Accept a stream of records on an address Skipprd listens on.
+---
 
-Listens on a TCP, UDP, or Unix socket for incoming data.
+# Socket
 
-## How it works
+Listen on `address` and parse framed payloads as records. Use it for simple network producers that are not HTTP, Kafka, or a cloud queue.
 
-1. Binds to the configured address using the specified socket mode.
-2. **TCP:** accepts connections and reads newline-delimited data.
-3. **UDP:** receives datagrams and processes each line.
-4. **Unix:** accepts connections on a Unix domain socket (unix only).
-5. Namespace convention: `socket.{mode}.{address}`.
+## Before you begin
 
-## Configuration
+- A free bind address on the Skipprd host (`0.0.0.0:9000` or similar).
+- A producer that can connect and send the framing you choose.
 
-```yaml
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSourceSocket, Pipeline
+
+cfg = Config.discover()
+src = cfg.data_source(
+    "net",
+    DataSourceSocket(mode="tcp", address="0.0.0.0:9000", framing="line", format="json"),
+)
+cfg.pipeline("net", Pipeline(data_source=src))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-source socket \
+  --pipeline net \
+  --name net \
+  --mode tcp \
+  --address 0.0.0.0:9000 \
+  --framing line \
+  --format json
+```
+
+```yaml [YAML]
 data_sources:
-  source:
+  net:
     Socket:
       mode: tcp
       address: "0.0.0.0:9000"
-      framing: newline
+      framing: line
+      format: json
 ```
 
-## Configuration variables
+:::
 
-| Variable | Default | Description |
-|---|---|---|
-| `mode` | *(required)* | `tcp`, `udp`, or `unix` |
-| `address` | *(required)* | Bind address (host:port or socket path) |
-| `framing` | `newline` | Frame delimiter (`newline` or `bytes`) |
-| `format` | `json` | Data format |
+Run `skipprd sync` (not `--once`) so the listener stays up.
 
-## Authentication
+## Options
 
-No connector-specific authentication is required.
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `mode` | string | Required | `tcp` or `udp` |
+| `address` | string | Required | Bind address `host:port` |
+| `framing` | string | Not set | How messages are split (`line`, …) |
+| `format` | string | Not set | Payload format |
+| `batch_size_bytes` | integer | Not set | Max bytes per batch |
+| `batch_size_seconds` | integer | Not set | Max seconds per batch |
+
+## What gets synced
+
+Each framed message becomes a record. Push sources can lose a message that arrived after accept and before the WAL commit — have producers retry. See [Exactly-once delivery](/concepts/exactly-once).
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| address already in use | Choose a different port or stop the process currently bound to that address. |
-| no data arriving | Check the sender target address, protocol mode, and any host firewall rules. |
+| Address already in use | Pick another port, or stop the other listener |
+| No rows | Confirm the producer uses the same `mode`, port, and `framing` |
+| Parse errors | Match `format` to the payload |
+
+## Next steps
+
+- [HTTP server](/connectors/inputs/http_server)
+- [Kafka](/connectors/inputs/kafka)

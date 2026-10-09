@@ -1,71 +1,90 @@
-# Azure Blob Storage Output
+---
+title: Azure Blob
+description: Write Skipprd batches as blobs in an Azure Storage container.
+---
 
-Writes Parquet or JSON Lines objects to Azure Blob Storage.
+# Azure Blob
 
-## How it works
+Writes files to a container prefix. It does not create a Synapse table — use [Synapse](/connectors/outputs/synapse) when you want SQL there.
 
-1. Serializes record batches as Parquet (default) or JSON Lines.
-2. Uploads to the configured container with optional prefix, namespace, Hive partitions, and time partitioning.
+## Before you begin
 
-## Configuration
-
-```yaml
-data_sinks:
-  sink:
-    AzureBlob:
-      account_name: mystorageaccount
-      account_key: "base64key..."
-      container: my-container
-      prefix: "data/"
-```
-
-## Configuration variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `account_name` | *(required)* | Azure storage account name |
-| `account_key` | | Access key (one of key/sas required) |
-| `sas_token` | | SAS token |
-| `container` | *(required)* | Blob container name |
-| `prefix` | | Key prefix for uploaded objects |
-| `format` | `parquet` | `parquet` or `jsonl` |
-
-## Authentication
-
-Authenticate with either an account key or a SAS token. For security best practices, we strongly advise against storing the account key or SAS token in `skippr.yml`. Use environment variable interpolation instead: replace the `account_key` or `sas_token` value with your own `${ENV_VAR}` reference.
-
-The relevant part of `skippr.yml` looks like this:
-
-```yaml
-data_sinks:
-  warehouse:
-    AzureBlob:
-      account_key: "${AZURE_BLOB_ACCOUNT_KEY}"
-```
-
-Set the env var before running `skipprd`:
-
-macOS / Linux
+- Storage account name and container.
+- An account key **or** a SAS token. Store it in the environment.
 
 ```bash
-export AZURE_BLOB_ACCOUNT_KEY="base64key..."
+export AZURE_STORAGE_ACCOUNT_KEY="..."
 ```
 
-Windows PowerShell
+## Configure
 
-```powershell
-$env:AZURE_BLOB_ACCOUNT_KEY = "base64key..."
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkAzureBlob, EnvRef, Pipeline
+
+cfg = Config.discover()
+raw = cfg.data_sink(
+    "raw",
+    DataSinkAzureBlob(
+        account_name="acmelanding",
+        container="skipprd",
+        account_key=EnvRef("AZURE_STORAGE_ACCOUNT_KEY"),
+        prefix="events",
+    ),
+)
+cfg.pipeline("events", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=raw))
+cfg.save()
 ```
 
-Windows Command Prompt
-
-```cmd
-set AZURE_BLOB_ACCOUNT_KEY=base64key...
+```bash [CLI]
+skipprd connect data-sink azure_blob \
+  --pipeline events \
+  --name raw \
+  --account-name acmelanding \
+  --container skipprd \
+  --account-key '${AZURE_STORAGE_ACCOUNT_KEY}' \
+  --prefix events
 ```
+
+```yaml [YAML]
+data_sinks:
+  raw:
+    AzureBlob:
+      account_name: acmelanding
+      container: skipprd
+      account_key: ${AZURE_STORAGE_ACCOUNT_KEY}
+      prefix: events
+```
+
+:::
+
+## Options
+
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `account_name` | string | Required | Storage account |
+| `container` | string | Required | Container |
+| `account_key` | secret | Not set | Account key as `${ENV}` |
+| `sas_token` | secret | Not set | SAS token as `${ENV}` (use instead of the key) |
+| `prefix` | string | Not set | Blob prefix |
+| `format` | string | Not set | Object format override |
+
+A retry overwrites the same blob.
+
+## How data lands
+
+Blobs land under `{container}/{prefix}/{namespace}/`.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| authentication failed | Verify the storage account name, account key or SAS token, and container name. |
-| writes fail | Check container permissions, prefix values, and any firewall restrictions on the storage account. |
+| Authentication failed | Export `account_key` or `sas_token` in this shell |
+| Container missing | Create it, or grant the key rights to create it |
+| 403 on prefix | Narrow SAS to write on that prefix |
+
+## Next steps
+
+- [Synapse](/connectors/outputs/synapse)
+- [S3 destination](/connectors/outputs/s3)

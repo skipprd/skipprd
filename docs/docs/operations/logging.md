@@ -1,72 +1,56 @@
-# Logging Event Map
+---
+title: Logging
+description: Turn on Skipprd logs, recognise a successful sync, and know which lines mean you should treat the run as failed.
+---
 
-Use this as a quick lookup: **log event -> what it means -> what to do**.
+# Logging
 
-Enable logging with the `--log` flag on any command. Default level is `info`; use `--log debug` for verbose output.
+Add `--log` to any command. The default level is `info`. Use `--log debug` only when you are chasing a specific failure — it is noisy.
 
-## Green path events
+```bash
+skipprd sync --pipeline payments --once --log
+```
 
-| Log event (pattern) | Meaning | Action |
+Read logs in the terminal or the collector you already use. Skipprd writes structured lines you can grep.
+
+## A successful run
+
+Treat a `sync --once` as good when all of these are true:
+
+1. The process exits 0.
+2. The log contains `Pipeline sync complete`.
+3. Uploaded row counts match what Skipprd expected, and no partitions were quarantined.
+4. A query against the destination returns the rows you expected.
+
+Typical lines on a healthy pass, in order:
+
+| Line (search for) | Meaning |
+|---|---|
+| `Syncing pipeline:` | The named pipeline started |
+| `Discovered new namespace:` / `Discovered new field:` | First-seen table or column — expected on the first run and after a schema change |
+| `Uploaded` + `parquet` + `rows=` | A file landed in the destination |
+| `Pipeline sync complete` | The run finished |
+
+On shutdown you may also see a drain line such as `Finalising: compactor drained and stopped`. That is the process finishing in-flight writes. The success marker you operate on is still `Pipeline sync complete` plus exit 0.
+
+## When to treat the run as failed
+
+| Line (search for) | Meaning | What you do |
 |---|---|---|
-| `Initializing data directories...` | Runtime startup | None |
-| `Uploaded config to S3: .../config/...json` | Run config persisted | None |
-| `get_metadata: tenant=... workspace=... pipeline=...` | Metadata lookup started | None |
-| `Loaded metadata from S3 (entries=..., keys=[...])` | Existing metadata loaded | None |
-| `Syncing pipeline: <name>` | Pipeline execution started | None |
-| `Offset DB size: ...` | Offset store loaded | None |
-| `WAL scan examined ...` | WAL replay/index pass completed | Check counts increase on restart/chaos |
-| `Indexed ... Segment files ...` | Recoverable WAL segments indexed | None |
-| `Committed ... offsets from .seg files` | Replay advanced offsets | None |
-| `Output plugin: Athena` | Output target selected | None |
-| `Syncing bucket: <bucket>, prefix: <prefix>` | Source connection active | None |
-| `Starting stream pipeline (...)` | Ingest worker pipeline active | None |
-| `Queueing ... ingest tasks ...` | Batches entering worker queue | Watch if queue grows without progress |
-| `Discovered new namespace: ...` | New namespace seen in input | Expected on first run |
-| `Discovered new field: ...` | Schema evolution detected | Expected with changing payloads |
-| `Updated pipeline metadata in S3: .../metadata.json` | Metadata persisted | Should appear during discovery/evolution |
-| `Uploaded ...parquet to S3 (rows=..., bytes=...)` | Output objects written successfully | None |
-| `Messages per Min: ...` | Throughput snapshot | Trend only |
-| `Uploads total: ..., inflight: ..., avg latency: ...` | Output pressure telemetry | Investigate if inflight/latency spike |
-| `Targets - upload: ..., wal: ..., s3_download: ...` | Concurrency target state | Trend only |
-| `Finalising: draining and stopping compactor` | End-of-run drain started | Must be followed by success line |
-| `Finalising: compactor drained and stopped` | End-of-run drain complete | Required for trustworthy completion |
-| `Finalising: Athena partition tasks drained` | Glue/Athena background tasks settled | Required before completion |
-| `Compactor: summary uploaded_rows=X expected_msgs=Y quarantined_parts=Z` | Final integrity snapshot | Expect `X == Y` and `Z == 0` |
-| `Pipeline sync complete` | Run completed | Final success marker |
+| `Finalising: compactor drain/stop did not complete cleanly` | In-flight writes did not finish | Treat counts as untrusted. Re-run the same command. |
+| `integrity check mismatch` or `quarantined_parts` greater than 0 | Uploaded rows do not match, or a slice could not be read | Compare destination counts to the source. See [Troubleshooting](/operations/troubleshooting). |
+| `Pipeline '<name>' not found` | No schema for that pipeline | Run `skipprd discover --pipeline <name>` first. |
+| `TABLE_NOT_FOUND` | The warehouse table is missing | Discover succeeded? Then re-run sync so the destination can create the table. |
+| Non-zero exit | The run said it failed | Re-run. Committed WAL batches are retried. |
 
-## Chaos mode events
+Throughput lines (`Messages per Min`, `Uploads total`) are trends, not a pass/fail signal.
 
-These are expected when running with `SKIPPR_CHAOS_MODE=yes`:
+## Chaos testing
 
-| Log event (pattern) | Meaning | Action |
-|---|---|---|
-| `Chaos mode throwing a random exit...` | Intentional kill injected | None |
-| `Killed ...` + `exit 137` | SIGKILL occurred | Expected in chaos tests |
-| `Chaos SIGKILL (exit 137) observed; continuing as expected` | Wrapper accepted chaos kill | None |
-| Next run has higher `WAL scan examined ...` / `Indexed ...` | Recovery from interrupted run | Expected |
+`SKIPPR_CHAOS_MODE=yes` kills the process on purpose. You should see a SIGKILL, then a later run that recovers. Leave it off in production. See [Advanced settings](/configuration/advanced).
 
-## High-priority warnings and errors
+## Next steps
 
-| Log event (pattern) | Meaning | Action |
-|---|---|---|
-| `Finalising: compactor drain/stop did not complete cleanly` | Shutdown safety invariant failed | Treat run as failed/untrusted |
-| `A Tokio 1.x context was found, but it is being shutdown` | Async work still running at runtime teardown | Investigate shutdown sequencing immediately |
-| `Compactor: integrity check mismatch ...` | Uploaded rows do not match expected or quarantined > 0 | Treat as correctness risk; validate output counts |
-| `quarantined_parts > 0` (in summary) | Partition(s) quarantined due to read/parse issues | Investigate WAL/parquet integrity |
-| `TABLE_NOT_FOUND ... awsdatacatalog.<db>.<table> ...` | Destination table missing/unavailable | Verify schema sync/catalog creation |
-| `Pipeline '<name>' not found` | Pipeline metadata missing | Run `discover` first, then `sync` |
-
-## Fast trust checklist
-
-A run is operationally green if all are true:
-
-- `Pipeline sync complete` exists in the logs
-- `Finalising: compactor drained and stopped` exists
-- `Compactor: summary uploaded_rows == expected_msgs`
-- `quarantined_parts=0`
-- No Tokio shutdown panic
-- Downstream query can read the destination table
-
-## Operational notes
-
-Skipprd runs as stateless compute in `disk` and `s3` modes: no clustering knobs, no peer list. `WAL_STORAGE=clustered` starts replica RPC, Arrow Flight SQL, an in-process Ballista scheduler+executor (gossip-elected cluster), and authenticated Chitchat on ephemeral UDP ports and uses DynamoDB (OSS) or Cloud tables for leases, membership, and fenced offsets. v1 requires a trusted private network; Cloud clustered mode also requires TLS PEMs. Even local disk is optional when using `WAL_STORAGE=s3`.
+- [Troubleshooting](/operations/troubleshooting)
+- [Exactly-once delivery](/concepts/exactly-once)
+- [skipprd sync](/cli/sync)

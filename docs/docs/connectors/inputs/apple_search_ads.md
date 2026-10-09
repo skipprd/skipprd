@@ -1,75 +1,111 @@
+---
+title: Apple Search Ads
+description: Land daily Apple Search Ads reports in your warehouse using Apple API client credentials.
+---
+
 # Apple Search Ads
 
-Ingest daily Apple Search Ads reporting from the Apple Search Ads API.
+Reads daily Search Ads reports (campaigns, keywords, search terms). Apple uses client-credentials JWT, not a browser redirect. Pair with a destination that can rewrite a day: [Athena](/connectors/outputs/athena), [Athena Iceberg](/connectors/outputs/athenaiceberg), or [SkipprLake](/connectors/outputs/skipprlake).
 
-## Connect
+## Before you begin
 
-Apple Search Ads uses Apple OAuth2 client credentials, not a browser redirect. Provide the organization ID and Apple API credentials:
+1. In Apple Search Ads, copy the **organization ID** (`org_id`).
+2. Create an API client: `client_id`, `team_id`, `key_id`, and a `.p8` private key.
+3. Store the key path in the environment.
 
-```yaml
+```bash
+export APPLE_SEARCH_ADS_CLIENT_ID="..."
+export APPLE_SEARCH_ADS_TEAM_ID="..."
+export APPLE_SEARCH_ADS_KEY_ID="..."
+export APPLE_SEARCH_ADS_PRIVATE_KEY_PATH="/path/to/AuthKey.p8"
+```
+
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSourceAppleSearchAds, EnvRef, Pipeline
+
+cfg = Config.discover()
+src = cfg.data_source(
+    "asa",
+    DataSourceAppleSearchAds(
+        org_id="123456",
+        client_id=EnvRef("APPLE_SEARCH_ADS_CLIENT_ID"),
+        team_id=EnvRef("APPLE_SEARCH_ADS_TEAM_ID"),
+        key_id=EnvRef("APPLE_SEARCH_ADS_KEY_ID"),
+        start_date="2024-01-01",
+        private_key_path="${APPLE_SEARCH_ADS_PRIVATE_KEY_PATH}",
+        stream_profile="full",
+    ),
+)
+cfg.pipeline("asa", Pipeline(data_source=src, data_sink=cfg.get_data_sink("lake")))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-source apple-search-ads \
+  --pipeline asa \
+  --name asa \
+  --org-id 123456 \
+  --client-id '${APPLE_SEARCH_ADS_CLIENT_ID}' \
+  --team-id '${APPLE_SEARCH_ADS_TEAM_ID}' \
+  --key-id '${APPLE_SEARCH_ADS_KEY_ID}' \
+  --start-date 2024-01-01 \
+  --private-key-path '${APPLE_SEARCH_ADS_PRIVATE_KEY_PATH}' \
+  --stream-profile full
+```
+
+```yaml [YAML]
 data_sources:
-  apple_search_ads:
+  asa:
     AppleSearchAds:
       org_id: "123456"
-      client_id: "${APPLE_SEARCH_ADS_CLIENT_ID}"
-      team_id: "${APPLE_SEARCH_ADS_TEAM_ID}"
-      key_id: "${APPLE_SEARCH_ADS_KEY_ID}"
-      private_key_path: "${APPLE_SEARCH_ADS_PRIVATE_KEY_PATH}"
+      client_id: ${APPLE_SEARCH_ADS_CLIENT_ID}
+      team_id: ${APPLE_SEARCH_ADS_TEAM_ID}
+      key_id: ${APPLE_SEARCH_ADS_KEY_ID}
+      private_key_path: ${APPLE_SEARCH_ADS_PRIVATE_KEY_PATH}
       start_date: "2024-01-01"
       stream_profile: full
 ```
 
-For short-lived smoke tests you can provide `access_token` instead of client credentials.
+:::
 
 ## Options
 
-| Field | Description |
-| --- | --- |
-| `org_id` | Apple Search Ads organization ID used in `X-AP-Context`. |
-| `client_id` | Apple API client ID for JWT client-credentials auth. |
-| `team_id` | Apple developer team ID used to sign the client secret JWT. |
-| `key_id` | Apple private key ID used to sign the client secret JWT. |
-| `private_key_pem` / `private_key_path` | `.p8` private key material or local path. |
-| `access_token` | Optional static bearer token for smoke tests. |
-| `start_date` / `end_date` | Inclusive report window. `end_date` defaults to yesterday minus processing lag. |
-| `lookback_days` | Number of recent days to reprocess after a checkpoint. Default `3`. |
-| `stream_profile` | `minimal`, `standard`, or `full`. Default `full`. |
-| `time_zone` | Default report timezone. Search term reports use `ORTZ`. |
-| `return_records_with_no_metrics` | Whether Apple should include zero-metric rows. Default `true`. |
-| `max_concurrent_requests` | Fan-out report request concurrency. Default `8`. |
-| `streams` | Optional explicit namespace list. |
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `org_id` | string | Required | Organization ID (`X-AP-Context`) |
+| `client_id` | string | Required | Apple API client ID |
+| `team_id` | string | Required | Team ID for the client-secret JWT |
+| `key_id` | string | Required | Key id for the `.p8` |
+| `start_date` | string | Required | First report date |
+| `private_key_path` | path | Not set | Path to the `.p8` |
+| `private_key_pem` | secret | Not set | Key material instead of a path |
+| `access_token` | secret | Not set | Static bearer for smoke tests |
+| `end_date` | string | Yesterday minus lag | Last report date |
+| `lookback_days` | integer | `3` | Days to re-fetch |
+| `stream_profile` | string | `full` | `minimal`, `standard`, or `full` |
+| `processing_lag_days` | integer | Not set | Skip immature trailing days |
+| `time_zone` | string | Account default | Report timezone (`ORTZ` for search terms) |
+| `return_records_with_no_metrics` | bool | `true` | Include zero-metric rows |
+| `max_concurrent_requests` | integer | `8` | Parallel report requests |
+| `streams` | list | Profile set | Exact stream list |
 
-## Streams
+## What gets synced
 
-| Namespace | Profile |
-| --- | --- |
-| `apple_search_ads.campaign_daily` | minimal |
-| `apple_search_ads.ad_group_daily` | standard+ |
-| `apple_search_ads.keyword_daily` | full |
-| `apple_search_ads.search_term_daily` | full |
-
-## Authentication
-
-Skipprd exchanges an **ES256 JWT** (signed with your Apple API private key) for a short-lived access token at `https://appleid.apple.com/auth/oauth2/token` (`grant_type=client_credentials`, `scope=searchadsorg`).
-
-Required env vars (typical):
-
-- `APPLE_SEARCH_ADS_ORG_ID`
-- `APPLE_SEARCH_ADS_CLIENT_ID`
-- `APPLE_SEARCH_ADS_TEAM_ID`
-- `APPLE_SEARCH_ADS_KEY_ID`
-- `APPLE_SEARCH_ADS_PRIVATE_KEY_PATH`
-
-Optional: `APPLE_SEARCH_ADS_ACCESS_TOKEN` to skip JWT exchange in local debugging.
+Daily report grains in the selected profile. Each run rewrites recent days (`lookback_days`). See [How sources land](/concepts/source-landing-semantics).
 
 ## Troubleshooting
 
 | Symptom | Fix |
-| --- | --- |
-| Token / 401 errors | Verify `client_id`, `team_id`, `key_id`, and PEM path; regenerate key in Apple Search Ads UI |
-| Empty keyword stream | Confirm campaigns and ad groups exist; check `max_concurrent_requests` and API rate limits |
-| Search term errors | Ensure the plugin sends `ORTZ` (built-in for `search_term_daily`) |
-| Slow discover | Expected — discover only samples 3 days of `campaign_daily`; use `skipprd sync` for full history |
-| Stale metrics | Confirm `replace_partition`; increase `lookback_days` |
+|---|---|
+| 401 | Check `client_id`, `team_id`, `key_id`, and that the `.p8` matches |
+| Empty reports | Confirm `org_id` and that campaigns exist in the date window |
+| Destination rejects the write | Use Athena, Athena Iceberg, or SkipprLake |
 
-Offline dev: set `SKIPPR_APPLE_SEARCH_ADS_FIXTURE_DIR` to JSON fixtures (`campaign_report.json`, `ad_group_report.json`, etc.).
+## Next steps
+
+- [Google Ads](/connectors/inputs/google_ads)
+- [How sources land](/concepts/source-landing-semantics)

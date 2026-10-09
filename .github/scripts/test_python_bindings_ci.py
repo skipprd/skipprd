@@ -291,10 +291,10 @@ class PythonBindingsCiTests(unittest.TestCase):
 
     def test_python_semver_is_independent_of_engine_tags(self):
         module = load_wheel_version()
-        self.assertEqual(module.python_semver(), "18.0.0")
+        self.assertEqual(module.python_semver(), "18.1.0")
         self.assertTrue(
             module.should_publish(
-                "18.0.0", unpublished=["skippr-18.0.0-cp310-abi3-macosx_11_0_arm64.whl"]
+                "18.1.0", unpublished=["skippr-18.1.0-cp310-abi3-macosx_11_0_arm64.whl"]
             )
         )
         self.assertFalse(module.should_publish("18.0.0", unpublished=[]))
@@ -380,9 +380,9 @@ class PythonBindingsCiTests(unittest.TestCase):
             python_cargo = (root / "python" / "Cargo.toml").read_text(encoding="utf-8")
             lock = (root / "Cargo.lock").read_text(encoding="utf-8")
             self.assertRegex((root / "Cargo.toml").read_text(encoding="utf-8"), r'(?m)^version = "9\.8\.7"$')
-            self.assertRegex(pyproject, r'(?m)^version = "18\.0\.0"$')
-            self.assertRegex(python_cargo, r'(?m)^version = "18\.0\.0"$')
-            self.assertIn('name = "skipprd-python"\nversion = "18.0.0"', lock)
+            self.assertRegex(pyproject, r'(?m)^version = "18\.1\.0"$')
+            self.assertRegex(python_cargo, r'(?m)^version = "18\.1\.0"$')
+            self.assertIn('name = "skipprd-python"\nversion = "18.1.0"', lock)
 
     def test_normalize_semver_rejects_v_prefix(self):
         module = load_set_version()

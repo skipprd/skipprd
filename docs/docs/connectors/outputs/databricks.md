@@ -1,100 +1,98 @@
-# Databricks / Delta Lake Output
+---
+title: Databricks
+description: Write Skipprd pipelines into a Databricks SQL warehouse as Delta tables.
+---
 
-Writes data to Databricks or any Delta Lake table. Supports two modes:
+# Databricks
 
-- **Delta Lake mode** (when `delta_table_uri` is set): writes Arrow batches directly to a Delta table at any object store URI (S3, Azure, GCS, local filesystem). No Databricks workspace required.
-- **COPY mode** (default): uploads Parquet to Databricks Volumes via the Files API, then optionally executes `COPY INTO` via the SQL Statement API.
+Use Databricks when analysts already query a SQL warehouse. Skipprd writes to `catalog.schema.table` using a personal access token.
 
-## How it works
+## Before you begin
 
-### Delta Lake mode
-
-1. Collects Arrow RecordBatches from the stream.
-2. Opens (or creates) the Delta table at the configured URI.
-3. Appends batches using the `deltalake` write operation.
-
-### COPY mode
-
-1. Serializes record batches to Parquet.
-2. Uploads the Parquet file to Databricks Volumes via the Files API.
-3. Optionally executes a `COPY INTO` SQL statement via the SQL Statement API.
-
-## Configuration (Delta Lake mode)
-
-```yaml
-data_sinks:
-  sink:
-    Databricks:
-      delta_table_uri: "s3://my-bucket/delta-table"
-      storage_options:
-        AWS_REGION: us-east-1
-```
-
-## Configuration (COPY mode)
-
-```yaml
-data_sinks:
-  sink:
-    Databricks:
-      workspace_url: "https://my-workspace.cloud.databricks.com"
-      token: "dapi..."
-      warehouse_id: "abc123"
-      catalog: main
-      schema: default
-      table: events
-```
-
-## Configuration variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `delta_table_uri` | | Delta table URI. When set, enables Delta Lake mode (`s3://`, `az://`, `gs://`, `file:///`) |
-| `storage_options` | | Key-value map for object store auth (e.g. `AWS_REGION`, `AWS_ACCESS_KEY_ID`) |
-| `workspace_url` | | Databricks workspace URL (COPY mode) |
-| `token` | | Personal access token (COPY mode) |
-| `warehouse_id` | | SQL warehouse ID (enables COPY INTO in COPY mode) |
-| `catalog` | `main` | Unity Catalog name (COPY mode) |
-| `schema` | `default` | Schema name (COPY mode) |
-| `table` | `data` | Target table name (COPY mode) |
-
-## Authentication
-
-Configure `workspace_url`, `token`, and optional `warehouse_id` directly when you connect the warehouse or in `skippr.yml`.
-
-For security best practices, we strongly advise against storing the token in `skippr.yml`. Use environment variable interpolation instead: replace the `token` value with your own `${ENV_VAR}` reference.
-
-The relevant part of `skippr.yml` looks like this:
-
-```yaml
-data_sinks:
-  warehouse:
-    Databricks:
-      token: "${DATABRICKS_TOKEN}"
-```
-
-Set the env var before running `skipprd`:
-
-macOS / Linux
+- Workspace URL (`https://<workspace>.cloud.databricks.com`).
+- A SQL warehouse id.
+- A token with rights to write the target schema.
+- Optional: a `delta_table_uri` when you write to a path instead of a Unity name.
 
 ```bash
 export DATABRICKS_TOKEN="dapi..."
 ```
 
-Windows PowerShell
+## Configure
 
-```powershell
-$env:DATABRICKS_TOKEN = "dapi..."
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkDatabricks, EnvRef, Pipeline
+
+cfg = Config.discover()
+dbx = cfg.data_sink(
+    "warehouse",
+    DataSinkDatabricks(
+        workspace_url="https://adb-123.azuredatabricks.net",
+        token=EnvRef("DATABRICKS_TOKEN"),
+        warehouse_id="abc123",
+        catalog="main",
+        schema="bronze",
+        table="events",
+    ),
+)
+cfg.pipeline("events", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=dbx))
+cfg.save()
 ```
 
-Windows Command Prompt
-
-```cmd
-set DATABRICKS_TOKEN=dapi...
+```bash [CLI]
+skipprd connect data-sink databricks \
+  --pipeline events \
+  --name warehouse \
+  --workspace-url https://adb-123.azuredatabricks.net \
+  --token '${DATABRICKS_TOKEN}' \
+  --warehouse-id abc123 \
+  --catalog main \
+  --schema bronze \
+  --table events
 ```
+
+```yaml [YAML]
+data_sinks:
+  warehouse:
+    Databricks:
+      workspace_url: https://adb-123.azuredatabricks.net
+      token: ${DATABRICKS_TOKEN}
+      warehouse_id: abc123
+      catalog: main
+      schema: bronze
+      table: events
+```
+
+:::
+
+## Options
+
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `workspace_url` | URL | Required | Workspace URL |
+| `token` | secret | Required | PAT as `${ENV}` |
+| `warehouse_id` | string | Required | SQL warehouse id |
+| `catalog` | string | Required | Unity catalog |
+| `schema` | string | Required | Schema |
+| `table` | string | Required | Table |
+| `delta_table_uri` | URI | Not set | Write to this Delta path instead of the Unity name |
+| `storage_options` | map | Not set | Extra storage settings for `delta_table_uri` |
+
+## How data lands
+
+Rows land in the Delta table. Retries are exactly once. New columns are added when the source schema grows.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| authentication failed | Verify the workspace URL, token, and any SQL warehouse ID values. |
-| writes or COPY INTO fail | Check catalog and schema permissions, warehouse availability, and whether the token can use that SQL warehouse. |
+| 401 / invalid token | Rotate the PAT and update the environment variable |
+| Warehouse not running | Start the SQL warehouse or enable auto-start |
+| Permission denied | Grant `USE` / `MODIFY` on the schema |
+
+## Next steps
+
+- [Exactly-once delivery](/concepts/exactly-once)
+- [Datalake](/concepts/datalake)

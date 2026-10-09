@@ -1,137 +1,117 @@
-# Snowflake Output
+---
+title: Snowflake
+description: Load Skipprd pipelines into Snowflake tables with key-pair authentication, automatic schema, and COPY INTO from a stage.
+---
 
-Writes compacted Parquet data to Snowflake using S3 staging and `COPY INTO` via the Snowflake REST SQL API.
+# Snowflake
 
-## How it works
+Use Snowflake when that warehouse is where analysts already work. Skipprd creates the schema and tables, stages Parquet, and runs `COPY INTO`. You provide an account, a user, a warehouse, and a database.
 
-1. Receives compacted Parquet streams from the WAL compactor.
-2. Serializes the stream to an in-memory Parquet file (sorted, Snappy-compressed).
-3. Sends a `PUT` command to Snowflake to obtain temporary upload credentials for the configured stage.
-4. Uploads the Parquet file directly to the stage's backing cloud storage (S3), with client-side encryption when required by the stage.
-5. Executes `COPY INTO` with `MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE` to bulk-load the staged data into the target table.
-6. Removes the staged file after a successful load.
-7. Namespace-to-table mapping converts dots to underscores and lowercases the result (e.g., `mssql.MyDB.dbo.customers` → `mssql_mydb_dbo_customers`).
+Prefer a key pair. Password sign-in fails when the account enforces MFA.
 
-Schema DDL (CREATE SCHEMA, CREATE TABLE, ALTER TABLE ADD COLUMN) is handled proactively by the shared schema sync worker during pipeline initialisation, before any data flows.
+## Before you begin
 
-## Authentication
-
-The plugin supports two authentication methods:
-
-**Key-pair (recommended):**
+1. **Account identifier** in `orgname-accountname` form (Snowsight → account menu), for example `myorg-myaccount`.
+2. **A role** with `USAGE` on the warehouse, database, and schema; `CREATE SCHEMA` on the database if Skipprd should create it; `CREATE TABLE` on the schema; `INSERT` and `SELECT` on the tables.
+3. **A key pair** (recommended). Create an unencrypted PKCS#8 key and attach the public key to the user. See the [Snowflake quickstart](/getting-started/quickstart-snowflake) for the SQL.
+4. **A stage** Skipprd can `PUT` to. The user stage `@~` works. A named stage such as `@SKIPPR_STAGE` is fine.
 
 ```bash
-SNOWFLAKE_PRIVATE_KEY_PATH=/path/to/rsa_key.p8
+export SNOWFLAKE_PRIVATE_KEY_PATH="/path/to/rsa_key.p8"
 ```
 
-Generates a JWT signed with the RSA private key. No password required.
+## Configure
 
-**Username/password:**
+These examples assume a source named `sample` already exists.
 
-```bash
-SNOWFLAKE_PASSWORD=secret
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkSnowflake, Pipeline
+
+cfg = Config.discover()
+warehouse = cfg.data_sink(
+    "warehouse",
+    DataSinkSnowflake(
+        account="myorg-myaccount",
+        user="skippr_loader",
+        private_key_path="${SNOWFLAKE_PRIVATE_KEY_PATH}",
+        warehouse="COMPUTE_WH",
+        database="RAW_DATA",
+        schema="PUBLIC",
+        role="LOADER_ROLE",
+        stage="@SKIPPR_STAGE",
+    ),
+)
+cfg.pipeline("bikehire", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=warehouse))
+cfg.save()
 ```
 
-Authenticates via `POST https://{account}.snowflakecomputing.com/session/v1/login-request`. The session token is cached and reused.
-
-If both `SNOWFLAKE_PRIVATE_KEY_PATH` and `SNOWFLAKE_PASSWORD` are set, key-pair auth takes precedence.
-
-## Configuration
-
-```bash
-DATA_OUTPUT_PLUGIN_NAME=Snowflake
-SNOWFLAKE_ACCOUNT=myorg-myaccount
-SNOWFLAKE_USER=skippr_loader
-SNOWFLAKE_PRIVATE_KEY_PATH=/path/to/rsa_key.p8
-SNOWFLAKE_WAREHOUSE=COMPUTE_WH
-SNOWFLAKE_DATABASE=RAW_DATA
-SNOWFLAKE_SCHEMA=PUBLIC
+```bash [CLI]
+skipprd connect data-sink snowflake \
+  --pipeline bikehire \
+  --name warehouse \
+  --account myorg-myaccount \
+  --user skippr_loader \
+  --private-key-path '${SNOWFLAKE_PRIVATE_KEY_PATH}' \
+  --warehouse COMPUTE_WH \
+  --database RAW_DATA \
+  --schema PUBLIC \
+  --role LOADER_ROLE \
+  --stage '@SKIPPR_STAGE'
 ```
 
-Or via YAML pipeline config:
-
-```yaml
+```yaml [YAML]
 data_sinks:
-  destination:
+  warehouse:
     Snowflake:
-      account: "myorg-myaccount"
-      user: "skippr_loader"
-      private_key_path: "${SNOWFLAKE_PRIVATE_KEY_PATH}"
-      warehouse: "COMPUTE_WH"
-      database: "RAW_DATA"
-      schema: "PUBLIC"
-      role: "LOADER_ROLE"
+      account: myorg-myaccount
+      user: skippr_loader
+      private_key_path: ${SNOWFLAKE_PRIVATE_KEY_PATH}
+      warehouse: COMPUTE_WH
+      database: RAW_DATA
+      schema: PUBLIC
+      role: LOADER_ROLE
       stage: "@SKIPPR_STAGE"
-      max_concurrency: 4
-      discovery_cache_ttl_secs: 300
 ```
 
-`max_concurrency` and `discovery_cache_ttl_secs` are optional query/model keys; ingest ignores them.
+:::
 
-## Configuration variables
+```bash
+skipprd discover --pipeline bikehire
+skipprd sync --pipeline bikehire --once --log
+```
 
-| Variable | Default | Description |
-|---|---|---|
-| `SNOWFLAKE_ACCOUNT` | *(required)* | Snowflake account identifier (e.g., `myorg-myaccount`) |
-| `SNOWFLAKE_USER` | *(required)* | Snowflake login user |
-| `SNOWFLAKE_PASSWORD` | | Snowflake login password (used when key-pair auth is not configured) |
-| `SNOWFLAKE_PRIVATE_KEY_PATH` | | Path to PKCS8 PEM private key for key-pair authentication |
-| `SNOWFLAKE_WAREHOUSE` | *(required)* | Compute warehouse name |
-| `SNOWFLAKE_DATABASE` | *(required)* | Target database |
-| `SNOWFLAKE_SCHEMA` | *(required)* | Target schema |
-| `SNOWFLAKE_ROLE` | | Optional role to assume |
-| `SNOWFLAKE_STAGE` | `@~` | Snowflake stage for file uploads. Defaults to the user stage. Named stages (e.g., `@SKIPPR_STAGE`) are also supported. |
-| `SNOWFLAKE_STAGING_URI` | | Optional external object store URI for direct staging (bypasses the Snowflake stage). Supports `s3://`, `azure://`, and `gcs://`. |
-| `SNOWFLAKE_STAGING_STORAGE_INTEGRATION` | | Optional Snowflake storage integration name for external staging. Required for GCS, optional for S3 and Azure. |
+## Options
 
-## Data loading
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `account` | string | Required | Account identifier (`myorg-myaccount` or `xy12345.us-east-1`) |
+| `user` | string | Required | Snowflake user |
+| `warehouse` | string | Required | Compute warehouse |
+| `database` | string | Required | Target database |
+| `schema` | string | Required | Target schema |
+| `private_key_path` | path | Not set | PKCS#8 PEM for key-pair sign-in. Preferred when set. |
+| `password` | secret | Not set | Password sign-in. Ignored when `private_key_path` is set. Use `${ENV}`. |
+| `role` | string | Not set | Role to assume after sign-in |
+| `stage` | string | `@~` | Stage for uploads. Named stages such as `@SKIPPR_STAGE` work. |
+| `staging_uri` | URI | Not set | Upload to this `s3://`, `azure://`, or `gcs://` prefix instead of the Snowflake stage |
+| `staging_storage_integration` | string | Not set | Snowflake storage integration. Required for GCS staging. |
+| `staging_azure_sas_token` | secret | Not set | SAS token when `staging_uri` is Azure |
+| `staging_azure_account_key` | secret | Not set | Account key when `staging_uri` is Azure |
+| `staging_gcs_service_account_key_path` | path | Not set | Service-account JSON when `staging_uri` is GCS |
+| `max_concurrency` | integer | Not set | Query/model only; ingest ignores it |
+| `discovery_cache_ttl_secs` | integer | Not set | Query/model only; ingest ignores it |
 
-By default, the plugin uploads Parquet files directly to the configured Snowflake stage using the native file transfer protocol:
+## How data lands
 
-1. A `PUT` command is sent to Snowflake to obtain temporary upload credentials for the stage's backing cloud storage.
-2. The Parquet file is uploaded to the stage (with client-side AES-256-CBC encryption when required by internal stages).
-3. `COPY INTO` loads the staged file into the target table.
-4. The staged file is removed after a successful load.
+Skipprd creates the schema and tables on the first sync, then adds columns when the source schema grows.
 
-This works out of the box with Snowflake stages backed by S3, Azure Blob Storage, or Google Cloud Storage — including the default user stage (`@~`) and named stages. No extra Skipprd storage config is required for the normal internal-stage path.
+Each source namespace becomes one table: dots become underscores and the name is lowercased (`s3.events.click_stream` → `s3_events_click_stream`).
 
-### Optional: direct external object staging
+Each batch is staged as Parquet and loaded with `COPY INTO` (`MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE`). The staged file is removed after a successful load. Retries do not duplicate rows — see [Exactly-once delivery](/concepts/exactly-once).
 
-As an alternative, you can set `SNOWFLAKE_STAGING_URI` to bypass the Snowflake stage and upload Parquet directly to external object storage. This can be useful when you want full control over the staging location or want staged files to remain visible outside Snowflake for debugging.
-
-Examples:
-
-- `s3://my-bucket/skippr-staging`
-- `azure://myaccount.blob.core.windows.net/mycontainer/skippr-staging`
-- `gcs://my-bucket/skippr-staging`
-
-Snowflake then reads from that URI during `COPY INTO`:
-
-- S3 uses the standard AWS credential chain for uploads and inline AWS credentials for Snowflake reads unless `SNOWFLAKE_STAGING_STORAGE_INTEGRATION` is set.
-- Azure uses `AZURE_STORAGE_SAS_TOKEN` for Snowflake reads unless `SNOWFLAKE_STAGING_STORAGE_INTEGRATION` is set. Uploads accept either `AZURE_STORAGE_SAS_TOKEN` or `AZURE_STORAGE_ACCOUNT_KEY`.
-- GCS uploads use `GOOGLE_APPLICATION_CREDENTIALS` or Application Default Credentials, and `SNOWFLAKE_STAGING_STORAGE_INTEGRATION` is required because Snowflake does not support inline GCS credentials in `COPY INTO`.
-
-## Table naming
-
-Skipprd namespaces are converted to Snowflake table names by replacing all dots with underscores and lowercasing:
-
-| Skipprd Namespace | Snowflake Table |
-|---|---|
-| `mssql.MyDB.dbo.customers` | `mssql_mydb_dbo_customers` |
-| `s3.events.click_stream` | `s3_events_click_stream` |
-
-## Schema management
-
-Schema DDL runs proactively during pipeline initialisation via the shared schema sync worker (the same mechanism used by Athena):
-
-- `CREATE SCHEMA IF NOT EXISTS` ensures the target schema exists.
-- `CREATE TABLE IF NOT EXISTS` creates tables with columns mapped from the Skipprd schema, including structured types (OBJECT, ARRAY, MAP).
-- Schema evolution: new columns are added via `ALTER TABLE ADD COLUMN IF NOT EXISTS`.
-- DDL operations are serialized per table and use schema-aware caching to avoid redundant DDL when the schema hasn't changed.
-
-## Type mapping
-
-| Skipprd Type | Snowflake Type |
+| Skipprd type | Snowflake type |
 |---|---|
 | String | `VARCHAR` |
 | Integer / Long | `NUMBER(38,0)` |
@@ -139,27 +119,24 @@ Schema DDL runs proactively during pipeline initialisation via the shared schema
 | Boolean | `BOOLEAN` |
 | Date | `DATE` |
 | Timestamp | `TIMESTAMP_NTZ` |
-| Struct | `OBJECT(field_name TYPE, ...)` |
-| Array | `ARRAY(element_type)` |
-| Map | `MAP(key_type, value_type)` |
+| Struct | `OBJECT(...)` |
+| Array | `ARRAY(...)` |
+| Map | `MAP(...)` |
 
-Nested types are fully preserved as Snowflake structured types rather than flattened to `VARIANT`.
-
-## Required permissions
-
-The Snowflake user needs:
-
-- `USAGE` on warehouse, database, and schema
-- `CREATE SCHEMA` on the target database (if the schema doesn't exist)
-- `CREATE TABLE` on the target schema
-- `INSERT`, `SELECT` on target tables
+Optional `staging_uri` writes Parquet to your own bucket instead of the Snowflake stage. GCS staging needs `staging_storage_integration` because Snowflake will not take inline GCS credentials on `COPY INTO`.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `Failed to connect: 250001` | Check the `SNOWFLAKE_ACCOUNT` format — use the org-account form (e.g. `MYORG-MYACCOUNT`) or include the region (e.g. `xy12345.us-east-1`) |
-| `Incorrect username or password` | Verify `SNOWFLAKE_USER` and auth env vars |
-| `Insufficient privileges` | Ensure the role has the grants listed above |
-| `390197 — Multi-factor authentication is required` | Switch to key-pair auth — password auth cannot work when MFA is enforced |
-| `openssl: command not found` | Install OpenSSL — on Windows: `winget install OpenSSL`, then restart your terminal |
+| `Failed to connect: 250001` | Check `account` — use `ORG-ACCOUNT` or include the region |
+| `Incorrect username or password` | Confirm `user` and that `private_key_path` or `password` is exported in this shell |
+| `Insufficient privileges` | Grant the privileges listed above to `role` |
+| `390197` MFA required | Switch to key-pair auth |
+| `openssl: command not found` | Install OpenSSL and recreate the key |
+
+## Next steps
+
+- [Quickstart: Snowflake](/getting-started/quickstart-snowflake)
+- [Exactly-once delivery](/concepts/exactly-once)
+- [skipprd sync](/cli/sync)

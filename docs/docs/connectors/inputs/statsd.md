@@ -1,37 +1,74 @@
-# StatsD Input
+---
+title: StatsD
+description: Listen for StatsD metrics and land them as records you can query in a warehouse.
+---
 
-Listens for StatsD metrics over UDP and converts them to JSON.
+# StatsD
 
-## How it works
+Skipprd binds `listen_address` and turns incoming StatsD lines into records. Use it to keep a copy of application metrics next to business data.
 
-1. Binds a UDP socket on the configured address.
-2. Parses incoming StatsD line protocol (`metric:value|type|@rate|#tags`).
-3. Each metric is converted to a JSON object with `name`, `value`, `type`, `sample_rate`, and `tags` fields.
-4. Namespace convention: `statsd`.
+## Before you begin
 
-## Configuration
+- A free UDP bind address on the host (for example `0.0.0.0:8125`).
+- Applications that can send StatsD to that address.
 
-```yaml
-data_sources:
-  source:
-    Statsd:
-      listen_address: "0.0.0.0:8125"
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSourceStatsd, Pipeline
+
+cfg = Config.discover()
+src = cfg.data_source(
+    "metrics",
+    DataSourceStatsd(listen_address="0.0.0.0:8125", format="statsd"),
+)
+cfg.pipeline("metrics", Pipeline(data_source=src))
+cfg.save()
 ```
 
-## Configuration variables
+```bash [CLI]
+skipprd connect data-source statsd \
+  --pipeline metrics \
+  --name metrics \
+  --listen-address 0.0.0.0:8125 \
+  --format statsd
+```
 
-| Variable | Default | Description |
-|---|---|---|
-| `listen_address` | `0.0.0.0:8125` | UDP address to listen on |
-| `format` | `json` | Data format |
+```yaml [YAML]
+data_sources:
+  metrics:
+    Statsd:
+      listen_address: "0.0.0.0:8125"
+      format: statsd
+```
 
-## Authentication
+:::
 
-No connector-specific authentication is required.
+Run `skipprd sync` without `--once` so the listener stays up.
+
+## Options
+
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `listen_address` | string | Required | Bind `host:port` |
+| `format` | string | Not set | Payload format |
+| `batch_size_bytes` | integer | Not set | Max bytes per batch |
+| `batch_size_seconds` | integer | Not set | Max seconds per batch |
+
+## What gets synced
+
+Each metric line becomes a record. Metrics that arrive before the WAL commit can be lost if the process dies — senders should tolerate that. See [Exactly-once delivery](/concepts/exactly-once).
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| port already in use | Choose a different listen address or stop the process currently using that UDP port. |
-| metrics are missing | Check sender configuration, network reachability, and any host firewall rules blocking UDP traffic. |
+| Address in use | Stop the other StatsD listener or change the port |
+| No rows | Confirm applications send to this host and port |
+
+## Next steps
+
+- [OTLP](/connectors/inputs/otlp)
+- [HTTP server](/connectors/inputs/http_server)

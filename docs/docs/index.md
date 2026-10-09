@@ -1,100 +1,138 @@
 ---
 title: Skipprd
-description: Self-hosted ELT engine. Describe a source and a destination in skippr.yml, then run Skipprd discover, Skipprd schema, and Skipprd sync.
+description: Skipprd is a self-hosted ELT engine. Install it, describe a source and destination in skippr.yml, and land your first data in minutes.
 ---
 
 # Skipprd
 
-Skipprd is an ELT engine in a single, portable binary — and a Python `Session` wrapping that same engine. It discovers your source data, evolves your schemas, fixes common serialisation issues and more, on the fly during ingest. It guarantees deliverable, backwards-compatible data to your destination. New field, no problem. Existing field changed type, no problem. Nested data types evolved a new array, no problem. It just works.
+Skipprd moves data from your sources — databases, files, streams, and SaaS APIs — into your warehouse or lake. It runs on your own machines, as the `skipprd` command or as the `skippr` Python package. Both run the same engine.
 
-You describe a source (and optionally a destination) in one `skippr.yml`. Skipprd reads the shape of the data and writes it — durably — through a write-ahead log. Add a warehouse sink when you want one. Discovery walks the source, maps types the same way every time, and writes that contract down. Change data capture aims at the table as it should be: order tokens, tombstones, a final state you can reconcile, not a pile of logs to replay by hand. Ingest is WAL-first. A batch is real once it is committed. Crash recovery starts there.
+You describe a pipeline once in `skippr.yml`: where data comes from, and where it should land. Skipprd does the rest:
 
-Plugins arrive on demand from `install.skippr.io`. The host stays small; connectors version on their own.
+- **Discovers the schema.** It samples the source and infers field names and types, including nested objects and arrays, the same way every time.
+- **Keeps up when data changes.** A new field, a field that changes type, or a nested object that grows a new array lands without breaking the tables you already query.
+- **Does not lose committed data.** Skipprd writes each batch to its write-ahead log (WAL) before the destination. A crash retries from the WAL. Whether a retry can duplicate a row depends on the destination — see [Exactly-once delivery](/concepts/exactly-once).
+- **Replicates database changes.** [Change data capture](/cdc/) keeps a destination table at the source's current state, including deletes.
+
+Connectors download on first use from `install.skippr.io`, so the engine stays small and each connector updates on its own.
+
+## Who it is for
+
+- **Developers and analysts** who want source data in a warehouse they can query, without writing extraction code.
+- **Operators** who install, schedule, monitor, and recover pipelines on their own infrastructure.
 
 ## Install
 
-You need a machine that can reach the source and the destination, plus credentials for both. Published binaries cover macOS arm64 and Linux x86_64.
+Skipprd runs on **macOS arm64** and **Linux x86_64**. Use Homebrew or the install script for the `skipprd` command, or `pip` for the Python package.
 
-```bash
+::: code-group
+
+```bash [Homebrew]
 brew tap skipprd/tap
 brew install skipprd
+skipprd --version
 ```
 
-Or:
-
-```bash
+```bash [install.sh]
 curl -sL https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh | sh
 skipprd --version
 ```
 
-Runtime source, sink, and schema plugins download on first use and cache under `~/.skippr/runtime_plugins`. Full setup, including a user-local install directory, is in [Install](/getting-started/install).
-
-## First pipeline
-
-Take JSON objects in S3, discover their nested schema, land them in Snowflake, then run SQL in Snowflake.
-
-```bash
-skipprd --version
+```bash [pip]
+pip install skippr
+python -c "import skippr; print(skippr.Session)"
 ```
 
-Export credentials the process can read. AWS reads the sample JSON. Snowflake uses a key pair.
+:::
+
+The `pip` package gives you the Python API (`import skippr`). It does not add the `skipprd` command. See [Install](/getting-started/install) for user-local installs, pinned versions, and fixes for common problems.
+
+## Your first pipeline in 5 minutes
+
+Read public sample JSON from S3, discover its schema, sync it, and count the rows with SQL. You do not need a warehouse: without a destination, Skipprd keeps the data in its local WAL and you can query it there.
+
+You need AWS credentials that can read S3. Any AWS account works.
 
 ```bash
-export AWS_ACCESS_KEY_ID="your-key"
-export AWS_SECRET_ACCESS_KEY="your-secret"
+mkdir skippr-first-pipeline && cd skippr-first-pipeline
+export AWS_ACCESS_KEY_ID="your-access-key-id"
+export AWS_SECRET_ACCESS_KEY="your-secret-access-key"
 export AWS_DEFAULT_REGION="us-east-1"
-export SNOWFLAKE_ACCOUNT="myorg-myaccount"
-export SNOWFLAKE_USER="skippr_loader"
-export SNOWFLAKE_PRIVATE_KEY_PATH="/path/to/rsa_key.p8"
 ```
 
-Write `skippr.yml` in the working directory. The sample prefix is JSON. Discover infers the contract; it does not load Snowflake.
+**1. Describe the pipeline.** Each tab writes the same `skippr.yml` in the current directory.
 
-```yaml
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSourceS3, LocalStorage, Pipeline
+
+cfg = Config().workspace("quickstart").storage(LocalStorage())
+sample = cfg.data_source(
+    "sample",
+    DataSourceS3(s3_bucket="skippr-public-sample-data", s3_prefix="bike-hire"),
+)
+cfg.pipeline("bikehire", Pipeline(data_source=sample))
+cfg.save("skippr.yml")
+```
+
+```bash [CLI]
+skipprd --workspace quickstart --storage-mode local connect data-source s3 \
+  --pipeline bikehire \
+  --name sample \
+  --s3-bucket skippr-public-sample-data \
+  --s3-prefix bike-hire
+```
+
+```yaml [YAML]
 skippr:
   workspace: quickstart
-  skippr_s3_bucket: your-state-bucket
+  skipprd_el_storage_mode: local
 
 pipelines:
   bikehire:
     data_source: data_sources.sample
-    data_sink: data_sinks.warehouse
 
 data_sources:
   sample:
     S3:
       s3_bucket: skippr-public-sample-data
       s3_prefix: bike-hire
-
-data_sinks:
-  warehouse:
-    Snowflake:
-      account: "myorg-myaccount"
-      user: "skippr_loader"
-      private_key_path: "${SNOWFLAKE_PRIVATE_KEY_PATH}"
-      warehouse: "COMPUTE_WH"
-      database: "RAW_DATA"
-      schema: "PUBLIC"
-      role: "LOADER_ROLE"
-      stage: "@SKIPPR_STAGE"
 ```
 
-```bash
-skipprd discover --pipeline bikehire --log
+:::
+
+`LocalStorage()` (`skipprd_el_storage_mode: local`) keeps Skipprd's state in `./data`, so you do not need a state bucket to try it out.
+
+**2. Discover, sync, and query.**
+
+::: code-group
+
+```python [Python]
+import skippr
+
+s = skippr.Session(skippr.Config.discover().get_pipeline("bikehire"))
+s.discover()
+s.sync(once=True)
+print(s.query("SELECT count(*) FROM bikehire"))
+```
+
+```bash [CLI]
+skipprd discover --pipeline bikehire
 skipprd schema --pipeline bikehire
-skipprd sync --pipeline bikehire --once --log
+skipprd sync --pipeline bikehire --once
+skipprd query --plain --sql "SELECT count(*) FROM bikehire"
 ```
 
-`discover` walks the JSON and writes field names and types. `schema` prints that contract. `sync --once` loads one pass into Snowflake and exits. Without `--once`, sync keeps reading. Then `SELECT` the landed table in Snowflake.
+:::
 
-Full walkthrough: [Snowflake](/getting-started/quickstart-snowflake). Source and sink reference: [S3](/connectors/inputs/s3), [Snowflake](/connectors/outputs/snowflake). Pipeline WAL and resume: [pipeline flow](/getting-started/how-it-works).
+`discover` samples the JSON and records every field and its type. `schema` prints what it found. `sync --once` reads the source in a single pass and exits; without `--once`, sync keeps running and picks up new objects. The query returns the number of rows Skipprd ingested.
 
-Other warehouses: [PostgreSQL](/getting-started/quickstart-postgres), [BigQuery](/getting-started/quickstart-bigquery), [S3 to Athena](/getting-started/quickstart).
+## Where to go next
 
-## When something fails
-
-- **`skipprd: command not found`** — the install directory is not on `PATH`. Install to `/usr/local/bin` or set `SKIPPR_INSTALL_DIR`.
-- **Plugin download fails** — the host needs HTTPS access to `install.skippr.io`. Check the network path from the machine running Skipprd, not from a laptop that will not run the job.
-- **Destination auth errors** — credentials live in the environment (`SNOWFLAKE_PRIVATE_KEY_PATH`, `POSTGRES_PASSWORD`, `GOOGLE_APPLICATION_CREDENTIALS`). They do not belong in git.
-
-More in [troubleshooting](/operations/troubleshooting).
+- **Land data in a warehouse:** [S3 to Athena](/getting-started/quickstart), [Snowflake](/getting-started/quickstart-snowflake), [PostgreSQL](/getting-started/quickstart-postgres), or [BigQuery](/getting-started/quickstart-bigquery).
+- **Use Skipprd from Python:** [Python](/python).
+- **Understand what happens to your data:** [How Skipprd works](/concepts/how-it-works) and [Schema discovery and evolution](/concepts/schema).
+- **Connect your own systems:** browse [data sources](/connectors/) and the [`skippr.yml` reference](/configuration/skippr-yml).
+- **Run it in production:** [WAL and buffering](/configuration/buffering), [State store](/configuration/skippr-store), [Logging](/operations/logging), and [Troubleshooting](/operations/troubleshooting).
+- **Look up a command:** [CLI reference](/cli/overview).

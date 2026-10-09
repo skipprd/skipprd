@@ -1,6 +1,6 @@
 [package]
 name = "skipprd-python"
-version = "18.0.0"
+version = "18.1.0"
 edition = "2021"
 description = "Python bindings for skipprd. Session is the engine."
 publish = false

@@ -1,123 +1,138 @@
-# Athena Output (S3 + Glue)
+---
+title: Athena
+description: Write Skipprd pipelines as Hive tables on S3, register them in Glue, and query them with Amazon Athena.
+---
 
-The primary output destination. Writes Snappy-compressed Parquet to S3 and manages tables in the AWS Glue Data Catalog, making data immediately queryable via Amazon Athena.
+# Athena
 
-## What it does
+Use Athena when analysts already run SQL in AWS. Skipprd writes Snappy Parquet to your bucket and registers Hive tables in Glue. Pair this destination with the [Glue schema sink](/connectors/schema_sinks/glue) so databases and tables exist before the first query.
 
-1. Converts compacted WAL segments into Parquet with Snappy compression
-2. Uploads Parquet via S3 multipart upload
-3. Enqueues Hive partition registration on the durable catalog outbox (`BatchCreatePartition` / `UpdatePartition`)
+This destination writes Hive tables, not Iceberg. For Iceberg (merge, replace-partition, `skipprd query` against the lake), use [Athena Iceberg](/connectors/outputs/athenaiceberg).
 
-Table DDL is driven by a paired [Glue schema sink](../schema_sinks/glue.md). Schema sync may rebuild an empty Glue table when partition keys do not match; ingest waits until live `GetTable` layout matches the catalog intent.
+## Before you begin
 
-## Configuration
+- An S3 bucket for Parquet and a **second** bucket (or prefix policy) for Athena query results. `athena_results_s3_bucket` is a bucket name, not an `s3://` URI.
+- A Glue database name Skipprd may create.
+- An Athena workgroup the role can use.
+- IAM that can `s3:PutObject` on the data prefix, `s3:GetObject` / `s3:ListBucket` as needed, and Glue `CreateDatabase`, `CreateTable`, `UpdateTable`, `BatchCreatePartition`.
 
-```yaml
+```bash
+export AWS_ACCESS_KEY_ID="..."
+export AWS_SECRET_ACCESS_KEY="..."
+export AWS_DEFAULT_REGION="us-east-1"
+```
+
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkAthena, Pipeline, SchemaSinkGlue
+
+cfg = Config.discover()
+catalog = cfg.schema_sink(
+    "catalog",
+    SchemaSinkGlue(
+        s3_bucket="my-output-bucket",
+        s3_prefix="warehouse/events",
+        glue_database_name="my_database",
+        athena_workgroup_name="primary",
+        athena_results_s3_bucket="my-athena-results",
+    ),
+)
+warehouse = cfg.data_sink(
+    "warehouse",
+    DataSinkAthena(
+        s3_bucket="my-output-bucket",
+        s3_prefix="warehouse/events",
+        athena_workgroup_name="primary",
+        athena_results_s3_bucket="my-athena-results",
+        region="us-east-1",
+    ),
+    schema_sink=catalog,
+)
+cfg.pipeline("events", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=warehouse))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-sink athena \
+  --pipeline events \
+  --name warehouse \
+  --s3-bucket my-output-bucket \
+  --s3-prefix warehouse/events \
+  --athena-workgroup-name primary \
+  --athena-results-s3-bucket my-athena-results \
+  --region us-east-1
+
+skipprd connect schema-sink glue \
+  --pipeline events \
+  --name catalog \
+  --s3-bucket my-output-bucket \
+  --s3-prefix warehouse/events \
+  --glue-database-name my_database \
+  --athena-workgroup-name primary \
+  --athena-results-s3-bucket my-athena-results
+```
+
+```yaml [YAML]
 data_sinks:
   warehouse:
     Athena:
       s3_bucket: my-output-bucket
       s3_prefix: warehouse/events
-      glue_database_name: my_database
       athena_workgroup_name: primary
       athena_results_s3_bucket: my-athena-results
       region: us-east-1
-      catalog: AwsDataCatalog
-```
-
-`s3_bucket`, `s3_prefix`, `glue_database_name`, `athena_workgroup_name`, and `athena_results_s3_bucket` are ingest fields. `region`, `catalog`, `max_concurrency`, and `discovery_cache_ttl_secs` are optional query/model keys; ingest ignores them.
-
-`skipprd query` on an Athena pipeline serves live WAL only. Query warehouse Parquet through Athena (or SDE `AthenaProvider` / dbt-athena).
-
-`athena_results_s3_bucket` is a **bucket name**, not an `s3://` URI.
-
-Environment equivalents:
-
-| Variable | YAML field | Description |
-|---|---|---|
-| `DATA_OUTPUT_S3_BUCKET` | `s3_bucket` | S3 bucket for Parquet output |
-| `DATA_OUTPUT_S3_PREFIX` | `s3_prefix` | Key prefix for output objects |
-| `SCHEMA_OUTPUT_GLUE_DATABASE_NAME` | `glue_database_name` | Glue database name |
-| `DATA_OUTPUT_ATHENA_WORKGROUP_NAME` | `athena_workgroup_name` | Athena workgroup for queries |
-| `DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET` | `athena_results_s3_bucket` | S3 bucket for Athena query results |
-
-## S3 layout
-
-```
-s3://{DATA_OUTPUT_S3_BUCKET}/{DATA_OUTPUT_S3_PREFIX}/{namespace}/
-  p_year=2025/
-    p_month=03/
-      p_day=04/
-        {segment_id}.parquet
-```
-
-Each namespace becomes a separate Glue table within the configured database.
-
-If Athena is used as a `deadletter_sink`, deadletters are written to the configured deadletter database using the pipeline name as the table name.
-
-## Performance tuning
-
-| Variable | Default | Description |
-|---|---|---|
-| `UPLOAD_CONCURRENCY` / `UPLOAD_CONCURRENCY_MAX` | auto-tuned (seed 16) | Concurrent multipart object uploads |
-| Athena multipart part size | 16 MiB | Fixed in the Athena sink |
-| `ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY` / `ATHENA_GLUE_CP_MAX` | auto-tuned (seed 2) | Glue control-plane concurrency |
-
-## Schema sink pairing
-
-```yaml
-pipelines:
-  events:
-    data_sink: data_sinks.landing
-
-data_sinks:
-  landing:
     schema_sink: schema_sinks.catalog
-    Athena:
-      s3_bucket: my-output-bucket
-      s3_prefix: warehouse/events
-      glue_database_name: my_database
-      athena_workgroup_name: primary
-      athena_results_s3_bucket: my-athena-results
 
 schema_sinks:
   catalog:
     Glue:
       s3_bucket: my-output-bucket
       s3_prefix: warehouse/events
+      glue_database_name: my_database
       athena_workgroup_name: primary
       athena_results_s3_bucket: my-athena-results
-      glue_database_name: my_database
 ```
 
-See [Glue schema sink](../schema_sinks/glue.md) for catalog configuration. Partition keys follow time bucketing or [source namespace contracts](../../concepts/source-landing-semantics.md) (for example `date` for [GA4](../inputs/google_analytics.md)).
+:::
 
-## Partitioned API sources
+Point `data_sinks.warehouse.schema_sink` at the Glue entry. There is no pipeline-level `schema_sink` field.
 
-When the source declares `replace_partition`, Athena deletes the contract partition prefix under the namespace (for example `date=2024-01-15`) before writing new Parquet. See [Source landing semantics](../../concepts/source-landing-semantics.md).
+## Options
 
-## AWS permissions required
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `s3_bucket` | string | Required | Bucket for Parquet |
+| `s3_prefix` | string | Required | Key prefix for tables |
+| `athena_workgroup_name` | string | Required | Athena workgroup |
+| `athena_results_s3_bucket` | string | Required | Bucket name for Athena results |
+| `format` | string | Not set | Output format when you override the default Parquet |
+| `region` | string | Not set | AWS region |
+| `catalog` | string | `AwsDataCatalog` | Glue catalog name |
+| `max_concurrency` | integer | Not set | Query/model only |
+| `discovery_cache_ttl_secs` | integer | Not set | Query/model only |
 
-The IAM identity running Skipprd needs:
+## How data lands
 
-- `s3:PutObject`, `s3:CreateMultipartUpload`, `s3:UploadPart`, `s3:CompleteMultipartUpload`, `s3:AbortMultipartUpload` on the output bucket
-- `glue:CreateDatabase`, `glue:GetDatabase` for database management
-- `glue:GetTable`, `glue:GetPartition`, `glue:BatchCreatePartition`, `glue:UpdatePartition` for ingest-time Hive partition registration
-- `glue:GetPartitions`, `glue:DeleteTable`, `glue:CreateTable`, `glue:UpdateTable` for table management and empty-table partition-layout heal
-- `athena:CreateWorkGroup`, `athena:GetWorkGroup`, `athena:UpdateWorkGroup` if using Athena workgroups
+Each source namespace becomes one Glue table. Files land under `s3://<bucket>/<prefix>/<namespace>/` partitioned by day. A retry overwrites the same object path, so the final files hold each row once.
 
-## Authentication
+`skipprd query` on an Athena pipeline shows in-flight WAL rows. Query landed Parquet in the Athena console (or your warehouse client).
 
-Authentication uses the AWS default credential chain.
-
-- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
-- IAM roles, instance profiles, or task roles
-- AWS SSO or shared config profiles
+Supports `append`, `replace_partition`, and `replace_table`. It does not merge by key — use [Athena Iceberg](/connectors/outputs/athenaiceberg) or [SkipprLake](/connectors/outputs/skipprlake) for that. See [How sources land](/concepts/source-landing-semantics).
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| query or Glue metadata errors | Verify the Glue database name, Athena workgroup settings, and the configured result S3 location. |
-| AccessDenied | Check the AWS credential chain and confirm access to S3, Glue, and Athena resources. |
-| stale GA4 metrics for past dates | Use a source with `replace_partition` and sufficient `lookback_days`; re-run `skipprd sync` |
+| `TABLE_NOT_FOUND` | Pair the Glue schema sink, run discover, then sync |
+| `AccessDenied` on S3 | Grant `s3:PutObject` on the data prefix and results bucket |
+| Glue `AccessDenied` | Grant database and table APIs on `glue_database_name` |
+| Empty Athena results | Confirm `athena_results_s3_bucket` is a bucket name, not a URI |
+
+## Next steps
+
+- [Glue schema sink](/connectors/schema_sinks/glue)
+- [Quickstart: S3 to Athena](/getting-started/quickstart)
+- [How sources land](/concepts/source-landing-semantics)

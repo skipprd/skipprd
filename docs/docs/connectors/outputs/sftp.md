@@ -1,73 +1,94 @@
-# SFTP Output
+---
+title: SFTP destination
+description: Upload Skipprd batches to a remote directory over SFTP.
+---
 
-Uploads Parquet or JSON Lines objects to a remote SFTP server.
+# SFTP
 
-## How it works
+Uploads each batch as a file on an SFTP server. Use it when a partner still collects files that way.
 
-1. Serializes record batches as Parquet (default) or JSON Lines.
-2. Connects via SSH and uploads to the configured remote path, including Hive partitions when present.
+## Before you begin
 
-## Configuration
-
-```yaml
-data_sinks:
-  sink:
-    Sftp:
-      host: sftp.example.com
-      port: 22
-      username: user
-      password: secret
-      remote_path: "/data/output"
-```
-
-## Configuration variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `host` | *(required)* | SFTP server hostname |
-| `port` | `22` | SSH port |
-| `username` | *(required)* | SSH username |
-| `password` | | Password authentication |
-| `private_key_path` | | Path to SSH private key |
-| `remote_path` | *(required)* | Remote directory for uploads |
-| `format` | `parquet` | `parquet` or `jsonl` |
-
-## Authentication
-
-Use either a password or an SSH private key. Prefer private-key auth for long-lived pipelines. For security best practices, we strongly advise against storing the password in `skippr.yml`. Use environment variable interpolation instead: replace the `password` value with your own `${ENV_VAR}` reference.
-
-The relevant part of `skippr.yml` looks like this:
-
-```yaml
-data_sinks:
-  warehouse:
-    Sftp:
-      password: "${SFTP_PASSWORD}"
-```
-
-Set the env var before running `skipprd`:
-
-macOS / Linux
+- Host, username, and a remote directory the user can write.
+- A password **or** a private key path.
 
 ```bash
-export SFTP_PASSWORD="secret"
+export SFTP_PASSWORD="change-me"
 ```
 
-Windows PowerShell
+## Configure
 
-```powershell
-$env:SFTP_PASSWORD = "secret"
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkSftp, EnvRef, Pipeline
+
+cfg = Config.discover()
+out = cfg.data_sink(
+    "partner",
+    DataSinkSftp(
+        host="sftp.partner.example",
+        username="skippr",
+        remote_path="/incoming/skipprd",
+        port=22,
+        password=EnvRef("SFTP_PASSWORD"),
+    ),
+)
+cfg.pipeline("export", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=out))
+cfg.save()
 ```
 
-Windows Command Prompt
-
-```cmd
-set SFTP_PASSWORD=secret
+```bash [CLI]
+skipprd connect data-sink sftp \
+  --pipeline export \
+  --name partner \
+  --host sftp.partner.example \
+  --username skippr \
+  --remote-path /incoming/skipprd \
+  --port 22 \
+  --password '${SFTP_PASSWORD}'
 ```
+
+```yaml [YAML]
+data_sinks:
+  partner:
+    Sftp:
+      host: sftp.partner.example
+      username: skippr
+      remote_path: /incoming/skipprd
+      port: 22
+      password: ${SFTP_PASSWORD}
+```
+
+:::
+
+## Options
+
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `host` | string | Required | SFTP host |
+| `username` | string | Required | User |
+| `remote_path` | path | Required | Remote directory |
+| `port` | integer | Not set | Port (default 22) |
+| `password` | secret | Not set | Password as `${ENV}` |
+| `private_key_path` | path | Not set | Private key file (instead of a password) |
+| `format` | string | Not set | File format override |
+
+A retry overwrites the same remote path.
+
+## How data lands
+
+Files are uploaded under `remote_path/<namespace>/`.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| authentication failed | Verify the username, password or private key path, and any host-based access controls. |
-| uploads fail | Check `remote_path`, available disk space, and whether the SSH user can create files in that directory. |
+| Connection refused | Check `host`, `port`, and firewall |
+| Auth failed | Confirm password or key, and that the key has no passphrase Skipprd cannot supply |
+| Permission denied | Grant write on `remote_path` |
+
+## Next steps
+
+- [SFTP source](/connectors/inputs/sftp)
+- [S3 destination](/connectors/outputs/s3)

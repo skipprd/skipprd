@@ -1,43 +1,100 @@
-# AthenaIceberg Schema Sink
+---
+title: Athena Iceberg schema sink
+description: Keep Glue Iceberg tables in step with an Athena Iceberg destination.
+config_class: DataSinkAthenaIceberg
+---
 
-Aligns Iceberg table metadata with discovered schemas for pipelines using the [AthenaIceberg data sink](../outputs/athenaiceberg.md).
+# Athena Iceberg schema
 
-The schema sink uses the same `AthenaIceberg` config as the data sink. Pair them: an AthenaIceberg data sink must use an AthenaIceberg schema sink, not Glue Hive.
+Pair this with the [Athena Iceberg](/connectors/outputs/athenaiceberg) destination. The destination writes Iceberg data; this sink keeps the Glue catalog entry aligned. Use the same warehouse, database, and workgroup on both.
 
-## Configuration
+## Before you begin
 
-```yaml
-data_sinks:
-  warehouse:
-    AthenaIceberg:
-      warehouse: s3://my-bucket/warehouse/
-      glue_database_name: analytics
-      athena_workgroup_name: primary
-      athena_results_s3_bucket: my-athena-results
-      region: us-east-1
-    schema_sink: schema_sinks.warehouse_schema
+- The Athena Iceberg destination already in `skippr.yml`.
+- Glue rights to create and update Iceberg tables.
 
-schema_sinks:
-  warehouse_schema:
-    AthenaIceberg:
-      warehouse: s3://my-bucket/warehouse/
-      glue_database_name: analytics
-      athena_workgroup_name: primary
-      athena_results_s3_bucket: my-athena-results
-      region: us-east-1
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkAthenaIceberg, Pipeline
+
+cfg = Config.discover()
+lake = cfg.data_sink(
+    "lake",
+    DataSinkAthenaIceberg(
+        warehouse="s3://my-iceberg-warehouse/",
+        glue_database_name="analytics",
+        athena_workgroup_name="primary",
+        athena_results_s3_bucket="my-athena-results",
+        region="us-east-1",
+    ),
+    schema_sink="lake_schema",
+)
+cfg.pipeline("reports", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=lake))
+cfg.save()
 ```
 
-| Field | Description |
-| --- | --- |
-| `warehouse` | Iceberg warehouse root — same as the data sink |
-| `glue_database_name` | Glue database — same as the data sink |
-| `athena_workgroup_name` | Athena workgroup — same as the data sink |
-| `athena_results_s3_bucket` | Athena results bucket — same as the data sink |
-| `region` | AWS region for Glue |
-| `catalog_id` | Glue catalog ID when not the account default |
-| `object_store` | Object-store credentials for Parquet |
+```bash [CLI]
+skipprd connect data-sink athenaiceberg \
+  --pipeline reports \
+  --name lake \
+  --warehouse s3://my-iceberg-warehouse/ \
+  --glue-database-name analytics \
+  --athena-workgroup-name primary \
+  --athena-results-s3-bucket my-athena-results \
+  --region us-east-1
 
-## Related
+skipprd connect schema-sink athenaiceberg \
+  --pipeline reports \
+  --name lake_schema
+```
 
-- [AthenaIceberg output](../outputs/athenaiceberg.md)
-- [Output destination](../../configuration/output.md)
+```yaml [YAML]
+schema_sinks:
+  lake_schema:
+    AthenaIceberg:
+      warehouse: s3://my-iceberg-warehouse/
+      glue_database_name: analytics
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: my-athena-results
+      region: us-east-1
+
+data_sinks:
+  lake:
+    AthenaIceberg:
+      warehouse: s3://my-iceberg-warehouse/
+      glue_database_name: analytics
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: my-athena-results
+    schema_sink: schema_sinks.lake_schema
+```
+
+:::
+
+## Options
+
+Same keys as the [Athena Iceberg destination](/connectors/outputs/athenaiceberg#options).
+
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `warehouse` | URI | Required | Iceberg warehouse root |
+| `glue_database_name` | string | Required | Glue database |
+| `athena_workgroup_name` | string | Required | Athena workgroup |
+| `athena_results_s3_bucket` | string | Required | Results bucket name |
+| `region` | string | Not set | AWS region |
+| `catalog_id` | string | Not set | Glue catalog id |
+| `object_store` | object | Not set | File-store override |
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Catalog and data disagree | Copy the destination block into `schema_sinks` — the fields must match |
+| Iceberg permission errors | Grant Iceberg table APIs, not only Hive `CreateTable` |
+
+## Next steps
+
+- [Athena Iceberg](/connectors/outputs/athenaiceberg)
+- [Datalake](/concepts/datalake)

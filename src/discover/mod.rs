@@ -18,6 +18,7 @@ use crate::discover::date_formats::DateFormats;
 pub mod evolution;
 mod filter_float;
 pub mod metadata_apply;
+pub mod schema_alter;
 pub mod stats;
 
 mod filter_bool;

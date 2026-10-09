@@ -1,80 +1,75 @@
-# Delta Lake Input
+---
+title: Delta Lake
+description: Read a Delta table from object storage or a local path into a Skipprd pipeline.
+---
 
-Reads data from a Delta Lake table at any object store URI (S3, Azure, GCS, or local filesystem).
+# Delta Lake
 
-## How it works
+Reads one Delta table at `table_uri`. Use it to pull a table another engine already wrote (Databricks, Spark, or a local Delta path).
 
-1. Opens the Delta table at the configured URI using the `deltalake` crate.
-2. Registers the table in a DataFusion session for SQL querying.
-3. Optionally applies a filter predicate for partition/row pushdown.
-4. Converts each Arrow RecordBatch row to a JSON record.
-5. Namespace convention: `delta_lake.{table_uri}`.
+## Before you begin
 
-## Configuration
+- A `s3://`, `file://`, or other URI the process can read.
+- Credentials for that store (AWS env vars for S3).
 
-```yaml
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSourceDeltaLake, Pipeline
+
+cfg = Config.discover()
+src = cfg.data_source(
+    "delta",
+    DataSourceDeltaLake(table_uri="s3://acme-delta/events"),
+)
+cfg.pipeline("events", Pipeline(data_source=src))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-source delta-lake \
+  --pipeline events \
+  --name delta \
+  --table-uri s3://acme-delta/events
+```
+
+```yaml [YAML]
 data_sources:
-  source:
+  delta:
     DeltaLake:
-      table_uri: "s3://my-bucket/delta-table"
-      storage_options:
-        AWS_REGION: us-east-1
-      filter: "date > '2024-01-01'"
+      table_uri: s3://acme-delta/events
 ```
 
-## Configuration variables
+:::
 
-| Variable | Default | Description |
-|---|---|---|
-| `table_uri` | | Delta table URI (`s3://`, `az://`, `gs://`, `file:///`) |
-| `storage_options` | | Key-value map for object store auth (e.g. `AWS_REGION`, `AWS_ACCESS_KEY_ID`) |
-| `version` | | Specific Delta table version to read |
-| `filter` | | SQL WHERE clause for pushdown filtering |
-| `batch_size_rows` | `10000` | Rows per ingest batch |
-| `format` | `json` | Data format |
+## Options
 
-## Authentication
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `table_uri` | URI | Required | Delta table root |
+| `storage_options` | map | Not set | Extra store settings (keys the Delta reader accepts) |
+| `version` | integer | Not set | Read this snapshot version |
+| `filter` | string | Not set | Push-down filter when the reader supports it |
+| `batch_size_rows` | integer | Not set | Rows per batch |
+| `format` | string | Not set | Format override |
+| `batch_size_bytes` | integer | Not set | Max bytes per batch |
+| `batch_size_seconds` | integer | Not set | Max seconds per batch |
 
-Authentication depends on the storage backend referenced by `table_uri`. For security best practices, we strongly advise against storing storage credentials in `skippr.yml`. Use environment variable interpolation instead: replace the relevant `storage_options` value with your own `${ENV_VAR}` reference.
+## What gets synced
 
-The relevant part of `skippr.yml` looks like this:
-
-```yaml
-data_sources:
-  source:
-    DeltaLake:
-      table_uri: "s3://bucket/path/to/table"
-      storage_options:
-        AWS_ACCESS_KEY_ID: "${DELTA_AWS_ACCESS_KEY_ID}"
-        AWS_SECRET_ACCESS_KEY: "${DELTA_AWS_SECRET_ACCESS_KEY}"
-```
-
-Set the env vars before running `skipprd`:
-
-macOS / Linux
-
-```bash
-export DELTA_AWS_ACCESS_KEY_ID="AKIA..."
-export DELTA_AWS_SECRET_ACCESS_KEY="secret"
-```
-
-Windows PowerShell
-
-```powershell
-$env:DELTA_AWS_ACCESS_KEY_ID = "AKIA..."
-$env:DELTA_AWS_SECRET_ACCESS_KEY = "secret"
-```
-
-Windows Command Prompt
-
-```cmd
-set DELTA_AWS_ACCESS_KEY_ID=AKIA...
-set DELTA_AWS_SECRET_ACCESS_KEY=secret
-```
+The current table (or `version`) becomes records. This is a snapshot read, not Databricks CDC.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| table cannot be opened | Verify `table_uri`, backend credentials, and that the Delta log is present at that path. |
-| schema inference looks wrong | Check the selected table version and any optional filter expression. |
+| Table not found | Check `table_uri` includes the `_delta_log` parent |
+| Access denied | Grant read on the prefix |
+| Empty read | Confirm `version` still exists |
+
+## Next steps
+
+- [Databricks destination](/connectors/outputs/databricks)
+- [S3 source](/connectors/inputs/s3)

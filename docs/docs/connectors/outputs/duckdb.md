@@ -1,61 +1,84 @@
-# Duckdb Output
+---
+title: DuckDB
+description: Land Skipprd pipelines as local Iceberg tables and query them with DuckDB or skipprd query.
+---
 
-Writes compacted batches to Apache Iceberg tables on the local filesystem (`file://`). Query those tables with `skipprd query` (Iceberg ∪ WAL) or DuckDB `iceberg_scan`. DuckDB sees persisted Iceberg only — not the skipprd WAL.
+# DuckDB
 
-Pair with the [Duckdb schema sink](../schema_sinks/duckdb.md).
+Use DuckDB for local analytics, CI, and laptops. Skipprd writes Iceberg tables under `warehouse` and names them with `table_namespace`. Pair with the [DuckDB schema sink](/connectors/schema_sinks/duckdb).
 
-Skippr Data Engineer does not model DuckDB as a warehouse.
+## Before you begin
 
-## Configuration
+- A directory Skipprd can create, as a `file:///` URI (three slashes + absolute path).
+- Enough disk for the tables plus the write-ahead log.
 
-```yaml
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkDuckdb, Pipeline
+
+cfg = Config.discover()
+local = cfg.data_sink(
+    "local",
+    DataSinkDuckdb(warehouse="file:///var/lib/skipprd/duckdb", table_namespace="bronze"),
+    schema_sink="local_schema",
+)
+cfg.pipeline("bikehire", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=local))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-sink duckdb \
+  --pipeline bikehire \
+  --name local \
+  --warehouse file:///var/lib/skipprd/duckdb \
+  --table-namespace bronze
+
+skipprd connect schema-sink duckdb \
+  --pipeline bikehire \
+  --name local_schema
+```
+
+```yaml [YAML]
 data_sinks:
   local:
     Duckdb:
-      warehouse: file:///Users/me/lake
+      warehouse: file:///var/lib/skipprd/duckdb
       table_namespace: bronze
     schema_sink: schema_sinks.local_schema
+
+schema_sinks:
+  local_schema:
+    Duckdb:
+      warehouse: file:///var/lib/skipprd/duckdb
+      table_namespace: bronze
 ```
 
-Table location is `{warehouse}/{table_namespace}/{table_name}`. Each Duckdb data sink must own a unique warehouse plus table namespace. Surrounding whitespace and a trailing slash on warehouse do not make a second namespace.
+:::
 
-Warehouse is `file://` only.
+## Options
 
-## Read with DuckDB
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `warehouse` | URI | Required | Iceberg root, usually `file:///…` |
+| `table_namespace` | string | Not set | Iceberg namespace for tables |
 
-Do not enable `unsafe_enable_version_guessing`. The sink writes Hadoop `v{N}.metadata.json` plus `version-hint.text` so DuckDB 1.5 `iceberg_scan` opens the current snapshot:
+## How data lands
 
-```sql
-INSTALL iceberg;
-LOAD iceberg;
-SELECT count(*) FROM iceberg_scan('/Users/me/lake/bronze/source');
-```
+Supports `append` and `replace_table`. It does not `replace_partition` or `merge_by_key` — use [SkipprLake](/connectors/outputs/skipprlake) or [Athena Iceberg](/connectors/outputs/athenaiceberg) for those. Retries are exactly once. `skipprd query` reads the local tables plus in-flight WAL rows.
 
-Pass the table directory (`{warehouse}/{table_namespace}/{table}`), not a metadata file.
+## Troubleshooting
 
-## Supported write policies
+| Symptom | Fix |
+|---|---|
+| Warehouse path rejected | Use an absolute `file:///` URI |
+| Source refuses `replace_partition` | Point that source at Iceberg in S3, or set `write_policy: append` when the source allows it |
+| Disk full | Free space on `warehouse` and `DATA_DIR` |
 
-| Policy | Supported |
-| --- | --- |
-| `append` | Yes |
-| `merge_by_key` | No |
-| `replace_partition` | No |
-| `replace_table` | Yes |
+## Next steps
 
-CDC sources that need merge-by-key are rejected at config time. See [Source landing semantics](../../concepts/source-landing-semantics.md).
-
-## Pipeline wiring
-
-```yaml
-pipelines:
-  reports:
-    data_source: data_sources.files
-    data_sink: data_sinks.local
-```
-
-Pairing is `data_sinks.<name>.schema_sink`, not a pipeline-level `schema_sink` field.
-
-## Related
-
-- [Duckdb schema sink](../schema_sinks/duckdb.md)
-- [Output destination](../../configuration/output.md)
+- [DuckDB schema sink](/connectors/schema_sinks/duckdb)
+- [Datalake](/concepts/datalake)
+- [skipprd query](/cli/query)
