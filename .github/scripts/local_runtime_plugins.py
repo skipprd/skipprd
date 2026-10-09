@@ -77,11 +77,30 @@ def sha256(path: Path) -> str:
 
 
 def current_rust_target_triple() -> str:
-    output = subprocess.check_output([ensure_tool("rustc"), "-vV"], text=True)
-    for line in output.splitlines():
-        if line.startswith("host: "):
-            return line.removeprefix("host: ").strip()
-    raise LocalRuntimePluginError("failed to determine current Rust host target triple")
+    explicit = os.environ.get("SKIPPR_TARGET_TRIPLE", "").strip()
+    if explicit:
+        return explicit
+    rustc = shutil.which("rustc")
+    if rustc:
+        output = subprocess.check_output([rustc, "-vV"], text=True)
+        for line in output.splitlines():
+            if line.startswith("host: "):
+                return line.removeprefix("host: ").strip()
+        raise LocalRuntimePluginError("failed to determine current Rust host target triple")
+    uname = os.uname()
+    sysname = uname.sysname.lower()
+    machine = uname.machine
+    if sysname == "linux" and machine in {"x86_64", "amd64"}:
+        return "x86_64-unknown-linux-gnu"
+    if sysname == "linux" and machine in {"aarch64", "arm64"}:
+        return "aarch64-unknown-linux-gnu"
+    if sysname == "darwin" and machine in {"arm64", "aarch64"}:
+        return "aarch64-apple-darwin"
+    if sysname == "darwin" and machine == "x86_64":
+        return "x86_64-apple-darwin"
+    raise LocalRuntimePluginError(
+        "rustc is not on PATH; set SKIPPR_TARGET_TRIPLE or install rustc"
+    )
 
 
 def target_binary_name(binary_name: str, target_triple: str) -> str:

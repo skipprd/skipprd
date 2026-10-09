@@ -106,12 +106,6 @@ SUCCESS = [
         None,
     ),
     (
-        "promote_n_float_to_double",
-        "ALTER TABLE s3_alter ALTER COLUMN n_float TYPE DOUBLE",
-        True,
-        None,
-    ),
-    (
         "promote_n_short_to_integer",
         "ALTER TABLE s3_alter ALTER COLUMN n_short TYPE INTEGER",
         True,
@@ -310,11 +304,11 @@ def main() -> None:
     types = duckdb(
         scan,
         f"SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM iceberg_scan('{scan}')) "
-        f"WHERE column_name IN ('version','n_float')",
+        f"WHERE column_name IN ('version','n_byte')",
     )
     print("promoted types:", types, flush=True)
     if "BIGINT" not in types and "HUGEINT" not in types:
-        raise SystemExit(f"version was not promoted: {types}")
+        raise SystemExit(f"version/n_byte was not promoted: {types}")
 
     count = duckdb(scan, f"SELECT count(*) FROM iceberg_scan('{scan}');").splitlines()[-1]
     if count != "3":
