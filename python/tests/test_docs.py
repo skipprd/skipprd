@@ -60,12 +60,20 @@ def test_doc_block_avoids_removed_api(code):
         assert name not in code, name
 
 
+def skippr_names(code):
+    names = set()
+    for match in re.finditer(r"from skippr import\s+(\([^)]+\)|[^\n]+)", code):
+        for name in match.group(1).replace("(", " ").replace(")", " ").split(","):
+            name = name.strip()
+            if re.fullmatch(r"[A-Za-z_]\w*", name):
+                names.add(name)
+    names |= set(re.findall(r"\bskippr\.([A-Z][A-Za-z_]\w*)", code))
+    return names
+
+
 @pytest.mark.parametrize("code", BLOCKS)
 def test_doc_block_names_exist(code):
-    imported = re.findall(r"from skippr import ([^\n]+)", code)
-    names = {n.strip() for line in imported for n in line.split(",") if n.strip()}
-    names |= set(re.findall(r"\bskippr\.([A-Z][A-Za-z_]\w*)", code))
-    for name in names:
+    for name in skippr_names(code):
         assert hasattr(skippr, name), name
 
 
