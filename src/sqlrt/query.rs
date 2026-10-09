@@ -93,13 +93,14 @@ async fn apply_alter_table(
                 stmt.pipeline
             )
         })?;
-    let field_id = schema_alter::field_id_for_op(metadata, &stmt.op).map_err(|e| e.to_string())?;
-    schema_alter::apply(metadata, &stmt.op).map_err(|e| e.to_string())?;
+    let op = schema_alter::canonicalize_op(metadata, &stmt.op).map_err(|e| e.to_string())?;
+    let field_id = schema_alter::field_id_for_op(metadata, &op).map_err(|e| e.to_string())?;
+    schema_alter::apply(metadata, &op).map_err(|e| e.to_string())?;
     crate::sqlrt::iceberg_alter::commit_schema_alter(
         config,
         &format!("{}", stmt.pipeline),
         &namespace,
-        &stmt.op,
+        &op,
         field_id,
     )
     .await?;

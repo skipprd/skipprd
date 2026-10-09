@@ -668,7 +668,7 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
     for (_namespace, metadata) in updated_metadata.metadata.iter_mut() {
         metadata.finalize_field_types(config, flatten);
     }
-    updated_metadata.enabled = true;
+    // Keep DISABLED. Discover used to force enabled=true, which undid ALTER's gate.
     METADATA.store(Arc::new(updated_metadata.clone()));
 
     config.set_metadata(&updated_metadata, true).await;

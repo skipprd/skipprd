@@ -38,6 +38,94 @@ pub fn is_iceberg_legal_promote(from: &SkipprDataType, to: &SkipprDataType) -> b
     )
 }
 
+pub fn canonicalize_op(
+    metadata: &Metadata,
+    op: &SchemaAlterOp,
+) -> Result<SchemaAlterOp, SchemaAlterError> {
+    Ok(match op {
+        SchemaAlterOp::Rename { from, to } => SchemaAlterOp::Rename {
+            from: resolve_field_path(metadata, from)?,
+            to: to.clone(),
+        },
+        SchemaAlterOp::Merge { src, dst } => SchemaAlterOp::Merge {
+            src: resolve_field_path(metadata, src)?,
+            dst: resolve_field_path(metadata, dst)?,
+        },
+        SchemaAlterOp::Drop { column } => SchemaAlterOp::Drop {
+            column: resolve_field_path(metadata, column)?,
+        },
+        SchemaAlterOp::Promote { column, to } => SchemaAlterOp::Promote {
+            column: resolve_field_path(metadata, column)?,
+            to: to.clone(),
+        },
+    })
+}
+
+pub fn resolve_field_path(metadata: &Metadata, name: &str) -> Result<String, SchemaAlterError> {
+    if exact_path_exists(metadata, name) {
+        return Ok(name.to_string());
+    }
+    if !name.contains('.') {
+        if let Some((key, _)) = metadata
+            .fields
+            .iter()
+            .find(|(_, child)| child.out_field_name == name)
+        {
+            return Ok(key.clone());
+        }
+    }
+    flatten_path_for(metadata, name)
+        .ok_or_else(|| SchemaAlterError::ColumnNotFound(name.to_string()))
+}
+
+fn exact_path_exists(metadata: &Metadata, name: &str) -> bool {
+    if name.contains('.') {
+        let mut current = metadata;
+        for segment in name.split('.') {
+            match current.fields.get(segment) {
+                Some(child) => current = child,
+                None => return false,
+            }
+        }
+        return true;
+    }
+    metadata.fields.contains_key(name)
+}
+
+fn flatten_name_segment(name: &str) -> String {
+    name.replace('-', "_")
+}
+
+fn flatten_path_for(metadata: &Metadata, want: &str) -> Option<String> {
+    fn walk(node: &Metadata, prefix_flat: &str, prefix_dot: &str, want: &str) -> Option<String> {
+        for (key, child) in node.fields.iter() {
+            let segment = if child.out_field_name.is_empty() {
+                key.as_str()
+            } else {
+                child.out_field_name.as_str()
+            };
+            let flat = if prefix_flat.is_empty() {
+                flatten_name_segment(segment)
+            } else {
+                format!("{}_{}", prefix_flat, flatten_name_segment(segment))
+            };
+            let dotted = if prefix_dot.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix_dot}.{key}")
+            };
+            if flat == want {
+                return Some(dotted);
+            }
+            if let Some(hit) = walk(child, &flat, &dotted, want) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+    walk(metadata, "", "", want)
+}
+
 pub fn field_id_for_op(metadata: &Metadata, op: &SchemaAlterOp) -> Result<i32, SchemaAlterError> {
     let name = match op {
         SchemaAlterOp::Rename { from, .. } => from.as_str(),
@@ -283,6 +371,54 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, SchemaAlterError::Failed(_)));
+    }
+
+    #[test]
+    fn resolve_field_path_maps_flattened_iceberg_name() {
+        let mut detail = field("detail", SkipprDataType::Record, 1);
+        detail.fields.insert(
+            "truck_reg".into(),
+            field("truck_reg", SkipprDataType::String, 4),
+        );
+        let meta = ns(vec![detail, field("region", SkipprDataType::String, 21)]);
+        assert_eq!(
+            resolve_field_path(&meta, "detail_truck_reg").unwrap(),
+            "detail.truck_reg"
+        );
+        assert_eq!(resolve_field_path(&meta, "region").unwrap(), "region");
+        assert_eq!(
+            resolve_field_path(&meta, "detail.truck_reg").unwrap(),
+            "detail.truck_reg"
+        );
+        assert!(matches!(
+            resolve_field_path(&meta, "nope"),
+            Err(SchemaAlterError::ColumnNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn canonicalize_op_rewrites_flatten_src() {
+        let mut detail = field("detail", SkipprDataType::Record, 1);
+        detail.fields.insert(
+            "truck_reg".into(),
+            field("truck_reg", SkipprDataType::String, 4),
+        );
+        let meta = ns(vec![detail]);
+        let op = canonicalize_op(
+            &meta,
+            &SchemaAlterOp::Rename {
+                from: "detail_truck_reg".into(),
+                to: "truck_registration".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            op,
+            SchemaAlterOp::Rename {
+                from: "detail.truck_reg".into(),
+                to: "truck_registration".into(),
+            }
+        );
     }
 
     #[test]

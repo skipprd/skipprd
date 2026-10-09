@@ -2,15 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
-## [18.1.0]
-
-### Added
-
-- `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
+## [18.1.1]
 
 ### Fixed
 
-- Iceberg writes and maintenance reads coerce Arrow `Timestamp(ms)` to Iceberg `Timestamp(µs)`. Files already on disk as `TIMESTAMP_MILLIS` no longer skip compaction.
+- `ALTER TABLE` matches Iceberg columns by name (including flattened `detail.truck_reg` → `detail_truck_reg`) when skippr's hashed `field_id` is not the Iceberg id. Glue tables created with sequential Iceberg ids can be renamed, promoted, merged, and dropped.
+- `discover` no longer force-enables a `DISABLED` pipeline, so the host loop cannot undo `DISABLE PIPELINE` before `ALTER TABLE`.
+
+## [18.1.0]
 
 ## [18.0.0]
 
