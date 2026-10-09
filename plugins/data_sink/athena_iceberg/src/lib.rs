@@ -33,11 +33,14 @@ pub struct AthenaIcebergConfig {
     pub warehouse: String,
     /// Glue database. Also the Iceberg namespace.
     pub glue_database_name: String,
+    /// Athena workgroup that runs SQL against these tables.
     pub athena_workgroup_name: String,
     /// Bucket name only (not an `s3://` URI), same as `Athena:`.
     pub athena_results_s3_bucket: String,
+    /// AWS region of the Glue catalog and Athena workgroup.
     #[serde(default)]
     pub region: Option<String>,
+    /// Glue catalog id when it is not the account default.
     #[serde(default)]
     pub catalog_id: Option<String>,
     #[serde(default)]

@@ -52,7 +52,7 @@ Python has its own semver in `pyproject.toml` and `python/Cargo.toml` (`18.0.0` 
 
 `.github/workflows/ci.yml` (**Python CI/CD Pipeline**) builds and tests the `skippr` wheel on GitHub-hosted Linux x86 (`ubuntu-latest`) and macOS arm64 (`skippr-darwin-arm64`) for engine tags (`[0-9]*`) and `python-v*` tags, plus `workflow_dispatch`. It does not run on `main` / master or pull requests. Release `cdylib` builds use `[profile.release]` `debug = false` and `strip = "symbols"` so the wheel stays under the PyPI project file limit of 100 MB (`scripts/test-python.sh` fails the job if a wheel is larger).
 
-`python-publish` runs on the same unprefixed engine tags as `publish_skipprd` (not `0.0.0`, not `test*`, not `python-v*`). It publishes only when that Python semver is absent from PyPI.
+`python-publish` runs on the same unprefixed engine tags as `publish_skipprd` (not `0.0.0`, not `test*`, not `python-v*`). It uploads wheel filenames that are not yet on PyPI (so Darwin can land after Linux on the same semver). PyPI never reuses a filename: a re-tag of a semver whose current filenames already exist stamps a PEP 427 build number (`skippr-18.0.0-1-cp310-abi3-…`). `pip install skippr==18.0.0` then installs the highest build. Do not bump `pyproject.toml` just to clobber.
 
 Publish uses **PyPI Trusted Publishing** (GitHub OIDC), not a pip login or `PYPI_API_TOKEN`. The job sets `id-token: write` and calls `pypa/gh-action-pypi-publish` with `attestations: false` (GitHub-hosted `ubuntu-latest`). GitHub mints a short-lived token; PyPI accepts it because this repo's GitHub publisher is registered.
 

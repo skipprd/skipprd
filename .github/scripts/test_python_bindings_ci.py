@@ -315,6 +315,49 @@ class PythonBindingsCiTests(unittest.TestCase):
             self.assertFalse(linux.exists())
             self.assertTrue(darwin.exists())
 
+    def test_republish_same_semver_stamps_a_new_build_tag(self):
+        module = load_wheel_version()
+        linux_name = "skippr-18.0.0-cp310-abi3-manylinux_2_28_x86_64.whl"
+        darwin_name = "skippr-18.0.0-cp310-abi3-macosx_11_0_arm64.whl"
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp)
+            (dist / linux_name).write_bytes(b"linux")
+            (dist / darwin_name).write_bytes(b"darwin")
+            stamped = module.stamp_rebuild_wheels(
+                dist, {linux_name, darwin_name}, "18.0.0"
+            )
+            names = sorted(p.name for p in stamped)
+            self.assertEqual(
+                names,
+                [
+                    "skippr-18.0.0-1-cp310-abi3-macosx_11_0_arm64.whl",
+                    "skippr-18.0.0-1-cp310-abi3-manylinux_2_28_x86_64.whl",
+                ],
+            )
+            self.assertFalse((dist / linux_name).exists())
+            self.assertTrue((dist / names[1]).exists())
+            again = module.stamp_rebuild_wheels(dist, set(names) | {linux_name}, "18.0.0")
+            self.assertEqual(
+                sorted(p.name for p in again),
+                [
+                    "skippr-18.0.0-2-cp310-abi3-macosx_11_0_arm64.whl",
+                    "skippr-18.0.0-2-cp310-abi3-manylinux_2_28_x86_64.whl",
+                ],
+            )
+
+    def test_missing_platform_does_not_stamp_a_build_tag(self):
+        module = load_wheel_version()
+        linux_name = "skippr-18.0.0-cp310-abi3-manylinux_2_28_x86_64.whl"
+        darwin_name = "skippr-18.0.0-cp310-abi3-macosx_11_0_arm64.whl"
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp)
+            (dist / linux_name).write_bytes(b"linux")
+            (dist / darwin_name).write_bytes(b"darwin")
+            missing = module.stamp_rebuild_wheels(dist, {linux_name}, "18.0.0")
+            self.assertEqual([p.name for p in missing], [darwin_name])
+            self.assertTrue((dist / linux_name).exists())
+            self.assertTrue((dist / darwin_name).exists())
+
     def test_set_root_package_version_does_not_stamp_python(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

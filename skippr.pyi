@@ -128,13 +128,27 @@ class Config:
     def save(self, path: str | os.PathLike[str] | None = None) -> None:
         """Merge-write to `path`, or to the loaded file."""
         ...
-    def to_yaml(self) -> str: ...
-    def workspace(self, value: str) -> Config: ...
-    def tenant(self, value: str) -> Config: ...
-    def storage(self, value: Storage) -> Config: ...
-    def store(self, value: Store) -> Config: ...
-    def wal_s3_bucket(self, value: str) -> Config: ...
-    def data_source(self, name: str, config: DataSourceConfig) -> DataSourceRef: ...
+    def to_yaml(self) -> str:
+        """Render the current config as YAML without writing a file."""
+        ...
+    def workspace(self, value: str) -> Config:
+        """Set `skippr.workspace`. Combined with tenant and pipeline for storage keys."""
+        ...
+    def tenant(self, value: str) -> Config:
+        """Set `skippr.tenant`. Default `default` for local runs."""
+        ...
+    def storage(self, value: Storage) -> Config:
+        """Where engine state lives: `LocalStorage()` or `S3Storage(bucket)`."""
+        ...
+    def store(self, value: Store) -> Config:
+        """SkipprStore for offsets and leases: `SledStore()`, `DynamoDbStore(table)`, or `CloudTablesStore(table)`."""
+        ...
+    def wal_s3_bucket(self, value: str) -> Config:
+        """Dedicated S3 bucket for WAL segments. Falls back to the storage bucket."""
+        ...
+    def data_source(self, name: str, config: DataSourceConfig) -> DataSourceRef:
+        """Register `data_sources.<name>`. Returns a ref to pass to `Pipeline`."""
+        ...
     @overload
     def data_sink(
         self, name: str, config: PairedDataSinkConfig, *, schema_sink: str | None = None
@@ -162,29 +176,55 @@ class Config:
         *,
         schema_sink: SchemaSinkRef | None = None,
     ) -> DeadletterSinkRef: ...
-    def schema_sink(self, name: str, config: SchemaSinkConfig) -> SchemaSinkRef: ...
-    def pipeline(self, name: str, pipeline: Pipeline) -> PipelineRef:
-        """Register a pipeline. Its refs must come from this config."""
+    def schema_sink(self, name: str, config: SchemaSinkConfig) -> SchemaSinkRef:
+        """Register `schema_sinks.<name>`. Paired sinks (AthenaIceberg, SkipprLake, Duckdb) often share this name."""
         ...
-    def get_pipeline(self, name: str) -> PipelineRef: ...
-    def get_data_source(self, name: str) -> DataSourceRef: ...
-    def get_data_sink(self, name: str) -> DataSinkRef: ...
-    def get_deadletter_sink(self, name: str) -> DeadletterSinkRef: ...
-    def get_schema_sink(self, name: str) -> SchemaSinkRef: ...
+    def pipeline(self, name: str, pipeline: Pipeline) -> PipelineRef:
+        """Register `pipelines.<name>`. Refs on `pipeline` must come from this config. Pass the result to `Session`."""
+        ...
+    def get_pipeline(self, name: str) -> PipelineRef:
+        """Look up a registered pipeline by YAML key."""
+        ...
+    def get_data_source(self, name: str) -> DataSourceRef:
+        """Look up a registered data source by YAML key."""
+        ...
+    def get_data_sink(self, name: str) -> DataSinkRef:
+        """Look up a registered data sink by YAML key."""
+        ...
+    def get_deadletter_sink(self, name: str) -> DeadletterSinkRef:
+        """Look up a registered deadletter sink by YAML key."""
+        ...
+    def get_schema_sink(self, name: str) -> SchemaSinkRef:
+        """Look up a registered schema sink by YAML key."""
+        ...
 
 @final
 class Session:
     """The engine bound to one pipeline. It snapshots the pipeline's config, with
     `${ENV}` references resolved, when it is created."""
 
-    def __new__(cls, pipeline: PipelineRef) -> Session: ...
+    def __new__(cls, pipeline: PipelineRef) -> Session:
+        """Bind the engine to one pipeline. `${ENV}` references resolve here."""
+        ...
     @property
-    def pipeline(self) -> str: ...
-    def doctor(self) -> dict[str, Any]: ...
-    def discover(self) -> None: ...
-    def sync(self, once: bool = False) -> None: ...
-    def query(self, sql: str) -> pyarrow.Table: ...
-    def df(self, name: str | None = None) -> pyarrow.Table: ...
+    def pipeline(self) -> str:
+        """YAML key of the bound pipeline."""
+        ...
+    def doctor(self) -> dict[str, Any]:
+        """Run startup checks. Returns `ok` and `checks`."""
+        ...
+    def discover(self) -> None:
+        """Discover schemas for this pipeline's source."""
+        ...
+    def sync(self, once: bool = False) -> None:
+        """Ingest. `once=True` runs a single pass; otherwise loops at `sync_frequency_seconds`."""
+        ...
+    def query(self, sql: str) -> pyarrow.Table:
+        """Run SQL against this pipeline's views. Returns an Arrow table."""
+        ...
+    def df(self, name: str | None = None) -> pyarrow.Table:
+        """Return the latest batch as an Arrow table. `name` selects a namespace."""
+        ...
 
 DataSourceAdRollAdsStreamProfile: TypeAlias = Literal["minimal", "standard", "full"]
 DataSourceAppleAppStoreSerpAppStoreEntity: TypeAlias = Literal[
@@ -397,7 +437,13 @@ class DataSourceAiCitationsTrackedPrompt:
         text: str,
         category: str | None = None,
         intent: str | None = None,
-    ) -> DataSourceAiCitationsTrackedPrompt: ...
+    ) -> DataSourceAiCitationsTrackedPrompt:
+        """Args:
+            id: YAML key `id`.
+            text: YAML key `text`.
+            category: YAML key `category`.
+            intent: YAML key `intent`."""
+        ...
     @property
     def id(self) -> str:
         """YAML key `id`."""
@@ -423,7 +469,12 @@ class DataSourceAppleAppStoreSerpTargetEntry:
         app_id: str,
         bundle_id: str | None = None,
         aliases: list[str] | None = None,
-    ) -> DataSourceAppleAppStoreSerpTargetEntry: ...
+    ) -> DataSourceAppleAppStoreSerpTargetEntry:
+        """Args:
+            app_id: YAML key `app_id`.
+            bundle_id: YAML key `bundle_id`.
+            aliases: YAML key `aliases`."""
+        ...
     @property
     def app_id(self) -> str:
         """YAML key `app_id`."""
@@ -452,7 +503,19 @@ class DataSourceDataForSeoBacklinksBacklinkJob:
         max_pages: int | None = None,
         include_subdomains: bool | None = None,
         exclude_internal_backlinks: bool | None = None,
-    ) -> DataSourceDataForSeoBacklinksBacklinkJob: ...
+    ) -> DataSourceDataForSeoBacklinksBacklinkJob:
+        """Args:
+            target: YAML key `target`.
+            job_tag: YAML key `job_tag`.
+            limit: YAML key `limit`.
+            mode: YAML key `mode`.
+            backlinks_status_type: YAML key `backlinks_status_type`.
+            filters: YAML key `filters`.
+            order_by: YAML key `order_by`.
+            max_pages: YAML key `max_pages`.
+            include_subdomains: YAML key `include_subdomains`.
+            exclude_internal_backlinks: YAML key `exclude_internal_backlinks`."""
+        ...
     @property
     def target(self) -> str:
         """YAML key `target`."""
@@ -508,7 +571,18 @@ class DataSourceDataForSeoBacklinksIntersectionJob:
         max_pages: int | None = None,
         filters: Any | None = None,
         internal_list_limit: int | None = None,
-    ) -> DataSourceDataForSeoBacklinksIntersectionJob: ...
+    ) -> DataSourceDataForSeoBacklinksIntersectionJob:
+        """Args:
+            name: YAML key `name`.
+            targets: YAML key `targets`.
+            exclude_targets: YAML key `exclude_targets`.
+            intersection_mode: YAML key `intersection_mode`.
+            limit: YAML key `limit`.
+            order_by: YAML key `order_by`.
+            max_pages: YAML key `max_pages`.
+            filters: YAML key `filters`.
+            internal_list_limit: YAML key `internal_list_limit`."""
+        ...
     @property
     def name(self) -> str:
         """YAML key `name`."""
@@ -557,7 +631,15 @@ class DataSourceDataForSeoBacklinksCompetitorEntry:
         max_pages: int | None = None,
         include_subdomains: bool | None = None,
         backlinks_status_type: str | None = None,
-    ) -> DataSourceDataForSeoBacklinksCompetitorEntry: ...
+    ) -> DataSourceDataForSeoBacklinksCompetitorEntry:
+        """Args:
+            name: YAML key `name`.
+            target: YAML key `target`.
+            limit: YAML key `limit`.
+            max_pages: YAML key `max_pages`.
+            include_subdomains: YAML key `include_subdomains`.
+            backlinks_status_type: YAML key `backlinks_status_type`."""
+        ...
     @property
     def name(self) -> str:
         """YAML key `name`."""
@@ -590,7 +672,11 @@ class DataSourceDataForSeoBacklinksHistoryConfig:
         *,
         date_from: str | None = None,
         date_to: str | None = None,
-    ) -> DataSourceDataForSeoBacklinksHistoryConfig: ...
+    ) -> DataSourceDataForSeoBacklinksHistoryConfig:
+        """Args:
+            date_from: YAML key `date_from`.
+            date_to: YAML key `date_to`."""
+        ...
     @property
     def date_from(self) -> str | None:
         """YAML key `date_from`."""
@@ -607,7 +693,11 @@ class DataSourceDataForSeoSeoOpportunitiesCompetitorEntry:
         *,
         name: str,
         domain: str,
-    ) -> DataSourceDataForSeoSeoOpportunitiesCompetitorEntry: ...
+    ) -> DataSourceDataForSeoSeoOpportunitiesCompetitorEntry:
+        """Args:
+            name: YAML key `name`.
+            domain: YAML key `domain`."""
+        ...
     @property
     def name(self) -> str:
         """YAML key `name`."""
@@ -627,7 +717,14 @@ class DataSourceDataForSeoSeoOpportunitiesLimitsConfig:
         serp_depth: int | None = None,
         rank_track_depth: int | None = None,
         max_competitors: int | None = None,
-    ) -> DataSourceDataForSeoSeoOpportunitiesLimitsConfig: ...
+    ) -> DataSourceDataForSeoSeoOpportunitiesLimitsConfig:
+        """Args:
+            max_seed_keywords: YAML key `max_seed_keywords`.
+            max_generated_keywords: YAML key `max_generated_keywords`.
+            serp_depth: YAML key `serp_depth`.
+            rank_track_depth: YAML key `rank_track_depth`.
+            max_competitors: YAML key `max_competitors`."""
+        ...
     @property
     def max_seed_keywords(self) -> int | None:
         """YAML key `max_seed_keywords`."""
@@ -659,7 +756,14 @@ class DataSourceDataForSeoSeoOpportunitiesScoringConfig:
         weak_domain_rank_threshold: int | None = None,
         prefer_question_keywords: bool | None = None,
         prefer_low_backlink_serps: bool | None = None,
-    ) -> DataSourceDataForSeoSeoOpportunitiesScoringConfig: ...
+    ) -> DataSourceDataForSeoSeoOpportunitiesScoringConfig:
+        """Args:
+            min_search_volume: YAML key `min_search_volume`.
+            max_keyword_difficulty: YAML key `max_keyword_difficulty`.
+            weak_domain_rank_threshold: YAML key `weak_domain_rank_threshold`.
+            prefer_question_keywords: YAML key `prefer_question_keywords`.
+            prefer_low_backlink_serps: YAML key `prefer_low_backlink_serps`."""
+        ...
     @property
     def min_search_volume(self) -> int | None:
         """YAML key `min_search_volume`."""
@@ -688,7 +792,11 @@ class DataSourceGoogleSerpRanksTargetEntry:
         *,
         site: str,
         aliases: list[str] | None = None,
-    ) -> DataSourceGoogleSerpRanksTargetEntry: ...
+    ) -> DataSourceGoogleSerpRanksTargetEntry:
+        """Args:
+            site: YAML key `site`.
+            aliases: YAML key `aliases`."""
+        ...
     @property
     def site(self) -> str:
         """YAML key `site`."""
@@ -707,7 +815,13 @@ class DataSourceHttpClientDataSourceHttpAuthConfig:
         user: str | None = None,
         password: EnvRef | None = None,
         token: EnvRef | None = None,
-    ) -> DataSourceHttpClientDataSourceHttpAuthConfig: ...
+    ) -> DataSourceHttpClientDataSourceHttpAuthConfig:
+        """Args:
+            strategy: YAML key `strategy`.
+            user: YAML key `user`.
+            password: YAML key `password`.
+            token: YAML key `token`."""
+        ...
     @property
     def strategy(self) -> str | None:
         """YAML key `strategy`."""
@@ -737,7 +851,16 @@ class DataSourceHubspotCrmPrivacyConfig:
         drop_streams: list[str] | None = None,
         hash_properties: list[str] | None = None,
         on_violation: DataSourceHubspotCrmOnViolation | None = None,
-    ) -> DataSourceHubspotCrmPrivacyConfig: ...
+    ) -> DataSourceHubspotCrmPrivacyConfig:
+        """Args:
+            mode: YAML key `mode`.
+            profile: YAML key `profile`.
+            drop_properties: YAML key `drop_properties`.
+            keep_properties: YAML key `keep_properties`.
+            drop_streams: YAML key `drop_streams`.
+            hash_properties: YAML key `hash_properties`.
+            on_violation: YAML key `on_violation`."""
+        ...
     @property
     def mode(self) -> DataSourceHubspotCrmPrivacyMode | None:
         """YAML key `mode`."""
@@ -778,7 +901,15 @@ class DataSourceRevolutBusinessPrivacyConfig:
         keep_properties: list[str] | None = None,
         hash_properties: list[str] | None = None,
         on_violation: DataSourceRevolutBusinessOnViolation | None = None,
-    ) -> DataSourceRevolutBusinessPrivacyConfig: ...
+    ) -> DataSourceRevolutBusinessPrivacyConfig:
+        """Args:
+            mode: YAML key `mode`.
+            profile: YAML key `profile`.
+            drop_properties: YAML key `drop_properties`.
+            keep_properties: YAML key `keep_properties`.
+            hash_properties: YAML key `hash_properties`.
+            on_violation: YAML key `on_violation`."""
+        ...
     @property
     def mode(self) -> DataSourceRevolutBusinessPrivacyMode | None:
         """YAML key `mode`."""
@@ -806,7 +937,16 @@ class DataSourceRevolutBusinessPrivacyConfig:
 
 @final
 class DataSourceSiteQualityViewport:
-    def __new__(cls, *, width: int, height: int) -> DataSourceSiteQualityViewport: ...
+    def __new__(
+        cls,
+        *,
+        width: int,
+        height: int,
+    ) -> DataSourceSiteQualityViewport:
+        """Args:
+            width: YAML key `width`.
+            height: YAML key `height`."""
+        ...
     @property
     def width(self) -> int:
         """YAML key `width`."""
@@ -824,7 +964,12 @@ class DataSourceSiteQualityDeviceProfile:
         profile: str,
         viewport: DataSourceSiteQualityViewport,
         user_agent: str | None = None,
-    ) -> DataSourceSiteQualityDeviceProfile: ...
+    ) -> DataSourceSiteQualityDeviceProfile:
+        """Args:
+            profile: YAML key `profile`.
+            viewport: YAML key `viewport`.
+            user_agent: YAML key `user_agent`."""
+        ...
     @property
     def profile(self) -> str:
         """YAML key `profile`."""
@@ -846,7 +991,12 @@ class DataSourceSiteQualityThrottleConfig:
         rtt_ms: int | None = None,
         throughput_kbps: float | None = None,
         cpu_slowdown: int | None = None,
-    ) -> DataSourceSiteQualityThrottleConfig: ...
+    ) -> DataSourceSiteQualityThrottleConfig:
+        """Args:
+            rtt_ms: YAML key `rtt_ms`.
+            throughput_kbps: YAML key `throughput_kbps`.
+            cpu_slowdown: YAML key `cpu_slowdown`."""
+        ...
     @property
     def rtt_ms(self) -> int | None:
         """YAML key `rtt_ms`."""
@@ -862,7 +1012,16 @@ class DataSourceSiteQualityThrottleConfig:
 
 @final
 class DataSourceSiteSecurityViewport:
-    def __new__(cls, *, width: int, height: int) -> DataSourceSiteSecurityViewport: ...
+    def __new__(
+        cls,
+        *,
+        width: int,
+        height: int,
+    ) -> DataSourceSiteSecurityViewport:
+        """Args:
+            width: YAML key `width`.
+            height: YAML key `height`."""
+        ...
     @property
     def width(self) -> int:
         """YAML key `width`."""
@@ -880,7 +1039,12 @@ class DataSourceSiteSecurityDeviceProfile:
         profile: str,
         viewport: DataSourceSiteSecurityViewport,
         user_agent: str | None = None,
-    ) -> DataSourceSiteSecurityDeviceProfile: ...
+    ) -> DataSourceSiteSecurityDeviceProfile:
+        """Args:
+            profile: YAML key `profile`.
+            viewport: YAML key `viewport`.
+            user_agent: YAML key `user_agent`."""
+        ...
     @property
     def profile(self) -> str:
         """YAML key `profile`."""
@@ -905,7 +1069,15 @@ class DataSourceStripePrivacyConfig:
         keep_properties: list[str] | None = None,
         hash_properties: list[str] | None = None,
         on_violation: DataSourceStripeOnViolation | None = None,
-    ) -> DataSourceStripePrivacyConfig: ...
+    ) -> DataSourceStripePrivacyConfig:
+        """Args:
+            mode: YAML key `mode`.
+            profile: YAML key `profile`.
+            drop_properties: YAML key `drop_properties`.
+            keep_properties: YAML key `keep_properties`.
+            hash_properties: YAML key `hash_properties`.
+            on_violation: YAML key `on_violation`."""
+        ...
     @property
     def mode(self) -> DataSourceStripePrivacyMode | None:
         """YAML key `mode`."""
@@ -942,7 +1114,15 @@ class DataSourceSumUpPrivacyConfig:
         keep_properties: list[str] | None = None,
         hash_properties: list[str] | None = None,
         on_violation: DataSourceSumUpOnViolation | None = None,
-    ) -> DataSourceSumUpPrivacyConfig: ...
+    ) -> DataSourceSumUpPrivacyConfig:
+        """Args:
+            mode: YAML key `mode`.
+            profile: YAML key `profile`.
+            drop_properties: YAML key `drop_properties`.
+            keep_properties: YAML key `keep_properties`.
+            hash_properties: YAML key `hash_properties`.
+            on_violation: YAML key `on_violation`."""
+        ...
     @property
     def mode(self) -> DataSourceSumUpPrivacyMode | None:
         """YAML key `mode`."""
@@ -979,7 +1159,15 @@ class DataSourceXeroAccountingPrivacyConfig:
         keep_properties: list[str] | None = None,
         hash_properties: list[str] | None = None,
         on_violation: DataSourceXeroAccountingOnViolation | None = None,
-    ) -> DataSourceXeroAccountingPrivacyConfig: ...
+    ) -> DataSourceXeroAccountingPrivacyConfig:
+        """Args:
+            mode: YAML key `mode`.
+            profile: YAML key `profile`.
+            drop_properties: YAML key `drop_properties`.
+            keep_properties: YAML key `keep_properties`.
+            hash_properties: YAML key `hash_properties`.
+            on_violation: YAML key `on_violation`."""
+        ...
     @property
     def mode(self) -> DataSourceXeroAccountingPrivacyMode | None:
         """YAML key `mode`."""
@@ -1010,7 +1198,11 @@ class DataSinkAthenaIcebergS3CompatibleObjectStoreS3:
     """AthenaIceberg / Glue parquet location. Local FS is not a nameable state.
     YAML key is `object_store`. `s3` is the AWS default chain. `r2` is explicit
     path-style credentials."""
-    def __new__(cls) -> DataSinkAthenaIcebergS3CompatibleObjectStoreS3: ...
+    def __new__(cls) -> DataSinkAthenaIcebergS3CompatibleObjectStoreS3:
+        """AthenaIceberg / Glue parquet location. Local FS is not a nameable state.
+        YAML key is `object_store`. `s3` is the AWS default chain. `r2` is explicit
+        path-style credentials."""
+        ...
 
 @final
 class DataSinkAthenaIcebergS3CompatibleObjectStoreR2:
@@ -1025,7 +1217,18 @@ class DataSinkAthenaIcebergS3CompatibleObjectStoreR2:
         secret_access_key: EnvRef,
         region: str | None = None,
         path_style: bool | None = None,
-    ) -> DataSinkAthenaIcebergS3CompatibleObjectStoreR2: ...
+    ) -> DataSinkAthenaIcebergS3CompatibleObjectStoreR2:
+        """AthenaIceberg / Glue parquet location. Local FS is not a nameable state.
+        YAML key is `object_store`. `s3` is the AWS default chain. `r2` is explicit
+        path-style credentials.
+
+        Args:
+            endpoint: YAML key `endpoint`.
+            access_key_id: YAML key `access_key_id`.
+            secret_access_key: YAML key `secret_access_key`.
+            region: YAML key `region`.
+            path_style: YAML key `path_style`."""
+        ...
     @property
     def endpoint(self) -> str:
         """YAML key `endpoint`."""
@@ -1052,14 +1255,22 @@ class DataSinkSkipprLakeWarehouseObjectStoreFile:
     """SkipprLake parquet location: local FS, AWS S3, or R2.
     YAML key is `object_store` (not `file_io`, not Apache Iceberg `FileIO`).
     AthenaIceberg MUST use [`S3CompatibleObjectStore`] so `File` cannot be named."""
-    def __new__(cls) -> DataSinkSkipprLakeWarehouseObjectStoreFile: ...
+    def __new__(cls) -> DataSinkSkipprLakeWarehouseObjectStoreFile:
+        """SkipprLake parquet location: local FS, AWS S3, or R2.
+        YAML key is `object_store` (not `file_io`, not Apache Iceberg `FileIO`).
+        AthenaIceberg MUST use [`S3CompatibleObjectStore`] so `File` cannot be named."""
+        ...
 
 @final
 class DataSinkSkipprLakeWarehouseObjectStoreS3:
     """SkipprLake parquet location: local FS, AWS S3, or R2.
     YAML key is `object_store` (not `file_io`, not Apache Iceberg `FileIO`).
     AthenaIceberg MUST use [`S3CompatibleObjectStore`] so `File` cannot be named."""
-    def __new__(cls) -> DataSinkSkipprLakeWarehouseObjectStoreS3: ...
+    def __new__(cls) -> DataSinkSkipprLakeWarehouseObjectStoreS3:
+        """SkipprLake parquet location: local FS, AWS S3, or R2.
+        YAML key is `object_store` (not `file_io`, not Apache Iceberg `FileIO`).
+        AthenaIceberg MUST use [`S3CompatibleObjectStore`] so `File` cannot be named."""
+        ...
 
 @final
 class DataSinkSkipprLakeWarehouseObjectStoreR2:
@@ -1074,7 +1285,18 @@ class DataSinkSkipprLakeWarehouseObjectStoreR2:
         secret_access_key: EnvRef,
         region: str | None = None,
         path_style: bool | None = None,
-    ) -> DataSinkSkipprLakeWarehouseObjectStoreR2: ...
+    ) -> DataSinkSkipprLakeWarehouseObjectStoreR2:
+        """SkipprLake parquet location: local FS, AWS S3, or R2.
+        YAML key is `object_store` (not `file_io`, not Apache Iceberg `FileIO`).
+        AthenaIceberg MUST use [`S3CompatibleObjectStore`] so `File` cannot be named.
+
+        Args:
+            endpoint: YAML key `endpoint`.
+            access_key_id: YAML key `access_key_id`.
+            secret_access_key: YAML key `secret_access_key`.
+            region: YAML key `region`.
+            path_style: YAML key `path_style`."""
+        ...
     @property
     def endpoint(self) -> str:
         """YAML key `endpoint`."""
@@ -1098,6 +1320,10 @@ class DataSinkSkipprLakeWarehouseObjectStoreR2:
 
 @final
 class Pipeline:
+    """One skipprd pipeline: a source, optional sinks, and how sync runs.
+
+    Register it with `Config.pipeline(name, Pipeline(...))`, then pass the
+    returned `PipelineRef` to `Session`."""
     def __new__(
         cls,
         *,
@@ -1116,35 +1342,85 @@ class Pipeline:
         stats: Stats | None = None,
         semantic_layer: SemanticLayerSettings | None = None,
         cdc: CdcPipelineConfig | None = None,
-    ) -> Pipeline: ...
+    ) -> Pipeline:
+        """One skipprd pipeline: a source, optional sinks, and how sync runs.
+
+        Register it with `Config.pipeline(name, Pipeline(...))`, then pass the
+        returned `PipelineRef` to `Session`.
+
+        Args:
+            data_source: Source this pipeline reads. Required. A `DataSourceRef` from this config.
+            type: Label for logs and metadata. Default `INGEST` (`PIPELINE_TYPE`).
+            auto_approve: Approve schema changes without prompting. Default true (`SCHEMA_AUTO_APPROVE`).
+            env: Environment label for logs and metadata. Default `prod` (`SKIPPR_ENV`).
+            buffer_threshold_bytes: Flush the ingest buffer at this many bytes. Default 10 MiB (`BUFFER_THRESHOLD_BYTES`).
+            buffer_threshold_seconds: Flush the ingest buffer after this many seconds. Default 60 (`BUFFER_THRESHOLD_SECONDS`).
+            chaos_mode: Kill the process mid-run with SIGKILL to test exactly-once recovery. Default false (`SKIPPR_CHAOS_MODE`).
+            sync_frequency_seconds: Seconds between sync loops. Default 900 (`SYNC_FREQUENCY`). `Session.sync(once=True)` still runs once.
+            data_dir: Local directory for WAL and offsets. Default `./data` (`DATA_DIR`).
+            transform: How records are namespaced, partitioned, flattened, and ordered before the sink.
+            data_sink: Destination for successful records. Optional: without it the WAL is the dataset.
+            deadletter_sink: Destination for records that fail transform or sink writes.
+            stats: Namespace cardinality and histogram collection during ingest.
+            semantic_layer: LLM semantic-layer generation for this pipeline.
+            cdc: CDC configuration. When present, the pipeline runs in CDC mode and"""
+        ...
     data_source: DataSourceRef
-    """YAML key `data_source`."""
+    """Source this pipeline reads. Required. A `DataSourceRef` from this config.
+
+    YAML key `data_source`."""
     type: str | None
-    """YAML key `type`."""
+    """Label for logs and metadata. Default `INGEST` (`PIPELINE_TYPE`).
+
+    YAML key `type`."""
     auto_approve: bool | None
-    """YAML key `auto_approve`."""
+    """Approve schema changes without prompting. Default true (`SCHEMA_AUTO_APPROVE`).
+
+    YAML key `auto_approve`."""
     env: str | None
-    """YAML key `env`."""
+    """Environment label for logs and metadata. Default `prod` (`SKIPPR_ENV`).
+
+    YAML key `env`."""
     buffer_threshold_bytes: int | None
-    """YAML key `buffer_threshold_bytes`."""
+    """Flush the ingest buffer at this many bytes. Default 10 MiB (`BUFFER_THRESHOLD_BYTES`).
+
+    YAML key `buffer_threshold_bytes`."""
     buffer_threshold_seconds: int | None
-    """YAML key `buffer_threshold_seconds`."""
+    """Flush the ingest buffer after this many seconds. Default 60 (`BUFFER_THRESHOLD_SECONDS`).
+
+    YAML key `buffer_threshold_seconds`."""
     chaos_mode: bool | None
-    """YAML key `chaos_mode`."""
+    """Kill the process mid-run with SIGKILL to test exactly-once recovery. Default false (`SKIPPR_CHAOS_MODE`).
+
+    YAML key `chaos_mode`."""
     sync_frequency_seconds: int | None
-    """YAML key `sync_frequency_seconds`."""
+    """Seconds between sync loops. Default 900 (`SYNC_FREQUENCY`). `Session.sync(once=True)` still runs once.
+
+    YAML key `sync_frequency_seconds`."""
     data_dir: str | None
-    """YAML key `data_dir`."""
+    """Local directory for WAL and offsets. Default `./data` (`DATA_DIR`).
+
+    YAML key `data_dir`."""
     transform: Transform | None
-    """YAML key `transform`."""
+    """How records are namespaced, partitioned, flattened, and ordered before the sink.
+
+    YAML key `transform`."""
     data_sink: DataSinkRef | None
-    """YAML key `data_sink`."""
+    """Destination for successful records. Optional: without it the WAL is the dataset.
+
+    YAML key `data_sink`."""
     deadletter_sink: DeadletterSinkRef | None
-    """YAML key `deadletter_sink`."""
+    """Destination for records that fail transform or sink writes.
+
+    YAML key `deadletter_sink`."""
     stats: Stats | None
-    """YAML key `stats`."""
+    """Namespace cardinality and histogram collection during ingest.
+
+    YAML key `stats`."""
     semantic_layer: SemanticLayerSettings | None
-    """YAML key `semantic_layer`."""
+    """LLM semantic-layer generation for this pipeline.
+
+    YAML key `semantic_layer`."""
     cdc: CdcPipelineConfig | None
     """CDC configuration. When present, the pipeline runs in CDC mode and
     validates source/sink compatibility at startup.
@@ -1153,6 +1429,7 @@ class Pipeline:
 
 @final
 class Transform:
+    """How source records are namespaced, partitioned, flattened, and ordered before the sink."""
     def __new__(
         cls,
         *,
@@ -1168,50 +1445,88 @@ class Transform:
         enable_unicode_parsing: bool | None = None,
         batch_order_fields: str | None = None,
         inject_fields: dict[str, Any] | None = None,
-    ) -> Transform: ...
+    ) -> Transform:
+        """How source records are namespaced, partitioned, flattened, and ordered before the sink.
+
+        Args:
+            batch_time_fields: Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.
+            batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.
+            flatten_events: Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).
+            record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.
+            batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).
+            partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.
+            namespace_fields: Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.
+            time_partition_prefix: Prefix for time-partition folder names (`p_` → `p_2026-10-08`).
+            enable_single_quote_parsing: Accept JSON that uses single quotes around strings.
+            enable_unicode_parsing: Accept JSON with unescaped Unicode.
+            batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.
+            inject_fields: Static field names and JSON values merged onto each source record before ingest."""
+        ...
     @property
     def batch_time_fields(self) -> str | None:
-        """YAML key `batch_time_fields`."""
+        """Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.
+
+        YAML key `batch_time_fields`."""
         ...
     @property
     def batch_time_unit(self) -> BatchTimeUnit | None:
-        """YAML key `batch_time_unit`."""
+        """Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.
+
+        YAML key `batch_time_unit`."""
         ...
     @property
     def flatten_events(self) -> bool | None:
-        """YAML key `flatten_events`."""
+        """Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).
+
+        YAML key `flatten_events`."""
         ...
     @property
     def record_field_path(self) -> str | None:
-        """YAML key `record_field_path`."""
+        """JSON pointer/path to the array of records inside each source object. Unset means the object is the record.
+
+        YAML key `record_field_path`."""
         ...
     @property
     def batch_partition_fields(self) -> str | None:
-        """YAML key `batch_partition_fields`."""
+        """Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).
+
+        YAML key `batch_partition_fields`."""
         ...
     @property
     def partition_allowed_values(self) -> str | None:
-        """YAML key `partition_allowed_values`."""
+        """Allowed values for partition columns. Records outside this set are dropped.
+
+        YAML key `partition_allowed_values`."""
         ...
     @property
     def namespace_fields(self) -> str | None:
-        """YAML key `namespace_fields`."""
+        """Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.
+
+        YAML key `namespace_fields`."""
         ...
     @property
     def time_partition_prefix(self) -> str | None:
-        """YAML key `time_partition_prefix`."""
+        """Prefix for time-partition folder names (`p_` → `p_2026-10-08`).
+
+        YAML key `time_partition_prefix`."""
         ...
     @property
     def enable_single_quote_parsing(self) -> bool | None:
-        """YAML key `enable_single_quote_parsing`."""
+        """Accept JSON that uses single quotes around strings.
+
+        YAML key `enable_single_quote_parsing`."""
         ...
     @property
     def enable_unicode_parsing(self) -> bool | None:
-        """YAML key `enable_unicode_parsing`."""
+        """Accept JSON with unescaped Unicode.
+
+        YAML key `enable_unicode_parsing`."""
         ...
     @property
     def batch_order_fields(self) -> str | None:
-        """YAML key `batch_order_fields`."""
+        """Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.
+
+        YAML key `batch_order_fields`."""
         ...
     @property
     def inject_fields(self) -> Mapping[str, Any] | None:
@@ -1222,6 +1537,7 @@ class Transform:
 
 @final
 class Stats:
+    """Namespace cardinality and histogram collection during ingest."""
     def __new__(
         cls,
         *,
@@ -1229,39 +1545,66 @@ class Stats:
         hll_precision: int | None = None,
         histogram_enabled: bool | None = None,
         flush_seconds: int | None = None,
-    ) -> Stats: ...
+    ) -> Stats:
+        """Namespace cardinality and histogram collection during ingest.
+
+        Args:
+            enabled: Collect HyperLogLog / histogram stats for this pipeline.
+            hll_precision: HyperLogLog precision (4–18). Higher is more accurate and uses more memory.
+            histogram_enabled: Also collect value histograms.
+            flush_seconds: Seconds between stats flushes."""
+        ...
     @property
     def enabled(self) -> bool | None:
-        """YAML key `enabled`."""
+        """Collect HyperLogLog / histogram stats for this pipeline.
+
+        YAML key `enabled`."""
         ...
     @property
     def hll_precision(self) -> int | None:
-        """YAML key `hll_precision`."""
+        """HyperLogLog precision (4–18). Higher is more accurate and uses more memory.
+
+        YAML key `hll_precision`."""
         ...
     @property
     def histogram_enabled(self) -> bool | None:
-        """YAML key `histogram_enabled`."""
+        """Also collect value histograms.
+
+        YAML key `histogram_enabled`."""
         ...
     @property
     def flush_seconds(self) -> int | None:
-        """YAML key `flush_seconds`."""
+        """Seconds between stats flushes.
+
+        YAML key `flush_seconds`."""
         ...
 
 @final
 class SemanticLayerSettings:
+    """LLM semantic-layer generation for this pipeline."""
     def __new__(
         cls,
         *,
         llm_enabled: bool | None = None,
         llm_debounce_ms: int | None = None,
-    ) -> SemanticLayerSettings: ...
+    ) -> SemanticLayerSettings:
+        """LLM semantic-layer generation for this pipeline.
+
+        Args:
+            llm_enabled: Ask an LLM to propose semantic-layer YAML from discovered schemas.
+            llm_debounce_ms: Wait this many milliseconds after the last schema change before generating."""
+        ...
     @property
     def llm_enabled(self) -> bool | None:
-        """YAML key `llm_enabled`."""
+        """Ask an LLM to propose semantic-layer YAML from discovered schemas.
+
+        YAML key `llm_enabled`."""
         ...
     @property
     def llm_debounce_ms(self) -> int | None:
-        """YAML key `llm_debounce_ms`."""
+        """Wait this many milliseconds after the last schema change before generating.
+
+        YAML key `llm_debounce_ms`."""
         ...
 
 @final
@@ -1271,7 +1614,11 @@ class CdcNamespaceConfig:
         *,
         business_key_columns: list[str] | None = None,
         null_key_policy: str | None = None,
-    ) -> CdcNamespaceConfig: ...
+    ) -> CdcNamespaceConfig:
+        """Args:
+            business_key_columns: Business key columns used for upsert/delete identity in the target.
+            null_key_policy: How exact-final-state sinks should handle rows with null business keys."""
+        ...
     @property
     def business_key_columns(self) -> Sequence[str] | None:
         """Business key columns used for upsert/delete identity in the target.
@@ -1293,7 +1640,11 @@ class CdcPipelineConfig:
         *,
         default: CdcNamespaceConfig | None = None,
         namespaces: dict[str, CdcNamespaceConfig] | None = None,
-    ) -> CdcPipelineConfig: ...
+    ) -> CdcPipelineConfig:
+        """Args:
+            default: Default CDC contract used for dynamically discovered namespaces.
+            namespaces: Namespace/table-specific CDC contracts. Keys are Skippr namespaces."""
+        ...
     @property
     def default(self) -> CdcNamespaceConfig | None:
         """Default CDC contract used for dynamically discovered namespaces.
@@ -1327,7 +1678,24 @@ class DataSourceAdRollAds:
         stream_profile: DataSourceAdRollAdsStreamProfile | None = None,
         processing_lag_days: int | None = None,
         streams: list[str] | None = None,
-    ) -> DataSourceAdRollAds: ...
+    ) -> DataSourceAdRollAds:
+        """Args:
+            advertiser_id: YAML key `advertiser_id`.
+            start_date: YAML key `start_date`.
+            access_token: YAML key `access_token`.
+            personal_access_token: YAML key `personal_access_token`.
+            oauth_token_url: YAML key `oauth_token_url`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_refresh_token: YAML key `oauth_refresh_token`.
+            api_base_url: YAML key `api_base_url`.
+            reporting_base_url: YAML key `reporting_base_url`.
+            end_date: YAML key `end_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            processing_lag_days: YAML key `processing_lag_days`.
+            streams: YAML key `streams`."""
+        ...
     advertiser_id: str
     """YAML key `advertiser_id`."""
     start_date: str
@@ -1376,7 +1744,17 @@ class DataSourceAiCitations:
         max_prompts_per_run: int | None = None,
         skip_unchanged_responses: bool | None = None,
         openai_base_url: str | None = None,
-    ) -> DataSourceAiCitations: ...
+    ) -> DataSourceAiCitations:
+        """Args:
+            site: YAML key `site`.
+            prompt_list: YAML key `prompt_list`.
+            models: YAML key `models`.
+            brand_names: YAML key `brand_names`.
+            requests_per_minute: YAML key `requests_per_minute`.
+            max_prompts_per_run: YAML key `max_prompts_per_run`.
+            skip_unchanged_responses: YAML key `skip_unchanged_responses`.
+            openai_base_url: YAML key `openai_base_url`."""
+        ...
     site: str
     """YAML key `site`."""
     @property
@@ -1422,7 +1800,20 @@ class DataSourceAmqp:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceAmqp: ...
+    ) -> DataSourceAmqp:
+        """Args:
+            connection_string: YAML key `connection_string`.
+            queue: YAML key `queue`.
+            exchange: YAML key `exchange`.
+            routing_key: YAML key `routing_key`.
+            consumer_tag: YAML key `consumer_tag`.
+            prefetch_count: YAML key `prefetch_count`.
+            mode: YAML key `mode`.
+            idle_timeout_seconds: YAML key `idle_timeout_seconds`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     connection_string: EnvRef
     """YAML key `connection_string`."""
     queue: str
@@ -1462,7 +1853,20 @@ class DataSourceAppleAppStoreSerp:
         capture_results: bool | None = None,
         force_refresh_today: bool | None = None,
         user_agent: str | None = None,
-    ) -> DataSourceAppleAppStoreSerp: ...
+    ) -> DataSourceAppleAppStoreSerp:
+        """Args:
+            targets: YAML key `targets`.
+            keywords: YAML key `keywords`.
+            storefronts: YAML key `storefronts`.
+            entity: YAML key `entity`.
+            max_depth: YAML key `max_depth`.
+            min_query_interval_ms: YAML key `min_query_interval_ms`.
+            max_queries_per_run: YAML key `max_queries_per_run`.
+            stop_after_first_target_match: YAML key `stop_after_first_target_match`.
+            capture_results: YAML key `capture_results`.
+            force_refresh_today: YAML key `force_refresh_today`.
+            user_agent: YAML key `user_agent`."""
+        ...
     @property
     def targets(self) -> Sequence[DataSourceAppleAppStoreSerpTargetEntry]:
         """YAML key `targets`."""
@@ -1519,7 +1923,25 @@ class DataSourceAppleSearchAds:
         return_records_with_no_metrics: bool | None = None,
         max_concurrent_requests: int | None = None,
         streams: list[str] | None = None,
-    ) -> DataSourceAppleSearchAds: ...
+    ) -> DataSourceAppleSearchAds:
+        """Args:
+            org_id: YAML key `org_id`.
+            client_id: YAML key `client_id`.
+            team_id: YAML key `team_id`.
+            key_id: YAML key `key_id`.
+            start_date: YAML key `start_date`.
+            private_key_path: YAML key `private_key_path`.
+            private_key_pem: YAML key `private_key_pem`.
+            access_token: YAML key `access_token`.
+            end_date: YAML key `end_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            processing_lag_days: YAML key `processing_lag_days`.
+            time_zone: YAML key `time_zone`.
+            return_records_with_no_metrics: YAML key `return_records_with_no_metrics`.
+            max_concurrent_requests: YAML key `max_concurrent_requests`.
+            streams: YAML key `streams`."""
+        ...
     org_id: str
     """YAML key `org_id`."""
     client_id: str
@@ -1578,7 +2000,25 @@ class DataSourceBingWebmasterTools:
         streams: list[str] | None = None,
         request_interval_ms: int | None = None,
         max_api_retries: int | None = None,
-    ) -> DataSourceBingWebmasterTools: ...
+    ) -> DataSourceBingWebmasterTools:
+        """Args:
+            site_url: YAML key `site_url`.
+            start_date: YAML key `start_date`.
+            api_key: YAML key `api_key`.
+            access_token: YAML key `access_token`.
+            oauth_token_url: YAML key `oauth_token_url`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_refresh_token: YAML key `oauth_refresh_token`.
+            end_date: YAML key `end_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            processing_lag_days: YAML key `processing_lag_days`.
+            window_in_days: YAML key `window_in_days`.
+            streams: YAML key `streams`.
+            request_interval_ms: YAML key `request_interval_ms`.
+            max_api_retries: YAML key `max_api_retries`."""
+        ...
     site_url: str
     """YAML key `site_url`."""
     start_date: str
@@ -1631,7 +2071,19 @@ class DataSourceClickhouse:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceClickhouse: ...
+    ) -> DataSourceClickhouse:
+        """Args:
+            url: YAML key `url`.
+            database: YAML key `database`.
+            user: YAML key `user`.
+            password: YAML key `password`.
+            tables: YAML key `tables`.
+            query: YAML key `query`.
+            batch_size_rows: YAML key `batch_size_rows`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     url: str
     """YAML key `url`."""
     database: str | None
@@ -1680,7 +2132,27 @@ class DataSourceContentQuality:
         seed_urls: list[str] | None = None,
         url_list: list[str] | None = None,
         max_response_bytes: int | None = None,
-    ) -> DataSourceContentQuality: ...
+    ) -> DataSourceContentQuality:
+        """Args:
+            site: YAML key `site`.
+            max_urls: YAML key `max_urls`.
+            max_depth: YAML key `max_depth`.
+            render_js: YAML key `render_js`.
+            crawl_rate_per_second: YAML key `crawl_rate_per_second`.
+            respect_robots: YAML key `respect_robots`.
+            openai_model: YAML key `openai_model`.
+            openai_enabled: YAML key `openai_enabled`.
+            openai_max_blocks_per_page: YAML key `openai_max_blocks_per_page`.
+            skip_unchanged_content: YAML key `skip_unchanged_content`.
+            user_agent: YAML key `user_agent`.
+            worker_node_path: YAML key `worker_node_path`.
+            render_wait_until: YAML key `render_wait_until`.
+            render_timeout_ms: YAML key `render_timeout_ms`.
+            playwright_executable_path: YAML key `playwright_executable_path`.
+            seed_urls: YAML key `seed_urls`.
+            url_list: YAML key `url_list`.
+            max_response_bytes: YAML key `max_response_bytes`."""
+        ...
     site: str
     """YAML key `site`."""
     max_urls: int | None
@@ -1743,7 +2215,21 @@ class DataSourceDataForSeoBacklinks:
         rank_scale: str | None = None,
         request_interval_ms: int | None = None,
         max_api_retries: int | None = None,
-    ) -> DataSourceDataForSeoBacklinks: ...
+    ) -> DataSourceDataForSeoBacklinks:
+        """Args:
+            login: YAML key `login`.
+            password: YAML key `password`.
+            site: YAML key `site`.
+            run_mode: YAML key `run_mode`.
+            backlink_jobs: YAML key `backlink_jobs`.
+            intersection_jobs: YAML key `intersection_jobs`.
+            competitors: YAML key `competitors`.
+            streams: YAML key `streams`.
+            history: YAML key `history`.
+            rank_scale: YAML key `rank_scale`.
+            request_interval_ms: YAML key `request_interval_ms`.
+            max_api_retries: YAML key `max_api_retries`."""
+        ...
     login: str | None
     """YAML key `login`."""
     password: EnvRef | None
@@ -1812,7 +2298,31 @@ class DataSourceDataForSeoSeoOpportunities:
         openai_enabled: bool | None = None,
         request_interval_ms: int | None = None,
         max_api_retries: int | None = None,
-    ) -> DataSourceDataForSeoSeoOpportunities: ...
+    ) -> DataSourceDataForSeoSeoOpportunities:
+        """Args:
+            site: YAML key `site`.
+            login: YAML key `login`.
+            password: YAML key `password`.
+            location_code: YAML key `location_code`.
+            language_code: YAML key `language_code`.
+            device: YAML key `device`.
+            search_engine: YAML key `search_engine`.
+            run_mode: YAML key `run_mode`.
+            seed_keywords: YAML key `seed_keywords`.
+            seed_queries_from_gsc: YAML key `seed_queries_from_gsc`.
+            gsc_source: YAML key `gsc_source`.
+            seed_urls_from_crawl: YAML key `seed_urls_from_crawl`.
+            seo_crawl_source: YAML key `seo_crawl_source`.
+            competitors: YAML key `competitors`.
+            rank_track_keywords: YAML key `rank_track_keywords`.
+            streams: YAML key `streams`.
+            limits: YAML key `limits`.
+            scoring: YAML key `scoring`.
+            openai_model: YAML key `openai_model`.
+            openai_enabled: YAML key `openai_enabled`.
+            request_interval_ms: YAML key `request_interval_ms`.
+            max_api_retries: YAML key `max_api_retries`."""
+        ...
     site: str
     """YAML key `site`."""
     login: str | None
@@ -1887,7 +2397,17 @@ class DataSourceDeltaLake:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceDeltaLake: ...
+    ) -> DataSourceDeltaLake:
+        """Args:
+            table_uri: YAML key `table_uri`.
+            storage_options: YAML key `storage_options`.
+            version: YAML key `version`.
+            filter: YAML key `filter`.
+            batch_size_rows: YAML key `batch_size_rows`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     table_uri: str
     """YAML key `table_uri`."""
     @property
@@ -1921,7 +2441,16 @@ class DataSourceDynamodb:
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
         cdc_mode: DataSourceDynamodbSourceCdcMode | None = None,
-    ) -> DataSourceDynamodb: ...
+    ) -> DataSourceDynamodb:
+        """Args:
+            table_name: YAML key `table_name`.
+            region: YAML key `region`.
+            endpoint_url: YAML key `endpoint_url`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`.
+            cdc_mode: YAML key `cdc_mode`."""
+        ...
     table_name: str
     """YAML key `table_name`."""
     region: str | None
@@ -1950,7 +2479,17 @@ class DataSourceEventbridge:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceEventbridge: ...
+    ) -> DataSourceEventbridge:
+        """Args:
+            event_bus_name: YAML key `event_bus_name`.
+            sqs_queue_url: YAML key `sqs_queue_url`.
+            rule_name: YAML key `rule_name`.
+            region: YAML key `region`.
+            endpoint_url: YAML key `endpoint_url`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     event_bus_name: str
     """YAML key `event_bus_name`."""
     sqs_queue_url: str
@@ -1977,7 +2516,13 @@ class DataSourceFile:
         format: str | None = None,
         batch_size_seconds: int | None = None,
         batch_size_bytes: int | None = None,
-    ) -> DataSourceFile: ...
+    ) -> DataSourceFile:
+        """Args:
+            path: YAML key `path`.
+            format: YAML key `format`.
+            batch_size_seconds: YAML key `batch_size_seconds`.
+            batch_size_bytes: YAML key `batch_size_bytes`."""
+        ...
     path: str
     """YAML key `path`."""
     format: str | None
@@ -2007,7 +2552,24 @@ class DataSourceGoogleAds:
         stream_profile: DataSourceGoogleAdsStreamProfile | None = None,
         processing_lag_days: int | None = None,
         streams: list[str] | None = None,
-    ) -> DataSourceGoogleAds: ...
+    ) -> DataSourceGoogleAds:
+        """Args:
+            customer_id: YAML key `customer_id`.
+            developer_token: YAML key `developer_token`.
+            start_date: YAML key `start_date`.
+            login_customer_id: YAML key `login_customer_id`.
+            access_token: YAML key `access_token`.
+            oauth_token_url: YAML key `oauth_token_url`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_refresh_token: YAML key `oauth_refresh_token`.
+            api_version: YAML key `api_version`.
+            end_date: YAML key `end_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            processing_lag_days: YAML key `processing_lag_days`.
+            streams: YAML key `streams`."""
+        ...
     customer_id: str
     """YAML key `customer_id`."""
     developer_token: EnvRef
@@ -2065,7 +2627,26 @@ class DataSourceGoogleAnalytics:
         streams: list[str] | None = None,
         request_interval_ms: int | None = None,
         max_api_retries: int | None = None,
-    ) -> DataSourceGoogleAnalytics: ...
+    ) -> DataSourceGoogleAnalytics:
+        """Args:
+            property_id: YAML key `property_id`.
+            start_date: YAML key `start_date`.
+            access_token: YAML key `access_token`.
+            oauth_token_url: YAML key `oauth_token_url`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_refresh_token: YAML key `oauth_refresh_token`.
+            service_account_json_path: YAML key `service_account_json_path`.
+            end_date: YAML key `end_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            keep_empty_rows: YAML key `keep_empty_rows`.
+            processing_lag_days: YAML key `processing_lag_days`.
+            window_in_days: YAML key `window_in_days`.
+            streams: YAML key `streams`.
+            request_interval_ms: Pause between successful Data API runReport calls (reduces 429 quota errors).
+            max_api_retries: Per-request retries on HTTP 429 / 5xx (exponential backoff in the plugin HTTP client)."""
+        ...
     property_id: str
     """YAML key `property_id`."""
     start_date: str
@@ -2127,7 +2708,22 @@ class DataSourceGooglePageSpeed:
         respect_robots: bool | None = None,
         top_audits_per_page: int | None = None,
         max_concurrent_requests: int | None = None,
-    ) -> DataSourceGooglePageSpeed: ...
+    ) -> DataSourceGooglePageSpeed:
+        """Args:
+            site: YAML key `site`.
+            api_key: YAML key `api_key`.
+            url_mode: YAML key `url_mode`.
+            url_list: YAML key `url_list`.
+            max_urls: YAML key `max_urls`.
+            strategies: YAML key `strategies`.
+            categories: YAML key `categories`.
+            locale: YAML key `locale`.
+            max_requests_per_run: YAML key `max_requests_per_run`.
+            requests_per_minute: YAML key `requests_per_minute`.
+            respect_robots: YAML key `respect_robots`.
+            top_audits_per_page: YAML key `top_audits_per_page`.
+            max_concurrent_requests: YAML key `max_concurrent_requests`."""
+        ...
     site: str
     """YAML key `site`."""
     api_key: EnvRef | None
@@ -2193,7 +2789,30 @@ class DataSourceGoogleSearchConsole:
         max_api_retries: int | None = None,
         url_inspection_enabled: bool | None = None,
         url_list: list[str] | None = None,
-    ) -> DataSourceGoogleSearchConsole: ...
+    ) -> DataSourceGoogleSearchConsole:
+        """Args:
+            site_url: YAML key `site_url`.
+            start_date: YAML key `start_date`.
+            access_token: YAML key `access_token`.
+            oauth_token_url: YAML key `oauth_token_url`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_refresh_token: YAML key `oauth_refresh_token`.
+            service_account_json_path: YAML key `service_account_json_path`.
+            end_date: YAML key `end_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            processing_lag_days: YAML key `processing_lag_days`.
+            window_in_days: YAML key `window_in_days`.
+            streams: YAML key `streams`.
+            search_type: YAML key `search_type`.
+            data_state: YAML key `data_state`.
+            row_limit: YAML key `row_limit`.
+            request_interval_ms: YAML key `request_interval_ms`.
+            max_api_retries: YAML key `max_api_retries`.
+            url_inspection_enabled: YAML key `url_inspection_enabled`.
+            url_list: YAML key `url_list`."""
+        ...
     site_url: str
     """YAML key `site_url`."""
     start_date: str
@@ -2271,7 +2890,30 @@ class DataSourceGoogleSerpRanks:
         allintitle_keywords: list[str] | None = None,
         allintitle_only: bool | None = None,
         max_allintitle_queries_per_run: int | None = None,
-    ) -> DataSourceGoogleSerpRanks: ...
+    ) -> DataSourceGoogleSerpRanks:
+        """Args:
+            targets: YAML key `targets`.
+            keywords: YAML key `keywords`.
+            country: YAML key `country`.
+            language: YAML key `language`.
+            device: YAML key `device`.
+            max_depth: YAML key `max_depth`.
+            min_query_interval_ms: YAML key `min_query_interval_ms`.
+            max_queries_per_run: YAML key `max_queries_per_run`.
+            stop_after_first_target_match: YAML key `stop_after_first_target_match`.
+            capture_results: YAML key `capture_results`.
+            force_refresh_today: YAML key `force_refresh_today`.
+            navigation_timeout_ms: YAML key `navigation_timeout_ms`.
+            worker_node_path: YAML key `worker_node_path`.
+            playwright_executable_path: YAML key `playwright_executable_path`.
+            user_agent: YAML key `user_agent`.
+            brightdata_zone: Bright Data SERP API zone (default `serp_api1`; override with `BRIGHTDATA_ZONE`).
+            brightdata_api_base: Bright Data API base URL (default `https://api.brightdata.com`).
+            include_allintitle: Fetch `allintitle:{keyword}` counts via Bright Data (keyword hub KGR).
+            allintitle_keywords: Keywords for allintitle fetches; defaults to `keywords` when empty.
+            allintitle_only: When true, skip organic rank fetches and only emit allintitle_daily rows.
+            max_allintitle_queries_per_run: Cap allintitle queries per run (defaults to `max_queries_per_run`)."""
+        ...
     @property
     def targets(self) -> Sequence[DataSourceGoogleSerpRanksTargetEntry]:
         """YAML key `targets`."""
@@ -2354,7 +2996,19 @@ class DataSourceHttpClient:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceHttpClient: ...
+    ) -> DataSourceHttpClient:
+        """Args:
+            url: YAML key `url`.
+            method: YAML key `method`.
+            headers: YAML key `headers`.
+            body: YAML key `body`.
+            auth: YAML key `auth`.
+            scrape_interval_seconds: YAML key `scrape_interval_seconds`.
+            scrape_timeout_seconds: YAML key `scrape_timeout_seconds`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     url: str
     """YAML key `url`."""
     method: str | None
@@ -2391,7 +3045,15 @@ class DataSourceHttpServer:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceHttpServer: ...
+    ) -> DataSourceHttpServer:
+        """Args:
+            listen_address: YAML key `listen_address`.
+            path: YAML key `path`.
+            auth_token: YAML key `auth_token`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     listen_address: str | None
     """YAML key `listen_address`."""
     path: str | None
@@ -2422,7 +3084,21 @@ class DataSourceHubspotCrm:
         oauth_client_secret: EnvRef | None = None,
         oauth_refresh_token: EnvRef | None = None,
         privacy: DataSourceHubspotCrmPrivacyConfig | None = None,
-    ) -> DataSourceHubspotCrm: ...
+    ) -> DataSourceHubspotCrm:
+        """Args:
+            hub_id: YAML key `hub_id`.
+            start_date: YAML key `start_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            streams: YAML key `streams`.
+            min_query_interval_ms: YAML key `min_query_interval_ms`.
+            access_token: YAML key `access_token`.
+            oauth_token_url: YAML key `oauth_token_url`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_refresh_token: YAML key `oauth_refresh_token`.
+            privacy: YAML key `privacy`."""
+        ...
     hub_id: str
     """YAML key `hub_id`."""
     start_date: str
@@ -2472,7 +3148,24 @@ class DataSourceKafka:
         batch_size_seconds: int | None = None,
         cdc_mode: DataSourceKafkaSourceCdcMode | None = None,
         debezium_format: bool | None = None,
-    ) -> DataSourceKafka: ...
+    ) -> DataSourceKafka:
+        """Args:
+            brokers: YAML key `brokers`.
+            topic: YAML key `topic`.
+            group_id: YAML key `group_id`.
+            auto_offset_reset: YAML key `auto_offset_reset`.
+            security_protocol: YAML key `security_protocol`.
+            sasl_mechanism: YAML key `sasl_mechanism`.
+            sasl_username: YAML key `sasl_username`.
+            sasl_password: YAML key `sasl_password`.
+            mode: YAML key `mode`.
+            idle_timeout_seconds: YAML key `idle_timeout_seconds`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`.
+            cdc_mode: YAML key `cdc_mode`.
+            debezium_format: YAML key `debezium_format`."""
+        ...
     brokers: str
     """YAML key `brokers`."""
     topic: str
@@ -2516,7 +3209,16 @@ class DataSourceKinesis:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceKinesis: ...
+    ) -> DataSourceKinesis:
+        """Args:
+            stream_name: YAML key `stream_name`.
+            region: YAML key `region`.
+            endpoint_url: YAML key `endpoint_url`.
+            mode: YAML key `mode`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     stream_name: str
     """YAML key `stream_name`."""
     region: str | None
@@ -2551,7 +3253,23 @@ class DataSourceLinkedInAds:
         stream_profile: DataSourceLinkedInAdsStreamProfile | None = None,
         processing_lag_days: int | None = None,
         streams: list[str] | None = None,
-    ) -> DataSourceLinkedInAds: ...
+    ) -> DataSourceLinkedInAds:
+        """Args:
+            ad_account_id: YAML key `ad_account_id`.
+            start_date: YAML key `start_date`.
+            access_token: YAML key `access_token`.
+            oauth_token_url: YAML key `oauth_token_url`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_refresh_token: YAML key `oauth_refresh_token`.
+            rest_version: YAML key `rest_version`.
+            api_version: YAML key `api_version`.
+            end_date: YAML key `end_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            processing_lag_days: YAML key `processing_lag_days`.
+            streams: YAML key `streams`."""
+        ...
     ad_account_id: str
     """YAML key `ad_account_id`."""
     start_date: str
@@ -2604,7 +3322,23 @@ class DataSourceMetaAds:
         processing_lag_days: int | None = None,
         instagram_filter: bool | None = None,
         streams: list[str] | None = None,
-    ) -> DataSourceMetaAds: ...
+    ) -> DataSourceMetaAds:
+        """Args:
+            ad_account_id: YAML key `ad_account_id`.
+            start_date: YAML key `start_date`.
+            access_token: YAML key `access_token`.
+            oauth_token_url: YAML key `oauth_token_url`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_refresh_token: YAML key `oauth_refresh_token`.
+            api_version: YAML key `api_version`.
+            end_date: YAML key `end_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            processing_lag_days: YAML key `processing_lag_days`.
+            instagram_filter: YAML key `instagram_filter`.
+            streams: YAML key `streams`."""
+        ...
     ad_account_id: str
     """YAML key `ad_account_id`."""
     start_date: str
@@ -2657,7 +3391,23 @@ class DataSourceMetaInstagramAds:
         processing_lag_days: int | None = None,
         instagram_filter: bool | None = None,
         streams: list[str] | None = None,
-    ) -> DataSourceMetaInstagramAds: ...
+    ) -> DataSourceMetaInstagramAds:
+        """Args:
+            ad_account_id: YAML key `ad_account_id`.
+            start_date: YAML key `start_date`.
+            access_token: YAML key `access_token`.
+            oauth_token_url: YAML key `oauth_token_url`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_refresh_token: YAML key `oauth_refresh_token`.
+            api_version: YAML key `api_version`.
+            end_date: YAML key `end_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            processing_lag_days: YAML key `processing_lag_days`.
+            instagram_filter: YAML key `instagram_filter`.
+            streams: YAML key `streams`."""
+        ...
     ad_account_id: str
     """YAML key `ad_account_id`."""
     start_date: str
@@ -2705,7 +3455,18 @@ class DataSourceMongodb:
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
         cdc_mode: DataSourceMongodbSourceCdcMode | None = None,
-    ) -> DataSourceMongodb: ...
+    ) -> DataSourceMongodb:
+        """Args:
+            connection_string: YAML key `connection_string`.
+            database: YAML key `database`.
+            collection: YAML key `collection`.
+            filter: YAML key `filter`.
+            batch_size_rows: YAML key `batch_size_rows`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`.
+            cdc_mode: YAML key `cdc_mode`."""
+        ...
     connection_string: EnvRef
     """YAML key `connection_string`."""
     database: str
@@ -2738,7 +3499,17 @@ class DataSourceMotherduck:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceMotherduck: ...
+    ) -> DataSourceMotherduck:
+        """Args:
+            motherduck_token: YAML key `motherduck_token`.
+            database: YAML key `database`.
+            tables: YAML key `tables`.
+            query: YAML key `query`.
+            batch_size_rows: YAML key `batch_size_rows`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     motherduck_token: EnvRef
     """YAML key `motherduck_token`."""
     database: str | None
@@ -2777,7 +3548,21 @@ class DataSourceMqtt:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceMqtt: ...
+    ) -> DataSourceMqtt:
+        """Args:
+            broker_url: YAML key `broker_url`.
+            topic: YAML key `topic`.
+            port: YAML key `port`.
+            client_id: YAML key `client_id`.
+            qos: YAML key `qos`.
+            username: YAML key `username`.
+            password: YAML key `password`.
+            mode: YAML key `mode`.
+            idle_timeout_seconds: YAML key `idle_timeout_seconds`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     broker_url: str
     """YAML key `broker_url`."""
     topic: str
@@ -2815,7 +3600,16 @@ class DataSourceMssql:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceMssql: ...
+    ) -> DataSourceMssql:
+        """Args:
+            connection_string: YAML key `connection_string`.
+            tables: YAML key `tables`.
+            batch_size_rows: YAML key `batch_size_rows`.
+            query_timeout_seconds: YAML key `query_timeout_seconds`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     connection_string: EnvRef
     """YAML key `connection_string`."""
     @property
@@ -2848,7 +3642,17 @@ class DataSourceMysql:
         cdc_mode: DataSourceMysqlSourceCdcMode | None = None,
         server_id: int | None = None,
         cdc_idle_timeout_seconds: int | None = None,
-    ) -> DataSourceMysql: ...
+    ) -> DataSourceMysql:
+        """Args:
+            connection_string: YAML key `connection_string`.
+            tables: YAML key `tables`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`.
+            cdc_mode: YAML key `cdc_mode`.
+            server_id: YAML key `server_id`.
+            cdc_idle_timeout_seconds: YAML key `cdc_idle_timeout_seconds`."""
+        ...
     connection_string: EnvRef
     """YAML key `connection_string`."""
     @property
@@ -2880,7 +3684,14 @@ class DataSourceOtlp:
         signals: list[DataSourceOtlpOtlpSignal] | None = None,
         auth_token: EnvRef | None = None,
         attribute_allowlist: list[str] | None = None,
-    ) -> DataSourceOtlp: ...
+    ) -> DataSourceOtlp:
+        """Args:
+            listen_address_grpc: YAML key `listen_address_grpc`.
+            listen_address_http: YAML key `listen_address_http`.
+            signals: YAML key `signals`.
+            auth_token: YAML key `auth_token`.
+            attribute_allowlist: `None` keeps all attributes. `Some([])` drops every attribute."""
+        ...
     listen_address_grpc: str | None
     """YAML key `listen_address_grpc`."""
     listen_address_http: str | None
@@ -2927,7 +3738,25 @@ class DataSourcePostgres:
         replication_slot_name: str | None = None,
         publication_name: str | None = None,
         cdc_idle_timeout_seconds: int | None = None,
-    ) -> DataSourcePostgres: ...
+    ) -> DataSourcePostgres:
+        """Args:
+            host: YAML key `host`.
+            port: YAML key `port`.
+            user: YAML key `user`.
+            password: YAML key `password`.
+            database: YAML key `database`.
+            connection_string: YAML key `connection_string`.
+            tables: YAML key `tables`.
+            query: YAML key `query`.
+            batch_size_rows: YAML key `batch_size_rows`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`.
+            cdc_mode: YAML key `cdc_mode`.
+            replication_slot_name: YAML key `replication_slot_name`.
+            publication_name: YAML key `publication_name`.
+            cdc_idle_timeout_seconds: YAML key `cdc_idle_timeout_seconds`."""
+        ...
     host: str | None
     """YAML key `host`."""
     port: int | None
@@ -2980,7 +3809,19 @@ class DataSourceRedshift:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceRedshift: ...
+    ) -> DataSourceRedshift:
+        """Args:
+            database: YAML key `database`.
+            cluster_identifier: YAML key `cluster_identifier`.
+            workgroup_name: YAML key `workgroup_name`.
+            db_user: YAML key `db_user`.
+            tables: YAML key `tables`.
+            query: YAML key `query`.
+            region: YAML key `region`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     database: str
     """YAML key `database`."""
     cluster_identifier: str | None
@@ -3023,7 +3864,21 @@ class DataSourceRevolutBusiness:
         access_token: EnvRef | None = None,
         issuer_domain: str | None = None,
         privacy: DataSourceRevolutBusinessPrivacyConfig | None = None,
-    ) -> DataSourceRevolutBusiness: ...
+    ) -> DataSourceRevolutBusiness:
+        """Args:
+            client_id: YAML key `client_id`.
+            start_date: YAML key `start_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            streams: YAML key `streams`.
+            min_query_interval_ms: YAML key `min_query_interval_ms`.
+            api_base: YAML key `api_base`.
+            private_key_pem: YAML key `private_key_pem`.
+            refresh_token: YAML key `refresh_token`.
+            access_token: YAML key `access_token`.
+            issuer_domain: YAML key `issuer_domain`.
+            privacy: YAML key `privacy`."""
+        ...
     client_id: str
     """YAML key `client_id`."""
     start_date: str
@@ -3067,19 +3922,42 @@ class DataSourceS3:
         region: str | None = None,
         s3_prefix_ordered_depth: int | None = None,
         s3_delimiter: str | None = None,
-    ) -> DataSourceS3: ...
+    ) -> DataSourceS3:
+        """Args:
+            s3_bucket: Bucket to read.
+            s3_prefix: Key prefix under the bucket. Use `/` for the whole bucket.
+            format: Object format: `json`, `jsonl`, `parquet`, `csv`, and plugin-specific values.
+            batch_size_seconds: Target seconds of data per ingest batch.
+            batch_size_bytes: Target bytes per ingest batch.
+            endpoint_url: Custom S3 API endpoint (MinIO, LocalStack, path-style).
+            region: AWS region for this bucket (required when the default credential region differs, e.g. cross-account picnic sync).
+            s3_prefix_ordered_depth: YAML key `s3_prefix_ordered_depth`.
+            s3_delimiter: YAML key `s3_delimiter`."""
+        ...
     s3_bucket: str
-    """YAML key `s3_bucket`."""
+    """Bucket to read.
+
+    YAML key `s3_bucket`."""
     s3_prefix: str
-    """YAML key `s3_prefix`."""
+    """Key prefix under the bucket. Use `/` for the whole bucket.
+
+    YAML key `s3_prefix`."""
     format: str | None
-    """YAML key `format`."""
+    """Object format: `json`, `jsonl`, `parquet`, `csv`, and plugin-specific values.
+
+    YAML key `format`."""
     batch_size_seconds: int | None
-    """YAML key `batch_size_seconds`."""
+    """Target seconds of data per ingest batch.
+
+    YAML key `batch_size_seconds`."""
     batch_size_bytes: int | None
-    """YAML key `batch_size_bytes`."""
+    """Target bytes per ingest batch.
+
+    YAML key `batch_size_bytes`."""
     endpoint_url: str | None
-    """YAML key `endpoint_url`."""
+    """Custom S3 API endpoint (MinIO, LocalStack, path-style).
+
+    YAML key `endpoint_url`."""
     region: str | None
     """AWS region for this bucket (required when the default credential region differs, e.g. cross-account picnic sync).
 
@@ -3108,7 +3986,23 @@ class DataSourceSeoCrawl:
         seed_urls: list[str] | None = None,
         url_list: list[str] | None = None,
         max_response_bytes: int | None = None,
-    ) -> DataSourceSeoCrawl: ...
+    ) -> DataSourceSeoCrawl:
+        """Args:
+            site: YAML key `site`.
+            max_urls: YAML key `max_urls`.
+            max_depth: YAML key `max_depth`.
+            render_js: YAML key `render_js`.
+            crawl_rate_per_second: YAML key `crawl_rate_per_second`.
+            respect_robots: YAML key `respect_robots`.
+            sitemap_probe_paths: YAML key `sitemap_probe_paths`.
+            openai_model: YAML key `openai_model`.
+            openai_structure_enabled: When true, optional LLM pass for structural / AIO convention signals (not content prose).
+            skip_unchanged_content: YAML key `skip_unchanged_content`.
+            user_agent: YAML key `user_agent`.
+            seed_urls: Extra paths or absolute URLs to seed the crawl queue (useful for JS SPAs with no static links).
+            url_list: When non-empty, process only these URLs (discovery is external).
+            max_response_bytes: YAML key `max_response_bytes`."""
+        ...
     site: str
     """YAML key `site`."""
     max_urls: int | None
@@ -3170,7 +4064,18 @@ class DataSourceSftp:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceSftp: ...
+    ) -> DataSourceSftp:
+        """Args:
+            host: YAML key `host`.
+            username: YAML key `username`.
+            remote_path: YAML key `remote_path`.
+            port: YAML key `port`.
+            password: YAML key `password`.
+            private_key_path: YAML key `private_key_path`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     host: str
     """YAML key `host`."""
     username: str
@@ -3207,7 +4112,21 @@ class DataSourceShopifyAdmin:
         oauth_client_id: str | None = None,
         oauth_client_secret: EnvRef | None = None,
         oauth_access_token: EnvRef | None = None,
-    ) -> DataSourceShopifyAdmin: ...
+    ) -> DataSourceShopifyAdmin:
+        """Args:
+            shop_domain: YAML key `shop_domain`.
+            start_date: YAML key `start_date`.
+            api_version: YAML key `api_version`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            streams: YAML key `streams`.
+            min_query_interval_ms: YAML key `min_query_interval_ms`.
+            max_queries_per_run: YAML key `max_queries_per_run`.
+            use_bulk_operations: YAML key `use_bulk_operations`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_access_token: YAML key `oauth_access_token`."""
+        ...
     shop_domain: str
     """YAML key `shop_domain`."""
     start_date: str
@@ -3261,7 +4180,28 @@ class DataSourceSiteQuality:
         playwright_executable_path: str | None = None,
         respect_robots: bool | None = None,
         skip_heavy_when_unchanged: bool | None = None,
-    ) -> DataSourceSiteQuality: ...
+    ) -> DataSourceSiteQuality:
+        """Args:
+            site: YAML key `site`.
+            url_mode: YAML key `url_mode`.
+            url_list: YAML key `url_list`.
+            max_pages_per_run: YAML key `max_pages_per_run`.
+            max_crawl_depth: YAML key `max_crawl_depth`.
+            crawl_seed_urls: YAML key `crawl_seed_urls`.
+            devices: YAML key `devices`.
+            wait_until: YAML key `wait_until`.
+            navigation_timeout_ms: YAML key `navigation_timeout_ms`.
+            lighthouse_enabled: YAML key `lighthouse_enabled`.
+            lighthouse_categories: YAML key `lighthouse_categories`.
+            axe_enabled: YAML key `axe_enabled`.
+            axe_tags: YAML key `axe_tags`.
+            throttle: YAML key `throttle`.
+            pages_per_minute: YAML key `pages_per_minute`.
+            worker_node_path: YAML key `worker_node_path`.
+            playwright_executable_path: YAML key `playwright_executable_path`.
+            respect_robots: YAML key `respect_robots`.
+            skip_heavy_when_unchanged: YAML key `skip_heavy_when_unchanged`."""
+        ...
     site: str
     """YAML key `site`."""
     url_mode: DataSourceSiteQualityUrlMode | None
@@ -3341,7 +4281,24 @@ class DataSourceSiteSecurity:
         respect_robots: bool | None = None,
         max_third_party_scripts: int | None = None,
         import_lighthouse_from_site_quality: bool | None = None,
-    ) -> DataSourceSiteSecurity: ...
+    ) -> DataSourceSiteSecurity:
+        """Args:
+            site: YAML key `site`.
+            url_mode: YAML key `url_mode`.
+            url_list: YAML key `url_list`.
+            max_pages_per_run: YAML key `max_pages_per_run`.
+            max_crawl_depth: YAML key `max_crawl_depth`.
+            crawl_seed_urls: YAML key `crawl_seed_urls`.
+            devices: YAML key `devices`.
+            wait_until: YAML key `wait_until`.
+            navigation_timeout_ms: YAML key `navigation_timeout_ms`.
+            pages_per_minute: YAML key `pages_per_minute`.
+            worker_node_path: YAML key `worker_node_path`.
+            playwright_executable_path: YAML key `playwright_executable_path`.
+            respect_robots: YAML key `respect_robots`.
+            max_third_party_scripts: YAML key `max_third_party_scripts`.
+            import_lighthouse_from_site_quality: YAML key `import_lighthouse_from_site_quality`."""
+        ...
     site: str
     """YAML key `site`."""
     url_mode: DataSourceSiteSecurityUrlMode | None
@@ -3397,7 +4354,16 @@ class DataSourceSns:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceSns: ...
+    ) -> DataSourceSns:
+        """Args:
+            topic_arn: YAML key `topic_arn`.
+            sqs_queue_url: YAML key `sqs_queue_url`.
+            region: YAML key `region`.
+            endpoint_url: YAML key `endpoint_url`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     topic_arn: str
     """YAML key `topic_arn`."""
     sqs_queue_url: str
@@ -3424,7 +4390,15 @@ class DataSourceSocket:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceSocket: ...
+    ) -> DataSourceSocket:
+        """Args:
+            mode: YAML key `mode`.
+            address: YAML key `address`.
+            framing: YAML key `framing`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     mode: str
     """YAML key `mode`."""
     address: str
@@ -3450,7 +4424,16 @@ class DataSourceSqs:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceSqs: ...
+    ) -> DataSourceSqs:
+        """Args:
+            queue_url: YAML key `queue_url`.
+            region: YAML key `region`.
+            endpoint_url: YAML key `endpoint_url`.
+            mode: YAML key `mode`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     queue_url: str
     """YAML key `queue_url`."""
     region: str | None
@@ -3475,7 +4458,13 @@ class DataSourceStatsd:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceStatsd: ...
+    ) -> DataSourceStatsd:
+        """Args:
+            listen_address: YAML key `listen_address`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     listen_address: str | None
     """YAML key `listen_address`."""
     format: str | None
@@ -3494,7 +4483,13 @@ class DataSourceStdin:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceStdin: ...
+    ) -> DataSourceStdin:
+        """Args:
+            mode: YAML key `mode`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     mode: str | None
     """YAML key `mode`."""
     format: str | None
@@ -3522,7 +4517,22 @@ class DataSourceStripe:
         oauth_client_secret: EnvRef | None = None,
         oauth_refresh_token: EnvRef | None = None,
         privacy: DataSourceStripePrivacyConfig | None = None,
-    ) -> DataSourceStripe: ...
+    ) -> DataSourceStripe:
+        """Args:
+            stripe_account_id: YAML key `stripe_account_id`.
+            start_date: YAML key `start_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            streams: YAML key `streams`.
+            min_query_interval_ms: YAML key `min_query_interval_ms`.
+            write_policy: YAML key `write_policy`.
+            access_token: YAML key `access_token`.
+            oauth_token_url: YAML key `oauth_token_url`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_refresh_token: YAML key `oauth_refresh_token`.
+            privacy: YAML key `privacy`."""
+        ...
     stripe_account_id: str
     """YAML key `stripe_account_id`."""
     start_date: str
@@ -3571,7 +4581,21 @@ class DataSourceSumUp:
         oauth_refresh_token: EnvRef | None = None,
         access_token: EnvRef | None = None,
         privacy: DataSourceSumUpPrivacyConfig | None = None,
-    ) -> DataSourceSumUp: ...
+    ) -> DataSourceSumUp:
+        """Args:
+            merchant_code: YAML key `merchant_code`.
+            start_date: YAML key `start_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            streams: YAML key `streams`.
+            min_query_interval_ms: YAML key `min_query_interval_ms`.
+            oauth_token_url: YAML key `oauth_token_url`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_refresh_token: YAML key `oauth_refresh_token`.
+            access_token: YAML key `access_token`.
+            privacy: YAML key `privacy`."""
+        ...
     merchant_code: str
     """YAML key `merchant_code`."""
     start_date: str
@@ -3619,7 +4643,22 @@ class DataSourceUpfoundryBacklinks:
         max_detail_rows: int | None = None,
         materialization_manifest_key: str | None = None,
         max_outbound_rows: int | None = None,
-    ) -> DataSourceUpfoundryBacklinks: ...
+    ) -> DataSourceUpfoundryBacklinks:
+        """Args:
+            site: YAML key `site`.
+            entity_domain: YAML key `entity_domain`.
+            ops_bucket: YAML key `ops_bucket`.
+            entity_kind: YAML key `entity_kind`.
+            domain_variants: YAML key `domain_variants`.
+            primary_domain: YAML key `primary_domain`.
+            competitor_name: YAML key `competitor_name`.
+            ops_prefix: YAML key `ops_prefix`.
+            selected_snapshot_id: YAML key `selected_snapshot_id`.
+            include_subdomains: YAML key `include_subdomains`.
+            max_detail_rows: YAML key `max_detail_rows`.
+            materialization_manifest_key: YAML key `materialization_manifest_key`.
+            max_outbound_rows: YAML key `max_outbound_rows`."""
+        ...
     site: str
     """YAML key `site`."""
     entity_domain: str
@@ -3665,7 +4704,18 @@ class DataSourceUpfoundryLinkGraphCompact:
         keep_failed_manifest_days: int | None = None,
         keep_staging_days: int | None = None,
         spam_model_version: str | None = None,
-    ) -> DataSourceUpfoundryLinkGraphCompact: ...
+    ) -> DataSourceUpfoundryLinkGraphCompact:
+        """Args:
+            ops_bucket: YAML key `ops_bucket`.
+            ops_prefix: YAML key `ops_prefix`.
+            max_staging_partitions: YAML key `max_staging_partitions`.
+            pagerank_damping: YAML key `pagerank_damping`.
+            pagerank_max_iterations: YAML key `pagerank_max_iterations`.
+            keep_complete_snapshots: YAML key `keep_complete_snapshots`.
+            keep_failed_manifest_days: YAML key `keep_failed_manifest_days`.
+            keep_staging_days: YAML key `keep_staging_days`.
+            spam_model_version: YAML key `spam_model_version`."""
+        ...
     ops_bucket: str
     """YAML key `ops_bucket`."""
     ops_prefix: str | None
@@ -3710,7 +4760,29 @@ class DataSourceUpfoundryLinkGraphIngest:
         selected_referrer_page_refs_uri: str | None = None,
         corpus_run_id: str | None = None,
         max_referrer_pages_per_run: int | None = None,
-    ) -> DataSourceUpfoundryLinkGraphIngest: ...
+    ) -> DataSourceUpfoundryLinkGraphIngest:
+        """Args:
+            ops_bucket: Ops corpus bucket, e.g. upfoundry-prod-ops
+            cc_crawl_id: Common Crawl collection id, e.g. CC-MAIN-2025-08
+            ops_prefix: Prefix under bucket, default link-graph-corpus
+            frontier_domains: Frontier seed domains (registrable), e.g. skippr.io
+            cc_crawl_ids: Optional explicit crawl IDs. When set, these are scanned before falling back to cc_crawl_id.
+            cc_index_base_uri: Common Crawl URL Index Parquet root. Supports `{crawl_id}` replacement.
+            cc_urls_index_prefix: Local materialized URL index prefix under ops_prefix.
+            cc_index_source: Candidate source: local_urls_index (default), fixture, or direct_datafusion_file.
+            cc_direct_index_enabled: Direct Common Crawl scans are debug/fallback only.
+            max_urls_per_run: YAML key `max_urls_per_run`.
+            max_links_per_page: YAML key `max_links_per_page`.
+            monthly_window: YAML key `monthly_window`.
+            cc_web_graph_uri: Optional Common Crawl Web Graph rank export URI (s3://, https://, or fixture file).
+            cc_web_graph_max_rows: YAML key `cc_web_graph_max_rows`.
+            live_crawl_enabled: YAML key `live_crawl_enabled`.
+            brightdata_proxy_escalation_enabled: YAML key `brightdata_proxy_escalation_enabled`.
+            include_subdomains: YAML key `include_subdomains`.
+            selected_referrer_page_refs_uri: Optional JSONL selected from cc_wat_source_pages_by_target_domain_index.
+            corpus_run_id: Stable run identifier used to keep staging, dimension, and manifest objects unique.
+            max_referrer_pages_per_run: YAML key `max_referrer_pages_per_run`."""
+        ...
     ops_bucket: str
     """Ops corpus bucket, e.g. upfoundry-prod-ops
 
@@ -3803,7 +4875,23 @@ class DataSourceUpfoundryLinkGraphWatIndex:
         include_subdomains: bool | None = None,
         sqs_queue_url: str | None = None,
         sqs_visibility_timeout_seconds: int | None = None,
-    ) -> DataSourceUpfoundryLinkGraphWatIndex: ...
+    ) -> DataSourceUpfoundryLinkGraphWatIndex:
+        """Args:
+            crawl_id: YAML key `crawl_id`.
+            wat_paths_manifest_uri: YAML key `wat_paths_manifest_uri`.
+            wat_path_start: YAML key `wat_path_start`.
+            wat_path_end: YAML key `wat_path_end`.
+            target_domain_bucket_count: YAML key `target_domain_bucket_count`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            max_records_per_batch: YAML key `max_records_per_batch`.
+            max_links_per_page: YAML key `max_links_per_page`.
+            max_wat_objects_per_sync: When `None`, process all remaining manifest paths in one sync (production default).
+            max_wat_object_bytes: YAML key `max_wat_object_bytes`.
+            max_wat_records_per_object: When set, stop parsing each WAT object after this many gzip member records.
+            include_subdomains: YAML key `include_subdomains`.
+            sqs_queue_url: YAML key `sqs_queue_url`.
+            sqs_visibility_timeout_seconds: YAML key `sqs_visibility_timeout_seconds`."""
+        ...
     crawl_id: str | None
     """YAML key `crawl_id`."""
     wat_paths_manifest_uri: str | None
@@ -3850,7 +4938,17 @@ class DataSourceWebsocket:
         format: str | None = None,
         batch_size_bytes: int | None = None,
         batch_size_seconds: int | None = None,
-    ) -> DataSourceWebsocket: ...
+    ) -> DataSourceWebsocket:
+        """Args:
+            url: YAML key `url`.
+            headers: YAML key `headers`.
+            ping_interval_seconds: YAML key `ping_interval_seconds`.
+            mode: YAML key `mode`.
+            idle_timeout_seconds: YAML key `idle_timeout_seconds`.
+            format: YAML key `format`.
+            batch_size_bytes: YAML key `batch_size_bytes`.
+            batch_size_seconds: YAML key `batch_size_seconds`."""
+        ...
     url: str
     """YAML key `url`."""
     @property
@@ -3891,7 +4989,23 @@ class DataSourceXAds:
         stream_profile: DataSourceXAdsStreamProfile | None = None,
         processing_lag_days: int | None = None,
         streams: list[str] | None = None,
-    ) -> DataSourceXAds: ...
+    ) -> DataSourceXAds:
+        """Args:
+            account_id: YAML key `account_id`.
+            start_date: YAML key `start_date`.
+            ad_account_id: YAML key `ad_account_id`.
+            bearer_token: YAML key `bearer_token`.
+            access_token: YAML key `access_token`.
+            oauth_consumer_key: YAML key `oauth_consumer_key`.
+            oauth_consumer_secret: YAML key `oauth_consumer_secret`.
+            oauth_token: YAML key `oauth_token`.
+            oauth_token_secret: YAML key `oauth_token_secret`.
+            end_date: YAML key `end_date`.
+            lookback_days: YAML key `lookback_days`.
+            stream_profile: YAML key `stream_profile`.
+            processing_lag_days: YAML key `processing_lag_days`.
+            streams: YAML key `streams`."""
+        ...
     account_id: str
     """YAML key `account_id`."""
     start_date: str
@@ -3943,7 +5057,22 @@ class DataSourceXeroAccounting:
         oauth_refresh_token: EnvRef | None = None,
         access_token: EnvRef | None = None,
         privacy: DataSourceXeroAccountingPrivacyConfig | None = None,
-    ) -> DataSourceXeroAccounting: ...
+    ) -> DataSourceXeroAccounting:
+        """Args:
+            tenant_id: YAML key `tenant_id`.
+            start_date: YAML key `start_date`.
+            lookback_days: YAML key `lookback_days`.
+            page_size: YAML key `page_size`.
+            stream_profile: YAML key `stream_profile`.
+            streams: YAML key `streams`.
+            min_query_interval_ms: YAML key `min_query_interval_ms`.
+            oauth_token_url: YAML key `oauth_token_url`.
+            oauth_client_id: YAML key `oauth_client_id`.
+            oauth_client_secret: YAML key `oauth_client_secret`.
+            oauth_refresh_token: YAML key `oauth_refresh_token`.
+            access_token: YAML key `access_token`.
+            privacy: YAML key `privacy`."""
+        ...
     tenant_id: str
     """YAML key `tenant_id`."""
     start_date: str
@@ -3987,7 +5116,16 @@ class DataSinkAmqp:
         format: str | None = None,
         max_in_flight: int | None = None,
         max_in_flight_bytes: int | None = None,
-    ) -> DataSinkAmqp: ...
+    ) -> DataSinkAmqp:
+        """Args:
+            connection_string: YAML key `connection_string`.
+            exchange: YAML key `exchange`.
+            routing_key: YAML key `routing_key`.
+            exchange_type: YAML key `exchange_type`.
+            format: YAML key `format`.
+            max_in_flight: YAML key `max_in_flight`.
+            max_in_flight_bytes: YAML key `max_in_flight_bytes`."""
+        ...
     connection_string: EnvRef
     """YAML key `connection_string`."""
     exchange: str
@@ -4018,7 +5156,19 @@ class DataSinkAthena:
         catalog: str | None = None,
         max_concurrency: int | None = None,
         discovery_cache_ttl_secs: int | None = None,
-    ) -> DataSinkAthena: ...
+    ) -> DataSinkAthena:
+        """Args:
+            s3_bucket: YAML key `s3_bucket`.
+            s3_prefix: YAML key `s3_prefix`.
+            athena_workgroup_name: YAML key `athena_workgroup_name`.
+            athena_results_s3_bucket: YAML key `athena_results_s3_bucket`.
+            format: YAML key `format`.
+            glue_database_name: YAML key `glue_database_name`.
+            region: Query/model only; ignored at ingest.
+            catalog: Query/model only; ignored at ingest.
+            max_concurrency: Query/model only; ignored at ingest.
+            discovery_cache_ttl_secs: Query/model only; ignored at ingest."""
+        ...
     s3_bucket: str
     """YAML key `s3_bucket`."""
     s3_prefix: str
@@ -4062,7 +5212,19 @@ class DataSinkAthenaIceberg:
         region: str | None = None,
         catalog_id: str | None = None,
         object_store: DataSinkAthenaIcebergS3CompatibleObjectStore | None = None,
-    ) -> DataSinkAthenaIceberg: ...
+    ) -> DataSinkAthenaIceberg:
+        """Config for the `AthenaIceberg` data sink and schema sink.
+        `skipprd query` reads Glue Iceberg ∪ WAL. Athena SQL still queries the same tables.
+
+        Args:
+            warehouse: Table storage root: `s3://bucket/prefix/`.
+            glue_database_name: Glue database. Also the Iceberg namespace.
+            athena_workgroup_name: Athena workgroup that runs SQL against these tables.
+            athena_results_s3_bucket: Bucket name only (not an `s3://` URI), same as `Athena:`.
+            region: AWS region of the Glue catalog and Athena workgroup.
+            catalog_id: Glue catalog id when it is not the account default.
+            object_store: YAML key `object_store`."""
+        ...
     warehouse: str
     """Table storage root: `s3://bucket/prefix/`.
 
@@ -4072,15 +5234,21 @@ class DataSinkAthenaIceberg:
 
     YAML key `glue_database_name`."""
     athena_workgroup_name: str
-    """YAML key `athena_workgroup_name`."""
+    """Athena workgroup that runs SQL against these tables.
+
+    YAML key `athena_workgroup_name`."""
     athena_results_s3_bucket: str
     """Bucket name only (not an `s3://` URI), same as `Athena:`.
 
     YAML key `athena_results_s3_bucket`."""
     region: str | None
-    """YAML key `region`."""
+    """AWS region of the Glue catalog and Athena workgroup.
+
+    YAML key `region`."""
     catalog_id: str | None
-    """YAML key `catalog_id`."""
+    """Glue catalog id when it is not the account default.
+
+    YAML key `catalog_id`."""
     object_store: DataSinkAthenaIcebergS3CompatibleObjectStore | None
     """YAML key `object_store`."""
 
@@ -4095,7 +5263,15 @@ class DataSinkAzureBlob:
         sas_token: EnvRef | None = None,
         prefix: str | None = None,
         format: str | None = None,
-    ) -> DataSinkAzureBlob: ...
+    ) -> DataSinkAzureBlob:
+        """Args:
+            account_name: YAML key `account_name`.
+            container: YAML key `container`.
+            account_key: YAML key `account_key`.
+            sas_token: YAML key `sas_token`.
+            prefix: YAML key `prefix`.
+            format: YAML key `format`."""
+        ...
     account_name: str
     """YAML key `account_name`."""
     container: str
@@ -4120,7 +5296,15 @@ class DataSinkBigquery:
         credentials_path: str | None = None,
         max_concurrency: int | None = None,
         discovery_cache_ttl_secs: int | None = None,
-    ) -> DataSinkBigquery: ...
+    ) -> DataSinkBigquery:
+        """Args:
+            project: YAML key `project`.
+            dataset: YAML key `dataset`.
+            location: YAML key `location`.
+            credentials_path: YAML key `credentials_path`.
+            max_concurrency: Query/model only; ignored at ingest.
+            discovery_cache_ttl_secs: Query/model only; ignored at ingest."""
+        ...
     project: str
     """YAML key `project`."""
     dataset: str
@@ -4148,7 +5332,14 @@ class DataSinkClickhouse:
         user: str | None = None,
         password: EnvRef | None = None,
         table: str | None = None,
-    ) -> DataSinkClickhouse: ...
+    ) -> DataSinkClickhouse:
+        """Args:
+            url: YAML key `url`.
+            database: YAML key `database`.
+            user: YAML key `user`.
+            password: YAML key `password`.
+            table: YAML key `table`."""
+        ...
     url: str
     """YAML key `url`."""
     database: str | None
@@ -4173,7 +5364,17 @@ class DataSinkDatabricks:
         table: str | None = None,
         delta_table_uri: str | None = None,
         storage_options: dict[str, str] | None = None,
-    ) -> DataSinkDatabricks: ...
+    ) -> DataSinkDatabricks:
+        """Args:
+            workspace_url: YAML key `workspace_url`.
+            token: YAML key `token`.
+            warehouse_id: YAML key `warehouse_id`.
+            catalog: YAML key `catalog`.
+            schema: YAML key `schema`.
+            table: YAML key `table`.
+            delta_table_uri: YAML key `delta_table_uri`.
+            storage_options: YAML key `storage_options`."""
+        ...
     workspace_url: str | None
     """YAML key `workspace_url`."""
     token: EnvRef | None
@@ -4199,7 +5400,19 @@ class DataSinkDatabricks:
 class DataSinkDuckdb:
     """Config for the `Duckdb` data sink and schema sink.
     `skipprd query` reads filesystem Iceberg ∪ WAL. DuckDB `iceberg_scan` still reads compacted Iceberg only."""
-    def __new__(cls, *, warehouse: str, table_namespace: str) -> DataSinkDuckdb: ...
+    def __new__(
+        cls,
+        *,
+        warehouse: str,
+        table_namespace: str,
+    ) -> DataSinkDuckdb:
+        """Config for the `Duckdb` data sink and schema sink.
+        `skipprd query` reads filesystem Iceberg ∪ WAL. DuckDB `iceberg_scan` still reads compacted Iceberg only.
+
+        Args:
+            warehouse: `file:///abs/path`.
+            table_namespace: Iceberg namespace for sink-managed tables. Unique per warehouse."""
+        ...
     warehouse: str
     """`file:///abs/path`.
 
@@ -4216,7 +5429,11 @@ class DataSinkFile:
         *,
         format: str | None = None,
         output_dir: str | None = None,
-    ) -> DataSinkFile: ...
+    ) -> DataSinkFile:
+        """Args:
+            format: YAML key `format`.
+            output_dir: YAML key `output_dir`."""
+        ...
     format: str | None
     """YAML key `format`."""
     output_dir: str | None
@@ -4231,7 +5448,13 @@ class DataSinkGcs:
         prefix: str | None = None,
         service_account_key_path: str | None = None,
         format: str | None = None,
-    ) -> DataSinkGcs: ...
+    ) -> DataSinkGcs:
+        """Args:
+            bucket: YAML key `bucket`.
+            prefix: YAML key `prefix`.
+            service_account_key_path: YAML key `service_account_key_path`.
+            format: YAML key `format`."""
+        ...
     bucket: str
     """YAML key `bucket`."""
     prefix: str | None
@@ -4250,7 +5473,13 @@ class DataSinkMotherduck:
         database: str | None = None,
         table: str | None = None,
         schema: str | None = None,
-    ) -> DataSinkMotherduck: ...
+    ) -> DataSinkMotherduck:
+        """Args:
+            motherduck_token: YAML key `motherduck_token`.
+            database: YAML key `database`.
+            table: YAML key `table`.
+            schema: Query/model only; ignored at ingest."""
+        ...
     motherduck_token: EnvRef
     """YAML key `motherduck_token`."""
     database: str | None
@@ -4275,7 +5504,18 @@ class DataSinkPostgres:
         password: EnvRef | None = None,
         schema: str | None = None,
         sslmode: str | None = None,
-    ) -> DataSinkPostgres: ...
+    ) -> DataSinkPostgres:
+        """Runtime / pipeline config for the Postgres data sink.
+
+        Args:
+            user: YAML key `user`.
+            database: YAML key `database`.
+            host: YAML key `host`.
+            port: YAML key `port`.
+            password: YAML key `password`.
+            schema: YAML key `schema`.
+            sslmode: YAML key `sslmode`."""
+        ...
     user: str
     """YAML key `user`."""
     database: str
@@ -4306,7 +5546,19 @@ class DataSinkRedshift:
         staging_s3_prefix: str | None = None,
         iam_role_arn: str | None = None,
         schema: str | None = None,
-    ) -> DataSinkRedshift: ...
+    ) -> DataSinkRedshift:
+        """Args:
+            database: YAML key `database`.
+            cluster_identifier: YAML key `cluster_identifier`.
+            workgroup_name: YAML key `workgroup_name`.
+            db_user: YAML key `db_user`.
+            table: YAML key `table`.
+            region: YAML key `region`.
+            staging_s3_bucket: YAML key `staging_s3_bucket`.
+            staging_s3_prefix: YAML key `staging_s3_prefix`.
+            iam_role_arn: YAML key `iam_role_arn`.
+            schema: Query/model only; ignored at ingest."""
+        ...
     database: str
     """YAML key `database`."""
     cluster_identifier: str | None
@@ -4339,15 +5591,29 @@ class DataSinkS3:
         s3_prefix: str,
         format: str | None = None,
         endpoint_url: str | None = None,
-    ) -> DataSinkS3: ...
+    ) -> DataSinkS3:
+        """Args:
+            s3_bucket: Bucket to write.
+            s3_prefix: Key prefix under the bucket.
+            format: Object format written to the prefix: `jsonl`, `parquet`, and plugin-specific values.
+            endpoint_url: Custom S3 API endpoint (MinIO, LocalStack, path-style)."""
+        ...
     s3_bucket: str
-    """YAML key `s3_bucket`."""
+    """Bucket to write.
+
+    YAML key `s3_bucket`."""
     s3_prefix: str
-    """YAML key `s3_prefix`."""
+    """Key prefix under the bucket.
+
+    YAML key `s3_prefix`."""
     format: str | None
-    """YAML key `format`."""
+    """Object format written to the prefix: `jsonl`, `parquet`, and plugin-specific values.
+
+    YAML key `format`."""
     endpoint_url: str | None
-    """YAML key `endpoint_url`."""
+    """Custom S3 API endpoint (MinIO, LocalStack, path-style).
+
+    YAML key `endpoint_url`."""
 
 @final
 class DataSinkSftp:
@@ -4361,7 +5627,16 @@ class DataSinkSftp:
         password: EnvRef | None = None,
         private_key_path: str | None = None,
         format: str | None = None,
-    ) -> DataSinkSftp: ...
+    ) -> DataSinkSftp:
+        """Args:
+            host: YAML key `host`.
+            username: YAML key `username`.
+            remote_path: YAML key `remote_path`.
+            port: YAML key `port`.
+            password: YAML key `password`.
+            private_key_path: YAML key `private_key_path`.
+            format: YAML key `format`."""
+        ...
     host: str
     """YAML key `host`."""
     username: str
@@ -4393,7 +5668,21 @@ class DataSinkSkipprLake:
         region: str | None = None,
         object_store: DataSinkSkipprLakeWarehouseObjectStore | None = None,
         table_namespace: str | None = None,
-    ) -> DataSinkSkipprLake: ...
+    ) -> DataSinkSkipprLake:
+        """Config for the `SkipprLake` data sink and schema sink.
+        Query and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)
+        inside `IcebergCatalogSpec`, not as a standalone query backend.
+        The Skippr catalog is the only catalog: pointers live in `catalog_table`
+        (DynamoDB, or Cloud Tables when SkipprStore selects it). Catalog rows MAY
+        share the SkipprStore table; PK/SK prefixes do not collide with offsets.
+
+        Args:
+            warehouse: Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.
+            catalog_table: Catalog pointer table. MAY be the SkipprStore table.
+            region: YAML key `region`.
+            object_store: YAML key `object_store`.
+            table_namespace: Iceberg namespace for sink-managed tables. Unique per `(catalog_table, table_namespace)`."""
+        ...
     warehouse: str
     """Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.
 
@@ -4432,7 +5721,25 @@ class DataSinkSnowflake:
         staging_gcs_service_account_key_path: str | None = None,
         max_concurrency: int | None = None,
         discovery_cache_ttl_secs: int | None = None,
-    ) -> DataSinkSnowflake: ...
+    ) -> DataSinkSnowflake:
+        """Args:
+            account: YAML key `account`.
+            user: YAML key `user`.
+            warehouse: YAML key `warehouse`.
+            database: YAML key `database`.
+            schema: YAML key `schema`.
+            password: YAML key `password`.
+            role: YAML key `role`.
+            stage: YAML key `stage`.
+            private_key_path: YAML key `private_key_path`.
+            staging_uri: YAML key `staging_uri`.
+            staging_storage_integration: YAML key `staging_storage_integration`.
+            staging_azure_sas_token: YAML key `staging_azure_sas_token`.
+            staging_azure_account_key: YAML key `staging_azure_account_key`.
+            staging_gcs_service_account_key_path: YAML key `staging_gcs_service_account_key_path`.
+            max_concurrency: Query/model only; ignored at ingest.
+            discovery_cache_ttl_secs: Query/model only; ignored at ingest."""
+        ...
     account: str
     """YAML key `account`."""
     user: str
@@ -4482,7 +5789,12 @@ class DataSinkSynapse:
         connection_string: EnvRef,
         schema: str | None = None,
         table: str | None = None,
-    ) -> DataSinkSynapse: ...
+    ) -> DataSinkSynapse:
+        """Args:
+            connection_string: YAML key `connection_string`.
+            schema: YAML key `schema`.
+            table: YAML key `table`."""
+        ...
     connection_string: EnvRef
     """YAML key `connection_string`."""
     schema: str | None
@@ -4501,7 +5813,15 @@ class SchemaSinkBigquery:
         credentials_path: str | None = None,
         max_concurrency: int | None = None,
         discovery_cache_ttl_secs: int | None = None,
-    ) -> SchemaSinkBigquery: ...
+    ) -> SchemaSinkBigquery:
+        """Args:
+            project: YAML key `project`.
+            dataset: YAML key `dataset`.
+            location: YAML key `location`.
+            credentials_path: YAML key `credentials_path`.
+            max_concurrency: Query/model only; ignored at ingest.
+            discovery_cache_ttl_secs: Query/model only; ignored at ingest."""
+        ...
     project: str
     """YAML key `project`."""
     dataset: str
@@ -4529,7 +5849,14 @@ class SchemaSinkClickhouse:
         user: str | None = None,
         password: EnvRef | None = None,
         table: str | None = None,
-    ) -> SchemaSinkClickhouse: ...
+    ) -> SchemaSinkClickhouse:
+        """Args:
+            url: YAML key `url`.
+            database: YAML key `database`.
+            user: YAML key `user`.
+            password: YAML key `password`.
+            table: YAML key `table`."""
+        ...
     url: str
     """YAML key `url`."""
     database: str | None
@@ -4556,7 +5883,19 @@ class SchemaSinkGlue:
         catalog: str | None = None,
         max_concurrency: int | None = None,
         discovery_cache_ttl_secs: int | None = None,
-    ) -> SchemaSinkGlue: ...
+    ) -> SchemaSinkGlue:
+        """Args:
+            s3_bucket: YAML key `s3_bucket`.
+            s3_prefix: YAML key `s3_prefix`.
+            athena_workgroup_name: YAML key `athena_workgroup_name`.
+            athena_results_s3_bucket: YAML key `athena_results_s3_bucket`.
+            format: YAML key `format`.
+            glue_database_name: YAML key `glue_database_name`.
+            region: Query/model only; ignored at ingest.
+            catalog: Query/model only; ignored at ingest.
+            max_concurrency: Query/model only; ignored at ingest.
+            discovery_cache_ttl_secs: Query/model only; ignored at ingest."""
+        ...
     s3_bucket: str
     """YAML key `s3_bucket`."""
     s3_prefix: str
@@ -4595,7 +5934,13 @@ class SchemaSinkMotherduck:
         database: str | None = None,
         table: str | None = None,
         schema: str | None = None,
-    ) -> SchemaSinkMotherduck: ...
+    ) -> SchemaSinkMotherduck:
+        """Args:
+            motherduck_token: YAML key `motherduck_token`.
+            database: YAML key `database`.
+            table: YAML key `table`.
+            schema: Query/model only; ignored at ingest."""
+        ...
     motherduck_token: EnvRef
     """YAML key `motherduck_token`."""
     database: str | None
@@ -4620,7 +5965,18 @@ class SchemaSinkPostgres:
         password: EnvRef | None = None,
         schema: str | None = None,
         sslmode: str | None = None,
-    ) -> SchemaSinkPostgres: ...
+    ) -> SchemaSinkPostgres:
+        """Runtime / pipeline config for the Postgres data sink.
+
+        Args:
+            user: YAML key `user`.
+            database: YAML key `database`.
+            host: YAML key `host`.
+            port: YAML key `port`.
+            password: YAML key `password`.
+            schema: YAML key `schema`.
+            sslmode: YAML key `sslmode`."""
+        ...
     user: str
     """YAML key `user`."""
     database: str
@@ -4651,7 +6007,19 @@ class SchemaSinkRedshift:
         staging_s3_prefix: str | None = None,
         iam_role_arn: str | None = None,
         schema: str | None = None,
-    ) -> SchemaSinkRedshift: ...
+    ) -> SchemaSinkRedshift:
+        """Args:
+            database: YAML key `database`.
+            cluster_identifier: YAML key `cluster_identifier`.
+            workgroup_name: YAML key `workgroup_name`.
+            db_user: YAML key `db_user`.
+            table: YAML key `table`.
+            region: YAML key `region`.
+            staging_s3_bucket: YAML key `staging_s3_bucket`.
+            staging_s3_prefix: YAML key `staging_s3_prefix`.
+            iam_role_arn: YAML key `iam_role_arn`.
+            schema: Query/model only; ignored at ingest."""
+        ...
     database: str
     """YAML key `database`."""
     cluster_identifier: str | None
@@ -4696,7 +6064,25 @@ class SchemaSinkSnowflake:
         staging_gcs_service_account_key_path: str | None = None,
         max_concurrency: int | None = None,
         discovery_cache_ttl_secs: int | None = None,
-    ) -> SchemaSinkSnowflake: ...
+    ) -> SchemaSinkSnowflake:
+        """Args:
+            account: YAML key `account`.
+            user: YAML key `user`.
+            warehouse: YAML key `warehouse`.
+            database: YAML key `database`.
+            schema: YAML key `schema`.
+            password: YAML key `password`.
+            role: YAML key `role`.
+            stage: YAML key `stage`.
+            private_key_path: YAML key `private_key_path`.
+            staging_uri: YAML key `staging_uri`.
+            staging_storage_integration: YAML key `staging_storage_integration`.
+            staging_azure_sas_token: YAML key `staging_azure_sas_token`.
+            staging_azure_account_key: YAML key `staging_azure_account_key`.
+            staging_gcs_service_account_key_path: YAML key `staging_gcs_service_account_key_path`.
+            max_concurrency: Query/model only; ignored at ingest.
+            discovery_cache_ttl_secs: Query/model only; ignored at ingest."""
+        ...
     account: str
     """YAML key `account`."""
     user: str
