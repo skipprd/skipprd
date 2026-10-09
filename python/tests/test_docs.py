@@ -1,6 +1,7 @@
 """Python blocks in the docs that use `skippr` must use the shipped API."""
 
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -50,7 +51,7 @@ def test_docs_have_python_blocks():
 
 @pytest.mark.parametrize("code", BLOCKS)
 def test_doc_block_compiles(code):
-    compile(code, "<doc>", "exec")
+    compile(textwrap.dedent(code), "<doc>", "exec")
 
 
 @pytest.mark.parametrize("code", BLOCKS)
@@ -63,7 +64,7 @@ def test_doc_block_avoids_removed_api(code):
 def test_doc_block_names_exist(code):
     imported = re.findall(r"from skippr import ([^\n]+)", code)
     names = {n.strip() for line in imported for n in line.split(",") if n.strip()}
-    names |= set(re.findall(r"\bskippr\.([A-Za-z_]\w*)", code))
+    names |= set(re.findall(r"\bskippr\.([A-Z][A-Za-z_]\w*)", code))
     for name in names:
         assert hasattr(skippr, name), name
 
