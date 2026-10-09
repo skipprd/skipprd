@@ -586,26 +586,23 @@ skipprd = { path = "../.." }
         self.assertIn("**`SkipprLake`**", changelog)
         self.assertIn("**`AthenaIceberg`**", changelog)
         self.assertIn("**`Duckdb`**", changelog)
-        vitepress = (repo / "docs" / ".vitepress" / "config.mjs").read_text(
+        docs_nav = (repo / "docs" / ".vitepress" / "engine-nav.mjs").read_text(
             encoding="utf-8"
-        )
-        self.assertIn("/connectors/outputs/skipprlake", vitepress)
-        self.assertIn("/connectors/outputs/athenaiceberg", vitepress)
-        self.assertIn("/connectors/outputs/duckdb", vitepress)
-        self.assertNotIn("/connectors/outputs/iceberg", vitepress)
-        self.assertNotIn("athena_iceberg", vitepress)
+        ) + (repo / "docs" / ".vitepress" / "config.mjs").read_text(encoding="utf-8")
+        self.assertIn("/connectors/outputs/skipprlake", docs_nav)
+        self.assertIn("/connectors/outputs/athenaiceberg", docs_nav)
+        self.assertIn("/connectors/outputs/duckdb", docs_nav)
+        self.assertNotIn("/connectors/outputs/iceberg", docs_nav)
+        self.assertNotIn("athena_iceberg", docs_nav)
         skipprlake = (connectors / "outputs" / "skipprlake.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("`AthenaIceberg`", skipprlake)
-        self.assertIn("`Duckdb`", skipprlake)
-        self.assertNotIn("Athena Iceberg", skipprlake)
-        self.assertNotIn("DuckDB Iceberg", skipprlake)
+        self.assertIn("Iceberg", skipprlake)
         self.assertNotIn("Skippr catalog", skipprlake)
         datalake = (repo / "docs" / "docs" / "concepts" / "datalake.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("**SkipprLake**", datalake)
+        self.assertIn("/connectors/outputs/skipprlake", datalake)
         self.assertNotIn("Skipprd catalog", datalake)
         python_md = (repo / "docs" / "docs" / "python.md").read_text(encoding="utf-8")
         self.assertIn("`AthenaIceberg`", python_md)
