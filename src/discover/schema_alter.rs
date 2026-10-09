@@ -175,23 +175,73 @@ fn rename_column(metadata: &mut Metadata, from: &str, to: &str) -> Result<(), Sc
     if from == to {
         return Ok(());
     }
-    if to.contains('.') {
-        return Err(SchemaAlterError::Failed(
-            "RENAME COLUMN target must be a single field name".to_string(),
-        ));
-    }
     if field_exists(metadata, to) {
         return Err(SchemaAlterError::ColumnExists(to.to_string()));
     }
-    let (parent, leaf) = parent_and_leaf(metadata, from)?;
-    let mut field = parent
-        .fields
-        .remove(&leaf)
-        .ok_or_else(|| SchemaAlterError::ColumnNotFound(from.to_string()))?;
+    ensure_rename_dest(metadata, from, to)?;
+    let mut field = take_field(metadata, from)?;
     field.out_field_name = last_segment(to).to_string();
-    parent.fields.insert(last_segment(to).to_string(), field);
+    insert_field_at_path(metadata, to, field)?;
     retarget_evolution_fields(metadata, from, Some(to));
     Ok(())
+}
+
+fn dest_parent_path(to: &str) -> Option<String> {
+    let segments: Vec<&str> = to
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() <= 1 {
+        return None;
+    }
+    Some(segments[..segments.len() - 1].join("."))
+}
+
+fn ensure_rename_dest(metadata: &Metadata, from: &str, to: &str) -> Result<(), SchemaAlterError> {
+    let Some(parent_path) = dest_parent_path(to) else {
+        return Ok(());
+    };
+    if parent_path == from || parent_path.starts_with(&format!("{from}.")) {
+        return Err(SchemaAlterError::Failed(format!(
+            "cannot rename '{from}' into itself"
+        )));
+    }
+    let parent = find_field(metadata, &parent_path)
+        .ok_or_else(|| SchemaAlterError::ColumnNotFound(to.to_string()))?;
+    if parent.determined_type != SkipprDataType::Record {
+        return Err(SchemaAlterError::Failed(format!(
+            "RENAME COLUMN target parent '{parent_path}' is not a record"
+        )));
+    }
+    Ok(())
+}
+
+fn take_field(metadata: &mut Metadata, path: &str) -> Result<Metadata, SchemaAlterError> {
+    let (parent, leaf) = parent_and_leaf(metadata, path)?;
+    parent
+        .fields
+        .remove(&leaf)
+        .ok_or_else(|| SchemaAlterError::ColumnNotFound(path.to_string()))
+}
+
+fn insert_field_at_path(
+    metadata: &mut Metadata,
+    to: &str,
+    field: Metadata,
+) -> Result<(), SchemaAlterError> {
+    let leaf = last_segment(to).to_string();
+    match dest_parent_path(to) {
+        None => {
+            metadata.fields.insert(leaf, field);
+            Ok(())
+        }
+        Some(parent_path) => {
+            let parent = Metadata::get_nested_metadata_from_field_notation(metadata, &parent_path)
+                .ok_or_else(|| SchemaAlterError::ColumnNotFound(to.to_string()))?;
+            parent.fields.insert(leaf, field);
+            Ok(())
+        }
+    }
 }
 
 fn merge_column(metadata: &mut Metadata, src: &str, dst: &str) -> Result<(), SchemaAlterError> {
@@ -360,7 +410,33 @@ mod tests {
     }
 
     #[test]
-    fn rename_rejects_dotted_target() {
+    fn rename_moves_into_existing_record() {
+        let mut detail = field("detail", SkipprDataType::Record, 1);
+        detail.fields.insert(
+            "truck_reg".into(),
+            field("truck_reg", SkipprDataType::String, 4),
+        );
+        let mut meta = ns(vec![detail, field("region", SkipprDataType::String, 21)]);
+        apply(
+            &mut meta,
+            &SchemaAlterOp::Rename {
+                from: "region".into(),
+                to: "detail.region".into(),
+            },
+        )
+        .unwrap();
+        assert!(meta.fields.get("region").is_none());
+        let moved = meta
+            .fields
+            .get("detail")
+            .and_then(|detail| detail.fields.get("region"))
+            .expect("region moved under detail");
+        assert_eq!(moved.out_field_name, "region");
+        assert_eq!(moved.field_id, 21);
+    }
+
+    #[test]
+    fn rename_dotted_target_missing_parent_is_not_found() {
         let mut meta = ns(vec![field("price", SkipprDataType::Long, 7)]);
         let err = apply(
             &mut meta,
@@ -370,7 +446,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(matches!(err, SchemaAlterError::Failed(_)));
+        assert!(matches!(err, SchemaAlterError::ColumnNotFound(_)));
     }
 
     #[test]

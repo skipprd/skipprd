@@ -23,6 +23,10 @@ fn iceberg_name_candidates(name: &str) -> Vec<String> {
     out
 }
 
+fn iceberg_field_name(name: &str) -> String {
+    name.replace('.', "_").replace('-', "_")
+}
+
 fn lookup_op_name(op: &SchemaAlterOp) -> &str {
     match op {
         SchemaAlterOp::Rename { from, .. } => from.as_str(),
@@ -36,13 +40,22 @@ fn resolve_iceberg_field_index(
     op: &SchemaAlterOp,
     field_id: i32,
 ) -> Option<usize> {
-    if let Some(idx) = fields.iter().position(|field| field.id == field_id) {
-        return Some(idx);
-    }
     let candidates = iceberg_name_candidates(lookup_op_name(op));
-    fields
+    let name_idx = fields
         .iter()
-        .position(|field| candidates.iter().any(|name| field.name == *name))
+        .position(|field| candidates.iter().any(|name| field.name == *name));
+    if let Some(idx) = fields.iter().position(|field| field.id == field_id) {
+        if candidates.iter().any(|name| fields[idx].name == *name) {
+            return Some(idx);
+        }
+        // Glue sequential ids (1..N) can collide with a skippr assigned id on a
+        // different column. Prefer the name hit when one exists; keep id when
+        // Iceberg already renamed and only the id still matches.
+        if name_idx.is_none() {
+            return Some(idx);
+        }
+    }
+    name_idx
 }
 
 pub fn iceberg_schema_after_alter(
@@ -53,28 +66,29 @@ pub fn iceberg_schema_after_alter(
     let mut fields: Vec<Arc<NestedField>> = current.as_struct().fields().iter().cloned().collect();
     match op {
         SchemaAlterOp::Rename { to, .. } => {
-            if to.contains('.') {
-                return Err("RENAME COLUMN target must be a single field name".into());
-            }
+            let new_name = iceberg_field_name(to);
             let Some(idx) = resolve_iceberg_field_index(&fields, op, field_id) else {
-                if fields.iter().any(|field| field.name == *to) {
+                if fields
+                    .iter()
+                    .any(|field| field.name == new_name || field.name == *to)
+                {
                     return Ok(current.clone());
                 }
                 return Err(format!("Iceberg field id {field_id} not found"));
             };
-            if fields[idx].name == *to {
+            if fields[idx].name == new_name {
                 return Ok(current.clone());
             }
             if fields
                 .iter()
-                .any(|field| field.name == *to && field.id != fields[idx].id)
+                .any(|field| field.name == new_name && field.id != fields[idx].id)
             {
-                return Err(format!("Iceberg column '{to}' already exists"));
+                return Err(format!("Iceberg column '{new_name}' already exists"));
             }
             let old = fields[idx].as_ref().clone();
             fields[idx] = Arc::new(NestedField::new(
                 old.id,
-                to,
+                new_name,
                 old.field_type.as_ref().clone(),
                 old.required,
             ));
@@ -265,6 +279,44 @@ mod tests {
     }
 
     #[test]
+    fn sequential_id_collision_does_not_mutate_wrong_column() {
+        let current = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![
+                Arc::new(NestedField::new(
+                    1,
+                    "region",
+                    Type::Primitive(PrimitiveType::String),
+                    false,
+                )),
+                Arc::new(NestedField::new(
+                    8,
+                    "n_float",
+                    Type::Primitive(PrimitiveType::Float),
+                    false,
+                )),
+                Arc::new(NestedField::new(
+                    3,
+                    "note",
+                    Type::Primitive(PrimitiveType::String),
+                    false,
+                )),
+            ])
+            .build()
+            .unwrap();
+        let next = iceberg_schema_after_alter(
+            &current,
+            &SchemaAlterOp::Drop {
+                column: "note".into(),
+            },
+            8,
+        )
+        .unwrap();
+        assert!(next.field_by_name("note").is_none());
+        assert_eq!(next.field_by_name("n_float").unwrap().id, 8);
+    }
+
+    #[test]
     fn drop_uses_field_id_not_name() {
         let current = Schema::builder()
             .with_schema_id(0)
@@ -341,6 +393,40 @@ mod tests {
         let field = next.field_by_name("region_code").unwrap();
         assert_eq!(field.id, 21);
         assert!(next.field_by_name("region").is_none());
+    }
+
+    #[test]
+    fn rename_to_nested_path_writes_flatten_name() {
+        let current = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![
+                Arc::new(NestedField::new(
+                    21,
+                    "region",
+                    Type::Primitive(PrimitiveType::String),
+                    false,
+                )),
+                Arc::new(NestedField::new(
+                    4,
+                    "detail_truck_reg",
+                    Type::Primitive(PrimitiveType::String),
+                    false,
+                )),
+            ])
+            .build()
+            .unwrap();
+        let next = iceberg_schema_after_alter(
+            &current,
+            &SchemaAlterOp::Rename {
+                from: "region".into(),
+                to: "detail.region".into(),
+            },
+            575921751,
+        )
+        .unwrap();
+        assert_eq!(next.field_by_name("detail_region").unwrap().id, 21);
+        assert!(next.field_by_name("region").is_none());
+        assert_eq!(next.field_by_name("detail_truck_reg").unwrap().id, 4);
     }
 
     #[test]

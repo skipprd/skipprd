@@ -1,0 +1,48 @@
+skippr:
+  workspace: test
+  skipprd_el_storage_mode: local
+  store:
+    type: dynamodb
+    name: skippr-alter-catalog
+
+pipelines:
+
+  s3_alter:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 10000000
+    buffer_threshold_seconds: 60
+    data_source: data_sources.s3_alter
+    data_sink: data_sinks.lake
+    transform:
+      flatten_events: yes
+
+data_sources:
+  s3_alter:
+    S3:
+      batch_size_bytes: 2048000
+      s3_bucket: skippr-e2e-sample-data
+      s3_prefix: S3_PREFIX_PLACEHOLDER
+      endpoint_url: R2_S3_ENDPOINT_PLACEHOLDER
+      region: auto
+
+data_sinks:
+  lake:
+    SkipprLake:
+      warehouse: LAKE_WAREHOUSE_PLACEHOLDER
+      catalog_table: skippr-alter-catalog
+      region: us-east-1
+      table_namespace: bronze
+      object_store:
+        type: file
+    schema_sink: schema_sinks.lake_schema
+
+schema_sinks:
+  lake_schema:
+    SkipprLake:
+      warehouse: LAKE_WAREHOUSE_PLACEHOLDER
+      catalog_table: skippr-alter-catalog
+      region: us-east-1
+      table_namespace: bronze
+      object_store:
+        type: file

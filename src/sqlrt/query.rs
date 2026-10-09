@@ -67,50 +67,40 @@ async fn apply_alter_table(
     config: &Config,
     stmt: &crate::sqlrt::parser::AlterTableStatement,
 ) -> Result<String, String> {
+    let pipeline = sql_ident_name(&stmt.pipeline);
     let mut skippr_metadata = config
         .get_metadata()
         .await
-        .map_err(|_| format!("No existing schema for {}", stmt.pipeline))?;
+        .map_err(|_| format!("No existing schema for {pipeline}"))?;
 
     if skippr_metadata.enabled {
         return Err(format!(
-            "Pipeline '{}' must be DISABLED before ALTER TABLE",
-            stmt.pipeline
+            "Pipeline '{pipeline}' must be DISABLED before ALTER TABLE"
         ));
     }
 
     let namespace = stmt
         .namespace
         .as_ref()
-        .map(|n| format!("{n}"))
-        .unwrap_or_else(|| format!("{}", stmt.pipeline));
+        .map(sql_ident_name)
+        .unwrap_or_else(|| pipeline.clone());
     let metadata = skippr_metadata
         .metadata
         .get_mut(&namespace)
-        .ok_or_else(|| {
-            format!(
-                "Schema '{namespace}' not found for pipeline '{}'",
-                stmt.pipeline
-            )
-        })?;
+        .ok_or_else(|| format!("Schema '{namespace}' not found for pipeline '{pipeline}'"))?;
     let op = schema_alter::canonicalize_op(metadata, &stmt.op).map_err(|e| e.to_string())?;
     let field_id = schema_alter::field_id_for_op(metadata, &op).map_err(|e| e.to_string())?;
     schema_alter::apply(metadata, &op).map_err(|e| e.to_string())?;
-    crate::sqlrt::iceberg_alter::commit_schema_alter(
-        config,
-        &format!("{}", stmt.pipeline),
-        &namespace,
-        &op,
-        field_id,
-    )
-    .await?;
+    crate::sqlrt::iceberg_alter::commit_schema_alter(config, &pipeline, &namespace, &op, field_id)
+        .await?;
 
     METADATA.store(Arc::new(skippr_metadata.clone()));
     config.persist_pipeline_metadata(&skippr_metadata).await?;
-    Ok(format!(
-        "ALTER TABLE {}.{namespace} {:?}",
-        stmt.pipeline, stmt.op
-    ))
+    Ok(format!("ALTER TABLE {pipeline}.{namespace} {:?}", stmt.op))
+}
+
+fn sql_ident_name(name: &impl std::fmt::Display) -> String {
+    format!("{name}").replace('"', "")
 }
 
 async fn apply_pipeline_toggle(
@@ -1914,6 +1904,15 @@ mod plain_query_document_tests {
         let doc = record_batches_to_plain_query(&batches).expect("doc");
         assert_eq!(doc.header, vec!["id"]);
         assert_eq!(doc.rows, vec![vec!["1".to_string()], vec!["2".to_string()]]);
+    }
+
+    #[test]
+    fn sql_ident_name_strips_quotes_from_hyphenated_namespace() {
+        assert_eq!(
+            super::sql_ident_name(&r#""skippr-e2e-sample-data""#),
+            "skippr-e2e-sample-data"
+        );
+        assert_eq!(super::sql_ident_name(&"s3_alter"), "s3_alter");
     }
 
     #[test]

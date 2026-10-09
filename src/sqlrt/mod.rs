@@ -2,6 +2,8 @@
 //!
 //! Implementation is being migrated from `src/sql/*` into this module.
 
+#[cfg(test)]
+mod alter_table_matrix;
 pub mod doc_parser;
 pub mod docs;
 pub mod flight_sql_table;
