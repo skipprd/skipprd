@@ -270,6 +270,23 @@ data_sources:
             run_command.assert_not_called()
             self.assertTrue(os.access(plugin, os.X_OK))
 
+    def test_host_triple_without_rustc_uses_uname(self) -> None:
+        host = type("Uname", (), {"sysname": "Linux", "machine": "x86_64"})()
+        with mock.patch.dict(os.environ, {"SKIPPR_TARGET_TRIPLE": ""}, clear=False):
+            with mock.patch.object(local_runtime_plugins.shutil, "which", return_value=None):
+                with mock.patch.object(os, "uname", return_value=host):
+                    self.assertEqual(
+                        local_runtime_plugins.current_rust_target_triple(),
+                        "x86_64-unknown-linux-gnu",
+                    )
+        with mock.patch.dict(
+            os.environ, {"SKIPPR_TARGET_TRIPLE": "aarch64-apple-darwin"}, clear=False
+        ):
+            self.assertEqual(
+                local_runtime_plugins.current_rust_target_triple(),
+                "aarch64-apple-darwin",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

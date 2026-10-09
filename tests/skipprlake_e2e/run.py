@@ -190,11 +190,17 @@ def stage_plugins(config_path: Path) -> str:
     result = subprocess.run(
         cmd,
         cwd=REPO_ROOT,
-        check=True,
         capture_output=True,
         text=True,
     )
-    sys.stdout.write(result.stdout)
+    if result.stdout:
+        sys.stdout.write(result.stdout)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr or "")
+        raise HarnessError(
+            f"local_runtime_plugins.py failed ({result.returncode}): "
+            f"{(result.stderr or result.stdout or '').strip()}"
+        )
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     if not lines:
         raise HarnessError("local_runtime_plugins.py printed no manifest dir")
