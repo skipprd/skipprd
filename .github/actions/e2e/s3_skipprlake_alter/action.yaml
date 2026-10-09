@@ -1,0 +1,105 @@
+name: S3 ALTER TABLE matrix into SkipprLake
+description: Sync fixture JSON from R2 into SkipprLake, then run the enumerated ALTER TABLE matrix.
+inputs:
+  skipprd_path:
+    required: true
+  plugin_binaries_dir:
+    required: true
+  r2_account_id:
+    required: true
+  r2_access_key_id:
+    required: true
+  r2_secret_access_key:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install Python deps and DuckDB
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install --quiet boto3
+        if ! command -v duckdb >/dev/null 2>&1; then
+          curl -fsSL https://install.duckdb.org | sh
+          echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
+        fi
+    - name: Start DynamoDB Local
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker rm -f skippr-alter-ddb >/dev/null 2>&1 || true
+        docker run -d --name skippr-alter-ddb -p 18013:8000 amazon/dynamodb-local \
+          -jar DynamoDBLocal.jar -sharedDb -inMemory
+        python3 - <<'PY'
+        import time
+        import boto3
+        from botocore.config import Config as BotoConfig
+        from botocore.exceptions import ClientError
+        client = boto3.client(
+            "dynamodb",
+            endpoint_url="http://127.0.0.1:18013",
+            region_name="us-east-1",
+            aws_access_key_id="local",
+            aws_secret_access_key="local",
+            config=BotoConfig(retries={"max_attempts": 8}),
+        )
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                client.list_tables()
+                break
+            except Exception:
+                time.sleep(0.5)
+        else:
+            raise SystemExit("DynamoDB Local did not become ready")
+        name = "skippr-alter-catalog"
+        try:
+            client.delete_table(TableName=name)
+            client.get_waiter("table_not_exists").wait(TableName=name)
+        except ClientError:
+            pass
+        client.create_table(
+            TableName=name,
+            AttributeDefinitions=[
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+            ],
+            KeySchema=[
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        client.get_waiter("table_exists").wait(TableName=name)
+        PY
+    - name: Sync S3 fixtures then run ALTER TABLE matrix
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.r2_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.r2_secret_access_key }}
+        AWS_DEFAULT_REGION: auto
+        AWS_EC2_METADATA_DISABLED: "true"
+        AWS_ENDPOINT_URL_DYNAMODB: http://127.0.0.1:18013
+        USE_LOCAL_PLUGIN_CODE: "1"
+        R2_ACCOUNT_ID: ${{ inputs.r2_account_id }}
+        SKIPPRD_PATH: ${{ inputs.skipprd_path }}
+      run: |
+        set -euo pipefail
+        work="${RUNNER_TEMP:-/tmp}/skippr-s3-alter"
+        mkdir -p "${work}/warehouse" "${work}/data" "${work}/manifests" target/release
+        cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
+        chmod +x target/release/skippr-plugin-* || true
+        warehouse_uri="file://${work}/warehouse"
+        endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+        python3 .github/scripts/local_runtime_plugins.py \
+          --config .github/actions/e2e/s3_skipprlake_alter/skippr.yml \
+          --pipeline s3_alter \
+          --output-dir "${work}/manifests" \
+          --release \
+          --skip-cargo-build
+        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
+        export ALTER_WORK="${work}"
+        export ALTER_WAREHOUSE="${warehouse_uri}"
+        export R2_S3_ENDPOINT="${endpoint}"
+        export ALTER_S3_PREFIX="bike-hire-alter/${GITHUB_RUN_ID}/"
+        python3 .github/actions/e2e/s3_skipprlake_alter/run_matrix.py

@@ -476,12 +476,12 @@ impl<'a> SParser<'a> {
     // This is a simplified sketch and needs to be integrated with your existing parsing logic.
 
     pub fn parse_alter_table(&mut self) -> Result<Statement, ParserError> {
-        let pipeline = self.parser.next_token().token.to_string();
+        let pipeline = token_ident(&self.parser.next_token().token);
 
         let namespace = match self.parser.peek_token().token.to_string().as_str() {
             "." => {
                 self.parser.next_token();
-                let namespace = self.parser.next_token().token.to_string();
+                let namespace = token_ident(&self.parser.next_token().token);
                 Some(ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
                     namespace,
                 ))]))
@@ -746,6 +746,13 @@ impl<'a> SParser<'a> {
     }
 }
 
+fn token_ident(token: &Token) -> String {
+    match token {
+        Token::Word(word) => word.value.clone(),
+        other => other.to_string().replace('"', ""),
+    }
+}
+
 fn object_name_to_column(name: &ObjectName) -> Result<String, ParserError> {
     if name.0.is_empty() {
         return Err(ParserError::ParserError("Expected column name".to_string()));
@@ -888,5 +895,33 @@ mod tests {
             err.to_string().contains("TABLE"),
             "expected TABLE instruction, got {err}"
         );
+    }
+
+    #[test]
+    fn alter_table_quoted_hyphenated_namespace() {
+        let mut parser = SParser::new(
+            r#"ALTER TABLE s3_alter."skippr-e2e-sample-data" RENAME COLUMN region TO region_code"#,
+        )
+        .unwrap();
+        match parser.parse_statement().unwrap() {
+            Statement::AlterTable(stmt) => {
+                let pipeline = format!("{}", stmt.pipeline).replace('"', "");
+                let namespace = stmt
+                    .namespace
+                    .as_ref()
+                    .map(|n| format!("{n}").replace('"', ""))
+                    .expect("namespace");
+                assert_eq!(pipeline, "s3_alter");
+                assert_eq!(namespace, "skippr-e2e-sample-data");
+                assert_eq!(
+                    stmt.op,
+                    SchemaAlterOp::Rename {
+                        from: "region".into(),
+                        to: "region_code".into(),
+                    }
+                );
+            }
+            other => panic!("expected AlterTable, got {other:?}"),
+        }
     }
 }

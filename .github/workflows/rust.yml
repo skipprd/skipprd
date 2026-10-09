@@ -276,6 +276,41 @@ jobs:
           r2_access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
           r2_secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
+  e2e_s3_schema_alter:
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+    name: S3 ALTER TABLE to SkipprLake (linux x86)
+    needs:
+      - linux_x86
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download skipprd
+        uses: actions/download-artifact@v4
+        with:
+          name: skipprd-linux_x86
+          path: skipprd-linux_x86
+      - name: Download runtime plugins
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-plugin-binaries-linux_x86
+          path: runtime-plugin-binaries-linux_x86
+      - name: Make skipprd executable
+        run: chmod +x ./skipprd-linux_x86/skipprd
+      - name: S3 ALTER TABLE matrix into SkipprLake
+        uses: ./.github/actions/e2e/s3_skipprlake_alter
+        with:
+          skipprd_path: ./skipprd-linux_x86/skipprd
+          plugin_binaries_dir: ./runtime-plugin-binaries-linux_x86
+          r2_account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          r2_access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          r2_secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
   e2e_file_postgres:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
     name: File to Postgres (linux x86)
@@ -412,6 +447,7 @@ jobs:
       - e2e_skipprlake
       - e2e_postgres_cdc
       - e2e_s3_schema_evolution
+      - e2e_s3_schema_alter
       - e2e_file_postgres
       - linux_x86
       - macos_arm64

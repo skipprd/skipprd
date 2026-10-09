@@ -15,6 +15,17 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
+## [18.1.2]
+
+### Added
+
+- Enumerated `ALTER TABLE` matrix in Rust (`rename` / `merge` / `drop` / `promote`, matching and sequential Iceberg ids, nested `TO` paths) and an S3 → SkipprLake e2e job that runs the same statements against a real lake table.
+
+### Fixed
+
+- `RENAME COLUMN region TO detail.region` moves the field into the nested record and writes the flattened Iceberg name `detail_region`.
+- Quoted hyphenated Iceberg namespaces (`s3_alter."skippr-e2e-sample-data"`) resolve for `ALTER TABLE`.
+
 ## [18.1.1]
 
 ### Fixed

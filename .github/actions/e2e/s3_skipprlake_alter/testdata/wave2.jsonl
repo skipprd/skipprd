@@ -1,0 +1,2 @@
+{"id":"4","region":"eu-west-1","version":2,"price":13,"n_byte":3,"n_short":4,"n_float":2.5,"detail":{"truck_reg":"GH78","geofence_id":"g4","pour_location":{"latitude":53.0}}}
+{"id":"5","region":"eu-west-1","version":2,"price":14,"n_byte":3,"n_short":4,"n_float":2.5,"detail":{"truck_reg":"IJ90","geofence_id":"g5","pour_location":{"latitude":53.1}}}

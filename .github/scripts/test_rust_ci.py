@@ -119,8 +119,10 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_skipprlake:", text)
         self.assertIn("e2e_postgres_cdc:", text)
         self.assertIn("e2e_s3_schema_evolution:", text)
+        self.assertIn("e2e_s3_schema_alter:", text)
         self.assertIn("e2e_file_postgres:", text)
         self.assertIn("s3_skipprlake_evolve", text)
+        self.assertIn("s3_skipprlake_alter", text)
         self.assertIn("file_postgres_append", text)
         self.assertNotIn(
             '["skippr-plugin-data-source-s3","skippr-plugin-data-source-file"',
@@ -147,6 +149,18 @@ class RustCiTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("unsafe_enable_version_guessing", evolve)
         self.assertIn("firmware_revision_decimal", evolve)
+        alter = (
+            ROOT / ".github" / "actions" / "e2e" / "s3_skipprlake_alter" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("run_matrix.py", alter)
+        alter_matrix = (
+            ROOT / ".github" / "actions" / "e2e" / "s3_skipprlake_alter" / "run_matrix.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("ALTER TABLE", alter_matrix)
+        self.assertIn("DISABLE PIPELINE s3_alter", alter_matrix)
+        self.assertIn("MERGE COLUMN", alter_matrix)
+        self.assertIn("def sql_ident(", alter_matrix)
+        self.assertIn('return f\'"{name}"\'', alter_matrix)
         file_postgres = (
             ROOT / ".github" / "actions" / "e2e" / "file_postgres_append" / "action.yaml"
         ).read_text(encoding="utf-8")
@@ -172,6 +186,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_skipprlake", publish)
         self.assertIn("e2e_postgres_cdc", publish)
         self.assertIn("e2e_s3_schema_evolution", publish)
+        self.assertIn("e2e_s3_schema_alter", publish)
         self.assertIn("e2e_file_postgres", publish)
         self.assertIn("macos_arm64", publish)
         self.assertIn("publish_runtime_plugins", publish)

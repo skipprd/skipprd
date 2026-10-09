@@ -130,8 +130,8 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "ALTER TABLE RENAME COLUMN".to_string(),
             syntax: "ALTER TABLE <pipeline>[.<namespace>] RENAME COLUMN <from> TO <to>".to_string(),
-            description: "Renames a column. The Iceberg field id is unchanged so existing files stay readable. Pipeline must be DISABLED.".to_string(),
-            example: "ALTER TABLE bikehire.trips RENAME COLUMN price TO amount".to_string(),
+            description: "Renames a column, including nested paths (detail.truck_reg). A dotted TO path moves the field into that record; Iceberg flatten names use underscores (detail.region → detail_region). The Iceberg field id is unchanged so existing files stay readable. Pipeline must be DISABLED.".to_string(),
+            example: "ALTER TABLE bikehire.trips RENAME COLUMN region TO detail.region".to_string(),
         },
     );
     docs.insert(

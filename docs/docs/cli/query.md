@@ -112,7 +112,7 @@ skipprd query --sql "LOAD SCHEMA 'bikehire-schema.json' INTO bikehire"
 skipprd query --sql "DISABLE PIPELINE bikehire"
 skipprd query --sql "ALTER TABLE bikehire.rides DROP COLUMN legacy_field"
 skipprd query --sql "ALTER TABLE bikehire.rides ALTER COLUMN n TYPE BIGINT"
-skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN price TO amount"
+skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN region TO detail.region"
 skipprd query --sql "ALTER TABLE bikehire.rides MERGE COLUMN price_string INTO price"
 skipprd query --sql "ENABLE PIPELINE bikehire"
 ```
