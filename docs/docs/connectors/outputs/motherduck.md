@@ -1,74 +1,85 @@
-# MotherDuck Output
+---
+title: MotherDuck destination
+description: Write Skipprd pipelines into a MotherDuck database.
+---
 
-Writes data to MotherDuck cloud tables via the MotherDuck REST API.
+# MotherDuck
 
-## How it works
+MotherDuck is hosted DuckDB. Use it when the destination should be shareable without running DuckDB on the Skipprd host.
 
-1. Authenticates with MotherDuck using a bearer token.
-2. Auto-creates tables with `CREATE TABLE IF NOT EXISTS` via the SQL endpoint.
-3. Inserts rows in batches of 1000 via SQL INSERT statements.
-4. All operations use `POST https://api.motherduck.com/v1/sql`.
+## Before you begin
 
-## Configuration
+- A MotherDuck token (`motherduck.com` → settings).
+- A database name. Skipprd creates `table` in `schema` when it can.
 
-```yaml
-data_sinks:
-  sink:
-    Motherduck:
-      motherduck_token: "ey..."
-      database: "my_database"
-      table: events
-      schema: main
+```bash
+export MOTHERDUCK_TOKEN="..."
 ```
 
-`schema` is an optional query/model key; ingest uses `table` for writes.
+## Configure
 
-## Configuration variables
+::: code-group
 
-| Variable | Default | Description |
-|---|---|---|
-| `motherduck_token` | *(required)* | MotherDuck auth token |
-| `database` | | MotherDuck database name |
-| `table` | (from namespace) | Target table name |
+```python [Python]
+from skippr import Config, DataSinkMotherduck, EnvRef, Pipeline
 
-## Authentication
+cfg = Config.discover()
+md = cfg.data_sink(
+    "warehouse",
+    DataSinkMotherduck(
+        motherduck_token=EnvRef("MOTHERDUCK_TOKEN"),
+        database="analytics",
+        schema="bronze",
+        table="events",
+    ),
+)
+cfg.pipeline("events", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=md))
+cfg.save()
+```
 
-Configure `motherduck_token` directly when you connect the warehouse or in `skippr.yml`.
+```bash [CLI]
+skipprd connect data-sink motherduck \
+  --pipeline events \
+  --name warehouse \
+  --motherduck-token '${MOTHERDUCK_TOKEN}' \
+  --database analytics \
+  --schema bronze \
+  --table events
+```
 
-For security best practices, we strongly advise against storing the token in `skippr.yml`. Use environment variable interpolation instead: replace the `motherduck_token` value with your own `${ENV_VAR}` reference.
-
-The relevant part of `skippr.yml` looks like this:
-
-```yaml
+```yaml [YAML]
 data_sinks:
   warehouse:
     Motherduck:
-      motherduck_token: "${MOTHERDUCK_TOKEN}"
+      motherduck_token: ${MOTHERDUCK_TOKEN}
+      database: analytics
+      schema: bronze
+      table: events
 ```
 
-Set the env var before running `skipprd`:
+:::
 
-macOS / Linux
+## Options
 
-```bash
-export MOTHERDUCK_TOKEN="md:..."
-```
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `motherduck_token` | secret | Required | Token as `${ENV}` |
+| `database` | string | Required | Database |
+| `table` | string | Required | Table |
+| `schema` | string | Not set | Schema (MotherDuck default if unset) |
 
-Windows PowerShell
+## How data lands
 
-```powershell
-$env:MOTHERDUCK_TOKEN = "md:..."
-```
-
-Windows Command Prompt
-
-```cmd
-set MOTHERDUCK_TOKEN=md:...
-```
+Retries are exactly once. For a local file warehouse, use [DuckDB](/connectors/outputs/duckdb) instead.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| authentication failed | Verify the configured MotherDuck token and confirm it still has access to the selected database. |
-| schema errors | Check the database and schema names and confirm the token can create or write objects there. |
+| Auth failed | Recreate the token and export it in this shell |
+| Database missing | Create it in MotherDuck, or use a token that can create databases |
+
+## Next steps
+
+- [MotherDuck source](/connectors/inputs/motherduck)
+- [DuckDB](/connectors/outputs/duckdb)

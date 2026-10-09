@@ -1,12 +1,63 @@
-# SkipprLake Output
+---
+title: SkipprLake
+description: Land Skipprd pipelines as Iceberg tables in your object store, with a catalog table Skipprd and skipprd query both use.
+---
 
-Writes compacted batches to Apache Iceberg tables via SkipprLake. Clustered `skipprd query` unions those tables with live WAL.
+# SkipprLake
 
-Pair with the [SkipprLake schema sink](../schema_sinks/skipprlake.md). `AthenaIceberg` and `Duckdb` are separate plugins.
+SkipprLake is Skipprd's Iceberg destination. Files go to a warehouse URI you name. Catalog pointers live in a table you name (`catalog_table`) — DynamoDB or Skippr Cloud Tables. That table may be the same one you use as the [state store](/configuration/skippr-store).
 
-## Configuration
+Pair it with the [SkipprLake schema sink](/connectors/schema_sinks/skipprlake).
 
-```yaml
+## Before you begin
+
+- A warehouse URI: `s3://bucket/path/` or `file:///absolute/path/` for local files.
+- A catalog table name, and credentials for that backend.
+- Unique `(catalog_table, table_namespace)` per SkipprLake destination. Two pipelines must not share that pair.
+
+```bash
+export AWS_ACCESS_KEY_ID="..."
+export AWS_SECRET_ACCESS_KEY="..."
+export AWS_DEFAULT_REGION="us-east-1"
+```
+
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkSkipprLake, Pipeline
+
+cfg = Config.discover()
+lake = cfg.data_sink(
+    "lake",
+    DataSinkSkipprLake(
+        warehouse="s3://my-iceberg-warehouse/",
+        catalog_table="my-iceberg-catalog",
+        region="us-east-1",
+        table_namespace="bronze",
+    ),
+    schema_sink="lake_schema",
+)
+cfg.pipeline("reports", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=lake))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-sink skipprlake \
+  --pipeline reports \
+  --name lake \
+  --warehouse s3://my-iceberg-warehouse/ \
+  --catalog-table my-iceberg-catalog \
+  --region us-east-1 \
+  --table-namespace bronze
+
+skipprd connect schema-sink skipprlake \
+  --pipeline reports \
+  --name lake_schema
+```
+
+```yaml [YAML]
 data_sinks:
   lake:
     SkipprLake:
@@ -15,18 +66,27 @@ data_sinks:
       region: us-east-1
       table_namespace: bronze
     schema_sink: schema_sinks.lake_schema
+
+schema_sinks:
+  lake_schema:
+    SkipprLake:
+      warehouse: s3://my-iceberg-warehouse/
+      catalog_table: my-iceberg-catalog
+      region: us-east-1
+      table_namespace: bronze
 ```
 
-`catalog_table` is a DynamoDB table (or Cloud Tables namespace) that holds Iceberg pointers. It MAY be the same table as SkipprStore (`skippr.store.name`); PK/SK prefixes do not collide.
+:::
 
-Each SkipprLake data sink must own a unique `(catalog_table, table_namespace)`. Table location is `{warehouse}/{table_namespace}/{table_name}`.
-
-Object storage credentials are `object_store`. `type: s3` (or omit it) is the AWS default credential chain and requires a `s3://` warehouse. `type: r2` is Cloudflare R2 (or other path-style S3-compatible stores). `type: file` is local parquet and requires a `file:///` warehouse. Catalog pointer credentials stay on the catalog backend, not `object_store`.
+Local files:
 
 ```yaml
 object_store:
   type: file
+# warehouse must be file:///...
 ```
+
+Cloudflare R2 (or another path-style S3 store):
 
 ```yaml
 object_store:
@@ -38,46 +98,34 @@ object_store:
   path_style: true
 ```
 
-| Field | Default | Description |
-| --- | --- | --- |
-| `warehouse` | *(required)* | Iceberg warehouse root (`s3://…` or `file:///…`) |
-| `catalog_table` | *(required)* | Catalog pointer table. MAY share SkipprStore. |
-| `region` | | AWS region for the catalog backend |
-| `object_store` | `s3` | Parquet store: `file` (`file://` warehouse), `s3` (`s3://`), or `r2` (`s3://` + endpoint) |
-| `table_namespace` | `default` | Iceberg namespace for sink-managed tables |
+## Options
 
-## Supported write policies
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `warehouse` | URI | Required | Iceberg root (`s3://…` or `file:///…`) |
+| `catalog_table` | string | Required | Catalog pointer table. May be the SkipprStore table. |
+| `region` | string | Not set | Region for the catalog backend |
+| `object_store` | object | `s3` | File store: `file`, `s3`, or `r2` |
+| `table_namespace` | string | `default` | Iceberg namespace |
 
-| Policy | Supported |
-| --- | --- |
-| `append` | Yes |
-| `merge_by_key` | Yes |
-| `replace_partition` | Yes |
-| `replace_table` | Yes |
+Table files live at `{warehouse}/{table_namespace}/{table_name}`.
 
-See [Source landing semantics](../../concepts/source-landing-semantics.md).
+## How data lands
 
-## Table history and maintenance
+Supports `append`, `merge_by_key`, `replace_partition`, and `replace_table`. Skipprd expires old snapshots (recent commits are kept), rewrites small files, and folds delete files. Query results stay the same; do not use old snapshots as time travel.
 
-The sink maintains its own tables. Nothing needs scheduling.
+`skipprd query` unions the Iceberg table with in-flight WAL rows.
 
-- **Snapshot retention.** Snapshots older than 24 hours are expired once the newest 100 commits are kept, along with the manifests and metadata files only they used. Do not rely on time travel or rollback to older snapshots. Retention is fixed, not configurable.
-- **Small files and deletes.** After a commit, the sink may rewrite a partition's small files into larger ones. When a partition collects more than 16 equality-delete files (from `merge_by_key` or CDC), it rewrites that partition with the deletes applied and drops them. A pass is bounded, so large tables are maintained over several commits.
+## Troubleshooting
 
-Query results do not change: maintenance commits replace files without changing rows. External engines that read the table (Athena, Snowflake, DuckDB, Spark) see ordinary Iceberg `replace` and `overwrite` snapshots.
+| Symptom | Fix |
+|---|---|
+| Catalog permission errors | Grant read/write on `catalog_table` |
+| Two pipelines fight over tables | Give each destination its own `table_namespace` |
+| `file://` warehouse fails | Set `object_store.type: file` and use an absolute `file:///` URI |
 
-## Pipeline wiring
+## Next steps
 
-```yaml
-pipelines:
-  reports:
-    data_source: data_sources.saas
-    data_sink: data_sinks.lake
-```
-
-Pairing is `data_sinks.<name>.schema_sink`, not a pipeline-level `schema_sink` field.
-
-## Related
-
-- [SkipprLake schema sink](../schema_sinks/skipprlake.md)
-- [Output destination](../../configuration/output.md)
+- [SkipprLake schema sink](/connectors/schema_sinks/skipprlake)
+- [Datalake](/concepts/datalake)
+- [How sources land](/concepts/source-landing-semantics)

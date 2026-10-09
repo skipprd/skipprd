@@ -1,52 +1,57 @@
-# Source landing semantics
+---
+title: How sources land
+description: Choose how each source table is written — append, merge, replace a day, or replace the table — and pair it with a destination that supports that write.
+---
 
-Some sources—especially API and SaaS connectors—declare **how each namespace’s data must land** in the warehouse. Skipprd calls this a **namespace contract**. Contracts are separate from column types discovered by `skipprd discover`.
+# How sources land
 
-## Namespace contracts
+A source does two jobs: it names the columns, and it says **how each table must be written**. Column types come from `skipprd discover`. How rows land is the write policy.
 
-For every table (namespace) a source can emit, the source plugin publishes a contract that includes:
+API and SaaS sources (Google Analytics, ads, Stripe, and similar) declare a policy per table because their APIs revise past days or republish a full snapshot. Database snapshot sources usually append. CDC sources merge or apply deletes.
 
-| Field | Meaning |
-|---|---|
-| Primary key | Logical row identity (business dimensions plus identifiers such as `property_id` and `date`) |
-| Partition key | Columns that define a physical slice for partition-scoped writes (often `date` for daily reports) |
-| Write policy | How the configured **data sink** must apply each batch |
-| Refresh window | Optional number of days to re-fetch before the checkpoint (for APIs that revise past days) |
-| Semantics | Descriptor such as `mutable_report` (informational) |
-
-The host validates contracts when a source starts and checks that your pipeline’s **data sink** supports every declared write policy.
+Skipprd checks the policy when the pipeline starts. If your destination cannot do what the source requires, startup fails with a clear error instead of writing a table you cannot trust.
 
 ## Write policies
 
-| Policy | Use when |
-|---|---|
-| `append` | Rows are immutable or append-only |
-| `merge_by_key` | Current state by business key (sink must support merge) |
-| `replace_partition` | A partition can be fully rewritten when numbers change |
-| `replace_table` | Small, bounded full snapshots |
+| Policy | What a run does | Use when |
+|---|---|---|
+| `append` | Adds rows. A second run adds another copy. | Immutable events, logs, or a destination that only appends |
+| `merge_by_key` | Upserts on the table's key | Current state by business key (CDC, CRM snapshots) |
+| `replace_partition` | Drops and rewrites the slice for that run (often one calendar day) | Reports that Google or an ads API will revise |
+| `replace_table` | Replaces the whole table with the latest run | Small, bounded snapshots where you do not keep history |
 
-**Mutable reports:** APIs like GA4 can change metrics for dates you already synced. `replace_partition` tells the sink to drop and rewrite the partition for the batch’s partition key values (for example `date=2024-01-15`) before writing new Parquet.
+**Mutable reports.** APIs such as GA4 change metrics for dates you already synced. `replace_partition` tells the destination to rewrite `date=2024-01-15` (or the equivalent) before writing the new rows.
 
-**Lookback / refresh window:** The source re-pulls the last *N* days on each run (`lookback_days` in GA4). Checkpoints record progress; they are not a substitute for the correct write policy.
+**Lookback.** Sources such as GA4 re-fetch the last *N* days on every run (`lookback_days`). That only stays correct if the write policy replaces those days. A checkpoint is not a substitute for the policy.
 
-## Destination pairing
+## Which destinations support replace
 
-| Data sink | `replace_partition` |
-|---|---|
-| Athena (S3 + Glue) | Yes |
-| AthenaIceberg | Yes |
-| SkipprLake | Yes |
-| Append-only sinks | No — pipeline validation fails |
+| Destination | `replace_partition` | `merge_by_key` | `replace_table` | `append` |
+|---|---|---|---|---|
+| Athena | Yes | No | Yes | Yes |
+| Athena Iceberg | Yes | Yes | Yes | Yes |
+| SkipprLake | Yes | Yes | Yes | Yes |
+| DuckDB | No | No | Yes | Yes |
+| Other destinations | No | Varies | Varies | Yes |
 
-## Discover vs contracts
+If you point a `replace_partition` source at an append-only destination, Skipprd refuses to start. Either change the destination, or set `write_policy: append` on sources that allow it (Stripe does; GA4 does not, because revised days would duplicate).
+
+## Discover vs landing
 
 | Layer | Controls |
 |---|---|
-| Namespace contract | **How** batches land |
-| Arrow / discovered schema | **Column names and types** |
+| Write policy, key, partition | **How** each batch is applied |
+| Discovered schema | **Column names and types** |
+
+Changing a column type is a schema change. Changing how a day is rewritten is a landing change. They are independent.
 
 ## Example: Google Analytics 4
 
-See [Google Analytics (GA4) input](../connectors/inputs/google_analytics.md) and [Athena output](../connectors/outputs/athena.md).
+GA4 daily tables use `replace_partition` on `date`. Each scheduled sync rewrites recent days Google may have revised. See [Google Analytics (GA4)](/connectors/inputs/google_analytics) and [GA4 bronze and modeling](/concepts/ga4-bronze-and-modeling).
 
-For plugin authors, see [API / SaaS source plugins](../maintainers/api-saas-source-plugins.md).
+## Next steps
+
+- [Google Analytics (GA4)](/connectors/inputs/google_analytics)
+- [Stripe](/connectors/inputs/stripe)
+- [Athena](/connectors/outputs/athena)
+- [Exactly-once delivery](/concepts/exactly-once)

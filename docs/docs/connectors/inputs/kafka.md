@@ -1,84 +1,177 @@
-# Kafka Input
+---
+title: Kafka source
+description: Consume a Kafka topic with Skipprd and land each message as a record, with consumer-group offsets committed only after data is durable.
+---
 
-Consumes messages from a Kafka topic.
+# Kafka source
 
-## How it works
+The Kafka source joins a consumer group, reads one topic, and lands each message value as one or more records. Use it to load event streams, application logs, or Debezium change events from Kafka into your warehouse. Skipprd commits the group's offset only after a message is safely in its write-ahead log (WAL), so a crash never skips data.
 
-1. Creates a Kafka consumer with the configured group ID.
-2. Subscribes to the topic and begins consuming.
-3. Offsets are committed after successful ingest.
-4. Supports stream and batch modes.
-5. Namespace convention: `kafka.{topic}`.
+## Before you begin
 
-## Configuration
+You need:
 
-```yaml
-data_sources:
-  source:
-    Kafka:
-      brokers: "localhost:9092"
-      topic: events
-      group_id: skippr-consumer
-      mode: batch
+- Network access from the machine running Skipprd to every broker in `brokers`.
+- A topic that producers write to, and permission for your user to read it and to commit offsets for the consumer group.
+- If the cluster uses SASL, a username and password for the `PLAIN` mechanism.
+
+::: warning TLS is not available in current builds
+Skipprd connects with `security_protocol` `PLAINTEXT` or `SASL_PLAINTEXT`. Clusters that require TLS (`SSL` or `SASL_SSL`), such as most managed Kafka services, can't be reached directly yet.
+:::
+
+## Configure
+
+Store the SASL password in an environment variable. Skipprd reads it when the run starts, and `skippr.yml` keeps only the reference.
+
+```bash
+export KAFKA_SASL_PASSWORD="your-password"
 ```
 
-## Configuration variables
+::: code-group
 
-| Variable | Default | Description |
-|---|---|---|
-| `brokers` | *(required)* | Kafka bootstrap servers |
-| `topic` | *(required)* | Topic to consume |
-| `group_id` | auto-generated | Consumer group ID |
-| `auto_offset_reset` | `earliest` | `earliest` or `latest` |
-| `security_protocol` | | Security protocol |
-| `sasl_mechanism` | | SASL mechanism |
-| `sasl_username` / `sasl_password` | | SASL credentials |
-| `mode` | `stream` | `stream` or `batch` |
-| `idle_timeout_seconds` | `5` | Batch mode idle timeout |
-| `format` | `json` | Data format |
+```python [Python]
+from skippr import Config, DataSourceKafka, EnvRef, Pipeline
 
-## Authentication
+cfg = Config.discover()
+src = cfg.data_source(
+    "orders_topic",
+    DataSourceKafka(
+        brokers="broker-1:9092,broker-2:9092",
+        topic="orders",
+        group_id="skippr-orders",
+        security_protocol="SASL_PLAINTEXT",
+        sasl_mechanism="PLAIN",
+        sasl_username="skippr",
+        sasl_password=EnvRef("KAFKA_SASL_PASSWORD"),
+    ),
+)
+cfg.pipeline("orders", Pipeline(data_source=src))
+cfg.save()
+```
 
-Kafka supports unauthenticated local development as well as secured broker setups. For security best practices, we strongly advise against storing SASL credentials in `skippr.yml`. Use environment variable interpolation instead: replace the `sasl_username` or `sasl_password` value with your own `${ENV_VAR}` reference.
+```bash [CLI]
+skipprd connect data-source kafka \
+  --pipeline orders \
+  --name orders_topic \
+  --brokers broker-1:9092,broker-2:9092 \
+  --topic orders \
+  --group-id skippr-orders \
+  --security-protocol SASL_PLAINTEXT \
+  --sasl-mechanism PLAIN \
+  --sasl-username skippr \
+  --sasl-password '${KAFKA_SASL_PASSWORD}'
+```
 
-The relevant part of `skippr.yml` looks like this:
+```yaml [YAML]
+pipelines:
+  orders:
+    data_source: data_sources.orders_topic
 
-```yaml
 data_sources:
-  source:
+  orders_topic:
     Kafka:
-      security_protocol: SASL_SSL
+      brokers: "broker-1:9092,broker-2:9092"
+      topic: orders
+      group_id: skippr-orders
+      security_protocol: SASL_PLAINTEXT
       sasl_mechanism: PLAIN
-      sasl_username: "${KAFKA_SASL_USERNAME}"
+      sasl_username: skippr
       sasl_password: "${KAFKA_SASL_PASSWORD}"
 ```
 
-Set the env vars before running `skipprd`:
+:::
 
-macOS / Linux
+For a local broker without authentication, set only `brokers` and `topic`.
 
-```bash
-export KAFKA_SASL_USERNAME="myuser"
-export KAFKA_SASL_PASSWORD="mypassword"
-```
+Run the pipeline and check the result:
 
-Windows PowerShell
+1. Produce a few test messages to the topic. The first run discovers the schema from live messages (see [What gets synced](#what-gets-synced)).
+2. Start the sync. Without `--once`, Skipprd keeps consuming until you stop it.
 
-```powershell
-$env:KAFKA_SASL_USERNAME = "myuser"
-$env:KAFKA_SASL_PASSWORD = "mypassword"
-```
+   ```bash
+   skipprd sync --pipeline orders --log
+   ```
 
-Windows Command Prompt
+3. In another terminal, read what landed:
 
-```cmd
-set KAFKA_SASL_USERNAME=myuser
-set KAFKA_SASL_PASSWORD=mypassword
-```
+   ```bash
+   skipprd df --pipeline orders
+   ```
+
+To load the data into a warehouse, add a destination to the pipeline. See [Destinations](/configuration/output).
+
+## Options
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `brokers` | string | Required | Comma-separated bootstrap servers, for example `broker-1:9092,broker-2:9092`. |
+| `topic` | string | Required | Topic to consume. One topic per source. |
+| `group_id` | string | `skippr-<topic>` | Consumer group. Offsets are committed to this group, so a new `group_id` starts over from `auto_offset_reset`. |
+| `auto_offset_reset` | string | `earliest` | Where a group with no committed offset starts: `earliest` (oldest retained message) or `latest` (only new messages). |
+| `security_protocol` | string | `PLAINTEXT` | `PLAINTEXT` or `SASL_PLAINTEXT`. |
+| `sasl_mechanism` | string | — | `PLAIN` when the cluster uses SASL. |
+| `sasl_username` | string | — | SASL username. |
+| `sasl_password` | secret | — | SASL password as a `${NAME}` reference. |
+| `mode` | string | `stream` | `stream` keeps consuming until Skipprd stops. `batch` stops after `idle_timeout_seconds` with no new message, which suits scheduled jobs that drain a backlog. |
+| `idle_timeout_seconds` | integer | `5` | In `batch` mode, seconds without a message before the source finishes. |
+| `format` | string | `json` | How each message value is parsed: `json`, `csv`, or `xml`. See [What gets synced](#what-gets-synced). |
+| `cdc_mode` | string | `snapshot` | `snapshot` lands messages as plain appended records. `cdc_only` attaches change metadata to each record for [change data capture](/cdc/). `snapshot_then_cdc` is rejected because Kafka has no snapshot to read. |
+| `debezium_format` | boolean | `false` | With `cdc_mode: cdc_only`, unwrap Debezium change envelopes. See [Debezium change events](#debezium-change-events). |
+| `batch_size_bytes` | integer | — | Not used by this connector. Each message is written individually; tune landing batches with the pipeline [buffer thresholds](/configuration/buffering). |
+| `batch_size_seconds` | integer | — | Not used by this connector. |
+
+### Environment variables
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `SKIPPR_RUNTIME_ONCE_IDLE_TIMEOUT_SECONDS` | integer | `60` | With `skipprd sync --once` in `stream` mode, seconds without a new message before the run finishes. Raise it if producers are bursty. |
+
+## What gets synced
+
+**Records.** Skipprd reads the message value and ignores the key, headers, and timestamp. With the default `format: json`:
+
+- a JSON object becomes one record;
+- a JSON array becomes one record per element;
+- newline-delimited JSON becomes one record per line.
+
+Messages with an empty value (tombstones) are skipped. With `format: csv`, each message is parsed as its own CSV document, so include the header row in every message.
+
+**Namespace.** All records land in the namespace `kafka.<topic>`, for example `kafka.orders`. Your destination turns the namespace into a table name.
+
+**Delivery.** Skipprd commits a message's offset only after the message is durable in the WAL. If Skipprd stops between those two steps, the next run reads that message again, so delivery is at least once. Design downstream models to tolerate an occasional duplicate, or use `cdc_mode: cdc_only` so each record carries a stable event ID.
+
+**Ordering.** Skipprd consumes each partition in offset order. Warehouse tables don't keep arrival order, so include an event timestamp in your messages if order matters.
+
+**Restarts.** A restarted pipeline resumes from the consumer group's last committed offset. Changing `group_id` starts a new group at `auto_offset_reset`.
+
+**Schema discovery.** The first time a pipeline runs, Skipprd discovers the schema by reading messages from the topic. `skipprd sync` does this automatically if you haven't run `skipprd discover`. Discover commits the offsets of the messages it reads but doesn't land them, so run it against test messages or a test consumer group.
+
+### Debezium change events
+
+Set `cdc_mode: cdc_only` and `debezium_format: true` to consume a Debezium topic. For each envelope, Skipprd reads `op` and lands:
+
+| `op` | Lands as | Row data |
+|---|---|---|
+| `c` | insert | `after` |
+| `u` | update | `after` |
+| `d` | delete | `before` |
+| `r` | snapshot read | `after` |
+
+Each record's event ID is its topic, partition, and offset. A message that isn't valid JSON lands unchanged as an insert.
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---|---|
-| connection or SASL failures | Verify broker addresses, security protocol, SASL settings, and network access to the cluster. |
-| messages are not arriving | Check the topic name, consumer group, and whether the producer is publishing to the expected topic. |
+| Symptom | Cause | Fix |
+|---|---|---|
+| Errors mention `SSL` or `SASL_SSL` being unsupported | Current builds don't include TLS for Kafka. | Use a listener that accepts `PLAINTEXT` or `SASL_PLAINTEXT`, for example through a private network. |
+| Authentication fails | Wrong mechanism or credentials. | Set `sasl_mechanism: PLAIN` and check `sasl_username` and the `KAFKA_SASL_PASSWORD` value. |
+| `environment variable is not set` | The `${KAFKA_SASL_PASSWORD}` reference can't be resolved. | Export the variable in the shell or service that runs `skipprd`. |
+| No records, no errors | The group already committed past the messages, or `auto_offset_reset: latest` skips the backlog. | Use a new `group_id` with `auto_offset_reset: earliest` to re-read retained messages. |
+| `snapshot_then_cdc` error at start | Kafka has no snapshot API. | Use `cdc_mode: cdc_only`. |
+| Run with `--once` never finishes | `mode: stream` waits for the idle timeout while messages keep arriving. | Use `mode: batch` with `idle_timeout_seconds`, or run without `--once` as a long-lived process. |
+
+## Next steps
+
+- [Destinations](/configuration/output): land the topic in a warehouse.
+- [Change data capture](/cdc/): how CDC records converge in the destination.
+- [WAL and buffering](/configuration/buffering): control how often batches land.

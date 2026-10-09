@@ -4,34 +4,64 @@ This document describes all SQL statements supported by Skippr.
 
 ## Schema Operations
 
-### ALTER SCHEMA ALTER COLUMN
+### ALTER TABLE ALTER COLUMN
 
 **Syntax:**
 ```sql
-ALTER SCHEMA <pipeline_name>[.<schema_name>] ALTER COLUMN <column_name> TYPE <new_type>
+ALTER TABLE <pipeline>[.<namespace>] ALTER COLUMN <column> TYPE <new_type>
 ```
 
 **Description:**
-Changes the data type of a column in a schema. For arrays, use ARRAY<TYPE> format.
+Iceberg-legal promotion only (byte/short/integer→long, byte/short→integer, float→double, timestamp_milli→timestamp; Iceberg timestamp is already µs). Nested DROP/MERGE without a top-level Iceberg field id fails closed. Widen to string with MERGE COLUMN. Pipeline must be DISABLED.
 
 **Example:**
 ```sql
-ALTER SCHEMA bike_hire ALTER COLUMN price TYPE DECIMAL(10,2)
+ALTER TABLE bikehire.trips ALTER COLUMN n TYPE BIGINT
 ```
 
-### ALTER SCHEMA DROP COLUMN
+### ALTER TABLE DROP COLUMN
 
 **Syntax:**
 ```sql
-ALTER SCHEMA <pipeline_name>[.<schema_name>] DROP COLUMN <column_name>
+ALTER TABLE <pipeline>[.<namespace>] DROP COLUMN <column>
 ```
 
 **Description:**
-Drops a column from a schema. Supports nested fields using dot notation.
+Drops a column from skippr metadata and the Iceberg table (same field id). Pipeline must be DISABLED.
 
 **Example:**
 ```sql
-ALTER SCHEMA bike_hire DROP COLUMN user_id
+ALTER TABLE bikehire.trips DROP COLUMN user_id
+```
+
+### ALTER TABLE MERGE COLUMN
+
+**Syntax:**
+```sql
+ALTER TABLE <pipeline>[.<namespace>] MERGE COLUMN <src> INTO <dst>
+```
+
+**Description:**
+Drops src from metadata and Iceberg (same field id path as DROP). Retargets type-conflict evolution so later values write to dst. Historical src-only rows are not copied. Pipeline must be DISABLED.
+
+**Example:**
+```sql
+ALTER TABLE bikehire.trips MERGE COLUMN price_string INTO price
+```
+
+### ALTER TABLE RENAME COLUMN
+
+**Syntax:**
+```sql
+ALTER TABLE <pipeline>[.<namespace>] RENAME COLUMN <from> TO <to>
+```
+
+**Description:**
+Renames a column. The Iceberg field id is unchanged so existing files stay readable. Pipeline must be DISABLED.
+
+**Example:**
+```sql
+ALTER TABLE bikehire.trips RENAME COLUMN price TO amount
 ```
 
 ### DROP SCHEMA

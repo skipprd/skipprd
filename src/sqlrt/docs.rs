@@ -107,27 +107,40 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         },
     );
 
-    // Alter Schema Drop Column
     docs.insert(
-        "ALTER SCHEMA DROP COLUMN".to_string(),
+        "ALTER TABLE DROP COLUMN".to_string(),
         SqlStatementDoc {
-            name: "ALTER SCHEMA DROP COLUMN".to_string(),
-            syntax: "ALTER SCHEMA <pipeline_name>[.<schema_name>] DROP COLUMN <column_name>"
-                .to_string(),
-            description: "Drops a column from a schema. Supports nested fields using dot notation."
-                .to_string(),
-            example: "ALTER SCHEMA bike_hire DROP COLUMN user_id".to_string(),
+            name: "ALTER TABLE DROP COLUMN".to_string(),
+            syntax: "ALTER TABLE <pipeline>[.<namespace>] DROP COLUMN <column>".to_string(),
+            description: "Drops a column from skippr metadata and the Iceberg table (same field id). Pipeline must be DISABLED.".to_string(),
+            example: "ALTER TABLE bikehire.trips DROP COLUMN user_id".to_string(),
         },
     );
-
-    // Alter Schema Alter Column Type
     docs.insert(
-        "ALTER SCHEMA ALTER COLUMN".to_string(),
+        "ALTER TABLE ALTER COLUMN".to_string(),
         SqlStatementDoc {
-            name: "ALTER SCHEMA ALTER COLUMN".to_string(),
-            syntax: "ALTER SCHEMA <pipeline_name>[.<schema_name>] ALTER COLUMN <column_name> TYPE <new_type>".to_string(),
-            description: "Changes the data type of a column in a schema. For arrays, use ARRAY<TYPE> format.".to_string(),
-            example: "ALTER SCHEMA bike_hire ALTER COLUMN price TYPE DECIMAL(10,2)".to_string(),
+            name: "ALTER TABLE ALTER COLUMN".to_string(),
+            syntax: "ALTER TABLE <pipeline>[.<namespace>] ALTER COLUMN <column> TYPE <new_type>".to_string(),
+            description: "Iceberg-legal promotion only (byte/short/integer→long, byte/short→integer, float→double, timestamp_milli→timestamp; Iceberg timestamp is already µs). Nested DROP/MERGE without a top-level Iceberg field id fails closed. Widen to string with MERGE COLUMN. Pipeline must be DISABLED.".to_string(),
+            example: "ALTER TABLE bikehire.trips ALTER COLUMN n TYPE BIGINT".to_string(),
+        },
+    );
+    docs.insert(
+        "ALTER TABLE RENAME COLUMN".to_string(),
+        SqlStatementDoc {
+            name: "ALTER TABLE RENAME COLUMN".to_string(),
+            syntax: "ALTER TABLE <pipeline>[.<namespace>] RENAME COLUMN <from> TO <to>".to_string(),
+            description: "Renames a column. The Iceberg field id is unchanged so existing files stay readable. Pipeline must be DISABLED.".to_string(),
+            example: "ALTER TABLE bikehire.trips RENAME COLUMN price TO amount".to_string(),
+        },
+    );
+    docs.insert(
+        "ALTER TABLE MERGE COLUMN".to_string(),
+        SqlStatementDoc {
+            name: "ALTER TABLE MERGE COLUMN".to_string(),
+            syntax: "ALTER TABLE <pipeline>[.<namespace>] MERGE COLUMN <src> INTO <dst>".to_string(),
+            description: "Drops src from metadata and Iceberg (same field id path as DROP). Retargets type-conflict evolution so later values write to dst. Historical src-only rows are not copied. Pipeline must be DISABLED.".to_string(),
+            example: "ALTER TABLE bikehire.trips MERGE COLUMN price_string INTO price".to_string(),
         },
     );
 
@@ -255,7 +268,7 @@ pub fn categorized_sql_docs() -> Vec<SqlDocCategory> {
     let mut data = Vec::new();
     let mut query = Vec::new();
     for doc in get_sql_docs().into_values() {
-        if doc.name.contains("SCHEMA") {
+        if doc.name.contains("SCHEMA") || doc.name.starts_with("ALTER TABLE") {
             schema.push(doc);
         } else if doc.name.contains("PIPELINE") {
             pipeline.push(doc);
@@ -441,6 +454,10 @@ mod tests {
             "SHOW SEMANTIC",
             "SHOW CATALOG",
             "SHOW PIPELINE",
+            "ALTER TABLE DROP COLUMN",
+            "ALTER TABLE ALTER COLUMN",
+            "ALTER TABLE RENAME COLUMN",
+            "ALTER TABLE MERGE COLUMN",
         ] {
             assert!(
                 docs.contains_key(name),

@@ -1,84 +1,108 @@
-# Postgres Output
+---
+title: PostgreSQL destination
+description: Write Skipprd pipelines into PostgreSQL. Schemas and tables are created on the first sync.
+---
 
-Writes record batches to PostgreSQL. Schemas and tables are created automatically when they do not exist.
+# PostgreSQL
 
-## How it works
+Use PostgreSQL when the destination is an application database or a small warehouse you already run. Skipprd creates the schema and tables, then inserts rows. It does not use logical replication on the write path.
 
-1. Receives batches from the WAL / sink pipeline.
-2. Ensures the target schema exists (`CREATE SCHEMA IF NOT EXISTS`).
-3. Creates or alters tables to match the incoming schema.
-4. Inserts rows into PostgreSQL tables.
+## Before you begin
 
-## Configuration
+- The Skipprd host can reach `host:port` (default `5432`).
+- A role that can `CREATE` on the target database (or an existing `schema` the role owns).
+- Store the password in the environment. Do not put it in `skippr.yml`.
 
 ```bash
-DATA_OUTPUT_PLUGIN_NAME=Postgres
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_USER=skippr
-POSTGRES_PASSWORD=secret
-POSTGRES_DATABASE=analytics
-POSTGRES_SCHEMA=public
-POSTGRES_SSLMODE=prefer
+export POSTGRES_PASSWORD="change-me"
 ```
 
-Or via YAML pipeline config:
+## Configure
 
-```yaml
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkPostgres, EnvRef, Pipeline
+
+cfg = Config.discover()
+warehouse = cfg.data_sink(
+    "warehouse",
+    DataSinkPostgres(
+        host="localhost",
+        port=5432,
+        user="skippr",
+        password=EnvRef("POSTGRES_PASSWORD"),
+        database="analytics",
+        schema="public",
+        sslmode="prefer",
+    ),
+)
+cfg.pipeline("files", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=warehouse))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-sink postgres \
+  --pipeline files \
+  --name warehouse \
+  --host localhost \
+  --port 5432 \
+  --user skippr \
+  --password '${POSTGRES_PASSWORD}' \
+  --database analytics \
+  --schema public \
+  --sslmode prefer
+```
+
+```yaml [YAML]
 data_sinks:
-  destination:
+  warehouse:
     Postgres:
-      host: "localhost"
+      host: localhost
       port: 5432
-      user: "skippr"
-      password: "${POSTGRES_PASSWORD}"
-      database: "analytics"
-      schema: "public"
-      sslmode: "prefer"
+      user: skippr
+      password: ${POSTGRES_PASSWORD}
+      database: analytics
+      schema: public
+      sslmode: prefer
 ```
 
-## Configuration variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `POSTGRES_HOST` | `localhost` | PostgreSQL host |
-| `POSTGRES_PORT` | `5432` | PostgreSQL port |
-| `POSTGRES_USER` | | Database user |
-| `POSTGRES_PASSWORD` | | Database password |
-| `POSTGRES_DATABASE` | | Target database name |
-| `POSTGRES_SCHEMA` | `public` | Target schema for tables |
-| `POSTGRES_SSLMODE` | | Libpq-style SSL mode (e.g. `disable`, `require`, `prefer`) |
-| `host`, `port`, `user`, `password`, `database`, `schema`, `sslmode` | | YAML equivalents / overrides |
-
-Connection parameters can be split between environment variables and YAML as supported by your pipeline configuration.
-
-## Authentication
-
-Authentication uses environment variables. Credentials are never stored in the config file.
-
-| Variable | Default | Description |
-|---|---|---|
-| `POSTGRES_HOST` | `localhost` | PostgreSQL host |
-| `POSTGRES_PORT` | `5432` | PostgreSQL port |
-| `POSTGRES_USER` | | Database user |
-| `POSTGRES_PASSWORD` | | Database password |
-| `POSTGRES_DATABASE` | | Database name (overrides config file) |
-| `POSTGRES_SCHEMA` | `public` | Target schema (overrides config file) |
-| `POSTGRES_SSLMODE` | | SSL mode (e.g. `disable`, `require`, `prefer`) |
-
-### Example
+:::
 
 ```bash
-export POSTGRES_HOST="localhost"
-export POSTGRES_USER="myuser"
-export POSTGRES_PASSWORD="mypassword"
+skipprd discover --pipeline files
+skipprd sync --pipeline files --once --log
 ```
+
+## Options
+
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `host` | string | `localhost` | PostgreSQL host |
+| `port` | integer | `5432` | Port |
+| `user` | string | Required | Database user |
+| `password` | secret | Not set | Password as `${ENV}` |
+| `database` | string | Required | Database name |
+| `schema` | string | `public` | Schema for tables |
+| `sslmode` | string | Not set | libpq mode: `disable`, `prefer`, `require` |
+
+## How data lands
+
+On the first sync Skipprd runs `CREATE SCHEMA IF NOT EXISTS` and creates tables to match the discovered schema. New columns are added later. Each batch is inserted as rows. Retries are exactly once — see [Exactly-once delivery](/concepts/exactly-once).
+
+Source namespaces become tables in `schema`. Prefer a dedicated schema so Skipprd tables stay out of the application schema.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `connection refused` | Check `POSTGRES_HOST` and `POSTGRES_PORT` are correct and the server is running |
-| `password authentication failed` | Verify `POSTGRES_USER` and `POSTGRES_PASSWORD` |
-| `database "..." does not exist` | Create the database first, or check the `database` field in config |
-| SSL errors | Set `POSTGRES_SSLMODE=disable` for local development |
+| Connection refused | Check `host`, `port`, and that PostgreSQL accepts connections from this machine |
+| Password authentication failed | Export the variable named in `password` in this shell |
+| `permission denied for schema` | `GRANT CREATE` on the schema, or let Skipprd create one the role owns |
+| SSL required / SSL off | Match `sslmode` to the server (`require` vs `disable`) |
+
+## Next steps
+
+- [PostgreSQL source](/connectors/inputs/postgres) — read from a different database
+- [Quickstart: PostgreSQL](/getting-started/quickstart-postgres)
+- [Exactly-once delivery](/concepts/exactly-once)

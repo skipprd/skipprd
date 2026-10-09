@@ -24,7 +24,7 @@ use arrow_schema::{
 };
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 
-use crate::arrow::schema::{ArrowSchemaVisitor, DEFAULT_MAP_FIELD_NAME, visit_schema};
+use crate::arrow::schema::{visit_schema, ArrowSchemaVisitor, DEFAULT_MAP_FIELD_NAME};
 use crate::error::Result;
 use crate::spec::{PrimitiveType, Schema, Type};
 use crate::{Error, ErrorKind};
@@ -79,6 +79,7 @@ impl<'a> Int96CoercionVisitor<'a> {
         if !matches!(
             field.data_type(),
             DataType::Timestamp(TimeUnit::Nanosecond, _)
+                | DataType::Timestamp(TimeUnit::Millisecond, _)
         ) {
             return None;
         }
@@ -292,23 +293,39 @@ mod tests {
     }
 
     #[test]
+    fn test_coerce_timestamp_ms_to_us() {
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true)
+                .with_metadata(field_id_meta(1)),
+            Field::new("id", DataType::Int32, false).with_metadata(field_id_meta(2)),
+        ]));
+        let iceberg = iceberg_schema_with_timestamp();
+        let coerced = coerce_int96_timestamps(&arrow_schema, &iceberg).unwrap();
+        assert_eq!(
+            coerced.field(0).data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
+    }
+
+    #[test]
     fn test_coerce_timestamptz_ns_to_us() {
         let iceberg = Schema::builder()
             .with_schema_id(1)
-            .with_fields(vec![
-                NestedField::optional(1, "ts", Type::Primitive(PrimitiveType::Timestamptz)).into(),
-            ])
+            .with_fields(vec![NestedField::optional(
+                1,
+                "ts",
+                Type::Primitive(PrimitiveType::Timestamptz),
+            )
+            .into()])
             .build()
             .unwrap();
 
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
-                true,
-            )
-            .with_metadata(field_id_meta(1)),
-        ]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            true,
+        )
+        .with_metadata(field_id_meta(1))]));
 
         let coerced = coerce_int96_timestamps(&arrow_schema, &iceberg).unwrap();
         assert_eq!(
@@ -321,16 +338,21 @@ mod tests {
     fn test_no_coercion_when_iceberg_is_timestamp_ns() {
         let iceberg = Schema::builder()
             .with_schema_id(1)
-            .with_fields(vec![
-                NestedField::optional(1, "ts", Type::Primitive(PrimitiveType::TimestampNs)).into(),
-            ])
+            .with_fields(vec![NestedField::optional(
+                1,
+                "ts",
+                Type::Primitive(PrimitiveType::TimestampNs),
+            )
+            .into()])
             .build()
             .unwrap();
 
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), true)
-                .with_metadata(field_id_meta(1)),
-        ]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            true,
+        )
+        .with_metadata(field_id_meta(1))]));
 
         assert!(coerce_int96_timestamps(&arrow_schema, &iceberg).is_none());
     }
@@ -339,21 +361,21 @@ mod tests {
     fn test_no_coercion_when_iceberg_is_timestamptz_ns() {
         let iceberg = Schema::builder()
             .with_schema_id(1)
-            .with_fields(vec![
-                NestedField::optional(1, "ts", Type::Primitive(PrimitiveType::TimestamptzNs))
-                    .into(),
-            ])
+            .with_fields(vec![NestedField::optional(
+                1,
+                "ts",
+                Type::Primitive(PrimitiveType::TimestamptzNs),
+            )
+            .into()])
             .build()
             .unwrap();
 
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
-                true,
-            )
-            .with_metadata(field_id_meta(1)),
-        ]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            true,
+        )
+        .with_metadata(field_id_meta(1))]));
 
         assert!(coerce_int96_timestamps(&arrow_schema, &iceberg).is_none());
     }
@@ -395,16 +417,21 @@ mod tests {
     fn test_defaults_to_us_when_iceberg_type_is_not_timestamp() {
         let iceberg = Schema::builder()
             .with_schema_id(1)
-            .with_fields(vec![
-                NestedField::optional(1, "ts", Type::Primitive(PrimitiveType::String)).into(),
-            ])
+            .with_fields(vec![NestedField::optional(
+                1,
+                "ts",
+                Type::Primitive(PrimitiveType::String),
+            )
+            .into()])
             .build()
             .unwrap();
 
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), true)
-                .with_metadata(field_id_meta(1)),
-        ]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            true,
+        )
+        .with_metadata(field_id_meta(1))]));
 
         let coerced = coerce_int96_timestamps(&arrow_schema, &iceberg).unwrap();
         assert_eq!(
@@ -418,10 +445,12 @@ mod tests {
         let mut meta = field_id_meta(1);
         meta.insert("custom_key".to_string(), "custom_value".to_string());
 
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), true)
-                .with_metadata(meta.clone()),
-        ]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            true,
+        )
+        .with_metadata(meta.clone())]));
         let iceberg = iceberg_schema_with_timestamp();
 
         let coerced = coerce_int96_timestamps(&arrow_schema, &iceberg).unwrap();
@@ -432,34 +461,32 @@ mod tests {
     fn test_coerce_timestamp_in_struct() {
         let iceberg = Schema::builder()
             .with_schema_id(1)
-            .with_fields(vec![
-                NestedField::required(
-                    1,
-                    "data",
-                    Type::Struct(StructType::new(vec![
-                        NestedField::optional(2, "ts", Type::Primitive(PrimitiveType::Timestamp))
-                            .into(),
-                    ])),
+            .with_fields(vec![NestedField::required(
+                1,
+                "data",
+                Type::Struct(StructType::new(vec![NestedField::optional(
+                    2,
+                    "ts",
+                    Type::Primitive(PrimitiveType::Timestamp),
                 )
-                .into(),
-            ])
+                .into()])),
+            )
+            .into()])
             .build()
             .unwrap();
 
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "data",
-                DataType::Struct(
-                    vec![
-                        Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), true)
-                            .with_metadata(field_id_meta(2)),
-                    ]
-                    .into(),
-                ),
-                false,
-            )
-            .with_metadata(field_id_meta(1)),
-        ]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "data",
+            DataType::Struct(
+                vec![
+                    Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), true)
+                        .with_metadata(field_id_meta(2)),
+                ]
+                .into(),
+            ),
+            false,
+        )
+        .with_metadata(field_id_meta(1))]));
 
         let coerced = coerce_int96_timestamps(&arrow_schema, &iceberg).unwrap();
         let inner = match coerced.field(0).data_type() {
@@ -476,21 +503,19 @@ mod tests {
     fn test_coerce_timestamp_in_list() {
         let iceberg = Schema::builder()
             .with_schema_id(1)
-            .with_fields(vec![
-                NestedField::optional(
-                    1,
-                    "timestamps",
-                    Type::List(ListType {
-                        element_field: NestedField::optional(
-                            2,
-                            "element",
-                            Type::Primitive(PrimitiveType::Timestamp),
-                        )
-                        .into(),
-                    }),
-                )
-                .into(),
-            ])
+            .with_fields(vec![NestedField::optional(
+                1,
+                "timestamps",
+                Type::List(ListType {
+                    element_field: NestedField::optional(
+                        2,
+                        "element",
+                        Type::Primitive(PrimitiveType::Timestamp),
+                    )
+                    .into(),
+                }),
+            )
+            .into()])
             .build()
             .unwrap();
 
@@ -500,10 +525,12 @@ mod tests {
             true,
         )
         .with_metadata(field_id_meta(2));
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("timestamps", DataType::List(Arc::new(element_field)), true)
-                .with_metadata(field_id_meta(1)),
-        ]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "timestamps",
+            DataType::List(Arc::new(element_field)),
+            true,
+        )
+        .with_metadata(field_id_meta(1))]));
 
         let coerced = coerce_int96_timestamps(&arrow_schema, &iceberg).unwrap();
         let element_dt = match coerced.field(0).data_type() {
@@ -520,27 +547,25 @@ mod tests {
     fn test_coerce_timestamp_in_map_value() {
         let iceberg = Schema::builder()
             .with_schema_id(1)
-            .with_fields(vec![
-                NestedField::optional(
-                    1,
-                    "ts_map",
-                    Type::Map(MapType {
-                        key_field: NestedField::required(
-                            2,
-                            "key",
-                            Type::Primitive(PrimitiveType::String),
-                        )
-                        .into(),
-                        value_field: NestedField::optional(
-                            3,
-                            "value",
-                            Type::Primitive(PrimitiveType::Timestamp),
-                        )
-                        .into(),
-                    }),
-                )
-                .into(),
-            ])
+            .with_fields(vec![NestedField::optional(
+                1,
+                "ts_map",
+                Type::Map(MapType {
+                    key_field: NestedField::required(
+                        2,
+                        "key",
+                        Type::Primitive(PrimitiveType::String),
+                    )
+                    .into(),
+                    value_field: NestedField::optional(
+                        3,
+                        "value",
+                        Type::Primitive(PrimitiveType::Timestamp),
+                    )
+                    .into(),
+                }),
+            )
+            .into()])
             .build()
             .unwrap();
 
@@ -556,14 +581,12 @@ mod tests {
             DataType::Struct(vec![key_field, value_field].into()),
             false,
         );
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new(
-                "ts_map",
-                DataType::Map(Arc::new(entries_field), false),
-                true,
-            )
-            .with_metadata(field_id_meta(1)),
-        ]));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "ts_map",
+            DataType::Map(Arc::new(entries_field), false),
+            true,
+        )
+        .with_metadata(field_id_meta(1))]));
 
         let coerced = coerce_int96_timestamps(&arrow_schema, &iceberg).unwrap();
         let value_dt = match coerced.field(0).data_type() {

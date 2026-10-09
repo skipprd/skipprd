@@ -1,81 +1,83 @@
-# DynamoDB Input
+---
+title: DynamoDB
+description: Copy a DynamoDB table into your destination, once or continuously with change streams.
+---
 
-Reads items from an Amazon DynamoDB table using a paginated `Scan`.
+# DynamoDB
 
-## Supported formats
+Reads items from one table. Use `cdc_mode: snapshot` for a one-off copy, or turn on DynamoDB streams and use `snapshot_then_cdc` to keep the destination in step.
 
-- Row-based JSON (each item serialized as a JSON object)
+## Before you begin
 
-## How it works
-
-1. Connects to DynamoDB in the configured AWS region (or the default credential chain region).
-2. Scans the target table with pagination until all items are read.
-3. Parallel scan segments are auto-tuned based on CPU count.
-4. Batches are ingested through the standard WAL pipeline.
-5. Lake namespace is the pipeline name (same as S3). AWS table identity stays in offset keys only.
-
-## Configuration
+- IAM that can `Scan` the table. For CDC, also `DescribeStream` / `GetRecords` on the table's stream.
+- Streams enabled on the table when you use a CDC mode.
+- `region` matching the table.
 
 ```bash
-DATA_SOURCE_PLUGIN_NAME=Dynamodb
-DYNAMODB_TABLE_NAME=my-table
-AWS_DEFAULT_REGION=us-east-1
+export AWS_DEFAULT_REGION="us-east-1"
 ```
 
-Or via YAML pipeline config:
+## Configure
 
-```yaml
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSourceDynamodb, Pipeline
+
+cfg = Config.discover()
+src = cfg.data_source(
+    "app",
+    DataSourceDynamodb(table_name="orders", region="us-east-1", cdc_mode="snapshot"),
+)
+cfg.pipeline("orders", Pipeline(data_source=src))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-source dynamodb \
+  --pipeline orders \
+  --name app \
+  --table-name orders \
+  --region us-east-1 \
+  --cdc-mode snapshot
+```
+
+```yaml [YAML]
 data_sources:
-  source:
+  app:
     Dynamodb:
-      table_name: "my-table"
-      region: "us-east-1"
+      table_name: orders
+      region: us-east-1
+      cdc_mode: snapshot
 ```
 
-## Configuration variables
+:::
 
-| Variable | Default | Description |
-|---|---|---|
-| `DYNAMODB_TABLE_NAME` | *(required)* | DynamoDB table to scan |
-| `AWS_DEFAULT_REGION` | | AWS region for the DynamoDB client |
-| `table_name` | | Table name (YAML; can be set via env) |
-| `region` | | Optional region override (YAML) |
+## Options
 
-## AWS credentials
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `table_name` | string | Required | DynamoDB table |
+| `region` | string | Required | AWS region |
+| `endpoint_url` | URL | Not set | Local or compatible endpoint |
+| `format` | string | Not set | Item format override |
+| `batch_size_bytes` | integer | Not set | Max bytes per batch |
+| `batch_size_seconds` | integer | Not set | Max seconds per batch |
+| `cdc_mode` | string | `snapshot` | `snapshot`, `snapshot_then_cdc`, or `cdc_only` |
 
-DynamoDB access uses the standard AWS credential chain (same as S3).
+## What gets synced
 
-## Namespace convention
-
-DynamoDB is one AWS table per pipeline. The lake table uses the **pipeline name**, the same default as S3. Offset and stream checkpoints stay keyed by the AWS table name (`dynamodb:` / `dynamodb-stream:`), so renaming the DynamoDB table in AWS does not change the warehouse table unless you also rename the pipeline.
-
-Optional `transform.namespace_fields` can still fan out records from field values. Use `cdc.default` for the business-key contract; do not key `cdc.namespaces` on the AWS table name.
-
-## Type mapping
-
-| DynamoDB Attribute | Skipprd Type |
-|---|---|
-| `S` (String) | String |
-| `N` (Number) | Number |
-| `BOOL` | Boolean |
-| `NULL` | Null |
-| `L` (List) | Array |
-| `M` (Map) | Object |
-| `B` (Binary) | Base64 String |
-| `SS` (String Set) | String Set |
-| `NS` (Number Set) | Number Set |
-
-## Authentication
-
-Authentication uses the AWS default credential chain.
-
-- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
-- IAM roles, instance profiles, or task roles
-- AWS SSO or shared config profiles
+Each item becomes a row. Snapshot copies the table once. CDC modes apply inserts, updates, and deletes — see [Change data capture](/cdc/).
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| AccessDenied or UnrecognizedClient | Verify the AWS credential chain and that the caller has access to the table and region. |
-| no items returned | Check `table_name`, region, and any custom endpoint settings such as LocalStack. |
+| `AccessDeniedException` | Grant Scan (and stream read for CDC) |
+| Stream not found | Enable DynamoDB Streams, then use a CDC mode |
+| Wrong region | Match `region` to the table |
+
+## Next steps
+
+- [Change data capture](/cdc/)
+- [CDC guarantees](/cdc/guarantees)

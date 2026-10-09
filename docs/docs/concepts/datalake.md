@@ -1,16 +1,49 @@
+---
+title: Datalake
+description: Land Skipprd pipelines as Iceberg tables in object storage so Athena, Snowflake, DuckDB, and skipprd query can read the same files.
+---
+
 # Datalake
 
-A **Datalake** stores data as files in object storage so many tools can read it, instead of copying it into one vendor’s warehouse first.
+A datalake stores tables as files in object storage so many tools can read them. You do not copy the data into one vendor's warehouse first.
 
-A **data warehouse** is optimized for SQL analytics on modeled tables. Skipprd's Datalake **enables** that: ELT pipelines land data in the lake; [Apache Iceberg](https://iceberg.apache.org/) tables on those files are what warehouse engines and Skipprd SQL both query. Iceberg is the open table format on the Datalake — snapshots, schema, and SQL over Parquet — without locking the data in a closed engine.
+Skipprd is not a warehouse. It lands pipelines as [Apache Iceberg](https://iceberg.apache.org/) tables on Parquet. Athena, Snowflake, DuckDB, and `skipprd query` can all read those tables.
 
-Skipprd is not a warehouse product. Warehouses you already use (Athena, Snowflake, and others) can read the same Iceberg tables.
+Use a lake destination when you want one copy of the data and several query engines. Use a warehouse destination (Snowflake, BigQuery, PostgreSQL) when that warehouse is the system of record.
 
-## How Skipprd uses it
+## How a pipeline lands in the lake
 
-1. **ELT** ingest writes a durable WAL, then compact to Iceberg Parquet in object storage.
-2. **SkipprLake**, **AthenaIceberg**, and **Duckdb** each write an Iceberg catalog skipprd can query. SkipprLake pointers live in DynamoDB or Cloud Tables (`catalog_table`). AthenaIceberg uses Glue. Duckdb uses a filesystem catalog on `file://`.
-3. Those sinks maintain their Iceberg tables automatically. They expire snapshots older than 24 hours once the newest 100 commits are kept, rewrite small files, and remove equality-delete files. Commit cost and table metadata stay flat as history grows. Older snapshots are not a time-travel promise.
-4. The lake identity is Iceberg `namespace.table`. `skipprd serve` Flight SQL and REST expose that name. `skipprd query` also registers `pipeline.namespace` as the local Iceberg ∪ WAL view of ingest. Hive Athena stays WAL-only for skipprd SQL. That clustered path is documented in [maintainer architecture](../maintainers/hla-distributed-query-iceberg-catalog.md).
+1. Skipprd reads a batch from the source and commits it to the write-ahead log.
+2. It writes the batch into Iceberg files in your bucket or warehouse path.
+3. The catalog (Glue, SkipprLake, or a local DuckDB catalog) points at the new snapshot.
 
-See also [How Skipprd Works](how-it-works.md), [SkipprLake](../connectors/outputs/skipprlake.md), [AthenaIceberg](../connectors/outputs/athenaiceberg.md), and [Duckdb](../connectors/outputs/duckdb.md).
+You query the Iceberg name (`namespace.table`). You do not open Parquet files by hand.
+
+## Destinations that write Iceberg
+
+| Destination | Catalog | Typical use |
+|---|---|---|
+| [SkipprLake](/connectors/outputs/skipprlake) | A table you name (`catalog_table`) | Skippr-managed lake, query with `skipprd query` |
+| [Athena Iceberg](/connectors/outputs/athenaiceberg) | AWS Glue | SQL in Athena on Iceberg tables |
+| [DuckDB](/connectors/outputs/duckdb) | Files on disk (`file://`) | Local analytics and CI |
+
+Hive Athena (the [Athena](/connectors/outputs/athena) destination) writes Hive tables on S3, not Iceberg. `skipprd query` can still read in-flight WAL rows for that pipeline, but the durable table is the Glue/Hive one.
+
+## What Skipprd maintains
+
+Iceberg destinations keep their own tables. They expire old snapshots (they keep recent commits, not unbounded history), compact small files, and drop delete files so metadata stays small. Older snapshots are not a time-travel product promise — query the current table.
+
+## Query
+
+```bash
+skipprd query --pipeline bikehire "SELECT * FROM rides LIMIT 20"
+```
+
+For Iceberg destinations this is the lake table plus any rows still in the WAL. For the query command itself, see [skipprd query](/cli/query).
+
+## Next steps
+
+- [SkipprLake](/connectors/outputs/skipprlake)
+- [Athena Iceberg](/connectors/outputs/athenaiceberg)
+- [DuckDB](/connectors/outputs/duckdb)
+- [How Skipprd works](/concepts/how-it-works)

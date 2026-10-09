@@ -1,73 +1,90 @@
-# ClickHouse Output
+---
+title: ClickHouse destination
+description: Insert Skipprd batches into a ClickHouse table. Retries can duplicate rows — deduplicate downstream.
+---
 
-Writes data to ClickHouse tables via the HTTP API using `INSERT FORMAT JSONEachRow`.
+# ClickHouse
 
-## How it works
+Use ClickHouse when that is already your analytics store. Skipprd inserts batches into `database.table`. A retry can write a batch again, so plan a unique key or a downstream dedup. See [Exactly-once delivery](/concepts/exactly-once).
 
-1. Receives Arrow RecordBatch streams.
-2. Auto-creates tables with `CREATE TABLE IF NOT EXISTS` using Nullable MergeTree columns.
-3. Converts each batch row to JSON and inserts via the ClickHouse HTTP bulk insert endpoint.
-4. Table name defaults to the namespace (dots replaced with underscores) or can be overridden.
+## Before you begin
 
-## Configuration
+- A HTTP(S) URL for the ClickHouse service (`https://host:8443`).
+- A database and a user that can insert (and create the table if it does not exist).
 
-```yaml
-data_sinks:
-  sink:
-    Clickhouse:
-      url: "http://localhost:8123"
-      database: default
-      user: default
-      password: secret
-      table: my_table
+```bash
+export CLICKHOUSE_PASSWORD="change-me"
 ```
 
-## Configuration variables
+## Configure
 
-| Variable | Default | Description |
-|---|---|---|
-| `url` | | ClickHouse HTTP endpoint |
-| `database` | | Database name |
-| `user` | | Username |
-| `password` | | Password |
-| `table` | (from namespace) | Target table name |
+::: code-group
 
-## Authentication
+```python [Python]
+from skippr import Config, DataSinkClickhouse, EnvRef, Pipeline
 
-Use the configured ClickHouse user and password, or rely on the default local user for development. For security best practices, we strongly advise against storing the password in `skippr.yml`. Use environment variable interpolation instead: replace the `password` value with your own `${ENV_VAR}` reference.
+cfg = Config.discover()
+ch = cfg.data_sink(
+    "warehouse",
+    DataSinkClickhouse(
+        url="https://clickhouse.internal:8443",
+        database="analytics",
+        user="skippr",
+        password=EnvRef("CLICKHOUSE_PASSWORD"),
+        table="events",
+    ),
+)
+cfg.pipeline("events", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=ch))
+cfg.save()
+```
 
-The relevant part of `skippr.yml` looks like this:
+```bash [CLI]
+skipprd connect data-sink clickhouse \
+  --pipeline events \
+  --name warehouse \
+  --url https://clickhouse.internal:8443 \
+  --database analytics \
+  --user skippr \
+  --password '${CLICKHOUSE_PASSWORD}' \
+  --table events
+```
 
-```yaml
+```yaml [YAML]
 data_sinks:
   warehouse:
     Clickhouse:
-      password: "${CLICKHOUSE_PASSWORD}"
+      url: https://clickhouse.internal:8443
+      database: analytics
+      user: skippr
+      password: ${CLICKHOUSE_PASSWORD}
+      table: events
 ```
 
-Set the env var before running `skipprd`:
+:::
 
-macOS / Linux
+## Options
 
-```bash
-export CLICKHOUSE_PASSWORD="secret"
-```
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `url` | URL | Required | ClickHouse HTTP(S) endpoint |
+| `database` | string | Required | Database |
+| `user` | string | Required | User |
+| `password` | secret | Not set | Password as `${ENV}` |
+| `table` | string | Required | Table name |
 
-Windows PowerShell
+## How data lands
 
-```powershell
-$env:CLICKHOUSE_PASSWORD = "secret"
-```
-
-Windows Command Prompt
-
-```cmd
-set CLICKHOUSE_PASSWORD=secret
-```
+Batches are inserted into `table`. Deduplicate on your primary key if a crash retries a batch.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| authentication failed | Verify the ClickHouse user, password, URL, and database name. |
-| writes succeed but deduped state looks delayed | This destination relies on ReplacingMergeTree merges. Use `FINAL` for point-in-time correctness when querying fresh data. |
+| Connection refused | Check `url` and TLS |
+| Authentication failed | Export the password variable in this shell |
+| Table missing | Grant `CREATE` or create the table first |
+
+## Next steps
+
+- [ClickHouse source](/connectors/inputs/clickhouse)
+- [Exactly-once delivery](/concepts/exactly-once)

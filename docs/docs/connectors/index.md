@@ -1,122 +1,121 @@
+---
+title: Connector catalog
+description: Every Skipprd source, destination, and schema sink — pick a connector and open its setup guide.
+---
+
 # Connectors
 
-Reference for configuring data sources, ingest sinks, and schema sinks in `skippr.yml`.
+A pipeline reads from one **source** and writes to one **destination**. Some destinations also need a **schema sink** so the warehouse catalog stays in step with the tables Skipprd creates.
 
-| Role | YAML block | Overview |
-| --- | --- | --- |
-| Read / extract | `data_sources:` | Input connectors (table below) |
-| Write ingested data | `data_sinks:` | [Data sinks](#data-sinks) |
-| Catalog / DDL for ingest | `schema_sinks:` | [Schema sinks](#schema-sinks) |
-
-Optional `version:` on a source, sink, or schema connector pins that connector to a specific release.
+Configure them in `skippr.yml`, Python, or `skipprd connect`. Pin a release with `version:` on that entry when you do not want “latest”.
 
 ## Data sources
 
 ### Databases
 
-| Plugin | Doc |
-| --- | --- |
-| `Clickhouse` | [ClickHouse](inputs/clickhouse.md) |
-| `Dynamodb` | [DynamoDB](inputs/dynamodb.md) |
-| `Mongodb` | [MongoDB](inputs/mongodb.md) |
-| `Motherduck` | [MotherDuck](inputs/motherduck.md) |
-| `Mssql` | [MSSQL](inputs/mssql.md) |
-| `Mysql` | [MySQL](inputs/mysql.md) |
-| `Postgres` | [PostgreSQL](inputs/postgres.md) |
-| `Redshift` | [Redshift](inputs/redshift.md) |
-| `DeltaLake` | [Delta Lake](inputs/delta_lake.md) |
+| Connector | Guide |
+|---|---|
+| `Clickhouse` | [ClickHouse](/connectors/inputs/clickhouse) |
+| `Dynamodb` | [DynamoDB](/connectors/inputs/dynamodb) |
+| `Mongodb` | [MongoDB](/connectors/inputs/mongodb) |
+| `Motherduck` | [MotherDuck](/connectors/inputs/motherduck) |
+| `Mssql` | [SQL Server](/connectors/inputs/mssql) |
+| `Mysql` | [MySQL](/connectors/inputs/mysql) |
+| `Postgres` | [PostgreSQL](/connectors/inputs/postgres) |
+| `Redshift` | [Redshift](/connectors/inputs/redshift) |
+| `DeltaLake` | [Delta Lake](/connectors/inputs/delta_lake) |
 
-### Object stores
+### Files and object stores
 
-| Plugin | Doc |
-| --- | --- |
-| `File` | [Local file](inputs/file.md) |
-| `S3` | [S3](inputs/s3.md) |
-| `Sftp` | [SFTP](inputs/sftp.md) |
+| Connector | Guide |
+|---|---|
+| `File` | [Local file](/connectors/inputs/file) |
+| `S3` | [S3](/connectors/inputs/s3) |
+| `Sftp` | [SFTP](/connectors/inputs/sftp) |
 
 ### Streaming
 
-| Plugin | Doc |
-| --- | --- |
-| `Kafka` | [Kafka](inputs/kafka.md) |
-| `Sqs` | [SQS](inputs/sqs.md) |
-| `Kinesis` | [Kinesis](inputs/kinesis.md) |
-| `Amqp` | [AMQP](inputs/amqp.md) |
-| `Sns` | [SNS](inputs/sns.md) |
-| `Eventbridge` | [EventBridge](inputs/eventbridge.md) |
-| `Mqtt` | [MQTT](inputs/mqtt.md) |
-| `Websocket` | [WebSocket](inputs/websocket.md) |
+| Connector | Guide |
+|---|---|
+| `Kafka` | [Kafka](/connectors/inputs/kafka) |
+| `Sqs` | [SQS](/connectors/inputs/sqs) |
+| `Kinesis` | [Kinesis](/connectors/inputs/kinesis) |
+| `Amqp` | [AMQP](/connectors/inputs/amqp) |
+| `Sns` | [SNS](/connectors/inputs/sns) |
+| `Eventbridge` | [EventBridge](/connectors/inputs/eventbridge) |
+| `Mqtt` | [MQTT](/connectors/inputs/mqtt) |
+| `Websocket` | [WebSocket](/connectors/inputs/websocket) |
 
-### HTTP / Network
+### HTTP and network
 
-| Plugin | Doc |
-| --- | --- |
-| `HttpClient` | [HTTP client](inputs/http_client.md) |
-| `HttpServer` | [HTTP server](inputs/http_server.md) |
-| `Socket` | [Socket](inputs/socket.md) |
-| `Statsd` | [StatsD](inputs/statsd.md) |
-| `Pcap` | [PCAP](inputs/pcap.md) |
+| Connector | Guide |
+|---|---|
+| `HttpClient` | [HTTP client](/connectors/inputs/http_client) |
+| `HttpServer` | [HTTP server](/connectors/inputs/http_server) |
+| `Socket` | [Socket](/connectors/inputs/socket) |
+| `Statsd` | [StatsD](/connectors/inputs/statsd) |
+| `Pcap` | [PCAP](/connectors/inputs/pcap) |
+| `Otlp` | [OTLP](/connectors/inputs/otlp) |
+| `Stdin` | [Stdin](/connectors/inputs/stdin) |
 
-### API / SaaS
+### Marketing, commerce, and CRM
 
-| Plugin | Doc |
-| --- | --- |
-| `GoogleAnalytics` | [GA4](inputs/google_analytics.md) |
-| `AppleSearchAds` | [Apple Search Ads](inputs/apple_search_ads.md) |
-| `GoogleAds` | [Google Ads](inputs/google_ads.md) |
-| `MetaAds` | [Meta Ads](inputs/meta_ads.md) |
-| `MetaInstagramAds` | [Meta Instagram Ads](inputs/meta_instagram_ads.md) |
-| `LinkedInAds` | [LinkedIn Ads](inputs/linkedin_ads.md) |
-| `XAds` | [X Ads](inputs/x_ads.md) |
-| `AdrollAds` | [AdRoll Ads](inputs/adroll_ads.md) |
-| `Stripe` | [Stripe](inputs/stripe.md) |
-| `ShopifyAdmin` | [Shopify Admin](inputs/shopify_admin.md) |
-| `HubspotCrm` | [HubSpot CRM](inputs/hubspot_crm.md) |
-| `XeroAccounting` | [Xero Accounting](inputs/xero_accounting.md) |
-| `RevolutBusiness` | [Revolut Business](inputs/revolut_business.md) |
-| `SumUp` | [SumUp](inputs/sumup.md) |
+| Connector | Guide |
+|---|---|
+| `GoogleAnalytics` | [Google Analytics (GA4)](/connectors/inputs/google_analytics) |
+| `GoogleAds` | [Google Ads](/connectors/inputs/google_ads) |
+| `GoogleSearchConsole` | [Google Search Console](/connectors/inputs/google_search_console) |
+| `BingWebmasterTools` | [Bing Webmaster Tools](/connectors/inputs/bing_webmaster_tools) |
+| `AppleSearchAds` | [Apple Search Ads](/connectors/inputs/apple_search_ads) |
+| `MetaAds` | [Meta Ads](/connectors/inputs/meta_ads) |
+| `MetaInstagramAds` | [Meta Instagram Ads](/connectors/inputs/meta_instagram_ads) |
+| `LinkedInAds` | [LinkedIn Ads](/connectors/inputs/linkedin_ads) |
+| `XAds` | [X Ads](/connectors/inputs/x_ads) |
+| `AdrollAds` | [AdRoll Ads](/connectors/inputs/adroll_ads) |
+| `Stripe` | [Stripe](/connectors/inputs/stripe) |
+| `ShopifyAdmin` | [Shopify Admin](/connectors/inputs/shopify_admin) |
+| `HubspotCrm` | [HubSpot CRM](/connectors/inputs/hubspot_crm) |
+| `XeroAccounting` | [Xero Accounting](/connectors/inputs/xero_accounting) |
+| `RevolutBusiness` | [Revolut Business](/connectors/inputs/revolut_business) |
+| `SumUp` | [SumUp](/connectors/inputs/sumup) |
 
-### Other
+## Destinations
 
-| Plugin | Doc |
-| --- | --- |
-| `Stdin` | [Stdin](inputs/stdin.md) |
-
-## Data sinks
-
-| Plugin | Doc |
-| --- | --- |
-| `Athena` | [Athena (S3 + Glue)](outputs/athena.md) |
-| `AthenaIceberg` | [AthenaIceberg](outputs/athenaiceberg.md) |
-| `Bigquery` | [BigQuery](outputs/bigquery.md) |
-| `Clickhouse` | [ClickHouse](outputs/clickhouse.md) |
-| `Databricks` | [Databricks](outputs/databricks.md) |
-| `Duckdb` | [Duckdb](outputs/duckdb.md) |
-| `Motherduck` | [MotherDuck](outputs/motherduck.md) |
-| `Postgres` | [Postgres](outputs/postgres.md) |
-| `Redshift` | [Redshift](outputs/redshift.md) |
-| `Snowflake` | [Snowflake](outputs/snowflake.md) |
-| `Synapse` | [Synapse](outputs/synapse.md) |
-| `SkipprLake` | [SkipprLake](outputs/skipprlake.md) |
-| `S3` | [S3](outputs/s3.md) |
-| `Gcs` | [GCS](outputs/gcs.md) |
-| `AzureBlob` | [Azure Blob](outputs/azure_blob.md) |
-| `Sftp` | [SFTP](outputs/sftp.md) |
-| `File` | [Local file](outputs/file.md) |
-| `Amqp` | [AMQP](outputs/amqp.md) |
-| `Stdout` | [Stdout](outputs/stdout.md) |
+| Connector | Guide |
+|---|---|
+| `Athena` | [Athena](/connectors/outputs/athena) |
+| `AthenaIceberg` | [Athena Iceberg](/connectors/outputs/athenaiceberg) |
+| `Bigquery` | [BigQuery](/connectors/outputs/bigquery) |
+| `Clickhouse` | [ClickHouse](/connectors/outputs/clickhouse) |
+| `Databricks` | [Databricks](/connectors/outputs/databricks) |
+| `Duckdb` | [DuckDB](/connectors/outputs/duckdb) |
+| `Motherduck` | [MotherDuck](/connectors/outputs/motherduck) |
+| `Postgres` | [PostgreSQL](/connectors/outputs/postgres) |
+| `Redshift` | [Redshift](/connectors/outputs/redshift) |
+| `Snowflake` | [Snowflake](/connectors/outputs/snowflake) |
+| `Synapse` | [Synapse](/connectors/outputs/synapse) |
+| `SkipprLake` | [SkipprLake](/connectors/outputs/skipprlake) |
+| `S3` | [S3](/connectors/outputs/s3) |
+| `Gcs` | [GCS](/connectors/outputs/gcs) |
+| `AzureBlob` | [Azure Blob](/connectors/outputs/azure_blob) |
+| `Sftp` | [SFTP](/connectors/outputs/sftp) |
+| `File` | [Local file](/connectors/outputs/file) |
+| `Amqp` | [AMQP](/connectors/outputs/amqp) |
+| `Stdout` | [Stdout](/connectors/outputs/stdout) |
 
 ## Schema sinks
 
-| Plugin | Doc | Typical data sink |
-| --- | --- | --- |
-| `Glue` | [Glue](schema_sinks/glue.md) | `Athena` |
-| `AthenaIceberg` | [AthenaIceberg](schema_sinks/athenaiceberg.md) | `AthenaIceberg` |
-| `Duckdb` | [Duckdb](schema_sinks/duckdb.md) | `Duckdb` |
-| `SkipprLake` | [SkipprLake](schema_sinks/skipprlake.md) | `SkipprLake` |
-| `Bigquery` | — | `Bigquery` |
-| `Snowflake` | — | `Snowflake` |
-| `Postgres` | — | `Postgres` |
-| `Redshift` | — | `Redshift` |
-| `Clickhouse` | — | `Clickhouse` |
-| `Motherduck` | — | `Motherduck` |
+Pair these with the matching destination so tables and columns appear in the catalog.
+
+| Connector | Guide | Pair with |
+|---|---|---|
+| `Glue` | [Glue](/connectors/schema_sinks/glue) | Athena |
+| `AthenaIceberg` | [Athena Iceberg schema](/connectors/schema_sinks/athenaiceberg) | Athena Iceberg |
+| `Duckdb` | [DuckDB schema](/connectors/schema_sinks/duckdb) | DuckDB |
+| `SkipprLake` | [SkipprLake schema](/connectors/schema_sinks/skipprlake) | SkipprLake |
+
+## Next steps
+
+- [Sources](/configuration/input)
+- [Destinations](/configuration/output)
+- [skipprd connect](/cli/connect)

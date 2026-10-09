@@ -1,34 +1,49 @@
-# GA4 bronze catalog and warehouse modeling
+---
+title: GA4 bronze and modeling
+description: Land Google Analytics 4 as daily bronze tables in Skipprd, then build warehouse rollups in SQL or dbt — not in the source.
+---
 
-Skipprd's GA4 source lands **daily fact grains** in bronze via the Data API `runReport`. Each namespace is one stable dimension set; rollups, pivots, and channel summaries belong in the warehouse (dbt or SQL).
+# GA4 bronze and modeling
 
-This is **not** the GA4 BigQuery export (event-level raw). Use a separate future source for event-level hoovering.
+The [Google Analytics (GA4) source](/connectors/inputs/google_analytics) lands **daily fact tables** from the Data API. Each table is one stable set of dimensions. Rollups, pivots, and channel summaries belong in the warehouse (SQL or dbt), not in Skipprd.
 
-## Bronze → warehouse examples
+This is not the GA4 BigQuery export. You get daily grains Skipprd can rewrite when Google revises a day, not event-level hits.
 
-| Bronze namespace | Example warehouse outputs |
-| --- | --- |
+## What to build on each bronze table
+
+| Bronze table | Warehouse work you typically do |
+|---|---|
 | `google_analytics.audience_daily` | Site-wide DAU, sessions, engagement KPIs |
-| `google_analytics.audience_retention_daily` | WAU / 28-day active users (metrics already on `date` grain) |
+| `google_analytics.audience_retention_daily` | WAU / 28-day active users (`date` grain already) |
 | `google_analytics.traffic_acquisition_daily` | Channel summary, source/medium rollups |
 | `google_analytics.traffic_campaign_daily` | Paid campaign performance |
-| `google_analytics.user_acquisition_daily` | New user acquisition by channel |
-| `google_analytics.events_daily` | Weekly event trends (group by week in SQL) |
-| `google_analytics.content_pages_daily` | Top pages, landing page analysis |
+| `google_analytics.user_acquisition_daily` | New-user acquisition by channel |
+| `google_analytics.events_daily` | Weekly event trends (`date_trunc` in SQL) |
+| `google_analytics.content_pages_daily` | Top pages and landing pages |
 | `google_analytics.geo_daily` | Country / region / city dashboards |
-| `google_analytics.demographics_*_daily` | Age, gender, interest, language breakdowns |
-| `google_analytics.ecommerce_items_daily` | Product-level revenue (requires ecommerce enabled) |
-| `google_analytics.publisher_ads_daily` | Ad unit performance (requires linked Ads) |
+| `google_analytics.demographics_*_daily` | Age, gender, interest, language |
+| `google_analytics.ecommerce_items_daily` | Product revenue (needs ecommerce in GA4) |
+| `google_analytics.publisher_ads_daily` | Ad-unit performance (needs linked Ads) |
 
-## Accuracy knobs (do not conflate)
+Join on `date` plus the dimension columns the table already has. Do not ask the source for a different grain.
+
+## Settings that affect accuracy
+
+These are easy to mix up. They do different jobs.
 
 | Setting | Role |
-| --- | --- |
-| `replace_partition` on `date` | Rewrite each calendar day’s partition when metrics change |
-| `lookback_days` | Re-pull recent **mature** days Google may revise |
-| `processing_lag_days` | Skip syncing the trailing edge while GA4 is still incomplete |
-| `window_in_days` | Days per API `dateRanges` chunk; default **1** to limit sampling |
+|---|---|
+| `replace_partition` on `date` | Rewrite that calendar day's partition when metrics change |
+| `lookback_days` | Re-pull recent days Google may revise |
+| `processing_lag_days` | Skip the newest days while GA4 is still incomplete |
+| `window_in_days` | Days per API request. Leave at `1` to limit sampling |
 
-**Recommended operations:** scheduled `skipprd sync` with defaults; raise `lookback_days` for long attribution windows — not `window_in_days > 1`.
+Run a scheduled `skipprd sync`. Raise `lookback_days` when attribution windows are long. Do not raise `window_in_days` to speed up a backfill — that increases sampling.
 
-See [Google Analytics (GA4) input](../connectors/inputs/google_analytics.md) and [Source landing semantics](source-landing-semantics.md).
+See [How sources land](/concepts/source-landing-semantics) for why `replace_partition` is required here.
+
+## Next steps
+
+- [Google Analytics (GA4)](/connectors/inputs/google_analytics)
+- [How sources land](/concepts/source-landing-semantics)
+- [Athena](/connectors/outputs/athena)

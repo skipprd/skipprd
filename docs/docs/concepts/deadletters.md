@@ -1,18 +1,27 @@
+---
+title: Deadletters
+description: Keep records that fail validation out of the main table, inspect them, and decide whether to fix the source or the schema.
+---
+
 # Deadletters
 
-Records that fail validation or cannot be normalized are captured as deadletters instead of being mixed into the primary output.
+When a record fails validation or cannot be normalised, Skipprd does not write it into the main table. It becomes a **deadletter**: the original payload plus the error.
 
-## How deadletters work
+You choose what happens next.
 
-- Deadletters still go through Skipprd's normal WAL and compaction pipeline.
-- A pipeline can optionally point at a dedicated deadletter sink from the top-level `deadletter_sinks` registry.
-- If `deadletter_sink` is unset for a pipeline, deadletter records are discarded after being counted and logged.
-- If `deadletter_sink` is set but the referenced sink is invalid, startup fails.
-- Deadletter Athena tables use the `_dl_<pipeline>` name, so the deadletter schema stays isolated from the primary table even when both live in Athena.
+- Point the pipeline at a `deadletter_sink` and Skipprd writes those records to that destination.
+- Leave `deadletter_sink` unset and Skipprd counts and logs them, then discards them.
+- If `deadletter_sink` points at a missing or invalid sink, startup fails.
 
-## Config file example
+Do not reuse the primary `data_sink` as the deadletter sink. Use a separate prefix, schema, or database so failed rows cannot mix with good ones.
 
-```yaml
+## Configure
+
+This pipeline writes good rows to Athena and failed rows to a second Athena database:
+
+::: code-group
+
+```yaml [YAML]
 pipelines:
   bike_hire:
     data_source: data_sources.source
@@ -54,28 +63,101 @@ schema_sinks:
       glue_database_name: analytics_deadletters
 ```
 
-You can also use `S3` or `File` sinks in `deadletter_sinks`.
+```python [Python]
+from skippr import Config, DataSinkAthena, Pipeline, SchemaSinkGlue
 
-## Deadletter schema
+cfg = Config.discover()
+glue = cfg.schema_sink(
+    "glue_analytics",
+    SchemaSinkGlue(
+        s3_bucket="my-main-bucket",
+        s3_prefix="warehouse/events",
+        athena_workgroup_name="analytics",
+        athena_results_s3_bucket="my-query-results",
+        glue_database_name="analytics",
+    ),
+)
+glue_dl = cfg.schema_sink(
+    "glue_analytics_deadletters",
+    SchemaSinkGlue(
+        s3_bucket="my-deadletter-bucket",
+        s3_prefix="warehouse/deadletters",
+        athena_workgroup_name="analytics",
+        athena_results_s3_bucket="my-query-results",
+        glue_database_name="analytics_deadletters",
+    ),
+)
+warehouse = cfg.data_sink(
+    "analytics",
+    DataSinkAthena(
+        athena_workgroup_name="analytics",
+        s3_bucket="my-main-bucket",
+        athena_results_s3_bucket="my-query-results",
+        s3_prefix="warehouse/events",
+    ),
+    schema_sink=glue,
+)
+dl = cfg.deadletter_sink(
+    "analytics_deadletters",
+    DataSinkAthena(
+        athena_workgroup_name="analytics",
+        s3_bucket="my-deadletter-bucket",
+        athena_results_s3_bucket="my-query-results",
+        s3_prefix="warehouse/deadletters",
+    ),
+    schema_sink=glue_dl,
+)
+cfg.pipeline(
+    "bike_hire",
+    Pipeline(
+        data_source=cfg.get_data_source("source"),
+        data_sink=warehouse,
+        deadletter_sink=dl,
+    ),
+)
+cfg.save()
+```
 
-Deadletter tables are written as Parquet with these columns:
+```bash [CLI]
+skipprd connect data-sink athena \
+  --pipeline bike_hire \
+  --name analytics \
+  --athena-workgroup-name analytics \
+  --s3-bucket my-main-bucket \
+  --athena-results-s3-bucket my-query-results \
+  --s3-prefix warehouse/events
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | string | Stable deadletter identifier derived from namespace and offset |
-| `namespace` | string | Source namespace that failed |
-| `record` | string | Original raw record payload |
-| `error` | string | Human-readable failure message |
-| `failure_code` | string | Error classification |
-| `event_time` | bigint | Source event time when available |
-| `processed_time` | bigint | Time Skipprd emitted the deadletter |
-| `source_uri` | string | Source file or object path |
-| `offset_key` | string | Source offset key |
-| `offset_pos` | bigint | Source offset position |
+skipprd connect schema-sink glue \
+  --pipeline bike_hire \
+  --name glue_analytics \
+  --s3-bucket my-main-bucket \
+  --s3-prefix warehouse/events \
+  --athena-workgroup-name analytics \
+  --athena-results-s3-bucket my-query-results \
+  --glue-database-name analytics
+```
 
-## Querying Athena deadletters
+`skipprd connect` does not write `deadletter_sinks`. Add that block in YAML or with `Config.deadletter_sink` as in the Python tab.
 
-When the deadletter sink is Athena, query the configured deadletter database using `_dl_<pipeline>` as the table name:
+:::
+
+`S3` and `File` destinations also work as deadletter sinks.
+
+## What a deadletter row contains
+
+| Column | Description |
+|---|---|
+| `id` | Stable id from the source namespace and offset |
+| `namespace` | Source table that failed |
+| `record` | Original payload |
+| `error` | Human-readable failure |
+| `failure_code` | Error class |
+| `event_time` | Source event time when the source provided one |
+| `processed_time` | When Skipprd emitted the deadletter |
+| `source_uri` | Source file or object path |
+| `offset_key` / `offset_pos` | Resume coordinates of the failed record |
+
+Athena deadletter tables are named `_dl_<pipeline>` in the deadletter database:
 
 ```sql
 SELECT id, namespace, error, failure_code
@@ -85,7 +167,14 @@ ORDER BY processed_time DESC
 LIMIT 50;
 ```
 
-## Operational guidance
+## What to do with them
 
-- Prefer a dedicated Glue database or S3 prefix for deadletters.
-- Do not point `deadletter_sink` at the same registry entry as the primary `data_sink`.
+1. Read the `error` and `failure_code`. Most failures are a type mismatch or a required field that is missing.
+2. Fix the source payload, or [review the schema](/concepts/schema) if Skipprd inferred the wrong type.
+3. Re-run sync. Skipprd does not automatically replay deadletters into the main table.
+
+## Next steps
+
+- [Schema discovery and evolution](/concepts/schema)
+- [Troubleshooting](/operations/troubleshooting)
+- [skipprd sync](/cli/sync)

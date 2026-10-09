@@ -1,67 +1,98 @@
-# Meta Instagram Ads Input
+---
+title: Meta Instagram Ads
+description: Land daily Instagram placement insights from a Meta ad account.
+---
 
-Daily Instagram placement insights from the Meta Marketing API.
+# Meta Instagram Ads
 
-## Connect
+Same Marketing API as [Meta Ads](/connectors/inputs/meta_ads), filtered to Instagram placements. Use it when Instagram spend should land in its own tables.
 
-Set `ad_account_id` and `access_token` (or OAuth refresh fields) in `skippr.yml`. Credentials belong in the environment, not in git.
+## Before you begin
 
-## Configuration
+- An `act_…` ad account and a long-lived token with `ads_read`.
+- A destination that can rewrite a day (Athena, Athena Iceberg, or SkipprLake).
 
-```yaml
+```bash
+export META_ADS_ACCESS_TOKEN="..."
+```
+
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSourceMetaInstagramAds, EnvRef, Pipeline
+
+cfg = Config.discover()
+src = cfg.data_source(
+    "ig_ads",
+    DataSourceMetaInstagramAds(
+        ad_account_id="act_123456789",
+        start_date="2024-01-01",
+        access_token=EnvRef("META_ADS_ACCESS_TOKEN"),
+        instagram_filter=True,
+        stream_profile="full",
+    ),
+)
+cfg.pipeline("ig", Pipeline(data_source=src, data_sink=cfg.get_data_sink("lake")))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-source meta-instagram-ads \
+  --pipeline ig \
+  --name ig_ads \
+  --ad-account-id act_123456789 \
+  --start-date 2024-01-01 \
+  --access-token '${META_ADS_ACCESS_TOKEN}' \
+  --instagram-filter \
+  --stream-profile full
+```
+
+```yaml [YAML]
 data_sources:
-  meta_instagram:
+  ig_ads:
     MetaInstagramAds:
-      ad_account_id: "act_123456789"
+      ad_account_id: act_123456789
       start_date: "2024-01-01"
       stream_profile: full
-      lookback_days: 3
-      processing_lag_days: 1
+      instagram_filter: true
       access_token: ${META_ADS_ACCESS_TOKEN}
 ```
 
-| Field | Default | Description |
-| --- | --- | --- |
-| `ad_account_id` | *(required)* | Meta ad account ID |
-| `start_date` | *(required)* | First report date (`YYYY-MM-DD`) |
-| `end_date` | | Last report date |
-| `lookback_days` | `3` | Mature days to re-fetch |
-| `processing_lag_days` | `1` | Skip trailing immature days |
-| `stream_profile` | `full` | `minimal`, `standard`, or `full` |
-| `streams` | profile set | Explicit namespace list |
-| `api_version` | | Graph API version override |
-| `access_token` | | Long-lived access token |
-| `oauth_*` | | OAuth refresh credentials |
+:::
 
-## Pipeline wiring
+## Options
 
-```yaml
-pipelines:
-  instagram:
-    data_source: data_sources.meta_instagram
-    data_sink: data_sinks.landing
-```
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `ad_account_id` | string | Required | `act_…` account id |
+| `start_date` | string | Required | First report date |
+| `access_token` | secret | Not set | Long-lived token |
+| `oauth_token_url` | URL | Not set | Token URL when you refresh |
+| `oauth_client_id` | string | Not set | OAuth client id |
+| `oauth_client_secret` | secret | Not set | OAuth secret |
+| `oauth_refresh_token` | secret | Not set | Refresh token |
+| `api_version` | string | Not set | Graph API version |
+| `end_date` | string | Yesterday minus lag | Last report date |
+| `lookback_days` | integer | Not set | Days to re-fetch |
+| `stream_profile` | string | Not set | `minimal`, `standard`, or `full` |
+| `processing_lag_days` | integer | Not set | Skip immature days |
+| `instagram_filter` | bool | `true` here | Keep Instagram placements |
+| `streams` | list | Profile set | Exact stream list |
 
-## Authentication
+## What gets synced
 
-Provide either:
-
-- **`access_token`** / `META_INSTAGRAM_ADS_ACCESS_TOKEN` — long-lived Marketing API token with `ads_read` (and related) permissions, or
-- **OAuth refresh** — `oauth_token_url`, `oauth_client_id`, `oauth_client_secret`, and `oauth_refresh_token` (defaults to Meta’s token endpoint when configured in `skippr.yml`).
-
-Required env vars (typical):
-
-- `META_AD_ACCOUNT_ID`
-- `META_INSTAGRAM_ADS_ACCESS_TOKEN`
+Daily Instagram placement insights. Each run rewrites recent days.
 
 ## Troubleshooting
 
 | Symptom | Fix |
-| --- | --- |
-| Token / 401 errors | Regenerate a long-lived token; confirm `ads_read` on the ad account |
-| Empty streams | Verify campaigns ran on Instagram; check `instagram_filter` |
-| Rate limits (429) | Plugin retries with backoff; reduce parallel jobs if needed |
-| Slow discover | Expected — discover only samples 3 days of `account_daily`; use `skipprd sync` for full history |
-| Stale metrics | Confirm `replace_partition`; increase `lookback_days` |
+|---|---|
+| Empty tables | Confirm the account has Instagram placements in the window |
+| 190 / invalid token | Same token fix as [Meta Ads](/connectors/inputs/meta_ads) |
 
-Offline dev: set `SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR` to JSON fixtures (`account_insights.json`, `campaign_insights.json`, etc.).
+## Next steps
+
+- [Meta Ads](/connectors/inputs/meta_ads)
+- [How sources land](/concepts/source-landing-semantics)

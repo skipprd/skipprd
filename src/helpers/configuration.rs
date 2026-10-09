@@ -2575,34 +2575,10 @@ impl Config {
     }
 
     pub async fn set_metadata(&self, pipeline_metadata: &PipelineMetadata, evolved: bool) {
-        use once_cell::sync::Lazy as OnceLazy;
-        static UPLOAD_LOCK: OnceLazy<tokio::sync::Mutex<()>> =
-            OnceLazy::new(|| tokio::sync::Mutex::new(()));
-
         // NOTE: callers are responsible for updating in-memory METADATA via
-        // METADATA.store() *before* calling this function.  Doing the store
-        // here caused stale async snapshots (e.g. from namespace creation) to
-        // regress already-evolved metadata, breaking serialization for records
-        // processed during the regression window.
-
-        let tenant = self.get_tenant();
-        let workspace = self.get_workspace_name();
-        let pipeline = self.get_pipeline_name();
-
-        let key = self.pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
-        let json_value = match serde_json::to_value(pipeline_metadata) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Failed to serialize metadata: {}", e);
-                return;
-            }
-        };
-
-        let storage = crate::adapters::storage::get_storage(self);
-        let _guard = UPLOAD_LOCK.lock().await;
-        match storage.put_json(&key, &json_value).await {
-            Ok(_) => info!("Updated pipeline metadata: {}", key),
-            Err(e) => error!("Failed to persist metadata: {}", e),
+        // METADATA.store() *before* calling this function.
+        if let Err(e) = self.persist_pipeline_metadata(pipeline_metadata).await {
+            error!("{e}");
         }
 
         if evolved {
@@ -2615,6 +2591,32 @@ impl Config {
                 });
             }
         }
+    }
+
+    /// Persist pipeline metadata or return the storage error. ALTER uses this
+    /// so Iceberg and skippr metadata cannot silently diverge.
+    pub async fn persist_pipeline_metadata(
+        &self,
+        pipeline_metadata: &PipelineMetadata,
+    ) -> Result<(), String> {
+        use once_cell::sync::Lazy as OnceLazy;
+        static UPLOAD_LOCK: OnceLazy<tokio::sync::Mutex<()>> =
+            OnceLazy::new(|| tokio::sync::Mutex::new(()));
+
+        let tenant = self.get_tenant();
+        let workspace = self.get_workspace_name();
+        let pipeline = self.get_pipeline_name();
+        let key = self.pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
+        let json_value = serde_json::to_value(pipeline_metadata)
+            .map_err(|e| format!("Failed to serialize metadata: {e}"))?;
+        let storage = crate::adapters::storage::get_storage(self);
+        let _guard = UPLOAD_LOCK.lock().await;
+        storage
+            .put_json(&key, &json_value)
+            .await
+            .map_err(|e| format!("Failed to persist metadata: {e}"))?;
+        info!("Updated pipeline metadata: {}", key);
+        Ok(())
     }
 
     // Stats configuration toggles (env-based defaults)

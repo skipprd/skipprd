@@ -2857,7 +2857,7 @@ impl AwsAthena {
             .table_type("EXTERNAL_TABLE");
 
         // Not valid to update partitions, would require a migration of all data and partition indexes.
-        // Additionally, when issuing `ALTER SCHEMA` - we may be local and not have a config file specifying
+        // Additionally, when issuing `ALTER TABLE` - we may be local and not have a config file specifying
         // the partition time unit (year, month, day, hour, minute).
         // So we inherit the existing partition keys.
         if existing_table.table().is_some() {

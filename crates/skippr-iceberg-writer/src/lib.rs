@@ -1338,6 +1338,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
             let mut pending_rows = 0usize;
             let mut pending_bytes = 0usize;
             while let Some(batch) = batches.try_next().await.map_err(to_io)? {
+                let batch = crate::parquet_util::coerce_timestamps_to_microseconds(batch)?;
                 pending_rows += batch.num_rows();
                 pending_bytes += record_batch_memory_size(&batch);
                 pending_batches.push(batch);
@@ -1711,6 +1712,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
         let mut prepared = Vec::with_capacity(batches.len());
         for batch in batches {
             let batch = crate::parquet_util::coerce_timestamp_dates_to_date32(batch, &date_fields)?;
+            let batch = crate::parquet_util::coerce_timestamps_to_microseconds(batch)?;
             prepared.push(apply_iceberg_field_ids(batch, &iceberg_schema)?);
         }
         let schema = prepared

@@ -1,69 +1,82 @@
-# Azure Synapse Output
+---
+title: Azure Synapse
+description: Write Skipprd pipelines into Azure Synapse dedicated SQL using a connection string.
+---
 
-Writes data to Azure Synapse Analytics (or SQL Server) via TDS protocol.
+# Synapse
 
-## How it works
+Use Synapse when the destination is a dedicated SQL pool you already run. Skipprd inserts into `schema.table`.
 
-1. Connects using a TDS/ADO connection string.
-2. Inserts rows via SQL INSERT statements.
+## Before you begin
 
-## Configuration
+- A connection string the Skipprd host can use (SQL auth or AAD, as your pool allows).
+- Store it in the environment.
 
-```yaml
+```bash
+export SYNAPSE_CONNECTION_STRING="Server=tcp:....sql.azuresynapse.net,1433;..."
+```
+
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkSynapse, EnvRef, Pipeline
+
+cfg = Config.discover()
+syn = cfg.data_sink(
+    "warehouse",
+    DataSinkSynapse(
+        connection_string=EnvRef("SYNAPSE_CONNECTION_STRING"),
+        schema="dbo",
+        table="events",
+    ),
+)
+cfg.pipeline("events", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=syn))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-sink synapse \
+  --pipeline events \
+  --name warehouse \
+  --connection-string '${SYNAPSE_CONNECTION_STRING}' \
+  --schema dbo \
+  --table events
+```
+
+```yaml [YAML]
 data_sinks:
-  sink:
+  warehouse:
     Synapse:
-      connection_string: "Server=myserver.database.windows.net;User Id=admin;Password=secret;Database=mydb"
+      connection_string: ${SYNAPSE_CONNECTION_STRING}
       schema: dbo
       table: events
 ```
 
-## Configuration variables
+:::
 
-| Variable | Default | Description |
-|---|---|---|
-| `connection_string` | *(required)* | ADO-style connection string |
-| `schema` | `dbo` | Target schema |
-| `table` | `data` | Target table |
+## Options
 
-## Authentication
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `connection_string` | secret | Required | Synapse connection string as `${ENV}` |
+| `schema` | string | Required | Schema |
+| `table` | string | Required | Table |
 
-Configure the `connection_string` field in `skippr.yml`. Use `${SYNAPSE_CONNECTION_STRING}` rather than a literal secret.
+## How data lands
 
-For security best practices, we strongly advise against storing the connection string in `skippr.yml`. Use environment variable interpolation instead: replace the `connection_string` value with your own `${ENV_VAR}` reference.
-
-The relevant part of `skippr.yml` looks like this:
-
-```yaml
-data_sinks:
-  warehouse:
-    Synapse:
-      connection_string: "${SYNAPSE_CONNECTION_STRING}"
-```
-
-Set the env var before running `skipprd`:
-
-macOS / Linux
-
-```bash
-export SYNAPSE_CONNECTION_STRING="Server=myserver.database.windows.net;User Id=admin;Password=secret;Database=mydb"
-```
-
-Windows PowerShell
-
-```powershell
-$env:SYNAPSE_CONNECTION_STRING = "Server=myserver.database.windows.net;User Id=admin;Password=secret;Database=mydb"
-```
-
-Windows Command Prompt
-
-```cmd
-set SYNAPSE_CONNECTION_STRING=Server=myserver.database.windows.net;User Id=admin;Password=secret;Database=mydb
-```
+Rows are inserted into `schema.table`. Retries are exactly once. Create the table first if the user cannot `CREATE TABLE`.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| authentication failed | Verify the configured connection string and confirm the login can reach the database. |
-| schema or table errors | Check the target schema name and that the login can create and write objects there. |
+| Login failed | Refresh the connection string and export it in this shell |
+| Firewall | Allow the Skipprd host IP on the Synapse firewall |
+| Table missing | Create it or grant `CREATE` |
+
+## Next steps
+
+- [Exactly-once delivery](/concepts/exactly-once)
+- [SQL Server source](/connectors/inputs/mssql)

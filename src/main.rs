@@ -262,8 +262,10 @@ async fn async_main() {
                 let collect_plain = skipprd::sqlrt::query::sql_uses_record_batch_collect(&sql)
                     && (storage == WalStorage::Clustered
                         || (options.plain && options.watch.is_none()));
+                let shared_extension =
+                    skipprd::sqlrt::query::sql_uses_shared_extension_collect(&sql);
                 let now = Instant::now();
-                if collect_plain {
+                if collect_plain || shared_extension {
                     match session.query(&sql).await {
                         Ok(batches) => {
                             skipprd::sqlrt::query::print_query_plain_json(&batches);

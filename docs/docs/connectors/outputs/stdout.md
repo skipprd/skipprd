@@ -1,40 +1,61 @@
-# Stdout Output
+---
+title: Stdout
+description: Print Skipprd batches to standard output. Debugging only — retries are not applied.
+---
 
-Prints each record batch as line-delimited JSON to standard output.
+# Stdout
 
-## How it works
+Writes each batch to stdout. Use it to see records while you wire a source. Do not use it as a production destination: a crash is not retried, and nothing is durable. See [Exactly-once delivery](/concepts/exactly-once).
 
-1. Receives compacted or batched records from the sink pipeline.
-2. Serializes batches as JSON lines (one JSON object per line) to `stdout`.
-3. No network or filesystem destination is required.
+## Before you begin
 
-## Configuration
+- A terminal or log collector that can take the process stdout.
 
-```bash
-DATA_OUTPUT_PLUGIN_NAME=Stdout
+## Configure
+
+This destination has no options.
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkStdout, Pipeline
+
+cfg = Config.discover()
+out = cfg.data_sink("out", DataSinkStdout())
+cfg.pipeline("sample", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=out))
+cfg.save()
 ```
 
-Or via YAML pipeline config:
+```bash [CLI]
+skipprd connect data-sink stdout \
+  --pipeline sample \
+  --name out
+```
 
-```yaml
+```yaml [YAML]
 data_sinks:
-  destination:
+  out:
     Stdout: {}
 ```
 
-Optional `format: jsonl` is accepted; `parquet` is rejected. The default is JSON Lines. This sink is useful for debugging pipelines and for piping Skipprd output into other tools.
+:::
 
-## Configuration variables
+## Options
 
-There are no sink-specific environment variables. Use `DATA_OUTPUT_PLUGIN_NAME=Stdout` (or the equivalent YAML `Stdout: {}` entry) only.
+This connector has no configuration keys.
 
-## Authentication
+## How data lands
 
-No connector-specific authentication is required.
+Records are printed as they flush. Redirect stdout if you want a file (`skipprd sync --once > batch.jsonl`). Prefer the [local file](/connectors/outputs/file) destination when you need paths you can keep.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| no visible output | Check whether stdout is being redirected by the calling shell, CI runner, or parent process. |
-| downstream consumer fails | Verify the receiving process expects the output format that Skipprd is writing. |
+| No output | Confirm the source produced rows (`--log`) and you did not redirect stdout away |
+| Mixed with logs | Logs go to stderr; keep `--log` on and read stdout separately |
+
+## Next steps
+
+- [Local file destination](/connectors/outputs/file)
+- [Logging](/operations/logging)

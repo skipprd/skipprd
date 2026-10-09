@@ -406,3 +406,35 @@ async fn one_pass_rewrites_at_most_the_file_ceiling() {
         (0..files as i64).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn iceberg_schema_accepts_arrow_timestamp_ms() {
+    use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
+    use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+    use std::collections::HashMap;
+    let field =
+        Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true).with_metadata(
+            HashMap::from([(PARQUET_FIELD_ID_META_KEY.to_string(), "1".to_string())]),
+        );
+    let schema = iceberg::arrow::arrow_schema_to_schema(&ArrowSchema::new(vec![field])).unwrap();
+    assert!(matches!(
+        schema.as_struct().fields()[0].field_type.as_ref(),
+        iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Timestamp)
+    ));
+}
+
+#[test]
+fn prepare_maintenance_coerces_on_disk_ms_timestamps() {
+    let src = include_str!("lib.rs");
+    let start = src
+        .find("async fn prepare_maintenance")
+        .expect("prepare_maintenance");
+    let end = src[start..]
+        .find("async fn upload_maintenance_rolls")
+        .expect("upload_maintenance_rolls")
+        + start;
+    assert!(
+        src[start..end].contains("coerce_timestamps_to_microseconds"),
+        "maintenance read must coerce Timestamp(ms) before rewrite"
+    );
+}

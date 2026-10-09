@@ -1,93 +1,64 @@
-# Advanced Configuration
+---
+title: Advanced settings
+description: Set the data directory, object-storage bucket, schema approval, and sync interval for production.
+---
 
-## State & storage
+# Advanced settings
 
-### SKIPPR_S3_BUCKET
+Most pipelines only need `skippr.yml` and a few secrets. Use these engine settings when you move off a laptop: a persistent data directory, an S3 bucket for schema and metadata, or a long-running sync loop.
 
-The S3 bucket used by Skipprd for all internal state: pipeline metadata, offsets, WAL segments (when `WAL_STORAGE=s3`), deadletters, config uploads, and query manifests.
+Connector options stay on the connector pages. This page is process-wide.
 
-| | |
-|---|---|
-| **Environment variable** | `SKIPPR_S3_BUCKET` |
-| **Default** | *(required for production use)* |
+## Data directory
 
-S3 layout within this bucket:
+`DATA_DIR` (default `./data`) holds the local write-ahead log when `WAL_STORAGE=disk`, plus local resume state. Skipprd creates it if it is missing.
 
-```
-{tenant}/{workspace}/{pipeline}/
-  metadata.json           # Pipeline metadata and schema
-  config/                 # Uploaded run config
-  segments/               # WAL segments (when WAL_STORAGE=s3)
-  manifest/               # Query manifest
-deadletters/
-  {tenant}/{workspace}/{pipeline}/...
+```bash
+export DATA_DIR=/var/lib/skipprd
 ```
 
-### SKIPPRD_EL_STORAGE_MODE
+You can also set `data_dir` on a pipeline in `skippr.yml`. Keep the directory on a persistent disk. See [WAL and buffering](/configuration/buffering).
 
-Controls where Skipprd extract/load metadata and namespace stats are persisted.
+## Object storage for schema and metadata
 
-| | |
-|---|---|
-| **Environment variable** | `SKIPPRD_EL_STORAGE_MODE` |
-| **YAML** | `skippr.skipprd_el_storage_mode` |
-| **Default** | `s3` |
-| **Values** | `s3`, `local` |
+`SKIPPR_S3_BUCKET` is the bucket Skipprd uses for pipeline schema, uploaded run config, and (when `WAL_STORAGE=s3`) WAL segments unless you set `SKIPPR_WAL_S3_BUCKET`.
 
-When set to `local`, metadata is read from and written to `{DATA_DIR}/metadata.json` (atomic write via temp + rename), and stats are stored under `{DATA_DIR}/stats/`.
+```bash
+export SKIPPR_S3_BUCKET=acme-skipprd-state
+```
 
-When set to `s3` (default), S3-based persistence is used.
+Required for production when schema is not stored only on the local disk.
 
-This internal development/testing setting only affects where Skipprd EL state (metadata, stats) is persisted.
+`SKIPPRD_EL_STORAGE_MODE` chooses where extract/load metadata and namespace stats persist:
 
-Use `local` when running Skipprd without an S3 bucket (for example dbt orchestration on a developer machine).
+| Value | Where metadata lives | Use when |
+|---|---|---|
+| `s3` (default) | `SKIPPR_S3_BUCKET` | Shared or remote state |
+| `local` | under `DATA_DIR` | A developer machine with no bucket, for example local dbt |
 
-### DATA_DIR
+YAML equivalent: `skippr.skipprd_el_storage_mode`.
 
-Local directory for WAL segments (when `WAL_STORAGE=disk`) and the offsets database.
+## Environment label
 
-| | |
-|---|---|
-| **Environment variable** | `DATA_DIR` |
-| **Default** | `./data` |
+`SKIPPR_ENV` (default `prod`) is a label on logs and metadata. It does not change behaviour.
 
-Created automatically if it doesn't exist. Supports absolute and relative paths.
+## Schema changes
 
-## Operational
+`SCHEMA_AUTO_APPROVE` (default `true`) applies discovered schema changes during discover and sync. Set it to `false` when you want to review a change with `skipprd schema` before it lands. See [Schema discovery and evolution](/concepts/schema).
 
-### SKIPPR_ENV
+## How often sync repeats
 
-| | |
-|---|---|
-| **Environment variable** | `SKIPPR_ENV` |
-| **Default** | `prod` |
+A bare `skipprd sync` already loops every `sync_frequency_seconds` on the pipeline (default 900). `SYNC_FREQUENCY`, when set, is a process-wide interval in seconds for that loop.
 
-Environment label. Used for logging and metadata context.
+Prefer the pipeline field in `skippr.yml` so each pipeline can differ.
 
-### SKIPPR_CHAOS_MODE
+## Chaos testing
 
-| | |
-|---|---|
-| **Environment variable** | `SKIPPR_CHAOS_MODE` |
-| **Default** | `no` |
-| **Values** | `yes` / `no` |
+`SKIPPR_CHAOS_MODE=yes` kills the process with SIGKILL at a random point 15–60 seconds into a run. Use it only to prove [exactly-once delivery](/concepts/exactly-once) under failure. Leave it unset in production.
 
-When enabled, the process exits with SIGKILL at a random point between 15 and 60 seconds into the run. Used to test exactly-once delivery guarantees under failure conditions.
+## Next steps
 
-### SCHEMA_AUTO_APPROVE
-
-| | |
-|---|---|
-| **Environment variable** | `SCHEMA_AUTO_APPROVE` |
-| **Default** | `true` |
-
-Automatically approve schema changes during discovery and evolution. When `false`, schema changes require manual approval.
-
-### SYNC_FREQUENCY
-
-| | |
-|---|---|
-| **Environment variable** | `SYNC_FREQUENCY` |
-| **Default** | *(unset)* |
-
-When set, sync runs repeatedly at this interval (in seconds) instead of running once and exiting.
+- [WAL and buffering](/configuration/buffering)
+- [State store](/configuration/skippr-store)
+- [Logging](/operations/logging)
+- [skippr.yml](/configuration/skippr-yml)

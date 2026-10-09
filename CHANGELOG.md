@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [18.1.0]
+
+### Added
+
+- `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
+
+### Fixed
+
+- Iceberg writes and maintenance reads coerce Arrow `Timestamp(ms)` to Iceberg `Timestamp(µs)`. Files already on disk as `TIMESTAMP_MILLIS` no longer skip compaction.
+
 ## [18.0.0]
 
 ### Breaking

@@ -1,35 +1,70 @@
-# File Input
+---
+title: Local file source
+description: Read JSON, CSV, or Parquet from a path on disk.
+---
 
-Reads data from the local filesystem.
+# Local file
 
-## Supported formats
+Reads files from `path`. Use it for a laptop sample, a nightly drop directory, or CI fixtures.
 
-- JSON
-- CSV / delimited
-- Parquet
+## Before you begin
 
-## Configuration
+- A file or directory Skipprd can read.
+- Format is inferred from the extension when you omit `format`.
 
-```bash
-DATA_SOURCE_PLUGIN_NAME=file
-DATA_SOURCE_PATH=/path/to/input-directory
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSourceFile, Pipeline
+
+cfg = Config.discover()
+src = cfg.data_source("sample", DataSourceFile(path="./data/events.jsonl", format="json"))
+cfg.pipeline("sample", Pipeline(data_source=src))
+cfg.save()
 ```
 
-| Variable | Default | Description |
-|---|---|---|
-| `DATA_SOURCE_PATH` | *(required)* | Path to the directory or file to ingest |
+```bash [CLI]
+skipprd connect data-source file \
+  --pipeline sample \
+  --name sample \
+  --path ./data/events.jsonl \
+  --format json
+```
 
-## Checkpointing
+```yaml [YAML]
+data_sources:
+  sample:
+    File:
+      path: ./data/events.jsonl
+      format: json
+```
 
-The file input tracks progress by file path and line offset. On restart, already-ingested files and lines are skipped.
+:::
 
-## Authentication
+## Options
 
-No connector-specific authentication is required.
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `path` | path | Required | File or directory |
+| `format` | string | Inferred | `json`, `csv`, or `parquet` |
+| `batch_size_seconds` | integer | Not set | Max seconds per batch |
+| `batch_size_bytes` | integer | Not set | Max bytes per batch |
+
+## What gets synced
+
+Each file becomes records. If `path` is a directory, Skipprd reads the files in it. Progress is per file; a file that changes after a commit is read again.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| file not found | Verify the path and working directory, or switch to an absolute path. |
-| permission denied | Check file permissions for the user running `skipprd`. |
+| File not found | Use a path relative to the working directory, or an absolute path |
+| Parse errors | Set `format`, and check the file is UTF-8 |
+| Permission denied | Grant read on `path` |
+
+## Next steps
+
+- [S3 source](/connectors/inputs/s3)
+- [Local file destination](/connectors/outputs/file)

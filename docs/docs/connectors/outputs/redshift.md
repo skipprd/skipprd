@@ -1,63 +1,110 @@
-# Redshift Output
+---
+title: Redshift destination
+description: Load Skipprd pipelines into Amazon Redshift using S3 staging and a COPY.
+---
 
-Writes data to Amazon Redshift using S3 staging + COPY (preferred) or direct INSERT via the Redshift Data API.
+# Redshift
 
-## How it works
+Skipprd stages Parquet on S3 and COPYs it into Redshift. You need a cluster or Serverless workgroup, a staging bucket, and an IAM role Redshift can assume to read that bucket.
 
-### S3 Staging mode (when `staging_s3_bucket` is set)
+## Before you begin
 
-1. Serializes Arrow batches to Parquet.
-2. Uploads Parquet to the staging S3 bucket.
-3. Executes `COPY INTO` via the Redshift Data API.
-4. Requires an IAM role ARN with Redshift COPY permissions.
+- Cluster identifier **or** workgroup name, plus the database and a user (`db_user`).
+- Staging bucket and prefix.
+- `iam_role_arn` that Redshift uses for `COPY`.
 
-### INSERT mode (fallback when no S3 bucket)
+```bash
+export AWS_DEFAULT_REGION="us-east-1"
+```
 
-1. Converts Arrow batches to SQL `INSERT INTO ... VALUES` statements.
-2. Executes via the Redshift Data API with polling for completion.
+## Configure
 
-## Configuration
+::: code-group
 
-```yaml
+```python [Python]
+from skippr import Config, DataSinkRedshift, Pipeline
+
+cfg = Config.discover()
+rs = cfg.data_sink(
+    "warehouse",
+    DataSinkRedshift(
+        database="analytics",
+        cluster_identifier="acme-warehouse",
+        db_user="skippr",
+        table="events",
+        region="us-east-1",
+        staging_s3_bucket="acme-skipprd-stage",
+        staging_s3_prefix="redshift/",
+        iam_role_arn="arn:aws:iam::123456789012:role/RedshiftCopy",
+        schema="public",
+    ),
+)
+cfg.pipeline("events", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=rs))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-sink redshift \
+  --pipeline events \
+  --name warehouse \
+  --database analytics \
+  --cluster-identifier acme-warehouse \
+  --db-user skippr \
+  --table events \
+  --region us-east-1 \
+  --staging-s3-bucket acme-skipprd-stage \
+  --staging-s3-prefix redshift/ \
+  --iam-role-arn arn:aws:iam::123456789012:role/RedshiftCopy \
+  --schema public
+```
+
+```yaml [YAML]
 data_sinks:
-  sink:
+  warehouse:
     Redshift:
-      database: my_warehouse
-      cluster_identifier: my-cluster
-      staging_s3_bucket: my-staging-bucket
-      staging_s3_prefix: skippr-staging/
-      iam_role_arn: "arn:aws:iam::123456789012:role/RedshiftCopyRole"
+      database: analytics
+      cluster_identifier: acme-warehouse
+      db_user: skippr
       table: events
+      region: us-east-1
+      staging_s3_bucket: acme-skipprd-stage
+      staging_s3_prefix: redshift/
+      iam_role_arn: arn:aws:iam::123456789012:role/RedshiftCopy
       schema: public
 ```
 
-`schema` is an optional query/model key; ingest uses `table` for writes.
+:::
 
-## Configuration variables
+For Serverless, set `workgroup_name` instead of `cluster_identifier`.
 
-| Variable | Default | Description |
-|---|---|---|
-| `database` | | Redshift database name |
-| `cluster_identifier` | | Redshift cluster identifier |
-| `workgroup_name` | | Redshift Serverless workgroup (alternative to cluster) |
-| `db_user` | | Database user for Data API |
-| `table` | (from namespace) | Target table name |
-| `region` | (AWS default) | AWS region |
-| `staging_s3_bucket` | | S3 bucket for COPY staging |
-| `staging_s3_prefix` | `skippr-staging` | S3 prefix for staged files |
-| `iam_role_arn` | | IAM role for Redshift COPY |
+## Options
 
-## Authentication
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `database` | string | Required | Database |
+| `cluster_identifier` | string | Not set | Provisioned cluster. Set this or `workgroup_name`. |
+| `workgroup_name` | string | Not set | Serverless workgroup |
+| `db_user` | string | Required | Database user |
+| `table` | string | Required | Table |
+| `region` | string | Required | AWS region |
+| `staging_s3_bucket` | string | Required | Staging bucket |
+| `staging_s3_prefix` | string | Required | Staging prefix |
+| `iam_role_arn` | string | Required | Role Redshift assumes for COPY |
+| `schema` | string | Not set | Schema (default `public`) |
 
-Authentication uses the AWS default credential chain.
+## How data lands
 
-- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
-- IAM roles, instance profiles, or task roles
-- AWS SSO or shared config profiles
+Each batch is uploaded to the staging prefix, then COPY loads it. Retries are exactly once. Staging objects are not a public dataset — treat the bucket as pipeline state.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| COPY or staging errors | Verify the staging S3 bucket, IAM role ARN, region, and Redshift cluster or workgroup settings. |
-| permission denied | Check the Redshift database user, schema permissions, and the IAM role Redshift uses to read from S3. |
+| COPY access denied | Attach S3 read on the staging prefix to `iam_role_arn` |
+| Cluster not found | Check `cluster_identifier` vs `workgroup_name` and `region` |
+| User cannot connect | Use Data API / IAM auth the cluster already allows for `db_user` |
+
+## Next steps
+
+- [Redshift source](/connectors/inputs/redshift)
+- [Exactly-once delivery](/concepts/exactly-once)

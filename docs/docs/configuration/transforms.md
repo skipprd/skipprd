@@ -1,99 +1,136 @@
+---
+title: Transforms
+description: Split records into tables, partition output by field or time, flatten nested objects, and sort rows for faster queries.
+---
+
 # Transforms
 
-Transform configuration controls how records are namespaced, partitioned, and structured before output.
+A transform shapes records between the source and the destination. Use one to split a mixed stream into separate tables, partition files by a field or by time, flatten nested JSON into columns, or sort rows so queries scan less data.
 
-## TRANSFORM_NAMESPACE_FIELDS
+Transforms are set per pipeline under `transform:`. Every key is optional.
 
-Fields that define the event type or schema namespace. Each unique combination of field values produces a separate schema and Glue table.
+## Set a transform
 
-| | |
-|---|---|
-| **Environment variable** | `TRANSFORM_NAMESPACE_FIELDS` |
-| **Default** | *(unset — all records share one schema)* |
-| **Example** | `event_type` or `category,sub_category` |
+This transform splits events into one table per `event_type`, partitions each table by day, and sorts rows by `customer_id`:
 
-Comma-separated for composite namespaces.
+::: code-group
 
-## TRANSFORM_BATCH_PARTITION_FIELDS
+```python [Python]
+from skippr import Config, Pipeline, Transform
 
-Fields used for Hive-style partitioning in the output. Records are grouped by the values of these fields.
+cfg = Config.load("skippr.yml")
+cfg.pipeline(
+    "events",
+    Pipeline(
+        data_source=cfg.get_data_source("events"),
+        data_sink=cfg.get_data_sink("lake"),
+        transform=Transform(
+            namespace_fields="event_type",
+            batch_time_fields="created_at",
+            batch_time_unit="day",
+            batch_order_fields="customer_id",
+        ),
+    ),
+)
+cfg.save()
+```
 
-| | |
-|---|---|
-| **Environment variable** | `TRANSFORM_BATCH_PARTITION_FIELDS` |
-| **Default** | *(unset)* |
-| **Example** | `country,state` or `product.category` |
+```yaml [YAML]
+pipelines:
+  events:
+    data_source: data_sources.events
+    data_sink: data_sinks.lake
+    transform:
+      namespace_fields: event_type
+      batch_time_fields: created_at
+      batch_time_unit: day
+      batch_order_fields: customer_id
+```
 
-Supports nested field paths using dot notation.
+:::
 
-## TRANSFORM_BATCH_TIME_FIELDS
+`skipprd connect` does not write transforms; set them in YAML or Python. Run `skipprd discover --pipeline events` after you change `namespace_fields`, because it changes which tables exist.
 
-Timestamp field(s) used for time-based partitioning. Skipprd uses the first field found in each record. Supports Unix timestamps in both seconds and milliseconds.
+## Options
 
-| | |
-|---|---|
-| **Environment variable** | `TRANSFORM_BATCH_TIME_FIELDS` |
-| **Default** | *(unset)* |
-| **Example** | `event_time` or `metadata.created_at,timestamp` |
+| Key | Environment fallback | Default | Description |
+|---|---|---|---|
+| `namespace_fields` | `TRANSFORM_NAMESPACE_FIELDS` | none (one table) | Fields that split records into tables. Each distinct combination of values becomes its own table and schema. Comma-separated. |
+| `batch_partition_fields` | `TRANSFORM_BATCH_PARTITION_FIELDS` | none | Hive-style partition columns. Comma-separated; nested paths use dots, as in `country,product.category`. |
+| `partition_allowed_values` | `TRANSFORM_PARTITION_ALLOWED_VALUES` | none | Comma-separated values allowed as partition values. Requires `batch_partition_fields`. |
+| `batch_time_fields` | `TRANSFORM_BATCH_TIME_FIELDS` | none | Timestamp fields used for time partitions. Comma-separated; Skipprd uses the first one present in each record. |
+| `batch_time_unit` | `TRANSFORM_BATCH_TIME_UNIT` | none | Time-partition depth: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`. |
+| `time_partition_prefix` | `TRANSFORM_TIME_PARTITION_PREFIX` | none | Text added before each time-partition folder name. |
+| `flatten_events` | `TRANSFORM_FLATTEN_EVENTS` | `false` | Turn nested objects into top-level columns with dotted names. |
+| `record_field_path` | `TRANSFORM_RECORD_FIELD_PATH` | none (each object is a record) | Path to an array of records inside each source object. |
+| `inject_fields` | none | none | Fixed field names and values added to every record. |
+| `batch_order_fields` | `TRANSFORM_BATCH_ORDER_FIELDS` | none (unsorted) | Columns to sort rows by inside each Parquet file. Comma-separated. |
+| `enable_single_quote_parsing` | none | `false` | Accept JSON that wraps strings in single quotes. |
+| `enable_unicode_parsing` | none | `false` | Accept JSON with unescaped Unicode. |
 
-Must be set if `TRANSFORM_BATCH_TIME_UNIT` is set.
+A key in `skippr.yml` beats its environment fallback. Flags accept `true`/`false`, `yes`/`no`, or `1`/`0`.
 
-## TRANSFORM_BATCH_TIME_UNIT
+## Split records into tables
 
-The granularity for time-based partitioning.
+Set `namespace_fields` when one source carries several kinds of record. With `namespace_fields: event_type`, records with `event_type: signup` and `event_type: purchase` land in separate tables, each with its own schema. Use several fields, such as `category,sub_category`, to split on their combination.
 
-| | |
-|---|---|
-| **Environment variable** | `TRANSFORM_BATCH_TIME_UNIT` |
-| **Default** | *(unset)* |
-| **Values** | `year`, `month`, `day`, `hour`, `minute` |
+Without `namespace_fields`, all records from a source share one table, apart from sources that already produce one table per object, such as database tables.
 
-Requires `TRANSFORM_BATCH_TIME_FIELDS` to be set.
+## Partition output
 
-## TRANSFORM_FLATTEN_EVENTS
+Partitions organise files into folders so query engines can skip folders a filter rules out.
 
-Whether to flatten nested structures into dot-separated column names.
+- **By field:** `batch_partition_fields: country` writes `p_country=GB/`, `p_country=US/`, and so on. To cap the number of partitions, list the values you want in `partition_allowed_values`; other values are not used as partition values.
+- **By time:** `batch_time_fields: created_at` with `batch_time_unit: day` writes `year=2026/month=10/day=9/` folders. Each unit includes the coarser ones above it. `time_partition_prefix: p_` changes those to `p_year=2026/p_month=10/p_day=9/`.
 
-| | |
-|---|---|
-| **Environment variable** | `TRANSFORM_FLATTEN_EVENTS` |
-| **Default** | `no` |
-| **Values** | `yes` / `no` (also accepts `true`/`false`, `1`/`0`) |
+Setting `batch_time_unit` without `batch_time_fields`, or `partition_allowed_values` without `batch_partition_fields`, stops the run with `Config dependency missing: ...`.
 
-When enabled, a nested field like `contact.name` becomes a top-level column named `contact.name` instead of a nested struct.
+Partition folders apply to destinations that write files, such as S3, GCS, Azure Blob, Local file, and Athena. Warehouse destinations load tables directly; see each connector page.
 
-## TRANSFORM_BATCH_ORDER_FIELDS
+## Flatten nested objects
 
-Columns used to sort rows within each Parquet file before writing. Sorting improves query performance in Athena and other engines that use Parquet row-group min/max statistics for predicate pruning.
+With `flatten_events: true`, a record like:
 
-| | |
-|---|---|
-| **Environment variable** | `TRANSFORM_BATCH_ORDER_FIELDS` |
-| **Config key** | `transform.batch_order_fields` |
-| **Default** | *(unset — no ordering)* |
-| **Example** | `customer_id,event_time` |
+```json
+{ "id": 7, "contact": { "name": "Ada", "email": "ada@example.com" } }
+```
 
-Comma-separated list of output column names. For each namespace Skipprd writes, only the fields that exist in that namespace's output schema are used; missing fields are silently ignored. If no configured fields match a given namespace, records are written unsorted.
+lands with columns `id`, `contact.name`, and `contact.email` instead of an `id` column and a nested `contact` struct. Flatten when your destination or BI tool handles flat columns better than nested ones.
 
-At the end of a run, Skipprd logs a warning listing any configured order fields that never matched any namespace observed during the run.
+## Read records nested in an array
 
-### How ordering helps
+Some APIs and exports wrap records in an envelope:
 
-Without ordering, a filter like `SELECT * FROM foo WHERE bar = 4` may scan the same amount of data as `SELECT * FROM foo` because matching values of `bar` are scattered across every row group in the file.
+```json
+{ "page": 1, "data": [ { "id": 1 }, { "id": 2 } ] }
+```
 
-When rows are sorted by `bar` before writing, values of `bar` cluster together. Each Parquet row group records the min and max value of every column, so the query engine can skip entire row groups that cannot contain `bar = 4`.
+Set `record_field_path` to the array so each element becomes a record. Without it, Skipprd treats the whole object as one record.
 
-### Multi-column ordering
+## Add fixed fields
 
-Fields are applied in the order listed. The first field provides the strongest clustering and benefits the most from pruning. Adding a second field helps queries that filter on both columns together but dilutes the clustering of the first column.
+`inject_fields` adds the same fields to every record before ingest, for example to tag where data came from:
 
-In practice, one or two fields is usually optimal. Long sort lists can reduce the pruning benefit for any single field.
+```yaml
+transform:
+  inject_fields:
+    source_system: billing
+    region: eu-west-1
+```
 
-### Automatic row-group sizing
+## Sort rows for faster queries
 
-When ordering is active, Skipprd automatically tunes the Parquet row-group size based on:
+`batch_order_fields` sorts rows inside each Parquet file before Skipprd writes it. Parquet stores the minimum and maximum of every column for each row group, so after sorting by `bar`, a query such as `SELECT * FROM foo WHERE bar = 4` can skip every row group whose range excludes `4`. Unsorted, matching rows are scattered and the query may scan the whole file.
 
-- **Average row width** in the current batch.
-- **Run lengths** of the leading sort column — high-cardinality columns produce shorter runs and smaller row groups; low-cardinality columns produce longer runs and larger row groups.
+- Fields apply in order. The first gives the strongest clustering, so put the column you filter on most first.
+- One or two fields is usually best. Each extra field helps queries that filter on all of them but weakens clustering on the first.
+- Names are output column names. A field missing from a table is ignored for that table. If none match, that table is written unsorted.
+- At the end of a run, Skipprd warns `batch_order_fields never matched any namespace during this run: [...]` for fields that matched no table, which usually means a typo.
 
-Row groups are kept between approximately 16 MiB and 64 MiB uncompressed (25,000–500,000 rows). This balances metadata overhead against predicate pruning granularity without requiring manual configuration.
+While sorting is on, Skipprd sizes row groups automatically, between about 16 MiB and 64 MiB uncompressed (25,000 to 500,000 rows), based on row width and how many distinct values the leading sort column has. You do not need to tune it.
+
+## Next steps
+
+- [Destinations](/configuration/output) — where transformed records land.
+- [Schema discovery and evolution](/concepts/schema) — how new fields and tables are detected.
+- [Pipelines](/configuration/pipeline) — the other pipeline keys.

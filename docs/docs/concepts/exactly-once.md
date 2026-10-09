@@ -1,61 +1,98 @@
-# Exactly-Once Delivery
+---
+title: Exactly-once delivery
+description: Learn what Skipprd guarantees when a sync crashes or retries, which destinations write each row exactly once, and how to plan for the rest.
+---
 
-Skipprd's exactly-once contract starts at the WAL and stays host-owned all the way through recovery.
+# Exactly-once delivery
 
-## Durable boundary
+Skipprd commits every batch to its write-ahead log (WAL) before it writes to your destination. After a crash or a failed write, it retries from the WAL. Whether a retry can ever produce a duplicate row depends on the destination. This page tells you what you get with each one.
 
-The only durable boundary is a **visible committed WAL segment**.
+## What is guaranteed
 
-That means:
+Once Skipprd has committed a batch to the WAL:
 
-- a source batch is durable once the host has written it to the WAL and made the commit visible
-- the offsets database is **not** the source of truth
-- sink progress is not the primary durability ledger
+- **It is not lost.** A process crash, including `kill -9`, does not lose committed batches. The next run writes them to the destination.
+- **It is not read again from the source.** Skipprd only advances the source position after the commit, and resumes from that position on restart. Sources with a refresh window, such as Google Analytics, re-read recent days on purpose and replace them; see [How sources land](/concepts/source-landing-semantics).
+- **It is written once** to destinations that support exactly-once writes. Each write carries a stable identity, so a retried write that already landed is recognised and skipped.
 
-Exactly-once output therefore depends on two things working together:
+The guarantee starts at the WAL commit. A pull source (files, databases, APIs, Kafka) re-reads anything it had not committed, so nothing is lost there. Some push sources, such as the [HTTP server](/connectors/inputs/http_server) source, accept a request before Skipprd commits it. If the process crashes in that window, the request is lost; have senders retry failed requests and make your downstream tolerant of the resulting repeats.
 
-1. **WAL-first durability** in the host
-2. **Replay-safe sink behavior** when compaction work is retried
+## What each destination guarantees
 
-## WAL
+| Guarantee on retry | Destinations | What you see |
+|---|---|---|
+| Exactly once | SkipprLake, Athena Iceberg, DuckDB, Snowflake, BigQuery, PostgreSQL, Redshift, Databricks, Synapse, MotherDuck | Each committed row lands once, even if Skipprd retries the write. |
+| Overwrite on retry | Athena, S3, GCS, Azure Blob, Local file, SFTP | A retry rewrites the same file at the same path, so the final set of files holds each row once. |
+| At least once | ClickHouse, AMQP | A retry can write a batch again. Deduplicate downstream, for example on a primary key. |
+| None | Stdout | Output is not retried. Use it for debugging only. |
 
-Every ingested record is written to the WAL before downstream compaction and destination writes. WAL segments can be stored on local disk (`WAL_STORAGE=disk`), S3 (`WAL_STORAGE=s3`), or a clustered disk WAL with synchronous peer replication (`WAL_STORAGE=clustered`).
+If duplicates matter, choose a destination from the "Exactly once" row. For change data capture, see [CDC guarantees](/cdc/guarantees): applying updates and deletes exactly once needs a CDC-capable source as well as the right destination.
 
-If Skipprd crashes, recovery starts from committed WAL state, not from in-memory progress.
+## What happens after a crash
 
-## Offsets database
+You do not need to do anything special. Run the same command again with the same `DATA_DIR`:
 
-The durable offsets database is stored on local disk at `DATA_DIR` for `disk` mode. `s3` and `clustered` modes can materialize the same 24-byte offset layout in DynamoDB. In all cases the host process owns the store.
+```bash
+skipprd sync --pipeline bikehire --once --log
+```
 
-Its role is to materialize the latest source positions that are already represented by committed WAL state. In other words:
+On start, Skipprd:
 
-- offsets represent **WAL-visible progress**
-- runtime source plugins do not mutate the DB directly
-- runtime source plugins read resume information from the host over the runtime protocol
+1. Finds the batches committed to the WAL that have not landed yet.
+2. Restores the source position from the committed data, so the source resumes where it left off.
+3. Writes the outstanding batches to your destination.
+4. Continues reading the source.
 
-This keeps the host as the only authority for durable ingest progress.
+If a run cannot finish writing its committed batches before it exits, it exits non-zero. Treat a non-zero exit as "retry later", not "data lost": the batches stay in the WAL for the next run.
 
-## Compaction and sinks
+## What can break the guarantee
 
-After data is durable in the WAL, the host compacts that data and sends destination work to sink and schema plugins.
+The guarantee depends on the WAL and the resume position surviving. Watch for these:
 
-Compaction can be retried after crashes or reconnects, so sink-side work must be replay-safe. Skipprd uses stable `compaction_id` values so repeated work can be identified and handled idempotently where the destination supports it.
+- **Losing `DATA_DIR`.** With the default local WAL, `DATA_DIR` holds both. A fresh disk means Skipprd re-reads the source from the beginning. On ephemeral compute, use `WAL_STORAGE=s3` and a DynamoDB state store instead. See [WAL and buffering](/configuration/buffering) and [State store](/configuration/skippr-store).
+- **Running `RESET PIPELINE`.** It deliberately deletes the WAL and the resume position. The next sync starts from scratch, which duplicates rows in append-only tables unless you clear them too.
+- **Two copies of one pipeline.** Run one `skipprd sync` per pipeline at a time, always against the same `DATA_DIR`. Two copies with separate state each keep their own resume position and both write to the destination.
 
-## Crash recovery
+### Clustered mode
 
-When Skipprd restarts after a crash:
+`WAL_STORAGE=clustered` keeps a synchronous second copy of the WAL on a peer, so a single machine failure loses no committed data. Clustered mode only accepts destinations whose retries cannot duplicate rows: the exactly-once and overwrite-on-retry destinations above. ClickHouse, AMQP, and Stdout are rejected at startup.
 
-1. The host scans committed WAL segments.
-2. The host re-materializes offset and checkpoint state from committed WAL progress.
-3. Any remaining compaction work is replayed.
-4. Runtime source plugins resume from host-provided checkpoint and offset state.
+## Test recovery yourself
 
-The key invariant is: **WAL recovery is the source of truth, and the offsets DB is a host-owned cache of that truth**.
+Chaos mode kills the process with `SIGKILL` at random points during a sync, so you can prove recovery against your own pipeline before you rely on it. Use it in a test environment only.
 
-## Clean shutdown
+::: code-group
 
-On clean shutdown, the host drains in-flight WAL work before exit. If that drain fails, the process exits non-zero so the run is treated as untrusted and recovery will replay from WAL on the next start.
+```python [Python]
+from skippr import Config, Pipeline
 
-## Chaos mode
+cfg = Config.discover()
+src = cfg.get_data_source("sample")
+sink = cfg.get_data_sink("warehouse")
+cfg.pipeline("bikehire", Pipeline(data_source=src, data_sink=sink, chaos_mode=True))
+cfg.save()
+```
 
-Skipprd includes a built-in chaos mode (`SKIPPR_CHAOS_MODE=yes`) that injects random SIGKILL signals during ingestion. This is used to validate the WAL-first recovery model under crash conditions.
+```bash [CLI]
+export SKIPPR_CHAOS_MODE=yes
+skipprd sync --pipeline bikehire --log
+```
+
+```yaml [YAML]
+pipelines:
+  bikehire:
+    data_source: data_sources.sample
+    data_sink: data_sinks.warehouse
+    chaos_mode: true
+```
+
+:::
+
+Restart the sync after each kill, then compare row counts between the source and the destination.
+
+## Next steps
+
+- [How Skipprd works](/concepts/how-it-works): the pipeline lifecycle and where state lives.
+- [CDC guarantees](/cdc/guarantees): exactly-once updates and deletes.
+- [WAL and buffering](/configuration/buffering): pick a WAL backend.
+- [Destinations](/configuration/output): configure a destination.

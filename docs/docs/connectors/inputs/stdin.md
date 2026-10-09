@@ -1,62 +1,72 @@
-# Stdin Input
+---
+title: Stdin
+description: Read records from standard input. Useful for pipes and one-off loads.
+---
 
-Reads line-delimited data from standard input.
+# Stdin
 
-## Supported formats
+Reads JSON or another `format` from stdin. Use it to pipe a command into Skipprd. This is not a long-running server — the process ends when stdin closes.
 
-- Depends on the optional `format` setting (e.g. JSON lines). Each line is typically one record.
+## Before you begin
 
-## How it works
+- A producer that writes records to stdout (one JSON object per line for `json`).
 
-1. Reads from `stdin` until EOF (**batch mode**, default) or continuously (**stream mode**).
-2. **Batch mode:** suitable for pipes and one-shot jobs; ingestion completes when the stream closes.
-3. **Stream mode:** keeps reading as new lines arrive for long-running processes.
-4. Namespace convention: `stdin`.
+## Configure
 
-## Configuration
+::: code-group
 
-```bash
-DATA_SOURCE_PLUGIN_NAME=Stdin
+```python [Python]
+from skippr import Config, DataSourceStdin, Pipeline
+
+cfg = Config.discover()
+src = cfg.data_source("pipe", DataSourceStdin(mode="line", format="json"))
+cfg.pipeline("pipe", Pipeline(data_source=src))
+cfg.save()
 ```
 
-Or via YAML pipeline config:
+```bash [CLI]
+skipprd connect data-source stdin \
+  --pipeline pipe \
+  --name pipe \
+  --mode line \
+  --format json
+```
 
-```yaml
+```yaml [YAML]
 data_sources:
-  source:
+  pipe:
     Stdin:
-      mode: batch
-      format: jsonl
+      mode: line
+      format: json
 ```
 
-## Typical usage
-
-Pipe data into Skipprd:
+:::
 
 ```bash
-cat data.json | skipprd sync --pipeline my_pipeline
+cat events.jsonl | skipprd sync --pipeline pipe --once
 ```
 
-## Configuration variables
+## Options
 
-| Variable | Default | Description |
-|---|---|---|
-| `mode` | `batch` | `batch` (read until EOF) or `stream` (continuous) |
-| `format` | | Optional format hint for the parser |
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `mode` | string | Not set | How stdin is framed (for example `line`) |
+| `format` | string | Not set | Payload format (`json`, …) |
+| `batch_size_bytes` | integer | Not set | Max bytes per batch |
+| `batch_size_seconds` | integer | Not set | Max seconds per batch |
 
-## Namespace convention
+## What gets synced
 
-```
-stdin
-```
-
-## Authentication
-
-No connector-specific authentication is required.
+Each framed payload becomes a record. There is no resume position beyond what the WAL already committed. If you re-run the same pipe, rows can duplicate in append-only destinations.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| no records are ingested | Check that the upstream process is piping data into stdin and that `--mode` matches the input format. |
-| parse errors | Verify the piped payload is valid for the selected mode and that record boundaries are what you expect. |
+| No rows | Confirm the producer writes to stdout and the pipe is attached |
+| Parse errors | Match `format` to the payload; JSON must be one object per line in `line` mode |
+
+## Next steps
+
+- [HTTP server](/connectors/inputs/http_server) — for push over the network
+- [Local file source](/connectors/inputs/file)

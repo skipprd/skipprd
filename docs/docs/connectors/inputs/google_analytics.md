@@ -1,128 +1,46 @@
-# Google Analytics (GA4) Input
-
-Curated **daily fact grains** from the GA4 Data API (`runReport`). One bronze namespace per stable dimension set; warehouse SQL builds rollups and reports.
-
-Not the GA4 BigQuery event export. See [GA4 bronze & modeling](../../concepts/ga4-bronze-and-modeling.md).
-
-## Configuration
-
-```yaml
-data_sources:
-  ga4:
-    GoogleAnalytics:
-      property_id: "123456789"
-      start_date: "2024-01-01"
-      stream_profile: full
-      lookback_days: 7
-      processing_lag_days: 1
-      window_in_days: 1
-      keep_empty_rows: true
-      access_token: ${GA4_ACCESS_TOKEN}
-```
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `property_id` | *(required)* | GA4 property ID |
-| `start_date` | *(required)* | First date (`YYYY-MM-DD`) |
-| `end_date` | | Last date; omit for through yesterday minus lag |
-| `stream_profile` | `full` | `minimal` (4), `standard` (16), `full` (23) |
-| `streams` | profile set | Explicit namespace list; overrides profile |
-| `lookback_days` | `3` | Mature days to re-fetch |
-| `processing_lag_days` | `1` | Skip last N calendar days |
-| `window_in_days` | `1` | Days per API date range; >1 risks sampling |
-| `keep_empty_rows` | `true` | Zero-metric dimension rows in API response |
-| Auth fields | | `access_token`, OAuth refresh, or service account |
-
-### Accuracy knobs
-
-| Setting | Purpose |
-| --- | --- |
-| `replace_partition` + `lookback_days` | Correct revised mature days |
-| `processing_lag_days` | Avoid immature trailing days |
-| `window_in_days: 1` | Minimize sampling (default) |
-
-### Stream profiles
-
-- **full** — 23 namespaces (production default)
-- **standard** — 16 (no demographics, ecommerce, publisher ads)
-- **minimal** — 4 acquisition/event tables (dev/CI)
-
-### Namespace catalog
-
-See the full table in [GA4 bronze & modeling](../../concepts/ga4-bronze-and-modeling.md).
-
-Ecommerce and publisher-ads namespaces are **optional**: invalid dimension/metric errors skip that stream for the run.
-
-### Landing semantics
-
-[Source landing semantics](../../concepts/source-landing-semantics.md). Pair with [Athena](../outputs/athena.md).
-
-## Authentication
-
-Skipprd calls the [Google Analytics Data API](https://developers.google.com/analytics/devguides/reporting/data/v1) with a **Bearer** token. Required OAuth scope:
-
-`https://www.googleapis.com/auth/analytics.readonly`
-
-The Google account or service account must have **Viewer** (or higher) on the GA4 property ([Admin → Property access management](https://support.google.com/analytics/answer/9305788)).
-
-Pick **one** method below. The plugin checks credentials in this order: `access_token` → OAuth refresh → service account → `GOOGLE_APPLICATION_CREDENTIALS`.
-
-Both production methods below share the same **Google Cloud project** prerequisite.
-
-#### Prerequisite: Google Cloud project + Data API
-
-1. Open [Google Cloud Console](https://console.cloud.google.com/) and select (or create) a project.
-2. Go to **APIs & Services → Library**, search for **Google Analytics Data API**, and click **Enable**.
-3. Note your **GA4 property ID** (GA4 **Admin → Property settings** → Property ID, numeric only — no `properties/` prefix).
-
+---
+title: Google Analytics (GA4)
+description: Sync daily GA4 reports on acquisition, engagement, content, geography, technology, and ecommerce into your warehouse with Skipprd.
 ---
 
-### Service account (recommended for production) {#service-account}
+# Google Analytics (GA4)
 
-Best for CI, servers, and scheduled `skipprd sync`. Skipprd reads the JSON key and mints short-lived access tokens automatically. You do **not** set `GA4_ACCESS_TOKEN`.
+The Google Analytics source reads daily reports from the GA4 Data API: traffic and user acquisition, events and conversions, audience, content, geography, demographics, technology, ecommerce, and publisher ads. Each stream is one fixed set of dimensions per day, so you build rollups, pivots, and channel summaries in SQL rather than in GA4. Use it when you want GA4 numbers in your warehouse alongside ad spend and revenue. It does not read the event-level GA4 BigQuery export. For modeling ideas, see [GA4 bronze and modeling](/concepts/ga4-bronze-and-modeling).
 
-#### 1. Create the service account (Cloud Console)
+## Before you begin
 
-1. **IAM & Admin → Service Accounts → Create service account**.
-2. Name it (for example `skippr-ga4-read`) and click **Create and continue**.
-3. **Grant this service account access to project** — optional for GA4 Data API reads; property-level access in GA4 (next step) is what matters. Click **Done**.
-4. Open the new service account → **Keys → Add key → Create new key → JSON** → **Create**. Store the downloaded `.json` file securely (treat it like a password).
+You need the GA4 property ID, a Google Cloud project with the Data API enabled, one set of credentials, and a destination that can rewrite daily partitions.
 
-The key file contains a field `client_email`, for example `skippr-ga4-read@my-project.iam.gserviceaccount.com`. You need that email in GA4.
+1. **Find the property ID.** In GA4, open **Admin → Property settings** and copy the numeric **Property ID**. Use the number only, without a `properties/` prefix.
+2. **Enable the Data API.** In the [Google Cloud Console](https://console.cloud.google.com/), select or create a project, open **APIs & Services → Library**, and enable the **Google Analytics Data API**.
+3. **Choose credentials.** Skipprd checks them in this order and uses the first one it finds: `access_token`, then OAuth refresh (all four `oauth_*` fields), then `service_account_json_path`, then the `GOOGLE_APPLICATION_CREDENTIALS` environment variable. Every method needs the scope `https://www.googleapis.com/auth/analytics.readonly` and at least **Viewer** on the property.
 
-#### 2. Grant the service account access to the GA4 property
+| Method | Use when | You provide |
+|---|---|---|
+| [Service account](#service-account) | Scheduled syncs on servers and CI | A JSON key file |
+| [OAuth refresh](#oauth-refresh) | A person's Google account should own access, or GA4 will not accept a service account | Client ID, client secret, refresh token |
+| [Access token](#access-token) | A first local test | A token that expires after about an hour |
 
-Service accounts do not inherit your personal Google login. Add the robot account explicitly:
+4. **Set up a destination.** Every stream is rewritten one day at a time, so the destination must support partition replacement: [Athena](/connectors/outputs/athena), [Athena Iceberg](/connectors/outputs/athenaiceberg), or [SkipprLake](/connectors/outputs/skipprlake). The examples below assume a data sink named `lake` already exists in `skippr.yml`.
 
-1. In [Google Analytics](https://analytics.google.com/), open the target property.
-2. **Admin** (gear) → **Property access management**.
-3. **+** → **Add users**.
-4. Paste the service account **email** from the JSON (`client_email`), for example `skipprd@optimistic-jet-274810.iam.gserviceaccount.com`.
-5. Role: **Viewer** (minimum for read-only Data API). Turn off **Notify new users by email** (there is no inbox for a service account). Save.
+### Service account
 
-Without this step, sync fails with **403** even if the key file is valid.
+Skipprd reads the JSON key and mints short-lived tokens on every sync.
 
-#### 2a. UI error: “This email doesn’t match a Google Account”
+1. In the Cloud Console, open **IAM & Admin → Service Accounts → Create service account**, name it (for example `skippr-ga4-read`), and click **Done**. It needs no project roles for Data API reads.
+2. Open the account, then **Keys → Add key → Create new key → JSON**. Store the downloaded file like a password. Its `client_email` field is the account's email address.
+3. In [Google Analytics](https://analytics.google.com/), open the property, then **Admin → Property access management → + → Add users**. Paste the `client_email`, choose **Viewer**, turn off **Notify new users by email**, and save.
 
-The GA4 **Add users** dialog only validates **human** Google accounts (`@gmail.com`, Google Workspace). Many properties show an error for `*.iam.gserviceaccount.com` even though the address is correct. That is a [known GA4 UI limitation](https://stackoverflow.com/questions/78464689/ga-property-access-management-can-t-add-service-account), not a problem with your service account.
+Without step 3, syncs fail with HTTP 403 even though the key is valid.
 
-**Fastest workaround — use [OAuth refresh](#oauth-refresh) instead:** authorize with the same Google account that already has GA4 **Administrator** access. Skipprd does not need the service account on the property for that path.
-
-**If you must use the service account**, grant access with the **Google Analytics Admin API** (as a GA4 admin user):
-
-1. In Cloud Console, enable **Google Analytics Admin API** (same project as the service account).
-2. Authenticate as a user who is **Administrator** on the GA4 property:
+**If GA4 says "This email doesn't match a Google Account".** The **Add users** dialog rejects `*.iam.gserviceaccount.com` addresses on many properties. Either switch to [OAuth refresh](#oauth-refresh), or grant access through the Google Analytics Admin API as a property **Administrator**:
 
 ```bash
 gcloud auth application-default login \
   --scopes=https://www.googleapis.com/auth/analytics.manage.users,https://www.googleapis.com/auth/cloud-platform
-```
 
-3. Create a property access binding (replace `PROPERTY_ID` and the service account email):
-
-```bash
-export PROPERTY_ID="123456789"   # numeric GA4 property ID
-export SA_EMAIL="skipprd@optimistic-jet-274810.iam.gserviceaccount.com"
+export PROPERTY_ID="123456789"
+export SA_EMAIL="skippr-ga4-read@my-project.iam.gserviceaccount.com"
 
 curl -s -X POST \
   "https://analyticsadmin.googleapis.com/v1alpha/properties/${PROPERTY_ID}/accessBindings" \
@@ -131,173 +49,29 @@ curl -s -X POST \
   -d "{\"user\": \"${SA_EMAIL}\", \"roles\": [\"predefinedRoles/viewer\"]}"
 ```
 
-4. In GA4 **Property access management**, confirm the service account appears in the user list (it may show up after the API call even when the UI refused manual entry).
+Enable the **Google Analytics Admin API** in the same Cloud project first. Afterwards, the service account appears under **Property access management**.
 
-If the API returns an error, use OAuth refresh for now or ask a GA4 **account** administrator to run the same `curl` at account level (`parent=accounts/ACCOUNT_ID`).
-
-#### 3. Configure Skipprd
-
-**Option A — path in config** (explicit, works everywhere):
-
-```yaml
-# skippr.yml (engine / runtime plugin)
-data_sources:
-  ga4:
-    GoogleAnalytics:
-      property_id: "123456789"
-      start_date: "2024-01-01"
-      service_account_json_path: /secure/path/skippr-ga4-key.json
-```
-
-**Option B — environment variable** (common in containers):
+Then point Skipprd at the key with `service_account_json_path`, or set the standard Google variable instead:
 
 ```bash
 export GOOGLE_APPLICATION_CREDENTIALS="/secure/path/skippr-ga4-key.json"
 ```
 
-Omit `service_account_json_path` when using `GOOGLE_APPLICATION_CREDENTIALS`; Skipprd picks up the path automatically.
+### OAuth refresh
 
+Skipprd stores a refresh token and exchanges it for a new access token on every sync. Set all four fields: `oauth_token_url`, `oauth_client_id`, `oauth_client_secret`, and `oauth_refresh_token`. If any one is missing, Skipprd skips this method.
 
-Do **not** set `access_token` when using a service account.
+1. **Consent screen.** In **APIs & Services → OAuth consent screen**, choose **Internal** if you use Google Workspace and the property belongs to the same organization. Otherwise choose **External**, add your Google account under **Test users**, and add the scope `https://www.googleapis.com/auth/analytics.readonly`. You do not need Google's app verification for a private pipeline.
+2. **Client.** In **APIs & Services → Credentials → Create credentials → OAuth client ID**, choose **Web application** and add the authorized redirect URI `https://developers.google.com/oauthplayground`. Copy the client ID and secret.
+3. **Refresh token.** In the [OAuth 2.0 Playground](https://developers.google.com/oauthplayground/), click the gear icon, choose **Use your own OAuth credentials**, and paste the client ID and secret. Enter the scope `https://www.googleapis.com/auth/analytics.readonly`, click **Authorize APIs**, and sign in as a user with Viewer access on the property. Click **Exchange authorization code for tokens** and copy the **refresh token**.
 
-#### 4. Verify
+If no refresh token appears, remove the app at [Google Account permissions](https://myaccount.google.com/permissions) and authorize again.
 
-```bash
-skipprd sync
-```
+Use `https://oauth2.googleapis.com/token` as `oauth_token_url`. It is an API endpoint that only accepts POST requests, so opening it in a browser shows an error page. That is expected.
 
-If auth fails, confirm the Data API is enabled, the JSON path is readable, and the service account email appears under property access management.
+### Access token
 
----
-
-### OAuth refresh (user-delegated automation) {#oauth-refresh}
-
-Use when a **human Google account** should own access (not a robot account), for example a workspace user who already has GA4 access. Skipprd stores a **refresh token** and requests a new access token on each sync. You do **not** set `GA4_ACCESS_TOKEN`.
-
-All four OAuth fields must be set for Skipprd to use this path: `oauth_token_url`, `oauth_client_id`, `oauth_client_secret`, `oauth_refresh_token`.
-
-#### 1. Configure the OAuth consent screen
-
-1. Cloud Console → **APIs & Services → OAuth consent screen**.
-2. User type:
-   - **Internal** — only if you use **Google Workspace** and the GA4 property is in the same org. No Google verification required for coworkers.
-   - **External** — personal Gmail or mixed accounts. For your own testing, leave publishing status as **Testing** (do not click **Publish app**).
-3. Fill required app name and support email.
-4. **Scopes → Add or remove scopes** → add manually:
-   `https://www.googleapis.com/auth/analytics.readonly`  
-   Google may show **“needs verification”** for External apps — that applies only if you publish to the public. In **Testing** mode you can use the scope without verification for accounts listed as test users.
-5. **Test users** (required for External + Testing): add every Google account that will run Playground / `skipprd sync` (your `@gmail.com` or Workspace email).
-6. Save. You do **not** need Google’s app review for a private Skipprd pipeline while status stays **Testing** and you are a listed test user.
-
-#### 2. Create an OAuth client ID
-
-1. **APIs & Services → Credentials → Create credentials → OAuth client ID**.
-2. Application type: **Web application** (works with the OAuth Playground below).
-3. Name it (for example `skippr-ga4-oauth`).
-4. **Authorized redirect URIs** → add:
-
-   `https://developers.google.com/oauthplayground`
-
-5. **Create** → copy the **Client ID** and **Client secret**.
-
-#### 3. Obtain a refresh token (one-time)
-
-Use the [OAuth 2.0 Playground](https://developers.google.com/oauthplayground/) with your client:
-
-1. Click the **gear** icon (top right) → check **Use your own OAuth credentials** → paste Client ID and Client secret → **Close**.
-2. In the left panel, scroll to **Google Analytics Data API v1** or paste into the input box:
-   `https://www.googleapis.com/auth/analytics.readonly`
-3. Click **Authorize APIs** → sign in with the **same Google user** that has Viewer access on the GA4 property.
-4. Click **Exchange authorization code for tokens**.
-5. Copy the **Refresh token** from the response. Store it in a secret manager or env var — it does not expire unless revoked.
-
-If no refresh token appears, revoke prior access at [Google Account permissions](https://myaccount.google.com/permissions), then repeat with the gear menu option **Force prompt** (if shown) so Google issues a new refresh token.
-
-#### 4. Configure Skipprd
-
-Set secrets via environment variables (recommended):
-
-```bash
-export GA4_OAUTH_CLIENT_ID="....apps.googleusercontent.com"
-export GA4_OAUTH_CLIENT_SECRET="...."
-export GA4_OAUTH_REFRESH_TOKEN="1//...."
-```
-
-```yaml
-# skippr.yml
-data_sources:
-  ga4:
-    GoogleAnalytics:
-      property_id: "123456789"
-      start_date: "2024-01-01"
-      oauth_token_url: https://oauth2.googleapis.com/token
-      oauth_client_id: ${GA4_OAUTH_CLIENT_ID}
-      oauth_client_secret: ${GA4_OAUTH_CLIENT_SECRET}
-      oauth_refresh_token: ${GA4_OAUTH_REFRESH_TOKEN}
-```
-
-`oauth_token_url` must be `https://oauth2.googleapis.com/token` for standard Google OAuth clients.
-
-> Do not open this URL in a browser
-`oauth2.googleapis.com/token` is a **POST-only API endpoint**. Opening it in Chrome/Safari shows “page can’t be found” — that is normal. Put the URL in `skippr.yml` only; Skipprd (or `curl` below) sends the refresh token there in the background.
-
-
-Do **not** set `access_token` when using refresh credentials.
-
-#### 5. Verify
-
-Optional — confirm the refresh token works:
-
-```bash
-curl -s -X POST https://oauth2.googleapis.com/token \
-  -d "client_id=${GA4_OAUTH_CLIENT_ID}" \
-  -d "client_secret=${GA4_OAUTH_CLIENT_SECRET}" \
-  -d "refresh_token=${GA4_OAUTH_REFRESH_TOKEN}" \
-  -d "grant_type=refresh_token" | jq -r .access_token
-```
-
-Then run `skipprd discover` then `skipprd sync --once`. On **401**, the refresh token may have been revoked; repeat section 3.
-
-#### Service account vs OAuth refresh
-
-| | Service account | OAuth refresh |
-| --- | --- | --- |
-| Identity | Robot (`...@....iam.gserviceaccount.com`) | Human Google user |
-| GA4 access | Add SA email in property access management | User must already have property access |
-| Secrets | JSON key file | Client ID, secret, refresh token |
-| Typical use | Production ETL, CI, VMs | When policy blocks service accounts on GA4 |
-
----
-
-### Bearer access token (`GA4_ACCESS_TOKEN`)
-
-`GA4_ACCESS_TOKEN` is the **OAuth 2.0 access token** string (starts with `ya29.` for Google). It is **not** a separate API key from the GA4 UI, and it **expires** (typically after about one hour). Use this for local testing; prefer a service account or refresh token for automation.
-
-#### Option A — OAuth 2.0 Playground (quickest for a first sync)
-
-1. Enable the **Google Analytics Data API** and create an **OAuth client ID** in Cloud Console (same as refresh flow above).
-2. Open [OAuth 2.0 Playground](https://developers.google.com/oauthplayground/).
-3. Gear icon → **Use your own OAuth credentials** → paste client ID and secret.
-4. Step 1: input scope `https://www.googleapis.com/auth/analytics.readonly` → **Authorize APIs** → sign in with a user that has access to the property.
-5. Step 2: **Exchange authorization code for tokens** → copy **Access token**.
-6. Export and run:
-
-```bash
-export GA4_ACCESS_TOKEN="ya29...."   # paste access token from Step 2
-skipprd sync
-```
-
-Your config can reference the env var:
-
-```yaml
-access_token: ${GA4_ACCESS_TOKEN}
-```
-
-Set `access_token: ${GA4_ACCESS_TOKEN}` in `skippr.yml`.
-
-#### Option B — gcloud (if you already use Google Cloud CLI)
-
-Log in with the Analytics scope, then print an access token:
+An access token is the short-lived OAuth token (it starts with `ya29.`), not an API key from the GA4 UI. It expires after about an hour, so use it for a first test only. If you already use the Google Cloud CLI:
 
 ```bash
 gcloud auth application-default login \
@@ -306,44 +80,169 @@ gcloud auth application-default login \
 export GA4_ACCESS_TOKEN="$(gcloud auth application-default print-access-token)"
 ```
 
-The token expires; re-run `print-access-token` when sync returns **401**.
+You can also copy the **Access token** from step 3 of the OAuth Playground flow.
 
-#### Option C — curl (when you already have a refresh token)
+## Configure
+
+Export the secrets for the method you chose. This example uses OAuth refresh:
 
 ```bash
-curl -s -X POST https://oauth2.googleapis.com/token \
-  -d client_id="${GA4_OAUTH_CLIENT_ID}" \
-  -d client_secret="${GA4_OAUTH_CLIENT_SECRET}" \
-  -d refresh_token="${GA4_OAUTH_REFRESH_TOKEN}" \
-  -d grant_type=refresh_token \
-  | jq -r .access_token
+export GA4_OAUTH_CLIENT_ID="1234567890-abc.apps.googleusercontent.com"
+export GA4_OAUTH_CLIENT_SECRET="your-client-secret"
+export GA4_OAUTH_REFRESH_TOKEN="1//your-refresh-token"
 ```
 
-Set `GA4_ACCESS_TOKEN` to the printed value, or configure the refresh fields in `skippr.yml` so Skipprd refreshes automatically (preferred).
+::: code-group
 
-### Security
+```python [Python]
+from skippr import Config, DataSourceGoogleAnalytics, EnvRef, Pipeline
 
-- Do not commit tokens, refresh tokens, or JSON keys in git. Use `${ENV_VAR}` in config.
-- Rotate compromised credentials in Cloud Console and GA4 property access.
+cfg = Config.discover()
+src = cfg.data_source(
+    "ga4",
+    DataSourceGoogleAnalytics(
+        property_id="123456789",
+        start_date="2026-01-01",
+        oauth_token_url="https://oauth2.googleapis.com/token",
+        oauth_client_id="${GA4_OAUTH_CLIENT_ID}",
+        oauth_client_secret=EnvRef("GA4_OAUTH_CLIENT_SECRET"),
+        oauth_refresh_token=EnvRef("GA4_OAUTH_REFRESH_TOKEN"),
+    ),
+)
+cfg.pipeline("ga4", Pipeline(data_source=src, data_sink=cfg.get_data_sink("lake")))
+cfg.save()
+```
 
+```bash [CLI]
+skipprd connect data-source google-analytics \
+  --pipeline ga4 \
+  --name ga4 \
+  --property-id 123456789 \
+  --start-date 2026-01-01 \
+  --oauth-token-url https://oauth2.googleapis.com/token \
+  --oauth-client-id '${GA4_OAUTH_CLIENT_ID}' \
+  --oauth-client-secret '${GA4_OAUTH_CLIENT_SECRET}' \
+  --oauth-refresh-token '${GA4_OAUTH_REFRESH_TOKEN}'
+```
 
+```yaml [YAML]
+pipelines:
+  ga4:
+    data_source: data_sources.ga4
+    data_sink: data_sinks.lake
 
-## Development fixtures
+data_sources:
+  ga4:
+    GoogleAnalytics:
+      property_id: "123456789"
+      start_date: "2026-01-01"
+      oauth_token_url: https://oauth2.googleapis.com/token
+      oauth_client_id: ${GA4_OAUTH_CLIENT_ID}
+      oauth_client_secret: ${GA4_OAUTH_CLIENT_SECRET}
+      oauth_refresh_token: ${GA4_OAUTH_REFRESH_TOKEN}
+```
 
-`SKIPPR_GA4_FIXTURE_DIR` — JSON files `{namespace_with_dots_as_underscores}_{YYYYMMDD}.json` (example: `google_analytics_events_daily_20240101.json`). See `plugins/data_source/google_analytics/tests/fixtures/`.
+:::
+
+For a service account, replace the four `oauth_*` fields with `service_account_json_path: /secure/path/skippr-ga4-key.json` (or omit credentials entirely when `GOOGLE_APPLICATION_CREDENTIALS` is set). For a test token, use `access_token: ${GA4_ACCESS_TOKEN}`. Set only one method.
+
+With the CLI, wire the `lake` destination into the same pipeline with `skipprd connect data-sink … --pipeline ga4` if it is not there already.
+
+### Check it worked
+
+```bash
+skipprd discover --pipeline ga4
+skipprd sync --pipeline ga4 --once
+```
+
+Then query `google_analytics_traffic_acquisition_daily` in your destination. You should see sessions by channel, source, and medium for each day from `start_date` through yesterday.
+
+## Options
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `property_id` | string | Required | Numeric GA4 property ID. |
+| `start_date` | string | Required | First report day, `YYYY-MM-DD`. |
+| `service_account_json_path` | string | — | Path to a service account JSON key. |
+| `oauth_token_url` | string | — | Token endpoint for refresh. Use `https://oauth2.googleapis.com/token`. |
+| `oauth_client_id` | string | — | OAuth client ID. |
+| `oauth_client_secret` | secret | — | OAuth client secret. |
+| `oauth_refresh_token` | secret | — | Refresh token with the `analytics.readonly` scope. |
+| `access_token` | secret | — | Short-lived bearer token. Takes priority over every other method. |
+| `end_date` | string | — | Last report day, `YYYY-MM-DD`. Without it, Skipprd syncs through yesterday. |
+| `lookback_days` | integer | `3` | Days before the last completed day to fetch again on every sync, so GA4's revisions land. |
+| `processing_lag_days` | integer | `1` | Never sync days more recent than this many days ago, while GA4 is still processing them. |
+| `window_in_days` | integer | `1` | Days per Data API request, from 1 to 364. Keep `1`: wider windows can trigger GA4 sampling. |
+| `keep_empty_rows` | boolean | `true` | Ask GA4 to return dimension combinations whose metrics are all zero. |
+| `stream_profile` | string | `full` | Which streams to sync: `minimal`, `standard`, or `full`. |
+| `streams` | list of strings | — | Exact stream names to sync, for example `[google_analytics.events_daily]`. Overrides `stream_profile`. |
+| `request_interval_ms` | integer | `300` | Pause after each successful request, to stay under GA4's per-property quotas. |
+| `max_api_retries` | integer | `12` | Attempts per request on rate-limit (429) and server (5xx) responses. |
+
+Secret fields only accept `${NAME}` environment references (`EnvRef("NAME")` in Python).
+
+## What gets synced
+
+Each stream lands as its own table named after the stream, with the dot replaced by an underscore (for example `google_analytics_events_daily`). Every row has `property_id`, `date`, the stream's dimensions, and its metrics. A row is unique on `property_id`, `date`, and the dimensions.
+
+| Stream | Dimensions (besides `date`) | Metrics | Profiles |
+|---|---|---|---|
+| `google_analytics.traffic_acquisition_daily` | `sessionDefaultChannelGroup`, `sessionSource`, `sessionMedium` | `sessions`, `totalUsers`, `conversions` | minimal, standard, full |
+| `google_analytics.traffic_campaign_daily` | `sessionCampaignName`, `sessionSource`, `sessionMedium` | `sessions`, `totalUsers`, `conversions` | standard, full |
+| `google_analytics.user_acquisition_daily` | `firstUserDefaultChannelGroup`, `firstUserSource`, `firstUserMedium` | `newUsers`, `totalUsers` | minimal, standard, full |
+| `google_analytics.user_acquisition_campaign_daily` | `firstUserCampaignName`, `firstUserSource`, `firstUserMedium` | `newUsers`, `totalUsers` | standard, full |
+| `google_analytics.events_daily` | `eventName` | `eventCount`, `totalUsers` | minimal, standard, full |
+| `google_analytics.conversions_daily` | `eventName` | `conversions`, `totalRevenue` | minimal, standard, full |
+| `google_analytics.audience_daily` | — | `activeUsers`, `newUsers`, `sessions`, `engagedSessions`, `averageSessionDuration` | standard, full |
+| `google_analytics.audience_retention_daily` | — | `active1DayUsers`, `active7DayUsers`, `active28DayUsers` | standard, full |
+| `google_analytics.content_pages_daily` | `pagePath` | `screenPageViews`, `sessions`, `totalUsers`, `engagementRate` | standard, full |
+| `google_analytics.content_titles_daily` | `pageTitle` | same as pages | standard, full |
+| `google_analytics.content_screens_daily` | `unifiedScreenClass` | same as pages | standard, full |
+| `google_analytics.content_group_daily` | `contentGroup` | same as pages | standard, full |
+| `google_analytics.geo_daily` | `country`, `region`, `city` | `sessions`, `totalUsers`, `newUsers` | standard, full |
+| `google_analytics.demographics_age_daily` | `userAgeBracket` | `sessions`, `totalUsers`, `newUsers` | full |
+| `google_analytics.demographics_gender_daily` | `userGender` | `sessions`, `totalUsers`, `newUsers` | full |
+| `google_analytics.demographics_interest_daily` | `brandingInterest` | `sessions`, `totalUsers`, `newUsers` | full |
+| `google_analytics.demographics_language_daily` | `language` | `sessions`, `totalUsers`, `newUsers` | full |
+| `google_analytics.tech_daily` | `deviceCategory`, `operatingSystem`, `browser` | `sessions`, `totalUsers` | standard, full |
+| `google_analytics.devices_daily` | `deviceCategory`, `mobileDeviceModel` | `sessions`, `totalUsers` | standard, full |
+| `google_analytics.tech_platform_daily` | `platform`, `deviceCategory` | `sessions`, `totalUsers` | standard, full |
+| `google_analytics.ecommerce_items_daily` | `itemName` | `itemsPurchased`, `itemRevenue`, `itemsAddedToCart` | full |
+| `google_analytics.ecommerce_categories_daily` | `itemCategory` | `itemsPurchased`, `itemRevenue` | full |
+| `google_analytics.publisher_ads_daily` | `adSourceName`, `adFormat`, `adUnitName` | `publisherAdClicks`, `publisherAdImpressions`, `adUnitExposure` | full |
+
+`minimal` is 4 streams, `standard` is 16, and `full` is all 23.
+
+**Optional streams.** The two ecommerce streams and `publisher_ads_daily` only work on properties with ecommerce or linked publisher ads. If GA4 rejects their dimensions or metrics, Skipprd skips that stream for the run and continues with the rest.
+
+**Incremental window.** The first sync reads every day from `start_date`, one request per stream per day. Each later sync starts again at the last completed day minus `lookback_days` and rewrites those days in full, so revised GA4 numbers replace the old ones. Increase `lookback_days` if you rely on long attribution windows. Do not raise `window_in_days` for that.
+
+**Row limits.** Each request returns one page, at most 10,000 rows (the Data API default). On large properties, high-cardinality streams such as `content_pages_daily`, `content_titles_daily`, `geo_daily`, and `devices_daily` can miss the long tail of a busy day. GA4 can also group rare values into `(other)` or hide them under its thresholding rules, so totals in these streams may differ slightly from the GA4 UI.
+
+**Discover.** `skipprd discover` reads only the 4 `minimal` streams for the last 3 days and does not save progress, so it stays fast and never shortens your first real sync.
+
+**Rate limits.** GA4 enforces per-property token quotas. Skipprd pauses `request_interval_ms` after each successful request and retries 429 and 5xx responses with exponential backoff (honouring `Retry-After`, waiting 30 seconds on a 429 without one, and never more than 2 minutes between attempts) up to `max_api_retries` attempts. A long backfill on the `full` profile makes 23 requests per day of history. If you keep hitting quota, backfill with `stream_profile: minimal` or `standard` first, or raise `request_interval_ms`.
+
+For how each day's partition is replaced, see [How sources land](/concepts/source-landing-semantics).
 
 ## Troubleshooting
 
-| Symptom | Fix |
-| --- | --- |
-| **This email doesn’t match a Google Account** (service account) | GA4 UI cannot add `*.iam.gserviceaccount.com` on many properties — use [OAuth refresh](#oauth-refresh) or [Admin API access binding](#2a-ui-error-this-email-doesnt-match-a-google-account) |
-| 401 / 403 | Regenerate `GA4_ACCESS_TOKEN` (expired), confirm `analytics.readonly` scope, and property **Viewer** access (or valid access binding for the service account) |
-| `GA4 requires access_token...` | Set `GA4_ACCESS_TOKEN`, OAuth refresh fields, or service account path — see [Authentication](#authentication) |
-| Empty ecommerce/ads tables | Enable features in GA4; streams are optional and may be skipped |
-| Stale metrics | Confirm `replace_partition`; increase `lookback_days` |
-| Sampling concerns | Keep `window_in_days: 1` |
-| OAuth scope **needs verification** / can’t publish app | Keep consent screen in **Testing**; add yourself under **Test users**; do not publish. Or use **Internal** if on Workspace. |
-| **`gcloud auth application-default login`: This app is blocked** | Workspace admin may block third-party Google sign-in, or the wrong account is signed in. Skip `gcloud` for Skipprd OAuth refresh — it is not required. Use Playground + env vars, or a service account JSON key. |
-| Playground / OAuth **access blocked** | Same as above: Testing + test users; try a personal Gmail GCP project; ask Workspace admin to allow your OAuth app or “Google Cloud SDK”. |
+| Symptom | Cause | Fix |
+|---|---|---|
+| `GA4 requires access_token, OAuth refresh credentials, service_account_json_path, or GOOGLE_APPLICATION_CREDENTIALS` | No credential method is complete. OAuth refresh needs all four fields, including `oauth_token_url`. | Configure one method from [Before you begin](#before-you-begin). |
+| HTTP 401 | The access token expired, or the refresh token was revoked. Refresh tokens from an **External** consent screen in **Testing** status expire after 7 days. | Generate a new token. For long-running pipelines, use a service account or an **Internal** consent screen. |
+| HTTP 403 | The identity has no access to the property, the Data API is not enabled, or the token lacks the `analytics.readonly` scope. | Add the user or service account as **Viewer** under **Property access management** and enable the Data API in the same Cloud project. |
+| **This email doesn't match a Google Account** when adding a service account | GA4's UI rejects service account addresses on many properties. | Grant access with the Admin API command in [Service account](#service-account), or use OAuth refresh. |
+| `gcloud auth application-default login` says **This app is blocked** | Your Workspace admin blocks the Google Cloud SDK, or the wrong account is signed in. | You do not need `gcloud`. Use the OAuth Playground flow or a service account key. |
+| OAuth Playground shows **Access blocked** | The consent screen is **External** and your account is not a test user. | Add your account under **Test users**, or use an **Internal** consent screen on Workspace. |
+| Ecommerce or publisher ads tables are empty | The property has no ecommerce or linked ads data, so those optional streams are skipped. | Expected. Remove them with `streams` or use `stream_profile: standard`. |
+| Recent days change between syncs | GA4 is still processing those days. | Expected. `lookback_days` re-fetches them; increase `processing_lag_days` to wait longer before the first read. |
+| Numbers look sampled | `window_in_days` is greater than 1. | Set `window_in_days: 1`. |
+| HTTP 429 after many retries | The property's quota is exhausted for the hour or day. | Reduce the profile for the backfill, raise `request_interval_ms`, or let the next scheduled sync continue from the checkpoint. |
+| `sink '…' does not support write policy ReplacePartition` | The destination cannot rewrite daily partitions. | Use Athena, Athena Iceberg, or SkipprLake as the destination. |
 
-Offline dev: set `SKIPPR_GA4_FIXTURE_DIR` to JSON fixtures named `{namespace_with_underscores}_{YYYYMMDD}.json`.
+## Next steps
+
+- [GA4 bronze and modeling](/concepts/ga4-bronze-and-modeling) shows how to turn these tables into reports.
+- [How sources land](/concepts/source-landing-semantics) explains partition replacement and lookback.
+- [Google Search Console](/connectors/inputs/google_search_console) adds organic search queries to the same warehouse.

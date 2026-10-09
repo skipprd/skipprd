@@ -1,56 +1,91 @@
-# Configuration Overview
+---
+title: Configuration overview
+description: Understand how skippr.yml, environment variables, and CLI flags combine, which one wins, and where each setting is documented.
+---
 
-Skipprd is configured primarily with `skippr.yml`. Environment variables are still supported for secrets, deployment overrides, and backwards-compatible engine configuration.
+# Configuration overview
 
-Start with:
+Skipprd takes configuration from three places. Each has one job:
 
-- [skippr.yml](skippr-yml.md) for the canonical project shape
-- [Input Source](input.md) for `data_sources`
-- [Output Destination](output.md) for ingest `data_sinks` and `schema_sinks`
+| Layer | Use it for | Example |
+|---|---|---|
+| `skippr.yml` | What you move: sources, destinations, pipelines, transforms, and engine settings you want under version control. | `data_sources`, `pipelines.orders.transform` |
+| Environment variables | Secrets, referenced from `skippr.yml` as `${NAME}`, and settings that describe the machine Skipprd runs on. | `APP_DB_PASSWORD`, `WAL_STORAGE`, `DATA_DIR` |
+| CLI flags | What to do on this run, plus a few per-run overrides. | `--pipeline orders`, `--once`, `--log`, `--wal-storage s3` |
 
-`skipprd discover` / `skipprd schema` / `skipprd sync` run the engine against this file. There is no separate `warehouses:` dialect.
+The usual split: commit `skippr.yml`, keep secrets in your environment or a gitignored `.env.local`, and set operator settings in your scheduler, container, or service definition.
 
-## Environment overrides
+Connectors are always configured in `skippr.yml`, through Python `Config`, or with `skipprd connect`. Each connector page lists its fields.
 
-| Variable | Default | Section | Description |
-|---|---|---|---|
-| **CLI mapping** | | | |
-| `PIPELINE_NAME` | | [Pipeline](pipeline.md) | Used when `--pipeline` is omitted |
-| `WORKSPACE_NAME` | `default` | [Pipeline](pipeline.md) | Workspace/domain name when `skippr.workspace` is unset |
-| `TENANT` | `default` | [Pipeline](pipeline.md) | Tenant identifier |
-| **Input source** | | | |
-| `DATA_SOURCE_PLUGIN_NAME` | *(required)* | [Input](input.md) | Source plugin: `s3`, `file` |
-| `DATA_SOURCE_S3_BUCKET` | | [Input](input.md) | S3 source bucket |
-| `DATA_SOURCE_S3_PREFIX` | | [Input](input.md) | S3 source key prefix |
-| `DATA_SOURCE_PATH` | | [Input](input.md) | Local file source path |
-| `DATA_SOURCE_BATCH_SIZE_BYTES` | plugin-defined | [Input](input.md) | Batch size in bytes |
-| `DATA_SOURCE_BATCH_SIZE_SECONDS` | plugin-defined | [Input](input.md) | Batch size in seconds |
-| **Output destination** | | | |
-| `DATA_OUTPUT_S3_BUCKET` | | [Output](output.md) | Destination S3 bucket for Parquet |
-| `DATA_OUTPUT_S3_PREFIX` | | [Output](output.md) | Destination S3 key prefix |
-| `SCHEMA_OUTPUT_GLUE_DATABASE_NAME` | | [Output](output.md) | Glue catalog database name |
-| `DATA_OUTPUT_ATHENA_WORKGROUP_NAME` | | [Output](output.md) | Athena workgroup |
-| `DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET` | | [Output](output.md) | S3 bucket for Athena query results |
-| `DATA_OUTPUT_MAX_ASYNC_UPLOADS` | `16` | [Output](output.md) | Max concurrent Parquet uploads |
-| **Transforms** | | | |
-| `TRANSFORM_NAMESPACE_FIELDS` | | [Transforms](transforms.md) | Fields that define event type / namespace |
-| `TRANSFORM_BATCH_PARTITION_FIELDS` | | [Transforms](transforms.md) | Fields for Hive partitioning |
-| `TRANSFORM_BATCH_TIME_FIELDS` | | [Transforms](transforms.md) | Timestamp field(s) for time partitioning |
-| `TRANSFORM_BATCH_TIME_UNIT` | | [Transforms](transforms.md) | Time granularity: `year`, `month`, `day`, `hour`, `minute` |
-| `TRANSFORM_FLATTEN_EVENTS` | `no` | [Transforms](transforms.md) | Flatten nested structures |
-| `TRANSFORM_BATCH_ORDER_FIELDS` | | [Transforms](transforms.md) | Sort rows within Parquet files for predicate pruning |
-| **Buffering & WAL** | | | |
-| `BUFFER_THRESHOLD_BYTES` | `10485760` | [Buffering](buffering.md) | Buffer flush threshold (bytes) |
-| `BUFFER_THRESHOLD_SECONDS` | `60` | [Buffering](buffering.md) | Buffer flush threshold (seconds) |
-| `WAL_STORAGE` | `disk` | [Buffering](buffering.md) | WAL backend: `disk`, `s3`, or `clustered` |
-| `WAL_BYTES_PER_FILE` | auto | [Buffering](buffering.md) | Optional WAL segment size override |
-| `WAL_MAX_DELAY_SECONDS` | `60` | [Buffering](buffering.md) | Coarse max WAL segment age before flush |
-| **Skipprd state** | | | |
-| `SKIPPR_S3_BUCKET` | | [Advanced](advanced.md) | S3 bucket for metadata, offsets, WAL (when S3), deadletters |
-| `SKIPPRD_EL_STORAGE_MODE` | `s3` | [Advanced](advanced.md) | Internal Skipprd EL metadata and stats persistence: `s3` (default) or `local` |
-| `DATA_DIR` | `./data` | [Advanced](advanced.md) | Local directory for WAL segments and offsets DB |
-| **Operational** | | | |
-| `SKIPPR_CHAOS_MODE` | `no` | [Advanced](advanced.md) | Enable chaos mode (random SIGKILL for testing) |
-| `SKIPPR_ENV` | `prod` | [Advanced](advanced.md) | Environment label |
-| `SCHEMA_AUTO_APPROVE` | `true` | [Advanced](advanced.md) | Auto-approve schema changes |
-| `SYNC_FREQUENCY` | | [Advanced](advanced.md) | Sync frequency (seconds) |
+## Which value wins
+
+When the same setting can come from more than one place, Skipprd resolves it like this:
+
+| Setting | Order, first wins |
+|---|---|
+| Pipeline settings such as `buffer_threshold_bytes`, `data_dir`, `sync_frequency_seconds`, and `transform.*` | `skippr.yml` pipeline key → environment variable → built-in default |
+| `skippr.workspace`, `skippr.tenant`, `skippr.skippr_s3_bucket`, `skippr.skipprd_el_storage_mode` | `skippr.yml` → environment variable → built-in default |
+| `skippr.wal_s3_bucket`, `skippr.store.type`, `skippr.store.name` | `skippr.yml` → CLI flag → environment variable → built-in default |
+| `WAL_STORAGE` | `--wal-storage` flag → `WAL_STORAGE` environment variable → `disk` |
+| Which config file to read | `--config` → `SKIPPR_CONFIG_FILE` → `./skippr.yml` and the other default names |
+| Which pipeline to run | `--pipeline` → `PIPELINE_NAME` |
+
+A value in `skippr.yml` always beats the environment. To vary a setting per machine, leave it out of `skippr.yml` and set the environment variable instead.
+
+## Global flags
+
+These flags work with any command:
+
+| Flag | Sets | Notes |
+|---|---|---|
+| `--config <path>` | The config file to read | Same as `SKIPPR_CONFIG_FILE`. |
+| `--log [level]` | Log output to stderr | `trace`, `debug`, `info` (default), `warn`, or `error`. See [Logging](/operations/logging). |
+| `--wal-storage <disk\|s3\|clustered>` | WAL backend | Overrides `WAL_STORAGE`. See [WAL and buffering](/configuration/buffering). |
+| `--wal-s3-bucket <bucket>` | WAL bucket for `s3` | Overrides `SKIPPR_WAL_S3_BUCKET`. |
+| `--store-type <sled\|dynamodb\|cloud-tables>` | State store | Overrides `SKIPPR_STORE_TYPE`. See [State store](/configuration/skippr-store). |
+| `--store-name <table>` | State store table | Overrides `SKIPPR_STORE_NAME`. |
+
+`--workspace`, `--tenant`, `--storage-mode`, and `--skippr-s3-bucket` take effect with `skipprd connect`, which writes them into the `skippr:` section of `skippr.yml`. Set them in the file for every other command.
+
+## Example: one file, two machines
+
+Keep the pipeline in `skippr.yml` and let each machine supply its own settings.
+
+On a laptop, use the defaults: the WAL and state stay in `./data`.
+
+```bash
+export APP_DB_PASSWORD='your-postgres-password'
+skipprd sync --pipeline orders --once
+```
+
+In a container with no persistent disk, keep the WAL in S3 and progress in DynamoDB:
+
+```bash
+export APP_DB_PASSWORD='your-postgres-password'
+export WAL_STORAGE=s3
+export SKIPPR_WAL_S3_BUCKET=acme-skipprd-wal
+export SKIPPR_STORE_TYPE=dynamodb
+export SKIPPR_STORE_NAME=skipprd-state
+skipprd sync --pipeline orders --once
+```
+
+This works only if `skippr.yml` does not set `skippr.store` or `skippr.wal_s3_bucket`, because file values win.
+
+## Where to go
+
+| To | Read |
+|---|---|
+| Look up any key in the file | [skippr.yml reference](/configuration/skippr-yml) |
+| Define a pipeline, its schedule, and its buffers | [Pipelines](/configuration/pipeline) |
+| Pick and wire a source | [Sources](/configuration/input) |
+| Pick and wire a destination, schema sink, or deadletter sink | [Destinations](/configuration/output) |
+| Split, partition, flatten, or sort records | [Transforms](/configuration/transforms) |
+| Choose disk, S3, or clustered WAL | [WAL and buffering](/configuration/buffering) |
+| Keep sync progress in DynamoDB | [State store](/configuration/skippr-store) |
+| Look up every other engine setting | [Advanced settings](/configuration/advanced) |
+
+## Next steps
+
+- [skippr.yml reference](/configuration/skippr-yml)
+- [How Skipprd works](/concepts/how-it-works)
+- [CLI overview](/cli/overview)

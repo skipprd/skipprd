@@ -1,40 +1,68 @@
-# File Output
+---
+title: Local file destination
+description: Write Skipprd batches as files on disk. Use it for debugging or a local hand-off.
+---
 
-Writes Parquet or JSON Lines files to the local filesystem. Useful for local development and testing.
+# Local file
 
-## Configuration
+Writes each batch into `output_dir`. Nothing is uploaded. Use this to inspect what a pipeline produces, or to feed another local process.
 
-```yaml
+## Before you begin
+
+- A directory Skipprd can create and write.
+
+## Configure
+
+::: code-group
+
+```python [Python]
+from skippr import Config, DataSinkFile, Pipeline
+
+cfg = Config.discover()
+out = cfg.data_sink("out", DataSinkFile(output_dir="./out", format="parquet"))
+cfg.pipeline("sample", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=out))
+cfg.save()
+```
+
+```bash [CLI]
+skipprd connect data-sink file \
+  --pipeline sample \
+  --name out \
+  --output-dir ./out \
+  --format parquet
+```
+
+```yaml [YAML]
 data_sinks:
-  lake:
+  out:
     File:
-      format: jsonl
-      output_dir: /tmp/cube-events
+      output_dir: ./out
+      format: parquet
 ```
 
-| Field | Default | Description |
-|---|---|---|
-| `format` | `parquet` | `parquet` or `jsonl` (`json` is accepted as an alias for `jsonl`) |
-| `output_dir` | `{data_dir}/output` | Lake root. Hive partitions are written under this directory. |
+:::
 
-## Output layout
+## Options
 
-Objects are written as:
+| Key | Type | Required/Default | Description |
+|---|---|---|---|
+| `output_dir` | path | Required | Directory for files |
+| `format` | string | Not set | File format (`parquet`, `json`, …) |
 
-```
-{output_dir}/{namespace}/{p_<field>=...}/{p_year=...}/{stem}.{parquet|jsonl}
-```
+A retry overwrites the same path.
 
-`batch_partition_fields` become `p_<field>=` directories. Time partitioning uses `TRANSFORM_BATCH_TIME_UNIT` and optional `time_partition_prefix` (use `p_` for `p_year` / `p_month` / `p_day`).
+## How data lands
 
-## Authentication
-
-No connector-specific authentication is required.
+Files appear under `output_dir/<namespace>/`. This destination is not a warehouse. For local SQL, use [DuckDB](/connectors/outputs/duckdb).
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| file cannot be created | Verify the parent directory exists and that the runner has write permission there. |
-| output is not where you expect | Set `output_dir` to an absolute path. The default root is `{data_dir}/output`. |
-| `format` rejected | File accepts only `parquet` and `jsonl`. |
+| Permission denied | Choose a writable `output_dir` |
+| Disk full | Free space, or point `DATA_DIR` and `output_dir` at a larger volume |
+
+## Next steps
+
+- [DuckDB](/connectors/outputs/duckdb)
+- [Stdout](/connectors/outputs/stdout)

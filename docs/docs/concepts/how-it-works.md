@@ -1,102 +1,134 @@
+---
+title: How Skipprd works
+description: Follow a pipeline from discover to query, learn what the write-ahead log guarantees, and know which state to keep and back up.
+---
+
 # How Skipprd works
 
-Skipprd is a host binary plus a published runtime plugin system. The host orchestrates discovery, sync, WAL recovery, compaction, and schema state. Runtime source, sink, and schema plugins resolve from published manifests or explicit local overrides.
+You describe a **pipeline** in `skippr.yml`: one source, and optionally one destination. Then you run four commands: discover the shape of the data, review the schema, sync the rows, and query them. Every batch is written to Skipprd's write-ahead log (WAL) first. A crash retries from the WAL. Whether a retry can duplicate a row depends on the destination — see [Exactly-once delivery](/concepts/exactly-once).
 
-## Pipeline lifecycle
+```text
+                ┌──────────────────────── skipprd ────────────────────────┐
+  data source ──▶  read batch ──▶ commit to WAL ──▶ write to destination   ──▶ destination
+                │                      │                     │            │
+                │                      ▼                     ▼            │
+                │              resume position        deadletter sink     │
+                │              (state store)          (optional)          │
+                └──────────────────────────────────────────────────────────┘
+```
 
-A pipeline moves through three phases:
+## The pipeline lifecycle
 
 ### 1. Discover
 
 ```bash
-skipprd discover --pipeline my_pipeline --log
+skipprd discover --pipeline bikehire --log
 ```
 
-Connects to the configured data source, samples records, and infers the complete schema including nested fields. The schema is persisted as pipeline metadata in S3 (`SKIPPR_S3_BUCKET`).
+Skipprd connects to the source, samples records, and infers field names, nesting, and types. It saves the result as the pipeline's schema. Discover never loads rows into your destination, so it is safe to run against production sources. See [Schema discovery and evolution](/concepts/schema).
 
-Discovery detects:
-
-- field names and nesting (including arrays of structs)
-- data types (string, integer, long, double, boolean, timestamps)
-- namespace separation when `TRANSFORM_NAMESPACE_FIELDS` is configured
-
-### 2. Sync
+### 2. Review the schema
 
 ```bash
-skipprd sync --pipeline my_pipeline --log
+skipprd schema --pipeline bikehire
 ```
 
-The main ingestion loop:
+Prints the discovered contract: fields, types, nesting, and namespaces (one namespace becomes one table). Check it before the first sync so table and column names in your warehouse are what you expect.
 
-1. **Resolve plugins** — the host resolves the required runtime source, sink, and schema plugins from the published registry. Latest is the default; per-plugin version pins are optional.
-2. **Connect runtime sessions** — plugins connect back to the host over a TCP control channel and a TCP data channel.
-3. **Read** — runtime source plugins read external systems and send raw or prepared batches to the host.
-4. **Durably buffer** — the host writes those batches to the WAL. Visible committed WAL state is the durable ingest boundary.
-5. **Compact and write** — the host replays committed WAL work through sink and schema plugins using replay-safe compaction ids.
-6. **Materialize resume state** — the host updates its offsets/checkpoint view from WAL-visible progress and provides that state back to sources on restart.
-
-On shutdown or crash recovery, the host replays from committed WAL state.
-
-### 3. Inspect schema, then query the warehouse
+### 3. Sync
 
 ```bash
-skipprd schema --pipeline my_pipeline
+skipprd sync --pipeline bikehire --once --log
 ```
 
-Prints the discovered contract. After `sync`, run SQL in the destination (Snowflake, Athena, PostgreSQL, BigQuery).
+For each pass, Skipprd:
 
-## Key components
+1. Reads a batch from the source.
+2. Commits the batch to the WAL. From this moment the batch is durable.
+3. Records the source position it has reached, so the next run resumes there.
+4. Writes committed batches to your destination and updates destination tables when the schema changes.
+5. Deletes WAL data your destination has acknowledged.
 
-### Write-Ahead Log (WAL)
+`--once` runs one pass and exits, which suits cron, CI, and orchestrators. Without it, `skipprd sync` keeps running and starts a new pass every `sync_frequency_seconds` (default 900).
 
-Every ingested record is first written to the WAL before downstream compaction and destination writes. This guarantees that data survives process crashes, including SIGKILL.
+### 4. Query
 
-- **Local disk WAL** (`WAL_STORAGE=disk`) — segments written under `DATA_DIR`
-- **S3 WAL** (`WAL_STORAGE=s3`) — segments written to `SKIPPR_S3_BUCKET`
-- **Clustered disk WAL** (`WAL_STORAGE=clustered`) — local segments plus one synchronous replica. Iceberg sinks (SkipprLake, AthenaIceberg, Duckdb) are the cold query path; live WAL is unioned in-process with that Iceberg snapshot ([Datalake](datalake.md)). Hive Athena and other non-Iceberg sinks are WAL-only for `skipprd query`.
+Query the tables in your warehouse with its own SQL client. For Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB), you can also query from the machine running Skipprd with [`skipprd query`](/cli/query). That view includes rows still in the WAL that have not landed yet. See [Datalake](/concepts/datalake).
 
-### Compactor
+## What the WAL guarantees
 
-The compactor reads committed WAL work, groups data by output partition, produces Parquet, and drives replay-safe sink/schema operations. If compaction is replayed after a crash, the same logical `compaction_id` is reused.
+The WAL is the durable buffer between your source and your destination. Skipprd commits each batch there before it writes anywhere else, and only advances the source position after the commit.
 
-### Offsets database
+This matters to you in three ways:
 
-The offsets database is stored at `DATA_DIR`, opened only by the host process, and treated as a materialized view of committed WAL progress.
+- **Crashes are safe.** If the process dies, including `kill -9`, the next run recovers committed batches from the WAL and resumes the source from the last committed position. Re-run the same command; there is no manual recovery step.
+- **Retries do not duplicate rows** in destinations that support exactly-once writes. Skipprd identifies each write so a retried write is not applied twice. Which destinations qualify is listed in [Exactly-once delivery](/concepts/exactly-once).
+- **A failed run says so.** If Skipprd cannot finish writing committed batches before it exits, the run exits non-zero. The next run picks up from the WAL.
 
-Runtime source plugins do not open the durable `sled` database directly. They ask the host to validate resume state and load checkpoints over the runtime protocol, while the host remains the only writer.
+The guarantee starts when a batch is committed. Data a source has handed over but Skipprd has not yet committed is covered only if the source can replay it, which pull sources such as files, databases, and APIs do.
 
-### Pipeline metadata
+### With a destination
 
-Stored in S3 at `{tenant}/{workspace}/{pipeline}/metadata.json`. Contains the discovered schema, field types, namespace definitions, and configuration. Updated on schema discovery and evolution.
+Set `data_sink` on the pipeline and Skipprd writes committed batches to that destination, then reclaims the WAL space. The WAL stays small: it holds only data that has not landed yet.
 
-### Runtime plugin registry
+### Without a destination
 
-By default, runtime plugins are resolved from the latest published manifest index at `install.skippr.io`. Each plugin crate is versioned independently, and the host is not stamped with a shared plugin bundle version.
+`data_sink` is optional. Without it, the WAL *is* the dataset: Skipprd keeps every batch and never reclaims it. Use this to explore a source before choosing a warehouse. Read the data with `skipprd query` or Python `Session.query()` and `Session.df()`.
 
-## Data flow diagram
-
-```text
-Published registry (`latest/manifest-index.json`)
-  │
-  ▼
-Host (`skipprd`)
-  │
-  ├── TCP control/data sessions
-  │
-  ├── Runtime Source Plugin ──▶ Host WAL writer
-  │                               │
-  │                               ▼
-  │                          WAL Segments
-  │                          (disk or S3)
-  │                               │
-  │                               ▼
-  │                          Compaction replay
-  │                               │
-  │                          ┌────┴────┐
-  │                          ▼         ▼
-  ├── Runtime Sink Plugin ▶ Parquet   Destination writes
-  │
-  ├── Runtime Schema Plugin ─▶ Glue/catalog updates
-  │
-  └── Host-owned offsets/checkpoint view
+```yaml
+pipelines:
+  bikehire:
+    data_source: data_sources.sample
 ```
+
+Because nothing is reclaimed, watch disk use on long-running pipelines without a destination.
+
+## Where state lives
+
+Skipprd keeps four kinds of state. Know where each one lives before you run a pipeline in production.
+
+| State | Default location | What to do |
+|---|---|---|
+| `skippr.yml` | Your project directory | Keep it in version control. Secrets stay in the environment as `${NAME}` references. |
+| WAL and resume positions | `DATA_DIR` (default `./data`), one subdirectory per pipeline | Put `DATA_DIR` on a persistent disk and reuse the same path on every run. |
+| Pipeline schema | The S3 bucket in `skippr.skippr_s3_bucket`, or under `DATA_DIR` with `skipprd_el_storage_mode: local` | Keep the bucket. Losing it means running discover again. |
+| Connector cache | `~/.skippr/runtime_plugins` | Nothing. Skipprd downloads a connector again if the cache is empty. |
+
+Set the data directory with the `DATA_DIR` environment variable or per pipeline with `data_dir` in `skippr.yml`.
+
+::: warning Keep DATA_DIR
+With the default local WAL, `DATA_DIR` holds data that may not have reached your destination yet, plus the position Skipprd resumes from. If you delete it or start on a fresh disk, Skipprd loses those batches and reads the source again from the beginning, which can duplicate rows in append-only destinations.
+:::
+
+If your compute is ephemeral (containers, Lambda, autoscaled hosts), move the WAL to S3 with `WAL_STORAGE=s3` and the state store to DynamoDB. Then no state lives on the machine. See [WAL and buffering](/configuration/buffering) and [State store](/configuration/skippr-store).
+
+Skipprd pauses reading when the disk holding `DATA_DIR` has less than 5 GB free or is 90% full, and resumes once usage drops back to 80%. A pipeline that stalls on a busy host is often waiting for disk space.
+
+## How connectors are installed
+
+Each source and destination is a connector Skipprd downloads for you. The first time a pipeline uses one, Skipprd:
+
+1. Looks up the latest version at `install.skippr.io`.
+2. Downloads it into the connector cache (`~/.skippr/runtime_plugins`).
+3. Reuses that copy on later runs of the same version.
+
+The machine needs outbound HTTPS to `install.skippr.io`. To put the cache on a persistent volume, set `SKIPPR_RUNTIME_PLUGIN_DIR` to that path.
+
+By default Skipprd uses the latest version of each connector. To pin a connector, add `version` to its entry in `skippr.yml`:
+
+```yaml
+data_sources:
+  sample:
+    S3:
+      version: 1.2.3
+      s3_bucket: skippr-public-sample-data
+      s3_prefix: bike-hire
+```
+
+## Next steps
+
+- [Install Skipprd](/getting-started/install) and run the [S3 to Athena quickstart](/getting-started/quickstart).
+- [Exactly-once delivery](/concepts/exactly-once): what each destination guarantees on retry.
+- [Schema discovery and evolution](/concepts/schema): how types are inferred and how changes land.
+- [WAL and buffering](/configuration/buffering): choose a WAL backend for production.
+- [skippr.yml](/configuration/skippr-yml): the full project file.
