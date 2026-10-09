@@ -48,7 +48,7 @@ On tag builds, `set_root_package_version.py` stamps the root host package versio
 
 ## Python wheels (PyPI)
 
-Python has its own semver in `pyproject.toml` and `python/Cargo.toml` (`18.1.0` today). It is not the skipprd git tag.
+Python has its own semver in `pyproject.toml` and `python/Cargo.toml` (`18.1.1` today). It is not the skipprd git tag.
 
 `.github/workflows/ci.yml` (**Python CI/CD Pipeline**) builds and tests the `skippr` wheel on GitHub-hosted Linux x86 (`ubuntu-latest`) and macOS arm64 (`skippr-darwin-arm64`) for engine tags (`[0-9]*`) and `python-v*` tags, plus `workflow_dispatch`. It does not run on `main` / master or pull requests. Release `cdylib` builds use `[profile.release]` `debug = false` and `strip = "symbols"` so the wheel stays under the PyPI project file limit of 100 MB (`scripts/test-python.sh` fails the job if a wheel is larger).
 
@@ -66,11 +66,11 @@ Registered publisher on [pypi.org](https://pypi.org):
 
 Do not create a PyPI API token. Do not put `TWINE_PASSWORD` in GitHub secrets.
 
-Bump `pyproject.toml` and `python/Cargo.toml` together, then tag the engine (`18.1.0`). Scratch `0.0.0` does not publish the wheel. `python-v*` still builds and tests the wheel; it does not publish.
+Bump `pyproject.toml` and `python/Cargo.toml` together, then tag the engine (`18.1.1`). Scratch `0.0.0` does not publish the wheel. `python-v*` still builds and tests the wheel; it does not publish.
 
 ## 3. Compile and test the important boundaries
 
-`.github/workflows/rust.yml` (**Rust CI/CD Pipeline**) is the linux x86 plus Darwin arm64 release lane. It runs on unprefixed engine tags (`18.1.0`) and `workflow_dispatch`, not on `main` or master branch pushes.
+`.github/workflows/rust.yml` (**Rust CI/CD Pipeline**) is the linux x86 plus Darwin arm64 release lane. It runs on unprefixed engine tags (`18.1.1`) and `workflow_dispatch`, not on `main` or master branch pushes.
 
 - `linux_test_suite` — Python workflow contracts (`test_rust_ci.py`, harness/plugin/host-boundary scripts). Cargo tests are skipped for now because they take too long on GitHub-hosted runners.
 - `linux_x86` — `rust-build-release` of skipprd plus the full workspace plugin catalog; starts in parallel with `linux_test_suite`
