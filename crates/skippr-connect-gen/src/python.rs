@@ -534,6 +534,10 @@ fn emit_rust_class(out: &mut String, class: &ClassSpec) {
     }
     out.push_str("}\n\n#[pymethods]\n");
     out.push_str(&format!("impl {} {{\n    #[new]\n", class.rust));
+    let ctor_doc = constructor_doc(class);
+    if !ctor_doc.is_empty() {
+        out.push_str(&format!("    #[doc = {ctor_doc:?}]\n"));
+    }
     let signature = class
         .fields
         .iter()
@@ -578,6 +582,33 @@ fn field_doc(field: &ClassField) -> String {
     } else {
         format!("{}\n\nYAML key `{}`.", field.doc, field.wire)
     }
+}
+
+fn arg_doc(field: &ClassField) -> String {
+    if field.doc.is_empty() {
+        return format!("YAML key `{}`.", field.wire);
+    }
+    field.doc.lines().next().unwrap_or("").trim().to_string()
+}
+
+/// Class summary plus Google-style `Args` so editors show field docs on
+/// constructor keyword arguments (`Pipeline(auto_approve=True)`).
+fn constructor_doc(class: &ClassSpec) -> String {
+    let mut lines = Vec::new();
+    if !class.doc.is_empty() {
+        lines.push(class.doc.clone());
+    }
+    if class.fields.is_empty() {
+        return lines.join("\n");
+    }
+    if !lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines.push("Args:".into());
+    for field in &class.fields {
+        lines.push(format!("    {}: {}", field.ident, arg_doc(field)));
+    }
+    lines.join("\n")
 }
 
 /// `python/src/connect_generated.rs`, `include!`d by `python/src/lib.rs`.
@@ -738,6 +769,7 @@ fn emit_stub_class(out: &mut String, class: &ClassSpec) {
             }
         })
         .collect::<Vec<_>>();
+    let ctor_doc = constructor_doc(class);
     let one_line = if params.is_empty() {
         format!("    def __new__(cls) -> {}: ...\n", class.py)
     } else {
@@ -747,14 +779,20 @@ fn emit_stub_class(out: &mut String, class: &ClassSpec) {
             class.py
         )
     };
-    if one_line.len() <= STUB_LINE_WIDTH {
+    if ctor_doc.is_empty() && one_line.len() <= STUB_LINE_WIDTH {
         out.push_str(&one_line);
+    } else if params.is_empty() {
+        out.push_str(&format!("    def __new__(cls) -> {}:\n", class.py));
+        out.push_str(&py_docstring(&ctor_doc, "        "));
+        out.push_str("        ...\n");
     } else {
         out.push_str("    def __new__(\n        cls,\n        *,\n");
         for param in &params {
             out.push_str(&format!("        {param},\n"));
         }
-        out.push_str(&format!("    ) -> {}: ...\n", class.py));
+        out.push_str(&format!("    ) -> {}:\n", class.py));
+        out.push_str(&py_docstring(&ctor_doc, "        "));
+        out.push_str("        ...\n");
     }
     for field in &class.fields {
         let optional = |ty: String| {

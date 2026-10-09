@@ -355,41 +355,53 @@ impl PairedSink {
     }
 }
 
+/// How source records are namespaced, partitioned, flattened, and ordered before the sink.
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Transform {
+    /// Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_time_fields: Option<String>,
+    /// Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_time_unit: Option<BatchTimeUnit>,
+    /// Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).
     #[serde(
         default,
         deserialize_with = "deserialize_flag",
         skip_serializing_if = "Option::is_none"
     )]
     pub flatten_events: Option<bool>,
+    /// JSON pointer/path to the array of records inside each source object. Unset means the object is the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_field_path: Option<String>,
+    /// Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_partition_fields: Option<String>,
+    /// Allowed values for partition columns. Records outside this set are dropped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition_allowed_values: Option<String>,
+    /// Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace_fields: Option<String>,
+    /// Prefix for time-partition folder names (`p_` → `p_2026-10-08`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_partition_prefix: Option<String>,
+    /// Accept JSON that uses single quotes around strings.
     #[serde(
         default,
         deserialize_with = "deserialize_flag",
         skip_serializing_if = "Option::is_none"
     )]
     pub enable_single_quote_parsing: Option<bool>,
+    /// Accept JSON with unescaped Unicode.
     #[serde(
         default,
         deserialize_with = "deserialize_flag",
         skip_serializing_if = "Option::is_none"
     )]
     pub enable_unicode_parsing: Option<bool>,
+    /// Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_order_fields: Option<String>,
     /// Static field names and JSON values merged onto each source record before ingest.
@@ -397,24 +409,32 @@ pub struct Transform {
     pub inject_fields: Option<BTreeMap<String, Value>>,
 }
 
+/// Namespace cardinality and histogram collection during ingest.
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Stats {
+    /// Collect HyperLogLog / histogram stats for this pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// HyperLogLog precision (4–18). Higher is more accurate and uses more memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hll_precision: Option<u8>,
+    /// Also collect value histograms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub histogram_enabled: Option<bool>,
+    /// Seconds between stats flushes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flush_seconds: Option<u64>,
 }
 
+/// LLM semantic-layer generation for this pipeline.
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticLayerSettings {
+    /// Ask an LLM to propose semantic-layer YAML from discovered schemas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_enabled: Option<bool>,
+    /// Wait this many milliseconds after the last schema change before generating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_debounce_ms: Option<u64>,
 }
@@ -455,43 +475,61 @@ pub type DataSourcePluginConfig = PluginConfigEntry;
 pub type DataSinkPluginConfig = PluginConfigEntry;
 pub type SchemaSinkConfig = PluginConfigEntry;
 
+/// One skipprd pipeline: a source, optional sinks, and how sync runs.
+///
+/// Register it with `Config.pipeline(name, Pipeline(...))`, then pass the
+/// returned `PipelineRef` to `Session`.
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Pipeline {
+    /// Label for logs and metadata. Default `INGEST` (`PIPELINE_TYPE`).
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
+    /// Approve schema changes without prompting. Default true (`SCHEMA_AUTO_APPROVE`).
     #[serde(
         default,
         deserialize_with = "deserialize_flag",
         skip_serializing_if = "Option::is_none"
     )]
     pub auto_approve: Option<bool>,
+    /// Environment label for logs and metadata. Default `prod` (`SKIPPR_ENV`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
+    /// Flush the ingest buffer at this many bytes. Default 10 MiB (`BUFFER_THRESHOLD_BYTES`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer_threshold_bytes: Option<u64>,
+    /// Flush the ingest buffer after this many seconds. Default 60 (`BUFFER_THRESHOLD_SECONDS`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer_threshold_seconds: Option<u64>,
+    /// Kill the process mid-run with SIGKILL to test exactly-once recovery. Default false (`SKIPPR_CHAOS_MODE`).
     #[serde(
         default,
         deserialize_with = "deserialize_flag",
         skip_serializing_if = "Option::is_none"
     )]
     pub chaos_mode: Option<bool>,
+    /// Seconds between sync loops. Default 900 (`SYNC_FREQUENCY`). `Session.sync(once=True)` still runs once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_frequency_seconds: Option<u64>,
+    /// Local directory for WAL and offsets. Default `./data` (`DATA_DIR`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
+    /// How records are namespaced, partitioned, flattened, and ordered before the sink.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transform: Option<Transform>,
+    /// Source this pipeline reads. Required. A `DataSourceRef` from this config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_source: Option<String>,
+    /// Destination for successful records. Optional: without it the WAL is the dataset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_sink: Option<String>,
+    /// Destination for records that fail transform or sink writes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadletter_sink: Option<String>,
+    /// Namespace cardinality and histogram collection during ingest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<Stats>,
+    /// LLM semantic-layer generation for this pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_layer: Option<SemanticLayerSettings>,
     /// CDC configuration. When present, the pipeline runs in CDC mode and

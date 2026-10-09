@@ -1998,6 +1998,39 @@ mod tests {
     }
 
     #[test]
+    fn python_constructor_kwargs_carry_implementor_docs() {
+        let (rs, stub) = python_outputs();
+        assert!(
+            stub.contains("class Pipeline:\n    \"\"\"One skipprd pipeline:"),
+            "Pipeline class docstring is what an editor shows on hover"
+        );
+        assert!(
+            stub.contains("Approve schema changes without prompting"),
+            "Pipeline.auto_approve must describe the behaviour, not only the YAML key"
+        );
+        assert!(
+            stub.contains("            auto_approve: Approve schema changes without prompting"),
+            "constructor Args are what editors show when hovering a keyword argument"
+        );
+        assert!(
+            rs.contains("Approve schema changes without prompting"),
+            "PyO3 field/constructor docs must match the stub"
+        );
+        assert!(
+            stub.contains("class Transform:\n    \"\"\"How source records are namespaced"),
+            "Transform class docstring is missing"
+        );
+        assert!(
+            stub.contains("Set `skippr.workspace`."),
+            "Config.workspace hover docs live in stub_core.pyi"
+        );
+        assert!(
+            stub.contains("Bucket to read."),
+            "DataSourceS3.s3_bucket must describe the field"
+        );
+    }
+
+    #[test]
     fn python_unknown_types_fail_generation() {
         let types = TypeCatalog::default();
         let plugin = PluginSpec {

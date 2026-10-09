@@ -324,6 +324,7 @@ pub struct PyDataSourceAiCitationsTrackedPrompt {
 #[pymethods]
 impl PyDataSourceAiCitationsTrackedPrompt {
     #[new]
+    #[doc = "Args:\n    id: YAML key `id`.\n    text: YAML key `text`.\n    category: YAML key `category`.\n    intent: YAML key `intent`."]
     #[pyo3(signature = (*, id, text, category = None, intent = None))]
     fn new(id: String, text: String, category: Option<String>, intent: Option<String>) -> Self {
         Self {
@@ -363,6 +364,7 @@ pub struct PyDataSourceAppleAppStoreSerpTargetEntry {
 #[pymethods]
 impl PyDataSourceAppleAppStoreSerpTargetEntry {
     #[new]
+    #[doc = "Args:\n    app_id: YAML key `app_id`.\n    bundle_id: YAML key `bundle_id`.\n    aliases: YAML key `aliases`."]
     #[pyo3(signature = (*, app_id, bundle_id = None, aliases = None))]
     fn new(app_id: String, bundle_id: Option<String>, aliases: Option<Vec<String>>) -> Self {
         Self {
@@ -429,6 +431,7 @@ pub struct PyDataSourceDataForSeoBacklinksBacklinkJob {
 #[pymethods]
 impl PyDataSourceDataForSeoBacklinksBacklinkJob {
     #[new]
+    #[doc = "Args:\n    target: YAML key `target`.\n    job_tag: YAML key `job_tag`.\n    limit: YAML key `limit`.\n    mode: YAML key `mode`.\n    backlinks_status_type: YAML key `backlinks_status_type`.\n    filters: YAML key `filters`.\n    order_by: YAML key `order_by`.\n    max_pages: YAML key `max_pages`.\n    include_subdomains: YAML key `include_subdomains`.\n    exclude_internal_backlinks: YAML key `exclude_internal_backlinks`."]
     #[pyo3(signature = (*, target, job_tag = None, limit = None, mode = None, backlinks_status_type = None, filters = None, order_by = None, max_pages = None, include_subdomains = None, exclude_internal_backlinks = None))]
     fn new(
         target: String,
@@ -508,6 +511,7 @@ pub struct PyDataSourceDataForSeoBacklinksIntersectionJob {
 #[pymethods]
 impl PyDataSourceDataForSeoBacklinksIntersectionJob {
     #[new]
+    #[doc = "Args:\n    name: YAML key `name`.\n    targets: YAML key `targets`.\n    exclude_targets: YAML key `exclude_targets`.\n    intersection_mode: YAML key `intersection_mode`.\n    limit: YAML key `limit`.\n    order_by: YAML key `order_by`.\n    max_pages: YAML key `max_pages`.\n    filters: YAML key `filters`.\n    internal_list_limit: YAML key `internal_list_limit`."]
     #[pyo3(signature = (*, name, targets, exclude_targets = None, intersection_mode = None, limit = None, order_by = None, max_pages = None, filters = None, internal_list_limit = None))]
     fn new(
         name: String,
@@ -573,6 +577,7 @@ pub struct PyDataSourceDataForSeoBacklinksCompetitorEntry {
 #[pymethods]
 impl PyDataSourceDataForSeoBacklinksCompetitorEntry {
     #[new]
+    #[doc = "Args:\n    name: YAML key `name`.\n    target: YAML key `target`.\n    limit: YAML key `limit`.\n    max_pages: YAML key `max_pages`.\n    include_subdomains: YAML key `include_subdomains`.\n    backlinks_status_type: YAML key `backlinks_status_type`."]
     #[pyo3(signature = (*, name, target, limit = None, max_pages = None, include_subdomains = None, backlinks_status_type = None))]
     fn new(
         name: String,
@@ -618,6 +623,7 @@ pub struct PyDataSourceDataForSeoBacklinksHistoryConfig {
 #[pymethods]
 impl PyDataSourceDataForSeoBacklinksHistoryConfig {
     #[new]
+    #[doc = "Args:\n    date_from: YAML key `date_from`.\n    date_to: YAML key `date_to`."]
     #[pyo3(signature = (*, date_from = None, date_to = None))]
     fn new(date_from: Option<String>, date_to: Option<String>) -> Self {
         Self { date_from, date_to }
@@ -647,6 +653,7 @@ pub struct PyDataSourceDataForSeoSeoOpportunitiesCompetitorEntry {
 #[pymethods]
 impl PyDataSourceDataForSeoSeoOpportunitiesCompetitorEntry {
     #[new]
+    #[doc = "Args:\n    name: YAML key `name`.\n    domain: YAML key `domain`."]
     #[pyo3(signature = (*, name, domain))]
     fn new(name: String, domain: String) -> Self {
         Self { name, domain }
@@ -690,6 +697,7 @@ pub struct PyDataSourceDataForSeoSeoOpportunitiesLimitsConfig {
 #[pymethods]
 impl PyDataSourceDataForSeoSeoOpportunitiesLimitsConfig {
     #[new]
+    #[doc = "Args:\n    max_seed_keywords: YAML key `max_seed_keywords`.\n    max_generated_keywords: YAML key `max_generated_keywords`.\n    serp_depth: YAML key `serp_depth`.\n    rank_track_depth: YAML key `rank_track_depth`.\n    max_competitors: YAML key `max_competitors`."]
     #[pyo3(signature = (*, max_seed_keywords = None, max_generated_keywords = None, serp_depth = None, rank_track_depth = None, max_competitors = None))]
     fn new(
         max_seed_keywords: Option<usize>,
@@ -745,6 +753,7 @@ pub struct PyDataSourceDataForSeoSeoOpportunitiesScoringConfig {
 #[pymethods]
 impl PyDataSourceDataForSeoSeoOpportunitiesScoringConfig {
     #[new]
+    #[doc = "Args:\n    min_search_volume: YAML key `min_search_volume`.\n    max_keyword_difficulty: YAML key `max_keyword_difficulty`.\n    weak_domain_rank_threshold: YAML key `weak_domain_rank_threshold`.\n    prefer_question_keywords: YAML key `prefer_question_keywords`.\n    prefer_low_backlink_serps: YAML key `prefer_low_backlink_serps`."]
     #[pyo3(signature = (*, min_search_volume = None, max_keyword_difficulty = None, weak_domain_rank_threshold = None, prefer_question_keywords = None, prefer_low_backlink_serps = None))]
     fn new(
         min_search_volume: Option<u32>,
@@ -787,6 +796,7 @@ pub struct PyDataSourceGoogleSerpRanksTargetEntry {
 #[pymethods]
 impl PyDataSourceGoogleSerpRanksTargetEntry {
     #[new]
+    #[doc = "Args:\n    site: YAML key `site`.\n    aliases: YAML key `aliases`."]
     #[pyo3(signature = (*, site, aliases = None))]
     fn new(site: String, aliases: Option<Vec<String>>) -> Self {
         Self { site, aliases }
@@ -826,6 +836,7 @@ pub struct PyDataSourceHttpClientDataSourceHttpAuthConfig {
 #[pymethods]
 impl PyDataSourceHttpClientDataSourceHttpAuthConfig {
     #[new]
+    #[doc = "Args:\n    strategy: YAML key `strategy`.\n    user: YAML key `user`.\n    password: YAML key `password`.\n    token: YAML key `token`."]
     #[pyo3(signature = (*, strategy = None, user = None, password = None, token = None))]
     fn new(
         strategy: Option<String>,
@@ -887,6 +898,7 @@ pub struct PyDataSourceHubspotCrmPrivacyConfig {
 #[pymethods]
 impl PyDataSourceHubspotCrmPrivacyConfig {
     #[new]
+    #[doc = "Args:\n    mode: YAML key `mode`.\n    profile: YAML key `profile`.\n    drop_properties: YAML key `drop_properties`.\n    keep_properties: YAML key `keep_properties`.\n    drop_streams: YAML key `drop_streams`.\n    hash_properties: YAML key `hash_properties`.\n    on_violation: YAML key `on_violation`."]
     #[pyo3(signature = (*, mode = None, profile = None, drop_properties = None, keep_properties = None, drop_streams = None, hash_properties = None, on_violation = None))]
     fn new(
         mode: Option<PyDataSourceHubspotCrmPrivacyMode>,
@@ -950,6 +962,7 @@ pub struct PyDataSourceRevolutBusinessPrivacyConfig {
 #[pymethods]
 impl PyDataSourceRevolutBusinessPrivacyConfig {
     #[new]
+    #[doc = "Args:\n    mode: YAML key `mode`.\n    profile: YAML key `profile`.\n    drop_properties: YAML key `drop_properties`.\n    keep_properties: YAML key `keep_properties`.\n    hash_properties: YAML key `hash_properties`.\n    on_violation: YAML key `on_violation`."]
     #[pyo3(signature = (*, mode = None, profile = None, drop_properties = None, keep_properties = None, hash_properties = None, on_violation = None))]
     fn new(
         mode: Option<PyDataSourceRevolutBusinessPrivacyMode>,
@@ -993,6 +1006,7 @@ pub struct PyDataSourceSiteQualityViewport {
 #[pymethods]
 impl PyDataSourceSiteQualityViewport {
     #[new]
+    #[doc = "Args:\n    width: YAML key `width`.\n    height: YAML key `height`."]
     #[pyo3(signature = (*, width, height))]
     fn new(width: u32, height: u32) -> Self {
         Self { width, height }
@@ -1026,6 +1040,7 @@ pub struct PyDataSourceSiteQualityDeviceProfile {
 #[pymethods]
 impl PyDataSourceSiteQualityDeviceProfile {
     #[new]
+    #[doc = "Args:\n    profile: YAML key `profile`.\n    viewport: YAML key `viewport`.\n    user_agent: YAML key `user_agent`."]
     #[pyo3(signature = (*, profile, viewport, user_agent = None))]
     fn new(
         profile: String,
@@ -1069,6 +1084,7 @@ pub struct PyDataSourceSiteQualityThrottleConfig {
 #[pymethods]
 impl PyDataSourceSiteQualityThrottleConfig {
     #[new]
+    #[doc = "Args:\n    rtt_ms: YAML key `rtt_ms`.\n    throughput_kbps: YAML key `throughput_kbps`.\n    cpu_slowdown: YAML key `cpu_slowdown`."]
     #[pyo3(signature = (*, rtt_ms = None, throughput_kbps = None, cpu_slowdown = None))]
     fn new(rtt_ms: Option<u32>, throughput_kbps: Option<f64>, cpu_slowdown: Option<u32>) -> Self {
         Self {
@@ -1102,6 +1118,7 @@ pub struct PyDataSourceSiteSecurityViewport {
 #[pymethods]
 impl PyDataSourceSiteSecurityViewport {
     #[new]
+    #[doc = "Args:\n    width: YAML key `width`.\n    height: YAML key `height`."]
     #[pyo3(signature = (*, width, height))]
     fn new(width: u32, height: u32) -> Self {
         Self { width, height }
@@ -1135,6 +1152,7 @@ pub struct PyDataSourceSiteSecurityDeviceProfile {
 #[pymethods]
 impl PyDataSourceSiteSecurityDeviceProfile {
     #[new]
+    #[doc = "Args:\n    profile: YAML key `profile`.\n    viewport: YAML key `viewport`.\n    user_agent: YAML key `user_agent`."]
     #[pyo3(signature = (*, profile, viewport, user_agent = None))]
     fn new(
         profile: String,
@@ -1190,6 +1208,7 @@ pub struct PyDataSourceStripePrivacyConfig {
 #[pymethods]
 impl PyDataSourceStripePrivacyConfig {
     #[new]
+    #[doc = "Args:\n    mode: YAML key `mode`.\n    profile: YAML key `profile`.\n    drop_properties: YAML key `drop_properties`.\n    keep_properties: YAML key `keep_properties`.\n    hash_properties: YAML key `hash_properties`.\n    on_violation: YAML key `on_violation`."]
     #[pyo3(signature = (*, mode = None, profile = None, drop_properties = None, keep_properties = None, hash_properties = None, on_violation = None))]
     fn new(
         mode: Option<PyDataSourceStripePrivacyMode>,
@@ -1251,6 +1270,7 @@ pub struct PyDataSourceSumUpPrivacyConfig {
 #[pymethods]
 impl PyDataSourceSumUpPrivacyConfig {
     #[new]
+    #[doc = "Args:\n    mode: YAML key `mode`.\n    profile: YAML key `profile`.\n    drop_properties: YAML key `drop_properties`.\n    keep_properties: YAML key `keep_properties`.\n    hash_properties: YAML key `hash_properties`.\n    on_violation: YAML key `on_violation`."]
     #[pyo3(signature = (*, mode = None, profile = None, drop_properties = None, keep_properties = None, hash_properties = None, on_violation = None))]
     fn new(
         mode: Option<PyDataSourceSumUpPrivacyMode>,
@@ -1312,6 +1332,7 @@ pub struct PyDataSourceXeroAccountingPrivacyConfig {
 #[pymethods]
 impl PyDataSourceXeroAccountingPrivacyConfig {
     #[new]
+    #[doc = "Args:\n    mode: YAML key `mode`.\n    profile: YAML key `profile`.\n    drop_properties: YAML key `drop_properties`.\n    keep_properties: YAML key `keep_properties`.\n    hash_properties: YAML key `hash_properties`.\n    on_violation: YAML key `on_violation`."]
     #[pyo3(signature = (*, mode = None, profile = None, drop_properties = None, keep_properties = None, hash_properties = None, on_violation = None))]
     fn new(
         mode: Option<PyDataSourceXeroAccountingPrivacyMode>,
@@ -1349,6 +1370,7 @@ pub struct PyDataSinkAthenaIcebergS3CompatibleObjectStoreS3 {}
 #[pymethods]
 impl PyDataSinkAthenaIcebergS3CompatibleObjectStoreS3 {
     #[new]
+    #[doc = "AthenaIceberg / Glue parquet location. Local FS is not a nameable state.\nYAML key is `object_store`. `s3` is the AWS default chain. `r2` is explicit\npath-style credentials."]
     fn new() -> Self {
         Self {}
     }
@@ -1389,6 +1411,7 @@ pub struct PyDataSinkAthenaIcebergS3CompatibleObjectStoreR2 {
 #[pymethods]
 impl PyDataSinkAthenaIcebergS3CompatibleObjectStoreR2 {
     #[new]
+    #[doc = "AthenaIceberg / Glue parquet location. Local FS is not a nameable state.\nYAML key is `object_store`. `s3` is the AWS default chain. `r2` is explicit\npath-style credentials.\n\nArgs:\n    endpoint: YAML key `endpoint`.\n    access_key_id: YAML key `access_key_id`.\n    secret_access_key: YAML key `secret_access_key`.\n    region: YAML key `region`.\n    path_style: YAML key `path_style`."]
     #[pyo3(signature = (*, endpoint, access_key_id, secret_access_key, region = None, path_style = None))]
     fn new(
         endpoint: String,
@@ -1424,6 +1447,7 @@ pub struct PyDataSinkSkipprLakeWarehouseObjectStoreFile {}
 #[pymethods]
 impl PyDataSinkSkipprLakeWarehouseObjectStoreFile {
     #[new]
+    #[doc = "SkipprLake parquet location: local FS, AWS S3, or R2.\nYAML key is `object_store` (not `file_io`, not Apache Iceberg `FileIO`).\nAthenaIceberg MUST use [`S3CompatibleObjectStore`] so `File` cannot be named."]
     fn new() -> Self {
         Self {}
     }
@@ -1446,6 +1470,7 @@ pub struct PyDataSinkSkipprLakeWarehouseObjectStoreS3 {}
 #[pymethods]
 impl PyDataSinkSkipprLakeWarehouseObjectStoreS3 {
     #[new]
+    #[doc = "SkipprLake parquet location: local FS, AWS S3, or R2.\nYAML key is `object_store` (not `file_io`, not Apache Iceberg `FileIO`).\nAthenaIceberg MUST use [`S3CompatibleObjectStore`] so `File` cannot be named."]
     fn new() -> Self {
         Self {}
     }
@@ -1486,6 +1511,7 @@ pub struct PyDataSinkSkipprLakeWarehouseObjectStoreR2 {
 #[pymethods]
 impl PyDataSinkSkipprLakeWarehouseObjectStoreR2 {
     #[new]
+    #[doc = "SkipprLake parquet location: local FS, AWS S3, or R2.\nYAML key is `object_store` (not `file_io`, not Apache Iceberg `FileIO`).\nAthenaIceberg MUST use [`S3CompatibleObjectStore`] so `File` cannot be named.\n\nArgs:\n    endpoint: YAML key `endpoint`.\n    access_key_id: YAML key `access_key_id`.\n    secret_access_key: YAML key `secret_access_key`.\n    region: YAML key `region`.\n    path_style: YAML key `path_style`."]
     #[pyo3(signature = (*, endpoint, access_key_id, secret_access_key, region = None, path_style = None))]
     fn new(
         endpoint: String,
@@ -1508,61 +1534,62 @@ impl PyDataSinkSkipprLakeWarehouseObjectStoreR2 {
     }
 }
 
+#[doc = "One skipprd pipeline: a source, optional sinks, and how sync runs.\n\nRegister it with `Config.pipeline(name, Pipeline(...))`, then pass the\nreturned `PipelineRef` to `Session`."]
 #[pyclass(from_py_object, name = "Pipeline", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyPipeline {
-    #[doc = "YAML key `data_source`."]
+    #[doc = "Source this pipeline reads. Required. A `DataSourceRef` from this config.\n\nYAML key `data_source`."]
     #[pyo3(get, set)]
     pub data_source: PyDataSourceRef,
-    #[doc = "YAML key `type`."]
+    #[doc = "Label for logs and metadata. Default `INGEST` (`PIPELINE_TYPE`).\n\nYAML key `type`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
-    #[doc = "YAML key `auto_approve`."]
+    #[doc = "Approve schema changes without prompting. Default true (`SCHEMA_AUTO_APPROVE`).\n\nYAML key `auto_approve`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_approve: Option<bool>,
-    #[doc = "YAML key `env`."]
+    #[doc = "Environment label for logs and metadata. Default `prod` (`SKIPPR_ENV`).\n\nYAML key `env`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
-    #[doc = "YAML key `buffer_threshold_bytes`."]
+    #[doc = "Flush the ingest buffer at this many bytes. Default 10 MiB (`BUFFER_THRESHOLD_BYTES`).\n\nYAML key `buffer_threshold_bytes`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buffer_threshold_bytes: Option<u64>,
-    #[doc = "YAML key `buffer_threshold_seconds`."]
+    #[doc = "Flush the ingest buffer after this many seconds. Default 60 (`BUFFER_THRESHOLD_SECONDS`).\n\nYAML key `buffer_threshold_seconds`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buffer_threshold_seconds: Option<u64>,
-    #[doc = "YAML key `chaos_mode`."]
+    #[doc = "Kill the process mid-run with SIGKILL to test exactly-once recovery. Default false (`SKIPPR_CHAOS_MODE`).\n\nYAML key `chaos_mode`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chaos_mode: Option<bool>,
-    #[doc = "YAML key `sync_frequency_seconds`."]
+    #[doc = "Seconds between sync loops. Default 900 (`SYNC_FREQUENCY`). `Session.sync(once=True)` still runs once.\n\nYAML key `sync_frequency_seconds`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_frequency_seconds: Option<u64>,
-    #[doc = "YAML key `data_dir`."]
+    #[doc = "Local directory for WAL and offsets. Default `./data` (`DATA_DIR`).\n\nYAML key `data_dir`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
-    #[doc = "YAML key `transform`."]
+    #[doc = "How records are namespaced, partitioned, flattened, and ordered before the sink.\n\nYAML key `transform`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transform: Option<PyTransform>,
-    #[doc = "YAML key `data_sink`."]
+    #[doc = "Destination for successful records. Optional: without it the WAL is the dataset.\n\nYAML key `data_sink`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_sink: Option<PyDataSinkRef>,
-    #[doc = "YAML key `deadletter_sink`."]
+    #[doc = "Destination for records that fail transform or sink writes.\n\nYAML key `deadletter_sink`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deadletter_sink: Option<PyDeadletterSinkRef>,
-    #[doc = "YAML key `stats`."]
+    #[doc = "Namespace cardinality and histogram collection during ingest.\n\nYAML key `stats`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stats: Option<PyStats>,
-    #[doc = "YAML key `semantic_layer`."]
+    #[doc = "LLM semantic-layer generation for this pipeline.\n\nYAML key `semantic_layer`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic_layer: Option<PySemanticLayerSettings>,
@@ -1575,6 +1602,7 @@ pub struct PyPipeline {
 #[pymethods]
 impl PyPipeline {
     #[new]
+    #[doc = "One skipprd pipeline: a source, optional sinks, and how sync runs.\n\nRegister it with `Config.pipeline(name, Pipeline(...))`, then pass the\nreturned `PipelineRef` to `Session`.\n\nArgs:\n    data_source: Source this pipeline reads. Required. A `DataSourceRef` from this config.\n    type: Label for logs and metadata. Default `INGEST` (`PIPELINE_TYPE`).\n    auto_approve: Approve schema changes without prompting. Default true (`SCHEMA_AUTO_APPROVE`).\n    env: Environment label for logs and metadata. Default `prod` (`SKIPPR_ENV`).\n    buffer_threshold_bytes: Flush the ingest buffer at this many bytes. Default 10 MiB (`BUFFER_THRESHOLD_BYTES`).\n    buffer_threshold_seconds: Flush the ingest buffer after this many seconds. Default 60 (`BUFFER_THRESHOLD_SECONDS`).\n    chaos_mode: Kill the process mid-run with SIGKILL to test exactly-once recovery. Default false (`SKIPPR_CHAOS_MODE`).\n    sync_frequency_seconds: Seconds between sync loops. Default 900 (`SYNC_FREQUENCY`). `Session.sync(once=True)` still runs once.\n    data_dir: Local directory for WAL and offsets. Default `./data` (`DATA_DIR`).\n    transform: How records are namespaced, partitioned, flattened, and ordered before the sink.\n    data_sink: Destination for successful records. Optional: without it the WAL is the dataset.\n    deadletter_sink: Destination for records that fail transform or sink writes.\n    stats: Namespace cardinality and histogram collection during ingest.\n    semantic_layer: LLM semantic-layer generation for this pipeline.\n    cdc: CDC configuration. When present, the pipeline runs in CDC mode and"]
     #[pyo3(signature = (*, data_source, r#type = None, auto_approve = None, env = None, buffer_threshold_bytes = None, buffer_threshold_seconds = None, chaos_mode = None, sync_frequency_seconds = None, data_dir = None, transform = None, data_sink = None, deadletter_sink = None, stats = None, semantic_layer = None, cdc = None))]
     fn new(
         data_source: PyDataSourceRef,
@@ -1617,50 +1645,51 @@ impl PyPipeline {
     }
 }
 
+#[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink."]
 #[pyclass(frozen, from_py_object, name = "Transform", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyTransform {
-    #[doc = "YAML key `batch_time_fields`."]
+    #[doc = "Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.\n\nYAML key `batch_time_fields`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_time_fields: Option<String>,
-    #[doc = "YAML key `batch_time_unit`."]
+    #[doc = "Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n\nYAML key `batch_time_unit`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_time_unit: Option<PyBatchTimeUnit>,
-    #[doc = "YAML key `flatten_events`."]
+    #[doc = "Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n\nYAML key `flatten_events`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flatten_events: Option<bool>,
-    #[doc = "YAML key `record_field_path`."]
+    #[doc = "JSON pointer/path to the array of records inside each source object. Unset means the object is the record.\n\nYAML key `record_field_path`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record_field_path: Option<String>,
-    #[doc = "YAML key `batch_partition_fields`."]
+    #[doc = "Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).\n\nYAML key `batch_partition_fields`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_partition_fields: Option<String>,
-    #[doc = "YAML key `partition_allowed_values`."]
+    #[doc = "Allowed values for partition columns. Records outside this set are dropped.\n\nYAML key `partition_allowed_values`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partition_allowed_values: Option<String>,
-    #[doc = "YAML key `namespace_fields`."]
+    #[doc = "Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.\n\nYAML key `namespace_fields`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace_fields: Option<String>,
-    #[doc = "YAML key `time_partition_prefix`."]
+    #[doc = "Prefix for time-partition folder names (`p_` → `p_2026-10-08`).\n\nYAML key `time_partition_prefix`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_partition_prefix: Option<String>,
-    #[doc = "YAML key `enable_single_quote_parsing`."]
+    #[doc = "Accept JSON that uses single quotes around strings.\n\nYAML key `enable_single_quote_parsing`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_single_quote_parsing: Option<bool>,
-    #[doc = "YAML key `enable_unicode_parsing`."]
+    #[doc = "Accept JSON with unescaped Unicode.\n\nYAML key `enable_unicode_parsing`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_unicode_parsing: Option<bool>,
-    #[doc = "YAML key `batch_order_fields`."]
+    #[doc = "Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.\n\nYAML key `batch_order_fields`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_order_fields: Option<String>,
@@ -1673,6 +1702,7 @@ pub struct PyTransform {
 #[pymethods]
 impl PyTransform {
     #[new]
+    #[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink.\n\nArgs:\n    batch_time_fields: Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.\n    batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n    flatten_events: Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n    record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.\n    batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).\n    partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.\n    namespace_fields: Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.\n    time_partition_prefix: Prefix for time-partition folder names (`p_` → `p_2026-10-08`).\n    enable_single_quote_parsing: Accept JSON that uses single quotes around strings.\n    enable_unicode_parsing: Accept JSON with unescaped Unicode.\n    batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.\n    inject_fields: Static field names and JSON values merged onto each source record before ingest."]
     #[pyo3(signature = (*, batch_time_fields = None, batch_time_unit = None, flatten_events = None, record_field_path = None, batch_partition_fields = None, partition_allowed_values = None, namespace_fields = None, time_partition_prefix = None, enable_single_quote_parsing = None, enable_unicode_parsing = None, batch_order_fields = None, inject_fields = None))]
     fn new(
         batch_time_fields: Option<String>,
@@ -1709,22 +1739,23 @@ impl PyTransform {
     }
 }
 
+#[doc = "Namespace cardinality and histogram collection during ingest."]
 #[pyclass(frozen, from_py_object, name = "Stats", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyStats {
-    #[doc = "YAML key `enabled`."]
+    #[doc = "Collect HyperLogLog / histogram stats for this pipeline.\n\nYAML key `enabled`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    #[doc = "YAML key `hll_precision`."]
+    #[doc = "HyperLogLog precision (4–18). Higher is more accurate and uses more memory.\n\nYAML key `hll_precision`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hll_precision: Option<u8>,
-    #[doc = "YAML key `histogram_enabled`."]
+    #[doc = "Also collect value histograms.\n\nYAML key `histogram_enabled`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub histogram_enabled: Option<bool>,
-    #[doc = "YAML key `flush_seconds`."]
+    #[doc = "Seconds between stats flushes.\n\nYAML key `flush_seconds`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flush_seconds: Option<u64>,
@@ -1733,6 +1764,7 @@ pub struct PyStats {
 #[pymethods]
 impl PyStats {
     #[new]
+    #[doc = "Namespace cardinality and histogram collection during ingest.\n\nArgs:\n    enabled: Collect HyperLogLog / histogram stats for this pipeline.\n    hll_precision: HyperLogLog precision (4–18). Higher is more accurate and uses more memory.\n    histogram_enabled: Also collect value histograms.\n    flush_seconds: Seconds between stats flushes."]
     #[pyo3(signature = (*, enabled = None, hll_precision = None, histogram_enabled = None, flush_seconds = None))]
     fn new(
         enabled: Option<bool>,
@@ -1753,6 +1785,7 @@ impl PyStats {
     }
 }
 
+#[doc = "LLM semantic-layer generation for this pipeline."]
 #[pyclass(
     frozen,
     from_py_object,
@@ -1761,11 +1794,11 @@ impl PyStats {
 )]
 #[derive(Clone, Serialize)]
 pub struct PySemanticLayerSettings {
-    #[doc = "YAML key `llm_enabled`."]
+    #[doc = "Ask an LLM to propose semantic-layer YAML from discovered schemas.\n\nYAML key `llm_enabled`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm_enabled: Option<bool>,
-    #[doc = "YAML key `llm_debounce_ms`."]
+    #[doc = "Wait this many milliseconds after the last schema change before generating.\n\nYAML key `llm_debounce_ms`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm_debounce_ms: Option<u64>,
@@ -1774,6 +1807,7 @@ pub struct PySemanticLayerSettings {
 #[pymethods]
 impl PySemanticLayerSettings {
     #[new]
+    #[doc = "LLM semantic-layer generation for this pipeline.\n\nArgs:\n    llm_enabled: Ask an LLM to propose semantic-layer YAML from discovered schemas.\n    llm_debounce_ms: Wait this many milliseconds after the last schema change before generating."]
     #[pyo3(signature = (*, llm_enabled = None, llm_debounce_ms = None))]
     fn new(llm_enabled: Option<bool>, llm_debounce_ms: Option<u64>) -> Self {
         Self {
@@ -1803,6 +1837,7 @@ pub struct PyCdcNamespaceConfig {
 #[pymethods]
 impl PyCdcNamespaceConfig {
     #[new]
+    #[doc = "Args:\n    business_key_columns: Business key columns used for upsert/delete identity in the target.\n    null_key_policy: How exact-final-state sinks should handle rows with null business keys."]
     #[pyo3(signature = (*, business_key_columns = None, null_key_policy = None))]
     fn new(business_key_columns: Option<Vec<String>>, null_key_policy: Option<String>) -> Self {
         Self {
@@ -1832,6 +1867,7 @@ pub struct PyCdcPipelineConfig {
 #[pymethods]
 impl PyCdcPipelineConfig {
     #[new]
+    #[doc = "Args:\n    default: Default CDC contract used for dynamically discovered namespaces.\n    namespaces: Namespace/table-specific CDC contracts. Keys are Skippr namespaces."]
     #[pyo3(signature = (*, default = None, namespaces = None))]
     fn new(
         default: Option<PyCdcNamespaceConfig>,
@@ -1914,6 +1950,7 @@ pub struct PyDataSourceAdRollAds {
 #[pymethods]
 impl PyDataSourceAdRollAds {
     #[new]
+    #[doc = "Args:\n    advertiser_id: YAML key `advertiser_id`.\n    start_date: YAML key `start_date`.\n    access_token: YAML key `access_token`.\n    personal_access_token: YAML key `personal_access_token`.\n    oauth_token_url: YAML key `oauth_token_url`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_refresh_token: YAML key `oauth_refresh_token`.\n    api_base_url: YAML key `api_base_url`.\n    reporting_base_url: YAML key `reporting_base_url`.\n    end_date: YAML key `end_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    processing_lag_days: YAML key `processing_lag_days`.\n    streams: YAML key `streams`."]
     #[pyo3(signature = (*, advertiser_id, start_date, access_token = None, personal_access_token = None, oauth_token_url = None, oauth_client_id = None, oauth_client_secret = None, oauth_refresh_token = None, api_base_url = None, reporting_base_url = None, end_date = None, lookback_days = None, stream_profile = None, processing_lag_days = None, streams = None))]
     fn new(
         advertiser_id: String,
@@ -1993,6 +2030,7 @@ pub struct PyDataSourceAiCitations {
 #[pymethods]
 impl PyDataSourceAiCitations {
     #[new]
+    #[doc = "Args:\n    site: YAML key `site`.\n    prompt_list: YAML key `prompt_list`.\n    models: YAML key `models`.\n    brand_names: YAML key `brand_names`.\n    requests_per_minute: YAML key `requests_per_minute`.\n    max_prompts_per_run: YAML key `max_prompts_per_run`.\n    skip_unchanged_responses: YAML key `skip_unchanged_responses`.\n    openai_base_url: YAML key `openai_base_url`."]
     #[pyo3(signature = (*, site, prompt_list, models, brand_names = None, requests_per_minute = None, max_prompts_per_run = None, skip_unchanged_responses = None, openai_base_url = None))]
     fn new(
         site: String,
@@ -2071,6 +2109,7 @@ pub struct PyDataSourceAmqp {
 #[pymethods]
 impl PyDataSourceAmqp {
     #[new]
+    #[doc = "Args:\n    connection_string: YAML key `connection_string`.\n    queue: YAML key `queue`.\n    exchange: YAML key `exchange`.\n    routing_key: YAML key `routing_key`.\n    consumer_tag: YAML key `consumer_tag`.\n    prefetch_count: YAML key `prefetch_count`.\n    mode: YAML key `mode`.\n    idle_timeout_seconds: YAML key `idle_timeout_seconds`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, connection_string, queue, exchange = None, routing_key = None, consumer_tag = None, prefetch_count = None, mode = None, idle_timeout_seconds = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         connection_string: PyEnvRef,
@@ -2158,6 +2197,7 @@ pub struct PyDataSourceAppleAppStoreSerp {
 #[pymethods]
 impl PyDataSourceAppleAppStoreSerp {
     #[new]
+    #[doc = "Args:\n    targets: YAML key `targets`.\n    keywords: YAML key `keywords`.\n    storefronts: YAML key `storefronts`.\n    entity: YAML key `entity`.\n    max_depth: YAML key `max_depth`.\n    min_query_interval_ms: YAML key `min_query_interval_ms`.\n    max_queries_per_run: YAML key `max_queries_per_run`.\n    stop_after_first_target_match: YAML key `stop_after_first_target_match`.\n    capture_results: YAML key `capture_results`.\n    force_refresh_today: YAML key `force_refresh_today`.\n    user_agent: YAML key `user_agent`."]
     #[pyo3(signature = (*, targets, keywords, storefronts, entity = None, max_depth = None, min_query_interval_ms = None, max_queries_per_run = None, stop_after_first_target_match = None, capture_results = None, force_refresh_today = None, user_agent = None))]
     fn new(
         targets: Vec<PyDataSourceAppleAppStoreSerpTargetEntry>,
@@ -2259,6 +2299,7 @@ pub struct PyDataSourceAppleSearchAds {
 #[pymethods]
 impl PyDataSourceAppleSearchAds {
     #[new]
+    #[doc = "Args:\n    org_id: YAML key `org_id`.\n    client_id: YAML key `client_id`.\n    team_id: YAML key `team_id`.\n    key_id: YAML key `key_id`.\n    start_date: YAML key `start_date`.\n    private_key_path: YAML key `private_key_path`.\n    private_key_pem: YAML key `private_key_pem`.\n    access_token: YAML key `access_token`.\n    end_date: YAML key `end_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    processing_lag_days: YAML key `processing_lag_days`.\n    time_zone: YAML key `time_zone`.\n    return_records_with_no_metrics: YAML key `return_records_with_no_metrics`.\n    max_concurrent_requests: YAML key `max_concurrent_requests`.\n    streams: YAML key `streams`."]
     #[pyo3(signature = (*, org_id, client_id, team_id, key_id, start_date, private_key_path = None, private_key_pem = None, access_token = None, end_date = None, lookback_days = None, stream_profile = None, processing_lag_days = None, time_zone = None, return_records_with_no_metrics = None, max_concurrent_requests = None, streams = None))]
     fn new(
         org_id: String,
@@ -2377,6 +2418,7 @@ pub struct PyDataSourceBingWebmasterTools {
 #[pymethods]
 impl PyDataSourceBingWebmasterTools {
     #[new]
+    #[doc = "Args:\n    site_url: YAML key `site_url`.\n    start_date: YAML key `start_date`.\n    api_key: YAML key `api_key`.\n    access_token: YAML key `access_token`.\n    oauth_token_url: YAML key `oauth_token_url`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_refresh_token: YAML key `oauth_refresh_token`.\n    end_date: YAML key `end_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    processing_lag_days: YAML key `processing_lag_days`.\n    window_in_days: YAML key `window_in_days`.\n    streams: YAML key `streams`.\n    request_interval_ms: YAML key `request_interval_ms`.\n    max_api_retries: YAML key `max_api_retries`."]
     #[pyo3(signature = (*, site_url, start_date, api_key = None, access_token = None, oauth_token_url = None, oauth_client_id = None, oauth_client_secret = None, oauth_refresh_token = None, end_date = None, lookback_days = None, stream_profile = None, processing_lag_days = None, window_in_days = None, streams = None, request_interval_ms = None, max_api_retries = None))]
     fn new(
         site_url: String,
@@ -2468,6 +2510,7 @@ pub struct PyDataSourceClickhouse {
 #[pymethods]
 impl PyDataSourceClickhouse {
     #[new]
+    #[doc = "Args:\n    url: YAML key `url`.\n    database: YAML key `database`.\n    user: YAML key `user`.\n    password: YAML key `password`.\n    tables: YAML key `tables`.\n    query: YAML key `query`.\n    batch_size_rows: YAML key `batch_size_rows`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, url, database = None, user = None, password = None, tables = None, query = None, batch_size_rows = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         url: String,
@@ -2579,6 +2622,7 @@ pub struct PyDataSourceContentQuality {
 #[pymethods]
 impl PyDataSourceContentQuality {
     #[new]
+    #[doc = "Args:\n    site: YAML key `site`.\n    max_urls: YAML key `max_urls`.\n    max_depth: YAML key `max_depth`.\n    render_js: YAML key `render_js`.\n    crawl_rate_per_second: YAML key `crawl_rate_per_second`.\n    respect_robots: YAML key `respect_robots`.\n    openai_model: YAML key `openai_model`.\n    openai_enabled: YAML key `openai_enabled`.\n    openai_max_blocks_per_page: YAML key `openai_max_blocks_per_page`.\n    skip_unchanged_content: YAML key `skip_unchanged_content`.\n    user_agent: YAML key `user_agent`.\n    worker_node_path: YAML key `worker_node_path`.\n    render_wait_until: YAML key `render_wait_until`.\n    render_timeout_ms: YAML key `render_timeout_ms`.\n    playwright_executable_path: YAML key `playwright_executable_path`.\n    seed_urls: YAML key `seed_urls`.\n    url_list: YAML key `url_list`.\n    max_response_bytes: YAML key `max_response_bytes`."]
     #[pyo3(signature = (*, site, max_urls = None, max_depth = None, render_js = None, crawl_rate_per_second = None, respect_robots = None, openai_model = None, openai_enabled = None, openai_max_blocks_per_page = None, skip_unchanged_content = None, user_agent = None, worker_node_path = None, render_wait_until = None, render_timeout_ms = None, playwright_executable_path = None, seed_urls = None, url_list = None, max_response_bytes = None))]
     fn new(
         site: String,
@@ -2687,6 +2731,7 @@ pub struct PyDataSourceDataForSeoBacklinks {
 #[pymethods]
 impl PyDataSourceDataForSeoBacklinks {
     #[new]
+    #[doc = "Args:\n    login: YAML key `login`.\n    password: YAML key `password`.\n    site: YAML key `site`.\n    run_mode: YAML key `run_mode`.\n    backlink_jobs: YAML key `backlink_jobs`.\n    intersection_jobs: YAML key `intersection_jobs`.\n    competitors: YAML key `competitors`.\n    streams: YAML key `streams`.\n    history: YAML key `history`.\n    rank_scale: YAML key `rank_scale`.\n    request_interval_ms: YAML key `request_interval_ms`.\n    max_api_retries: YAML key `max_api_retries`."]
     #[pyo3(signature = (*, login = None, password = None, site = None, run_mode = None, backlink_jobs = None, intersection_jobs = None, competitors = None, streams = None, history = None, rank_scale = None, request_interval_ms = None, max_api_retries = None))]
     fn new(
         login: Option<String>,
@@ -2822,6 +2867,7 @@ pub struct PyDataSourceDataForSeoSeoOpportunities {
 #[pymethods]
 impl PyDataSourceDataForSeoSeoOpportunities {
     #[new]
+    #[doc = "Args:\n    site: YAML key `site`.\n    login: YAML key `login`.\n    password: YAML key `password`.\n    location_code: YAML key `location_code`.\n    language_code: YAML key `language_code`.\n    device: YAML key `device`.\n    search_engine: YAML key `search_engine`.\n    run_mode: YAML key `run_mode`.\n    seed_keywords: YAML key `seed_keywords`.\n    seed_queries_from_gsc: YAML key `seed_queries_from_gsc`.\n    gsc_source: YAML key `gsc_source`.\n    seed_urls_from_crawl: YAML key `seed_urls_from_crawl`.\n    seo_crawl_source: YAML key `seo_crawl_source`.\n    competitors: YAML key `competitors`.\n    rank_track_keywords: YAML key `rank_track_keywords`.\n    streams: YAML key `streams`.\n    limits: YAML key `limits`.\n    scoring: YAML key `scoring`.\n    openai_model: YAML key `openai_model`.\n    openai_enabled: YAML key `openai_enabled`.\n    request_interval_ms: YAML key `request_interval_ms`.\n    max_api_retries: YAML key `max_api_retries`."]
     #[pyo3(signature = (*, site, login = None, password = None, location_code = None, language_code = None, device = None, search_engine = None, run_mode = None, seed_keywords = None, seed_queries_from_gsc = None, gsc_source = None, seed_urls_from_crawl = None, seo_crawl_source = None, competitors = None, rank_track_keywords = None, streams = None, limits = None, scoring = None, openai_model = None, openai_enabled = None, request_interval_ms = None, max_api_retries = None))]
     fn new(
         site: String,
@@ -2917,6 +2963,7 @@ pub struct PyDataSourceDeltaLake {
 #[pymethods]
 impl PyDataSourceDeltaLake {
     #[new]
+    #[doc = "Args:\n    table_uri: YAML key `table_uri`.\n    storage_options: YAML key `storage_options`.\n    version: YAML key `version`.\n    filter: YAML key `filter`.\n    batch_size_rows: YAML key `batch_size_rows`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, table_uri, storage_options = None, version = None, filter = None, batch_size_rows = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         table_uri: String,
@@ -2980,6 +3027,7 @@ pub struct PyDataSourceDynamodb {
 #[pymethods]
 impl PyDataSourceDynamodb {
     #[new]
+    #[doc = "Args:\n    table_name: YAML key `table_name`.\n    region: YAML key `region`.\n    endpoint_url: YAML key `endpoint_url`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`.\n    cdc_mode: YAML key `cdc_mode`."]
     #[pyo3(signature = (*, table_name, region = None, endpoint_url = None, format = None, batch_size_bytes = None, batch_size_seconds = None, cdc_mode = None))]
     fn new(
         table_name: String,
@@ -3044,6 +3092,7 @@ pub struct PyDataSourceEventbridge {
 #[pymethods]
 impl PyDataSourceEventbridge {
     #[new]
+    #[doc = "Args:\n    event_bus_name: YAML key `event_bus_name`.\n    sqs_queue_url: YAML key `sqs_queue_url`.\n    rule_name: YAML key `rule_name`.\n    region: YAML key `region`.\n    endpoint_url: YAML key `endpoint_url`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, event_bus_name, sqs_queue_url, rule_name = None, region = None, endpoint_url = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         event_bus_name: String,
@@ -3095,6 +3144,7 @@ pub struct PyDataSourceFile {
 #[pymethods]
 impl PyDataSourceFile {
     #[new]
+    #[doc = "Args:\n    path: YAML key `path`.\n    format: YAML key `format`.\n    batch_size_seconds: YAML key `batch_size_seconds`.\n    batch_size_bytes: YAML key `batch_size_bytes`."]
     #[pyo3(signature = (*, path, format = None, batch_size_seconds = None, batch_size_bytes = None))]
     fn new(
         path: String,
@@ -3180,6 +3230,7 @@ pub struct PyDataSourceGoogleAds {
 #[pymethods]
 impl PyDataSourceGoogleAds {
     #[new]
+    #[doc = "Args:\n    customer_id: YAML key `customer_id`.\n    developer_token: YAML key `developer_token`.\n    start_date: YAML key `start_date`.\n    login_customer_id: YAML key `login_customer_id`.\n    access_token: YAML key `access_token`.\n    oauth_token_url: YAML key `oauth_token_url`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_refresh_token: YAML key `oauth_refresh_token`.\n    api_version: YAML key `api_version`.\n    end_date: YAML key `end_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    processing_lag_days: YAML key `processing_lag_days`.\n    streams: YAML key `streams`."]
     #[pyo3(signature = (*, customer_id, developer_token, start_date, login_customer_id = None, access_token = None, oauth_token_url = None, oauth_client_id = None, oauth_client_secret = None, oauth_refresh_token = None, api_version = None, end_date = None, lookback_days = None, stream_profile = None, processing_lag_days = None, streams = None))]
     fn new(
         customer_id: String,
@@ -3296,6 +3347,7 @@ pub struct PyDataSourceGoogleAnalytics {
 #[pymethods]
 impl PyDataSourceGoogleAnalytics {
     #[new]
+    #[doc = "Args:\n    property_id: YAML key `property_id`.\n    start_date: YAML key `start_date`.\n    access_token: YAML key `access_token`.\n    oauth_token_url: YAML key `oauth_token_url`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_refresh_token: YAML key `oauth_refresh_token`.\n    service_account_json_path: YAML key `service_account_json_path`.\n    end_date: YAML key `end_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    keep_empty_rows: YAML key `keep_empty_rows`.\n    processing_lag_days: YAML key `processing_lag_days`.\n    window_in_days: YAML key `window_in_days`.\n    streams: YAML key `streams`.\n    request_interval_ms: Pause between successful Data API runReport calls (reduces 429 quota errors).\n    max_api_retries: Per-request retries on HTTP 429 / 5xx (exponential backoff in the plugin HTTP client)."]
     #[pyo3(signature = (*, property_id, start_date, access_token = None, oauth_token_url = None, oauth_client_id = None, oauth_client_secret = None, oauth_refresh_token = None, service_account_json_path = None, end_date = None, lookback_days = None, stream_profile = None, keep_empty_rows = None, processing_lag_days = None, window_in_days = None, streams = None, request_interval_ms = None, max_api_retries = None))]
     fn new(
         property_id: String,
@@ -3401,6 +3453,7 @@ pub struct PyDataSourceGooglePageSpeed {
 #[pymethods]
 impl PyDataSourceGooglePageSpeed {
     #[new]
+    #[doc = "Args:\n    site: YAML key `site`.\n    api_key: YAML key `api_key`.\n    url_mode: YAML key `url_mode`.\n    url_list: YAML key `url_list`.\n    max_urls: YAML key `max_urls`.\n    strategies: YAML key `strategies`.\n    categories: YAML key `categories`.\n    locale: YAML key `locale`.\n    max_requests_per_run: YAML key `max_requests_per_run`.\n    requests_per_minute: YAML key `requests_per_minute`.\n    respect_robots: YAML key `respect_robots`.\n    top_audits_per_page: YAML key `top_audits_per_page`.\n    max_concurrent_requests: YAML key `max_concurrent_requests`."]
     #[pyo3(signature = (*, site, api_key = None, url_mode = None, url_list = None, max_urls = None, strategies = None, categories = None, locale = None, max_requests_per_run = None, requests_per_minute = None, respect_robots = None, top_audits_per_page = None, max_concurrent_requests = None))]
     fn new(
         site: String,
@@ -3533,6 +3586,7 @@ pub struct PyDataSourceGoogleSearchConsole {
 #[pymethods]
 impl PyDataSourceGoogleSearchConsole {
     #[new]
+    #[doc = "Args:\n    site_url: YAML key `site_url`.\n    start_date: YAML key `start_date`.\n    access_token: YAML key `access_token`.\n    oauth_token_url: YAML key `oauth_token_url`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_refresh_token: YAML key `oauth_refresh_token`.\n    service_account_json_path: YAML key `service_account_json_path`.\n    end_date: YAML key `end_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    processing_lag_days: YAML key `processing_lag_days`.\n    window_in_days: YAML key `window_in_days`.\n    streams: YAML key `streams`.\n    search_type: YAML key `search_type`.\n    data_state: YAML key `data_state`.\n    row_limit: YAML key `row_limit`.\n    request_interval_ms: YAML key `request_interval_ms`.\n    max_api_retries: YAML key `max_api_retries`.\n    url_inspection_enabled: YAML key `url_inspection_enabled`.\n    url_list: YAML key `url_list`."]
     #[pyo3(signature = (*, site_url, start_date, access_token = None, oauth_token_url = None, oauth_client_id = None, oauth_client_secret = None, oauth_refresh_token = None, service_account_json_path = None, end_date = None, lookback_days = None, stream_profile = None, processing_lag_days = None, window_in_days = None, streams = None, search_type = None, data_state = None, row_limit = None, request_interval_ms = None, max_api_retries = None, url_inspection_enabled = None, url_list = None))]
     fn new(
         site_url: String,
@@ -3677,6 +3731,7 @@ pub struct PyDataSourceGoogleSerpRanks {
 #[pymethods]
 impl PyDataSourceGoogleSerpRanks {
     #[new]
+    #[doc = "Args:\n    targets: YAML key `targets`.\n    keywords: YAML key `keywords`.\n    country: YAML key `country`.\n    language: YAML key `language`.\n    device: YAML key `device`.\n    max_depth: YAML key `max_depth`.\n    min_query_interval_ms: YAML key `min_query_interval_ms`.\n    max_queries_per_run: YAML key `max_queries_per_run`.\n    stop_after_first_target_match: YAML key `stop_after_first_target_match`.\n    capture_results: YAML key `capture_results`.\n    force_refresh_today: YAML key `force_refresh_today`.\n    navigation_timeout_ms: YAML key `navigation_timeout_ms`.\n    worker_node_path: YAML key `worker_node_path`.\n    playwright_executable_path: YAML key `playwright_executable_path`.\n    user_agent: YAML key `user_agent`.\n    brightdata_zone: Bright Data SERP API zone (default `serp_api1`; override with `BRIGHTDATA_ZONE`).\n    brightdata_api_base: Bright Data API base URL (default `https://api.brightdata.com`).\n    include_allintitle: Fetch `allintitle:{keyword}` counts via Bright Data (keyword hub KGR).\n    allintitle_keywords: Keywords for allintitle fetches; defaults to `keywords` when empty.\n    allintitle_only: When true, skip organic rank fetches and only emit allintitle_daily rows.\n    max_allintitle_queries_per_run: Cap allintitle queries per run (defaults to `max_queries_per_run`)."]
     #[pyo3(signature = (*, targets, keywords, country = None, language = None, device = None, max_depth = None, min_query_interval_ms = None, max_queries_per_run = None, stop_after_first_target_match = None, capture_results = None, force_refresh_today = None, navigation_timeout_ms = None, worker_node_path = None, playwright_executable_path = None, user_agent = None, brightdata_zone = None, brightdata_api_base = None, include_allintitle = None, allintitle_keywords = None, allintitle_only = None, max_allintitle_queries_per_run = None))]
     fn new(
         targets: Vec<PyDataSourceGoogleSerpRanksTargetEntry>,
@@ -3778,6 +3833,7 @@ pub struct PyDataSourceHttpClient {
 #[pymethods]
 impl PyDataSourceHttpClient {
     #[new]
+    #[doc = "Args:\n    url: YAML key `url`.\n    method: YAML key `method`.\n    headers: YAML key `headers`.\n    body: YAML key `body`.\n    auth: YAML key `auth`.\n    scrape_interval_seconds: YAML key `scrape_interval_seconds`.\n    scrape_timeout_seconds: YAML key `scrape_timeout_seconds`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, url, method = None, headers = None, body = None, auth = None, scrape_interval_seconds = None, scrape_timeout_seconds = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         url: String,
@@ -3842,6 +3898,7 @@ pub struct PyDataSourceHttpServer {
 #[pymethods]
 impl PyDataSourceHttpServer {
     #[new]
+    #[doc = "Args:\n    listen_address: YAML key `listen_address`.\n    path: YAML key `path`.\n    auth_token: YAML key `auth_token`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, listen_address = None, path = None, auth_token = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         listen_address: Option<String>,
@@ -3920,6 +3977,7 @@ pub struct PyDataSourceHubspotCrm {
 #[pymethods]
 impl PyDataSourceHubspotCrm {
     #[new]
+    #[doc = "Args:\n    hub_id: YAML key `hub_id`.\n    start_date: YAML key `start_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    streams: YAML key `streams`.\n    min_query_interval_ms: YAML key `min_query_interval_ms`.\n    access_token: YAML key `access_token`.\n    oauth_token_url: YAML key `oauth_token_url`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_refresh_token: YAML key `oauth_refresh_token`.\n    privacy: YAML key `privacy`."]
     #[pyo3(signature = (*, hub_id, start_date, lookback_days = None, stream_profile = None, streams = None, min_query_interval_ms = None, access_token = None, oauth_token_url = None, oauth_client_id = None, oauth_client_secret = None, oauth_refresh_token = None, privacy = None))]
     fn new(
         hub_id: String,
@@ -4022,6 +4080,7 @@ pub struct PyDataSourceKafka {
 #[pymethods]
 impl PyDataSourceKafka {
     #[new]
+    #[doc = "Args:\n    brokers: YAML key `brokers`.\n    topic: YAML key `topic`.\n    group_id: YAML key `group_id`.\n    auto_offset_reset: YAML key `auto_offset_reset`.\n    security_protocol: YAML key `security_protocol`.\n    sasl_mechanism: YAML key `sasl_mechanism`.\n    sasl_username: YAML key `sasl_username`.\n    sasl_password: YAML key `sasl_password`.\n    mode: YAML key `mode`.\n    idle_timeout_seconds: YAML key `idle_timeout_seconds`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`.\n    cdc_mode: YAML key `cdc_mode`.\n    debezium_format: YAML key `debezium_format`."]
     #[pyo3(signature = (*, brokers, topic, group_id = None, auto_offset_reset = None, security_protocol = None, sasl_mechanism = None, sasl_username = None, sasl_password = None, mode = None, idle_timeout_seconds = None, format = None, batch_size_bytes = None, batch_size_seconds = None, cdc_mode = None, debezium_format = None))]
     fn new(
         brokers: String,
@@ -4099,6 +4158,7 @@ pub struct PyDataSourceKinesis {
 #[pymethods]
 impl PyDataSourceKinesis {
     #[new]
+    #[doc = "Args:\n    stream_name: YAML key `stream_name`.\n    region: YAML key `region`.\n    endpoint_url: YAML key `endpoint_url`.\n    mode: YAML key `mode`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, stream_name, region = None, endpoint_url = None, mode = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         stream_name: String,
@@ -4187,6 +4247,7 @@ pub struct PyDataSourceLinkedInAds {
 #[pymethods]
 impl PyDataSourceLinkedInAds {
     #[new]
+    #[doc = "Args:\n    ad_account_id: YAML key `ad_account_id`.\n    start_date: YAML key `start_date`.\n    access_token: YAML key `access_token`.\n    oauth_token_url: YAML key `oauth_token_url`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_refresh_token: YAML key `oauth_refresh_token`.\n    rest_version: YAML key `rest_version`.\n    api_version: YAML key `api_version`.\n    end_date: YAML key `end_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    processing_lag_days: YAML key `processing_lag_days`.\n    streams: YAML key `streams`."]
     #[pyo3(signature = (*, ad_account_id, start_date, access_token = None, oauth_token_url = None, oauth_client_id = None, oauth_client_secret = None, oauth_refresh_token = None, rest_version = None, api_version = None, end_date = None, lookback_days = None, stream_profile = None, processing_lag_days = None, streams = None))]
     fn new(
         ad_account_id: String,
@@ -4289,6 +4350,7 @@ pub struct PyDataSourceMetaAds {
 #[pymethods]
 impl PyDataSourceMetaAds {
     #[new]
+    #[doc = "Args:\n    ad_account_id: YAML key `ad_account_id`.\n    start_date: YAML key `start_date`.\n    access_token: YAML key `access_token`.\n    oauth_token_url: YAML key `oauth_token_url`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_refresh_token: YAML key `oauth_refresh_token`.\n    api_version: YAML key `api_version`.\n    end_date: YAML key `end_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    processing_lag_days: YAML key `processing_lag_days`.\n    instagram_filter: YAML key `instagram_filter`.\n    streams: YAML key `streams`."]
     #[pyo3(signature = (*, ad_account_id, start_date, access_token = None, oauth_token_url = None, oauth_client_id = None, oauth_client_secret = None, oauth_refresh_token = None, api_version = None, end_date = None, lookback_days = None, stream_profile = None, processing_lag_days = None, instagram_filter = None, streams = None))]
     fn new(
         ad_account_id: String,
@@ -4391,6 +4453,7 @@ pub struct PyDataSourceMetaInstagramAds {
 #[pymethods]
 impl PyDataSourceMetaInstagramAds {
     #[new]
+    #[doc = "Args:\n    ad_account_id: YAML key `ad_account_id`.\n    start_date: YAML key `start_date`.\n    access_token: YAML key `access_token`.\n    oauth_token_url: YAML key `oauth_token_url`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_refresh_token: YAML key `oauth_refresh_token`.\n    api_version: YAML key `api_version`.\n    end_date: YAML key `end_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    processing_lag_days: YAML key `processing_lag_days`.\n    instagram_filter: YAML key `instagram_filter`.\n    streams: YAML key `streams`."]
     #[pyo3(signature = (*, ad_account_id, start_date, access_token = None, oauth_token_url = None, oauth_client_id = None, oauth_client_secret = None, oauth_refresh_token = None, api_version = None, end_date = None, lookback_days = None, stream_profile = None, processing_lag_days = None, instagram_filter = None, streams = None))]
     fn new(
         ad_account_id: String,
@@ -4472,6 +4535,7 @@ pub struct PyDataSourceMongodb {
 #[pymethods]
 impl PyDataSourceMongodb {
     #[new]
+    #[doc = "Args:\n    connection_string: YAML key `connection_string`.\n    database: YAML key `database`.\n    collection: YAML key `collection`.\n    filter: YAML key `filter`.\n    batch_size_rows: YAML key `batch_size_rows`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`.\n    cdc_mode: YAML key `cdc_mode`."]
     #[pyo3(signature = (*, connection_string, database, collection, filter = None, batch_size_rows = None, format = None, batch_size_bytes = None, batch_size_seconds = None, cdc_mode = None))]
     fn new(
         connection_string: PyEnvRef,
@@ -4541,6 +4605,7 @@ pub struct PyDataSourceMotherduck {
 #[pymethods]
 impl PyDataSourceMotherduck {
     #[new]
+    #[doc = "Args:\n    motherduck_token: YAML key `motherduck_token`.\n    database: YAML key `database`.\n    tables: YAML key `tables`.\n    query: YAML key `query`.\n    batch_size_rows: YAML key `batch_size_rows`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, motherduck_token, database = None, tables = None, query = None, batch_size_rows = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         motherduck_token: PyEnvRef,
@@ -4623,6 +4688,7 @@ pub struct PyDataSourceMqtt {
 #[pymethods]
 impl PyDataSourceMqtt {
     #[new]
+    #[doc = "Args:\n    broker_url: YAML key `broker_url`.\n    topic: YAML key `topic`.\n    port: YAML key `port`.\n    client_id: YAML key `client_id`.\n    qos: YAML key `qos`.\n    username: YAML key `username`.\n    password: YAML key `password`.\n    mode: YAML key `mode`.\n    idle_timeout_seconds: YAML key `idle_timeout_seconds`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, broker_url, topic, port = None, client_id = None, qos = None, username = None, password = None, mode = None, idle_timeout_seconds = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         broker_url: String,
@@ -4694,6 +4760,7 @@ pub struct PyDataSourceMssql {
 #[pymethods]
 impl PyDataSourceMssql {
     #[new]
+    #[doc = "Args:\n    connection_string: YAML key `connection_string`.\n    tables: YAML key `tables`.\n    batch_size_rows: YAML key `batch_size_rows`.\n    query_timeout_seconds: YAML key `query_timeout_seconds`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, connection_string, tables = None, batch_size_rows = None, query_timeout_seconds = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         connection_string: PyEnvRef,
@@ -4759,6 +4826,7 @@ pub struct PyDataSourceMysql {
 #[pymethods]
 impl PyDataSourceMysql {
     #[new]
+    #[doc = "Args:\n    connection_string: YAML key `connection_string`.\n    tables: YAML key `tables`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`.\n    cdc_mode: YAML key `cdc_mode`.\n    server_id: YAML key `server_id`.\n    cdc_idle_timeout_seconds: YAML key `cdc_idle_timeout_seconds`."]
     #[pyo3(signature = (*, connection_string, tables = None, format = None, batch_size_bytes = None, batch_size_seconds = None, cdc_mode = None, server_id = None, cdc_idle_timeout_seconds = None))]
     fn new(
         connection_string: PyEnvRef,
@@ -4815,6 +4883,7 @@ pub struct PyDataSourceOtlp {
 #[pymethods]
 impl PyDataSourceOtlp {
     #[new]
+    #[doc = "Args:\n    listen_address_grpc: YAML key `listen_address_grpc`.\n    listen_address_http: YAML key `listen_address_http`.\n    signals: YAML key `signals`.\n    auth_token: YAML key `auth_token`.\n    attribute_allowlist: `None` keeps all attributes. `Some([])` drops every attribute."]
     #[pyo3(signature = (*, listen_address_grpc = None, listen_address_http = None, signals = None, auth_token = None, attribute_allowlist = None))]
     fn new(
         listen_address_grpc: Option<String>,
@@ -4925,6 +4994,7 @@ pub struct PyDataSourcePostgres {
 #[pymethods]
 impl PyDataSourcePostgres {
     #[new]
+    #[doc = "Args:\n    host: YAML key `host`.\n    port: YAML key `port`.\n    user: YAML key `user`.\n    password: YAML key `password`.\n    database: YAML key `database`.\n    connection_string: YAML key `connection_string`.\n    tables: YAML key `tables`.\n    query: YAML key `query`.\n    batch_size_rows: YAML key `batch_size_rows`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`.\n    cdc_mode: YAML key `cdc_mode`.\n    replication_slot_name: YAML key `replication_slot_name`.\n    publication_name: YAML key `publication_name`.\n    cdc_idle_timeout_seconds: YAML key `cdc_idle_timeout_seconds`."]
     #[pyo3(signature = (*, host = None, port = None, user = None, password = None, database = None, connection_string = None, tables = None, query = None, batch_size_rows = None, format = None, batch_size_bytes = None, batch_size_seconds = None, cdc_mode = None, replication_slot_name = None, publication_name = None, cdc_idle_timeout_seconds = None))]
     fn new(
         host: Option<String>,
@@ -5016,6 +5086,7 @@ pub struct PyDataSourceRedshift {
 #[pymethods]
 impl PyDataSourceRedshift {
     #[new]
+    #[doc = "Args:\n    database: YAML key `database`.\n    cluster_identifier: YAML key `cluster_identifier`.\n    workgroup_name: YAML key `workgroup_name`.\n    db_user: YAML key `db_user`.\n    tables: YAML key `tables`.\n    query: YAML key `query`.\n    region: YAML key `region`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, database, cluster_identifier = None, workgroup_name = None, db_user = None, tables = None, query = None, region = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         database: String,
@@ -5102,6 +5173,7 @@ pub struct PyDataSourceRevolutBusiness {
 #[pymethods]
 impl PyDataSourceRevolutBusiness {
     #[new]
+    #[doc = "Args:\n    client_id: YAML key `client_id`.\n    start_date: YAML key `start_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    streams: YAML key `streams`.\n    min_query_interval_ms: YAML key `min_query_interval_ms`.\n    api_base: YAML key `api_base`.\n    private_key_pem: YAML key `private_key_pem`.\n    refresh_token: YAML key `refresh_token`.\n    access_token: YAML key `access_token`.\n    issuer_domain: YAML key `issuer_domain`.\n    privacy: YAML key `privacy`."]
     #[pyo3(signature = (*, client_id, start_date, lookback_days = None, stream_profile = None, streams = None, min_query_interval_ms = None, api_base = None, private_key_pem = None, refresh_token = None, access_token = None, issuer_domain = None, privacy = None))]
     fn new(
         client_id: String,
@@ -5141,25 +5213,25 @@ impl PyDataSourceRevolutBusiness {
 #[pyclass(from_py_object, name = "DataSourceS3", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyDataSourceS3 {
-    #[doc = "YAML key `s3_bucket`."]
+    #[doc = "Bucket to read.\n\nYAML key `s3_bucket`."]
     #[pyo3(get, set)]
     pub s3_bucket: String,
-    #[doc = "YAML key `s3_prefix`."]
+    #[doc = "Key prefix under the bucket. Use `/` for the whole bucket.\n\nYAML key `s3_prefix`."]
     #[pyo3(get, set)]
     pub s3_prefix: String,
-    #[doc = "YAML key `format`."]
+    #[doc = "Object format: `json`, `jsonl`, `parquet`, `csv`, and plugin-specific values.\n\nYAML key `format`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
-    #[doc = "YAML key `batch_size_seconds`."]
+    #[doc = "Target seconds of data per ingest batch.\n\nYAML key `batch_size_seconds`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_size_seconds: Option<i64>,
-    #[doc = "YAML key `batch_size_bytes`."]
+    #[doc = "Target bytes per ingest batch.\n\nYAML key `batch_size_bytes`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_size_bytes: Option<i64>,
-    #[doc = "YAML key `endpoint_url`."]
+    #[doc = "Custom S3 API endpoint (MinIO, LocalStack, path-style).\n\nYAML key `endpoint_url`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint_url: Option<String>,
@@ -5180,6 +5252,7 @@ pub struct PyDataSourceS3 {
 #[pymethods]
 impl PyDataSourceS3 {
     #[new]
+    #[doc = "Args:\n    s3_bucket: Bucket to read.\n    s3_prefix: Key prefix under the bucket. Use `/` for the whole bucket.\n    format: Object format: `json`, `jsonl`, `parquet`, `csv`, and plugin-specific values.\n    batch_size_seconds: Target seconds of data per ingest batch.\n    batch_size_bytes: Target bytes per ingest batch.\n    endpoint_url: Custom S3 API endpoint (MinIO, LocalStack, path-style).\n    region: AWS region for this bucket (required when the default credential region differs, e.g. cross-account picnic sync).\n    s3_prefix_ordered_depth: YAML key `s3_prefix_ordered_depth`.\n    s3_delimiter: YAML key `s3_delimiter`."]
     #[pyo3(signature = (*, s3_bucket, s3_prefix, format = None, batch_size_seconds = None, batch_size_bytes = None, endpoint_url = None, region = None, s3_prefix_ordered_depth = None, s3_delimiter = None))]
     fn new(
         s3_bucket: String,
@@ -5273,6 +5346,7 @@ pub struct PyDataSourceSeoCrawl {
 #[pymethods]
 impl PyDataSourceSeoCrawl {
     #[new]
+    #[doc = "Args:\n    site: YAML key `site`.\n    max_urls: YAML key `max_urls`.\n    max_depth: YAML key `max_depth`.\n    render_js: YAML key `render_js`.\n    crawl_rate_per_second: YAML key `crawl_rate_per_second`.\n    respect_robots: YAML key `respect_robots`.\n    sitemap_probe_paths: YAML key `sitemap_probe_paths`.\n    openai_model: YAML key `openai_model`.\n    openai_structure_enabled: When true, optional LLM pass for structural / AIO convention signals (not content prose).\n    skip_unchanged_content: YAML key `skip_unchanged_content`.\n    user_agent: YAML key `user_agent`.\n    seed_urls: Extra paths or absolute URLs to seed the crawl queue (useful for JS SPAs with no static links).\n    url_list: When non-empty, process only these URLs (discovery is external).\n    max_response_bytes: YAML key `max_response_bytes`."]
     #[pyo3(signature = (*, site, max_urls = None, max_depth = None, render_js = None, crawl_rate_per_second = None, respect_robots = None, sitemap_probe_paths = None, openai_model = None, openai_structure_enabled = None, skip_unchanged_content = None, user_agent = None, seed_urls = None, url_list = None, max_response_bytes = None))]
     fn new(
         site: String,
@@ -5354,6 +5428,7 @@ pub struct PyDataSourceSftp {
 #[pymethods]
 impl PyDataSourceSftp {
     #[new]
+    #[doc = "Args:\n    host: YAML key `host`.\n    username: YAML key `username`.\n    remote_path: YAML key `remote_path`.\n    port: YAML key `port`.\n    password: YAML key `password`.\n    private_key_path: YAML key `private_key_path`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, host, username, remote_path, port = None, password = None, private_key_path = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         host: String,
@@ -5438,6 +5513,7 @@ pub struct PyDataSourceShopifyAdmin {
 #[pymethods]
 impl PyDataSourceShopifyAdmin {
     #[new]
+    #[doc = "Args:\n    shop_domain: YAML key `shop_domain`.\n    start_date: YAML key `start_date`.\n    api_version: YAML key `api_version`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    streams: YAML key `streams`.\n    min_query_interval_ms: YAML key `min_query_interval_ms`.\n    max_queries_per_run: YAML key `max_queries_per_run`.\n    use_bulk_operations: YAML key `use_bulk_operations`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_access_token: YAML key `oauth_access_token`."]
     #[pyo3(signature = (*, shop_domain, start_date, api_version = None, lookback_days = None, stream_profile = None, streams = None, min_query_interval_ms = None, max_queries_per_run = None, use_bulk_operations = None, oauth_client_id = None, oauth_client_secret = None, oauth_access_token = None))]
     fn new(
         shop_domain: String,
@@ -5557,6 +5633,7 @@ pub struct PyDataSourceSiteQuality {
 #[pymethods]
 impl PyDataSourceSiteQuality {
     #[new]
+    #[doc = "Args:\n    site: YAML key `site`.\n    url_mode: YAML key `url_mode`.\n    url_list: YAML key `url_list`.\n    max_pages_per_run: YAML key `max_pages_per_run`.\n    max_crawl_depth: YAML key `max_crawl_depth`.\n    crawl_seed_urls: YAML key `crawl_seed_urls`.\n    devices: YAML key `devices`.\n    wait_until: YAML key `wait_until`.\n    navigation_timeout_ms: YAML key `navigation_timeout_ms`.\n    lighthouse_enabled: YAML key `lighthouse_enabled`.\n    lighthouse_categories: YAML key `lighthouse_categories`.\n    axe_enabled: YAML key `axe_enabled`.\n    axe_tags: YAML key `axe_tags`.\n    throttle: YAML key `throttle`.\n    pages_per_minute: YAML key `pages_per_minute`.\n    worker_node_path: YAML key `worker_node_path`.\n    playwright_executable_path: YAML key `playwright_executable_path`.\n    respect_robots: YAML key `respect_robots`.\n    skip_heavy_when_unchanged: YAML key `skip_heavy_when_unchanged`."]
     #[pyo3(signature = (*, site, url_mode = None, url_list = None, max_pages_per_run = None, max_crawl_depth = None, crawl_seed_urls = None, devices = None, wait_until = None, navigation_timeout_ms = None, lighthouse_enabled = None, lighthouse_categories = None, axe_enabled = None, axe_tags = None, throttle = None, pages_per_minute = None, worker_node_path = None, playwright_executable_path = None, respect_robots = None, skip_heavy_when_unchanged = None))]
     fn new(
         site: String,
@@ -5674,6 +5751,7 @@ pub struct PyDataSourceSiteSecurity {
 #[pymethods]
 impl PyDataSourceSiteSecurity {
     #[new]
+    #[doc = "Args:\n    site: YAML key `site`.\n    url_mode: YAML key `url_mode`.\n    url_list: YAML key `url_list`.\n    max_pages_per_run: YAML key `max_pages_per_run`.\n    max_crawl_depth: YAML key `max_crawl_depth`.\n    crawl_seed_urls: YAML key `crawl_seed_urls`.\n    devices: YAML key `devices`.\n    wait_until: YAML key `wait_until`.\n    navigation_timeout_ms: YAML key `navigation_timeout_ms`.\n    pages_per_minute: YAML key `pages_per_minute`.\n    worker_node_path: YAML key `worker_node_path`.\n    playwright_executable_path: YAML key `playwright_executable_path`.\n    respect_robots: YAML key `respect_robots`.\n    max_third_party_scripts: YAML key `max_third_party_scripts`.\n    import_lighthouse_from_site_quality: YAML key `import_lighthouse_from_site_quality`."]
     #[pyo3(signature = (*, site, url_mode = None, url_list = None, max_pages_per_run = None, max_crawl_depth = None, crawl_seed_urls = None, devices = None, wait_until = None, navigation_timeout_ms = None, pages_per_minute = None, worker_node_path = None, playwright_executable_path = None, respect_robots = None, max_third_party_scripts = None, import_lighthouse_from_site_quality = None))]
     fn new(
         site: String,
@@ -5750,6 +5828,7 @@ pub struct PyDataSourceSns {
 #[pymethods]
 impl PyDataSourceSns {
     #[new]
+    #[doc = "Args:\n    topic_arn: YAML key `topic_arn`.\n    sqs_queue_url: YAML key `sqs_queue_url`.\n    region: YAML key `region`.\n    endpoint_url: YAML key `endpoint_url`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, topic_arn, sqs_queue_url, region = None, endpoint_url = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         topic_arn: String,
@@ -5806,6 +5885,7 @@ pub struct PyDataSourceSocket {
 #[pymethods]
 impl PyDataSourceSocket {
     #[new]
+    #[doc = "Args:\n    mode: YAML key `mode`.\n    address: YAML key `address`.\n    framing: YAML key `framing`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, mode, address, framing = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         mode: String,
@@ -5865,6 +5945,7 @@ pub struct PyDataSourceSqs {
 #[pymethods]
 impl PyDataSourceSqs {
     #[new]
+    #[doc = "Args:\n    queue_url: YAML key `queue_url`.\n    region: YAML key `region`.\n    endpoint_url: YAML key `endpoint_url`.\n    mode: YAML key `mode`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, queue_url, region = None, endpoint_url = None, mode = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         queue_url: String,
@@ -5915,6 +5996,7 @@ pub struct PyDataSourceStatsd {
 #[pymethods]
 impl PyDataSourceStatsd {
     #[new]
+    #[doc = "Args:\n    listen_address: YAML key `listen_address`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, listen_address = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         listen_address: Option<String>,
@@ -5959,6 +6041,7 @@ pub struct PyDataSourceStdin {
 #[pymethods]
 impl PyDataSourceStdin {
     #[new]
+    #[doc = "Args:\n    mode: YAML key `mode`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, mode = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         mode: Option<String>,
@@ -6037,6 +6120,7 @@ pub struct PyDataSourceStripe {
 #[pymethods]
 impl PyDataSourceStripe {
     #[new]
+    #[doc = "Args:\n    stripe_account_id: YAML key `stripe_account_id`.\n    start_date: YAML key `start_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    streams: YAML key `streams`.\n    min_query_interval_ms: YAML key `min_query_interval_ms`.\n    write_policy: YAML key `write_policy`.\n    access_token: YAML key `access_token`.\n    oauth_token_url: YAML key `oauth_token_url`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_refresh_token: YAML key `oauth_refresh_token`.\n    privacy: YAML key `privacy`."]
     #[pyo3(signature = (*, stripe_account_id, start_date, lookback_days = None, stream_profile = None, streams = None, min_query_interval_ms = None, write_policy = None, access_token = None, oauth_token_url = None, oauth_client_id = None, oauth_client_secret = None, oauth_refresh_token = None, privacy = None))]
     fn new(
         stripe_account_id: String,
@@ -6129,6 +6213,7 @@ pub struct PyDataSourceSumUp {
 #[pymethods]
 impl PyDataSourceSumUp {
     #[new]
+    #[doc = "Args:\n    merchant_code: YAML key `merchant_code`.\n    start_date: YAML key `start_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    streams: YAML key `streams`.\n    min_query_interval_ms: YAML key `min_query_interval_ms`.\n    oauth_token_url: YAML key `oauth_token_url`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_refresh_token: YAML key `oauth_refresh_token`.\n    access_token: YAML key `access_token`.\n    privacy: YAML key `privacy`."]
     #[pyo3(signature = (*, merchant_code, start_date, lookback_days = None, stream_profile = None, streams = None, min_query_interval_ms = None, oauth_token_url = None, oauth_client_id = None, oauth_client_secret = None, oauth_refresh_token = None, access_token = None, privacy = None))]
     fn new(
         merchant_code: String,
@@ -6226,6 +6311,7 @@ pub struct PyDataSourceUpfoundryBacklinks {
 #[pymethods]
 impl PyDataSourceUpfoundryBacklinks {
     #[new]
+    #[doc = "Args:\n    site: YAML key `site`.\n    entity_domain: YAML key `entity_domain`.\n    ops_bucket: YAML key `ops_bucket`.\n    entity_kind: YAML key `entity_kind`.\n    domain_variants: YAML key `domain_variants`.\n    primary_domain: YAML key `primary_domain`.\n    competitor_name: YAML key `competitor_name`.\n    ops_prefix: YAML key `ops_prefix`.\n    selected_snapshot_id: YAML key `selected_snapshot_id`.\n    include_subdomains: YAML key `include_subdomains`.\n    max_detail_rows: YAML key `max_detail_rows`.\n    materialization_manifest_key: YAML key `materialization_manifest_key`.\n    max_outbound_rows: YAML key `max_outbound_rows`."]
     #[pyo3(signature = (*, site, entity_domain, ops_bucket, entity_kind = None, domain_variants = None, primary_domain = None, competitor_name = None, ops_prefix = None, selected_snapshot_id = None, include_subdomains = None, max_detail_rows = None, materialization_manifest_key = None, max_outbound_rows = None))]
     fn new(
         site: String,
@@ -6311,6 +6397,7 @@ pub struct PyDataSourceUpfoundryLinkGraphCompact {
 #[pymethods]
 impl PyDataSourceUpfoundryLinkGraphCompact {
     #[new]
+    #[doc = "Args:\n    ops_bucket: YAML key `ops_bucket`.\n    ops_prefix: YAML key `ops_prefix`.\n    max_staging_partitions: YAML key `max_staging_partitions`.\n    pagerank_damping: YAML key `pagerank_damping`.\n    pagerank_max_iterations: YAML key `pagerank_max_iterations`.\n    keep_complete_snapshots: YAML key `keep_complete_snapshots`.\n    keep_failed_manifest_days: YAML key `keep_failed_manifest_days`.\n    keep_staging_days: YAML key `keep_staging_days`.\n    spam_model_version: YAML key `spam_model_version`."]
     #[pyo3(signature = (*, ops_bucket, ops_prefix = None, max_staging_partitions = None, pagerank_damping = None, pagerank_max_iterations = None, keep_complete_snapshots = None, keep_failed_manifest_days = None, keep_staging_days = None, spam_model_version = None))]
     fn new(
         ops_bucket: String,
@@ -6431,6 +6518,7 @@ pub struct PyDataSourceUpfoundryLinkGraphIngest {
 #[pymethods]
 impl PyDataSourceUpfoundryLinkGraphIngest {
     #[new]
+    #[doc = "Args:\n    ops_bucket: Ops corpus bucket, e.g. upfoundry-prod-ops\n    cc_crawl_id: Common Crawl collection id, e.g. CC-MAIN-2025-08\n    ops_prefix: Prefix under bucket, default link-graph-corpus\n    frontier_domains: Frontier seed domains (registrable), e.g. skippr.io\n    cc_crawl_ids: Optional explicit crawl IDs. When set, these are scanned before falling back to cc_crawl_id.\n    cc_index_base_uri: Common Crawl URL Index Parquet root. Supports `{crawl_id}` replacement.\n    cc_urls_index_prefix: Local materialized URL index prefix under ops_prefix.\n    cc_index_source: Candidate source: local_urls_index (default), fixture, or direct_datafusion_file.\n    cc_direct_index_enabled: Direct Common Crawl scans are debug/fallback only.\n    max_urls_per_run: YAML key `max_urls_per_run`.\n    max_links_per_page: YAML key `max_links_per_page`.\n    monthly_window: YAML key `monthly_window`.\n    cc_web_graph_uri: Optional Common Crawl Web Graph rank export URI (s3://, https://, or fixture file).\n    cc_web_graph_max_rows: YAML key `cc_web_graph_max_rows`.\n    live_crawl_enabled: YAML key `live_crawl_enabled`.\n    brightdata_proxy_escalation_enabled: YAML key `brightdata_proxy_escalation_enabled`.\n    include_subdomains: YAML key `include_subdomains`.\n    selected_referrer_page_refs_uri: Optional JSONL selected from cc_wat_source_pages_by_target_domain_index.\n    corpus_run_id: Stable run identifier used to keep staging, dimension, and manifest objects unique.\n    max_referrer_pages_per_run: YAML key `max_referrer_pages_per_run`."]
     #[pyo3(signature = (*, ops_bucket, cc_crawl_id, ops_prefix = None, frontier_domains = None, cc_crawl_ids = None, cc_index_base_uri = None, cc_urls_index_prefix = None, cc_index_source = None, cc_direct_index_enabled = None, max_urls_per_run = None, max_links_per_page = None, monthly_window = None, cc_web_graph_uri = None, cc_web_graph_max_rows = None, live_crawl_enabled = None, brightdata_proxy_escalation_enabled = None, include_subdomains = None, selected_referrer_page_refs_uri = None, corpus_run_id = None, max_referrer_pages_per_run = None))]
     fn new(
         ops_bucket: String,
@@ -6551,6 +6639,7 @@ pub struct PyDataSourceUpfoundryLinkGraphWatIndex {
 #[pymethods]
 impl PyDataSourceUpfoundryLinkGraphWatIndex {
     #[new]
+    #[doc = "Args:\n    crawl_id: YAML key `crawl_id`.\n    wat_paths_manifest_uri: YAML key `wat_paths_manifest_uri`.\n    wat_path_start: YAML key `wat_path_start`.\n    wat_path_end: YAML key `wat_path_end`.\n    target_domain_bucket_count: YAML key `target_domain_bucket_count`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    max_records_per_batch: YAML key `max_records_per_batch`.\n    max_links_per_page: YAML key `max_links_per_page`.\n    max_wat_objects_per_sync: When `None`, process all remaining manifest paths in one sync (production default).\n    max_wat_object_bytes: YAML key `max_wat_object_bytes`.\n    max_wat_records_per_object: When set, stop parsing each WAT object after this many gzip member records.\n    include_subdomains: YAML key `include_subdomains`.\n    sqs_queue_url: YAML key `sqs_queue_url`.\n    sqs_visibility_timeout_seconds: YAML key `sqs_visibility_timeout_seconds`."]
     #[pyo3(signature = (*, crawl_id = None, wat_paths_manifest_uri = None, wat_path_start = None, wat_path_end = None, target_domain_bucket_count = None, batch_size_bytes = None, max_records_per_batch = None, max_links_per_page = None, max_wat_objects_per_sync = None, max_wat_object_bytes = None, max_wat_records_per_object = None, include_subdomains = None, sqs_queue_url = None, sqs_visibility_timeout_seconds = None))]
     fn new(
         crawl_id: Option<String>,
@@ -6630,6 +6719,7 @@ pub struct PyDataSourceWebsocket {
 #[pymethods]
 impl PyDataSourceWebsocket {
     #[new]
+    #[doc = "Args:\n    url: YAML key `url`.\n    headers: YAML key `headers`.\n    ping_interval_seconds: YAML key `ping_interval_seconds`.\n    mode: YAML key `mode`.\n    idle_timeout_seconds: YAML key `idle_timeout_seconds`.\n    format: YAML key `format`.\n    batch_size_bytes: YAML key `batch_size_bytes`.\n    batch_size_seconds: YAML key `batch_size_seconds`."]
     #[pyo3(signature = (*, url, headers = None, ping_interval_seconds = None, mode = None, idle_timeout_seconds = None, format = None, batch_size_bytes = None, batch_size_seconds = None))]
     fn new(
         url: String,
@@ -6720,6 +6810,7 @@ pub struct PyDataSourceXAds {
 #[pymethods]
 impl PyDataSourceXAds {
     #[new]
+    #[doc = "Args:\n    account_id: YAML key `account_id`.\n    start_date: YAML key `start_date`.\n    ad_account_id: YAML key `ad_account_id`.\n    bearer_token: YAML key `bearer_token`.\n    access_token: YAML key `access_token`.\n    oauth_consumer_key: YAML key `oauth_consumer_key`.\n    oauth_consumer_secret: YAML key `oauth_consumer_secret`.\n    oauth_token: YAML key `oauth_token`.\n    oauth_token_secret: YAML key `oauth_token_secret`.\n    end_date: YAML key `end_date`.\n    lookback_days: YAML key `lookback_days`.\n    stream_profile: YAML key `stream_profile`.\n    processing_lag_days: YAML key `processing_lag_days`.\n    streams: YAML key `streams`."]
     #[pyo3(signature = (*, account_id, start_date, ad_account_id = None, bearer_token = None, access_token = None, oauth_consumer_key = None, oauth_consumer_secret = None, oauth_token = None, oauth_token_secret = None, end_date = None, lookback_days = None, stream_profile = None, processing_lag_days = None, streams = None))]
     fn new(
         account_id: String,
@@ -6818,6 +6909,7 @@ pub struct PyDataSourceXeroAccounting {
 #[pymethods]
 impl PyDataSourceXeroAccounting {
     #[new]
+    #[doc = "Args:\n    tenant_id: YAML key `tenant_id`.\n    start_date: YAML key `start_date`.\n    lookback_days: YAML key `lookback_days`.\n    page_size: YAML key `page_size`.\n    stream_profile: YAML key `stream_profile`.\n    streams: YAML key `streams`.\n    min_query_interval_ms: YAML key `min_query_interval_ms`.\n    oauth_token_url: YAML key `oauth_token_url`.\n    oauth_client_id: YAML key `oauth_client_id`.\n    oauth_client_secret: YAML key `oauth_client_secret`.\n    oauth_refresh_token: YAML key `oauth_refresh_token`.\n    access_token: YAML key `access_token`.\n    privacy: YAML key `privacy`."]
     #[pyo3(signature = (*, tenant_id, start_date, lookback_days = None, page_size = None, stream_profile = None, streams = None, min_query_interval_ms = None, oauth_token_url = None, oauth_client_id = None, oauth_client_secret = None, oauth_refresh_token = None, access_token = None, privacy = None))]
     fn new(
         tenant_id: String,
@@ -6890,6 +6982,7 @@ pub struct PyDataSinkAmqp {
 #[pymethods]
 impl PyDataSinkAmqp {
     #[new]
+    #[doc = "Args:\n    connection_string: YAML key `connection_string`.\n    exchange: YAML key `exchange`.\n    routing_key: YAML key `routing_key`.\n    exchange_type: YAML key `exchange_type`.\n    format: YAML key `format`.\n    max_in_flight: YAML key `max_in_flight`.\n    max_in_flight_bytes: YAML key `max_in_flight_bytes`."]
     #[pyo3(signature = (*, connection_string, exchange, routing_key = None, exchange_type = None, format = None, max_in_flight = None, max_in_flight_bytes = None))]
     fn new(
         connection_string: PyEnvRef,
@@ -6960,6 +7053,7 @@ pub struct PyDataSinkAthena {
 #[pymethods]
 impl PyDataSinkAthena {
     #[new]
+    #[doc = "Args:\n    s3_bucket: YAML key `s3_bucket`.\n    s3_prefix: YAML key `s3_prefix`.\n    athena_workgroup_name: YAML key `athena_workgroup_name`.\n    athena_results_s3_bucket: YAML key `athena_results_s3_bucket`.\n    format: YAML key `format`.\n    glue_database_name: YAML key `glue_database_name`.\n    region: Query/model only; ignored at ingest.\n    catalog: Query/model only; ignored at ingest.\n    max_concurrency: Query/model only; ignored at ingest.\n    discovery_cache_ttl_secs: Query/model only; ignored at ingest."]
     #[pyo3(signature = (*, s3_bucket, s3_prefix, athena_workgroup_name, athena_results_s3_bucket, format = None, glue_database_name = None, region = None, catalog = None, max_concurrency = None, discovery_cache_ttl_secs = None))]
     fn new(
         s3_bucket: String,
@@ -7002,17 +7096,17 @@ pub struct PyDataSinkAthenaIceberg {
     #[doc = "Glue database. Also the Iceberg namespace.\n\nYAML key `glue_database_name`."]
     #[pyo3(get, set)]
     pub glue_database_name: String,
-    #[doc = "YAML key `athena_workgroup_name`."]
+    #[doc = "Athena workgroup that runs SQL against these tables.\n\nYAML key `athena_workgroup_name`."]
     #[pyo3(get, set)]
     pub athena_workgroup_name: String,
     #[doc = "Bucket name only (not an `s3://` URI), same as `Athena:`.\n\nYAML key `athena_results_s3_bucket`."]
     #[pyo3(get, set)]
     pub athena_results_s3_bucket: String,
-    #[doc = "YAML key `region`."]
+    #[doc = "AWS region of the Glue catalog and Athena workgroup.\n\nYAML key `region`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
-    #[doc = "YAML key `catalog_id`."]
+    #[doc = "Glue catalog id when it is not the account default.\n\nYAML key `catalog_id`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_id: Option<String>,
@@ -7025,6 +7119,7 @@ pub struct PyDataSinkAthenaIceberg {
 #[pymethods]
 impl PyDataSinkAthenaIceberg {
     #[new]
+    #[doc = "Config for the `AthenaIceberg` data sink and schema sink.\n`skipprd query` reads Glue Iceberg ∪ WAL. Athena SQL still queries the same tables.\n\nArgs:\n    warehouse: Table storage root: `s3://bucket/prefix/`.\n    glue_database_name: Glue database. Also the Iceberg namespace.\n    athena_workgroup_name: Athena workgroup that runs SQL against these tables.\n    athena_results_s3_bucket: Bucket name only (not an `s3://` URI), same as `Athena:`.\n    region: AWS region of the Glue catalog and Athena workgroup.\n    catalog_id: Glue catalog id when it is not the account default.\n    object_store: YAML key `object_store`."]
     #[pyo3(signature = (*, warehouse, glue_database_name, athena_workgroup_name, athena_results_s3_bucket, region = None, catalog_id = None, object_store = None))]
     fn new(
         warehouse: String,
@@ -7081,6 +7176,7 @@ pub struct PyDataSinkAzureBlob {
 #[pymethods]
 impl PyDataSinkAzureBlob {
     #[new]
+    #[doc = "Args:\n    account_name: YAML key `account_name`.\n    container: YAML key `container`.\n    account_key: YAML key `account_key`.\n    sas_token: YAML key `sas_token`.\n    prefix: YAML key `prefix`.\n    format: YAML key `format`."]
     #[pyo3(signature = (*, account_name, container, account_key = None, sas_token = None, prefix = None, format = None))]
     fn new(
         account_name: String,
@@ -7135,6 +7231,7 @@ pub struct PyDataSinkBigquery {
 #[pymethods]
 impl PyDataSinkBigquery {
     #[new]
+    #[doc = "Args:\n    project: YAML key `project`.\n    dataset: YAML key `dataset`.\n    location: YAML key `location`.\n    credentials_path: YAML key `credentials_path`.\n    max_concurrency: Query/model only; ignored at ingest.\n    discovery_cache_ttl_secs: Query/model only; ignored at ingest."]
     #[pyo3(signature = (*, project, dataset, location = None, credentials_path = None, max_concurrency = None, discovery_cache_ttl_secs = None))]
     fn new(
         project: String,
@@ -7186,6 +7283,7 @@ pub struct PyDataSinkClickhouse {
 #[pymethods]
 impl PyDataSinkClickhouse {
     #[new]
+    #[doc = "Args:\n    url: YAML key `url`.\n    database: YAML key `database`.\n    user: YAML key `user`.\n    password: YAML key `password`.\n    table: YAML key `table`."]
     #[pyo3(signature = (*, url, database = None, user = None, password = None, table = None))]
     fn new(
         url: String,
@@ -7248,6 +7346,7 @@ pub struct PyDataSinkDatabricks {
 #[pymethods]
 impl PyDataSinkDatabricks {
     #[new]
+    #[doc = "Args:\n    workspace_url: YAML key `workspace_url`.\n    token: YAML key `token`.\n    warehouse_id: YAML key `warehouse_id`.\n    catalog: YAML key `catalog`.\n    schema: YAML key `schema`.\n    table: YAML key `table`.\n    delta_table_uri: YAML key `delta_table_uri`.\n    storage_options: YAML key `storage_options`."]
     #[pyo3(signature = (*, workspace_url = None, token = None, warehouse_id = None, catalog = None, schema = None, table = None, delta_table_uri = None, storage_options = None))]
     fn new(
         workspace_url: Option<String>,
@@ -7291,6 +7390,7 @@ pub struct PyDataSinkDuckdb {
 #[pymethods]
 impl PyDataSinkDuckdb {
     #[new]
+    #[doc = "Config for the `Duckdb` data sink and schema sink.\n`skipprd query` reads filesystem Iceberg ∪ WAL. DuckDB `iceberg_scan` still reads compacted Iceberg only.\n\nArgs:\n    warehouse: `file:///abs/path`.\n    table_namespace: Iceberg namespace for sink-managed tables. Unique per warehouse."]
     #[pyo3(signature = (*, warehouse, table_namespace))]
     fn new(warehouse: String, table_namespace: String) -> Self {
         Self {
@@ -7320,6 +7420,7 @@ pub struct PyDataSinkFile {
 #[pymethods]
 impl PyDataSinkFile {
     #[new]
+    #[doc = "Args:\n    format: YAML key `format`.\n    output_dir: YAML key `output_dir`."]
     #[pyo3(signature = (*, format = None, output_dir = None))]
     fn new(format: Option<String>, output_dir: Option<String>) -> Self {
         Self { format, output_dir }
@@ -7353,6 +7454,7 @@ pub struct PyDataSinkGcs {
 #[pymethods]
 impl PyDataSinkGcs {
     #[new]
+    #[doc = "Args:\n    bucket: YAML key `bucket`.\n    prefix: YAML key `prefix`.\n    service_account_key_path: YAML key `service_account_key_path`.\n    format: YAML key `format`."]
     #[pyo3(signature = (*, bucket, prefix = None, service_account_key_path = None, format = None))]
     fn new(
         bucket: String,
@@ -7396,6 +7498,7 @@ pub struct PyDataSinkMotherduck {
 #[pymethods]
 impl PyDataSinkMotherduck {
     #[new]
+    #[doc = "Args:\n    motherduck_token: YAML key `motherduck_token`.\n    database: YAML key `database`.\n    table: YAML key `table`.\n    schema: Query/model only; ignored at ingest."]
     #[pyo3(signature = (*, motherduck_token, database = None, table = None, schema = None))]
     fn new(
         motherduck_token: PyEnvRef,
@@ -7451,6 +7554,7 @@ pub struct PyDataSinkPostgres {
 #[pymethods]
 impl PyDataSinkPostgres {
     #[new]
+    #[doc = "Runtime / pipeline config for the Postgres data sink.\n\nArgs:\n    user: YAML key `user`.\n    database: YAML key `database`.\n    host: YAML key `host`.\n    port: YAML key `port`.\n    password: YAML key `password`.\n    schema: YAML key `schema`.\n    sslmode: YAML key `sslmode`."]
     #[pyo3(signature = (*, user, database, host = None, port = None, password = None, schema = None, sslmode = None))]
     fn new(
         user: String,
@@ -7524,6 +7628,7 @@ pub struct PyDataSinkRedshift {
 #[pymethods]
 impl PyDataSinkRedshift {
     #[new]
+    #[doc = "Args:\n    database: YAML key `database`.\n    cluster_identifier: YAML key `cluster_identifier`.\n    workgroup_name: YAML key `workgroup_name`.\n    db_user: YAML key `db_user`.\n    table: YAML key `table`.\n    region: YAML key `region`.\n    staging_s3_bucket: YAML key `staging_s3_bucket`.\n    staging_s3_prefix: YAML key `staging_s3_prefix`.\n    iam_role_arn: YAML key `iam_role_arn`.\n    schema: Query/model only; ignored at ingest."]
     #[pyo3(signature = (*, database, cluster_identifier = None, workgroup_name = None, db_user = None, table = None, region = None, staging_s3_bucket = None, staging_s3_prefix = None, iam_role_arn = None, schema = None))]
     fn new(
         database: String,
@@ -7559,17 +7664,17 @@ impl PyDataSinkRedshift {
 #[pyclass(from_py_object, name = "DataSinkS3", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyDataSinkS3 {
-    #[doc = "YAML key `s3_bucket`."]
+    #[doc = "Bucket to write.\n\nYAML key `s3_bucket`."]
     #[pyo3(get, set)]
     pub s3_bucket: String,
-    #[doc = "YAML key `s3_prefix`."]
+    #[doc = "Key prefix under the bucket.\n\nYAML key `s3_prefix`."]
     #[pyo3(get, set)]
     pub s3_prefix: String,
-    #[doc = "YAML key `format`."]
+    #[doc = "Object format written to the prefix: `jsonl`, `parquet`, and plugin-specific values.\n\nYAML key `format`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
-    #[doc = "YAML key `endpoint_url`."]
+    #[doc = "Custom S3 API endpoint (MinIO, LocalStack, path-style).\n\nYAML key `endpoint_url`."]
     #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint_url: Option<String>,
@@ -7578,6 +7683,7 @@ pub struct PyDataSinkS3 {
 #[pymethods]
 impl PyDataSinkS3 {
     #[new]
+    #[doc = "Args:\n    s3_bucket: Bucket to write.\n    s3_prefix: Key prefix under the bucket.\n    format: Object format written to the prefix: `jsonl`, `parquet`, and plugin-specific values.\n    endpoint_url: Custom S3 API endpoint (MinIO, LocalStack, path-style)."]
     #[pyo3(signature = (*, s3_bucket, s3_prefix, format = None, endpoint_url = None))]
     fn new(
         s3_bucket: String,
@@ -7631,6 +7737,7 @@ pub struct PyDataSinkSftp {
 #[pymethods]
 impl PyDataSinkSftp {
     #[new]
+    #[doc = "Args:\n    host: YAML key `host`.\n    username: YAML key `username`.\n    remote_path: YAML key `remote_path`.\n    port: YAML key `port`.\n    password: YAML key `password`.\n    private_key_path: YAML key `private_key_path`.\n    format: YAML key `format`."]
     #[pyo3(signature = (*, host, username, remote_path, port = None, password = None, private_key_path = None, format = None))]
     fn new(
         host: String,
@@ -7684,6 +7791,7 @@ pub struct PyDataSinkSkipprLake {
 #[pymethods]
 impl PyDataSinkSkipprLake {
     #[new]
+    #[doc = "Config for the `SkipprLake` data sink and schema sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(DynamoDB, or Cloud Tables when SkipprStore selects it). Catalog rows MAY\nshare the SkipprStore table; PK/SK prefixes do not collide with offsets.\n\nArgs:\n    warehouse: Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.\n    catalog_table: Catalog pointer table. MAY be the SkipprStore table.\n    region: YAML key `region`.\n    object_store: YAML key `object_store`.\n    table_namespace: Iceberg namespace for sink-managed tables. Unique per `(catalog_table, table_namespace)`."]
     #[pyo3(signature = (*, warehouse, catalog_table, region = None, object_store = None, table_namespace = None))]
     fn new(
         warehouse: String,
@@ -7773,6 +7881,7 @@ pub struct PyDataSinkSnowflake {
 #[pymethods]
 impl PyDataSinkSnowflake {
     #[new]
+    #[doc = "Args:\n    account: YAML key `account`.\n    user: YAML key `user`.\n    warehouse: YAML key `warehouse`.\n    database: YAML key `database`.\n    schema: YAML key `schema`.\n    password: YAML key `password`.\n    role: YAML key `role`.\n    stage: YAML key `stage`.\n    private_key_path: YAML key `private_key_path`.\n    staging_uri: YAML key `staging_uri`.\n    staging_storage_integration: YAML key `staging_storage_integration`.\n    staging_azure_sas_token: YAML key `staging_azure_sas_token`.\n    staging_azure_account_key: YAML key `staging_azure_account_key`.\n    staging_gcs_service_account_key_path: YAML key `staging_gcs_service_account_key_path`.\n    max_concurrency: Query/model only; ignored at ingest.\n    discovery_cache_ttl_secs: Query/model only; ignored at ingest."]
     #[pyo3(signature = (*, account, user, warehouse, database, schema, password = None, role = None, stage = None, private_key_path = None, staging_uri = None, staging_storage_integration = None, staging_azure_sas_token = None, staging_azure_account_key = None, staging_gcs_service_account_key_path = None, max_concurrency = None, discovery_cache_ttl_secs = None))]
     fn new(
         account: String,
@@ -7852,6 +7961,7 @@ pub struct PyDataSinkSynapse {
 #[pymethods]
 impl PyDataSinkSynapse {
     #[new]
+    #[doc = "Args:\n    connection_string: YAML key `connection_string`.\n    schema: YAML key `schema`.\n    table: YAML key `table`."]
     #[pyo3(signature = (*, connection_string, schema = None, table = None))]
     fn new(connection_string: PyEnvRef, schema: Option<String>, table: Option<String>) -> Self {
         Self {
@@ -7896,6 +8006,7 @@ pub struct PySchemaSinkBigquery {
 #[pymethods]
 impl PySchemaSinkBigquery {
     #[new]
+    #[doc = "Args:\n    project: YAML key `project`.\n    dataset: YAML key `dataset`.\n    location: YAML key `location`.\n    credentials_path: YAML key `credentials_path`.\n    max_concurrency: Query/model only; ignored at ingest.\n    discovery_cache_ttl_secs: Query/model only; ignored at ingest."]
     #[pyo3(signature = (*, project, dataset, location = None, credentials_path = None, max_concurrency = None, discovery_cache_ttl_secs = None))]
     fn new(
         project: String,
@@ -7947,6 +8058,7 @@ pub struct PySchemaSinkClickhouse {
 #[pymethods]
 impl PySchemaSinkClickhouse {
     #[new]
+    #[doc = "Args:\n    url: YAML key `url`.\n    database: YAML key `database`.\n    user: YAML key `user`.\n    password: YAML key `password`.\n    table: YAML key `table`."]
     #[pyo3(signature = (*, url, database = None, user = None, password = None, table = None))]
     fn new(
         url: String,
@@ -8013,6 +8125,7 @@ pub struct PySchemaSinkGlue {
 #[pymethods]
 impl PySchemaSinkGlue {
     #[new]
+    #[doc = "Args:\n    s3_bucket: YAML key `s3_bucket`.\n    s3_prefix: YAML key `s3_prefix`.\n    athena_workgroup_name: YAML key `athena_workgroup_name`.\n    athena_results_s3_bucket: YAML key `athena_results_s3_bucket`.\n    format: YAML key `format`.\n    glue_database_name: YAML key `glue_database_name`.\n    region: Query/model only; ignored at ingest.\n    catalog: Query/model only; ignored at ingest.\n    max_concurrency: Query/model only; ignored at ingest.\n    discovery_cache_ttl_secs: Query/model only; ignored at ingest."]
     #[pyo3(signature = (*, s3_bucket, s3_prefix, athena_workgroup_name, athena_results_s3_bucket, format = None, glue_database_name = None, region = None, catalog = None, max_concurrency = None, discovery_cache_ttl_secs = None))]
     fn new(
         s3_bucket: String,
@@ -8068,6 +8181,7 @@ pub struct PySchemaSinkMotherduck {
 #[pymethods]
 impl PySchemaSinkMotherduck {
     #[new]
+    #[doc = "Args:\n    motherduck_token: YAML key `motherduck_token`.\n    database: YAML key `database`.\n    table: YAML key `table`.\n    schema: Query/model only; ignored at ingest."]
     #[pyo3(signature = (*, motherduck_token, database = None, table = None, schema = None))]
     fn new(
         motherduck_token: PyEnvRef,
@@ -8123,6 +8237,7 @@ pub struct PySchemaSinkPostgres {
 #[pymethods]
 impl PySchemaSinkPostgres {
     #[new]
+    #[doc = "Runtime / pipeline config for the Postgres data sink.\n\nArgs:\n    user: YAML key `user`.\n    database: YAML key `database`.\n    host: YAML key `host`.\n    port: YAML key `port`.\n    password: YAML key `password`.\n    schema: YAML key `schema`.\n    sslmode: YAML key `sslmode`."]
     #[pyo3(signature = (*, user, database, host = None, port = None, password = None, schema = None, sslmode = None))]
     fn new(
         user: String,
@@ -8196,6 +8311,7 @@ pub struct PySchemaSinkRedshift {
 #[pymethods]
 impl PySchemaSinkRedshift {
     #[new]
+    #[doc = "Args:\n    database: YAML key `database`.\n    cluster_identifier: YAML key `cluster_identifier`.\n    workgroup_name: YAML key `workgroup_name`.\n    db_user: YAML key `db_user`.\n    table: YAML key `table`.\n    region: YAML key `region`.\n    staging_s3_bucket: YAML key `staging_s3_bucket`.\n    staging_s3_prefix: YAML key `staging_s3_prefix`.\n    iam_role_arn: YAML key `iam_role_arn`.\n    schema: Query/model only; ignored at ingest."]
     #[pyo3(signature = (*, database, cluster_identifier = None, workgroup_name = None, db_user = None, table = None, region = None, staging_s3_bucket = None, staging_s3_prefix = None, iam_role_arn = None, schema = None))]
     fn new(
         database: String,
@@ -8295,6 +8411,7 @@ pub struct PySchemaSinkSnowflake {
 #[pymethods]
 impl PySchemaSinkSnowflake {
     #[new]
+    #[doc = "Args:\n    account: YAML key `account`.\n    user: YAML key `user`.\n    warehouse: YAML key `warehouse`.\n    database: YAML key `database`.\n    schema: YAML key `schema`.\n    password: YAML key `password`.\n    role: YAML key `role`.\n    stage: YAML key `stage`.\n    private_key_path: YAML key `private_key_path`.\n    staging_uri: YAML key `staging_uri`.\n    staging_storage_integration: YAML key `staging_storage_integration`.\n    staging_azure_sas_token: YAML key `staging_azure_sas_token`.\n    staging_azure_account_key: YAML key `staging_azure_account_key`.\n    staging_gcs_service_account_key_path: YAML key `staging_gcs_service_account_key_path`.\n    max_concurrency: Query/model only; ignored at ingest.\n    discovery_cache_ttl_secs: Query/model only; ignored at ingest."]
     #[pyo3(signature = (*, account, user, warehouse, database, schema, password = None, role = None, stage = None, private_key_path = None, staging_uri = None, staging_storage_integration = None, staging_azure_sas_token = None, staging_azure_account_key = None, staging_gcs_service_account_key_path = None, max_concurrency = None, discovery_cache_ttl_secs = None))]
     fn new(
         account: String,

@@ -78,12 +78,18 @@ fn runtime_log_wal_enabled() -> bool {
 
 #[derive(Deserialize, SkipprConfig, Debug, Clone)]
 pub struct DataSourceS3PluginConfig {
+    /// Object format: `json`, `jsonl`, `parquet`, `csv`, and plugin-specific values.
     pub format: Option<String>,
+    /// Target seconds of data per ingest batch.
     pub batch_size_seconds: Option<i64>,
+    /// Target bytes per ingest batch.
     pub batch_size_bytes: Option<i64>,
+    /// Custom S3 API endpoint (MinIO, LocalStack, path-style).
     pub endpoint_url: Option<String>,
 
+    /// Bucket to read.
     pub s3_bucket: String,
+    /// Key prefix under the bucket. Use `/` for the whole bucket.
     pub s3_prefix: String,
     /// AWS region for this bucket (required when the default credential region differs, e.g. cross-account picnic sync).
     pub region: Option<String>,

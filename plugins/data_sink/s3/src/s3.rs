@@ -27,9 +27,13 @@ use tracing::info;
 
 #[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkS3PluginConfig {
+    /// Object format written to the prefix: `jsonl`, `parquet`, and plugin-specific values.
     pub format: Option<String>,
+    /// Custom S3 API endpoint (MinIO, LocalStack, path-style).
     pub endpoint_url: Option<String>,
+    /// Bucket to write.
     pub s3_bucket: String,
+    /// Key prefix under the bucket.
     pub s3_prefix: String,
 }
 
