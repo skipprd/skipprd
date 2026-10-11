@@ -43,6 +43,7 @@ export const engineSections = [
       { text: 'WAL and buffering', link: '/configuration/buffering' },
       { text: 'State store', link: '/configuration/skippr-store' },
       { text: 'Advanced settings', link: '/configuration/advanced' },
+      { text: 'ALTER operations', link: '/operations/alter' },
       { text: 'Logging', link: '/operations/logging' },
       { text: 'Troubleshooting', link: '/operations/troubleshooting' },
     ],

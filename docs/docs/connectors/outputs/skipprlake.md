@@ -126,6 +126,7 @@ Supports `append`, `merge_by_key`, `replace_partition`, and `replace_table`. Ski
 
 ## Next steps
 
+- [ALTER operations](/operations/alter) — rename, merge, drop, and widen columns after the table exists
 - [SkipprLake schema sink](/connectors/schema_sinks/skipprlake)
 - [Datalake](/concepts/datalake)
 - [How sources land](/concepts/source-landing-semantics)

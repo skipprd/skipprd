@@ -134,5 +134,5 @@ skipprd query --plain --sql "SELECT count(*) FROM bikehire"
 - **Use Skipprd from Python:** [Python](/python).
 - **Understand what happens to your data:** [How Skipprd works](/concepts/how-it-works) and [Schema discovery and evolution](/concepts/schema).
 - **Connect your own systems:** browse [data sources](/connectors/) and the [`skippr.yml` reference](/configuration/skippr-yml).
-- **Run it in production:** [WAL and buffering](/configuration/buffering), [State store](/configuration/skippr-store), [Logging](/operations/logging), and [Troubleshooting](/operations/troubleshooting).
+- **Run it in production:** [WAL and buffering](/configuration/buffering), [State store](/configuration/skippr-store), [ALTER operations](/operations/alter), [Logging](/operations/logging), and [Troubleshooting](/operations/troubleshooting).
 - **Look up a command:** [CLI reference](/cli/overview).

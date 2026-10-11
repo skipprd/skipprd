@@ -75,7 +75,7 @@ skipprd query --sql "ALTER TABLE bikehire.trips MERGE COLUMN price_string INTO p
 skipprd query --sql "ENABLE PIPELINE bikehire"
 ```
 
-`MERGE COLUMN` drops the sibling and retargets evolution so later values write to the target. Historical src-only rows are not copied. `ALTER TABLE` also supports `RENAME COLUMN` (including nested `TO` paths such as `detail.region`), `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE` (byte/short/integer to long, byte/short to integer, float to double, timestamp_milli to timestamp). Iceberg timestamps are already microseconds, so a milli→timestamp promote updates skippr metadata only. Nested `DROP`/`MERGE` of a record that has no top-level Iceberg field fails closed. The pipeline must be `DISABLED` for every `ALTER TABLE`. Run `skipprd sql-help` for the full syntax.
+`MERGE COLUMN` drops the sibling and retargets evolution so later values write to the target. Historical src-only rows are not copied. The same `ALTER TABLE` family also renames (including nested `TO` paths such as `detail.region`), drops, and widens types. The pipeline must be `DISABLED` first. See [ALTER operations](/operations/alter) for the full matrix, fail-closed cases, and SkipprLake examples.
 
 ## Flatten nested fields
 
