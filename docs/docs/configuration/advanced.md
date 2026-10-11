@@ -44,7 +44,7 @@ YAML equivalent: `skippr.skipprd_el_storage_mode`.
 
 ## Schema changes
 
-`SCHEMA_AUTO_APPROVE` (default `true`) applies discovered schema changes during discover and sync. Set it to `false` when you want to review a change with `skipprd schema` before it lands. See [Schema discovery and evolution](/concepts/schema).
+`SCHEMA_AUTO_APPROVE` (default `true`) applies discovered schema changes during discover and sync. Set it to `false` when you want to review a change with `skipprd schema` before it lands. See [Schema discovery and evolution](/concepts/schema). To rename, merge, drop, or widen columns after data has landed, disable the pipeline and run [ALTER operations](/operations/alter).
 
 ## How often sync repeats
 

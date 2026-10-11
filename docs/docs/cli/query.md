@@ -119,6 +119,8 @@ skipprd query --sql "ENABLE PIPELINE bikehire"
 
 Flattened Iceberg names (`detail_truck_reg`) and skippr dotted paths (`detail.truck_reg`) both resolve. Iceberg sequential field ids are matched by name when they differ from skippr's hashed ids.
 
+The pipeline must be disabled for every `ALTER TABLE`. See [ALTER operations](/operations/alter) for rename, merge, drop, type promote, and what fails closed.
+
 Run [`skipprd sql-help`](/cli/sql-help) for the syntax of every statement, or `skipprd query --sql "SHOW DOCS"`.
 
 ## Troubleshooting
