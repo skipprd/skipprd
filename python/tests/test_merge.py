@@ -115,11 +115,11 @@ def test_secret_fields_accept_only_env_refs_on_save(tmp_path, value):
 def test_invalid_pipeline_raises_instead_of_exiting(tmp_path):
     script = textwrap.dedent(
         f"""
-        from skippr import Config, DataSourceFile, LocalStorage, Pipeline, Session, Transform
+        from skippr import BatchTimeUnit, Config, DataSourceFile, LocalStorage, Pipeline, Session, Transform
         c = Config().workspace("w").storage(LocalStorage())
         src = c.data_source("s", DataSourceFile(path={str(tmp_path / "in.json")!r}))
         p = c.pipeline("p", Pipeline(data_source=src, data_dir={str(tmp_path / "d")!r},
-                                     transform=Transform(batch_time_unit="day")))
+                                     transform=Transform(batch_time_unit=BatchTimeUnit.DAY)))
         try:
             Session(p)
         except ValueError as err:

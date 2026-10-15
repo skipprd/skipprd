@@ -9,7 +9,9 @@ from skippr import (
     DataSinkSkipprLake,
     DataSinkSkipprLakeWarehouseObjectStoreR2,
     DataSourceFile,
+    BatchTimeUnit,
     DataSourceGoogleSerpRanks,
+    DataSourceGoogleSerpRanksSerpDevice,
     DataSourceGoogleSerpRanksTargetEntry,
     DataSourceHttpClient,
     DataSourceHttpClientDataSourceHttpAuthConfig,
@@ -287,10 +289,17 @@ def test_lists_numbers_and_nested_classes_persist_typed():
     assert "- ex" in raw
 
 
-def test_literal_fields_validate_values():
-    DataSourceGoogleSerpRanks(keywords=[], targets=[], device="mobile")
-    with pytest.raises(ValueError, match="desktop"):
-        DataSourceGoogleSerpRanks(keywords=[], targets=[], device="tablet")  # type: ignore[arg-type]
+def test_enum_fields_take_class_members_not_strings():
+    DataSourceGoogleSerpRanks(
+        keywords=[],
+        targets=[],
+        device=DataSourceGoogleSerpRanksSerpDevice.MOBILE,
+    )
+    Transform(batch_time_unit=BatchTimeUnit.DAY)
+    with pytest.raises(TypeError, match="DataSourceGoogleSerpRanksSerpDevice"):
+        DataSourceGoogleSerpRanks(keywords=[], targets=[], device="mobile")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="BatchTimeUnit"):
+        Transform(batch_time_unit="day")  # type: ignore[arg-type]
 
 
 def test_tagged_enum_variant_serializes_tag():
