@@ -39,7 +39,7 @@ export SKIPPR_STORE_NAME=acme-skipprd-offsets
 skipprd sync --pipeline payments --once
 ```
 
-Give the WAL its own bucket so pipeline state is not mixed with lake files. Pair S3 WAL with DynamoDB (or Cloud Tables) so resume positions survive when the machine is gone. See [State store](/configuration/skippr-store).
+Give the WAL its own bucket so pipeline state is not mixed with lake files. Pair S3 WAL with DynamoDB so resume positions survive when the machine is gone. See [State store](/configuration/skippr-store).
 
 ### More than one node
 

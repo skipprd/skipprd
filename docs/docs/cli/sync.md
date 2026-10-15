@@ -36,7 +36,7 @@ skipprd sync [--pipeline <name>] [--once] [--output progress|text|json] [--log [
 | `--wal-storage <MODE>` | `disk` | WAL backend: `disk`, `s3`, or `clustered`. `clustered` does not support `--once`. See [WAL and buffering](/configuration/buffering). |
 | `--wal-s3-bucket <BUCKET>` | State bucket | WAL bucket for `--wal-storage s3`, when `skippr.yml` does not set `skippr.wal_s3_bucket`. |
 | `--store-type <TYPE>` | `sled` | State store for offsets and leases, when `skippr.yml` does not set `skippr.store.type`. See [State store](/configuration/skippr-store). |
-| `--store-name <NAME>` | None | Table name for the `dynamodb` or `cloud-tables` state store. |
+| `--store-name <NAME>` | None | Table name for the `dynamodb` state store. |
 
 See [CLI overview](/cli/overview) for the other global flags.
 

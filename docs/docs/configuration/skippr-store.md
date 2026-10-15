@@ -1,6 +1,6 @@
 ---
 title: State store
-description: Persist resume positions and catalog pointers so a new machine can continue a pipeline. Choose local state, DynamoDB, or Skippr Cloud Tables.
+description: Persist resume positions and catalog pointers so a new machine can continue a pipeline. Choose local state or DynamoDB.
 ---
 
 # State store
@@ -15,11 +15,10 @@ You need an external store when the machine is ephemeral. On a long-lived host w
 |---|---|---|
 | `sled` (default) | nothing, or `SKIPPR_STORE_TYPE=sled` | Persistent `DATA_DIR` on one host |
 | `dynamodb` | `SKIPPR_STORE_TYPE=dynamodb` | S3 WAL, Lambda, or a cluster of nodes |
-| `cloud-tables` | `SKIPPR_STORE_TYPE=cloud-tables` | The same job on Skippr Cloud Tables |
 
-`WAL_STORAGE=clustered` defaults to DynamoDB if you do not set a type. Set `cloud-tables` when that cluster runs on Skippr Cloud.
+`WAL_STORAGE=clustered` defaults to DynamoDB if you do not set a type.
 
-Name the table with `SKIPPR_STORE_NAME` (or `skippr.store.name` in `skippr.yml`). Required for DynamoDB, Cloud Tables, and clustered WAL.
+Name the table with `SKIPPR_STORE_NAME` (or `skippr.store.name` in `skippr.yml`). Required for DynamoDB and clustered WAL.
 
 ## Configure
 
@@ -69,22 +68,6 @@ export SKIPPR_STORE_NAME=acme-skipprd-offsets
 skipprd sync --pipeline google_analytics
 ```
 
-Skippr Cloud Tables:
-
-```yaml
-skippr:
-  store:
-    type: cloud-tables
-    name: acme-skipprd-offsets
-```
-
-```bash
-export WAL_STORAGE=clustered
-export SKIPPR_STORE_TYPE=cloud-tables
-export SKIPPR_STORE_NAME=acme-skipprd-offsets
-skipprd sync --pipeline google_analytics
-```
-
 ## After a crash
 
 If a resume row is missing but the WAL still has the batch, the next run rebuilds progress from the WAL. You do not edit the store by hand.
@@ -95,7 +78,7 @@ If both the WAL and the store are gone, the pipeline starts from the beginning o
 
 | Key | Values | Description |
 |---|---|---|
-| `skippr.store.type` / `SKIPPR_STORE_TYPE` / `--store-type` | `sled`, `dynamodb`, `cloud-tables` | Where resume state lives |
+| `skippr.store.type` / `SKIPPR_STORE_TYPE` / `--store-type` | `sled`, `dynamodb` | Where resume state lives |
 | `skippr.store.name` / `SKIPPR_STORE_NAME` / `--store-name` | table name | Required except for local `sled` |
 | `WAL_STORAGE` | `disk`, `s3`, `clustered` | See [WAL and buffering](/configuration/buffering) |
 | `SKIPPR_WAL_S3_BUCKET` | bucket | Dedicated WAL bucket when `WAL_STORAGE=s3` |

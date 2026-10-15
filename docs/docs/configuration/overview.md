@@ -42,7 +42,7 @@ These flags work with any command:
 | `--log [level]` | Log output to stderr | `trace`, `debug`, `info` (default), `warn`, or `error`. See [Logging](/operations/logging). |
 | `--wal-storage <disk\|s3\|clustered>` | WAL backend | Overrides `WAL_STORAGE`. See [WAL and buffering](/configuration/buffering). |
 | `--wal-s3-bucket <bucket>` | WAL bucket for `s3` | Overrides `SKIPPR_WAL_S3_BUCKET`. |
-| `--store-type <sled\|dynamodb\|cloud-tables>` | State store | Overrides `SKIPPR_STORE_TYPE`. See [State store](/configuration/skippr-store). |
+| `--store-type <sled\|dynamodb>` | State store | Overrides `SKIPPR_STORE_TYPE`. See [State store](/configuration/skippr-store). |
 | `--store-name <table>` | State store table | Overrides `SKIPPR_STORE_NAME`. |
 
 `--workspace`, `--tenant`, `--storage-mode`, and `--skippr-s3-bucket` take effect with `skipprd connect`, which writes them into the `skippr:` section of `skippr.yml`. Set them in the file for every other command.
