@@ -1940,6 +1940,10 @@ mod tests {
         assert!(rs.contains("config_enum!(PyDataSourceStripeStreamProfile"));
         assert!(stub.contains("class BatchTimeUnit:"));
         assert!(stub.contains("    DAY: ClassVar[BatchTimeUnit]"));
+        assert!(
+            stub.contains("    def __eq__(self, other: object, /) -> bool: ..."),
+            "stubtest requires positional-only __eq__ to match PyO3"
+        );
         assert!(stub.contains("class DataSourceStripeStreamProfile:"));
         assert!(
             stub.contains("search_engine: DataSourceDataForSeoSeoOpportunitiesSearchEngine | None")
