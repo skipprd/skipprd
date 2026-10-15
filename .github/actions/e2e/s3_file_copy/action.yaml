@@ -1,5 +1,5 @@
 name: S3 copy matrix
-description: Copy json/csv/xml through type: copy, S3 (R2) → File and File → S3 (R2).
+description: "Copy json/csv/xml through type: copy, S3 (R2) → File and File → S3 (R2)."
 inputs:
   skipprd_path:
     required: true
