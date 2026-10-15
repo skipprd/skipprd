@@ -14,30 +14,57 @@ pub async fn load_and_install_pipeline_schema(
     initialized: bool,
 ) -> Result<(), PromoteError> {
     let required = live_wal_namespaces(paths, log, key)?;
+    let pipeline = config.pipeline_type().map_err(PromoteError::Other)?;
     let mut metadata = match config.load_pipeline_metadata(key).await {
         Ok(Some(metadata)) => metadata,
         Ok(None) => {
-            if missing_metadata_is_fatal(initialized, &required) {
+            if missing_metadata_is_fatal(initialized, &required, pipeline) {
                 return Err(PromoteError::SchemaMissing("metadata.json".into()));
             }
-            return Ok(());
+            match promote_metadata_when_file_missing(config, pipeline) {
+                Some(metadata) => metadata,
+                None => return Ok(()),
+            }
         }
         Err(err) => return Err(PromoteError::Other(err)),
     };
     metadata.flattened = flatten;
     let _ = metadata.migrate_persisted_metadata();
     install_from_pipeline_metadata(config, &metadata);
-    ensure_live_wal_namespaces_in_metadata(&required, &metadata)
+    ensure_live_wal_namespaces_in_metadata(&required, &metadata, pipeline)
 }
 
-pub fn missing_metadata_is_fatal(initialized: bool, live_namespaces: &[String]) -> bool {
+pub fn promote_metadata_when_file_missing(
+    config: &Config,
+    pipeline: crate::pipeline_type::PipelineType,
+) -> Option<PipelineMetadata> {
+    match pipeline {
+        crate::pipeline_type::PipelineType::Copy => Some(PipelineMetadata::new(config)),
+        crate::pipeline_type::PipelineType::Ingest | crate::pipeline_type::PipelineType::Cdc => {
+            None
+        }
+    }
+}
+
+pub fn missing_metadata_is_fatal(
+    initialized: bool,
+    live_namespaces: &[String],
+    pipeline: crate::pipeline_type::PipelineType,
+) -> bool {
+    if pipeline == crate::pipeline_type::PipelineType::Copy {
+        return false;
+    }
     initialized || !live_namespaces.is_empty()
 }
 
 pub fn ensure_live_wal_namespaces_in_metadata(
     required: &[String],
     metadata: &PipelineMetadata,
+    pipeline: crate::pipeline_type::PipelineType,
 ) -> Result<(), PromoteError> {
+    if pipeline == crate::pipeline_type::PipelineType::Copy {
+        return Ok(());
+    }
     for namespace in required {
         if !metadata.metadata.contains_key(namespace) {
             return Err(PromoteError::SchemaMissing(namespace.clone()));
@@ -98,22 +125,83 @@ mod tests {
     #[test]
     fn missing_live_namespace_blocks_promotion() {
         let metadata = metadata_with_namespace("events");
-        let err = ensure_live_wal_namespaces_in_metadata(&["other".into()], &metadata).unwrap_err();
+        let err = ensure_live_wal_namespaces_in_metadata(
+            &["other".into()],
+            &metadata,
+            crate::pipeline_type::PipelineType::Ingest,
+        )
+        .unwrap_err();
         assert!(matches!(err, PromoteError::SchemaMissing(ns) if ns == "other"));
     }
 
     #[test]
     fn live_namespace_in_metadata_json_allows_promotion() {
         let metadata = metadata_with_namespace("events");
-        ensure_live_wal_namespaces_in_metadata(&["events".into()], &metadata).unwrap();
-        ensure_live_wal_namespaces_in_metadata(&[], &metadata).unwrap();
+        ensure_live_wal_namespaces_in_metadata(
+            &["events".into()],
+            &metadata,
+            crate::pipeline_type::PipelineType::Ingest,
+        )
+        .unwrap();
+        ensure_live_wal_namespaces_in_metadata(
+            &[],
+            &metadata,
+            crate::pipeline_type::PipelineType::Ingest,
+        )
+        .unwrap();
+        ensure_live_wal_namespaces_in_metadata(
+            &["events".into()],
+            &metadata_with_namespace("other"),
+            crate::pipeline_type::PipelineType::Copy,
+        )
+        .unwrap();
     }
 
     #[test]
     fn missing_metadata_json_is_fatal_once_initialized_or_live_wal_exists() {
-        assert!(!missing_metadata_is_fatal(false, &[]));
-        assert!(missing_metadata_is_fatal(true, &[]));
-        assert!(missing_metadata_is_fatal(false, &["events".into()]));
-        assert!(missing_metadata_is_fatal(true, &["events".into()]));
+        assert!(!missing_metadata_is_fatal(
+            false,
+            &[],
+            crate::pipeline_type::PipelineType::Ingest
+        ));
+        assert!(missing_metadata_is_fatal(
+            true,
+            &[],
+            crate::pipeline_type::PipelineType::Ingest
+        ));
+        assert!(missing_metadata_is_fatal(
+            false,
+            &["events".into()],
+            crate::pipeline_type::PipelineType::Ingest
+        ));
+        assert!(missing_metadata_is_fatal(
+            true,
+            &["events".into()],
+            crate::pipeline_type::PipelineType::Ingest
+        ));
+        assert!(!missing_metadata_is_fatal(
+            true,
+            &["events".into()],
+            crate::pipeline_type::PipelineType::Copy
+        ));
+    }
+
+    #[test]
+    fn copy_missing_metadata_installs_empty_pipeline_metadata() {
+        let config = Config::new();
+        let copy =
+            promote_metadata_when_file_missing(&config, crate::pipeline_type::PipelineType::Copy)
+                .expect("copy promote installs empty metadata");
+        assert!(copy.metadata.is_empty());
+        assert!(promote_metadata_when_file_missing(
+            &config,
+            crate::pipeline_type::PipelineType::Ingest
+        )
+        .is_none());
+        assert!(promote_metadata_when_file_missing(
+            &config,
+            crate::pipeline_type::PipelineType::Cdc
+        )
+        .is_none());
     }
 }

@@ -482,9 +482,9 @@ pub type SchemaSinkConfig = PluginConfigEntry;
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Pipeline {
-    /// Label for logs and metadata. Default `INGEST` (`PIPELINE_TYPE`).
+    /// Pipeline mode. Omitted is ingest. YAML `cdc:` is CDC settings, not the mode.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
+    pub r#type: Option<crate::pipeline_type::PipelineType>,
     /// Approve schema changes without prompting. Default true (`SCHEMA_AUTO_APPROVE`).
     #[serde(
         default,
@@ -532,8 +532,8 @@ pub struct Pipeline {
     /// LLM semantic-layer generation for this pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_layer: Option<SemanticLayerSettings>,
-    /// CDC configuration. When present, the pipeline runs in CDC mode and
-    /// validates source/sink compatibility at startup.
+    /// CDC settings (contracts / business keys). Mode is `type: cdc`, not the
+    /// presence of this block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cdc: Option<CdcPipelineConfig>,
 }
@@ -1598,17 +1598,40 @@ impl Config {
             .unwrap_or_default()
     }
 
-    pub fn get_pipeline_type(&self) -> String {
-        let v = Self::yaml_or_env(
-            self.get_pipeline_config().r#type.as_ref(),
-            "PIPELINE_TYPE",
-            "INGEST",
-        );
-        if v.is_empty() {
-            "INGEST".to_string()
-        } else {
-            v
+    pub fn pipeline_type(&self) -> Result<crate::pipeline_type::PipelineType, String> {
+        let pipeline = self.get_pipeline_config();
+        crate::pipeline_type::resolve_pipeline_type(pipeline.r#type, pipeline.cdc.is_some())
+    }
+
+    /// Log/metrics label for `pipelines.*.type`. Never reads `PIPELINE_TYPE`.
+    pub fn pipeline_type_log_label(&self) -> &'static str {
+        self.pipeline_type()
+            .map(crate::pipeline_type::PipelineType::as_str)
+            .unwrap_or("")
+    }
+
+    fn copy_pipeline_violations(pipeline: &Pipeline) -> Option<String> {
+        let Some(transform) = pipeline.transform.as_ref() else {
+            return None;
+        };
+        if transform.flatten_events == Some(true) {
+            return Some("type: copy cannot set transform.flatten_events".into());
         }
+        if transform
+            .inject_fields
+            .as_ref()
+            .is_some_and(|fields| !fields.is_empty())
+        {
+            return Some("type: copy cannot set transform.inject_fields".into());
+        }
+        if transform
+            .batch_order_fields
+            .as_ref()
+            .is_some_and(|fields| !fields.trim().is_empty())
+        {
+            return Some("type: copy cannot set transform.batch_order_fields".into());
+        }
+        None
     }
 
     pub fn get_stats_config(&self) -> Stats {
@@ -1965,15 +1988,32 @@ impl Config {
         }
 
         violations.extend(self.whole_config_violations());
-        if let Ok(entry) = self.get_pipeline_output_plugin_config() {
-            if let Err(err) = entry.resolved_output_format() {
-                violations.push(err);
+        match self.pipeline_type() {
+            Ok(pipeline_type) => {
+                if pipeline_type == crate::pipeline_type::PipelineType::Copy {
+                    if let Some(err) = Self::copy_pipeline_violations(&pipeline) {
+                        violations.push(err);
+                    }
+                }
+                let source_format = self
+                    .get_pipeline_input_plugin_config()
+                    .ok()
+                    .map(|entry| entry.input_format());
+                if let Ok(entry) = self.get_pipeline_output_plugin_config() {
+                    if let Err(err) = entry.resolved_output_format(pipeline_type, source_format) {
+                        violations.push(err);
+                    }
+                }
+                if let Ok(Some(entry)) = self.get_pipeline_deadletter_plugin_config() {
+                    if let Err(err) = entry.resolved_output_format(
+                        crate::pipeline_type::PipelineType::deadletter_format_mode(),
+                        source_format,
+                    ) {
+                        violations.push(err);
+                    }
+                }
             }
-        }
-        if let Ok(Some(entry)) = self.get_pipeline_deadletter_plugin_config() {
-            if let Err(err) = entry.resolved_output_format() {
-                violations.push(err);
-            }
+            Err(err) => violations.push(err),
         }
 
         Self::validate_env_u64(self, "SYNC_FREQUENCY", &mut violations);
@@ -3438,6 +3478,149 @@ pipelines:
       enable_single_quote_parsing: "true"
     chaos_mode: 0
 "#;
+
+    #[test]
+    fn pipeline_type_parses_lowercase_and_legacy_ingest() {
+        let copy: Pipeline = serde_yaml::from_str("type: copy\n").unwrap();
+        assert_eq!(copy.r#type, Some(crate::pipeline_type::PipelineType::Copy));
+        let ingest: Pipeline = serde_yaml::from_str("type: INGEST\n").unwrap();
+        assert_eq!(
+            ingest.r#type,
+            Some(crate::pipeline_type::PipelineType::Ingest)
+        );
+        let err = serde_yaml::from_str::<Pipeline>("type: passthrough\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown pipeline type"));
+    }
+
+    #[test]
+    fn pipeline_type_env_does_not_override_yaml() {
+        let original = std::env::var("PIPELINE_TYPE").ok();
+        std::env::set_var("PIPELINE_TYPE", "copy");
+        let mut config = Config::new();
+        config
+            .pipelines
+            .insert("p".to_string(), Pipeline::default());
+        let bound = config.bind_pipeline("p");
+        assert_eq!(
+            bound.pipeline_type().unwrap(),
+            crate::pipeline_type::PipelineType::Ingest
+        );
+        assert_eq!(bound.pipeline_type_log_label(), "ingest");
+        match original {
+            Some(value) => std::env::set_var("PIPELINE_TYPE", value),
+            None => std::env::remove_var("PIPELINE_TYPE"),
+        }
+    }
+
+    #[test]
+    fn pipeline_type_log_label_follows_yaml_type() {
+        let mut config = Config::new();
+        let mut pipeline = Pipeline::default();
+        pipeline.r#type = Some(crate::pipeline_type::PipelineType::Copy);
+        config.pipelines.insert("p".to_string(), pipeline);
+        let bound = config.bind_pipeline("p");
+        assert_eq!(bound.pipeline_type_log_label(), "copy");
+    }
+
+    #[test]
+    fn unresolved_pipeline_type_does_not_format_check_as_ingest() {
+        let mut config = Config::new();
+        let mut pipeline = Pipeline::default();
+        pipeline.r#type = Some(crate::pipeline_type::PipelineType::Copy);
+        pipeline.cdc = Some(CdcPipelineConfig::default());
+        pipeline.data_sink = Some("data_sinks.out".into());
+        config.pipelines.insert("p".to_string(), pipeline);
+        config.data_sinks = Some(
+            [(
+                "out".into(),
+                DataSinkEntry {
+                    config: PluginConfigEntry {
+                        plugin_name: "File".into(),
+                        config: json!({ "format": "csv" }),
+                    },
+                    schema_sink: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let bound = config.bind_pipeline("p");
+        let violations = bound.get_config_dependency_violations();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("type: copy cannot include a cdc: block")),
+            "{violations:?}"
+        );
+        assert!(
+            !violations.iter().any(|v| v.contains("csv")),
+            "copy+cdc must not ingest-reject csv: {violations:?}"
+        );
+    }
+
+    fn copy_file_csv_pipeline_with_deadletter(dl_format: &str) -> Config {
+        let mut config = Config::new();
+        let mut pipeline = Pipeline::default();
+        pipeline.r#type = Some(crate::pipeline_type::PipelineType::Copy);
+        pipeline.data_sink = Some("data_sinks.out".into());
+        pipeline.deadletter_sink = Some("deadletter_sinks.dl".into());
+        config.pipelines.insert("p".to_string(), pipeline);
+        config.data_sinks = Some(
+            [(
+                "out".into(),
+                DataSinkEntry {
+                    config: PluginConfigEntry {
+                        plugin_name: "File".into(),
+                        config: json!({ "format": "csv" }),
+                    },
+                    schema_sink: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        config.deadletter_sinks = Some(
+            [(
+                "dl".into(),
+                DataSinkEntry {
+                    config: PluginConfigEntry {
+                        plugin_name: "File".into(),
+                        config: json!({ "format": dl_format }),
+                    },
+                    schema_sink: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        config.bind_pipeline("p")
+    }
+
+    #[test]
+    fn copy_deadletter_csv_is_rejected_as_arrow_format() {
+        let bound = copy_file_csv_pipeline_with_deadletter("csv");
+        let violations = bound.get_config_dependency_violations();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("csv") && !v.contains("type: copy cannot")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn copy_deadletter_jsonl_is_legal_with_csv_primary() {
+        let bound = copy_file_csv_pipeline_with_deadletter("jsonl");
+        let violations = bound.get_config_dependency_violations();
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.to_ascii_lowercase().contains("csv")),
+            "{violations:?}"
+        );
+    }
 
     #[test]
     fn flags_accept_the_one_grammar_and_reject_the_rest() {

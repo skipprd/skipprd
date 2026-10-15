@@ -62,6 +62,8 @@ Skipprd holds records in memory and flushes when either limit is hit.
 
 Leave the defaults unless you have a reason. A larger byte threshold means fewer, bigger writes to the destination. A smaller second threshold means rows appear sooner.
 
+These limits are **per slice** — one namespace, partition, and time bucket — not for the whole `sync --once`. A 20 MiB / 300 s pair does not merge a multi-hour historical copy into one object when keys are sparse. For `type: copy` of history, keep a modest byte threshold and a large time threshold (for example `86400`) so each slice grows until drain.
+
 These optional overrides rarely need a change:
 
 | Variable | Default | Meaning |

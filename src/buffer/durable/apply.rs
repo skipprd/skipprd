@@ -270,7 +270,10 @@ mod tests {
                 vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
             )
             .unwrap();
-            batches.insert(key.clone(), vec![batch]);
+            batches.insert(
+                key.clone(),
+                crate::buffer::segment_file::WalPayload::Arrow(vec![batch]),
+            );
             parts_meta.insert(key, (0, std::time::SystemTime::UNIX_EPOCH));
         }
         let (meta, _rows, sha) = seg

@@ -16,7 +16,7 @@ This transform splits events into one table per `event_type`, partitions each ta
 ::: code-group
 
 ```python [Python]
-from skippr import Config, Pipeline, Transform
+from skippr import BatchTimeUnit, Config, Pipeline, Transform
 
 cfg = Config.load("skippr.yml")
 cfg.pipeline(
@@ -27,7 +27,7 @@ cfg.pipeline(
         transform=Transform(
             namespace_fields="event_type",
             batch_time_fields="created_at",
-            batch_time_unit="day",
+            batch_time_unit=BatchTimeUnit.DAY,
             batch_order_fields="customer_id",
         ),
     ),

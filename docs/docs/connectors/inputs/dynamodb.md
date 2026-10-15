@@ -22,12 +22,16 @@ export AWS_DEFAULT_REGION="us-east-1"
 ::: code-group
 
 ```python [Python]
-from skippr import Config, DataSourceDynamodb, Pipeline
+from skippr import Config, DataSourceDynamodb, DataSourceDynamodbSourceCdcMode, Pipeline
 
 cfg = Config.discover()
 src = cfg.data_source(
     "app",
-    DataSourceDynamodb(table_name="orders", region="us-east-1", cdc_mode="snapshot"),
+    DataSourceDynamodb(
+        table_name="orders",
+        region="us-east-1",
+        cdc_mode=DataSourceDynamodbSourceCdcMode.SNAPSHOT,
+    ),
 )
 cfg.pipeline("orders", Pipeline(data_source=src))
 cfg.save()

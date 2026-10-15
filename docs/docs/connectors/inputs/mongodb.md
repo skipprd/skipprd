@@ -22,7 +22,7 @@ export MONGODB_URI="mongodb+srv://skippr:${MONGODB_PASSWORD}@cluster.mongodb.net
 ::: code-group
 
 ```python [Python]
-from skippr import Config, DataSourceMongodb, EnvRef, Pipeline
+from skippr import Config, DataSourceMongodb, DataSourceMongodbSourceCdcMode, EnvRef, Pipeline
 
 cfg = Config.discover()
 src = cfg.data_source(
@@ -31,7 +31,7 @@ src = cfg.data_source(
         connection_string=EnvRef("MONGODB_URI"),
         database="app",
         collection="orders",
-        cdc_mode="snapshot",
+        cdc_mode=DataSourceMongodbSourceCdcMode.SNAPSHOT,
     ),
 )
 cfg.pipeline("orders", Pipeline(data_source=src))

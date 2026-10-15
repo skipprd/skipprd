@@ -2,9 +2,13 @@ use crate::buffer::direct_io::DirectIoFile;
 use crate::helpers::offsets::OffsetKey;
 use crate::metrics::counters as metrics_counters;
 use crate::plugins::cdc::{WalPartKind, WalPartMeta};
+use crate::serdes::copy::CopyWalRecord;
 use arrow::array::RecordBatch;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 use bincode;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -15,6 +19,71 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use std::{fs, io};
+
+/// Arrow IPC PART (SEGF v3 payload and v4 codec 0).
+pub const PART_CODEC_ARROW: u8 = 0;
+/// Compressed bincode of `CopyWalRecord` frames (v4 codec 1).
+pub const PART_CODEC_COPY: u8 = 1;
+const SEGF_VERSION_V3: u32 = 3;
+
+/// One partition's WAL bytes. Copy and Arrow never share a map entry
+/// (`schema_fingerprint` for copy is always `"copy"`).
+#[derive(Clone, Debug)]
+pub enum WalPayload {
+    Arrow(Vec<RecordBatch>),
+    Raw(Vec<CopyWalRecord>),
+}
+
+impl WalPayload {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Arrow(batches) => batches.is_empty(),
+            Self::Raw(records) => records.is_empty(),
+        }
+    }
+
+    pub fn estimated_bytes(&self) -> u64 {
+        match self {
+            Self::Arrow(batches) => batches
+                .iter()
+                .map(|batch| batch.get_array_memory_size() as u64)
+                .sum(),
+            Self::Raw(records) => records.iter().map(CopyWalRecord::estimated_wal_bytes).sum(),
+        }
+    }
+
+    pub fn row_count(&self) -> u64 {
+        match self {
+            Self::Arrow(batches) => batches.iter().map(|batch| batch.num_rows() as u64).sum(),
+            Self::Raw(records) => records.len() as u64,
+        }
+    }
+
+    pub fn codec(&self) -> u8 {
+        match self {
+            Self::Arrow(_) => PART_CODEC_ARROW,
+            Self::Raw(_) => PART_CODEC_COPY,
+        }
+    }
+
+    pub fn extend(&mut self, other: WalPayload) -> Result<(), String> {
+        match (self, other) {
+            (Self::Arrow(dst), Self::Arrow(src)) => {
+                dst.extend(src);
+                Ok(())
+            }
+            (Self::Raw(dst), Self::Raw(src)) => {
+                dst.extend(src);
+                Ok(())
+            }
+            _ => Err("WAL partition mixed Arrow and copy payloads".to_string()),
+        }
+    }
+}
+
+fn accepted_segf_version(version: u32) -> bool {
+    version == SEGF_VERSION_V3 || version == VERSION
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct PartitionKey {
@@ -29,9 +98,9 @@ const MAGIC: &[u8; 4] = b"SEGF";
 const PART: &[u8; 4] = b"PART";
 const FOOT: &[u8; 4] = b"FOOT";
 const COMMIT_MAGIC: &[u8; 4] = b"SEGC";
-/// Segment format version. Includes an optional `part_meta_blob` per PART
-/// for CDC row-aligned metadata (mutation kind, event_id, order_token).
-const VERSION: u32 = 3;
+/// Segment format version. v4 writes a PART `codec` u8 before `data_len`.
+/// v3 (Arrow IPC, no codec byte) remains readable.
+const VERSION: u32 = 4;
 const COMMIT_HEADER_VERSION: u32 = 1;
 const FOOTER_LEN: usize = 4 + 4 + 32;
 const COMMIT_HEADER_LEN: usize = 60;
@@ -77,6 +146,8 @@ pub struct SegmentPartitionIndexEntry {
     pub part_meta_start: u64,
     pub part_meta_len: u64,
     pub part_meta_summary: SegmentPartMetaSummary,
+    /// `PART_CODEC_ARROW` or `PART_CODEC_COPY`. v3 segments are Arrow.
+    pub codec: u8,
     pub start: u64,
     pub len: u64,
 }
@@ -131,6 +202,65 @@ thread_local! {
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn read_part_codec_and_len<R: Read>(reader: &mut R, version: u32) -> io::Result<(u8, u64)> {
+    let codec = if version >= VERSION {
+        let mut codec = [0u8; 1];
+        reader.read_exact(&mut codec)?;
+        codec[0]
+    } else {
+        PART_CODEC_ARROW
+    };
+    if codec != PART_CODEC_ARROW && codec != PART_CODEC_COPY {
+        return Err(invalid_data(format!("unknown WAL PART codec {codec}")));
+    }
+    let mut len_buf = [0u8; 8];
+    reader.read_exact(&mut len_buf)?;
+    Ok((codec, u64::from_le_bytes(len_buf)))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CopyWalFrame {
+    value: Vec<u8>,
+    identity: Option<Vec<u8>>,
+}
+
+fn encode_copy_part(records: &[CopyWalRecord]) -> io::Result<Vec<u8>> {
+    let frames: Vec<CopyWalFrame> = records
+        .iter()
+        .map(|record| {
+            Ok(CopyWalFrame {
+                value: serde_json::to_vec(&record.value)
+                    .map_err(|err| invalid_data(format!("encode copy WAL value: {err}")))?,
+                identity: record.identity.clone(),
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let raw = bincode::serialize(&frames)
+        .map_err(|err| invalid_data(format!("encode copy WAL: {err}")))?;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(&raw)?;
+    encoder.finish()
+}
+
+/// Decompress a copy PART payload into format-agnostic WAL frames.
+pub fn decode_copy_part(bytes: &[u8]) -> io::Result<Vec<CopyWalRecord>> {
+    let mut decoder = GzDecoder::new(bytes);
+    let mut raw = Vec::new();
+    decoder.read_to_end(&mut raw)?;
+    let frames: Vec<CopyWalFrame> = bincode::deserialize(&raw)
+        .map_err(|err| invalid_data(format!("decode copy WAL: {err}")))?;
+    frames
+        .into_iter()
+        .map(|frame| {
+            Ok(CopyWalRecord {
+                value: serde_json::from_slice(&frame.value)
+                    .map_err(|err| invalid_data(format!("decode copy WAL value: {err}")))?,
+                identity: frame.identity,
+            })
+        })
+        .collect()
 }
 
 fn parse_part_meta_blob(blob: &[u8]) -> io::Result<(WalPartMeta, SegmentPartMetaSummary)> {
@@ -332,7 +462,7 @@ impl SegmentFile {
         let mut ver = [0u8; 4];
         reader.read_exact(&mut ver)?;
         let version = u32::from_le_bytes(ver);
-        if version != VERSION {
+        if !accepted_segf_version(version) {
             return Err(invalid_data(format!(
                 "Compactor: read refused version={version}"
             )));
@@ -406,9 +536,7 @@ impl SegmentFile {
                 }
             }
 
-            let mut len_buf = [0u8; 8];
-            reader.read_exact(&mut len_buf)?;
-            let data_len = u64::from_le_bytes(len_buf);
+            let (codec, data_len) = read_part_codec_and_len(reader, version)?;
             let start = reader.stream_position()?;
             if start.saturating_add(data_len) > file_len {
                 return Err(invalid_data(format!(
@@ -426,6 +554,7 @@ impl SegmentFile {
                 part_meta_start,
                 part_meta_len: meta_len,
                 part_meta_summary,
+                codec,
                 start,
                 len: data_len,
             });
@@ -470,17 +599,16 @@ impl SegmentFile {
         Ok(SegmentFile { path: p_final })
     }
 
-    /// Layout per PART:
+    /// Layout per PART (v4):
     ///   PART | key_len | key_blob | part_bytes | updated_secs
-    ///   | part_meta_len | part_meta_blob | data_len | Arrow IPC
+    ///   | part_meta_len | part_meta_blob | codec | data_len | payload
     ///
-    /// `part_meta_blobs` maps each `PartitionKey` to its serialized
-    /// `WalPartMeta`. Partitions not present in the map get a zero-length
-    /// meta blob (append-mode semantics).
+    /// v3 omits `codec` and the payload is Arrow IPC. `part_meta_blobs` maps
+    /// each `PartitionKey` to serialized `WalPartMeta`.
     pub fn write_snapshot(
         &self,
         offsets: &std::collections::HashMap<OffsetKey, u64>,
-        batches: &std::collections::HashMap<PartitionKey, Vec<RecordBatch>>,
+        batches: &std::collections::HashMap<PartitionKey, WalPayload>,
         partitions_meta: &std::collections::HashMap<
             PartitionKey,
             (u64 /*bytes*/, SystemTime /*updated*/),
@@ -499,10 +627,10 @@ impl SegmentFile {
     }
 }
 
-/// Encode a SEGF body + FOOT once. Disk and S3 persist the same bytes.
+/// Encode a SEGF v4 body + FOOT once. Disk and S3 persist the same bytes.
 pub fn encode_snapshot(
     offsets: &std::collections::HashMap<OffsetKey, u64>,
-    batches: &std::collections::HashMap<PartitionKey, Vec<RecordBatch>>,
+    batches: &std::collections::HashMap<PartitionKey, WalPayload>,
     partitions_meta: &std::collections::HashMap<
         PartitionKey,
         (u64 /*bytes*/, SystemTime /*updated*/),
@@ -530,8 +658,8 @@ pub fn encode_snapshot(
     let mut parts_count: u32 = 0;
     let mut index: Vec<SegmentPartitionIndexEntry> = Vec::with_capacity(batches.len());
 
-    for (key, rbatches) in batches.iter() {
-        if rbatches.is_empty() {
+    for (key, payload) in batches.iter() {
+        if payload.is_empty() {
             continue;
         }
         parts_count = parts_count.saturating_add(1);
@@ -566,24 +694,36 @@ pub fn encode_snapshot(
             file.write_all(meta_blob)?;
         }
 
+        let codec = payload.codec();
+        file.write_all(&[codec])?;
         let data_len_pos = file.stream_position()?;
         file.write_all(&0u64.to_le_bytes())?;
 
         let start = file.stream_position()?;
-        {
-            let options = IpcWriteOptions::default();
-            let mut writer =
-                StreamWriter::try_new_with_options(&mut file, &rbatches[0].schema(), options)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
-            for b in rbatches.iter() {
-                total_rows += b.num_rows() as u64;
+        match payload {
+            WalPayload::Arrow(rbatches) => {
+                let options = IpcWriteOptions::default();
+                let mut writer = StreamWriter::try_new_with_options(
+                    &mut file,
+                    &rbatches[0].schema(),
+                    options,
+                )
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
+                for b in rbatches.iter() {
+                    total_rows += b.num_rows() as u64;
+                    writer.write(b).map_err(|e| {
+                        io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e))
+                    })?;
+                }
                 writer
-                    .write(b)
+                    .finish()
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
             }
-            writer
-                .finish()
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
+            WalPayload::Raw(records) => {
+                let encoded = encode_copy_part(records)?;
+                total_rows = total_rows.saturating_add(records.len() as u64);
+                file.write_all(&encoded)?;
+            }
         }
         let end = file.stream_position()?;
         let len = end - start;
@@ -601,6 +741,7 @@ pub fn encode_snapshot(
             part_meta_start,
             part_meta_len: meta_len,
             part_meta_summary,
+            codec,
             start,
             len,
         });
@@ -710,7 +851,7 @@ impl SegmentFile {
         let mut ver = [0u8; 4];
         reader.read_exact(&mut ver)?;
         let version = u32::from_le_bytes(ver);
-        if version != VERSION {
+        if !accepted_segf_version(version) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("read_part_meta_blobs: refused version={}", version),
@@ -758,10 +899,7 @@ impl SegmentFile {
                 result.insert(key, meta_blob);
             }
 
-            // Skip data_len + Arrow data
-            let mut len_buf = [0u8; 8];
-            reader.read_exact(&mut len_buf)?;
-            let data_len = u64::from_le_bytes(len_buf);
+            let (_codec, data_len) = read_part_codec_and_len(reader, version)?;
             reader.seek(io::SeekFrom::Current(data_len as i64))?;
         }
 
@@ -813,7 +951,7 @@ mod tests_wal_writer {
     fn test_write_snapshot_footer_and_hash() {
         let dir = temp_dir();
         let seg = SegmentFile::new(&dir, "t1").unwrap();
-        let mut batches: HashMap<PartitionKey, Vec<RecordBatch>> = HashMap::new();
+        let mut batches: HashMap<PartitionKey, WalPayload> = HashMap::new();
         let key = PartitionKey {
             sink_ref: "data_outputs.test".to_string(),
             namespace: "ns".to_string(),
@@ -821,7 +959,7 @@ mod tests_wal_writer {
             time: Some(0),
             schema_fingerprint: "schema".to_string(),
         };
-        batches.insert(key.clone(), vec![make_batch()]);
+        batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
         let mut parts_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let offsets: HashMap<crate::helpers::offsets::OffsetKey, u64> = HashMap::new();
@@ -895,8 +1033,8 @@ mod tests_wal_writer {
             schema_fingerprint: "schema".to_string(),
         };
         let batch = make_batch();
-        let mut batches: HashMap<PartitionKey, Vec<RecordBatch>> = HashMap::new();
-        batches.insert(key.clone(), vec![batch]);
+        let mut batches: HashMap<PartitionKey, WalPayload> = HashMap::new();
+        batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
         let mut parts_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let offsets: HashMap<crate::helpers::offsets::OffsetKey, u64> = HashMap::new();
@@ -990,8 +1128,8 @@ mod tests_wal_writer {
             schema_fingerprint: "".to_string(),
         };
         let batch = make_batch();
-        let mut batches: HashMap<PartitionKey, Vec<RecordBatch>> = HashMap::new();
-        batches.insert(key.clone(), vec![batch]);
+        let mut batches: HashMap<PartitionKey, WalPayload> = HashMap::new();
+        batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
         let mut parts_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
         parts_meta.insert(key.clone(), (100, SystemTime::now()));
         let offsets: HashMap<crate::helpers::offsets::OffsetKey, u64> = HashMap::new();
@@ -1023,7 +1161,7 @@ mod tests_wal_writer {
     fn snapshot_one_part(name: &str) -> (PathBuf, SegmentFile, [u8; 32], SegmentFileMetadata) {
         let dir = temp_dir();
         let seg = SegmentFile::new(&dir, name).unwrap();
-        let mut batches: HashMap<PartitionKey, Vec<RecordBatch>> = HashMap::new();
+        let mut batches: HashMap<PartitionKey, WalPayload> = HashMap::new();
         let key = PartitionKey {
             sink_ref: "out".into(),
             namespace: "ns".into(),
@@ -1031,7 +1169,7 @@ mod tests_wal_writer {
             time: Some(0),
             schema_fingerprint: "schema".into(),
         };
-        batches.insert(key.clone(), vec![make_batch()]);
+        batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
         let mut parts_meta = HashMap::new();
         parts_meta.insert(key, (0, SystemTime::now()));
         let offsets = HashMap::new();
@@ -1175,5 +1313,127 @@ mod tests_wal_writer {
         assert_eq!(result, WalPairReclaim::Removed);
         assert!(!seg_path.exists());
         assert!(!commit_path.exists());
+    }
+
+    #[test]
+    fn v4_mixed_arrow_and_copy_parts_roundtrip() {
+        let dir = temp_dir();
+        let seg = SegmentFile::new(&dir, "mixed").unwrap();
+        let arrow_key = PartitionKey {
+            sink_ref: "data_outputs.test".to_string(),
+            namespace: "_dl_copy".to_string(),
+            partition: String::new(),
+            time: Some(0),
+            schema_fingerprint: "arrow-fp".to_string(),
+        };
+        let copy_key = PartitionKey {
+            sink_ref: "data_outputs.test".to_string(),
+            namespace: "events".to_string(),
+            partition: String::new(),
+            time: Some(0),
+            schema_fingerprint: crate::pipeline_type::COPY_WAL_FINGERPRINT.to_string(),
+        };
+        let mut batches = HashMap::new();
+        batches.insert(arrow_key.clone(), WalPayload::Arrow(vec![make_batch()]));
+        batches.insert(
+            copy_key.clone(),
+            WalPayload::Raw(vec![crate::serdes::copy::CopyWalRecord {
+                value: serde_json::json!({"id": 1}),
+                identity: Some(b"{\"id\":1}\n".to_vec()),
+            }]),
+        );
+        let mut parts_meta = HashMap::new();
+        parts_meta.insert(arrow_key.clone(), (0, SystemTime::now()));
+        parts_meta.insert(copy_key.clone(), (0, SystemTime::now()));
+        let (meta, rows, _sha) = seg
+            .write_snapshot(&HashMap::new(), &batches, &parts_meta, &HashMap::new())
+            .unwrap();
+        assert_eq!(meta.num_partitions, 2);
+        assert_eq!(rows, 4);
+        let read = SegmentFile::read_metadata_from_bytes(&fs::read(&seg.path).unwrap()).unwrap();
+        let copy_idx = read
+            .index
+            .iter()
+            .find(|idx| idx.key.schema_fingerprint == crate::pipeline_type::COPY_WAL_FINGERPRINT)
+            .unwrap();
+        let arrow_idx = read
+            .index
+            .iter()
+            .find(|idx| idx.key.schema_fingerprint == "arrow-fp")
+            .unwrap();
+        assert_eq!(copy_idx.codec, PART_CODEC_COPY);
+        assert_eq!(arrow_idx.codec, PART_CODEC_ARROW);
+        let bytes = fs::read(&seg.path).unwrap();
+        let start = copy_idx.start as usize;
+        let end = start + copy_idx.len as usize;
+        let decoded = decode_copy_part(&bytes[start..end]).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].value["id"], 1);
+    }
+
+    #[test]
+    fn v3_arrow_segment_still_reads() {
+        let dir = temp_dir();
+        let path = dir.join("legacy.seg");
+        let key = PartitionKey {
+            sink_ref: "data_outputs.test".to_string(),
+            namespace: "ns".to_string(),
+            partition: String::new(),
+            time: Some(0),
+            schema_fingerprint: "schema".to_string(),
+        };
+        let mut file = Cursor::new(Vec::new());
+        file.write_all(MAGIC).unwrap();
+        file.write_all(&SEGF_VERSION_V3.to_le_bytes()).unwrap();
+        file.write_all(&0u64.to_le_bytes()).unwrap();
+        let offsets =
+            bincode::serialize(&HashMap::<crate::helpers::offsets::OffsetKey, u64>::new()).unwrap();
+        file.write_all(&(offsets.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(&offsets).unwrap();
+        file.write_all(PART).unwrap();
+        let key_blob = bincode::serialize(&key).unwrap();
+        file.write_all(&(key_blob.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(&key_blob).unwrap();
+        file.write_all(&0u64.to_le_bytes()).unwrap();
+        file.write_all(&0u64.to_le_bytes()).unwrap();
+        file.write_all(&0u64.to_le_bytes()).unwrap();
+        let data_len_pos = file.stream_position().unwrap();
+        file.write_all(&0u64.to_le_bytes()).unwrap();
+        let start = file.stream_position().unwrap();
+        {
+            let batch = make_batch();
+            let options = IpcWriteOptions::default();
+            let mut writer =
+                StreamWriter::try_new_with_options(&mut file, &batch.schema(), options).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let end = file.stream_position().unwrap();
+        let len = end - start;
+        file.seek(std::io::SeekFrom::Start(data_len_pos)).unwrap();
+        file.write_all(&len.to_le_bytes()).unwrap();
+        file.seek(std::io::SeekFrom::Start(end)).unwrap();
+        let digest = Sha256::digest(&file.get_ref()[..end as usize]);
+        file.write_all(FOOT).unwrap();
+        file.write_all(&1u32.to_le_bytes()).unwrap();
+        file.write_all(&digest).unwrap();
+        fs::write(&path, file.into_inner()).unwrap();
+        let meta = SegmentFile::read_metadata_from_bytes(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(meta.num_partitions, 1);
+        assert_eq!(meta.index[0].codec, PART_CODEC_ARROW);
+    }
+
+    #[test]
+    fn copy_estimated_bytes_tracks_identity_without_json_display() {
+        let identity = b"{\"id\":1}\n".to_vec();
+        let payload = WalPayload::Raw(vec![crate::serdes::copy::CopyWalRecord {
+            value: serde_json::json!({"id": 1}),
+            identity: Some(identity.clone()),
+        }]);
+        let bytes = payload.estimated_bytes();
+        assert!(bytes >= identity.len() as u64);
+        assert!(bytes < 64);
     }
 }

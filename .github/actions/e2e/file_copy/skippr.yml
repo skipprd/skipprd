@@ -1,0 +1,27 @@
+skippr:
+  workspace: test
+  skipprd_el_storage_mode: local
+
+pipelines:
+  file_copy:
+    auto_approve: yes
+    env: test
+    type: copy
+    buffer_threshold_bytes: 10000000
+    buffer_threshold_seconds: 60
+    data_source: data_sources.file_copy
+    data_sink: data_sinks.file_copy
+    transform:
+      batch_partition_fields: region
+
+data_sources:
+  file_copy:
+    File:
+      path: SOURCE_DIR_PLACEHOLDER
+      format: json
+
+data_sinks:
+  file_copy:
+    File:
+      output_dir: OUTPUT_DIR_PLACEHOLDER
+      format: jsonl

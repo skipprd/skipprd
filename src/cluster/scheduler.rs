@@ -471,7 +471,11 @@ async fn try_promote_and_ingest(
         }
     };
     install_durable_store(store);
-    tracing::info!(pipeline = %name, "clustered primary ingest started");
+    tracing::info!(
+        pipeline = %name,
+        pipeline.type = app_cfg.bind_pipeline(name).pipeline_type_log_label(),
+        "clustered primary ingest started"
+    );
     metrics::set_cluster_primary(1);
     metrics::set_cluster_ready(1);
     let replace_client = replica_client.clone();

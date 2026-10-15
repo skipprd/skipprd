@@ -28,7 +28,7 @@ export OTLP_TOKEN="$(openssl rand -hex 32)"
 ::: code-group
 
 ```python [Python]
-from skippr import Config, DataSourceOtlp, EnvRef, Pipeline
+from skippr import Config, DataSourceOtlp, DataSourceOtlpOtlpSignal, EnvRef, Pipeline
 
 cfg = Config.discover()
 src = cfg.data_source(
@@ -36,7 +36,7 @@ src = cfg.data_source(
     DataSourceOtlp(
         listen_address_grpc="0.0.0.0:4317",
         listen_address_http="0.0.0.0:4318",
-        signals=["logs"],
+        signals=[DataSourceOtlpOtlpSignal.LOGS],
         auth_token=EnvRef("OTLP_TOKEN"),
     ),
 )

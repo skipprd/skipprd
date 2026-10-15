@@ -109,6 +109,7 @@ impl Logger {
             "tenant": _tenant,
             "workspace_name": workspace,
             "pipeline_name": pipeline,
+            "pipeline_type": config.pipeline_type_log_label(),
             "run_id": _run_id,
             "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "exit_code": exit_code

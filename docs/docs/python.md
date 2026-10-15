@@ -224,7 +224,7 @@ lake = cfg.data_sink(
 )
 ```
 
-Fields with a fixed set of values are `Literal` types. `DataSourceGoogleSerpRanks(keywords=[], targets=[], device="tablet")` is a type error in your editor and a `ValueError` at runtime, because `device` accepts only `"desktop"` or `"mobile"`.
+Fields with a fixed set of values are frozen enum classes. Pass the class member, not a string. `Pipeline(data_source=src, type="copy")` is a type error; use `type=PipelineType.COPY`. Time partitions take `batch_time_unit=BatchTimeUnit.DAY`, not `"day"`. Connector fields such as `cdc_mode` and `stream_profile` follow the same pattern.
 
 ## Schema sinks
 

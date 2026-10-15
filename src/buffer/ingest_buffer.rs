@@ -22,7 +22,7 @@ use crate::buffer::s3_wal_body_cache;
 #[cfg(test)]
 use crate::buffer::segment_file::SegmentPartMetaSummary;
 use crate::buffer::segment_file::{
-    PartitionKey, SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry,
+    PartitionKey, SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry, WalPayload,
 };
 use crate::buffer::wal_store::{SegmentWriteLocation, SegmentWriteResult};
 use crate::buffer::BufferChunker;
@@ -172,7 +172,7 @@ struct SegmentSnapshot {
     created_at: SystemTime,
     total_bytes: u64,
     offsets: HashMap<OffsetKey, u64>,
-    batches: HashMap<PartitionKey, Vec<RecordBatch>>,
+    batches: HashMap<PartitionKey, WalPayload>,
     meta: HashMap<PartitionKey, SegmentPartitionMeta>,
     part_meta_blobs: HashMap<PartitionKey, Vec<u8>>,
     checkpoint_updates: Vec<(String, crate::plugins::cdc::CheckpointEnvelope)>,
@@ -182,7 +182,7 @@ impl SegmentSnapshot {
     fn new(
         id: String,
         offsets: HashMap<OffsetKey, u64>,
-        batches: HashMap<PartitionKey, Vec<RecordBatch>>,
+        batches: HashMap<PartitionKey, WalPayload>,
         meta: HashMap<PartitionKey, SegmentPartitionMeta>,
         total_bytes: u64,
         part_meta_blobs: HashMap<PartitionKey, Vec<u8>>,
@@ -887,8 +887,8 @@ pub struct IngestBufferBatch {
     pub(crate) _time: Option<i64>,
     pub(crate) _schema_fingerprint: String,
     pub(crate) schema: SchemaRef,
-    pub(crate) record_batches: Option<Vec<RecordBatch>>,
-    /// Per-row CDC metadata aligned 1:1 with the rows in `record_batches`.
+    pub(crate) payload: WalPayload,
+    /// Per-row CDC metadata aligned 1:1 with Arrow rows. Ignored for copy.
     /// `None` means append-mode (no CDC metadata).
     pub(crate) cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
     /// Checkpoint envelope to store when this batch's WAL segment is durably committed.
@@ -897,7 +897,7 @@ pub struct IngestBufferBatch {
 
 // Single global segment that aggregates batches for all partitions
 struct GlobalSegment {
-    batches: HashMap<PartitionKey, Vec<RecordBatch>>,
+    batches: HashMap<PartitionKey, WalPayload>,
     offsets: HashMap<OffsetKey, u64>,
     cdc_meta: HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
     checkpoint_updates: Vec<(String, crate::plugins::cdc::CheckpointEnvelope)>,
@@ -922,19 +922,20 @@ impl GlobalSegment {
     fn add(
         &mut self,
         key: PartitionKey,
-        batches: Vec<RecordBatch>,
+        payload: WalPayload,
         offsets: &HashMap<OffsetKey, u64>,
         cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
         checkpoint_update: Option<(String, crate::plugins::cdc::CheckpointEnvelope)>,
-    ) {
-        let mut add_bytes: u64 = 0;
-        for b in batches.iter() {
-            add_bytes = add_bytes.saturating_add(b.get_array_memory_size() as u64);
+    ) -> Result<(), String> {
+        let add_bytes = payload.estimated_bytes();
+        match self.batches.entry(key.clone()) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(payload);
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                slot.get_mut().extend(payload)?;
+            }
         }
-        self.batches
-            .entry(key.clone())
-            .or_insert_with(|| Vec::with_capacity(64))
-            .extend(batches);
         if let Some(rows) = cdc_rows {
             self.cdc_meta
                 .entry(key)
@@ -952,11 +953,12 @@ impl GlobalSegment {
         }
         self.bytes = self.bytes.saturating_add(add_bytes);
         self.updated_at = SystemTime::now();
+        Ok(())
     }
     fn take(
         &mut self,
     ) -> (
-        HashMap<PartitionKey, Vec<RecordBatch>>,
+        HashMap<PartitionKey, WalPayload>,
         HashMap<OffsetKey, u64>,
         HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
         Vec<(String, crate::plugins::cdc::CheckpointEnvelope)>,
@@ -974,7 +976,7 @@ impl GlobalSegment {
 
 fn serialize_cdc_meta_to_blobs(
     cdc_meta: &HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
-    batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
+    batches: &HashMap<PartitionKey, WalPayload>,
 ) -> HashMap<PartitionKey, Vec<u8>> {
     use crate::plugins::cdc::WalPartMeta;
     let mut blobs: HashMap<PartitionKey, Vec<u8>> = HashMap::new();
@@ -982,15 +984,7 @@ fn serialize_cdc_meta_to_blobs(
         if rows.is_empty() {
             continue;
         }
-        let arrow_row_count = batches
-            .get(key)
-            .map(|partition_batches| {
-                partition_batches
-                    .iter()
-                    .map(|batch| batch.num_rows() as u64)
-                    .sum()
-            })
-            .unwrap_or(0);
+        let arrow_row_count = batches.get(key).map(WalPayload::row_count).unwrap_or(0);
         let meta = WalPartMeta::cdc(rows.clone(), arrow_row_count)
             .expect("CDC WAL metadata must align with Arrow rows before WAL serialization");
         let bytes = bincode::serialize(&meta)
@@ -1030,7 +1024,10 @@ impl Buffers {
             let partition = ingest_buffer_batch._partition.clone();
             let time = ingest_buffer_batch._time;
             let schema_fingerprint = if ingest_buffer_batch._schema_fingerprint.is_empty() {
-                schema_fingerprint(&ingest_buffer_batch.schema)
+                match &ingest_buffer_batch.payload {
+                    WalPayload::Raw(_) => crate::pipeline_type::COPY_WAL_FINGERPRINT.to_string(),
+                    WalPayload::Arrow(_) => schema_fingerprint(&ingest_buffer_batch.schema),
+                }
             } else {
                 ingest_buffer_batch._schema_fingerprint.clone()
             };
@@ -1042,14 +1039,14 @@ impl Buffers {
                 schema_fingerprint,
             };
 
-            let mut batches_vec = ingest_buffer_batch
-                .record_batches
-                .take()
-                .unwrap_or_default();
-            if batches_vec.is_empty() {
+            let payload = std::mem::replace(
+                &mut ingest_buffer_batch.payload,
+                WalPayload::Arrow(Vec::new()),
+            );
+            if payload.is_empty() {
                 if Config::log_wal_enabled() {
                     debug!(
-                        "WAL: skipped write ns={} part={} time={:?} (no record batches)",
+                        "WAL: skipped write ns={} part={} time={:?} (empty payload)",
                         ingest_buffer_batch._namespace,
                         ingest_buffer_batch._partition,
                         ingest_buffer_batch._time
@@ -1057,21 +1054,18 @@ impl Buffers {
                 }
                 continue;
             }
-            let batch_bytes = batches_vec
-                .iter()
-                .map(|b| b.get_array_memory_size() as u64)
-                .sum::<u64>();
+            let batch_bytes = payload.estimated_bytes();
             added_bytes = added_bytes.saturating_add(batch_bytes);
             let mut seg = SEGMENT_LIVE
                 .lock()
                 .map_err(|_| "WAL live segment lock poisoned".to_string())?;
             seg.add(
                 key,
-                batches_vec.drain(..).collect(),
+                payload,
                 &ingest_buffer_batch.offsets,
                 ingest_buffer_batch.cdc_rows.take(),
                 ingest_buffer_batch.checkpoint_update.take(),
-            );
+            )?;
         }
         Ok(added_bytes)
     }
@@ -1246,15 +1240,11 @@ impl Buffers {
         };
 
         let mut meta: HashMap<PartitionKey, SegmentPartitionMeta> = HashMap::new();
-        for (key, batches) in to_flush_batches.iter() {
-            let bytes_estimate = batches
-                .iter()
-                .map(|b| b.get_array_memory_size() as u64)
-                .sum();
+        for (key, payload) in to_flush_batches.iter() {
             meta.insert(
                 key.clone(),
                 SegmentPartitionMeta {
-                    bytes: bytes_estimate,
+                    bytes: payload.estimated_bytes(),
                     updated_at: SystemTime::now(),
                 },
             );
@@ -2851,6 +2841,9 @@ impl Buffers {
         entry: &CompactionEntry,
         seg_path: &Path,
     ) -> io::Result<Vec<RecordBatch>> {
+        if entry.idx.codec != crate::buffer::segment_file::PART_CODEC_ARROW {
+            return Err(io::Error::other("expected Arrow WAL PART"));
+        }
         let mut file = DirectIoFile::open(seg_path)?;
         file.seek(io::SeekFrom::Start(entry.idx.start))?;
         let reader = io::BufReader::new(file);
@@ -2908,6 +2901,9 @@ impl Buffers {
         entry: &CompactionEntry,
         s3_resolved: Option<Arc<Vec<u8>>>,
     ) -> io::Result<Vec<RecordBatch>> {
+        if entry.idx.codec != crate::buffer::segment_file::PART_CODEC_ARROW {
+            return Err(io::Error::other("expected Arrow WAL PART"));
+        }
         match (&s3_resolved, &entry.source) {
             (Some(data), SegmentSource::S3 { .. }) => {
                 let start = entry.idx.start as usize;
@@ -3596,6 +3592,112 @@ impl Buffers {
         Ok(())
     }
 
+    async fn compact_copy_work(
+        config: &Config,
+        work: CompactionWork,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        budget: Arc<FlushExecutionBudget>,
+    ) -> io::Result<bool> {
+        struct WorkGuard<'a>(&'a CompactionWork);
+        impl Drop for WorkGuard<'_> {
+            fn drop(&mut self) {
+                Buffers::release_work_in_flight(self.0);
+                crate::metrics::counters::dec_wal_compactions_in_flight();
+            }
+        }
+        crate::metrics::counters::inc_wal_compactions_in_flight();
+        crate::metrics::counters::add_wal_compaction_started(work.entries.len() as u64);
+        crate::metrics::counters::add_wal_compaction_transaction_started(1);
+        let _guard = WorkGuard(&work);
+        let mut records = Vec::new();
+        for entry in work.entries.iter() {
+            let s3_body = Self::resolve_entry_s3_body(entry).await?;
+            let entry_for_blocking = entry.clone();
+            let cfg = config.clone();
+            let part = tokio::task::spawn_blocking(move || {
+                Self::read_entry_copy(&cfg, &entry_for_blocking, s3_body)
+            })
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))??;
+            records.extend(part);
+        }
+        let pipeline_type = config.pipeline_type().map_err(io::Error::other)?;
+        let source = config
+            .get_pipeline_input_plugin_config()
+            .ok()
+            .map(|plugin| plugin.input_format());
+        let format = config
+            .get_pipeline_output_plugin_config()
+            .map_err(io::Error::other)?
+            .resolved_output_format(pipeline_type, source)
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("type: copy requires an output format"))?;
+        let body = crate::serdes::copy::encode_copy(format, &records)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        let rows = records.len() as u64;
+        let source_contract =
+            crate::plugins::source_contract::namespace_source_contract(&work.txn.namespace);
+        let sink_ctx = crate::plugins::SinkWriteContext {
+            filename: work.txn.target_filename.clone(),
+            compaction_id: work.txn.id.clone(),
+            idempotency_key: work.txn.id.clone(),
+            wal_refs: work
+                .txn
+                .refs
+                .iter()
+                .map(WalPartRef::to_runtime_ref)
+                .collect(),
+            write_semantics: work.txn.semantics,
+            schema_fingerprint: work.txn.schema_fingerprint.clone(),
+            cdc_ctx: None,
+            source_contract: source_contract.as_ref(),
+        };
+        let sent_txn = work.txn.clone().mark_sent();
+        Self::persist_compaction_manifest(config, &sent_txn).await?;
+        let _sink_permit = budget.acquire_sink().await?;
+        shared_output.sync_bytes(body, rows, sink_ctx).await?;
+        Self::persist_compaction_manifest(config, &sent_txn.clone().mark_acked()).await?;
+        Self::tombstone_grouped_work(config, &work)?;
+        COMPACT_FAILURES.remove(&format!("{}:{}", work.txn.sink_ref, work.txn.id));
+        crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
+        crate::metrics::counters::add_wal_compaction_transaction_completed(1);
+        Ok(true)
+    }
+
+    fn read_entry_copy(
+        config: &Config,
+        entry: &CompactionEntry,
+        s3_resolved: Option<Arc<Vec<u8>>>,
+    ) -> io::Result<Vec<crate::serdes::copy::CopyWalRecord>> {
+        if entry.idx.codec != crate::buffer::segment_file::PART_CODEC_COPY {
+            return Err(io::Error::other("expected copy WAL PART"));
+        }
+        let bytes = match (&s3_resolved, &entry.source) {
+            (Some(data), SegmentSource::S3 { .. }) => {
+                let start = entry.idx.start as usize;
+                let end = start.saturating_add(entry.idx.len as usize).min(data.len());
+                data[start..end].to_vec()
+            }
+            (None, SegmentSource::Disk(seg_path) | SegmentSource::Wal { path: seg_path, .. }) => {
+                let mut file = DirectIoFile::open(seg_path)?;
+                file.seek(io::SeekFrom::Start(entry.idx.start))?;
+                let mut buf = vec![0u8; entry.idx.len as usize];
+                file.read_exact(&mut buf).or_else(|err| {
+                    Self::maybe_quarantine_disk_read_error(config, entry, seg_path, &err)?;
+                    Err(err)
+                })?;
+                buf
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "copy compaction source/body mismatch",
+                ))
+            }
+        };
+        crate::buffer::segment_file::decode_copy_part(&bytes)
+    }
+
     async fn compact_grouped_work(
         config: &Config,
         work: CompactionWork,
@@ -3611,6 +3713,24 @@ impl Buffers {
             Self::release_work_in_flight(&work);
             return Ok(false);
         };
+        if work
+            .entries
+            .iter()
+            .any(|entry| entry.idx.codec == crate::buffer::segment_file::PART_CODEC_COPY)
+        {
+            if work
+                .entries
+                .iter()
+                .any(|entry| entry.idx.codec != crate::buffer::segment_file::PART_CODEC_COPY)
+            {
+                Self::release_work_in_flight(&work);
+                return Err(io::Error::other(
+                    "compaction group mixed copy and Arrow WAL parts",
+                ));
+            }
+            let result = Self::compact_copy_work(config, work, shared_output, budget).await;
+            return result;
+        }
         let timeout = Self::grouped_compaction_timeout();
         let job_started = std::time::Instant::now();
         let progress = GroupedCompactionTracker::begin(
@@ -4545,6 +4665,7 @@ mod tests_wal_commit {
             part_meta_start: 0,
             part_meta_len: 0,
             part_meta_summary: SegmentPartMetaSummary::Append,
+            codec: crate::buffer::segment_file::PART_CODEC_ARROW,
             start,
             len: 1024,
         }
@@ -4619,7 +4740,7 @@ mod tests_wal_commit {
                 time: Some(1_700_000_000),
                 schema_fingerprint: "schema-v1".to_string(),
             };
-            batches.insert(key.clone(), vec![make_batch()]);
+            batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
             parts_meta.insert(key, (0, SystemTime::UNIX_EPOCH));
         }
         let offsets = StdHashMap::new();
@@ -4728,7 +4849,7 @@ mod tests_wal_commit {
             time: Some(0),
             schema_fingerprint: "schema".into(),
         };
-        batches.insert(key.clone(), vec![make_batch()]);
+        batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
         let mut parts_meta = StdHashMap::new();
         parts_meta.insert(key, (0, std::time::SystemTime::now()));
         let (meta, _, _) = seg
@@ -4817,8 +4938,8 @@ mod tests_wal_commit {
             time: Some(0),
             schema_fingerprint: "schema".to_string(),
         };
-        let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
-        batches.insert(key.clone(), vec![make_batch()]);
+        let mut batches: StdHashMap<PartitionKey, WalPayload> = StdHashMap::new();
+        batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
         let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
@@ -4847,8 +4968,8 @@ mod tests_wal_commit {
             time: Some(0),
             schema_fingerprint: "schema".to_string(),
         };
-        let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
-        batches.insert(key.clone(), vec![make_batch()]);
+        let mut batches: StdHashMap<PartitionKey, WalPayload> = StdHashMap::new();
+        batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
         let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
@@ -4880,8 +5001,8 @@ mod tests_wal_commit {
             time: Some(0),
             schema_fingerprint: "schema".to_string(),
         };
-        let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
-        batches.insert(key.clone(), vec![make_batch()]);
+        let mut batches: StdHashMap<PartitionKey, WalPayload> = StdHashMap::new();
+        batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
         let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let empty_blobs: StdHashMap<PartitionKey, Vec<u8>> = StdHashMap::new();
@@ -4985,7 +5106,7 @@ mod tests_wal_commit {
             _time: Some(0),
             _schema_fingerprint: String::new(),
             schema,
-            record_batches: Some(vec![batch]),
+            payload: WalPayload::Arrow(vec![batch]),
             cdc_rows: None,
             checkpoint_update: None,
         };
@@ -5049,7 +5170,7 @@ mod tests_wal_commit {
                 time: Some(1_700_000_000),
                 schema_fingerprint: "schema-v1".to_string(),
             };
-            batches.insert(key.clone(), vec![make_batch()]);
+            batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
             parts_meta.insert(key.clone(), (1024, SystemTime::UNIX_EPOCH));
             let rows = (0..3)
                 .map(|row| WalRowMeta {
@@ -5516,6 +5637,7 @@ mod compaction_semantics_tests {
             part_meta_start: 0,
             part_meta_len: 0,
             part_meta_summary: SegmentPartMetaSummary::Append,
+            codec: crate::buffer::segment_file::PART_CODEC_ARROW,
             start: 0,
             len: 100,
         };

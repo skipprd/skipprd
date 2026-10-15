@@ -1,0 +1,4 @@
+<records>
+  <record><id>1</id><region>eu</region><price>9.5</price></record>
+  <record><id>2</id><region>us</region><price>4.0</price></record>
+</records>

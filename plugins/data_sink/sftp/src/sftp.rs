@@ -4,8 +4,9 @@ use futures::StreamExt;
 use serde_derive::Deserialize;
 use skippr_object_writer::backends::AtomicFileBackend;
 use skippr_object_writer::{
-    CompletionMetadata, MultipartUpload, ObjectPartReceipt, ObjectWriteBackend, ObjectWriteError,
-    ObjectWriteReceipt, ObjectWriteRequest, ObjectWriteSession, ObjectWriterConfig, PartMetadata,
+    identity_put_bytes, CompletionMetadata, MultipartUpload, ObjectPartReceipt, ObjectWriteBackend,
+    ObjectWriteError, ObjectWriteReceipt, ObjectWriteRequest, ObjectWriteSession,
+    ObjectWriterConfig, PartMetadata,
 };
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
@@ -422,6 +423,21 @@ impl DataSink for DataSinkSftpPlugin {
         Ok(SinkWriteOutcome::Applied)
     }
 
+    async fn sync_bytes(
+        &self,
+        body: Vec<u8>,
+        rows: u64,
+        ctx: skippr_runtime_sdk::plugins::SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
+        self.write_copy_bytes(body, rows, &remote_file_path).await?;
+        Ok(SinkWriteOutcome::Applied)
+    }
+
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::SFTP
     }
@@ -628,7 +644,9 @@ impl DataSinkSftpPlugin {
             skippr_runtime_sdk::serdes::output_format::OutputFormat::Jsonl => {
                 session.write_jsonl(batches).await
             }
-            skippr_runtime_sdk::serdes::output_format::OutputFormat::Native => {
+            skippr_runtime_sdk::serdes::output_format::OutputFormat::Native
+            | skippr_runtime_sdk::serdes::output_format::OutputFormat::Csv
+            | skippr_runtime_sdk::serdes::output_format::OutputFormat::Xml => {
                 return Err(std::io::Error::other(
                     skippr_runtime_sdk::serdes::output_format::OutputFormat::FILE_SINK_NEEDS_PARQUET_OR_JSONL,
                 ));
@@ -640,6 +658,30 @@ impl DataSinkSftpPlugin {
         counters::add_parquet_bytes(receipt.bytes);
         counters::add_upload(1);
         Ok(receipt)
+    }
+
+    async fn write_copy_bytes(
+        &self,
+        body: Vec<u8>,
+        rows: u64,
+        remote_file_path: &str,
+    ) -> Result<ObjectWriteReceipt, std::io::Error> {
+        use skippr_runtime_sdk::metrics::counters;
+        let format = self
+            .output_layout
+            .required_format()
+            .map_err(std::io::Error::other)?;
+        counters::inc_uploads_in_flight();
+        let result = identity_put_bytes(
+            self.object_backend.clone(),
+            remote_file_path,
+            format.content_type(),
+            body,
+            rows,
+        )
+        .await;
+        counters::dec_uploads_in_flight();
+        result.map_err(|error| std::io::Error::other(error.to_string()))
     }
 
     async fn remote_manifest_matches(
@@ -768,5 +810,57 @@ mod tests {
             ),
             "/exports/root/events/p_rmc=EU1/p_year=2022/p_month=2/p_day=19/apply-0001.parquet"
         );
+        let mut csv = plugin;
+        csv.output_layout.format =
+            Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Csv);
+        assert_eq!(
+            csv.remote_file_path("namespace=events", "apply-0001"),
+            "/exports/root/events/apply-0001.csv"
+        );
+        csv.output_layout.format =
+            Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Xml);
+        assert_eq!(
+            csv.remote_file_path("namespace=events", "apply-0001"),
+            "/exports/root/events/apply-0001.xml"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_identity_put_writes_object_bytes() {
+        let config = test_config();
+        let spool_root =
+            std::env::temp_dir().join(format!("skippr-sftp-copy-spool-{}", std::process::id()));
+        let plugin = DataSinkSftpPlugin {
+            config: config.clone(),
+            object_backend: Arc::new(SftpObjectBackend {
+                config,
+                spool_backend: Arc::new(AtomicFileBackend::new()),
+                spool_root,
+                uploads: Mutex::new(HashMap::new()),
+                next_upload_id: AtomicU64::new(1),
+            }),
+            output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                format: Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Jsonl),
+                ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+            },
+        };
+        let dir = std::env::temp_dir().join(format!("skippr-sftp-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let remote = plugin.remote_file_path("namespace=events", "apply-copy");
+        let path = dir.join(remote.trim_start_matches('/'));
+        let body = b"{\"id\":1}\n".to_vec();
+        skippr_object_writer::identity_put_bytes(
+            std::sync::Arc::new(AtomicFileBackend::new()),
+            path.to_string_lossy(),
+            skippr_runtime_sdk::serdes::output_format::OutputFormat::Jsonl.content_type(),
+            body.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(remote, "/exports/root/events/apply-copy.jsonl");
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

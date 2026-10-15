@@ -119,6 +119,7 @@ pub struct DataSourceS3Plugin {
     optimal_chunk_size: usize,
     #[allow(dead_code)]
     pending_cap: Option<Arc<AtomicUsize>>,
+    pipeline_type: skippr_runtime_sdk::protocol::PipelineType,
 }
 
 impl DataSourceS3Plugin {
@@ -143,6 +144,7 @@ impl DataSourceS3Plugin {
             active_threads: 0,
             optimal_chunk_size: 0,
             pending_cap: None,
+            pipeline_type: skippr_runtime_sdk::protocol::PipelineType::Ingest,
         }
     }
 
@@ -153,7 +155,9 @@ impl DataSourceS3Plugin {
         let runtime_child_data_dir = format!("{}/runtime_source_children/s3", context.data_dir);
         let temp_dir = format!("{}/source", runtime_child_data_dir);
         let _ = fs::create_dir_all(&temp_dir);
-        Self::from_config(config, temp_dir).await
+        let mut plugin = Self::from_config(config, temp_dir).await;
+        plugin.pipeline_type = context.pipeline_type;
+        plugin
     }
 
     // Continuation token persistence removed; rely on paginator state.
@@ -495,7 +499,13 @@ impl DataSourceS3Plugin {
                     out
                 }
             })
-            .buffer_unordered(dl_concurrency.min(32));
+            .buffer_unordered(
+                if self.pipeline_type == skippr_runtime_sdk::protocol::PipelineType::Copy {
+                    dl_concurrency
+                } else {
+                    dl_concurrency.min(32)
+                },
+            );
 
         let mut current_batch: Vec<IngestBatch> = Vec::new();
         let mut current_bytes: usize = 0;

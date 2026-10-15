@@ -35,6 +35,7 @@ pub mod internalfields;
 pub mod lineage;
 pub mod metrics;
 pub mod pipeline_backend;
+pub mod pipeline_type;
 pub mod plugins;
 pub mod query_flight;
 pub mod runtime_plugins;
