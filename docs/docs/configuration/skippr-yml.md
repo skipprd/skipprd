@@ -155,8 +155,8 @@ Skipprd rejects any other root key, and any unknown key inside these sections, w
 | `skipprd_el_storage_mode` | `s3` or `local` | `s3` | Where pipeline metadata (discovered schemas and stats) is kept. `local` keeps it under `DATA_DIR`; `s3` keeps it in `skippr_s3_bucket`. Falls back to `SKIPPRD_EL_STORAGE_MODE`. |
 | `skippr_s3_bucket` | string | none | S3 bucket for pipeline metadata when `skipprd_el_storage_mode` is `s3`, and the default bucket for the WAL when `WAL_STORAGE=s3`. Falls back to `SKIPPR_S3_BUCKET`. |
 | `wal_s3_bucket` | string | `skippr_s3_bucket` | Dedicated bucket for the write-ahead log when `WAL_STORAGE=s3`. See [WAL and buffering](/configuration/buffering). |
-| `store.type` | `sled`, `dynamodb`, or `cloud-tables` | `sled` | Where sync progress is saved. `sled` is the local on-disk state store. See [State store](/configuration/skippr-store). |
-| `store.name` | string | none | DynamoDB or Cloud Tables table name. Required when `store.type` is `dynamodb` or `cloud-tables`. |
+| `store.type` | `sled` or `dynamodb` | `sled` | Where sync progress is saved. `sled` is the local on-disk state store. See [State store](/configuration/skippr-store). |
+| `store.name` | string | none | DynamoDB table name. Required when `store.type` is `dynamodb`. |
 
 The WAL backend is not a YAML key. Set it with the `WAL_STORAGE` environment variable or the `--wal-storage` flag, because it describes the machine Skipprd runs on rather than the data you move.
 

@@ -71,7 +71,7 @@ These flags apply to every `connect` command.
 | `--storage-mode <MODE>` | None | Sets `skippr.skipprd_el_storage_mode`: `local` keeps engine state on local disk, `s3` keeps it in `skippr.skippr_s3_bucket`. Setting `local` without `--skippr-s3-bucket` removes any existing `skippr_s3_bucket`. |
 | `--skippr-s3-bucket <BUCKET>` | None | Sets `skippr.skippr_s3_bucket`, the bucket for engine state in `s3` storage mode. |
 | `--wal-s3-bucket <BUCKET>` | None | Sets `skippr.wal_s3_bucket`, a dedicated bucket for WAL segments. |
-| `--store-type <TYPE>` | None | Sets `skippr.store.type`: `sled`, `dynamodb`, or `cloud-tables`. Replaces the whole `store` block. |
+| `--store-type <TYPE>` | None | Sets `skippr.store.type`: `sled` or `dynamodb`. Replaces the whole `store` block. |
 | `--store-name <NAME>` | None | Sets `skippr.store.name`. Requires `--store-type`. |
 | `--log [LEVEL]` | Off | Print logs to stderr. |
 
@@ -295,7 +295,7 @@ skipprd doctor
 | `plugin name 'warehouse' already uses Postgres, not Snowflake` | That `--name` is already a different connector in `skippr.yml`. | Use a new `--name`, or remove the old entry. |
 | `connect schema-sink requires a data_sink on this pipeline` | The schema sink was added before the destination. | Run `connect data-sink` for the pipeline first. |
 | `paired ... configs must be equal before a write changes them` | A paired data sink and schema sink were edited apart by hand. | Make the two blocks in `skippr.yml` identical, then rerun. |
-| `--store-name requires --store-type` | `--store-name` was passed alone. | Add `--store-type dynamodb` or `--store-type cloud-tables`. |
+| `--store-name requires --store-type` | `--store-name` was passed alone. | Add `--store-type dynamodb`. |
 | `entry name "a.b" must be non-empty and contain no '.'` | Entry names are referenced as `<section>.<name>`, so dots are not allowed. | Use underscores or hyphens. |
 | `connect requires --pipeline` | No `--pipeline` and no terminal to prompt on (for example in CI). | Pass `--pipeline` and `--name` explicitly. |
 | `... is not a YAML (.yml / .yaml) file` | `--config` points at a JSON or TOML file. | `connect` writes YAML only. Point `--config` at a `.yml` file. |
