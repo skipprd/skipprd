@@ -1,5 +1,5 @@
 name: File to File copy matrix
-description: Copy json/csv/xml from a local File source through type: copy into File objects.
+description: "Copy json/csv/xml from a local File source through type: copy into File objects."
 inputs:
   skipprd_path:
     required: true

@@ -209,6 +209,24 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("gh release", publish)
         self.assertIn("secrets.GITHUB_TOKEN", publish)
 
+    def test_composite_action_descriptions_quote_embedded_colons(self) -> None:
+        actions = list((ROOT / ".github" / "actions").rglob("action.yaml"))
+        self.assertTrue(actions)
+        for path in actions:
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if not line.startswith("description:"):
+                    continue
+                value = line[len("description:") :].lstrip()
+                if ": " not in value.strip("'\""):
+                    continue
+                quoted = (value.startswith('"') and value.endswith('"')) or (
+                    value.startswith("'") and value.endswith("'")
+                )
+                self.assertTrue(
+                    quoted,
+                    f"{path.relative_to(ROOT)}:{i}: quote description when it contains ': '",
+                )
+
     def test_rust_ci_runs_only_on_engine_tags(self) -> None:
         text = RUST.read_text(encoding="utf-8")
         header = text.split("\njobs:", 1)[0]
