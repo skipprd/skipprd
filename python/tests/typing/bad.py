@@ -39,7 +39,7 @@ DataSourceS3(s3_bucket="b")  # type: ignore[call-arg]
 # Wrong field type.
 DataSourceS3(s3_bucket="b", s3_prefix="p", batch_size_bytes="1MB")  # type: ignore[arg-type]
 
-# Literal fields take only their declared values.
+# Enum fields take class members, not strings.
 DataSourceGoogleSerpRanks(keywords=[], targets=[], device="tablet")  # type: ignore[arg-type]
 
 # Unpaired sinks link a SchemaSinkRef, not a name.
