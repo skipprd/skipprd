@@ -814,7 +814,7 @@ fn emit_stub_unit_enum(out: &mut String, unit_enum: &UnitEnumSpec) {
     for (_, py, _) in &unit_enum.variants {
         out.push_str(&format!("    {py}: ClassVar[{}]\n", unit_enum.alias));
     }
-    out.push_str("    def __eq__(self, other: object) -> bool: ...\n");
+    out.push_str("    def __eq__(self, other: object, /) -> bool: ...\n");
     out.push_str("    def __hash__(self) -> int: ...\n\n");
 }
 
