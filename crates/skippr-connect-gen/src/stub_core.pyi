@@ -2,7 +2,7 @@
 
 import os
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, TypeAlias, final, overload
+from typing import Any, ClassVar, Literal, TypeAlias, final, overload
 
 import pyarrow
 

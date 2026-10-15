@@ -672,7 +672,12 @@ fn build_source_start_request_for_pipeline(
     .map_err(io::Error::other)?;
 
     Ok(SourceStartRequest {
-        context: runtime_execution_context(config, pipeline_name, execution_mode),
+        context: runtime_execution_context(
+            config,
+            pipeline_name,
+            execution_mode,
+            RuntimeBinding::Primary,
+        ),
         config: source_config,
         once: source_once || execution_mode == RuntimeExecutionMode::Discover,
         source_ingest_window: runtime_source_ingest_window(),
@@ -828,7 +833,7 @@ async fn ingest_runtime_batches_into_core(
             _time: batch.time,
             _schema_fingerprint: batch.schema_fingerprint,
             schema,
-            record_batches: Some(record_batches),
+            payload: crate::buffer::segment_file::WalPayload::Arrow(record_batches),
             cdc_rows: batch.cdc_rows,
             checkpoint_update: batch
                 .checkpoint_update
@@ -859,8 +864,7 @@ async fn ingest_runtime_batches_into_core(
 
     let arrow_bytes = buffer_batches
         .iter()
-        .flat_map(|batch| batch.record_batches.as_ref().into_iter().flatten())
-        .map(|batch| batch.get_array_memory_size())
+        .map(|batch| batch.payload.estimated_bytes() as usize)
         .sum::<usize>();
     crate::metrics::counters::add_messages(total_rows);
     crate::metrics::counters::add_source_bytes(total_bytes);
@@ -1532,6 +1536,7 @@ fn runtime_execution_context(
     config: &Config,
     pipeline_name: &str,
     execution_mode: RuntimeExecutionMode,
+    binding: RuntimeBinding,
 ) -> RuntimeExecutionContext {
     let partition_fields = config
         .get_transform_batch_partition_fields()
@@ -1573,14 +1578,35 @@ fn runtime_execution_context(
             order_fields,
             time_partition_granularity,
             time_partition_prefix,
-            format: match config.get_pipeline_output_plugin_config() {
-                Ok(entry) => entry
-                    .resolved_output_format()
-                    .expect("output format was already validated"),
-                Err(_) => None,
+            format: {
+                let pipeline_type = binding.format_pipeline(
+                    config
+                        .pipeline_type()
+                        .expect("pipeline type was already validated"),
+                );
+                let source = config
+                    .get_pipeline_input_plugin_config()
+                    .ok()
+                    .map(|source| source.input_format());
+                let entry = match binding {
+                    RuntimeBinding::Primary => config.get_pipeline_output_plugin_config().ok(),
+                    RuntimeBinding::Deadletter => config
+                        .get_pipeline_deadletter_plugin_config()
+                        .ok()
+                        .flatten(),
+                };
+                match entry {
+                    Some(entry) => entry
+                        .resolved_output_format(pipeline_type, source)
+                        .expect("output format was already validated"),
+                    None => None,
+                }
             },
         },
         inject_fields,
+        pipeline_type: config
+            .pipeline_type()
+            .expect("pipeline type was already validated"),
     }
 }
 
@@ -3005,7 +3031,7 @@ impl RuntimeDataSinkPlugin {
                 ))
             })?;
         let mut context =
-            runtime_execution_context(app_cfg, &pipeline_name, RuntimeExecutionMode::Sync);
+            runtime_execution_context(app_cfg, &pipeline_name, RuntimeExecutionMode::Sync, binding);
         if let Some(data_dir) = data_dir {
             context.data_dir = data_dir;
         }
@@ -3212,16 +3238,28 @@ impl RuntimeDataSinkPlugin {
             .await
     }
 
+    async fn send_sink_raw_request(
+        &self,
+        request: SinkRunRequest,
+        body: Vec<u8>,
+        rows: u64,
+    ) -> io::Result<SinkWriteOutcome> {
+        self.send_sink_request(request, None, Some((body, rows)))
+            .await
+    }
+
     async fn send_sink_request(
         &self,
         request: SinkRunRequest,
-        stream: datafusion::execution::SendableRecordBatchStream,
+        stream: Option<datafusion::execution::SendableRecordBatchStream>,
+        preencoded: Option<(Vec<u8>, u64)>,
     ) -> io::Result<SinkWriteOutcome> {
         let mut retried = false;
         let mut schema_refreshes = 0usize;
-        let mut stream = Some(stream);
-        let mut encoded_bytes: Option<Vec<u8>> = None;
-        let mut encoded_rows: Option<u64> = None;
+        let mut stream = stream;
+        let mut encoded_bytes: Option<Vec<u8>> =
+            preencoded.as_ref().map(|(bytes, _)| bytes.clone());
+        let mut encoded_rows: Option<u64> = preencoded.as_ref().map(|(_, rows)| *rows);
         let prepare = PrepareSink {
             request_id: request.request_id,
             envelope: sink_apply_envelope(&request),
@@ -3751,7 +3789,7 @@ impl DataSink for RuntimeDataSinkPlugin {
             payload_mode: RuntimeSinkPayloadMode::FullStream,
             live_wal_segments: None,
         };
-        self.send_sink_request(request, stream).await
+        self.send_sink_request(request, Some(stream), None).await
     }
 
     async fn sync_grouped(
@@ -3810,6 +3848,65 @@ impl DataSink for RuntimeDataSinkPlugin {
             live_wal_segments: ctx.live_wal_segments,
         };
         self.send_grouped_sink_request(request, reader).await
+    }
+
+    async fn sync_bytes(
+        &self,
+        body: Vec<u8>,
+        rows: u64,
+        ctx: crate::plugins::SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, io::Error> {
+        let namespace =
+            query_value_from_runtime_filename(&ctx.filename, "namespace").or_else(|| {
+                ctx.wal_refs
+                    .first()
+                    .map(|wal_ref| wal_ref.namespace.clone())
+            });
+        let copy =
+            self.install_request.context.pipeline_type == crate::pipeline_type::PipelineType::Copy;
+        let (required_schema_namespace, schema_version) = if copy {
+            (String::new(), 0)
+        } else {
+            let required_schema_namespace = namespace.clone().unwrap_or_default();
+            let schema_version = self
+                .ensure_namespace_schema_state(&required_schema_namespace)
+                .await?;
+            (required_schema_namespace, schema_version)
+        };
+        let source_contract = ctx.source_contract.cloned().or_else(|| {
+            namespace
+                .as_deref()
+                .and_then(crate::plugins::source_contract::namespace_source_contract)
+        });
+        let request = SinkRunRequest {
+            request_id: next_runtime_request_id(),
+            compaction_id: if ctx.compaction_id.is_empty() {
+                runtime_compaction_id(&ctx.filename)
+            } else {
+                ctx.compaction_id.clone()
+            },
+            idempotency_key: if ctx.idempotency_key.is_empty() {
+                if ctx.compaction_id.is_empty() {
+                    runtime_compaction_id(&ctx.filename)
+                } else {
+                    ctx.compaction_id.clone()
+                }
+            } else {
+                ctx.idempotency_key.clone()
+            },
+            wal_refs: ctx.wal_refs.clone(),
+            write_semantics: ctx.write_semantics,
+            schema_fingerprint: ctx.schema_fingerprint.clone(),
+            binding: self.install_request.binding,
+            required_schema_namespace,
+            required_schema_version: schema_version,
+            filename: ctx.filename,
+            cdc_ctx: ctx.cdc_ctx.cloned(),
+            source_contract,
+            payload_mode: RuntimeSinkPayloadMode::RawBytes,
+            live_wal_segments: None,
+        };
+        self.send_sink_raw_request(request, body, rows).await
     }
 
     fn capability(&self) -> &'static cdc::SinkCapability {
@@ -3883,7 +3980,12 @@ impl RuntimeSchemaSinkPlugin {
         config: RuntimeSchemaConfig,
     ) -> io::Result<Self> {
         let install_request = RuntimeSchemaInstallRequest {
-            context: runtime_execution_context(app_cfg, &pipeline_name, RuntimeExecutionMode::Sync),
+            context: runtime_execution_context(
+                app_cfg,
+                &pipeline_name,
+                RuntimeExecutionMode::Sync,
+                binding,
+            ),
             binding,
             config,
         };
@@ -4194,14 +4296,16 @@ mod tests {
         BufferedRuntimeFrameReader, RuntimeChildConnection, RuntimeSinkProcessBudget,
         MAX_RUNTIME_FRAME_BYTES,
     };
-    use crate::helpers::configuration::Config;
+    use crate::helpers::configuration::{Config, Pipeline};
     use crate::helpers::offsets::{
         OffsetKey, OffsetTypes, Offsets, RuntimeOffsetOperation, RuntimeOffsetRpcRequest,
         RuntimeOffsetValue,
     };
+    use crate::helpers::plugin_config::{DataSinkEntry, PluginConfigEntry};
     use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
-    use crate::runtime_plugins::protocol::RuntimeBinding;
+    use crate::runtime_plugins::protocol::{RuntimeBinding, RuntimeExecutionMode};
     use crate::runtime_plugins::wire::write_frame;
+    use crate::serdes::output_format::OutputFormat;
     use serde::{Deserialize, Serialize};
     use serial_test::serial;
     use tempfile::TempDir;
@@ -4211,6 +4315,63 @@ mod tests {
 
     fn env_lock() -> MutexGuard<'static, ()> {
         ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn deadletter_runtime_context_does_not_inherit_copy_csv() {
+        let mut config = Config::new();
+        let mut pipeline = Pipeline::default();
+        pipeline.r#type = Some(crate::pipeline_type::PipelineType::Copy);
+        pipeline.data_sink = Some("data_sinks.out".into());
+        pipeline.deadletter_sink = Some("deadletter_sinks.dl".into());
+        config.pipelines.insert("p".to_string(), pipeline);
+        config.data_sinks = Some(
+            [(
+                "out".into(),
+                DataSinkEntry {
+                    config: PluginConfigEntry {
+                        plugin_name: "File".into(),
+                        config: serde_json::json!({ "format": "csv" }),
+                    },
+                    schema_sink: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        config.deadletter_sinks = Some(
+            [(
+                "dl".into(),
+                DataSinkEntry {
+                    config: PluginConfigEntry {
+                        plugin_name: "File".into(),
+                        config: serde_json::json!({ "format": "jsonl" }),
+                    },
+                    schema_sink: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let bound = config.bind_pipeline("p");
+        let primary = super::runtime_execution_context(
+            &bound,
+            "p",
+            RuntimeExecutionMode::Sync,
+            RuntimeBinding::Primary,
+        );
+        let deadletter = super::runtime_execution_context(
+            &bound,
+            "p",
+            RuntimeExecutionMode::Sync,
+            RuntimeBinding::Deadletter,
+        );
+        assert_eq!(primary.output_layout.format, Some(OutputFormat::Csv));
+        assert_eq!(deadletter.output_layout.format, Some(OutputFormat::Jsonl));
+        assert_eq!(
+            deadletter.pipeline_type,
+            crate::pipeline_type::PipelineType::Copy
+        );
     }
 
     struct DataDirGuard {

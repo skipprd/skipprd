@@ -1,0 +1,56 @@
+name: S3 copy matrix
+description: Copy json/csv/xml through type: copy, S3 (R2) → File and File → S3 (R2).
+inputs:
+  skipprd_path:
+    required: true
+  plugin_binaries_dir:
+    required: true
+  r2_account_id:
+    required: true
+  r2_access_key_id:
+    required: true
+  r2_secret_access_key:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install Python deps
+      shell: bash
+      run: python3 -m pip install --quiet boto3
+    - name: S3 → File copy matrix
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.r2_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.r2_secret_access_key }}
+        AWS_DEFAULT_REGION: auto
+        AWS_EC2_METADATA_DISABLED: "true"
+        USE_LOCAL_PLUGIN_CODE: "1"
+        R2_ACCOUNT_ID: ${{ inputs.r2_account_id }}
+        SKIPPRD_PATH: ${{ inputs.skipprd_path }}
+      run: |
+        set -euo pipefail
+        work="${RUNNER_TEMP:-/tmp}/skippr-s3-file-copy"
+        mkdir -p "${work}" target/release
+        cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
+        chmod +x target/release/skippr-plugin-* || true
+        python3 .github/scripts/local_runtime_plugins.py \
+          --config .github/actions/e2e/s3_file_copy/skippr.yml \
+          --pipeline s3_file_copy \
+          --output-dir "${work}/manifests" \
+          --release \
+          --skip-cargo-build
+        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
+        export COPY_WORK="${work}"
+        export R2_S3_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+        export COPY_S3_PREFIX="s3-file-copy/${GITHUB_RUN_ID}/"
+        python3 .github/actions/e2e/s3_file_copy/run_matrix.py
+        python3 .github/scripts/local_runtime_plugins.py \
+          --config .github/actions/e2e/s3_file_copy/skippr_s3_sink.yml \
+          --pipeline file_s3_copy \
+          --output-dir "${work}/manifests-s3-sink" \
+          --release \
+          --skip-cargo-build
+        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests-s3-sink"
+        export COPY_WORK="${work}/s3-sink"
+        export COPY_S3_PREFIX="file-s3-copy/${GITHUB_RUN_ID}/"
+        python3 .github/actions/e2e/s3_file_copy/run_s3_sink.py

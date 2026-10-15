@@ -24,7 +24,7 @@ export XERO_REFRESH_TOKEN="..."
 ::: code-group
 
 ```python [Python]
-from skippr import Config, DataSourceXeroAccounting, EnvRef, Pipeline
+from skippr import Config, DataSourceXeroAccounting, DataSourceXeroAccountingStreamProfile, EnvRef, Pipeline
 
 cfg = Config.discover()
 src = cfg.data_source(
@@ -35,7 +35,7 @@ src = cfg.data_source(
         oauth_client_id="${XERO_CLIENT_ID}",
         oauth_client_secret=EnvRef("XERO_CLIENT_SECRET"),
         oauth_refresh_token=EnvRef("XERO_REFRESH_TOKEN"),
-        stream_profile="full",
+        stream_profile=DataSourceXeroAccountingStreamProfile.FULL,
     ),
 )
 cfg.pipeline("accounting", Pipeline(data_source=src, data_sink=cfg.get_data_sink("lake")))

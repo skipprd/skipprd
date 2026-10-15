@@ -99,7 +99,7 @@ To stream changes after the copy:
 ::: code-group
 
 ```python [Python]
-from skippr import Config, DataSourceMysql, EnvRef, Pipeline
+from skippr import Config, DataSourceMysql, DataSourceMysqlSourceCdcMode, EnvRef, Pipeline
 
 cfg = Config.discover()
 src = cfg.data_source(
@@ -107,7 +107,7 @@ src = cfg.data_source(
     DataSourceMysql(
         connection_string=EnvRef("MYSQL_CONNECTION_STRING"),
         tables=["shop.customers", "shop.orders"],
-        cdc_mode="snapshot_then_cdc",
+        cdc_mode=DataSourceMysqlSourceCdcMode.SNAPSHOTTHENCDC,
         server_id=4201,
     ),
 )

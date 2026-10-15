@@ -445,6 +445,27 @@ impl DataSink for OutputRouter {
         plugin.sync_grouped(reader, ctx).await
     }
 
+    async fn sync_bytes(
+        &self,
+        body: Vec<u8>,
+        rows: u64,
+        ctx: crate::plugins::SinkWriteContext<'_>,
+    ) -> Result<crate::plugins::SinkWriteOutcome, std::io::Error> {
+        let sink_ref = BufferChunker::decode_file_sink_ref(&ctx.filename);
+        let target_sink_ref = if sink_ref.is_empty() {
+            self.primary_sink_ref.clone()
+        } else {
+            sink_ref
+        };
+        let plugin = self.sinks.get(&target_sink_ref).ok_or_else(|| {
+            std::io::Error::other(format!(
+                "No output sink registered for persisted sink_ref '{}'",
+                target_sink_ref
+            ))
+        })?;
+        plugin.sync_bytes(body, rows, ctx).await
+    }
+
     async fn install_schema_state(
         &self,
         schema_version: u64,
@@ -557,6 +578,12 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
     config
         .validate_pipeline_for_run(&pipeline_name)
         .map_err(io::Error::other)?;
+    if config.pipeline_type().map_err(io::Error::other)? == crate::pipeline_type::PipelineType::Copy
+    {
+        return Err(io::Error::other(
+            "skipprd discover is not used with type: copy",
+        ));
+    }
     Ingest::reset_discovery_progress();
     let start_time = Instant::now();
 
@@ -572,8 +599,9 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
     );
 
     info!(
-        "Analysing data and generating Skippr metadata for pipeline: {}",
-        pipeline_name
+        pipeline = %pipeline_name,
+        pipeline.type = config.pipeline_type_log_label(),
+        "Analysing data and generating Skippr metadata"
     );
 
     let _data_dir = config.get_data_dir();
@@ -876,6 +904,14 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
                 );
                 config.set_metadata(&seeded, false).await;
                 seeded
+            } else if config.pipeline_type().map_err(io::Error::other)?
+                == crate::pipeline_type::PipelineType::Copy
+            {
+                info!(
+                    "type: copy: no schema metadata for pipeline '{}'; continuing without discover",
+                    pipeline_name
+                );
+                PipelineMetadata::new(config)
             } else {
                 info!(
                     "No existing Skippr metadata for pipeline '{}'; running discover first",
@@ -893,7 +929,11 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
         Err(true) => PipelineMetadata::new(config),
     };
 
-    info!("Syncing pipeline: {}", pipeline_name);
+    info!(
+        pipeline = %pipeline_name,
+        pipeline.type = config.pipeline_type_log_label(),
+        "Syncing pipeline"
+    );
     // Stats tailer removed; catalogs built at end-of-run only
 
     crate::metrics::ingest_profile::reset_profile_counters();
@@ -987,7 +1027,11 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
         };
         use std::collections::BTreeMap;
         let pipeline = config.get_pipeline_config();
-        if let Some(ref cdc_cfg) = pipeline.cdc {
+        if config.pipeline_type().map_err(io::Error::other)?
+            == crate::pipeline_type::PipelineType::Cdc
+        {
+            let cdc_cfg = pipeline.cdc.clone().unwrap_or_default();
+            let cdc_cfg = &cdc_cfg;
             let input_name = config.get_pipeline_input_plugin_name();
             let runtime_input_version =
                 config
@@ -1788,6 +1832,15 @@ mod output_router_capability_tests {
             Ok(crate::plugins::SinkWriteOutcome::Applied)
         }
 
+        async fn sync_bytes(
+            &self,
+            _body: Vec<u8>,
+            _rows: u64,
+            _ctx: crate::plugins::SinkWriteContext<'_>,
+        ) -> Result<crate::plugins::SinkWriteOutcome, std::io::Error> {
+            Ok(crate::plugins::SinkWriteOutcome::Applied)
+        }
+
         fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {
             self.0
         }
@@ -1826,5 +1879,32 @@ mod output_router_capability_tests {
             Some("Athena")
         );
         assert!(router.capability_for_sink_ref("unknown_sink").is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_bytes_forwards_to_registered_sink() {
+        let primary = "data_sinks.file".to_string();
+        let mut sinks = HashMap::new();
+        sinks.insert(primary.clone(), boxed_sink(&sink_capabilities::FILE));
+        let router = OutputRouter {
+            primary_sink_ref: primary,
+            sinks,
+        };
+        let ctx = crate::plugins::SinkWriteContext {
+            filename: "namespace=events".to_string(),
+            compaction_id: "c1".to_string(),
+            idempotency_key: "c1".to_string(),
+            wal_refs: Vec::new(),
+            write_semantics:
+                crate::buffer::compaction_transaction::SinkWriteSemantics::IdempotentAtLeastOnce,
+            schema_fingerprint: crate::pipeline_type::COPY_WAL_FINGERPRINT.to_string(),
+            cdc_ctx: None,
+            source_contract: None,
+        };
+        let outcome = router
+            .sync_bytes(b"{\"id\":1}\n".to_vec(), 1, ctx)
+            .await
+            .unwrap();
+        assert_eq!(outcome, crate::plugins::SinkWriteOutcome::Applied);
     }
 }

@@ -9,8 +9,8 @@ use object_store::ObjectStoreExt;
 use serde_derive::Deserialize;
 use skippr_object_writer::backends::ObjectStoreBackend;
 use skippr_object_writer::{
-    ObjectWriteError, ObjectWriteReceipt, ObjectWriteRequest, ObjectWriteSession,
-    ObjectWriterConfig,
+    identity_put_bytes, ObjectWriteError, ObjectWriteReceipt, ObjectWriteRequest,
+    ObjectWriteSession, ObjectWriterConfig,
 };
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
@@ -216,6 +216,21 @@ impl DataSink for DataSinkAzureBlobPlugin {
         let receipt = self.write_stream(stream, &final_key).await?;
         self.write_receipt(&manifest_path, &expected_manifest, &receipt)
             .await?;
+        Ok(SinkWriteOutcome::Applied)
+    }
+
+    async fn sync_bytes(
+        &self,
+        body: Vec<u8>,
+        rows: u64,
+        ctx: skippr_runtime_sdk::plugins::SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        self.write_copy_bytes(body, rows, &final_key).await?;
         Ok(SinkWriteOutcome::Applied)
     }
 
@@ -427,7 +442,7 @@ impl DataSinkAzureBlobPlugin {
                     .await
             }
             OutputFormat::Jsonl => session.write_jsonl(batches).await,
-            OutputFormat::Native => {
+            OutputFormat::Native | OutputFormat::Csv | OutputFormat::Xml => {
                 return Err(io::Error::other(
                     OutputFormat::FILE_SINK_NEEDS_PARQUET_OR_JSONL,
                 ));
@@ -439,6 +454,30 @@ impl DataSinkAzureBlobPlugin {
         counters::add_parquet_bytes(receipt.bytes);
         counters::add_upload(1);
         Ok(receipt)
+    }
+
+    async fn write_copy_bytes(
+        &self,
+        body: Vec<u8>,
+        rows: u64,
+        final_key: &str,
+    ) -> io::Result<ObjectWriteReceipt> {
+        use skippr_runtime_sdk::metrics::counters;
+        let format = self
+            .output_layout
+            .required_format()
+            .map_err(io::Error::other)?;
+        counters::inc_uploads_in_flight();
+        let result = identity_put_bytes(
+            self.object_backend.clone(),
+            final_key,
+            format.content_type(),
+            body,
+            rows,
+        )
+        .await;
+        counters::dec_uploads_in_flight();
+        result.map_err(|error| io::Error::other(error.to_string()))
     }
 
     async fn manifest_matches(
@@ -554,5 +593,52 @@ mod tests {
             ),
             "root/events/region/us/p_year=2022/p_month=2/p_day=19/apply-0001.jsonl"
         );
+        jsonl.output_layout.format =
+            Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Csv);
+        assert_eq!(
+            jsonl.object_key_for_filename("namespace=events", "apply-0001"),
+            "root/events/apply-0001.csv"
+        );
+        jsonl.output_layout.format =
+            Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Xml);
+        assert_eq!(
+            jsonl.object_key_for_filename("namespace=events", "apply-0001"),
+            "root/events/apply-0001.xml"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_identity_put_writes_object_bytes() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let plugin = DataSinkAzureBlobPlugin {
+            store: store.clone(),
+            object_backend: Arc::new(ObjectStoreBackend::new(store.clone())),
+            config: DataSinkAzureBlobPluginConfig {
+                account_name: "account".to_string(),
+                account_key: None,
+                sas_token: None,
+                container: "container".to_string(),
+                prefix: Some("/root/".to_string()),
+                format: None,
+            },
+            output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                format: Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Jsonl),
+                ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+            },
+        };
+        let body = b"{\"id\":1}\n".to_vec();
+        let key = plugin.object_key_for_filename("namespace=events", "apply-copy");
+        plugin
+            .write_copy_bytes(body.clone(), 1, &key)
+            .await
+            .unwrap();
+        let got = store
+            .get(&object_store::path::Path::from(key.as_str()))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(got.as_ref(), body.as_slice());
     }
 }

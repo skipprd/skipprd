@@ -182,7 +182,10 @@ mod tests {
             schema_fingerprint: "fp".into(),
         };
         let mut batches = HashMap::new();
-        batches.insert(key.clone(), vec![batch()]);
+        batches.insert(
+            key.clone(),
+            crate::buffer::segment_file::WalPayload::Arrow(vec![batch()]),
+        );
         let mut meta = HashMap::new();
         meta.insert(key, (12, SystemTime::now()));
         let mut offsets = HashMap::new();

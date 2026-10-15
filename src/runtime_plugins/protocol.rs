@@ -9,6 +9,7 @@ use crate::buffer::compaction_transaction::{
 use crate::discover::OutputMetadata;
 use crate::helpers::configuration::{DataSinkPluginConfig, DataSourcePluginConfig};
 use crate::helpers::offsets::{OffsetKey, RuntimeOffsetRpcRequest, RuntimeOffsetRpcResponse};
+pub use crate::pipeline_type::PipelineType;
 use crate::plugins::cdc::{
     sink_capabilities, CheckpointEnvelope, EventIdSemantics, SinkCapability, SinkGuaranteeTier,
     SourceBootstrapStyle, SourceCapability, SourceCheckpointStyle, SourceGuaranteeTier,
@@ -24,7 +25,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 20;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 21;
 pub const COMMIT_RECEIPT_VERSION: u32 = 1;
 pub const CATALOG_INTENT_VERSION: u32 = 2;
 pub const GLUE_PARTITION_CATALOG_INTENT_VERSION: u32 = 1;
@@ -53,6 +54,18 @@ pub enum RuntimePluginKind {
 pub enum RuntimeBinding {
     Primary,
     Deadletter,
+}
+
+impl RuntimeBinding {
+    pub fn format_pipeline(
+        self,
+        pipeline: crate::pipeline_type::PipelineType,
+    ) -> crate::pipeline_type::PipelineType {
+        match self {
+            Self::Primary => pipeline,
+            Self::Deadletter => crate::pipeline_type::PipelineType::deadletter_format_mode(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -286,7 +299,7 @@ impl RuntimeOutputLayout {
             .format
             .ok_or_else(|| "object sink requires RuntimeOutputLayout.format".to_string())?;
         if format.is_native() {
-            return Err("this sink writes files and needs format parquet or jsonl. Table sinks such as Postgres insert rows and have no file format.".to_string());
+            return Err("this sink writes files and needs a file format (parquet, jsonl, csv, or xml). Table sinks such as Postgres insert rows and have no file format.".to_string());
         }
         Ok(format)
     }
@@ -330,6 +343,8 @@ pub struct RuntimeExecutionContext {
     pub output_layout: RuntimeOutputLayout,
     #[serde(default)]
     pub inject_fields: BTreeMap<String, String>,
+    #[serde(default)]
+    pub pipeline_type: PipelineType,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -743,6 +758,7 @@ pub enum RuntimeSinkPayloadMode {
     #[default]
     FullStream,
     GroupedChunks,
+    RawBytes,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -848,6 +864,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn deadletter_format_pipeline_is_ingest_even_for_copy() {
+        assert_eq!(
+            RuntimeBinding::Primary.format_pipeline(crate::pipeline_type::PipelineType::Copy),
+            crate::pipeline_type::PipelineType::Copy
+        );
+        assert_eq!(
+            RuntimeBinding::Deadletter.format_pipeline(crate::pipeline_type::PipelineType::Copy),
+            crate::pipeline_type::PipelineType::Ingest
+        );
+    }
+
+    #[test]
     fn source_start_roundtrips_at_v17() {
         let frame = HostFrame::RunSource(SourceStartRequest {
             context: RuntimeExecutionContext {
@@ -857,6 +885,7 @@ mod tests {
                 execution_mode: RuntimeExecutionMode::Sync,
                 output_layout: RuntimeOutputLayout::default(),
                 inject_fields: Default::default(),
+                pipeline_type: crate::pipeline_type::PipelineType::Ingest,
             },
             config: RuntimeSourceConfig(RuntimePluginConfigEnvelope::new(
                 "Test",
@@ -874,7 +903,37 @@ mod tests {
         };
         assert_eq!(decoded.context.pipeline_name, "pipeline");
         assert_eq!(decoded.context.execution_mode, RuntimeExecutionMode::Sync);
+        assert_eq!(
+            decoded.context.pipeline_type,
+            crate::pipeline_type::PipelineType::Ingest
+        );
         assert!(decoded.once);
+    }
+
+    #[test]
+    fn sink_install_copy_pipeline_type_roundtrips() {
+        let request = RuntimeSinkInstallRequest {
+            context: RuntimeExecutionContext {
+                pipeline_name: "pipeline".to_string(),
+                workspace_name: "workspace".to_string(),
+                data_dir: "/tmp/data".to_string(),
+                execution_mode: RuntimeExecutionMode::Sync,
+                output_layout: RuntimeOutputLayout::default(),
+                inject_fields: Default::default(),
+                pipeline_type: crate::pipeline_type::PipelineType::Copy,
+            },
+            binding: RuntimeBinding::Primary,
+            config: RuntimeSinkConfig(RuntimePluginConfigEnvelope::new(
+                "File",
+                serde_json::json!({}),
+            )),
+        };
+        let decoded: RuntimeSinkInstallRequest =
+            bincode::deserialize(&bincode::serialize(&request).unwrap()).unwrap();
+        assert_eq!(
+            decoded.context.pipeline_type,
+            crate::pipeline_type::PipelineType::Copy
+        );
     }
 
     #[test]
@@ -1246,8 +1305,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_hard_cut_to_v20() {
-        assert_eq!(RUNTIME_PROTOCOL_VERSION, 20);
+    fn protocol_version_is_hard_cut_to_v21() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 21);
     }
 
     #[test]

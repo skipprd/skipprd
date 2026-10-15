@@ -51,7 +51,7 @@ These live on the pipeline in `skippr.yml` (see [Pipelines](/configuration/pipel
 
 ## What sync does
 
-1. Loads the pipeline's saved schema. If there is none yet, it runs [discover](/cli/discover) first.
+1. Loads the pipeline's saved schema. If there is none yet, it runs [discover](/cli/discover) first. Pipelines with `type: copy` skip this step: copy has no schema, and `skipprd discover` fails closed.
 2. Skips the pipeline if it was disabled with `DISABLE PIPELINE`.
 3. Takes the pipeline's writer lease, so only one `sync` writes a pipeline at a time.
 4. Reads the source in batches and buffers each batch in the WAL.

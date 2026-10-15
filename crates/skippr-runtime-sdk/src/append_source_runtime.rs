@@ -548,6 +548,7 @@ mod tests {
                 execution_mode: RuntimeExecutionMode::Sync,
                 output_layout: RuntimeOutputLayout::default(),
                 inject_fields: Default::default(),
+                pipeline_type: Default::default(),
             },
             config: RuntimeSourceConfig(RuntimePluginConfigEnvelope::new("Test", json!({}))),
             once,

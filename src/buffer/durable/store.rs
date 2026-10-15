@@ -18,7 +18,7 @@ use super::mutation::{
 };
 use super::replicate::ReplicationMode;
 use crate::buffer::compaction_transaction::CompactionTransaction;
-use crate::buffer::segment_file::{PartitionKey, SegmentFile};
+use crate::buffer::segment_file::{PartitionKey, SegmentFile, WalPayload};
 use crate::buffer::wal_store::{SegmentWriteLocation, SegmentWriteResult, WalStore};
 use crate::helpers::offsets::{OffsetKey, Offsets};
 
@@ -413,7 +413,7 @@ impl PipelineDurableStore {
         &self,
         snapshot_id: &str,
         offsets: &HashMap<OffsetKey, u64>,
-        batches: &HashMap<PartitionKey, Vec<arrow::array::RecordBatch>>,
+        batches: &HashMap<PartitionKey, WalPayload>,
         partitions_meta: &HashMap<PartitionKey, (u64, SystemTime)>,
         part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
         checkpoint_updates: &HashMap<String, crate::plugins::cdc::CheckpointEnvelope>,
@@ -951,7 +951,7 @@ impl WalStore for ClusteredWalStore {
         &self,
         snapshot_id: &str,
         offsets: &HashMap<OffsetKey, u64>,
-        batches: &HashMap<PartitionKey, Vec<arrow::array::RecordBatch>>,
+        batches: &HashMap<PartitionKey, WalPayload>,
         partitions_meta: &HashMap<PartitionKey, (u64, SystemTime)>,
         part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
         checkpoint_updates: &HashMap<String, crate::plugins::cdc::CheckpointEnvelope>,

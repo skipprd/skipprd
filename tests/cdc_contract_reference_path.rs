@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use skipprd::buffer::segment_file::{PartitionKey, SegmentFile};
+use skipprd::buffer::segment_file::{PartitionKey, SegmentFile, WalPayload};
 use skipprd::helpers::offsets::OffsetKey;
 use skipprd::plugins::cdc::*;
 
@@ -90,8 +90,8 @@ fn reference_path_wal_cdc_metadata_roundtrip() {
     };
 
     let batch = make_batch();
-    let mut batches: HashMap<PartitionKey, Vec<arrow::record_batch::RecordBatch>> = HashMap::new();
-    batches.insert(key.clone(), vec![batch]);
+    let mut batches: HashMap<PartitionKey, WalPayload> = HashMap::new();
+    batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
     let mut parts_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
     parts_meta.insert(key.clone(), (0, SystemTime::now()));
     let offsets: HashMap<OffsetKey, u64> = HashMap::new();
@@ -146,7 +146,7 @@ fn reference_path_wal_append_mode_has_empty_meta() {
 
     let batch = make_batch();
     let mut batches = HashMap::new();
-    batches.insert(key.clone(), vec![batch]);
+    batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
     let mut parts_meta = HashMap::new();
     parts_meta.insert(key.clone(), (0u64, SystemTime::now()));
     let offsets: HashMap<OffsetKey, u64> = HashMap::new();
