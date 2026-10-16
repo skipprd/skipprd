@@ -23,7 +23,7 @@ export SHOPIFY_ACCESS_TOKEN="shpat_..."
 ::: code-group
 
 ```python [Python]
-from skippr import Config, DataSourceShopifyAdmin, EnvRef, Pipeline
+from skippr import Config, DataSourceShopifyAdmin, DataSourceShopifyAdminStreamProfile, EnvRef, Pipeline
 
 cfg = Config.discover()
 src = cfg.data_source(
@@ -31,7 +31,7 @@ src = cfg.data_source(
     DataSourceShopifyAdmin(
         shop_domain="my-store.myshopify.com",
         start_date="2024-01-01",
-        stream_profile="full",
+        stream_profile=DataSourceShopifyAdminStreamProfile.FULL,
         oauth_access_token=EnvRef("SHOPIFY_ACCESS_TOKEN"),
     ),
 )

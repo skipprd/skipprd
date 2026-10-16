@@ -163,6 +163,7 @@ impl Harness {
                 execution_mode: Default::default(),
                 output_layout: Default::default(),
                 inject_fields: BTreeMap::new(),
+                pipeline_type: Default::default(),
             },
             RuntimeBinding::Primary,
             "lake".to_string(),

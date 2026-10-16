@@ -192,6 +192,11 @@ fn read_ordinal_batches(
     if idx.key.namespace != namespace {
         return Ok(Vec::new());
     }
+    if idx.codec != crate::buffer::segment_file::PART_CODEC_ARROW {
+        return Err(DataFusionError::Execution(
+            "sqlrt does not read copy WAL parts".to_string(),
+        ));
+    }
     if file.seek(std::io::SeekFrom::Start(idx.start)).is_err() {
         return Ok(Vec::new());
     }
@@ -538,11 +543,11 @@ mod tests {
         };
         batches.insert(
             part,
-            vec![RecordBatch::try_new(
+            crate::buffer::segment_file::WalPayload::Arrow(vec![RecordBatch::try_new(
                 schema.clone(),
                 vec![Arc::new(StringArray::from(vec!["evt-a"]))],
             )
-            .unwrap()],
+            .unwrap()]),
         );
         let (meta, _rows, _sha) = seg
             .write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())

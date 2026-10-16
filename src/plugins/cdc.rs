@@ -442,12 +442,19 @@ pub struct SinkCapability {
 }
 
 impl SinkCapability {
-    pub fn resolve_format(&self, configured: Option<&str>) -> Result<Option<OutputFormat>, String> {
+    pub fn resolve_format(
+        &self,
+        configured: Option<&str>,
+        pipeline: crate::pipeline_type::PipelineType,
+        source: Option<crate::serdes::input_format::InputFormat>,
+    ) -> Result<Option<OutputFormat>, String> {
         crate::serdes::output_format::resolve_output_format(
             self.name,
             self.supported_formats,
             self.default_format,
             configured,
+            pipeline,
+            source,
         )
     }
 }
@@ -1182,7 +1189,12 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::DeterministicOverwrite,
         grouping_support: Grouping::CdcEncodedBatches,
-        supported_formats: &[OutputFormat::Parquet, OutputFormat::Jsonl],
+        supported_formats: &[
+            OutputFormat::Parquet,
+            OutputFormat::Jsonl,
+            OutputFormat::Csv,
+            OutputFormat::Xml,
+        ],
         default_format: Some(OutputFormat::Parquet),
     };
 
@@ -1196,7 +1208,12 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::DeterministicOverwrite,
         grouping_support: Grouping::CdcEncodedBatches,
-        supported_formats: &[OutputFormat::Parquet, OutputFormat::Jsonl],
+        supported_formats: &[
+            OutputFormat::Parquet,
+            OutputFormat::Jsonl,
+            OutputFormat::Csv,
+            OutputFormat::Xml,
+        ],
         default_format: Some(OutputFormat::Parquet),
     };
 
@@ -1210,7 +1227,12 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::DeterministicOverwrite,
         grouping_support: Grouping::CdcEncodedBatches,
-        supported_formats: &[OutputFormat::Parquet, OutputFormat::Jsonl],
+        supported_formats: &[
+            OutputFormat::Parquet,
+            OutputFormat::Jsonl,
+            OutputFormat::Csv,
+            OutputFormat::Xml,
+        ],
         default_format: Some(OutputFormat::Parquet),
     };
 
@@ -1224,7 +1246,12 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::DeterministicOverwrite,
         grouping_support: Grouping::CdcEncodedBatches,
-        supported_formats: &[OutputFormat::Parquet, OutputFormat::Jsonl],
+        supported_formats: &[
+            OutputFormat::Parquet,
+            OutputFormat::Jsonl,
+            OutputFormat::Csv,
+            OutputFormat::Xml,
+        ],
         default_format: Some(OutputFormat::Parquet),
     };
 
@@ -1238,7 +1265,12 @@ pub mod sink_capabilities {
         supports_transactions: false,
         retry_semantics: Retry::DeterministicOverwrite,
         grouping_support: Grouping::CdcEncodedBatches,
-        supported_formats: &[OutputFormat::Parquet, OutputFormat::Jsonl],
+        supported_formats: &[
+            OutputFormat::Parquet,
+            OutputFormat::Jsonl,
+            OutputFormat::Csv,
+            OutputFormat::Xml,
+        ],
         default_format: Some(OutputFormat::Parquet),
     };
 
@@ -1837,12 +1869,18 @@ mod tests {
     #[test]
     fn file_defaults_parquet_and_accepts_jsonl() {
         assert_eq!(
-            sink_capabilities::FILE.resolve_format(None).unwrap(),
+            sink_capabilities::FILE
+                .resolve_format(None, crate::pipeline_type::PipelineType::Ingest, None)
+                .unwrap(),
             Some(crate::serdes::output_format::OutputFormat::Parquet)
         );
         assert_eq!(
             sink_capabilities::FILE
-                .resolve_format(Some("jsonl"))
+                .resolve_format(
+                    Some("jsonl"),
+                    crate::pipeline_type::PipelineType::Ingest,
+                    None,
+                )
                 .unwrap(),
             Some(crate::serdes::output_format::OutputFormat::Jsonl)
         );
@@ -1851,12 +1889,18 @@ mod tests {
     #[test]
     fn warehouse_sinks_reject_configured_format() {
         let err = sink_capabilities::POSTGRES
-            .resolve_format(Some("jsonl"))
+            .resolve_format(
+                Some("jsonl"),
+                crate::pipeline_type::PipelineType::Ingest,
+                None,
+            )
             .unwrap_err();
         assert!(err.contains("writes rows into tables"));
         assert!(err.contains("Remove `format: jsonl`"));
         assert_eq!(
-            sink_capabilities::POSTGRES.resolve_format(None).unwrap(),
+            sink_capabilities::POSTGRES
+                .resolve_format(None, crate::pipeline_type::PipelineType::Ingest, None)
+                .unwrap(),
             None
         );
     }
@@ -1864,23 +1908,93 @@ mod tests {
     #[test]
     fn athena_defaults_parquet_and_rejects_jsonl() {
         assert_eq!(
-            sink_capabilities::ATHENA.resolve_format(None).unwrap(),
+            sink_capabilities::ATHENA
+                .resolve_format(None, crate::pipeline_type::PipelineType::Ingest, None)
+                .unwrap(),
             Some(crate::serdes::output_format::OutputFormat::Parquet)
         );
         let err = sink_capabilities::ATHENA
-            .resolve_format(Some("jsonl"))
+            .resolve_format(
+                Some("jsonl"),
+                crate::pipeline_type::PipelineType::Ingest,
+                None,
+            )
             .unwrap_err();
         assert!(err.contains("does not support format 'jsonl'"));
+    }
+
+    fn copy_identity_sink(kind: crate::connect::DataSink) -> bool {
+        use crate::connect::DataSink::*;
+        match kind {
+            S3 | Gcs | AzureBlob | File | Sftp => true,
+            Amqp | Athena | AthenaIceberg | Bigquery | Clickhouse | Databricks | Duckdb
+            | Motherduck | Postgres | Redshift | SkipprLake | Snowflake | Stdout | Synapse => false,
+        }
+    }
+
+    #[test]
+    fn every_catalogued_sink_is_copy_identity_or_fail_closed() {
+        use crate::connect::DataSink::*;
+        use crate::pipeline_type::PipelineType;
+        use crate::serdes::input_format::InputFormat;
+        use crate::serdes::output_format::OutputFormat;
+        let kinds = [
+            Amqp,
+            Athena,
+            AthenaIceberg,
+            AzureBlob,
+            Bigquery,
+            Clickhouse,
+            Databricks,
+            Duckdb,
+            File,
+            Gcs,
+            Motherduck,
+            Postgres,
+            Redshift,
+            S3,
+            Sftp,
+            SkipprLake,
+            Snowflake,
+            Stdout,
+            Synapse,
+        ];
+        for kind in kinds {
+            let cap = sink_capabilities::by_kind(kind).expect(kind.plugin_name());
+            let identity = OutputFormat::supports_copy_identity(cap.supported_formats);
+            assert_eq!(identity, copy_identity_sink(kind), "{}", cap.name);
+            let resolved = cap.resolve_format(None, PipelineType::Copy, Some(InputFormat::Json));
+            if identity {
+                assert_eq!(
+                    resolved
+                        .as_ref()
+                        .map_err(|err| format!("{}: {err}", cap.name)),
+                    Ok(&Some(OutputFormat::Jsonl)),
+                    "{}",
+                    cap.name
+                );
+            } else {
+                assert!(
+                    resolved.is_err(),
+                    "{} should fail closed for type: copy, got {resolved:?}",
+                    cap.name
+                );
+            }
+        }
     }
 
     #[test]
     fn stdout_and_amqp_default_jsonl() {
         assert_eq!(
-            sink_capabilities::STDOUT.resolve_format(None).unwrap(),
+            sink_capabilities::STDOUT
+                .resolve_format(None, crate::pipeline_type::PipelineType::Ingest, None)
+                .unwrap(),
             Some(crate::serdes::output_format::OutputFormat::Jsonl)
         );
         assert_eq!(
-            sink_capabilities::AMQP.resolve_format(None).unwrap(),
+            sink_capabilities::AMQP
+                .resolve_format(None, crate::pipeline_type::PipelineType::Ingest, None)
+                .unwrap(),
             Some(crate::serdes::output_format::OutputFormat::Jsonl)
         );
     }

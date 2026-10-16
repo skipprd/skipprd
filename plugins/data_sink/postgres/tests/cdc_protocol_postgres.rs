@@ -15,7 +15,7 @@ use skippr_plugin_data_sink_postgres::{
     CdcApplyMutation, CdcApplyRow, CdcApplyRowMetadata, CdcApplyValue, PostgresCdcBackend,
 };
 use skippr_runtime_sdk::plugins::cdc::{MutationKind, WalPartKind, WalPartMeta, WalRowMeta};
-use skippr_runtime_sdk::sink_compat::segment_file::{PartitionKey, SegmentFile};
+use skippr_runtime_sdk::sink_compat::segment_file::{PartitionKey, SegmentFile, WalPayload};
 
 const SOURCE_CONN: &str =
     "host=localhost port=15432 user=postgres password=testpass dbname=skippr_test";
@@ -79,8 +79,8 @@ fn cdc_wal_roundtrip_with_postgres_metadata() {
     )
     .unwrap();
 
-    let mut batches: HashMap<PartitionKey, Vec<arrow::record_batch::RecordBatch>> = HashMap::new();
-    batches.insert(key.clone(), vec![batch]);
+    let mut batches: HashMap<PartitionKey, WalPayload> = HashMap::new();
+    batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
     let mut parts_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
     parts_meta.insert(key.clone(), (0, SystemTime::now()));
     let offsets = HashMap::new();

@@ -68,13 +68,18 @@ data_sinks:
 | `account_key` | secret | Not set | Account key as `${ENV}` |
 | `sas_token` | secret | Not set | SAS token as `${ENV}` (use instead of the key) |
 | `prefix` | string | Not set | Blob prefix |
-| `format` | string | Not set | Object format override |
+| `format` | string | Not set | For pipeline type `ingest`, set `format` on this data sink to `parquet` or `jsonl`. For pipeline type `copy`, set `format` on this data sink to `jsonl`, `csv`, or `xml`. If you omit `format` on a copy pipeline, the data sink follows the source: json → jsonl, csv → csv, xml → xml. In pipeline type `copy`, nested objects and arrays in CSV are written as compact JSON strings. When pipeline type is `copy`, the deadletter sink still writes `parquet` or `jsonl`; it does not follow a `csv` or `xml` data sink. |
 
 A retry overwrites the same blob.
 
 ## How data lands
 
-Blobs land under `{container}/{prefix}/{namespace}/`.
+Blobs land at `{container}/{prefix}/{namespace}/…`.
+
+- `{prefix}` is `prefix`.
+- `{namespace}` is the source namespace (table or stream name).
+- Optional partition folders follow the namespace: `p_country=GB/` from `batch_partition_fields`, and `year=2026/month=10/day=9/` from `batch_time_fields` (or `p_year=…` when `time_partition_prefix` is `p_`).
+- The file name is the batch identity plus the `format` extension, for example `apply-0001.jsonl`.
 
 ## Troubleshooting
 

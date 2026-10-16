@@ -520,7 +520,7 @@ fn track_partition_offset_with_key(
         _time: time_b.clone(),
         _schema_fingerprint: String::new(),
         schema: schema_hash.schema.clone(),
-        record_batches: None,
+        payload: crate::buffer::segment_file::WalPayload::Arrow(Vec::new()),
         cdc_rows: None,
         checkpoint_update: None,
     });
@@ -553,7 +553,7 @@ fn track_partition_offset_with_schema(
         _time: time_b.clone(),
         _schema_fingerprint: String::new(),
         schema: schema_hash.schema.clone(),
-        record_batches: None,
+        payload: crate::buffer::segment_file::WalPayload::Arrow(Vec::new()),
         cdc_rows: None,
         checkpoint_update: None,
     });
@@ -992,6 +992,110 @@ struct SchemaHash {
 }
 
 type IngestPartitionKey = (String, String, String, Option<i64>, String);
+
+/// Bind deadletter records into Arrow WAL with offsets, or publish Closed/Position
+/// when there is no deadletter sink. Returns false if the request already failed.
+fn commit_deadletters(
+    config: &Config,
+    offset_db: &Offsets,
+    submit_id: u64,
+    buf: &mut HashMap<IngestPartitionKey, IngestBufferBatch>,
+    dl_records: Vec<DeadletterRecord>,
+    mut dl_offsets: HashMap<OffsetKey, u64>,
+) -> bool {
+    if dl_records.is_empty() {
+        return true;
+    }
+    let dl_count = dl_records.len();
+    metrics_hot::add_deadletters(dl_count as u64);
+    let mut dl_offsets_committed = false;
+    if config.get_pipeline_deadletters_ref().is_some() {
+        deadletter::ensure_namespace_registered(config);
+    }
+    if let Some(deadletter_sink_ref) = config.get_pipeline_deadletters_ref() {
+        let dl_ns = deadletter::table_name(config);
+        let dl_schema: SchemaRef = deadletter::arrow_schema();
+        let dl_time_bucket = BufferChunker::event_time_bucket(
+            config,
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        );
+        if let Some(batch) = deadletter::build_batch(&dl_records) {
+            let key = (
+                deadletter_sink_ref.clone(),
+                dl_ns.clone(),
+                String::new(),
+                Some(dl_time_bucket),
+                "0".to_string(),
+            );
+            buf.insert(
+                key,
+                IngestBufferBatch {
+                    offsets: std::mem::take(&mut dl_offsets),
+                    sink_ref: deadletter_sink_ref,
+                    _namespace: dl_ns,
+                    _partition: String::new(),
+                    _time: Some(dl_time_bucket),
+                    _schema_fingerprint: String::new(),
+                    schema: dl_schema,
+                    payload: crate::buffer::segment_file::WalPayload::Arrow(vec![batch]),
+                    cdc_rows: None,
+                    checkpoint_update: None,
+                },
+            );
+            dl_offsets_committed = true;
+            warn!("Deadlettered {} records into WAL", dl_count);
+        }
+    } else {
+        warn!(
+            "Discarded {} deadletter records because no deadletter sink is configured",
+            dl_count
+        );
+        let sample_limit = std::cmp::min(dl_count, 5);
+        for (i, rec) in dl_records.iter().take(sample_limit).enumerate() {
+            warn!(
+                "deadletter[{}/{}]: failure_code={} error={} namespace={} record={}",
+                i + 1,
+                dl_count,
+                rec.failure_code,
+                rec.error,
+                rec.namespace,
+                &rec.record[..std::cmp::min(rec.record.len(), 200)],
+            );
+        }
+    }
+    if !dl_offsets_committed && !dl_offsets.is_empty() {
+        for (ok, pos) in dl_offsets.drain() {
+            let offset_key = OffsetKey {
+                namespace: ok.namespace.clone(),
+                partition: ok.partition.clone(),
+            };
+            if let Err(err) = offset_db.set(&offset_key, OffsetTypes::Closed, 1) {
+                warn!("deadletter offset closed publish failed: {err}");
+                if submit_id != 0 {
+                    crate::buffer::wal_writer::fail_request(
+                        submit_id,
+                        format!("deadletter offset closed publish failed: {err}"),
+                    );
+                }
+                return false;
+            }
+            if let Err(err) = offset_db.set(&offset_key, OffsetTypes::Position, pos) {
+                warn!("deadletter offset position publish failed: {err}");
+                if submit_id != 0 {
+                    crate::buffer::wal_writer::fail_request(
+                        submit_id,
+                        format!("deadletter offset position publish failed: {err}"),
+                    );
+                }
+                return false;
+            }
+        }
+    }
+    true
+}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct IngestBatch {
@@ -2600,6 +2704,177 @@ impl Ingest {
         }
     }
 
+    fn process_copy_batch(
+        config: &Config,
+        datas: &Arc<Vec<IngestBatch>>,
+        offset_db_clone: &Arc<Offsets>,
+        handle: runtime::Handle,
+        submit_id: u64,
+    ) {
+        let format = match config.get_pipeline_input_plugin_config() {
+            Ok(plugin) => plugin.input_format(),
+            Err(_) => Default::default(),
+        };
+        let transform_snap = IngestTransformSnapshot::capture(config);
+        let primary_sink_ref = config.get_pipeline_output_sink_ref();
+        let pipeline_name = config.get_pipeline_name();
+        let empty_schema: SchemaRef = Arc::new(arrow::datatypes::Schema::empty());
+        let fingerprint = crate::pipeline_type::COPY_WAL_FINGERPRINT.to_string();
+        let allowed_values =
+            cleaned_partition_allowed_values(config, &config.get_partition_allowed_values());
+        let mut ns_cache = HashMap::new();
+        let mut buf: HashMap<IngestPartitionKey, IngestBufferBatch> = HashMap::new();
+        let mut dl_records: Vec<DeadletterRecord> = Vec::new();
+        let mut dl_offsets: HashMap<OffsetKey, u64> = HashMap::new();
+
+        for ingest_batch in datas.iter() {
+            let records = match crate::serdes::copy::decode_copy(config, format, &ingest_batch.data)
+            {
+                Ok(records) => records,
+                Err(err) => {
+                    let decode_offset_pos = ingest_batch.data.lines().count().max(1) as u64;
+                    dl_records.push(DeadletterRecord {
+                        namespace: pipeline_name.clone(),
+                        record: ingest_batch.data.clone(),
+                        error: err.to_string(),
+                        failure_code: "INPUT_FORMAT".to_string(),
+                        event_time: None,
+                        source_uri: ingest_batch.source_uri.clone(),
+                        offset_key: format!(
+                            "{}:{}",
+                            ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition
+                        ),
+                        offset_pos: 1,
+                    });
+                    dl_offsets
+                        .entry(ingest_batch.offset_key.clone())
+                        .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
+                        .or_insert(decode_offset_pos);
+                    continue;
+                }
+            };
+            let offset_pos = ingest_batch
+                .offset_pos
+                .unwrap_or_else(|| records.len().max(1) as u64);
+            let batch_namespace_override = ingest_batch
+                .namespace
+                .clone()
+                .unwrap_or_else(|| pipeline_name.clone());
+            let fixed_namespace = if transform_snap.skip_namespace_field_parse {
+                Some(storage_namespace(config, &batch_namespace_override))
+            } else {
+                None
+            };
+            for record in records {
+                let namespace = if let Some(fixed) = fixed_namespace.as_ref() {
+                    fixed.clone()
+                } else {
+                    storage_namespace(
+                        config,
+                        &Helpers::parse_namespace_field_with_fields(
+                            config,
+                            &record.value,
+                            batch_namespace_override.clone(),
+                            &mut ns_cache,
+                            &transform_snap.namespace_fields,
+                        ),
+                    )
+                };
+                let partition = if transform_snap.skip_partition_parse {
+                    String::new()
+                } else {
+                    Helpers::parse_partition_field_with_fields(
+                        config,
+                        &record.value,
+                        &allowed_values,
+                        &transform_snap.partition_fields,
+                    )
+                };
+                let time = if transform_snap.skip_time_parse {
+                    None
+                } else {
+                    Helpers::parse_time_field_with_fields(
+                        &record.value,
+                        &transform_snap.time_fields,
+                    )
+                    .map(|ts| BufferChunker::event_time_bucket(config, ts))
+                };
+                let key = (
+                    primary_sink_ref.clone(),
+                    namespace.clone(),
+                    partition.clone(),
+                    time,
+                    fingerprint.clone(),
+                );
+                let entry = ensure_partition_buffer_entry(&mut buf, &key, || IngestBufferBatch {
+                    offsets: HashMap::new(),
+                    sink_ref: primary_sink_ref.clone(),
+                    _namespace: namespace,
+                    _partition: partition,
+                    _time: time,
+                    _schema_fingerprint: fingerprint.clone(),
+                    schema: empty_schema.clone(),
+                    payload: crate::buffer::segment_file::WalPayload::Raw(Vec::new()),
+                    cdc_rows: None,
+                    checkpoint_update: None,
+                });
+                match &mut entry.payload {
+                    crate::buffer::segment_file::WalPayload::Raw(records) => records.push(record),
+                    crate::buffer::segment_file::WalPayload::Arrow(_) => {
+                        error!("copy admit mixed Arrow+Raw under one WAL key");
+                        if submit_id != 0 {
+                            crate::buffer::wal_writer::fail_request(
+                                submit_id,
+                                "copy admit mixed Arrow+Raw under one WAL key".to_string(),
+                            );
+                        }
+                        return;
+                    }
+                }
+                update_partition_offset(entry, &ingest_batch.offset_key, offset_pos);
+            }
+        }
+
+        if !commit_deadletters(
+            config,
+            offset_db_clone,
+            submit_id,
+            &mut buf,
+            dl_records,
+            dl_offsets,
+        ) {
+            return;
+        }
+
+        let all_batches: Vec<IngestBufferBatch> = buf.into_values().collect();
+        if all_batches.is_empty() {
+            if submit_id != 0 {
+                crate::buffer::wal_writer::complete_request_without_wal(submit_id);
+            }
+            return;
+        }
+        let arrow_bytes = all_batches
+            .iter()
+            .map(|batch| batch.payload.estimated_bytes() as usize)
+            .sum::<usize>();
+        let raw_bytes = datas.iter().map(|batch| batch.bytes).sum::<usize>();
+        let (done_tx, _done_rx) = tokio::sync::oneshot::channel();
+        let unit = crate::buffer::wal_writer::WalCommitUnit {
+            submit_id,
+            batches: all_batches,
+            offsets_db: offset_db_clone.clone(),
+            raw_bytes,
+            arrow_bytes,
+            done: done_tx,
+        };
+        if let Err(err) = handle.block_on(crate::buffer::wal_writer::submit(unit)) {
+            error!("Copy: WAL writer enqueue failed: {}", err);
+            if submit_id != 0 {
+                crate::buffer::wal_writer::fail_request(submit_id, err.to_string());
+            }
+        }
+    }
+
     fn process_batch(
         config: &Config,
         datas: &Arc<Vec<IngestBatch>>,
@@ -2621,6 +2896,21 @@ impl Ingest {
 
         if offset_db_clone.is_remote() {
             panic!("host ingest must use local offsets; runtime sources submit payloads through SourceSyncContext");
+        }
+
+        match config.pipeline_type() {
+            Ok(crate::pipeline_type::PipelineType::Copy) => {
+                Self::process_copy_batch(config, datas, offset_db_clone, handle, submit_id);
+                return;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                error!("pipeline type: {err}");
+                if submit_id != 0 {
+                    crate::buffer::wal_writer::fail_request(submit_id, err);
+                }
+                return;
+            }
         }
 
         let allowed_values = config.get_partition_allowed_values();
@@ -3328,7 +3618,7 @@ impl Ingest {
 
             match merge_record_batches(entry.schema.clone(), batches) {
                 Ok(merged) => {
-                    entry.record_batches = Some(merged);
+                    entry.payload = crate::buffer::segment_file::WalPayload::Arrow(merged);
                 }
                 Err(err) => {
                     warn!(
@@ -3341,7 +3631,7 @@ impl Ingest {
         ingest_profile::add_arrow_json_ns(arrow_started.elapsed().as_nanos() as u64);
 
         for (k, entry) in buf.iter_mut() {
-            if entry.record_batches.is_some() {
+            if !entry.payload.is_empty() {
                 continue;
             }
             if let Some(rows) = cdc_row_buf.remove(k) {
@@ -3351,96 +3641,15 @@ impl Ingest {
             }
         }
 
-        // Flush accumulated deadletter records into buf as a regular WAL entry.
-        // The deadletter batch carries dl_offsets so the source offsets are
-        // committed only when the WAL segment is durably flushed, matching the
-        // guarantees for normal data.
-        if !dl_records.is_empty() {
-            let dl_count = dl_records.len();
-            metrics_hot::add_deadletters(dl_count as u64);
-            let mut dl_offsets_committed = false;
-            if let Some(deadletter_sink_ref) = deadletter_sink_ref.clone() {
-                let dl_ns = deadletter::table_name(config);
-                let dl_schema: SchemaRef = deadletter::arrow_schema();
-                let dl_time_bucket = BufferChunker::event_time_bucket(
-                    config,
-                    SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64,
-                );
-                if let Some(batch) = deadletter::build_batch(&dl_records) {
-                    let key = (
-                        deadletter_sink_ref.clone(),
-                        dl_ns.clone(),
-                        String::new(),
-                        Some(dl_time_bucket),
-                        "0".to_string(),
-                    );
-                    buf.insert(
-                        key,
-                        IngestBufferBatch {
-                            offsets: std::mem::take(&mut dl_offsets),
-                            sink_ref: deadletter_sink_ref,
-                            _namespace: dl_ns,
-                            _partition: String::new(),
-                            _time: Some(dl_time_bucket),
-                            _schema_fingerprint: String::new(),
-                            schema: dl_schema,
-                            record_batches: Some(vec![batch]),
-                            cdc_rows: None,
-                            checkpoint_update: None,
-                        },
-                    );
-                    dl_offsets_committed = true;
-                    warn!("Deadlettered {} records into WAL", dl_count);
-                }
-            } else {
-                warn!(
-                    "Discarded {} deadletter records because no deadletter sink is configured",
-                    dl_count
-                );
-                let sample_limit = std::cmp::min(dl_count, 5);
-                for (i, rec) in dl_records.iter().take(sample_limit).enumerate() {
-                    warn!(
-                        "deadletter[{}/{}]: failure_code={} error={} namespace={} record={}",
-                        i + 1,
-                        dl_count,
-                        rec.failure_code,
-                        rec.error,
-                        rec.namespace,
-                        &rec.record[..std::cmp::min(rec.record.len(), 200)],
-                    );
-                }
-            }
-            if !dl_offsets_committed && !dl_offsets.is_empty() {
-                for (ok, pos) in dl_offsets.drain() {
-                    let offset_key = OffsetKey {
-                        namespace: ok.namespace.clone(),
-                        partition: ok.partition.clone(),
-                    };
-                    if let Err(err) = offset_db_clone.set(&offset_key, OffsetTypes::Closed, 1) {
-                        warn!("deadletter offset closed publish failed: {err}");
-                        if submit_id != 0 {
-                            crate::buffer::wal_writer::fail_request(
-                                submit_id,
-                                format!("deadletter offset closed publish failed: {err}"),
-                            );
-                        }
-                        return;
-                    }
-                    if let Err(err) = offset_db_clone.set(&offset_key, OffsetTypes::Position, pos) {
-                        warn!("deadletter offset position publish failed: {err}");
-                        if submit_id != 0 {
-                            crate::buffer::wal_writer::fail_request(
-                                submit_id,
-                                format!("deadletter offset position publish failed: {err}"),
-                            );
-                        }
-                        return;
-                    }
-                }
-            }
+        if !commit_deadletters(
+            config,
+            offset_db_clone,
+            submit_id,
+            &mut buf,
+            dl_records,
+            dl_offsets,
+        ) {
+            return;
         }
 
         // Batch write: aggregate all partition batches and enqueue once for the WAL writer.
@@ -3452,6 +3661,12 @@ impl Ingest {
             }
         }
         for namespace in schema_sync_namespaces {
+            if matches!(
+                config.pipeline_type(),
+                Ok(crate::pipeline_type::PipelineType::Copy)
+            ) {
+                continue;
+            }
             if let Err(err) = ensure_output_schema_synced_for_namespace(config, &namespace) {
                 warn!(
                     "Schema sync barrier failed for namespace {}; deferring batch without committing offsets: {}",
@@ -3479,7 +3694,10 @@ impl Ingest {
             if Config::debug_enabled() || Config::log_wal_enabled() {
                 let total_batches: usize = all_batches
                     .iter()
-                    .map(|e| e.record_batches.as_ref().map(|v| v.len()).unwrap_or(0))
+                    .map(|e| match &e.payload {
+                        crate::buffer::segment_file::WalPayload::Arrow(batches) => batches.len(),
+                        crate::buffer::segment_file::WalPayload::Raw(records) => records.len(),
+                    })
                     .sum();
                 let total_offsets: usize =
                     all_batches.iter().map(|batch| batch.offsets.len()).sum();
@@ -3505,8 +3723,7 @@ impl Ingest {
             }
             let arrow_bytes = all_batches
                 .iter()
-                .flat_map(|batch| batch.record_batches.as_ref().into_iter().flatten())
-                .map(|batch| batch.get_array_memory_size())
+                .map(|batch| batch.payload.estimated_bytes() as usize)
                 .sum::<usize>();
             let raw_bytes = datas.iter().map(|batch| batch.bytes).sum::<usize>();
             let (done_tx, _done_rx) = tokio::sync::oneshot::channel();

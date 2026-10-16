@@ -3520,6 +3520,7 @@ mod contract_schema_tests {
                 format: None,
             },
             inject_fields: Default::default(),
+            pipeline_type: Default::default(),
         };
         let keys = build_glue_partition_keys(
             &context,

@@ -124,7 +124,7 @@ To stream changes after the copy, add `cdc_mode`. Set `host`, `port`, `user`, `p
 ::: code-group
 
 ```python [Python]
-from skippr import Config, DataSourcePostgres, EnvRef, Pipeline
+from skippr import Config, DataSourcePostgres, DataSourcePostgresSourceCdcMode, EnvRef, Pipeline
 
 cfg = Config.discover()
 src = cfg.data_source(
@@ -134,7 +134,7 @@ src = cfg.data_source(
         user="skippr_reader",
         password=EnvRef("POSTGRES_PASSWORD"),
         database="app",
-        cdc_mode="snapshot_then_cdc",
+        cdc_mode=DataSourcePostgresSourceCdcMode.SNAPSHOTTHENCDC,
     ),
 )
 pipe = cfg.pipeline("app_db", Pipeline(data_source=src))

@@ -1,3 +1,4 @@
+pub mod copy;
 pub mod csv;
 pub mod decode;
 pub mod input_format;

@@ -102,6 +102,7 @@ struct MetricsEnvConfig {
     chaos_mode: String,
     input_format: String,
     output_format: String,
+    pipeline_type: String,
 }
 
 impl MetricsEnvConfig {
@@ -131,14 +132,21 @@ impl MetricsEnvConfig {
             config_dependency_error_count: config.get_config_dependency_violations().len(),
             data_dir: config.get_pipeline_data_dir(),
             chaos_mode: config.get_pipeline_chaos_mode().to_string(),
-            input_format: match config.get_pipeline_input_plugin_config() {
-                Ok(config) => config.format().to_string(),
-                Err(_) => String::from(""),
+            input_format: match (
+                config.pipeline_type(),
+                config.get_pipeline_input_plugin_config(),
+            ) {
+                (Ok(pipeline), Ok(entry)) => entry.format(pipeline),
+                _ => String::from(""),
             },
-            output_format: match config.get_pipeline_output_plugin_config() {
-                Ok(config) => config.format().to_string(),
-                Err(_) => String::from(""),
+            output_format: match (
+                config.pipeline_type(),
+                config.get_pipeline_output_plugin_config(),
+            ) {
+                (Ok(pipeline), Ok(entry)) => entry.format(pipeline),
+                _ => String::from(""),
             },
+            pipeline_type: config.pipeline_type_log_label().to_string(),
         }
     }
 }
@@ -536,6 +544,7 @@ impl Metrics {
             "tenant": tenant,
             "workspace_name": workspace,
             "pipeline_name": pipeline,
+            "pipeline_type": config.pipeline_type_log_label(),
             "status": metrics.status.name(),
             "start_time": start_time_utc_str,
             "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -638,6 +647,7 @@ impl Metrics {
             "tenant": tenant,
             "workspace_name": workspace,
             "pipeline_name": pipeline,
+            "pipeline_type": config.pipeline_type_log_label(),
             "status": metrics.status.name(),
             "start_time": start_time_utc_str,
             "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),

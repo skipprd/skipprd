@@ -1,0 +1,30 @@
+name: File to File copy matrix
+description: "Copy json/csv/xml from a local File source through type: copy into File objects."
+inputs:
+  skipprd_path:
+    required: true
+  plugin_binaries_dir:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: File → File copy matrix
+      shell: bash
+      env:
+        USE_LOCAL_PLUGIN_CODE: "1"
+        SKIPPRD_PATH: ${{ inputs.skipprd_path }}
+      run: |
+        set -euo pipefail
+        work="${RUNNER_TEMP:-/tmp}/skippr-file-copy"
+        mkdir -p "${work}" target/release
+        cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
+        chmod +x target/release/skippr-plugin-* || true
+        python3 .github/scripts/local_runtime_plugins.py \
+          --config .github/actions/e2e/file_copy/skippr.yml \
+          --pipeline file_copy \
+          --output-dir "${work}/manifests" \
+          --release \
+          --skip-cargo-build
+        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
+        export COPY_WORK="${work}"
+        python3 .github/actions/e2e/file_copy/run_matrix.py

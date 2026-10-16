@@ -104,7 +104,10 @@ mod tests {
             let batch =
                 RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(vec![*id]))])
                     .unwrap();
-            batches.insert(part, vec![batch]);
+            batches.insert(
+                part,
+                crate::buffer::segment_file::WalPayload::Arrow(vec![batch]),
+            );
         }
         let (meta, _rows, _sha) = seg
             .write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())

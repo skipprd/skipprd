@@ -1148,6 +1148,7 @@ mod tests {
                     canonical_hash: [start as u8; 32],
                 },
             },
+            codec: crate::buffer::segment_file::PART_CODEC_ARROW,
             start,
             len: bytes,
         };

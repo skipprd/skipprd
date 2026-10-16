@@ -1391,6 +1391,16 @@ pub trait DataSink: Send + Sync {
         ctx: GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, std::io::Error>;
 
+    /// Identity PUT for `type: copy`. Default is fail-closed.
+    async fn sync_bytes(
+        &self,
+        _body: Vec<u8>,
+        _rows: u64,
+        _ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        Err(io::Error::other("this sink does not support type: copy"))
+    }
+
     async fn sync_grouped_call_result(
         &self,
         reader: GroupedBatchReader,

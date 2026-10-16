@@ -23,17 +23,23 @@ impl PluginConfigEntry {
         InputFormat::from_option(self.string_field("format").as_deref())
     }
 
-    pub fn resolved_output_format(&self) -> Result<Option<OutputFormat>, String> {
+    pub fn resolved_output_format(
+        &self,
+        pipeline: crate::pipeline_type::PipelineType,
+        source: Option<InputFormat>,
+    ) -> Result<Option<OutputFormat>, String> {
         match crate::plugins::cdc::sink_capabilities::by_name(&self.plugin_name) {
-            Some(capability) => capability.resolve_format(self.string_field("format").as_deref()),
+            Some(capability) => {
+                capability.resolve_format(self.string_field("format").as_deref(), pipeline, source)
+            }
             None => Ok(None),
         }
     }
 
-    pub fn format(&self) -> String {
+    pub fn format(&self, pipeline: crate::pipeline_type::PipelineType) -> String {
         if crate::connect::DataSink::parse(&self.plugin_name).is_some() {
             return self
-                .resolved_output_format()
+                .resolved_output_format(pipeline, None)
                 .ok()
                 .flatten()
                 .map(|format| format.to_string())
@@ -236,8 +242,13 @@ mod tests {
                 "table_namespace": "bronze"
             }),
         };
-        assert_eq!(entry.resolved_output_format().unwrap(), None);
-        assert_eq!(entry.format(), "");
+        assert_eq!(
+            entry
+                .resolved_output_format(crate::pipeline_type::PipelineType::Ingest, None)
+                .unwrap(),
+            None
+        );
+        assert_eq!(entry.format(crate::pipeline_type::PipelineType::Ingest), "");
     }
 
     #[test]
@@ -254,7 +265,9 @@ mod tests {
             }),
         };
         assert_eq!(
-            entry.resolved_output_format().unwrap(),
+            entry
+                .resolved_output_format(crate::pipeline_type::PipelineType::Ingest, None)
+                .unwrap(),
             Some(OutputFormat::Parquet)
         );
 
@@ -265,7 +278,9 @@ mod tests {
             config: serde_json::json!({ "format": "parquet" }),
         };
         assert_eq!(
-            parquet.resolved_output_format().unwrap(),
+            parquet
+                .resolved_output_format(crate::pipeline_type::PipelineType::Ingest, None)
+                .unwrap(),
             Some(OutputFormat::Parquet)
         );
 
@@ -275,7 +290,9 @@ mod tests {
                 .to_string(),
             config: serde_json::json!({ "format": "jsonl" }),
         };
-        let err = rejected.resolved_output_format().unwrap_err();
+        let err = rejected
+            .resolved_output_format(crate::pipeline_type::PipelineType::Ingest, None)
+            .unwrap_err();
         assert!(err.contains("does not support format 'jsonl'"));
     }
 
@@ -292,8 +309,13 @@ mod tests {
                 "athena_results_s3_bucket": "results"
             }),
         };
-        assert_eq!(entry.resolved_output_format().unwrap(), None);
-        assert_eq!(entry.format(), "");
+        assert_eq!(
+            entry
+                .resolved_output_format(crate::pipeline_type::PipelineType::Ingest, None)
+                .unwrap(),
+            None
+        );
+        assert_eq!(entry.format(crate::pipeline_type::PipelineType::Ingest), "");
     }
 
     #[test]
@@ -307,8 +329,13 @@ mod tests {
                 "table_namespace": "bronze"
             }),
         };
-        assert_eq!(entry.resolved_output_format().unwrap(), None);
-        assert_eq!(entry.format(), "");
+        assert_eq!(
+            entry
+                .resolved_output_format(crate::pipeline_type::PipelineType::Ingest, None)
+                .unwrap(),
+            None
+        );
+        assert_eq!(entry.format(crate::pipeline_type::PipelineType::Ingest), "");
     }
 
     #[test]
@@ -318,7 +345,9 @@ mod tests {
             config: json!({}),
         };
         assert_eq!(
-            entry.resolved_output_format().unwrap(),
+            entry
+                .resolved_output_format(crate::pipeline_type::PipelineType::Ingest, None)
+                .unwrap(),
             Some(OutputFormat::Parquet)
         );
     }
@@ -330,8 +359,29 @@ mod tests {
             config: json!({ "format": "jsonl" }),
         };
         assert_eq!(
-            entry.resolved_output_format().unwrap(),
+            entry
+                .resolved_output_format(crate::pipeline_type::PipelineType::Ingest, None)
+                .unwrap(),
             Some(OutputFormat::Jsonl)
+        );
+    }
+
+    #[test]
+    fn file_copy_csv_format_follows_pipeline_type() {
+        let entry = PluginConfigEntry {
+            plugin_name: "File".to_string(),
+            config: json!({ "format": "csv" }),
+        };
+        assert_eq!(
+            entry.format(crate::pipeline_type::PipelineType::Copy),
+            "csv"
+        );
+        assert_eq!(entry.format(crate::pipeline_type::PipelineType::Ingest), "");
+        assert_eq!(
+            entry
+                .resolved_output_format(crate::pipeline_type::PipelineType::Copy, None)
+                .unwrap(),
+            Some(OutputFormat::Csv)
         );
     }
 
@@ -341,7 +391,9 @@ mod tests {
             plugin_name: "Postgres".to_string(),
             config: json!({ "format": "jsonl" }),
         };
-        let err = entry.resolved_output_format().unwrap_err();
+        let err = entry
+            .resolved_output_format(crate::pipeline_type::PipelineType::Ingest, None)
+            .unwrap_err();
         assert!(err.contains("writes rows into tables"));
         assert!(err.contains("Remove `format: jsonl`"));
     }

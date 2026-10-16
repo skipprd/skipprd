@@ -46,8 +46,8 @@ enum PyTy {
     EnvRef,
     /// `serde_json::Value`: any JSON-serializable Python value.
     Any,
-    /// A string enum, validated against its serde names.
-    Literal {
+    /// A unit string enum, emitted as a frozen PyO3 class.
+    UnitEnum {
         rust: String,
         alias: String,
     },
@@ -74,7 +74,7 @@ impl PyTy {
             Self::Float => "f64".into(),
             Self::EnvRef => "PyEnvRef".into(),
             Self::Any => "PyAnyValue".into(),
-            Self::Literal { rust, .. } | Self::Class { rust, .. } | Self::Union { rust, .. } => {
+            Self::UnitEnum { rust, .. } | Self::Class { rust, .. } | Self::Union { rust, .. } => {
                 rust.clone()
             }
             Self::List(inner) => format!("Vec<{}>", inner.rust()),
@@ -91,7 +91,7 @@ impl PyTy {
             Self::Float => "float".into(),
             Self::EnvRef => "EnvRef".into(),
             Self::Any => "Any".into(),
-            Self::Literal { alias, .. } | Self::Union { alias, .. } => alias.clone(),
+            Self::UnitEnum { alias, .. } | Self::Union { alias, .. } => alias.clone(),
             Self::Class { py, .. } => py.clone(),
             Self::List(inner) => format!("list[{}]", inner.py()),
             Self::Map(inner) => format!("dict[str, {}]", inner.py()),
@@ -125,26 +125,11 @@ struct ClassSpec {
     fields: Vec<ClassField>,
 }
 
-struct LiteralSpec {
+struct UnitEnumSpec {
     rust: String,
     alias: String,
-    values: Vec<String>,
-}
-
-impl LiteralSpec {
-    /// A one-value enum is spelled inline: stubtest cannot check a
-    /// `Literal["x"]` alias against its runtime twin.
-    fn exported(&self) -> bool {
-        self.values.len() > 1
-    }
-
-    fn py(&self) -> String {
-        if self.exported() {
-            self.alias.clone()
-        } else {
-            format!("Literal[{:?}]", self.values[0])
-        }
-    }
+    /// (Rust ident, Python member, serde wire)
+    variants: Vec<(String, String, String)>,
 }
 
 struct UnionSpec {
@@ -162,7 +147,7 @@ struct Scope<'a> {
     owner: &'a str,
     prefix: String,
     classes: Vec<ClassSpec>,
-    literals: Vec<LiteralSpec>,
+    unit_enums: Vec<UnitEnumSpec>,
     unions: Vec<UnionSpec>,
     done: BTreeSet<String>,
 }
@@ -174,7 +159,7 @@ impl<'a> Scope<'a> {
             owner,
             prefix,
             classes: Vec::new(),
-            literals: Vec::new(),
+            unit_enums: Vec::new(),
             unions: Vec::new(),
             done: BTreeSet::new(),
         }
@@ -301,16 +286,24 @@ impl<'a> Scope<'a> {
             let alias = self.name(leaf);
             let rust = format!("Py{alias}");
             if spec.is_string_enum() {
-                let literal = LiteralSpec {
-                    rust: rust.clone(),
-                    alias,
-                    values: spec.variants.iter().map(|v| v.wire.clone()).collect(),
-                };
-                let py = literal.py();
                 if self.done.insert(leaf.to_string()) {
-                    self.literals.push(literal);
+                    self.unit_enums.push(UnitEnumSpec {
+                        rust: rust.clone(),
+                        alias: alias.clone(),
+                        variants: spec
+                            .variants
+                            .iter()
+                            .map(|v| {
+                                (
+                                    ident_ok(&v.rust_name),
+                                    v.rust_name.to_ascii_uppercase(),
+                                    v.wire.clone(),
+                                )
+                            })
+                            .collect(),
+                    });
                 }
-                return Ok(PyTy::Literal { rust, alias: py });
+                return Ok(PyTy::UnitEnum { rust, alias });
             }
             let Some(tag) = spec.tag.clone() else {
                 return Err(format!(
@@ -380,7 +373,7 @@ fn is_paired(plugin: &PluginSpec, engine: &EngineSpec) -> bool {
 pub struct PythonModel {
     plugin_classes: Vec<(PluginKind, String, bool, ClassSpec)>,
     scopes_classes: Vec<ClassSpec>,
-    literals: Vec<LiteralSpec>,
+    unit_enums: Vec<UnitEnumSpec>,
     unions: Vec<UnionSpec>,
     engine_classes: Vec<ClassSpec>,
 }
@@ -389,7 +382,7 @@ pub fn python_model(plugins: &[PluginSpec], engine: &EngineSpec) -> Result<Pytho
     let mut model = PythonModel {
         plugin_classes: Vec::new(),
         scopes_classes: Vec::new(),
-        literals: Vec::new(),
+        unit_enums: Vec::new(),
         unions: Vec::new(),
         engine_classes: Vec::new(),
     };
@@ -429,7 +422,7 @@ pub fn python_model(plugins: &[PluginSpec], engine: &EngineSpec) -> Result<Pytho
             class,
         ));
         model.scopes_classes.extend(scope.classes);
-        model.literals.extend(scope.literals);
+        model.unit_enums.extend(scope.unit_enums);
         model.unions.extend(scope.unions);
     }
     if !errors.is_empty() {
@@ -451,7 +444,7 @@ pub fn python_model(plugins: &[PluginSpec], engine: &EngineSpec) -> Result<Pytho
     )?;
     model.engine_classes.push(pipeline);
     model.engine_classes.extend(scope.classes);
-    model.literals.extend(scope.literals);
+    model.unit_enums.extend(scope.unit_enums);
     model.unions.extend(scope.unions);
 
     let mut names = BTreeSet::new();
@@ -461,13 +454,7 @@ pub fn python_model(plugins: &[PluginSpec], engine: &EngineSpec) -> Result<Pytho
         .map(|(_, _, _, c)| c.py.clone())
         .chain(model.scopes_classes.iter().map(|c| c.py.clone()))
         .chain(model.engine_classes.iter().map(|c| c.py.clone()))
-        .chain(
-            model
-                .literals
-                .iter()
-                .filter(|l| l.exported())
-                .map(|l| l.alias.clone()),
-        )
+        .chain(model.unit_enums.iter().map(|e| e.alias.clone()))
         .chain(model.unions.iter().map(|u| u.alias.clone()))
         .chain(
             model
@@ -615,17 +602,15 @@ fn constructor_doc(class: &ClassSpec) -> String {
 pub fn emit_python_rs(model: &PythonModel) -> String {
     let mut out = String::from(GENERATED_PREAMBLE);
     out.push('\n');
-    for literal in &model.literals {
-        let values = literal
-            .values
-            .iter()
-            .map(|v| format!("{v:?}"))
-            .collect::<Vec<_>>()
-            .join(", ");
+    for unit_enum in &model.unit_enums {
         out.push_str(&format!(
-            "config_literal!({}, \"{}\", [{values}]);\n",
-            literal.rust, literal.alias
+            "config_enum!({}, \"{}\", {{\n",
+            unit_enum.rust, unit_enum.alias
         ));
+        for (ident, py, wire) in &unit_enum.variants {
+            out.push_str(&format!("    {ident} = {py:?} => {wire:?},\n"));
+        }
+        out.push_str("});\n");
     }
     out.push('\n');
     for union in &model.unions {
@@ -684,11 +669,8 @@ pub fn emit_python_rs(model: &PythonModel) -> String {
     for class in model.every_class() {
         out.push_str(&format!("    m.add_class::<{}>()?;\n", class.rust));
     }
-    for literal in model.literals.iter().filter(|l| l.exported()) {
-        out.push_str(&format!(
-            "    m.add(\"{}\", literal_alias(m.py(), {}::VALUES)?)?;\n",
-            literal.alias, literal.rust
-        ));
+    for unit_enum in &model.unit_enums {
+        out.push_str(&format!("    m.add_class::<{}>()?;\n", unit_enum.rust));
     }
     for union in &model.unions {
         out.push_str(&format!(
@@ -827,6 +809,15 @@ fn emit_stub_class(out: &mut String, class: &ClassSpec) {
     out.push('\n');
 }
 
+fn emit_stub_unit_enum(out: &mut String, unit_enum: &UnitEnumSpec) {
+    out.push_str(&format!("@final\nclass {}:\n", unit_enum.alias));
+    for (_, py, _) in &unit_enum.variants {
+        out.push_str(&format!("    {py}: ClassVar[{}]\n", unit_enum.alias));
+    }
+    out.push_str("    def __eq__(self, other: object, /) -> bool: ...\n");
+    out.push_str("    def __hash__(self) -> int: ...\n\n");
+}
+
 fn stub_union_alias(out: &mut String, alias: &str, members: &[&str]) {
     let one_line = format!("{alias}: TypeAlias = {}\n", members.join(" | "));
     if one_line.len() <= STUB_LINE_WIDTH {
@@ -844,26 +835,8 @@ pub fn emit_python_stub(model: &PythonModel) -> String {
     let mut out = String::from("# @generated by skippr-connect-gen. Do not edit.\n");
     out.push_str(STUB_CORE);
     out.push('\n');
-    for literal in model.literals.iter().filter(|l| l.exported()) {
-        let values = literal
-            .values
-            .iter()
-            .map(|v| format!("{v:?}"))
-            .collect::<Vec<_>>();
-        let one_line = format!(
-            "{}: TypeAlias = Literal[{}]\n",
-            literal.alias,
-            values.join(", ")
-        );
-        if one_line.len() <= STUB_LINE_WIDTH {
-            out.push_str(&one_line);
-        } else {
-            out.push_str(&format!("{}: TypeAlias = Literal[\n", literal.alias));
-            for value in &values {
-                out.push_str(&format!("    {value},\n"));
-            }
-            out.push_str("]\n");
-        }
+    for unit_enum in &model.unit_enums {
+        emit_stub_unit_enum(&mut out, unit_enum);
     }
     for union in &model.unions {
         let variants = union
