@@ -2073,7 +2073,6 @@ impl<S: SinkSpec> IcebergWriter<S> {
                     .write_parquet_file(
                         &namespace,
                         "data",
-                        &filename,
                         object_stem,
                         parquet_bytes.bytes.clone(),
                     )
@@ -2127,13 +2126,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
             let delete_row_count = delete_bytes.num_rows as u64;
             if delete_row_count > 0 {
                 let delete_file_uri = self
-                    .write_parquet_file(
-                        &namespace,
-                        "delete",
-                        &filename,
-                        object_stem,
-                        delete_bytes.bytes,
-                    )
+                    .write_parquet_file(&namespace, "delete", object_stem, delete_bytes.bytes)
                     .await?;
                 commit_files.push(self.build_data_file(
                     &table,
@@ -2265,13 +2258,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
             let delete_row_count = delete_bytes.num_rows as u64;
             if delete_row_count > 0 {
                 let delete_file_uri = self
-                    .write_parquet_file(
-                        &namespace,
-                        "delete",
-                        &filename,
-                        object_stem,
-                        delete_bytes.bytes,
-                    )
+                    .write_parquet_file(&namespace, "delete", object_stem, delete_bytes.bytes)
                     .await?;
                 commit_files.push(self.build_data_file(
                     &table,
@@ -2302,7 +2289,6 @@ impl<S: SinkSpec> IcebergWriter<S> {
                     .write_parquet_file(
                         &namespace,
                         "data",
-                        &filename,
                         object_stem,
                         parquet_bytes.bytes.clone(),
                     )
@@ -2716,30 +2702,17 @@ impl<S: SinkSpec> IcebergWriter<S> {
         &self,
         namespace: &str,
         content_dir: &str,
-        filename: &str,
         object_stem: Option<&str>,
         bytes: bytes::Bytes,
     ) -> Result<String, io::Error> {
-        let table_location = self.table_location(namespace);
-        let (bucket, table_prefix) = parse_object_location(&table_location)?.parts();
-        let digest = object_stem
-            .map(str::to_string)
-            .unwrap_or_else(|| hex::encode(md5::compute(filename).0));
-        let key = format!(
-            "{}/{}/{}.parquet",
-            table_prefix.trim_matches('/'),
-            content_dir,
-            digest
-        );
-        self.put_object_bytes(&bucket, &key, bytes).await?;
-        let file = if bucket.is_empty() {
-            ObjectLocation::File {
-                path: PathBuf::from(&key),
-            }
-        } else {
-            ObjectLocation::S3 { bucket, key }
+        let identity = native_parquet_identity(object_stem, &bytes);
+        let content = match content_dir {
+            "delete" => PendingFileContent::EqualityDeletes,
+            _ => PendingFileContent::Data,
         };
-        Ok(file.iceberg_uri())
+        let (bucket, key, uri) = self.grouped_file_location(namespace, content, &identity)?;
+        self.put_object_bytes(&bucket, &key, bytes).await?;
+        Ok(uri)
     }
 
     fn idempotency_manifest_location(
@@ -3081,6 +3054,13 @@ fn legacy_grouped_object_keys(table_prefix: &str, idempotency_key: &str) -> Vec<
         })
     })
     .collect()
+}
+
+fn native_parquet_identity(object_stem: Option<&str>, bytes: &[u8]) -> String {
+    match object_stem.map(str::trim).filter(|stem| !stem.is_empty()) {
+        Some(stem) => stem.to_string(),
+        None => hex::encode(md5::compute(bytes).0),
+    }
 }
 
 fn grouped_file_identity(
@@ -4192,6 +4172,34 @@ mod tests {
 
     fn output_metadata(value: serde_json::Value) -> OutputMetadata {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn native_parquet_identity_keeps_a_present_stem() {
+        assert_eq!(
+            native_parquet_identity(Some("apply-1"), b"payload"),
+            "apply-1"
+        );
+        assert_eq!(
+            native_parquet_identity(Some("  apply-1  "), b"other"),
+            "apply-1"
+        );
+    }
+
+    #[test]
+    fn native_parquet_identity_hashes_bytes_when_the_stem_is_missing() {
+        let hashed = hex::encode(md5::compute(b"payload").0);
+        assert_eq!(native_parquet_identity(None, b"payload"), hashed);
+        assert_eq!(native_parquet_identity(Some(""), b"payload"), hashed);
+        assert_eq!(native_parquet_identity(Some("   "), b"payload"), hashed);
+        assert_ne!(
+            native_parquet_identity(None, b"payload"),
+            native_parquet_identity(None, b"other")
+        );
+        assert_eq!(
+            native_parquet_identity(None, b"payload"),
+            native_parquet_identity(None, b"payload")
+        );
     }
 
     #[test]
