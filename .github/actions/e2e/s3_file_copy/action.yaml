@@ -28,6 +28,7 @@ runs:
         R2_ACCOUNT_ID: ${{ inputs.r2_account_id }}
         SKIPPRD_PATH: ${{ inputs.skipprd_path }}
         PLUGIN_BINARIES_DIR: ${{ inputs.plugin_binaries_dir }}
+        SKIPPR_TARGET_TRIPLE: x86_64-unknown-linux-gnu
       run: |
         set -euo pipefail
         source "${GITHUB_WORKSPACE}/.github/scripts/e2e_stage_plugins.sh"

@@ -245,6 +245,18 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("run_matrix.py", s3_copy)
         self.assertIn("run_s3_sink.py", s3_copy)
         self.assertIn("skippr_s3_sink.yml", s3_copy)
+        self.assertIn("SKIPPR_TARGET_TRIPLE: x86_64-unknown-linux-gnu", s3_copy)
+        s3_open = (
+            ROOT / ".github" / "actions" / "e2e" / "s3_list_open_keys" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("run.py", s3_open)
+        self.assertIn("SKIPPR_TARGET_TRIPLE: x86_64-unknown-linux-gnu", s3_open)
+        open_keys = text.split("\n  e2e_s3_list_open_keys:", 1)[1].split(
+            "\n  e2e_s3_file_copy:", 1
+        )[0]
+        self.assertIn("secrets.R2_ACCOUNT_ID", open_keys)
+        self.assertIn("secrets.R2_ACCESS_KEY_ID", open_keys)
+        self.assertIn("secrets.R2_SECRET_ACCESS_KEY", open_keys)
         s3_s3 = (
             ROOT / ".github" / "actions" / "e2e" / "s3_s3_copy" / "action.yaml"
         ).read_text(encoding="utf-8")
