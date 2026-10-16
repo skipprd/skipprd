@@ -15,8 +15,8 @@ use futures::StreamExt;
 use serde_derive::{Deserialize, Serialize};
 use skippr_object_writer::backends::AtomicFileBackend;
 use skippr_object_writer::{
-    ObjectWriteError, ObjectWriteReceipt, ObjectWriteRequest, ObjectWriteSession,
-    ObjectWriterConfig,
+    identity_put_bytes, ObjectWriteError, ObjectWriteReceipt, ObjectWriteRequest,
+    ObjectWriteSession, ObjectWriterConfig,
 };
 use skippr_runtime_sdk::plugins::cdc;
 use skippr_runtime_sdk::plugins::DataSink;
@@ -285,6 +285,39 @@ impl DataSink for FileSinkRuntimePlugin {
         Ok(SinkWriteOutcome::Applied)
     }
 
+    async fn sync_bytes(
+        &self,
+        body: Vec<u8>,
+        rows: u64,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, io::Error> {
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let output_file = output_file_path(
+            &self.data_dir,
+            self.config.output_dir.as_deref(),
+            &ctx.filename,
+            &object_stem,
+            &self.output_layout,
+        )?;
+        let format = self
+            .output_layout
+            .required_format()
+            .map_err(io::Error::other)?;
+        identity_put_bytes(
+            self.object_backend.clone(),
+            output_file.to_string_lossy(),
+            format.content_type(),
+            body,
+            rows,
+        )
+        .await
+        .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(SinkWriteOutcome::Applied)
+    }
+
     async fn install_schema_state(
         &self,
         _schema_version: u64,
@@ -392,7 +425,7 @@ async fn sync_file_sink(
                 .await
         }
         OutputFormat::Jsonl => session.write_jsonl(batches).await,
-        OutputFormat::Native => {
+        OutputFormat::Native | OutputFormat::Csv | OutputFormat::Xml => {
             return Err(io::Error::other(
                 OutputFormat::FILE_SINK_NEEDS_PARQUET_OR_JSONL,
             ));
@@ -621,5 +654,74 @@ mod tests {
                 "/lake/events/p_rmc=EU1/p_year=2022/p_month=2/p_day=19/apply-0001.parquet"
             )
         );
+    }
+
+    #[test]
+    fn csv_and_xml_use_copy_extensions() {
+        for (format, ext) in [
+            (OutputFormat::Csv, "csv"),
+            (OutputFormat::Xml, "xml"),
+            (OutputFormat::Jsonl, "jsonl"),
+        ] {
+            let mut layout = skippr_runtime_sdk::protocol::RuntimeOutputLayout::default();
+            layout.format = Some(format);
+            assert_eq!(
+                output_file_path("/data", None, "namespace=events", "apply-0001", &layout).unwrap(),
+                PathBuf::from(format!("/data/output/events/apply-0001.{ext}"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn copy_identity_put_writes_file_bytes() {
+        let dir = std::env::temp_dir().join(format!("skippr-file-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let plugin = FileSinkRuntimePlugin {
+            config: DataSinkFilePluginConfig {
+                format: None,
+                output_dir: Some(dir.display().to_string()),
+            },
+            data_dir: dir.display().to_string(),
+            output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                format: Some(OutputFormat::Jsonl),
+                ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+            },
+            object_backend: Arc::new(AtomicFileBackend::new()),
+        };
+        let body = b"{\"id\":1}\n".to_vec();
+        plugin
+            .sync_bytes(
+                body.clone(),
+                1,
+                SinkWriteContext {
+                    filename: "namespace=events".to_string(),
+                    compaction_id: "copy-1".to_string(),
+                    idempotency_key: "copy-1".to_string(),
+                    wal_refs: vec![],
+                    write_semantics:
+                        skippr_runtime_sdk::plugins::SinkWriteSemantics::IdempotentAtLeastOnce,
+                    schema_fingerprint: "copy".to_string(),
+                    cdc_ctx: None,
+                    source_contract: None,
+                },
+            )
+            .await
+            .unwrap();
+        let mut stack = vec![dir.clone()];
+        let mut written = Vec::new();
+        while let Some(current) = stack.pop() {
+            for entry in fs::read_dir(&current).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+                    written.push(path);
+                }
+            }
+        }
+        assert_eq!(written.len(), 1);
+        assert_eq!(fs::read(&written[0]).unwrap(), body);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

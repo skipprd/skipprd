@@ -8,8 +8,9 @@ use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use serde_derive::Deserialize;
 use skippr_object_writer::{
-    CompletionMetadata, MultipartUpload, ObjectPartReceipt, ObjectWriteBackend, ObjectWriteError,
-    ObjectWriteReceipt, ObjectWriteRequest, ObjectWriteSession, ObjectWriterConfig, PartMetadata,
+    identity_put_bytes, CompletionMetadata, MultipartUpload, ObjectPartReceipt, ObjectWriteBackend,
+    ObjectWriteError, ObjectWriteReceipt, ObjectWriteRequest, ObjectWriteSession,
+    ObjectWriterConfig, PartMetadata,
 };
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
@@ -345,6 +346,21 @@ impl DataSink for DataSinkS3Plugin {
         Ok(SinkWriteOutcome::Applied)
     }
 
+    async fn sync_bytes(
+        &self,
+        body: Vec<u8>,
+        rows: u64,
+        ctx: skippr_runtime_sdk::plugins::SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        self.write_copy_bytes(body, rows, &final_key).await?;
+        Ok(SinkWriteOutcome::Applied)
+    }
+
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::S3
     }
@@ -601,7 +617,7 @@ impl DataSinkS3Plugin {
                     .await
             }
             OutputFormat::Jsonl => session.write_jsonl(batches).await,
-            OutputFormat::Native => {
+            OutputFormat::Native | OutputFormat::Csv | OutputFormat::Xml => {
                 return Err(io::Error::other(
                     OutputFormat::FILE_SINK_NEEDS_PARQUET_OR_JSONL,
                 ));
@@ -613,6 +629,30 @@ impl DataSinkS3Plugin {
         counters::add_parquet_bytes(receipt.bytes);
         counters::add_upload(1);
         Ok(receipt)
+    }
+
+    async fn write_copy_bytes(
+        &self,
+        body: Vec<u8>,
+        rows: u64,
+        final_key: &str,
+    ) -> io::Result<ObjectWriteReceipt> {
+        use skippr_runtime_sdk::metrics::counters;
+        let format = self
+            .output_layout
+            .required_format()
+            .map_err(io::Error::other)?;
+        counters::inc_uploads_in_flight();
+        let result = identity_put_bytes(
+            self.object_backend.clone(),
+            final_key,
+            format.content_type(),
+            body,
+            rows,
+        )
+        .await;
+        counters::dec_uploads_in_flight();
+        result.map_err(|error| io::Error::other(error.to_string()))
     }
 
     async fn manifest_matches(
@@ -768,6 +808,27 @@ mod tests {
             plugin.object_key_for_filename("namespace=events", "apply-0001"),
             "root/events/apply-0001.parquet"
         );
+        let mut plugin = plugin;
+        for (format, ext) in [
+            (
+                skippr_runtime_sdk::serdes::output_format::OutputFormat::Csv,
+                "csv",
+            ),
+            (
+                skippr_runtime_sdk::serdes::output_format::OutputFormat::Xml,
+                "xml",
+            ),
+            (
+                skippr_runtime_sdk::serdes::output_format::OutputFormat::Jsonl,
+                "jsonl",
+            ),
+        ] {
+            plugin.output_layout.format = Some(format);
+            assert_eq!(
+                plugin.object_key_for_filename("namespace=events", "apply-0001"),
+                format!("root/events/apply-0001.{ext}")
+            );
+        }
     }
 
     #[test]
@@ -804,5 +865,50 @@ mod tests {
             ),
             "root/events/p_rmc=EU1/p_year=2022/p_month=2/p_day=19/apply-0001.parquet"
         );
+    }
+
+    #[tokio::test]
+    async fn copy_identity_put_writes_object_bytes() {
+        let client = S3Client::from_conf(
+            aws_sdk_s3::config::Builder::new()
+                .behavior_version(aws_config::BehaviorVersion::latest())
+                .build(),
+        );
+        let config = DataSinkS3PluginConfig {
+            format: None,
+            endpoint_url: None,
+            s3_bucket: "bucket".to_string(),
+            s3_prefix: "/root/".to_string(),
+        };
+        let plugin = DataSinkS3Plugin {
+            s3_client: client.clone(),
+            object_backend: Arc::new(S3ObjectBackend {
+                client,
+                bucket: config.s3_bucket.clone(),
+            }),
+            config,
+            output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                format: Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Jsonl),
+                ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+            },
+        };
+        let dir = std::env::temp_dir().join(format!("skippr-s3-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = plugin.object_key_for_filename("namespace=events", "apply-copy");
+        let path = dir.join(&key);
+        let body = b"{\"id\":1}\n".to_vec();
+        skippr_object_writer::identity_put_bytes(
+            std::sync::Arc::new(skippr_object_writer::backends::AtomicFileBackend::new()),
+            path.to_string_lossy(),
+            skippr_runtime_sdk::serdes::output_format::OutputFormat::Jsonl.content_type(),
+            body.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(key, "root/events/apply-copy.jsonl");
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -13,7 +13,7 @@ use skippr_plugin_data_sink_postgres::{
 };
 use skippr_runtime_sdk::plugins::cdc::*;
 use skippr_runtime_sdk::progress::OffsetKey;
-use skippr_runtime_sdk::sink_compat::segment_file::{PartitionKey, SegmentFile};
+use skippr_runtime_sdk::sink_compat::segment_file::{PartitionKey, SegmentFile, WalPayload};
 
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
@@ -175,7 +175,7 @@ fn reference_path_full_lifecycle_insert_update_delete() {
 
     let batch = make_batch();
     let mut batches = HashMap::new();
-    batches.insert(key.clone(), vec![batch]);
+    batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
     let mut parts_meta = HashMap::new();
     parts_meta.insert(key.clone(), (0u64, SystemTime::now()));
     let offsets: HashMap<OffsetKey, u64> = HashMap::new();

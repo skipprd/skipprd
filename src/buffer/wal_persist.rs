@@ -6,11 +6,10 @@ use std::collections::HashMap;
 use std::io;
 use std::time::SystemTime;
 
-use arrow::array::RecordBatch;
 use skippr_lease::LeaseGuard;
 use tracing::error;
 
-use crate::buffer::segment_file::{encode_snapshot, PartitionKey, SegmentFile};
+use crate::buffer::segment_file::{encode_snapshot, PartitionKey, SegmentFile, WalPayload};
 use crate::buffer::wal_object_store::{snapshot_pair_keys, GetOutcome, PutOutcome, WalObjectStore};
 use crate::buffer::wal_store::{SegmentWriteLocation, SegmentWriteResult};
 use crate::helpers::offsets::OffsetKey;
@@ -214,7 +213,7 @@ pub async fn persist_snapshot_pair(
     prefix_url: &str,
     snapshot_id: &str,
     offsets: &HashMap<OffsetKey, u64>,
-    batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
+    batches: &HashMap<PartitionKey, WalPayload>,
     partitions_meta: &HashMap<PartitionKey, (u64, SystemTime)>,
     part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
     lease: &LeaseGuard,
@@ -249,7 +248,7 @@ pub async fn persist_snapshot_keys(
     commit_key: &str,
     snapshot_id: &str,
     offsets: &HashMap<OffsetKey, u64>,
-    batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
+    batches: &HashMap<PartitionKey, WalPayload>,
     partitions_meta: &HashMap<PartitionKey, (u64, SystemTime)>,
     part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
     lease: &LeaseGuard,
@@ -280,7 +279,7 @@ async fn persist_owned_pair(
     commit_key: &str,
     snapshot_id: &str,
     offsets: &HashMap<OffsetKey, u64>,
-    batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
+    batches: &HashMap<PartitionKey, WalPayload>,
     partitions_meta: &HashMap<PartitionKey, (u64, SystemTime)>,
     part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
     lease: &LeaseGuard,
@@ -357,7 +356,7 @@ pub fn persist_error_from_io(err: PersistError, snapshot_id: &str) -> io::Error 
 mod tests {
     use super::*;
     use crate::buffer::wal_object_store::{ScriptedGet, ScriptedObjectStore, ScriptedPut};
-    use arrow::array::Int32Array;
+    use arrow::array::{Int32Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
     use serial_test::serial;
     use skippr_lease::{
@@ -374,7 +373,7 @@ mod tests {
 
     fn snapshot_parts() -> (
         HashMap<OffsetKey, u64>,
-        HashMap<PartitionKey, Vec<RecordBatch>>,
+        HashMap<PartitionKey, WalPayload>,
         HashMap<PartitionKey, (u64, SystemTime)>,
         HashMap<PartitionKey, Vec<u8>>,
     ) {
@@ -386,7 +385,7 @@ mod tests {
             schema_fingerprint: "fp".into(),
         };
         let mut batches = HashMap::new();
-        batches.insert(key.clone(), vec![batch()]);
+        batches.insert(key.clone(), WalPayload::Arrow(vec![batch()]));
         let mut meta = HashMap::new();
         meta.insert(key, (12, SystemTime::now()));
         let mut offsets = HashMap::new();

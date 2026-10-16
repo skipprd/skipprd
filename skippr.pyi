@@ -3,7 +3,7 @@
 
 import os
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, TypeAlias, final, overload
+from typing import Any, ClassVar, Literal, TypeAlias, final, overload
 
 import pyarrow
 
@@ -226,90 +226,429 @@ class Session:
         """Return the latest batch as an Arrow table. `name` selects a namespace."""
         ...
 
-DataSourceAdRollAdsStreamProfile: TypeAlias = Literal["minimal", "standard", "full"]
-DataSourceAppleAppStoreSerpAppStoreEntity: TypeAlias = Literal[
-    "software",
-    "iPadSoftware",
-    "macSoftware",
-]
-DataSourceAppleSearchAdsStreamProfile: TypeAlias = Literal["minimal", "standard", "full"]
-DataSourceBingWebmasterToolsStreamProfile: TypeAlias = Literal["minimal", "standard", "full"]
-DataSourceDataForSeoBacklinksRunMode: TypeAlias = Literal["both", "backlinks", "page_intersection"]
-DataSourceDataForSeoBacklinksStreamKind: TypeAlias = Literal[
-    "backlinks",
-    "summary",
-    "referring_domains",
-    "anchors",
-    "history",
-    "page_intersection",
-]
-DataSourceDataForSeoSeoOpportunitiesDevice: TypeAlias = Literal["desktop", "mobile"]
-DataSourceDataForSeoSeoOpportunitiesRunMode: TypeAlias = Literal["full", "mvp", "discover_only"]
-DataSourceDataForSeoSeoOpportunitiesStreamKind: TypeAlias = Literal[
-    "keyword_suggestions",
-    "keyword_metrics",
-    "serp_results",
-    "serp_features",
-    "weak_spots",
-    "keyword_clusters",
-    "competitor_keywords",
-    "competitor_sitemaps",
-    "rank_tracking",
-    "ai_citation_opportunities",
-    "content_briefs",
-    "opportunity_scores",
-]
-DataSourceDynamodbSourceCdcMode: TypeAlias = Literal["snapshot", "snapshot_then_cdc", "cdc_only"]
-DataSourceGoogleAdsStreamProfile: TypeAlias = Literal["minimal", "standard", "full"]
-DataSourceGoogleAnalyticsStreamProfile: TypeAlias = Literal["minimal", "standard", "full"]
-DataSourceGooglePageSpeedUrlMode: TypeAlias = Literal["tld_sample", "url_list"]
-DataSourceGooglePageSpeedStrategy: TypeAlias = Literal["mobile", "desktop"]
-DataSourceGoogleSearchConsoleStreamProfile: TypeAlias = Literal["minimal", "standard", "full"]
-DataSourceGoogleSerpRanksSerpDevice: TypeAlias = Literal["desktop", "mobile"]
-DataSourceHubspotCrmStreamProfile: TypeAlias = Literal["minimal", "console_default", "full"]
-DataSourceHubspotCrmPrivacyMode: TypeAlias = Literal["passthrough", "profile", "allowlist"]
-DataSourceHubspotCrmPrivacyProfile: TypeAlias = Literal[
-    "passthrough",
-    "upfoundry_safe",
-    "crm_revenue_only",
-]
-DataSourceHubspotCrmOnViolation: TypeAlias = Literal["drop", "deadletter"]
-DataSourceKafkaSourceCdcMode: TypeAlias = Literal["snapshot", "snapshot_then_cdc", "cdc_only"]
-DataSourceLinkedInAdsStreamProfile: TypeAlias = Literal["minimal", "standard", "full"]
-DataSourceMetaAdsStreamProfile: TypeAlias = Literal["minimal", "standard", "full"]
-DataSourceMetaInstagramAdsStreamProfile: TypeAlias = Literal["minimal", "standard", "full"]
-DataSourceMongodbSourceCdcMode: TypeAlias = Literal["snapshot", "snapshot_then_cdc", "cdc_only"]
-DataSourceMysqlSourceCdcMode: TypeAlias = Literal["snapshot", "snapshot_then_cdc", "cdc_only"]
-DataSourceOtlpOtlpSignal: TypeAlias = Literal["traces", "logs", "metrics"]
-DataSourcePostgresSourceCdcMode: TypeAlias = Literal["snapshot", "snapshot_then_cdc", "cdc_only"]
-DataSourceRevolutBusinessStreamProfile: TypeAlias = Literal["minimal", "console_default", "full"]
-DataSourceRevolutBusinessPrivacyMode: TypeAlias = Literal["passthrough", "profile", "allowlist"]
-DataSourceRevolutBusinessPrivacyProfile: TypeAlias = Literal["passthrough", "upfoundry_safe"]
-DataSourceRevolutBusinessOnViolation: TypeAlias = Literal["drop", "deadletter"]
-DataSourceShopifyAdminStreamProfile: TypeAlias = Literal["minimal", "console_default", "full"]
-DataSourceSiteQualityUrlMode: TypeAlias = Literal["tld_sample", "url_list", "site_crawl"]
-DataSourceSiteSecurityUrlMode: TypeAlias = Literal["tld_sample", "url_list", "site_crawl"]
-DataSourceStripeStreamProfile: TypeAlias = Literal["minimal", "console_default", "full"]
-DataSourceStripeWritePolicy: TypeAlias = Literal[
-    "append",
-    "merge_by_key",
-    "replace_table",
-    "replace_partition",
-]
-DataSourceStripePrivacyMode: TypeAlias = Literal["passthrough", "profile", "allowlist"]
-DataSourceStripePrivacyProfile: TypeAlias = Literal["passthrough", "upfoundry_safe"]
-DataSourceStripeOnViolation: TypeAlias = Literal["drop", "deadletter"]
-DataSourceSumUpStreamProfile: TypeAlias = Literal["minimal", "console_default", "full"]
-DataSourceSumUpPrivacyMode: TypeAlias = Literal["passthrough", "profile", "allowlist"]
-DataSourceSumUpPrivacyProfile: TypeAlias = Literal["passthrough", "upfoundry_safe"]
-DataSourceSumUpOnViolation: TypeAlias = Literal["drop", "deadletter"]
-DataSourceUpfoundryBacklinksEntityKind: TypeAlias = Literal["target", "competitor"]
-DataSourceXAdsStreamProfile: TypeAlias = Literal["minimal", "standard", "full"]
-DataSourceXeroAccountingStreamProfile: TypeAlias = Literal["minimal", "console_default", "full"]
-DataSourceXeroAccountingPrivacyMode: TypeAlias = Literal["passthrough", "profile", "allowlist"]
-DataSourceXeroAccountingPrivacyProfile: TypeAlias = Literal["passthrough", "upfoundry_safe"]
-DataSourceXeroAccountingOnViolation: TypeAlias = Literal["drop", "deadletter"]
-BatchTimeUnit: TypeAlias = Literal["year", "month", "day", "hour", "minute"]
+@final
+class DataSourceAdRollAdsStreamProfile:
+    MINIMAL: ClassVar[DataSourceAdRollAdsStreamProfile]
+    STANDARD: ClassVar[DataSourceAdRollAdsStreamProfile]
+    FULL: ClassVar[DataSourceAdRollAdsStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceAppleAppStoreSerpAppStoreEntity:
+    SOFTWARE: ClassVar[DataSourceAppleAppStoreSerpAppStoreEntity]
+    IPADSOFTWARE: ClassVar[DataSourceAppleAppStoreSerpAppStoreEntity]
+    MACSOFTWARE: ClassVar[DataSourceAppleAppStoreSerpAppStoreEntity]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceAppleSearchAdsStreamProfile:
+    MINIMAL: ClassVar[DataSourceAppleSearchAdsStreamProfile]
+    STANDARD: ClassVar[DataSourceAppleSearchAdsStreamProfile]
+    FULL: ClassVar[DataSourceAppleSearchAdsStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceBingWebmasterToolsStreamProfile:
+    MINIMAL: ClassVar[DataSourceBingWebmasterToolsStreamProfile]
+    STANDARD: ClassVar[DataSourceBingWebmasterToolsStreamProfile]
+    FULL: ClassVar[DataSourceBingWebmasterToolsStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceDataForSeoBacklinksRunMode:
+    BOTH: ClassVar[DataSourceDataForSeoBacklinksRunMode]
+    BACKLINKS: ClassVar[DataSourceDataForSeoBacklinksRunMode]
+    PAGEINTERSECTION: ClassVar[DataSourceDataForSeoBacklinksRunMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceDataForSeoBacklinksStreamKind:
+    BACKLINKS: ClassVar[DataSourceDataForSeoBacklinksStreamKind]
+    SUMMARY: ClassVar[DataSourceDataForSeoBacklinksStreamKind]
+    REFERRINGDOMAINS: ClassVar[DataSourceDataForSeoBacklinksStreamKind]
+    ANCHORS: ClassVar[DataSourceDataForSeoBacklinksStreamKind]
+    HISTORY: ClassVar[DataSourceDataForSeoBacklinksStreamKind]
+    PAGEINTERSECTION: ClassVar[DataSourceDataForSeoBacklinksStreamKind]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceDataForSeoSeoOpportunitiesDevice:
+    DESKTOP: ClassVar[DataSourceDataForSeoSeoOpportunitiesDevice]
+    MOBILE: ClassVar[DataSourceDataForSeoSeoOpportunitiesDevice]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceDataForSeoSeoOpportunitiesSearchEngine:
+    GOOGLE: ClassVar[DataSourceDataForSeoSeoOpportunitiesSearchEngine]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceDataForSeoSeoOpportunitiesRunMode:
+    FULL: ClassVar[DataSourceDataForSeoSeoOpportunitiesRunMode]
+    MVP: ClassVar[DataSourceDataForSeoSeoOpportunitiesRunMode]
+    DISCOVERONLY: ClassVar[DataSourceDataForSeoSeoOpportunitiesRunMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceDataForSeoSeoOpportunitiesStreamKind:
+    KEYWORDSUGGESTIONS: ClassVar[DataSourceDataForSeoSeoOpportunitiesStreamKind]
+    KEYWORDMETRICS: ClassVar[DataSourceDataForSeoSeoOpportunitiesStreamKind]
+    SERPRESULTS: ClassVar[DataSourceDataForSeoSeoOpportunitiesStreamKind]
+    SERPFEATURES: ClassVar[DataSourceDataForSeoSeoOpportunitiesStreamKind]
+    WEAKSPOTS: ClassVar[DataSourceDataForSeoSeoOpportunitiesStreamKind]
+    KEYWORDCLUSTERS: ClassVar[DataSourceDataForSeoSeoOpportunitiesStreamKind]
+    COMPETITORKEYWORDS: ClassVar[DataSourceDataForSeoSeoOpportunitiesStreamKind]
+    COMPETITORSITEMAPS: ClassVar[DataSourceDataForSeoSeoOpportunitiesStreamKind]
+    RANKTRACKING: ClassVar[DataSourceDataForSeoSeoOpportunitiesStreamKind]
+    AICITATIONOPPORTUNITIES: ClassVar[DataSourceDataForSeoSeoOpportunitiesStreamKind]
+    CONTENTBRIEFS: ClassVar[DataSourceDataForSeoSeoOpportunitiesStreamKind]
+    OPPORTUNITYSCORES: ClassVar[DataSourceDataForSeoSeoOpportunitiesStreamKind]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceDynamodbSourceCdcMode:
+    SNAPSHOT: ClassVar[DataSourceDynamodbSourceCdcMode]
+    SNAPSHOTTHENCDC: ClassVar[DataSourceDynamodbSourceCdcMode]
+    CDCONLY: ClassVar[DataSourceDynamodbSourceCdcMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceGoogleAdsStreamProfile:
+    MINIMAL: ClassVar[DataSourceGoogleAdsStreamProfile]
+    STANDARD: ClassVar[DataSourceGoogleAdsStreamProfile]
+    FULL: ClassVar[DataSourceGoogleAdsStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceGoogleAnalyticsStreamProfile:
+    MINIMAL: ClassVar[DataSourceGoogleAnalyticsStreamProfile]
+    STANDARD: ClassVar[DataSourceGoogleAnalyticsStreamProfile]
+    FULL: ClassVar[DataSourceGoogleAnalyticsStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceGooglePageSpeedUrlMode:
+    TLDSAMPLE: ClassVar[DataSourceGooglePageSpeedUrlMode]
+    URLLIST: ClassVar[DataSourceGooglePageSpeedUrlMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceGooglePageSpeedStrategy:
+    MOBILE: ClassVar[DataSourceGooglePageSpeedStrategy]
+    DESKTOP: ClassVar[DataSourceGooglePageSpeedStrategy]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceGoogleSearchConsoleStreamProfile:
+    MINIMAL: ClassVar[DataSourceGoogleSearchConsoleStreamProfile]
+    STANDARD: ClassVar[DataSourceGoogleSearchConsoleStreamProfile]
+    FULL: ClassVar[DataSourceGoogleSearchConsoleStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceGoogleSerpRanksSerpDevice:
+    DESKTOP: ClassVar[DataSourceGoogleSerpRanksSerpDevice]
+    MOBILE: ClassVar[DataSourceGoogleSerpRanksSerpDevice]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceHubspotCrmStreamProfile:
+    MINIMAL: ClassVar[DataSourceHubspotCrmStreamProfile]
+    CONSOLEDEFAULT: ClassVar[DataSourceHubspotCrmStreamProfile]
+    FULL: ClassVar[DataSourceHubspotCrmStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceHubspotCrmPrivacyMode:
+    PASSTHROUGH: ClassVar[DataSourceHubspotCrmPrivacyMode]
+    PROFILE: ClassVar[DataSourceHubspotCrmPrivacyMode]
+    ALLOWLIST: ClassVar[DataSourceHubspotCrmPrivacyMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceHubspotCrmPrivacyProfile:
+    PASSTHROUGH: ClassVar[DataSourceHubspotCrmPrivacyProfile]
+    UPFOUNDRYSAFE: ClassVar[DataSourceHubspotCrmPrivacyProfile]
+    CRMREVENUEONLY: ClassVar[DataSourceHubspotCrmPrivacyProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceHubspotCrmOnViolation:
+    DROP: ClassVar[DataSourceHubspotCrmOnViolation]
+    DEADLETTER: ClassVar[DataSourceHubspotCrmOnViolation]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceKafkaSourceCdcMode:
+    SNAPSHOT: ClassVar[DataSourceKafkaSourceCdcMode]
+    SNAPSHOTTHENCDC: ClassVar[DataSourceKafkaSourceCdcMode]
+    CDCONLY: ClassVar[DataSourceKafkaSourceCdcMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceLinkedInAdsStreamProfile:
+    MINIMAL: ClassVar[DataSourceLinkedInAdsStreamProfile]
+    STANDARD: ClassVar[DataSourceLinkedInAdsStreamProfile]
+    FULL: ClassVar[DataSourceLinkedInAdsStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceMetaAdsStreamProfile:
+    MINIMAL: ClassVar[DataSourceMetaAdsStreamProfile]
+    STANDARD: ClassVar[DataSourceMetaAdsStreamProfile]
+    FULL: ClassVar[DataSourceMetaAdsStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceMetaInstagramAdsStreamProfile:
+    MINIMAL: ClassVar[DataSourceMetaInstagramAdsStreamProfile]
+    STANDARD: ClassVar[DataSourceMetaInstagramAdsStreamProfile]
+    FULL: ClassVar[DataSourceMetaInstagramAdsStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceMongodbSourceCdcMode:
+    SNAPSHOT: ClassVar[DataSourceMongodbSourceCdcMode]
+    SNAPSHOTTHENCDC: ClassVar[DataSourceMongodbSourceCdcMode]
+    CDCONLY: ClassVar[DataSourceMongodbSourceCdcMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceMysqlSourceCdcMode:
+    SNAPSHOT: ClassVar[DataSourceMysqlSourceCdcMode]
+    SNAPSHOTTHENCDC: ClassVar[DataSourceMysqlSourceCdcMode]
+    CDCONLY: ClassVar[DataSourceMysqlSourceCdcMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceOtlpOtlpSignal:
+    TRACES: ClassVar[DataSourceOtlpOtlpSignal]
+    LOGS: ClassVar[DataSourceOtlpOtlpSignal]
+    METRICS: ClassVar[DataSourceOtlpOtlpSignal]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourcePostgresSourceCdcMode:
+    SNAPSHOT: ClassVar[DataSourcePostgresSourceCdcMode]
+    SNAPSHOTTHENCDC: ClassVar[DataSourcePostgresSourceCdcMode]
+    CDCONLY: ClassVar[DataSourcePostgresSourceCdcMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceRevolutBusinessStreamProfile:
+    MINIMAL: ClassVar[DataSourceRevolutBusinessStreamProfile]
+    CONSOLEDEFAULT: ClassVar[DataSourceRevolutBusinessStreamProfile]
+    FULL: ClassVar[DataSourceRevolutBusinessStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceRevolutBusinessPrivacyMode:
+    PASSTHROUGH: ClassVar[DataSourceRevolutBusinessPrivacyMode]
+    PROFILE: ClassVar[DataSourceRevolutBusinessPrivacyMode]
+    ALLOWLIST: ClassVar[DataSourceRevolutBusinessPrivacyMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceRevolutBusinessPrivacyProfile:
+    PASSTHROUGH: ClassVar[DataSourceRevolutBusinessPrivacyProfile]
+    UPFOUNDRYSAFE: ClassVar[DataSourceRevolutBusinessPrivacyProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceRevolutBusinessOnViolation:
+    DROP: ClassVar[DataSourceRevolutBusinessOnViolation]
+    DEADLETTER: ClassVar[DataSourceRevolutBusinessOnViolation]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceShopifyAdminStreamProfile:
+    MINIMAL: ClassVar[DataSourceShopifyAdminStreamProfile]
+    CONSOLEDEFAULT: ClassVar[DataSourceShopifyAdminStreamProfile]
+    FULL: ClassVar[DataSourceShopifyAdminStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceSiteQualityUrlMode:
+    TLDSAMPLE: ClassVar[DataSourceSiteQualityUrlMode]
+    URLLIST: ClassVar[DataSourceSiteQualityUrlMode]
+    SITECRAWL: ClassVar[DataSourceSiteQualityUrlMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceSiteSecurityUrlMode:
+    TLDSAMPLE: ClassVar[DataSourceSiteSecurityUrlMode]
+    URLLIST: ClassVar[DataSourceSiteSecurityUrlMode]
+    SITECRAWL: ClassVar[DataSourceSiteSecurityUrlMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceStripeStreamProfile:
+    MINIMAL: ClassVar[DataSourceStripeStreamProfile]
+    CONSOLEDEFAULT: ClassVar[DataSourceStripeStreamProfile]
+    FULL: ClassVar[DataSourceStripeStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceStripeWritePolicy:
+    APPEND: ClassVar[DataSourceStripeWritePolicy]
+    MERGEBYKEY: ClassVar[DataSourceStripeWritePolicy]
+    REPLACETABLE: ClassVar[DataSourceStripeWritePolicy]
+    REPLACEPARTITION: ClassVar[DataSourceStripeWritePolicy]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceStripePrivacyMode:
+    PASSTHROUGH: ClassVar[DataSourceStripePrivacyMode]
+    PROFILE: ClassVar[DataSourceStripePrivacyMode]
+    ALLOWLIST: ClassVar[DataSourceStripePrivacyMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceStripePrivacyProfile:
+    PASSTHROUGH: ClassVar[DataSourceStripePrivacyProfile]
+    UPFOUNDRYSAFE: ClassVar[DataSourceStripePrivacyProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceStripeOnViolation:
+    DROP: ClassVar[DataSourceStripeOnViolation]
+    DEADLETTER: ClassVar[DataSourceStripeOnViolation]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceSumUpStreamProfile:
+    MINIMAL: ClassVar[DataSourceSumUpStreamProfile]
+    CONSOLEDEFAULT: ClassVar[DataSourceSumUpStreamProfile]
+    FULL: ClassVar[DataSourceSumUpStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceSumUpPrivacyMode:
+    PASSTHROUGH: ClassVar[DataSourceSumUpPrivacyMode]
+    PROFILE: ClassVar[DataSourceSumUpPrivacyMode]
+    ALLOWLIST: ClassVar[DataSourceSumUpPrivacyMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceSumUpPrivacyProfile:
+    PASSTHROUGH: ClassVar[DataSourceSumUpPrivacyProfile]
+    UPFOUNDRYSAFE: ClassVar[DataSourceSumUpPrivacyProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceSumUpOnViolation:
+    DROP: ClassVar[DataSourceSumUpOnViolation]
+    DEADLETTER: ClassVar[DataSourceSumUpOnViolation]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceUpfoundryBacklinksEntityKind:
+    TARGET: ClassVar[DataSourceUpfoundryBacklinksEntityKind]
+    COMPETITOR: ClassVar[DataSourceUpfoundryBacklinksEntityKind]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceXAdsStreamProfile:
+    MINIMAL: ClassVar[DataSourceXAdsStreamProfile]
+    STANDARD: ClassVar[DataSourceXAdsStreamProfile]
+    FULL: ClassVar[DataSourceXAdsStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceXeroAccountingStreamProfile:
+    MINIMAL: ClassVar[DataSourceXeroAccountingStreamProfile]
+    CONSOLEDEFAULT: ClassVar[DataSourceXeroAccountingStreamProfile]
+    FULL: ClassVar[DataSourceXeroAccountingStreamProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceXeroAccountingPrivacyMode:
+    PASSTHROUGH: ClassVar[DataSourceXeroAccountingPrivacyMode]
+    PROFILE: ClassVar[DataSourceXeroAccountingPrivacyMode]
+    ALLOWLIST: ClassVar[DataSourceXeroAccountingPrivacyMode]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceXeroAccountingPrivacyProfile:
+    PASSTHROUGH: ClassVar[DataSourceXeroAccountingPrivacyProfile]
+    UPFOUNDRYSAFE: ClassVar[DataSourceXeroAccountingPrivacyProfile]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class DataSourceXeroAccountingOnViolation:
+    DROP: ClassVar[DataSourceXeroAccountingOnViolation]
+    DEADLETTER: ClassVar[DataSourceXeroAccountingOnViolation]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class PipelineType:
+    INGEST: ClassVar[PipelineType]
+    COPY: ClassVar[PipelineType]
+    CDC: ClassVar[PipelineType]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class BatchTimeUnit:
+    YEAR: ClassVar[BatchTimeUnit]
+    MONTH: ClassVar[BatchTimeUnit]
+    DAY: ClassVar[BatchTimeUnit]
+    HOUR: ClassVar[BatchTimeUnit]
+    MINUTE: ClassVar[BatchTimeUnit]
+    def __eq__(self, other: object, /) -> bool: ...
+    def __hash__(self) -> int: ...
+
 DataSinkAthenaIcebergS3CompatibleObjectStore: TypeAlias = (
     DataSinkAthenaIcebergS3CompatibleObjectStoreS3
     | DataSinkAthenaIcebergS3CompatibleObjectStoreR2
@@ -1328,7 +1667,7 @@ class Pipeline:
         cls,
         *,
         data_source: DataSourceRef,
-        type: str | None = None,
+        type: PipelineType | None = None,
         auto_approve: bool | None = None,
         env: str | None = None,
         buffer_threshold_bytes: int | None = None,
@@ -1350,7 +1689,7 @@ class Pipeline:
 
         Args:
             data_source: Source this pipeline reads. Required. A `DataSourceRef` from this config.
-            type: Label for logs and metadata. Default `INGEST` (`PIPELINE_TYPE`).
+            type: Pipeline mode. Omitted is ingest. YAML `cdc:` is CDC settings, not the mode.
             auto_approve: Approve schema changes without prompting. Default true (`SCHEMA_AUTO_APPROVE`).
             env: Environment label for logs and metadata. Default `prod` (`SKIPPR_ENV`).
             buffer_threshold_bytes: Flush the ingest buffer at this many bytes. Default 10 MiB (`BUFFER_THRESHOLD_BYTES`).
@@ -1363,14 +1702,14 @@ class Pipeline:
             deadletter_sink: Destination for records that fail transform or sink writes.
             stats: Namespace cardinality and histogram collection during ingest.
             semantic_layer: LLM semantic-layer generation for this pipeline.
-            cdc: CDC configuration. When present, the pipeline runs in CDC mode and"""
+            cdc: CDC settings (contracts / business keys). Mode is `type: cdc`, not the"""
         ...
     data_source: DataSourceRef
     """Source this pipeline reads. Required. A `DataSourceRef` from this config.
 
     YAML key `data_source`."""
-    type: str | None
-    """Label for logs and metadata. Default `INGEST` (`PIPELINE_TYPE`).
+    type: PipelineType | None
+    """Pipeline mode. Omitted is ingest. YAML `cdc:` is CDC settings, not the mode.
 
     YAML key `type`."""
     auto_approve: bool | None
@@ -1422,8 +1761,8 @@ class Pipeline:
 
     YAML key `semantic_layer`."""
     cdc: CdcPipelineConfig | None
-    """CDC configuration. When present, the pipeline runs in CDC mode and
-    validates source/sink compatibility at startup.
+    """CDC settings (contracts / business keys). Mode is `type: cdc`, not the
+    presence of this block.
 
     YAML key `cdc`."""
 
@@ -2282,7 +2621,7 @@ class DataSourceDataForSeoSeoOpportunities:
         location_code: int | None = None,
         language_code: str | None = None,
         device: DataSourceDataForSeoSeoOpportunitiesDevice | None = None,
-        search_engine: Literal["google"] | None = None,
+        search_engine: DataSourceDataForSeoSeoOpportunitiesSearchEngine | None = None,
         run_mode: DataSourceDataForSeoSeoOpportunitiesRunMode | None = None,
         seed_keywords: list[str] | None = None,
         seed_queries_from_gsc: bool | None = None,
@@ -2335,7 +2674,7 @@ class DataSourceDataForSeoSeoOpportunities:
     """YAML key `language_code`."""
     device: DataSourceDataForSeoSeoOpportunitiesDevice | None
     """YAML key `device`."""
-    search_engine: Literal["google"] | None
+    search_engine: DataSourceDataForSeoSeoOpportunitiesSearchEngine | None
     """YAML key `search_engine`."""
     run_mode: DataSourceDataForSeoSeoOpportunitiesRunMode | None
     """YAML key `run_mode`."""

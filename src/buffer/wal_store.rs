@@ -1,9 +1,8 @@
-use crate::buffer::segment_file::{PartitionKey, SegmentFileMetadata};
+use crate::buffer::segment_file::{PartitionKey, SegmentFileMetadata, WalPayload};
 use crate::buffer::wal_object_store::{parse_s3_prefix, S3WalObjectStore};
 use crate::buffer::wal_persist::{persist_error_from_io, persist_snapshot_pair};
 use crate::helpers::configuration::Config;
 use crate::helpers::wal_storage::WalStorage;
-use arrow::array::RecordBatch;
 use async_trait::async_trait;
 use skippr_lease::LeaseGuard;
 use std::collections::HashMap;
@@ -147,7 +146,7 @@ pub trait WalStore {
         &self,
         snapshot_id: &str,
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
-        batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
+        batches: &HashMap<PartitionKey, WalPayload>,
         partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/)>,
         part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
         checkpoint_updates: &HashMap<String, crate::plugins::cdc::CheckpointEnvelope>,
@@ -173,7 +172,7 @@ impl WalStore for S3WalStore {
         &self,
         snapshot_id: &str,
         offsets: &HashMap<crate::helpers::offsets::OffsetKey, u64>,
-        batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
+        batches: &HashMap<PartitionKey, WalPayload>,
         partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/)>,
         part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
         _checkpoint_updates: &HashMap<String, crate::plugins::cdc::CheckpointEnvelope>,
@@ -250,7 +249,7 @@ pub struct WalStoreFactory;
 impl WalStoreFactory {
     pub fn for_batches(
         config: &Config,
-        batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
+        batches: &HashMap<PartitionKey, WalPayload>,
     ) -> Box<dyn WalStore + Send + Sync> {
         let _ = batches; // unused; selection via root-level storage
         match config.get_wal_storage() {

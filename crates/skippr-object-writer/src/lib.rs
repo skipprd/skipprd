@@ -368,6 +368,40 @@ where
         ));
         ObjectWriteOperation { cancel, task }
     }
+
+    /// Identity PUT of already-encoded object bytes (`type: copy`).
+    pub fn write_bytes(self, body: Vec<u8>, rows: u64) -> ObjectWriteOperation {
+        let (cancel, cancel_rx) = watch::channel(false);
+        let task = tokio::spawn(coordinate_identity_write(
+            self.backend,
+            self.request,
+            self.config,
+            body,
+            rows,
+            cancel.clone(),
+            cancel_rx,
+        ));
+        ObjectWriteOperation { cancel, task }
+    }
+}
+
+/// Identity PUT used by copy object sinks (File/S3/GCS/Azure/SFTP).
+pub async fn identity_put_bytes<B>(
+    backend: Arc<B>,
+    object_key: impl Into<String>,
+    content_type: impl Into<String>,
+    body: Vec<u8>,
+    rows: u64,
+) -> Result<ObjectWriteReceipt, ObjectWriteError>
+where
+    B: ObjectWriteBackend,
+{
+    let session = ObjectWriteSession::new(
+        backend,
+        ObjectWriteRequest::new(object_key).with_content_type(content_type),
+        ObjectWriterConfig::default(),
+    )?;
+    session.write_bytes(body, rows).await
 }
 
 /// Awaitable write operation. Dropping it requests cancellation; the detached
@@ -418,6 +452,139 @@ enum EncodeMode {
         writer_properties: WriterProperties,
     },
     Jsonl,
+}
+
+async fn coordinate_identity_write<B>(
+    backend: Arc<B>,
+    request: ObjectWriteRequest,
+    config: ObjectWriterConfig,
+    body: Vec<u8>,
+    rows: u64,
+    cancel: watch::Sender<bool>,
+    mut cancel_rx: watch::Receiver<bool>,
+) -> Result<ObjectWriteReceipt, ObjectWriteError>
+where
+    B: ObjectWriteBackend,
+{
+    if body.is_empty() || rows == 0 {
+        return Err(ObjectWriteError::EmptyInput);
+    }
+    let upload = tokio::select! {
+        biased;
+        _ = wait_for_cancellation(&mut cancel_rx) => return Err(ObjectWriteError::Cancelled),
+        result = backend.begin(&request) => result.map_err(|error| ObjectWriteError::backend("begin", error))?,
+    };
+    let result = write_identity_upload(
+        backend.clone(),
+        &upload,
+        &request,
+        &config,
+        body,
+        rows,
+        cancel,
+        cancel_rx,
+    )
+    .await;
+    if result.is_err() {
+        let _ = backend.abort(&upload).await;
+    }
+    result
+}
+
+async fn write_identity_upload<B>(
+    backend: Arc<B>,
+    upload: &MultipartUpload,
+    request: &ObjectWriteRequest,
+    config: &ObjectWriterConfig,
+    body: Vec<u8>,
+    rows: u64,
+    cancel: watch::Sender<bool>,
+    mut cancel_rx: watch::Receiver<bool>,
+) -> Result<ObjectWriteReceipt, ObjectWriteError>
+where
+    B: ObjectWriteBackend,
+{
+    let mut uploads = FuturesUnordered::new();
+    let mut completed_parts = Vec::new();
+    let mut next_part_number = 1_u32;
+    let part_size = config.part_size.max(1);
+    for chunk in body.chunks(part_size) {
+        let part_number = next_part_number;
+        next_part_number = next_part_number
+            .checked_add(1)
+            .ok_or(ObjectWriteError::TooManyParts)?;
+        let bytes = bytes::Bytes::copy_from_slice(chunk);
+        let byte_count = bytes.len() as u64;
+        let backend = backend.clone();
+        let upload = upload.clone();
+        uploads.push(async move {
+            let result = backend.upload_part(&upload, part_number, bytes).await;
+            (part_number, byte_count, result)
+        });
+        while uploads.len() >= config.max_in_flight_parts {
+            tokio::select! {
+                biased;
+                _ = wait_for_cancellation(&mut cancel_rx) => {
+                    let _ = cancel.send(true);
+                    return Err(ObjectWriteError::Cancelled);
+                }
+                uploaded = uploads.next() => {
+                    let Some((part_number, byte_count, result)) = uploaded else { continue; };
+                    let metadata = result.map_err(|error| ObjectWriteError::backend("upload_part", error))?;
+                    completed_parts.push(ObjectPartReceipt {
+                        part_number,
+                        bytes: byte_count,
+                        etag: metadata.etag,
+                        checksum: metadata.checksum,
+                        metadata: metadata.metadata,
+                    });
+                }
+            }
+        }
+    }
+    while let Some((part_number, byte_count, result)) = uploads.next().await {
+        if *cancel_rx.borrow() {
+            return Err(ObjectWriteError::Cancelled);
+        }
+        let metadata = result.map_err(|error| ObjectWriteError::backend("upload_part", error))?;
+        completed_parts.push(ObjectPartReceipt {
+            part_number,
+            bytes: byte_count,
+            etag: metadata.etag,
+            checksum: metadata.checksum,
+            metadata: metadata.metadata,
+        });
+    }
+    completed_parts.sort_unstable_by_key(|part| part.part_number);
+    let bytes = completed_parts.iter().try_fold(0_u64, |total, part| {
+        total
+            .checked_add(part.bytes)
+            .ok_or(ObjectWriteError::StatisticsOverflow)
+    })?;
+    let transport_chunk_count =
+        u32::try_from(completed_parts.len()).map_err(|_| ObjectWriteError::TooManyParts)?;
+    let completion = tokio::select! {
+        biased;
+        _ = wait_for_cancellation(&mut cancel_rx) => return Err(ObjectWriteError::Cancelled),
+        result = backend.complete(upload, &completed_parts) => {
+            result.map_err(|error| ObjectWriteError::backend("complete", error))?
+        }
+    };
+    let mut backend_metadata = upload.metadata.clone();
+    backend_metadata.extend(completion.metadata);
+    Ok(ObjectWriteReceipt {
+        version: 1,
+        object_key: request.object_key.clone(),
+        upload_id: upload.upload_id.clone(),
+        rows,
+        bytes,
+        transport_chunk_count,
+        parts: completed_parts,
+        etag: completion.etag,
+        checksum: completion.checksum,
+        version_id: completion.version_id,
+        backend_metadata,
+    })
 }
 
 async fn coordinate_write<B, S>(
@@ -1135,5 +1302,47 @@ mod tests {
             .unwrap();
         assert_eq!(receipt.rows, 2);
         assert_eq!(backend.completes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn identity_put_uploads_body_bytes() {
+        let backend = Arc::new(MockBackend::default());
+        let body = b"{\"id\":1}\n{\"id\":2}\n".to_vec();
+        let receipt = session(backend.clone(), config(8))
+            .write_bytes(body.clone(), 2)
+            .await
+            .unwrap();
+        assert_eq!(receipt.rows, 2);
+        assert_eq!(receipt.bytes, body.len() as u64);
+        let uploaded: usize = backend
+            .uploaded_sizes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, n)| *n)
+            .sum();
+        assert_eq!(uploaded, body.len());
+        assert_eq!(backend.completes.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.aborts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn identity_put_bytes_writes_filesystem_object() {
+        let dir = std::env::temp_dir().join(format!("skippr-identity-put-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events/apply-copy.jsonl");
+        let body = b"{\"id\":1}\n".to_vec();
+        identity_put_bytes(
+            Arc::new(backends::AtomicFileBackend::new()),
+            path.to_string_lossy(),
+            "application/x-ndjson",
+            body.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

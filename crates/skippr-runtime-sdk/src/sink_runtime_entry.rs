@@ -992,6 +992,22 @@ where
             .await?;
             (result, progress.rows, progress.bytes)
         }
+        RuntimeSinkPayloadMode::RawBytes => {
+            let payload = read_sink_payload_channel(&mut data_receiver, request.request_id).await?;
+            let body = payload
+                .chunks
+                .iter()
+                .flat_map(|chunk| chunk.arrow_stream_bytes.iter().copied())
+                .collect::<Vec<u8>>();
+            let plugin = match request.binding {
+                RuntimeBinding::Primary => primary_plugin.as_ref(),
+                RuntimeBinding::Deadletter => deadletter_plugin.as_ref(),
+            }
+            .ok_or_else(|| io::Error::other("runtime sink is not installed"))?;
+            let ctx = sink_write_context(&request);
+            let result = SinkCallResult::outcome(plugin.sync_bytes(body, payload.rows, ctx).await?);
+            (result, payload.rows, payload.bytes)
+        }
     };
     if let Some(manifest) = ledger_manifest.as_ref() {
         if matches!(

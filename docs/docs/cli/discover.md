@@ -5,7 +5,7 @@ description: Read a pipeline's source and infer the schema of every namespace, w
 
 # skipprd discover
 
-`skipprd discover` reads a pipeline's source, infers the columns and types of each namespace (a stream of records with one schema, such as a table or an event type), and saves that schema. It never writes to your destination, so it is safe to run against production sources. Run it after you connect a new source and before your first sync. You can run it again at any time: new fields are added to the saved schema. If you skip it, `skipprd sync` runs discover for you the first time.
+`skipprd discover` reads a pipeline's source, infers the columns and types of each namespace (a stream of records with one schema, such as a table or an event type), and saves that schema. It never writes to your destination, so it is safe to run against production sources. Run it after you connect a new source and before your first sync. You can run it again at any time: new fields are added to the saved schema. If you skip it, `skipprd sync` runs discover for you the first time. Pipelines with `type: copy` do not use discover: `skipprd discover` fails closed, and `sync` does not infer a schema.
 
 ## Usage
 
@@ -100,6 +100,7 @@ skipprd --config ./prod/skippr.yml discover --pipeline bikehire --log
 | Stops after `[start] Discovering` and exits `1` | The source failed (credentials, network, or a bad setting). The reason is written to the logs. | Rerun with `--log` to see the error on screen, or read `logs/skipprd.<date>.log`. |
 | `[skippr] config failed: ... references ${NAME} ... but that environment variable is not set` | A `${NAME}` reference in `skippr.yml` has no value. | `export NAME=...`, or add it to a `.env` file next to `skippr.yml`. |
 | `WAL_STORAGE=clustered does not support discover` | Discover runs only with `disk` or `s3` WAL storage. | Run discover without `--wal-storage clustered` (and unset `WAL_STORAGE`). |
+| `skipprd discover is not used with type: copy` | Copy pipelines have no schema to infer. | Run `skipprd sync` with `type: copy`. |
 | A field has the wrong type | Inference chose a type from the records it saw. | Correct it with [`skipprd metadata apply`](/cli/metadata). |
 
 ## Next steps

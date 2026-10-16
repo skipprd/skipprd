@@ -95,6 +95,9 @@ fn load_seg_dir_batches(
                 Ok(f) => f,
                 Err(_) => continue,
             };
+            if idx.codec != crate::buffer::segment_file::PART_CODEC_ARROW {
+                return Err(io::Error::other("sqlrt does not read copy WAL parts"));
+            }
             if file.seek(std::io::SeekFrom::Start(idx.start)).is_err() {
                 continue;
             }
@@ -199,6 +202,11 @@ impl WalReader for S3WalReader {
                                 for idx in meta.index.iter() {
                                     if idx.key.namespace != pipe {
                                         continue;
+                                    }
+                                    if idx.codec != crate::buffer::segment_file::PART_CODEC_ARROW {
+                                        return Err(io::Error::other(
+                                            "sqlrt does not read copy WAL parts",
+                                        ));
                                     }
                                     let start = idx.start as usize;
                                     let end = start.saturating_add(idx.len as usize);
@@ -321,11 +329,13 @@ mod tests {
                 time: None,
                 schema_fingerprint: "fp".into(),
             },
-            vec![arrow::array::RecordBatch::try_new(
-                schema,
-                vec![Arc::new(StringArray::from(vec!["row-1"]))],
-            )
-            .unwrap()],
+            crate::buffer::segment_file::WalPayload::Arrow(vec![
+                arrow::array::RecordBatch::try_new(
+                    schema,
+                    vec![Arc::new(StringArray::from(vec!["row-1"]))],
+                )
+                .unwrap(),
+            ]),
         );
         let (meta, _rows, _sha) = seg
             .write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())

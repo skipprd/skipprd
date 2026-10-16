@@ -1344,8 +1344,13 @@ pub fn discover_engine(root: &Path) -> Result<EngineSpec, String> {
             _ => None,
         })
         .ok_or_else(|| format!("{}: enum PairedSink not found", path.display()))?;
+    let mut types = reflect_source_file(&path)?;
+    let pipeline_type = root.join("src/pipeline_type.rs");
+    let extra = reflect_source_file(&pipeline_type)?;
+    types.structs.extend(extra.structs);
+    types.enums.extend(extra.enums);
     Ok(EngineSpec {
-        types: reflect_source_file(&path)?,
+        types,
         paired_sinks,
     })
 }
@@ -1929,20 +1934,21 @@ mod tests {
     }
 
     #[test]
-    fn python_string_enums_are_literals() {
+    fn python_string_enums_are_classes() {
         let (rs, stub) = python_outputs();
-        assert!(stub.contains("BatchTimeUnit: TypeAlias = Literal[\"year\", \"month\", \"day\", \"hour\", \"minute\"]\n"));
-        assert!(stub.contains("DataSourceStripeStreamProfile: TypeAlias = Literal["));
+        assert!(rs.contains("config_enum!(PyBatchTimeUnit, \"BatchTimeUnit\""));
+        assert!(rs.contains("config_enum!(PyDataSourceStripeStreamProfile"));
+        assert!(stub.contains("class BatchTimeUnit:"));
+        assert!(stub.contains("    DAY: ClassVar[BatchTimeUnit]"));
         assert!(
-            !rs.contains("name = \"DataSourceStripeStreamProfile\""),
-            "string enums are validated strings, not classes"
+            stub.contains("    def __eq__(self, other: object, /) -> bool: ..."),
+            "stubtest requires positional-only __eq__ to match PyO3"
         );
-        assert!(rs.contains("config_literal!(PyDataSourceStripeStreamProfile,"));
+        assert!(stub.contains("class DataSourceStripeStreamProfile:"));
         assert!(
-            !stub.contains("DataSourceDataForSeoSeoOpportunitiesSearchEngine: TypeAlias"),
-            "one-value enums are spelled inline"
+            stub.contains("search_engine: DataSourceDataForSeoSeoOpportunitiesSearchEngine | None")
         );
-        assert!(stub.contains("search_engine: Literal[\"google\"] | None"));
+        assert!(!stub.contains("TypeAlias = Literal["));
     }
 
     #[test]

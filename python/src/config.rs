@@ -147,31 +147,6 @@ fn type_name(obj: &Bound<'_, PyAny>) -> String {
         .unwrap_or_else(|_| "object".into())
 }
 
-fn check_literal(alias: &str, values: &[&str], value: String) -> PyResult<String> {
-    if values.contains(&value.as_str()) {
-        return Ok(value);
-    }
-    let expected = values
-        .iter()
-        .map(|v| format!("{v:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(PyValueError::new_err(format!(
-        "{value:?} is not a valid {alias}; expected one of {expected}"
-    )))
-}
-
-/// `Literal["a"] | Literal["b"]`: the runtime twin of the stub's
-/// `Literal["a", "b"]`, which type checkers read as that union.
-fn literal_alias<'py>(py: Python<'py>, values: &[&str]) -> PyResult<Bound<'py, PyAny>> {
-    let literal = py.import("typing")?.getattr("Literal")?;
-    let members = values
-        .iter()
-        .map(|value| literal.get_item(*value))
-        .collect::<PyResult<Vec<_>>>()?;
-    union_alias(members)
-}
-
 fn union_alias<'py>(
     types: impl IntoIterator<Item = Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
@@ -237,33 +212,29 @@ pub enum SinkConfig {
     Unpaired(PluginConfigEntry),
 }
 
-/// A string enum field: a `str` validated against the serde names.
-macro_rules! config_literal {
-    ($name:ident, $alias:literal, [$($value:literal),+ $(,)?]) => {
-        #[derive(Clone, Serialize)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            const VALUES: &'static [&'static str] = &[$($value),+];
+/// A unit string enum: constructors take the class member, not a `str`.
+macro_rules! config_enum {
+    ($name:ident, $alias:literal, { $($ident:ident = $py:literal => $wire:literal),+ $(,)? }) => {
+        #[pyclass(eq, frozen, hash, name = $alias, module = "skippr")]
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum $name {
+            $(
+                #[pyo3(name = $py)]
+                $ident,
+            )+
         }
 
-        impl<'a, 'py> FromPyObject<'a, 'py> for $name {
-            type Error = PyErr;
-
-            fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
-                let value: String = obj.extract().map_err(Into::<PyErr>::into)?;
-                check_literal($alias, Self::VALUES, value).map(Self)
+        impl $name {
+            fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$ident => $wire),+
+                }
             }
         }
 
-        impl<'py> IntoPyObject<'py> for $name {
-            type Target = PyString;
-            type Output = Bound<'py, PyString>;
-            type Error = std::convert::Infallible;
-
-            fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
-                Ok(PyString::new(py, &self.0))
+        impl Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.as_str())
             }
         }
     };

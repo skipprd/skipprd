@@ -15,6 +15,19 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
+## [18.2.0]
+
+### Added
+
+- `pipelines.*.type` is a closed enum (`ingest` | `copy` | `cdc`). `type: copy` is decode × encode (json/csv/xml → jsonl/csv/xml) through format-agnostic WAL frames; compact encodes the sink `format`. Copy CSV columns are top-level scalars; nested objects and arrays are compact JSON strings.
+- Runtime protocol 21: `RuntimeExecutionContext.pipeline_type` (bincode string `ingest`/`copy`/`cdc`) and `RuntimeSinkPayloadMode::RawBytes` Identity PUT on File, S3, GCS, Azure Blob, and SFTP.
+- Logs, metrics envelopes, and config snapshots label `pipeline_type` (`ingest` | `copy` | `cdc`) from YAML `pipelines.*.type`. `PIPELINE_TYPE` does not override it.
+
+### Breaking
+
+- Python unit string enums (`PipelineType`, `OutputFormat`, `StreamProfile`, …) are frozen PyO3 classes, not `Literal[...]` strings. Pass `PipelineType.COPY`, not `"copy"`.
+- Runtime plugins must rebuild for protocol 21.
+
 ## [18.1.2]
 
 ### Added

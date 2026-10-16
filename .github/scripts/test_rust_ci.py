@@ -121,9 +121,13 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_s3_schema_evolution:", text)
         self.assertIn("e2e_s3_schema_alter:", text)
         self.assertIn("e2e_file_postgres:", text)
+        self.assertIn("e2e_file_copy:", text)
+        self.assertIn("e2e_s3_file_copy:", text)
         self.assertIn("s3_skipprlake_evolve", text)
         self.assertIn("s3_skipprlake_alter", text)
         self.assertIn("file_postgres_append", text)
+        self.assertIn("file_copy", text)
+        self.assertIn("s3_file_copy", text)
         self.assertNotIn(
             '["skippr-plugin-data-source-s3","skippr-plugin-data-source-file"',
             text,
@@ -167,6 +171,12 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("SELECT 1", file_postgres)
         self.assertIn("public.file_postgres_append", file_postgres)
         self.assertNotIn("public.people", file_postgres)
+        s3_copy = (
+            ROOT / ".github" / "actions" / "e2e" / "s3_file_copy" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("run_matrix.py", s3_copy)
+        self.assertIn("run_s3_sink.py", s3_copy)
+        self.assertIn("skippr_s3_sink.yml", s3_copy)
         self.assertNotRegex(text, r"(?m)^  cleanup:")
         plugins = text.split("\n  publish_runtime_plugins:", 1)[1].split(
             "\n  publish_skipprd:", 1
@@ -188,6 +198,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_s3_schema_evolution", publish)
         self.assertIn("e2e_s3_schema_alter", publish)
         self.assertIn("e2e_file_postgres", publish)
+        self.assertIn("e2e_file_copy", publish)
+        self.assertIn("e2e_s3_file_copy", publish)
         self.assertIn("macos_arm64", publish)
         self.assertIn("publish_runtime_plugins", publish)
         self.assertIn("refs/tags/", publish)
@@ -196,6 +208,24 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("skipprd-macos_arm64.tar.gz", publish)
         self.assertIn("gh release", publish)
         self.assertIn("secrets.GITHUB_TOKEN", publish)
+
+    def test_composite_action_descriptions_quote_embedded_colons(self) -> None:
+        actions = list((ROOT / ".github" / "actions").rglob("action.yaml"))
+        self.assertTrue(actions)
+        for path in actions:
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if not line.startswith("description:"):
+                    continue
+                value = line[len("description:") :].lstrip()
+                if ": " not in value.strip("'\""):
+                    continue
+                quoted = (value.startswith('"') and value.endswith('"')) or (
+                    value.startswith("'") and value.endswith("'")
+                )
+                self.assertTrue(
+                    quoted,
+                    f"{path.relative_to(ROOT)}:{i}: quote description when it contains ': '",
+                )
 
     def test_rust_ci_runs_only_on_engine_tags(self) -> None:
         text = RUST.read_text(encoding="utf-8")

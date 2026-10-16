@@ -554,6 +554,7 @@ mod tests {
                 part_meta_start: 0,
                 part_meta_len: 0,
                 part_meta_summary: SegmentPartMetaSummary::Append,
+                codec: crate::buffer::segment_file::PART_CODEC_ARROW,
                 start: ordinal as u64,
                 len: 1,
             })
