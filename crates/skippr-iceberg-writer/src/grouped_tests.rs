@@ -300,6 +300,32 @@ impl Harness {
         );
         writer.sync_grouped_call_result(reader, ctx).await.unwrap()
     }
+
+    pub async fn native_write(&self, filename: &str, ids: Vec<i64>) {
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from_iter_values(ids))],
+        )
+        .unwrap();
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            futures::stream::iter(vec![Ok(batch)]),
+        ));
+        self.writer
+            .sync(stream, filename.to_string(), None)
+            .await
+            .unwrap();
+    }
+
+    pub fn warehouse_data_dir(&self) -> PathBuf {
+        let location = self.writer.table_location(NAMESPACE);
+        PathBuf::from(location.strip_prefix("file://").unwrap()).join("data")
+    }
 }
 
 #[tokio::test]
@@ -630,4 +656,48 @@ async fn two_thousand_commit_history_keeps_metadata_flat() {
         "metadata grew from {steady} to {last} bytes"
     );
     assert_eq!(scanned_ids(&table).await, (0..COMMITS).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn grouped_file_location_keeps_an_absolute_file_warehouse() {
+    let harness = Harness::new().await;
+    let table = harness.writer.table_location(NAMESPACE);
+    let root = parse_object_location(&table).unwrap();
+    let (bucket, prefix) = root.parts();
+    assert!(bucket.is_empty());
+    assert!(prefix.starts_with('/'), "{prefix}");
+
+    let (bucket, key, uri) = harness
+        .writer
+        .grouped_file_location(NAMESPACE, PendingFileContent::Data, "roll")
+        .unwrap();
+    assert!(bucket.is_empty());
+    assert_eq!(key, format!("{prefix}/data/roll.parquet"));
+    assert_eq!(uri, format!("file://{key}"));
+}
+
+#[tokio::test]
+async fn two_native_appends_with_the_same_filename_keep_every_row() {
+    let harness = Harness::new().await;
+    let filename = format!("namespace={NAMESPACE}");
+    harness.native_write(&filename, vec![0, 1, 2]).await;
+    harness.native_write(&filename, vec![3, 4, 5]).await;
+
+    let warehouse = harness.dir.path();
+    let files: Vec<PathBuf> = std::fs::read_dir(harness.warehouse_data_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("parquet"))
+        .collect();
+    assert_eq!(files.len(), 2, "files={files:?}");
+    assert!(
+        files
+            .iter()
+            .all(|path| path.is_absolute() && path.starts_with(warehouse)),
+        "files={files:?} warehouse={warehouse:?}"
+    );
+    assert_eq!(
+        scanned_ids(&harness.table().await).await,
+        vec![0, 1, 2, 3, 4, 5]
+    );
 }
