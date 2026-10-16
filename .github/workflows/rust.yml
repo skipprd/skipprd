@@ -406,6 +406,9 @@ jobs:
         with:
           skipprd_path: ./skipprd-linux_x86/skipprd
           plugin_binaries_dir: ./runtime-plugin-binaries-linux_x86
+          r2_account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          r2_access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          r2_secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
   e2e_s3_file_copy:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'

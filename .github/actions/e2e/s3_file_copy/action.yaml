@@ -27,6 +27,7 @@ runs:
         USE_LOCAL_PLUGIN_CODE: "1"
         R2_ACCOUNT_ID: ${{ inputs.r2_account_id }}
         SKIPPRD_PATH: ${{ inputs.skipprd_path }}
+        SKIPPR_TARGET_TRIPLE: x86_64-unknown-linux-gnu
       run: |
         set -euo pipefail
         work="${RUNNER_TEMP:-/tmp}/skippr-s3-file-copy"
