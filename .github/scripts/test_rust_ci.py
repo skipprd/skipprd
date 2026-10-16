@@ -122,11 +122,13 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_s3_schema_alter:", text)
         self.assertIn("e2e_file_postgres:", text)
         self.assertIn("e2e_file_copy:", text)
+        self.assertIn("e2e_s3_list_open_keys:", text)
         self.assertIn("e2e_s3_file_copy:", text)
         self.assertIn("s3_skipprlake_evolve", text)
         self.assertIn("s3_skipprlake_alter", text)
         self.assertIn("file_postgres_append", text)
         self.assertIn("file_copy", text)
+        self.assertIn("s3_list_open_keys", text)
         self.assertIn("s3_file_copy", text)
         self.assertNotIn(
             '["skippr-plugin-data-source-s3","skippr-plugin-data-source-file"',
@@ -199,6 +201,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_s3_schema_alter", publish)
         self.assertIn("e2e_file_postgres", publish)
         self.assertIn("e2e_file_copy", publish)
+        self.assertIn("e2e_s3_list_open_keys", publish)
         self.assertIn("e2e_s3_file_copy", publish)
         self.assertIn("macos_arm64", publish)
         self.assertIn("publish_runtime_plugins", publish)

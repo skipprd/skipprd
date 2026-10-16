@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [18.2.1]
+
+### Fixed
+
+- S3 source starts GET as soon as a ListObjects page has an offset that is not Closed. Closed keys are still skipped per page. Each run re-lists the prefix; it does not resume from a continuation token.
+
 ## [18.2.0]
 
 ### Added
