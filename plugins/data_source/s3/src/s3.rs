@@ -15,14 +15,13 @@ use std::time::Duration;
 
 use serde_derive::Deserialize;
 
-use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
 use skippr_runtime_sdk::ingest::IngestBatch;
 use skippr_runtime_sdk::plugins::source_sync::{SourcePayloadTask, SourceSyncContext};
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
 use skippr_runtime_sdk::source_sync::offset_validation_entry;
 
 use crate::helpers::Helpers;
-use futures::stream::{self, StreamExt};
-use skippr_runtime_sdk::helpers::configuration::runtime_child_config;
+use futures::stream::{self, Stream, StreamExt};
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::protocol::RuntimeExecutionContext;
 use std::io::BufRead as _;
@@ -75,6 +74,93 @@ fn runtime_is_ci() -> bool {
 
 fn runtime_log_wal_enabled() -> bool {
     env_truthy("LOG_WAL") || env_truthy("LOG_WAL_DEBUG") || env_truthy("LOG_WAL_UPLOADS")
+}
+
+/// Keys on one ListObjects page that are not Closed. Order is list order.
+fn open_objects_from_listed_page(
+    bucket: &str,
+    items: Vec<(String, i64)>,
+    ctx: &dyn SourceSyncContext,
+) -> Result<Vec<(String, i64)>, std::io::Error> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    let validation_entries = items
+        .iter()
+        .map(|(key, _)| {
+            // Match the key host ingest uses after the runtime wire round-trip
+            // (normalize twice). Existing Closed offsets were written under that form.
+            let offset_key =
+                IngestBatch::runtime_roundtrip_offset_key(bucket.to_string(), key.clone());
+            offset_validation_entry(
+                offset_key.namespace,
+                offset_key.partition,
+                OffsetTypes::Closed,
+                1,
+            )
+        })
+        .collect::<Vec<_>>();
+    let should_process = ctx.validate_offset_batch(&validation_entries)?;
+    let mut open = Vec::new();
+    for ((key, size), process) in items.into_iter().zip(should_process) {
+        if !process {
+            if runtime_log_wal_enabled() {
+                info!(
+                    "s3 source: skipping closed object namespace={} key={}",
+                    bucket, key
+                );
+            }
+            continue;
+        }
+        open.push((key, size));
+    }
+    Ok(open)
+}
+
+/// Yield open objects as soon as each list page is offset-filtered.
+/// Does not wait for the rest of the prefix and does not persist continuation tokens.
+fn stream_open_listed_objects<S>(
+    pages: S,
+    bucket: String,
+    ctx: Arc<dyn SourceSyncContext>,
+) -> impl Stream<Item = Result<(String, i64), std::io::Error>> + Unpin
+where
+    S: Stream<Item = Result<Vec<(String, i64)>, std::io::Error>> + Send + 'static,
+{
+    Box::pin(stream::unfold(
+        (
+            Box::pin(pages),
+            std::collections::VecDeque::<(String, i64)>::new(),
+            bucket,
+            ctx,
+            false,
+        ),
+        |state| async move {
+            let (mut pages, mut ready, bucket, ctx, done) = state;
+            if done {
+                return None;
+            }
+            loop {
+                if let Some(item) = ready.pop_front() {
+                    return Some((Ok(item), (pages, ready, bucket, ctx, false)));
+                }
+                match pages.next().await {
+                    None => return None,
+                    Some(Err(err)) => {
+                        return Some((Err(err), (pages, ready, bucket, ctx, true)));
+                    }
+                    Some(Ok(items)) => {
+                        match open_objects_from_listed_page(&bucket, items, ctx.as_ref()) {
+                            Ok(open) => ready.extend(open),
+                            Err(err) => {
+                                return Some((Err(err), (pages, ready, bucket, ctx, true)));
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    ))
 }
 
 #[derive(Deserialize, SkipprConfig, Debug, Clone)]
@@ -167,8 +253,8 @@ impl DataSourceS3Plugin {
     ///
     /// This method:
     /// 1. Lists objects from the configured S3 bucket and prefix
-    /// 2. For each batch of objects, downloads and processes them
-    /// 3. Uses continuation tokens to resume listing where it left off
+    /// 2. Skips Closed offsets on each list page and starts downloads immediately
+    /// 3. Re-lists from the prefix each run (no continuation-token resume)
     pub async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         self.sync_stream(ctx).await
     }
@@ -179,7 +265,6 @@ impl DataSourceS3Plugin {
         let s3_bucket_dl = s3_bucket.clone();
         let s3_bucket_outer = s3_bucket_dl.clone();
         let s3_bucket_ns = s3_bucket.clone();
-        let ingest_config = runtime_child_config();
         let delimiter = "/".to_string();
         let inventory_prefix = self.config.s3_prefix.clone();
         let total_cpus = num_cpus::get();
@@ -218,7 +303,7 @@ impl DataSourceS3Plugin {
             Helpers::human_readable_size(chunk_size as u64)
         );
 
-        let mut pager = self
+        let pager = self
             .s3_client
             .list_objects_v2()
             .bucket(s3_bucket.clone())
@@ -227,56 +312,31 @@ impl DataSourceS3Plugin {
             .page_size(1000)
             .send();
 
-        let mut listed_keys = Vec::new();
-        while let Some(page_result) = pager.next().await {
-            let page = page_result.map_err(|err| {
-                std::io::Error::other(format!("failed to list S3 objects: {err}"))
-            })?;
-            let items: Vec<(String, i64)> = page
-                .contents
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|obj| {
-                    obj.key()
-                        .map(|k| (k.to_string(), obj.size().unwrap_or_default()))
-                })
-                .collect();
-            if items.is_empty() {
-                continue;
-            }
-            let validation_entries = items
-                .iter()
-                .map(|(key, _)| {
-                    // Match the key host ingest uses after the runtime wire round-trip
-                    // (normalize twice). Existing Closed offsets were written under that form.
-                    let offset_key = IngestBatch::runtime_roundtrip_offset_key(
-                        s3_bucket_filter.clone(),
-                        key.clone(),
-                    );
-                    offset_validation_entry(
-                        offset_key.namespace,
-                        offset_key.partition,
-                        OffsetTypes::Closed,
-                        1,
-                    )
-                })
-                .collect::<Vec<_>>();
-            let should_process = ctx.validate_offset_batch(&validation_entries)?;
-            for ((key, size), process) in items.into_iter().zip(should_process) {
-                if !process {
-                    if runtime_log_wal_enabled() {
-                        info!(
-                            "s3 source: skipping closed object namespace={} key={}",
-                            s3_bucket_filter, key
-                        );
-                    }
-                    continue;
+        let page_stream = stream::unfold(pager, |mut pager| async move {
+            match pager.next().await {
+                None => None,
+                Some(Err(err)) => Some((
+                    Err(std::io::Error::other(format!(
+                        "failed to list S3 objects: {err}"
+                    ))),
+                    pager,
+                )),
+                Some(Ok(page)) => {
+                    let items: Vec<(String, i64)> = page
+                        .contents
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|obj| {
+                            obj.key()
+                                .map(|k| (k.to_string(), obj.size().unwrap_or_default()))
+                        })
+                        .collect();
+                    Some((Ok(items), pager))
                 }
-                listed_keys.push((key, size));
             }
-        }
-
-        let keys_stream = stream::iter(listed_keys);
+        });
+        let keys_stream =
+            stream_open_listed_objects(page_stream, s3_bucket_filter, Arc::clone(&ctx));
 
         let dl_concurrency_env = env_string("S3_DOWNLOAD_CONCURRENCY").unwrap_or_default();
         let env_dl = dl_concurrency_env.parse::<usize>().ok().filter(|v| *v > 0);
@@ -417,13 +477,14 @@ impl DataSourceS3Plugin {
         let dl_sem_clone = dl_sem.clone();
         let inflate_ratio_clone = inflate_ratio;
         let download_stream = keys_stream
-            .map(move |(key, size_bytes)| {
+            .map(move |listed| {
                 let s3 = s3_client_clone.clone();
                 let bucket = s3_bucket_dl.clone();
                 let mem = mem_sem_clone.clone();
                 let dl_ctrl = dl_sem_clone.clone();
                 let inflate_ratio = inflate_ratio_clone;
                 async move {
+                    let (key, size_bytes) = listed?;
                     // Acquire permits for estimated decompressed MiB (min 1)
                     let est_uncompressed_bytes: u64 = (std::cmp::max(1i64, size_bytes) as u64)
                         .saturating_mul(inflate_ratio as u64);
@@ -709,5 +770,208 @@ impl DataSource for DataSourceS3Plugin {
 
     fn execution_contract(&self) -> skippr_runtime_sdk::plugins::SourceExecutionContract {
         skippr_runtime_sdk::plugins::SourceExecutionContract::finite()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skippr_runtime_sdk::ingest::ThroughputMetrics;
+    use skippr_runtime_sdk::plugins::cdc::CheckpointEnvelope;
+    use skippr_runtime_sdk::plugins::{OffsetValidationEntry, SourcePayloadTask};
+    use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    struct FilterClosedContext {
+        closed: HashSet<String>,
+        validated_pages: Mutex<Vec<usize>>,
+    }
+
+    impl FilterClosedContext {
+        fn new(closed: HashSet<String>) -> Self {
+            Self {
+                closed,
+                validated_pages: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl SourceSyncContext for FilterClosedContext {
+        fn submit_payload_tasks(
+            &self,
+            _tasks: Vec<SourcePayloadTask>,
+        ) -> Result<ThroughputMetrics, std::io::Error> {
+            Ok(ThroughputMetrics {
+                bytes_per_second: 0,
+                active_cores: 0,
+                queue_length: 0,
+                optimal_chunk_size: 0,
+            })
+        }
+
+        fn validate_offset_batch(
+            &self,
+            entries: &[OffsetValidationEntry],
+        ) -> Result<Vec<bool>, std::io::Error> {
+            self.validated_pages.lock().unwrap().push(entries.len());
+            Ok(entries
+                .iter()
+                .map(|entry| !self.closed.contains(&entry.key.partition))
+                .collect())
+        }
+
+        fn relay_offset_hints(
+            &self,
+            _hints: Vec<RuntimeOffsetMaterializationHint>,
+        ) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn store_checkpoint(
+            &self,
+            _key: &str,
+            _envelope: &CheckpointEnvelope,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn load_checkpoint_envelope(
+            &self,
+            _key: &str,
+        ) -> Result<Option<CheckpointEnvelope>, String> {
+            Ok(None)
+        }
+    }
+
+    fn closed_partition(bucket: &str, key: &str) -> String {
+        IngestBatch::runtime_roundtrip_offset_key(bucket, key).partition
+    }
+
+    #[test]
+    fn open_objects_from_listed_page_skips_closed_keeps_list_order() {
+        let bucket = "lake";
+        let closed = HashSet::from([closed_partition(bucket, "done.json")]);
+        let ctx = FilterClosedContext::new(closed);
+        let open = open_objects_from_listed_page(
+            bucket,
+            vec![
+                ("done.json".into(), 11),
+                ("a.json".into(), 22),
+                ("b.json".into(), 33),
+            ],
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(open, vec![("a.json".into(), 22), ("b.json".into(), 33)]);
+    }
+
+    #[tokio::test]
+    async fn stream_open_listed_objects_set_matches_filtered_pages() {
+        let bucket = "lake".to_string();
+        let closed = HashSet::from([closed_partition(&bucket, "done.json")]);
+        let ctx = Arc::new(FilterClosedContext::new(closed));
+        let pages = stream::iter(vec![
+            Ok(vec![("done.json".into(), 1), ("a.json".into(), 2)]),
+            Ok(vec![("b.json".into(), 3)]),
+        ]);
+        let listed = vec![
+            ("done.json".into(), 1),
+            ("a.json".into(), 2),
+            ("b.json".into(), 3),
+        ];
+        let expected = open_objects_from_listed_page(&bucket, listed, ctx.as_ref()).unwrap();
+        let got: Vec<(String, i64)> = stream_open_listed_objects(pages, bucket, ctx)
+            .map(|item| item.expect("open listed object"))
+            .collect()
+            .await;
+        assert_eq!(got, expected);
+        assert_eq!(got, vec![("a.json".into(), 2), ("b.json".into(), 3)]);
+    }
+
+    #[tokio::test]
+    async fn stream_open_listed_objects_yields_before_later_pages() {
+        let bucket = "lake".to_string();
+        let ctx = Arc::new(FilterClosedContext::new(HashSet::new()));
+        let (release_page_two, page_two) = tokio::sync::oneshot::channel::<()>();
+        let pages = stream::unfold((0usize, Some(page_two)), |(page, page_two)| async move {
+            match page {
+                0 => Some((Ok(vec![("a.json".into(), 1)]), (1, page_two))),
+                1 => {
+                    page_two
+                        .expect("second page waiter")
+                        .await
+                        .expect("first open key must start before page two");
+                    Some((Ok(vec![("b.json".into(), 2)]), (2, None)))
+                }
+                _ => None,
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut open = stream_open_listed_objects(pages, bucket, ctx);
+            let first = open
+                .next()
+                .await
+                .expect("open key from first page")
+                .expect("list page");
+            assert_eq!(first.0, "a.json");
+            release_page_two.send(()).expect("release second list page");
+            let second = open
+                .next()
+                .await
+                .expect("open key from second page")
+                .expect("list page");
+            assert_eq!(second.0, "b.json");
+            assert!(open.next().await.is_none());
+        })
+        .await
+        .expect("listing must not wait for later pages before yielding open keys");
+    }
+
+    #[tokio::test]
+    async fn stream_open_listed_objects_skips_closed_page_before_later_pages() {
+        let bucket = "lake".to_string();
+        let closed = HashSet::from([closed_partition(&bucket, "done.json")]);
+        let ctx = Arc::new(FilterClosedContext::new(closed));
+        let (release_page_three, page_three) = tokio::sync::oneshot::channel::<()>();
+        let pages = stream::unfold(
+            (0usize, Some(page_three)),
+            |(page, page_three)| async move {
+                match page {
+                    0 => Some((Ok(vec![("done.json".into(), 1)]), (1, page_three))),
+                    1 => Some((Ok(vec![("a.json".into(), 2)]), (2, page_three))),
+                    2 => {
+                        page_three
+                            .expect("third page waiter")
+                            .await
+                            .expect("open key must start before later list pages");
+                        Some((Ok(vec![("b.json".into(), 3)]), (3, None)))
+                    }
+                    _ => None,
+                }
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut open = stream_open_listed_objects(pages, bucket, ctx);
+            let first = open
+                .next()
+                .await
+                .expect("open key after closed page")
+                .expect("list page");
+            assert_eq!(first.0, "a.json");
+            release_page_three
+                .send(())
+                .expect("release later list page");
+            let second = open
+                .next()
+                .await
+                .expect("open key from later page")
+                .expect("list page");
+            assert_eq!(second.0, "b.json");
+            assert!(open.next().await.is_none());
+        })
+        .await
+        .expect("closed-only pages must not block yielding later open keys");
     }
 }

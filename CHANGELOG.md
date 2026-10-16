@@ -22,6 +22,10 @@ All notable changes to this project will be documented in this file.
 - WAL metadata lives in the skipprd store catalog (sled / DynamoDB). `mutation.log`, completion bitmaps, `.seg.commit`, and clustered protocol v2 are gone. First start imports existing installs once and archives leftover files. Clustered peers must all run protocol v3; start the former primary first. Deleting `DATA_DIR` with sled deletes the catalog.
 - Experimental `skippr.store.type=cloud-tables`, Python `CloudTablesStore`, and `--features offset-store-cloud-tables` are removed. Skippr Store is sled (local) or DynamoDB (remote). Clustered WAL and SkipprLake catalog pointers use DynamoDB.
 
+### Fixed
+
+- S3 source starts GET as soon as a ListObjects page has an offset that is not Closed. Closed keys are still skipped per page. Each run re-lists the prefix; it does not resume from a continuation token.
+
 ## [18.3.8]
 
 ### Breaking
@@ -105,7 +109,6 @@ All notable changes to this project will be documented in this file.
 
 - Copy Identity-PUT S3 (and other object sinks) no longer fail after handshake when the next control frame is `PrepareSink` / `RawBytes`.
 - Runtime frame decode errors include the first payload bytes so a tag/layout mismatch is visible without a debugger.
-
 ## [18.2.0]
 
 ### Added

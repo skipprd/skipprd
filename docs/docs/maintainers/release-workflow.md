@@ -87,6 +87,7 @@ Bump `pyproject.toml` and `python/Cargo.toml` together, then tag the engine (`18
 - `e2e_s3_schema_evolution` — S3 v1 then backward-compatible v2 into SkipprLake
 - `e2e_schema_lifecycle` — discover/sync then `skipprd migrate` + `ALTER TABLE` matrix into SkipprLake (rename / merge / drop / promote / fail-closed), with a second sync after apply
 - `e2e_file_postgres` — File source append into Docker Postgres
+- `e2e_s3_list_open_keys` — copy open S3 keys, then skip Closed offsets on the next list
 - `e2e_s3_file_copy` — S3 (R2) → File and File → S3 (R2) `type: copy`
 - `e2e_s3_s3_copy` — S3 (R2) → S3 (R2) `type: copy` Identity PUT (source and sink plugins together)
 - `e2e_prev_plugins` — this tag’s host with previous protocol-compatible File/S3/SkipprLake crate pins

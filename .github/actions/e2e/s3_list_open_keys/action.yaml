@@ -1,0 +1,30 @@
+name: Copy open keys then skip Closed
+description: "Copy File objects, skip Closed offsets, then copy a newly added object."
+inputs:
+  skipprd_path:
+    required: true
+  plugin_binaries_dir:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Open keys copy, then Closed skip
+      shell: bash
+      env:
+        USE_LOCAL_PLUGIN_CODE: "1"
+        SKIPPRD_PATH: ${{ inputs.skipprd_path }}
+      run: |
+        set -euo pipefail
+        work="${RUNNER_TEMP:-/tmp}/skippr-s3-list-open-keys"
+        mkdir -p "${work}" target/release
+        cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
+        chmod +x target/release/skippr-plugin-* || true
+        python3 .github/scripts/local_runtime_plugins.py \
+          --config .github/actions/e2e/s3_list_open_keys/skippr.yml \
+          --pipeline file_copy \
+          --output-dir "${work}/manifests" \
+          --release \
+          --skip-cargo-build
+        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
+        export COPY_WORK="${work}"
+        python3 .github/actions/e2e/s3_list_open_keys/run.py
