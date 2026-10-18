@@ -15,6 +15,18 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
+## [18.3.0]
+
+### Breaking
+
+- Runtime protocol 22. `PipelineType` on the plugin bincode wire is a `u32` discriminant (`0=ingest`, `1=copy`, `2=cdc`), not a length-prefixed string. Protocol 21 could decode a string length or `PrepareSink.request_id` as a `HostFrame` variant (`invalid value: integer 54, expected variant index 0 <= i < 11`). YAML/JSON `type: copy` is unchanged.
+- Every runtime plugin crate patch version is bumped so catalog paths are immutable next to 18.2.0 / protocol 21 artifacts. Hosts must run skippr 18.3.0 with the matching plugin bundle; S3 sink is `0.1.4`.
+
+### Fixed
+
+- Copy Identity-PUT S3 (and other object sinks) no longer fail after handshake when the next control frame is `PrepareSink` / `RawBytes`.
+- Runtime frame decode errors include the first payload bytes so a tag/layout mismatch is visible without a debugger.
+
 ## [18.2.0]
 
 ### Added

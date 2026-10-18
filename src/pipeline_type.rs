@@ -7,13 +7,18 @@ use serde_derive::{Deserialize, Serialize};
 pub const COPY_WAL_FINGERPRINT: &str = "copy";
 
 /// How a pipeline moves records. YAML `type:` is this enum; `cdc:` is settings.
+///
+/// Config serde stays a lowercase string so connect-gen and `type: copy` keep
+/// working. The runtime plugin bincode field uses [`wire`] (`u32` 0/1/2) so a
+/// layout mismatch cannot treat a string length as a `HostFrame` tag.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase", try_from = "String", into = "String")]
+#[repr(u32)]
 pub enum PipelineType {
     #[default]
-    Ingest,
-    Copy,
-    Cdc,
+    Ingest = 0,
+    Copy = 1,
+    Cdc = 2,
 }
 
 impl PipelineType {
@@ -60,6 +65,42 @@ impl TryFrom<String> for PipelineType {
 impl From<PipelineType> for String {
     fn from(value: PipelineType) -> Self {
         value.as_str().to_string()
+    }
+}
+
+/// Bincode encoding for `RuntimeExecutionContext.pipeline_type`.
+pub mod wire {
+    use super::PipelineType;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &PipelineType,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            serializer.serialize_str(value.as_str())
+        } else {
+            serializer.serialize_u32(*value as u32)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PipelineType, D::Error> {
+        if deserializer.is_human_readable() {
+            let raw = String::deserialize(deserializer)?;
+            PipelineType::try_from(raw).map_err(serde::de::Error::custom)
+        } else {
+            match u32::deserialize(deserializer)? {
+                0 => Ok(PipelineType::Ingest),
+                1 => Ok(PipelineType::Copy),
+                2 => Ok(PipelineType::Cdc),
+                other => Err(serde::de::Error::invalid_value(
+                    serde::de::Unexpected::Unsigned(u64::from(other)),
+                    &"pipeline type tag 0=ingest, 1=copy, 2=cdc",
+                )),
+            }
+        }
     }
 }
 
@@ -170,5 +211,37 @@ mod tests {
         assert_eq!(decoded, PipelineType::Copy);
         let as_str: String = bincode::deserialize(&bytes).unwrap();
         assert_eq!(as_str, "copy");
+    }
+
+    #[test]
+    fn yaml_keeps_lowercase_copy_name() {
+        let yaml = serde_yaml::to_string(&PipelineType::Copy).unwrap();
+        assert!(yaml.contains("copy"), "{yaml}");
+        let decoded: PipelineType = serde_yaml::from_str("copy\n").unwrap();
+        assert_eq!(decoded, PipelineType::Copy);
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct WireCopy {
+        #[serde(with = "super::wire")]
+        kind: PipelineType,
+    }
+
+    #[test]
+    fn protocol_wire_encodes_copy_as_u32() {
+        let bytes = bincode::serialize(&WireCopy {
+            kind: PipelineType::Copy,
+        })
+        .unwrap();
+        let decoded: WireCopy = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.kind, PipelineType::Copy);
+        assert_eq!(bytes, 1u32.to_le_bytes());
+    }
+
+    #[test]
+    fn protocol_21_bincode_string_is_rejected_on_the_wire() {
+        let proto21 = bincode::serialize(&"copy".to_string()).unwrap();
+        let err = bincode::deserialize::<WireCopy>(&proto21).unwrap_err();
+        assert!(err.to_string().contains("pipeline type tag"), "{err}");
     }
 }

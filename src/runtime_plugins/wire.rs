@@ -77,7 +77,10 @@ where
     T: DeserializeOwned,
 {
     let bytes = read_len_prefixed(reader).await?;
-    bincode::deserialize(&bytes).map_err(|err| io::Error::other(err.to_string()))
+    bincode::deserialize(&bytes).map_err(|err| {
+        let prefix = bytes.len().min(16);
+        io::Error::other(format!("{err}; prefix={:02x?}", &bytes[..prefix]))
+    })
 }
 
 pub async fn read_frame_or_eof<R, T>(reader: &mut R) -> io::Result<Option<T>>
@@ -154,5 +157,21 @@ mod tests {
         assert!(err
             .to_string()
             .contains("runtime frame truncated while reading payload"));
+    }
+
+    #[tokio::test]
+    async fn read_frame_includes_payload_prefix_on_decode_error() {
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        writer.write_all(&0u32.to_le_bytes()).await.unwrap();
+        drop(writer);
+
+        let err = read_frame_or_eof::<_, TestFrame>(&mut reader)
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("prefix=") && message.contains("[]"),
+            "{message}"
+        );
     }
 }
