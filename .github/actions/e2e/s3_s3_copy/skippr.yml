@@ -1,0 +1,34 @@
+skippr:
+  workspace: test
+  skipprd_el_storage_mode: local
+
+pipelines:
+  s3_s3_copy:
+    auto_approve: yes
+    env: test
+    type: copy
+    buffer_threshold_bytes: 10000000
+    buffer_threshold_seconds: 60
+    data_source: data_sources.s3_src
+    data_sink: data_sinks.s3_dst
+    transform:
+      batch_partition_fields: region
+
+data_sources:
+  s3_src:
+    S3:
+      batch_size_bytes: 2048000
+      s3_bucket: skippr-e2e-sample-data
+      s3_prefix: SOURCE_PREFIX_PLACEHOLDER
+      endpoint_url: R2_S3_ENDPOINT_PLACEHOLDER
+      region: auto
+      format: json
+
+data_sinks:
+  s3_dst:
+    S3:
+      s3_bucket: skippr-e2e-sample-data
+      s3_prefix: SINK_PREFIX_PLACEHOLDER
+      endpoint_url: R2_S3_ENDPOINT_PLACEHOLDER
+      region: auto
+      format: jsonl
