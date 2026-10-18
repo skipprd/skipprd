@@ -82,6 +82,9 @@ Bump `pyproject.toml` and `python/Cargo.toml` together, then tag the engine (`18
 - `e2e_s3_schema_evolution` — S3 v1 then backward-compatible v2 into SkipprLake
 - `e2e_s3_schema_alter` — S3 fixture into SkipprLake, then the enumerated `ALTER TABLE` matrix (rename / merge / drop / promote / fail-closed)
 - `e2e_file_postgres` — File source append into Docker Postgres
+- `e2e_file_copy` — File → File `type: copy`
+- `e2e_s3_file_copy` — S3 (R2) → File and File → S3 (R2) `type: copy`
+- `e2e_s3_s3_copy` — S3 (R2) → S3 (R2) `type: copy` Identity PUT (source and sink plugins together)
 - `publish_runtime_plugins` — on engine tags, after linux and Darwin catalog builds, stage and upload protocol-matching manifests plus binaries
 - `publish_skipprd` — on engine tags, after chaos, the GitHub e2e jobs, Darwin, and plugin publish, upload `skipprd-linux_x86.tar.gz` and `skipprd-macos_arm64.tar.gz` to the install CDN and create the GitHub release
 

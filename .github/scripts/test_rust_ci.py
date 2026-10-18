@@ -123,11 +123,13 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_file_postgres:", text)
         self.assertIn("e2e_file_copy:", text)
         self.assertIn("e2e_s3_file_copy:", text)
+        self.assertIn("e2e_s3_s3_copy:", text)
         self.assertIn("s3_skipprlake_evolve", text)
         self.assertIn("s3_skipprlake_alter", text)
         self.assertIn("file_postgres_append", text)
         self.assertIn("file_copy", text)
         self.assertIn("s3_file_copy", text)
+        self.assertIn("s3_s3_copy", text)
         self.assertNotIn(
             '["skippr-plugin-data-source-s3","skippr-plugin-data-source-file"',
             text,
@@ -177,6 +179,23 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("run_matrix.py", s3_copy)
         self.assertIn("run_s3_sink.py", s3_copy)
         self.assertIn("skippr_s3_sink.yml", s3_copy)
+        s3_s3 = (
+            ROOT / ".github" / "actions" / "e2e" / "s3_s3_copy" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        s3_s3_yaml = (
+            ROOT / ".github" / "actions" / "e2e" / "s3_s3_copy" / "skippr.yml"
+        ).read_text(encoding="utf-8")
+        s3_s3_run = (
+            ROOT / ".github" / "actions" / "e2e" / "s3_s3_copy" / "run.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("run.py", s3_s3)
+        self.assertIn("type: copy", s3_s3_yaml)
+        self.assertIn("data_sources.s3_src", s3_s3_yaml)
+        self.assertIn("data_sinks.s3_dst", s3_s3_yaml)
+        self.assertIn("SOURCE_PREFIX_PLACEHOLDER", s3_s3_yaml)
+        self.assertIn("SINK_PREFIX_PLACEHOLDER", s3_s3_yaml)
+        self.assertIn("runtime sink control frame read failed", s3_s3_run)
+        self.assertIn("original NDJSON identity bytes", s3_s3_run)
         self.assertNotRegex(text, r"(?m)^  cleanup:")
         plugins = text.split("\n  publish_runtime_plugins:", 1)[1].split(
             "\n  publish_skipprd:", 1
@@ -200,6 +219,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_file_postgres", publish)
         self.assertIn("e2e_file_copy", publish)
         self.assertIn("e2e_s3_file_copy", publish)
+        self.assertIn("e2e_s3_s3_copy", publish)
         self.assertIn("macos_arm64", publish)
         self.assertIn("publish_runtime_plugins", publish)
         self.assertIn("refs/tags/", publish)
