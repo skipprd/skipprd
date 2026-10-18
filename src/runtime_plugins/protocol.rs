@@ -25,7 +25,10 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 21;
+// Protocol 22: PipelineType is a bincode u32 (YAML/JSON stay lowercase names).
+// Bump every plugin crate patch when this constant changes so catalog paths
+// stay immutable.
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 22;
 pub const COMMIT_RECEIPT_VERSION: u32 = 1;
 pub const CATALOG_INTENT_VERSION: u32 = 2;
 pub const GLUE_PARTITION_CATALOG_INTENT_VERSION: u32 = 1;
@@ -343,7 +346,7 @@ pub struct RuntimeExecutionContext {
     pub output_layout: RuntimeOutputLayout,
     #[serde(default)]
     pub inject_fields: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, with = "crate::pipeline_type::wire")]
     pub pipeline_type: PipelineType,
 }
 
@@ -1305,8 +1308,100 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_hard_cut_to_v21() {
-        assert_eq!(RUNTIME_PROTOCOL_VERSION, 21);
+    fn protocol_version_is_hard_cut_to_v22() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 22);
+    }
+
+    #[test]
+    fn copy_prepare_sink_host_frame_roundtrips() {
+        let request = SinkRunRequest {
+            request_id: 54,
+            compaction_id: "c1".into(),
+            idempotency_key: "c1".into(),
+            wal_refs: Vec::new(),
+            write_semantics: SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
+            binding: RuntimeBinding::Primary,
+            required_schema_namespace: String::new(),
+            required_schema_version: 0,
+            filename: "cube_events/p_rmc=cemex/part.jsonl".into(),
+            cdc_ctx: None,
+            source_contract: None,
+            payload_mode: RuntimeSinkPayloadMode::RawBytes,
+            live_wal_segments: None,
+        };
+        let prepare = PrepareSink {
+            request_id: 54,
+            envelope: crate::sink_apply_identity::SinkApplyEnvelopeV2::new(
+                request.compaction_id.clone(),
+                request.idempotency_key.clone(),
+                &request.wal_refs,
+                false,
+                crate::plugins::source_contract::WritePolicy::Append,
+                request.write_semantics,
+                None,
+                None,
+                None,
+            ),
+            request,
+        };
+        let bytes = bincode::serialize(&HostFrame::PrepareSink(prepare)).unwrap();
+        let tag = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        assert_eq!(
+            tag, 6,
+            "PrepareSink is HostFrame variant 6; request_id must not be the tag"
+        );
+        let decoded: HostFrame = bincode::deserialize(&bytes).unwrap();
+        let HostFrame::PrepareSink(decoded) = decoded else {
+            panic!("expected PrepareSink");
+        };
+        assert_eq!(decoded.request_id, 54);
+        assert_eq!(
+            decoded.request.payload_mode,
+            RuntimeSinkPayloadMode::RawBytes
+        );
+    }
+
+    #[test]
+    fn unwrapped_prepare_sink_is_not_a_host_frame() {
+        let request = SinkRunRequest {
+            request_id: 54,
+            compaction_id: "c1".into(),
+            idempotency_key: "c1".into(),
+            wal_refs: Vec::new(),
+            write_semantics: SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
+            binding: RuntimeBinding::Primary,
+            required_schema_namespace: String::new(),
+            required_schema_version: 0,
+            filename: "f".into(),
+            cdc_ctx: None,
+            source_contract: None,
+            payload_mode: RuntimeSinkPayloadMode::RawBytes,
+            live_wal_segments: None,
+        };
+        let prepare = PrepareSink {
+            request_id: 54,
+            envelope: crate::sink_apply_identity::SinkApplyEnvelopeV2::new(
+                request.compaction_id.clone(),
+                request.idempotency_key.clone(),
+                &request.wal_refs,
+                false,
+                crate::plugins::source_contract::WritePolicy::Append,
+                request.write_semantics,
+                None,
+                None,
+                None,
+            ),
+            request,
+        };
+        let err =
+            bincode::deserialize::<HostFrame>(&bincode::serialize(&prepare).unwrap()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("variant index 0 <= i < 11") && message.contains("54"),
+            "{message}"
+        );
     }
 
     #[test]
