@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 
 use ::skipprd::api::Session as EngineSession;
 use ::skipprd::helpers::configuration::Config;
+use ::skipprd::helpers::logging::init_logging;
 use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 use arrow::pyarrow::ToPyArrow;
@@ -87,6 +88,8 @@ impl PySession {
             pipeline: name.to_string(),
         };
         session.admit()?;
+        let level = std::env::var("SKIPPR_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
+        init_logging(Some(level));
         Ok(session)
     }
 

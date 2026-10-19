@@ -196,6 +196,11 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("SINK_PREFIX_PLACEHOLDER", s3_s3_yaml)
         self.assertIn("runtime sink control frame read failed", s3_s3_run)
         self.assertIn("original NDJSON identity bytes", s3_s3_run)
+        self.assertIn("namespace_fields", s3_s3_run)
+        self.assertIn("detail-type", s3_s3_run)
+        self.assertIn("expected variant index", s3_s3_run)
+        self.assertIn("json_jsonl_namespace_burst", s3_s3_run)
+        self.assertIn("SKIPPR_RUNTIME_LOG_LEVEL", s3_s3)
         self.assertNotRegex(text, r"(?m)^  cleanup:")
         plugins = text.split("\n  publish_runtime_plugins:", 1)[1].split(
             "\n  publish_skipprd:", 1
