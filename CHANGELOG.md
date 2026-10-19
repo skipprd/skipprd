@@ -15,6 +15,12 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
+## [18.3.3]
+
+### Changed
+
+- Per-request runtime IPC frame names (`control write` / `control read`) are `debug`, not `info`. Handshake, decode errors, and the 6-byte PrepareSink desync warn stay. EU Staging 18.3.1 with `SKIPPR_LOG_LEVEL=info` logged every PrepareSink/ack on the COPY hot path.
+
 ## [18.3.2]
 
 ### Fixed
