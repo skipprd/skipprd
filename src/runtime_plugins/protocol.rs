@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
 // Protocol 22: PipelineType is a bincode u32 (YAML/JSON stay lowercase names).
+// 18.3.1 keeps protocol 22 and rejects trailing frame bytes so a too-long
+// payload cannot steal the next length prefix (EU Staging COPY desync).
 // Bump every plugin crate patch when this constant changes so catalog paths
 // stay immutable.
 pub const RUNTIME_PROTOCOL_VERSION: u32 = 22;
@@ -822,6 +824,33 @@ pub enum HostFrame {
     Shutdown,
 }
 
+impl HostFrame {
+    pub fn wire_label(&self) -> &'static str {
+        match self {
+            Self::Handshake(_) => "Handshake",
+            Self::InstallSink(_) => "InstallSink",
+            Self::InstallSchema(_) => "InstallSchema",
+            Self::InstallSchemaState(_) => "InstallSchemaState",
+            Self::InstallSchemaDelta(_) => "InstallSchemaDelta",
+            Self::RunSource(_) => "RunSource",
+            Self::PrepareSink(_) => "PrepareSink",
+            Self::RunSchema(_) => "RunSchema",
+            Self::IngestAck(_) => "IngestAck",
+            Self::OffsetResponse(_) => "OffsetResponse",
+            Self::Shutdown => "Shutdown",
+        }
+    }
+
+    pub fn request_id(&self) -> Option<u64> {
+        match self {
+            Self::PrepareSink(prepare) => Some(prepare.request_id),
+            Self::RunSchema(request) => Some(request.request_id),
+            Self::IngestAck(ack) => Some(ack.request_id),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum PluginFrame {
     HandshakeAck(HandshakeResponse),
@@ -834,6 +863,34 @@ pub enum PluginFrame {
     SchemaAck(RuntimeRequestAck),
     SchemaStateRefreshRequired(RuntimeSchemaRefreshRequest),
     Error(String),
+}
+
+impl PluginFrame {
+    pub fn wire_label(&self) -> &'static str {
+        match self {
+            Self::HandshakeAck(_) => "HandshakeAck",
+            Self::Installed => "Installed",
+            Self::SourceEvent(_) => "SourceEvent",
+            Self::OffsetRequest(_) => "OffsetRequest",
+            Self::PrepareAck(_) => "PrepareAck",
+            Self::SinkAck(_) => "SinkAck",
+            Self::SinkError(_) => "SinkError",
+            Self::SchemaAck(_) => "SchemaAck",
+            Self::SchemaStateRefreshRequired(_) => "SchemaStateRefreshRequired",
+            Self::Error(_) => "Error",
+        }
+    }
+
+    pub fn request_id(&self) -> Option<u64> {
+        match self {
+            Self::PrepareAck(ack) => Some(ack.request_id),
+            Self::SinkAck(ack) => Some(ack.request_id),
+            Self::SinkError(err) => Some(err.request_id),
+            Self::SchemaAck(ack) => Some(ack.request_id),
+            Self::SchemaStateRefreshRequired(refresh) => Some(refresh.request_id),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -936,6 +993,88 @@ mod tests {
         assert_eq!(
             decoded.context.pipeline_type,
             crate::pipeline_type::PipelineType::Copy
+        );
+    }
+
+    fn copy_prepare_sink(request_id: u64) -> PrepareSink {
+        let request = SinkRunRequest {
+            request_id,
+            compaction_id: format!("c{request_id}"),
+            idempotency_key: format!("k{request_id}"),
+            wal_refs: Vec::new(),
+            write_semantics: SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
+            binding: RuntimeBinding::Primary,
+            required_schema_namespace: String::new(),
+            required_schema_version: 0,
+            filename: "cube.json".into(),
+            cdc_ctx: None,
+            source_contract: None,
+            payload_mode: RuntimeSinkPayloadMode::RawBytes,
+            live_wal_segments: None,
+        };
+        PrepareSink {
+            request_id,
+            envelope: crate::sink_apply_identity::SinkApplyEnvelopeV2::new(
+                request.compaction_id.clone(),
+                request.idempotency_key.clone(),
+                &request.wal_refs,
+                false,
+                Default::default(),
+                request.write_semantics,
+                None,
+                None,
+                None,
+            ),
+            request,
+        }
+    }
+
+    #[test]
+    fn prepare_sink_is_host_frame_variant_6() {
+        let payload = bincode::serialize(&HostFrame::PrepareSink(copy_prepare_sink(31))).unwrap();
+        assert_eq!(u32::from_le_bytes(payload[0..4].try_into().unwrap()), 6);
+        assert_eq!(&payload[4..10], &[0x1f, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[tokio::test]
+    async fn omitted_length_prefix_on_prepare_sink_matches_eu_staging_desync() {
+        use crate::runtime_plugins::wire::read_frame;
+        use tokio::io::AsyncWriteExt;
+
+        let payload = bincode::serialize(&HostFrame::PrepareSink(copy_prepare_sink(31))).unwrap();
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        writer.write_all(&payload).await.unwrap();
+        drop(writer);
+
+        let err = read_frame::<_, HostFrame>(&mut reader).await.unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("31")
+                && message.contains("expected variant index")
+                && message.contains("payload_len=6")
+                && message.contains("1f, 00, 00, 00, 00, 00"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn length_prefixed_prepare_sink_roundtrips_copy_raw_bytes() {
+        use crate::runtime_plugins::wire::{read_frame, write_frame};
+
+        let frame = HostFrame::PrepareSink(copy_prepare_sink(31));
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        write_frame(&mut writer, &frame).await.unwrap();
+        drop(writer);
+
+        let decoded = read_frame::<_, HostFrame>(&mut reader).await.unwrap();
+        let HostFrame::PrepareSink(prepare) = decoded else {
+            panic!("expected PrepareSink, got {}", decoded.wire_label());
+        };
+        assert_eq!(prepare.request_id, 31);
+        assert_eq!(
+            prepare.request.payload_mode,
+            RuntimeSinkPayloadMode::RawBytes
         );
     }
 
