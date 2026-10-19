@@ -15,6 +15,18 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
+## [18.3.1]
+
+### Fixed
+
+- Runtime control frames reject trailing bincode bytes so a 4-byte-too-long admin frame cannot steal the next length prefix. EU Staging 18.3.0 failed COPY Identity PUT with `integer 31, expected variant index 0 <= i < 11; prefix=[1f, 00, 00, 00, 00, 00]` — that 6-byte payload is `PrepareSink` tag `6` read as a length, then `request_id=31`. Writes now put length and payload in one buffer.
+- Host and sink plugins log control-frame names, request ids, and short-frame warnings. Python `Session` enables skipprd file/stderr logs (`SKIPPR_LOG_LEVEL`, default `info`) so CloudCycle Iceberg hosts no longer leave `skipprd.*.log` empty.
+- S3 → S3 COPY e2e adds a CloudCycle-shaped namespace burst (16 `detail-type` objects, then Identity PUT) and fails on the EU desync markers.
+
+### Changed
+
+- Plugin crate patch versions are bumped so catalog paths pick up the SDK wire/logging change. Protocol stays 22. S3 sink is `0.1.5`.
+
 ## [18.3.0]
 
 ### Breaking

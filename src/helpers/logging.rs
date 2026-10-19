@@ -1,6 +1,9 @@
+use std::sync::OnceLock;
+
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 static mut CLI_LOGS_ENABLED: bool = false;
+static LOGGING_INIT: OnceLock<()> = OnceLock::new();
 
 const LOG_DIR_NAME: &str = "logs";
 const MAX_LOG_FILES: usize = 10;
@@ -9,6 +12,9 @@ pub fn init_logging(level_opt: Option<String>) {
     let enabled = level_opt.is_some();
     unsafe {
         CLI_LOGS_ENABLED = enabled;
+    }
+    if LOGGING_INIT.set(()).is_err() {
+        return;
     }
 
     let base_filter = "\

@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-schema-sink-skipprlake"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 
 [[bin]]

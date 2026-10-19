@@ -63,7 +63,9 @@ use crate::runtime_plugins::sdk::{
     decode_record_batch_stream, decode_record_batch_stream_with_stats,
     encode_record_batch_stream_with_stats, encode_record_batches,
 };
-use crate::runtime_plugins::wire::{read_frame, write_frame, MAX_RUNTIME_FRAME_BYTES};
+use crate::runtime_plugins::wire::{
+    decode_payload, read_frame, write_frame, MAX_RUNTIME_FRAME_BYTES,
+};
 use crate::sink_apply_identity::SinkApplyEnvelopeV2;
 
 #[derive(Clone, Debug)]
@@ -418,6 +420,10 @@ impl RuntimeChildConnection {
             protocol_version: RUNTIME_PROTOCOL_VERSION,
             sink_session_capacity: self.sink_session_capacity,
         });
+        info!(
+            "runtime sink handshake write pipeline={} protocol={} session_capacity={}",
+            self.pipeline_name, RUNTIME_PROTOCOL_VERSION, self.sink_session_capacity
+        );
         write_frame(&mut self.control, &request).await?;
         let frame: PluginFrame = read_frame(&mut self.control).await?;
         let PluginFrame::HandshakeAck(handshake) = frame else {
@@ -425,6 +431,10 @@ impl RuntimeChildConnection {
                 "runtime plugin did not respond with a handshake ack",
             ));
         };
+        info!(
+            "runtime sink handshake ack plugin={} protocol={} kind={:?}",
+            handshake.plugin_name, handshake.protocol_version, handshake.kind
+        );
         self.resolved.manifest.verify_handshake(&handshake)
     }
 
@@ -593,8 +603,7 @@ impl BufferedRuntimeFrameReader {
 
         let payload_start = self.consumed + 4;
         let payload_end = payload_start + frame_len;
-        let frame = bincode::deserialize(&self.buffer[payload_start..payload_end])
-            .map_err(|err| io::Error::other(err.to_string()))?;
+        let frame = decode_payload(&self.buffer[payload_start..payload_end])?;
         self.consumed = payload_end;
         self.compact();
         Ok(Some(frame))
@@ -2173,6 +2182,7 @@ impl RuntimeSinkMultiplexConnection {
             child,
             control,
             data,
+            sink_session_capacity,
             ..
         } = connection;
         let child_pid = child.id();
@@ -2189,6 +2199,10 @@ impl RuntimeSinkMultiplexConnection {
         let control_reader_task = tokio::spawn(async move {
             run_runtime_sink_control_demux(control_reader, reader_shared).await;
         });
+        info!(
+            "runtime sink multiplex started child_pid={:?} session_capacity={}",
+            child_pid, sink_session_capacity
+        );
         Arc::new(Self {
             _child: Mutex::new(child),
             control_writer: Mutex::new(control_writer),
@@ -2244,6 +2258,11 @@ impl RuntimeSinkMultiplexConnection {
         if !self.is_alive() {
             return Err(self.failure());
         }
+        info!(
+            "runtime sink control write frame={} request_id={:?}",
+            frame.wire_label(),
+            frame.request_id()
+        );
         let result = {
             let mut writer = self.control_writer.lock().await;
             write_frame(&mut *writer, frame).await
@@ -2326,8 +2345,16 @@ async fn run_runtime_sink_control_demux(
 ) {
     loop {
         let frame = match read_frame::<_, PluginFrame>(&mut reader).await {
-            Ok(frame) => frame,
+            Ok(frame) => {
+                info!(
+                    "runtime sink control read frame={} request_id={:?}",
+                    frame.wire_label(),
+                    frame.request_id()
+                );
+                frame
+            }
             Err(err) => {
+                warn!("runtime sink control connection failed: {err}");
                 shared.fail(
                     err.kind(),
                     format!("runtime sink control connection failed: {err}"),

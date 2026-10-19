@@ -27,6 +27,9 @@ runs:
         USE_LOCAL_PLUGIN_CODE: "1"
         R2_ACCOUNT_ID: ${{ inputs.r2_account_id }}
         SKIPPRD_PATH: ${{ inputs.skipprd_path }}
+        SKIPPR_RUNTIME_LOG_LEVEL: info
+        SKIPPR_LOG_LEVEL: info
+        RUST_LOG: skippr=info
       run: |
         set -euo pipefail
         work="${RUNNER_TEMP:-/tmp}/skippr-s3-s3-copy"
