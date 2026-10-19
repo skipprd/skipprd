@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [18.3.2]
+
+### Fixed
+
+- Runtime short-frame warnings fire only on the 6-byte omitted-length-prefix signature (`PrepareSink` tag 6 used as the next frame length). `PluginFrame::Installed` is a 4-byte unit variant (`prefix=[01,00,00,00]`) and no longer logs as a COPY desync.
+
 ## [18.3.1]
 
 ### Fixed

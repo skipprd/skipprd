@@ -11,11 +11,18 @@ const CLEAN_RUNTIME_EOF: &str = "runtime channel closed before next frame";
 /// request_id means the plugin treated that tag as the next length prefix.
 const PREPARE_SINK_VARIANT_TAG: u32 = 6;
 
+pub(crate) fn looks_like_omitted_prepare_sink_length_prefix(bytes: &[u8]) -> bool {
+    // PluginFrame::Installed is a 4-byte unit variant (`[01,00,00,00]`). Warning
+    // on every payload under 32 bytes treated that handshake ack as the EU
+    // Staging COPY desync.
+    bytes.len() == PREPARE_SINK_VARIANT_TAG as usize
+}
+
 pub(crate) fn decode_payload<T>(bytes: &[u8]) -> io::Result<T>
 where
     T: DeserializeOwned,
 {
-    if bytes.len() < 32 {
+    if looks_like_omitted_prepare_sink_length_prefix(bytes) {
         tracing::warn!(
             "runtime ipc short frame payload_len={} prefix={:02x?} (PrepareSink tag={}; short payloads usually mean the previous length prefix was skipped)",
             bytes.len(),
@@ -154,10 +161,89 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_plugins::protocol::{HostFrame, PluginFrame};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
 
     #[derive(Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
     struct TestFrame {
         value: u32,
+    }
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("capture").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Capture {
+        type Writer = Capture;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_warns(f: impl FnOnce()) -> String {
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = capture.0.lock().expect("capture").clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn installed_plugin_frame_is_four_bytes_not_prepare_sink_desync() {
+        let payload = bincode::serialize(&PluginFrame::Installed).unwrap();
+        assert_eq!(payload.as_slice(), &[1, 0, 0, 0]);
+        assert!(!looks_like_omitted_prepare_sink_length_prefix(&payload));
+        let decoded: PluginFrame = decode_payload(&payload).unwrap();
+        assert!(matches!(decoded, PluginFrame::Installed));
+    }
+
+    #[test]
+    fn installed_plugin_frame_does_not_warn_as_short_frame() {
+        let logged = capture_warns(|| {
+            let payload = bincode::serialize(&PluginFrame::Installed).unwrap();
+            let _: PluginFrame = decode_payload(&payload).unwrap();
+        });
+        assert!(
+            !logged.contains("short frame") && !logged.contains("payload_len=4"),
+            "{logged}"
+        );
+    }
+
+    #[test]
+    fn host_shutdown_unit_variant_is_four_bytes_not_desync() {
+        let payload = bincode::serialize(&HostFrame::Shutdown).unwrap();
+        assert_eq!(payload.len(), 4);
+        assert!(!looks_like_omitted_prepare_sink_length_prefix(&payload));
+    }
+
+    #[test]
+    fn omitted_prepare_sink_length_warns_on_six_byte_eu_staging_payload() {
+        let eu = [0x1f, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert!(looks_like_omitted_prepare_sink_length_prefix(&eu));
+        let logged = capture_warns(|| {
+            let _ = decode_payload::<HostFrame>(&eu);
+        });
+        assert!(
+            logged.contains("short frame")
+                && logged.contains("payload_len=6")
+                && logged.contains("1f"),
+            "{logged}"
+        );
     }
 
     #[tokio::test]
