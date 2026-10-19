@@ -9,6 +9,7 @@ mismatch fails the job (`runtime sink control frame read failed`).
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -26,6 +27,48 @@ matrix = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(matrix)
 CELLS = matrix.CELLS
 CONTROL_FRAME_ERROR = "runtime sink control frame read failed"
+DESYNC_MARKERS = (
+    CONTROL_FRAME_ERROR,
+    "expected variant index",
+    "skipped length prefix",
+    "payload_len=6",
+)
+BURST_FILES = 16
+NAMESPACE_TRANSFORM = """      flatten_events: false
+      namespace_fields: detail-type
+      batch_time_fields: time
+      batch_time_unit: day
+      time_partition_prefix: p_
+      batch_partition_fields: detail.rmc
+"""
+
+
+def fail_if_control_desync(combined: str, cell: str) -> bool:
+    for marker in DESYNC_MARKERS:
+        if marker in combined:
+            print(f"{cell}: control-frame regression: {marker}", file=sys.stderr)
+            return True
+    return False
+
+
+def cube_event_object(index: int) -> bytes:
+    namespace = f"EventType{index:02d}"
+    rmc = f"rmc{index:02d}"
+    records = [
+        {
+            "id": str(index),
+            "detail-type": namespace,
+            "time": "2026-01-15T12:00:00Z",
+            "detail": {"rmc": rmc},
+        },
+        {
+            "id": str(index + 1000),
+            "detail-type": namespace,
+            "time": "2026-01-15T13:00:00Z",
+            "detail": {"rmc": rmc},
+        },
+    ]
+    return "".join(json.dumps(record) + "\n" for record in records).encode()
 
 
 def download_cell(client, bucket: str, prefix: str, dest: Path, sink_fmt: str) -> list[Path]:
@@ -101,8 +144,7 @@ def run_cell(
     if proc.stderr:
         print(proc.stderr, end="", file=sys.stderr)
     combined = f"{proc.stdout}\n{proc.stderr}"
-    if CONTROL_FRAME_ERROR in combined:
-        print(f"{cell}: {CONTROL_FRAME_ERROR}", file=sys.stderr)
+    if fail_if_control_desync(combined, cell):
         return 1
     if proc.returncode:
         print(f"{cell}: skipprd sync exited {proc.returncode}", file=sys.stderr)
@@ -157,6 +199,81 @@ def run_cell(
     return 0
 
 
+def run_namespace_burst(
+    client,
+    bucket: str,
+    template: str,
+    skipprd: str,
+    work: Path,
+    prefix_root: str,
+    endpoint: str,
+) -> int:
+    """CloudCycle COPY shape: many namespaces, then Identity PUT PrepareSinks."""
+    cell = "json_jsonl_namespace_burst"
+    source_prefix = f"{prefix_root}{cell}/src/"
+    sink_prefix = f"{prefix_root}{cell}/dst/"
+    expected_rows = BURST_FILES * 2
+    local_src = work / cell / "src"
+    local_src.mkdir(parents=True, exist_ok=True)
+    for index in range(BURST_FILES):
+        body = cube_event_object(index)
+        name = f"event-{index:02d}.json"
+        path = local_src / name
+        path.write_bytes(body)
+        client.upload_file(str(path), bucket, f"{source_prefix}{name}")
+    yaml = (
+        template.replace("SOURCE_PREFIX_PLACEHOLDER", source_prefix)
+        .replace("SINK_PREFIX_PLACEHOLDER", sink_prefix)
+        .replace("R2_S3_ENDPOINT_PLACEHOLDER", endpoint)
+        .replace("      batch_partition_fields: region\n", NAMESPACE_TRANSFORM)
+    )
+    cfg = work / cell / "skippr.yml"
+    cfg.write_text(yaml)
+    data = work / cell / "data"
+    downloaded = work / cell / "downloaded"
+    data.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["DATA_DIR"] = str(data)
+    env["DATA_DIR_MIN_FREE_BYTES"] = "0"
+    env["DATA_DIR_HIGH_WATERMARK_PCT"] = "0"
+    proc = subprocess.run(
+        [
+            skipprd,
+            "--config",
+            str(cfg),
+            "sync",
+            "--log",
+            "--pipeline",
+            "s3_s3_copy",
+            "--once",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.stdout:
+        print(proc.stdout, end="")
+    if proc.stderr:
+        print(proc.stderr, end="", file=sys.stderr)
+    combined = f"{proc.stdout}\n{proc.stderr}"
+    if fail_if_control_desync(combined, cell):
+        return 1
+    if proc.returncode:
+        print(f"{cell}: skipprd sync exited {proc.returncode}", file=sys.stderr)
+        return proc.returncode
+    written = download_cell(client, bucket, sink_prefix, downloaded, "jsonl")
+    if not written:
+        print(f"{cell}: no jsonl objects under s3://{bucket}/{sink_prefix}", file=sys.stderr)
+        return 1
+    rows = sum(matrix.count_records(path, "jsonl") for path in written)
+    if rows != expected_rows:
+        print(f"{cell}: expected {expected_rows} records, got {rows} in {written}", file=sys.stderr)
+        return 1
+    print(f"{cell}: {len(written)} object(s), {rows} records")
+    return 0
+
+
 def main() -> int:
     skipprd = os.environ["SKIPPRD_PATH"]
     work = Path(os.environ["COPY_WORK"])
@@ -189,6 +306,10 @@ def main() -> int:
             cell,
         ):
             return 1
+    if run_namespace_burst(
+        client, bucket, template, skipprd, work, prefix_root, endpoint
+    ):
+        return 1
     return 0
 
 

@@ -119,6 +119,26 @@ fn with_io_context(err: io::Error, context: impl AsRef<str>) -> io::Error {
     io::Error::new(err.kind(), format!("{}: {}", context.as_ref(), err))
 }
 
+fn runtime_ipc_verbose() -> bool {
+    matches!(
+        std::env::var("SKIPPR_RUNTIME_LOG_LEVEL")
+            .unwrap_or_else(|_| "warn".to_string())
+            .to_ascii_lowercase()
+            .as_str(),
+        "trace" | "debug" | "info"
+    )
+}
+
+fn log_sink_control(message: impl AsRef<str>) {
+    eprintln!("skippr-runtime-ipc: {}", message.as_ref());
+}
+
+fn log_sink_control_verbose(message: impl AsRef<str>) {
+    if runtime_ipc_verbose() {
+        log_sink_control(message);
+    }
+}
+
 async fn connect_runtime_channel(addr_env: &str) -> io::Result<TcpStream> {
     let addr = std::env::var(addr_env)
         .map_err(|_| io::Error::other(format!("missing runtime channel env {addr_env}")))?;
@@ -685,6 +705,13 @@ where
         }
     }
 
+    log_sink_control(format!(
+        "handshake ok plugin={} protocol={} session_capacity={} supports_schema={}",
+        handshake_display_name,
+        handshake.protocol_version,
+        handshake.sink_session_capacity,
+        supports_schema
+    ));
     control_writer
         .write(&PluginFrame::HandshakeAck(HandshakeResponse {
             protocol_version: RUNTIME_PROTOCOL_VERSION,
@@ -714,8 +741,18 @@ where
     loop {
         let frame = tokio::select! {
             frame = read_frame_or_eof::<_, HostFrame>(&mut control_reader) => {
-                match frame.map_err(|err| with_io_context(err, "runtime sink control frame read failed"))? {
-                    Some(frame) => frame,
+                match frame.map_err(|err| {
+                    log_sink_control(format!("control frame read failed: {err}"));
+                    with_io_context(err, "runtime sink control frame read failed")
+                })? {
+                    Some(frame) => {
+                        log_sink_control_verbose(format!(
+                            "control read frame={} request_id={:?}",
+                            frame.wire_label(),
+                            frame.request_id()
+                        ));
+                        frame
+                    }
                     None => {
                         data_demux.abort();
                         sessions.shutdown().await;
