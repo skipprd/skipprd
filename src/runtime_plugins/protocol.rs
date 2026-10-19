@@ -1059,6 +1059,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn length_prefixed_installed_plugin_frame_roundtrips_without_desync_warn() {
+        use crate::runtime_plugins::wire::{
+            looks_like_omitted_prepare_sink_length_prefix, read_frame, write_frame,
+        };
+
+        let payload = bincode::serialize(&PluginFrame::Installed).unwrap();
+        assert_eq!(payload.as_slice(), &[1, 0, 0, 0]);
+        assert!(!looks_like_omitted_prepare_sink_length_prefix(&payload));
+
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        write_frame(&mut writer, &PluginFrame::Installed)
+            .await
+            .unwrap();
+        drop(writer);
+
+        let decoded = read_frame::<_, PluginFrame>(&mut reader).await.unwrap();
+        assert!(matches!(decoded, PluginFrame::Installed));
+    }
+
+    #[tokio::test]
     async fn length_prefixed_prepare_sink_roundtrips_copy_raw_bytes() {
         use crate::runtime_plugins::wire::{read_frame, write_frame};
 
