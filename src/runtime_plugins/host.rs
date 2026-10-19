@@ -2258,7 +2258,7 @@ impl RuntimeSinkMultiplexConnection {
         if !self.is_alive() {
             return Err(self.failure());
         }
-        info!(
+        debug!(
             "runtime sink control write frame={} request_id={:?}",
             frame.wire_label(),
             frame.request_id()
@@ -2346,7 +2346,7 @@ async fn run_runtime_sink_control_demux(
     loop {
         let frame = match read_frame::<_, PluginFrame>(&mut reader).await {
             Ok(frame) => {
-                info!(
+                debug!(
                     "runtime sink control read frame={} request_id={:?}",
                     frame.wire_label(),
                     frame.request_id()
