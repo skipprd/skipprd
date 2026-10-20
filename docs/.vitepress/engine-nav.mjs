@@ -56,6 +56,7 @@ export const engineSections = [
       { text: 'skipprd discover', link: '/cli/discover' },
       { text: 'skipprd schema', link: '/cli/schema' },
       { text: 'skipprd metadata', link: '/cli/metadata' },
+      { text: 'skipprd migrate', link: '/cli/migrate' },
       { text: 'skipprd sync', link: '/cli/sync' },
       { text: 'skipprd query', link: '/cli/query' },
       { text: 'skipprd df', link: '/cli/df' },

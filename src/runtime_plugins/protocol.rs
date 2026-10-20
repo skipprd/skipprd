@@ -16,7 +16,7 @@ use crate::plugins::cdc::{
     SourceOrderModel, SyncContext,
 };
 use crate::plugins::source_contract::{SinkWritePolicySupport, SourceNamespaceContract};
-use crate::plugins::SinkWriteOutcome;
+use crate::plugins::{AlterSupport, SinkWriteOutcome};
 use crate::serdes::output_format::OutputFormat;
 use crate::sink_apply_identity::SinkApplyEnvelopeV2;
 use serde::{Deserialize, Serialize};
@@ -25,12 +25,13 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
+// Protocol 23: HostFrame::ApplyAlter for SchemaSink migrations.
 // Protocol 22: PipelineType is a bincode u32 (YAML/JSON stay lowercase names).
 // 18.3.1 keeps protocol 22 and rejects trailing frame bytes so a too-long
 // payload cannot steal the next length prefix (EU Staging COPY desync).
 // Bump every plugin crate patch when this constant changes so catalog paths
 // stay immutable.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 22;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 23;
 pub const COMMIT_RECEIPT_VERSION: u32 = 1;
 pub const CATALOG_INTENT_VERSION: u32 = 2;
 pub const GLUE_PARTITION_CATALOG_INTENT_VERSION: u32 = 1;
@@ -417,6 +418,7 @@ pub struct HandshakeResponse {
     pub source_capability: Option<RuntimeSourceCapabilityDescriptor>,
     pub sink_capability: Option<RuntimeSinkCapabilityDescriptor>,
     pub supports_schema: bool,
+    pub alter_support: AlterSupport,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -822,6 +824,7 @@ pub enum HostFrame {
     IngestAck(RuntimeIngestAck),
     OffsetResponse(RuntimeOffsetRpcResponse),
     Shutdown,
+    ApplyAlter(SchemaAlterRequest),
 }
 
 impl HostFrame {
@@ -838,6 +841,7 @@ impl HostFrame {
             Self::IngestAck(_) => "IngestAck",
             Self::OffsetResponse(_) => "OffsetResponse",
             Self::Shutdown => "Shutdown",
+            Self::ApplyAlter(_) => "ApplyAlter",
         }
     }
 
@@ -845,10 +849,20 @@ impl HostFrame {
         match self {
             Self::PrepareSink(prepare) => Some(prepare.request_id),
             Self::RunSchema(request) => Some(request.request_id),
+            Self::ApplyAlter(request) => Some(request.request_id),
             Self::IngestAck(ack) => Some(ack.request_id),
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SchemaAlterRequest {
+    pub request_id: u64,
+    pub namespace: String,
+    pub op: crate::discover::schema_alter::SchemaAlterOp,
+    pub field_id: i32,
+    pub metadata: OutputMetadata,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1467,8 +1481,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_hard_cut_to_v22() {
-        assert_eq!(RUNTIME_PROTOCOL_VERSION, 22);
+    fn protocol_version_is_hard_cut_to_v23() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 23);
     }
 
     #[test]
@@ -1558,7 +1572,7 @@ mod tests {
             bincode::deserialize::<HostFrame>(&bincode::serialize(&prepare).unwrap()).unwrap_err();
         let message = err.to_string();
         assert!(
-            message.contains("variant index 0 <= i < 11") && message.contains("54"),
+            message.contains("variant index 0 <= i < 12") && message.contains("54"),
             "{message}"
         );
     }

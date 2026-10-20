@@ -8,6 +8,11 @@ use zerocopy::{byteorder::U64, AsBytes, LayoutVerified};
 pub trait OffsetStore: Send + Sync {
     fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String>;
     fn put_bytes(&self, sk: &str, bytes: &[u8]) -> Result<(), String>;
+    fn fetch_and_update_bytes(
+        &self,
+        sk: &str,
+        update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
+    ) -> Result<Option<Vec<u8>>, String>;
     fn get_offset(&self, namespace: &str, partition: &str) -> Result<Option<Vec<u8>>, String>;
     fn fetch_and_update_offset(
         &self,
@@ -50,6 +55,23 @@ impl OffsetStore for SledOffsetStore {
         self.tree
             .insert(sk.as_bytes(), bytes)
             .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    fn fetch_and_update_bytes(
+        &self,
+        sk: &str,
+        update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let mut update = Some(update);
+        self.tree
+            .fetch_and_update(sk.as_bytes(), |current| {
+                update
+                    .take()
+                    .and_then(|f| f(current.map(|v| v.to_vec())))
+                    .map(IVec::from)
+            })
+            .map(|v| v.map(|bytes| bytes.to_vec()))
             .map_err(|err| err.to_string())
     }
 
@@ -99,6 +121,14 @@ impl OffsetStore for skippr_offset_store_dynamodb::DynamoDbOffsetStore {
         skippr_offset_store_dynamodb::DynamoDbOffsetStore::put_bytes(self, sk, bytes)
     }
 
+    fn fetch_and_update_bytes(
+        &self,
+        sk: &str,
+        update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        skippr_offset_store_dynamodb::DynamoDbOffsetStore::fetch_and_update_bytes(self, sk, update)
+    }
+
     fn get_offset(&self, namespace: &str, partition: &str) -> Result<Option<Vec<u8>>, String> {
         skippr_offset_store_dynamodb::DynamoDbOffsetStore::get_offset(self, namespace, partition)
     }
@@ -135,6 +165,16 @@ impl OffsetStore for skippr_offset_store_cloud_tables::CloudTablesOffsetStore {
 
     fn put_bytes(&self, sk: &str, bytes: &[u8]) -> Result<(), String> {
         skippr_offset_store_cloud_tables::CloudTablesOffsetStore::put_bytes(self, sk, bytes)
+    }
+
+    fn fetch_and_update_bytes(
+        &self,
+        sk: &str,
+        update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        skippr_offset_store_cloud_tables::CloudTablesOffsetStore::fetch_and_update_bytes(
+            self, sk, update,
+        )
     }
 
     fn get_offset(&self, namespace: &str, partition: &str) -> Result<Option<Vec<u8>>, String> {

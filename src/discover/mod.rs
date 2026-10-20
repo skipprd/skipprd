@@ -17,6 +17,7 @@ use crate::discover::date_formats::DateFormats;
 
 pub mod evolution;
 mod filter_float;
+pub mod iceberg_schema;
 pub mod metadata_apply;
 pub mod schema_alter;
 pub mod stats;
@@ -289,7 +290,6 @@ impl OutputMetadata {
 pub struct PipelineMetadata {
     pub name: String,
     pub metadata: HashMap<String, Metadata>,
-    pub sql: Option<Vec<String>>,
     pub enabled: bool,
     #[serde(default)]
     pub flattened: bool,
@@ -311,7 +311,6 @@ impl crate::discover::PipelineMetadata {
         Self {
             name: pipeline_name,
             metadata: HashMap::new(),
-            sql: None,
             enabled: true,
             flattened: flatten,
             metadata_version: CURRENT_METADATA_VERSION,
@@ -330,25 +329,12 @@ impl crate::discover::PipelineMetadata {
         Ok(Self {
             name: pipeline_name,
             metadata: metadata,
-            sql: None,
             enabled: true,
             flattened: flatten,
             metadata_version: CURRENT_METADATA_VERSION,
             schema_id: DEFAULT_SCHEMA_ID,
             source_contracts: HashMap::new(),
         })
-    }
-
-    pub fn append_sql(&mut self, sql_str: String) {
-        let sql = self.sql.as_mut();
-        match sql {
-            Some(pipeline_sql) => {
-                pipeline_sql.push(sql_str);
-            }
-            None => {
-                self.sql = Some(vec![sql_str]);
-            }
-        }
     }
 
     pub fn migrate_persisted_metadata(&mut self) -> bool {
@@ -3832,7 +3818,6 @@ mod tests_roundtrip {
         let mut pipeline = PipelineMetadata {
             name: "pipeline".to_string(),
             metadata: HashMap::from([("orders".to_string(), root)]),
-            sql: None,
             enabled: true,
             flattened: false,
             metadata_version: 0,
@@ -3873,7 +3858,6 @@ mod tests_roundtrip {
         let mut pipeline = PipelineMetadata {
             name: "pipeline".to_string(),
             metadata: HashMap::from([("id_insert".to_string(), root)]),
-            sql: None,
             enabled: true,
             flattened: false,
             metadata_version: 3,

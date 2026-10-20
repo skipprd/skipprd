@@ -67,10 +67,19 @@ macro_rules! declare_sink_spec {
 #[macro_export]
 macro_rules! declare_schema_sink_spec {
     ($spec:ident, $plugin:ty, $name:expr) => {
+        $crate::declare_schema_sink_spec!(
+            $spec,
+            $plugin,
+            $name,
+            $crate::plugins::AlterSupport::Unsupported
+        );
+    };
+    ($spec:ident, $plugin:ty, $name:expr, $alter:expr) => {
         pub struct $spec;
 
         impl $crate::plugins::SchemaSinkSpec for $spec {
             const NAME: &'static str = $name;
+            const ALTER_SUPPORT: $crate::plugins::AlterSupport = $alter;
         }
 
         impl $crate::plugins::HasSchemaSinkSpec for $plugin {

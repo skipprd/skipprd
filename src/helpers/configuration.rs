@@ -3110,6 +3110,17 @@ impl Config {
         format!("{}:{}", self.primary_schema_scope(), namespace)
     }
 
+    pub(crate) async fn primary_schema_sink(
+        &self,
+    ) -> Result<Arc<dyn crate::plugins::SchemaSink + Send + Sync>, String> {
+        let schema_plugin_name = self.get_pipeline_schema_plugin_name();
+        if schema_plugin_name.is_empty() {
+            return Err("schema sink does not support migrations".into());
+        }
+        self.blocking_primary_schema_plugin(&self.primary_schema_scope())
+            .await
+    }
+
     async fn blocking_primary_schema_plugin(
         &self,
         scope: &str,

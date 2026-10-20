@@ -18,6 +18,7 @@ use std::task::{Context, Poll};
 pub use crate::buffer::compaction_transaction::SinkWriteSemantics;
 
 use crate::buffer::compaction_transaction::{SinkGroupingSupport, SinkRetrySemantics};
+use crate::discover::schema_alter::SchemaAlterOp;
 use crate::discover::OutputMetadata;
 use crate::plugins::cdc::{SinkCapability, SourceCapability, SyncContext};
 use crate::plugins::source_contract::SourceNamespaceContract;
@@ -919,6 +920,7 @@ pub trait HasSinkSpec {
 
 pub trait SchemaSinkSpec: 'static {
     const NAME: &'static str;
+    const ALTER_SUPPORT: crate::plugins::AlterSupport = crate::plugins::AlterSupport::Unsupported;
 }
 
 pub trait HasSchemaSinkSpec {
@@ -978,10 +980,19 @@ macro_rules! declare_sink_spec {
 #[macro_export]
 macro_rules! declare_schema_sink_spec {
     ($spec:ident, $plugin:ty, $name:expr) => {
+        $crate::declare_schema_sink_spec!(
+            $spec,
+            $plugin,
+            $name,
+            $crate::plugins::AlterSupport::Unsupported
+        );
+    };
+    ($spec:ident, $plugin:ty, $name:expr, $alter:expr) => {
         pub struct $spec;
 
         impl $crate::plugins::SchemaSinkSpec for $spec {
             const NAME: &'static str = $name;
+            const ALTER_SUPPORT: $crate::plugins::AlterSupport = $alter;
         }
 
         impl $crate::plugins::HasSchemaSinkSpec for $plugin {
@@ -1462,8 +1473,32 @@ pub struct SchemaSyncRequest<'a> {
     pub source_contract: Option<&'a SourceNamespaceContract>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlterSupport {
+    Native,
+    Unsupported,
+}
+
 #[async_trait]
 pub trait SchemaSink: Send + Sync {
+    fn alter_support(&self) -> AlterSupport {
+        AlterSupport::Unsupported
+    }
+
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        metadata: &OutputMetadata,
+        op: &SchemaAlterOp,
+        field_id: i32,
+    ) -> Result<(), std::io::Error> {
+        let _ = (namespace, metadata, op, field_id);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "schema sink does not support migrations",
+        ))
+    }
+
     async fn sync_schema(
         &self,
         namespace: &str,

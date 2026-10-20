@@ -67,15 +67,13 @@ Sibling columns keep every value without breaking existing queries. Watch for th
 
 ### Fold a sibling column back
 
-For Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB), you can merge a sibling column into the original. Disable the pipeline first:
+For Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB) and warehouses with native DDL, you can merge a sibling column into the original:
 
 ```bash
-skipprd query --sql "DISABLE PIPELINE bikehire"
 skipprd query --sql "ALTER TABLE bikehire.trips MERGE COLUMN price_string INTO price"
-skipprd query --sql "ENABLE PIPELINE bikehire"
 ```
 
-`MERGE COLUMN` drops the sibling and retargets evolution so later values write to the target. Historical src-only rows are not copied. The same `ALTER TABLE` family also renames (including nested `TO` paths such as `detail.region`), drops, and widens types. The pipeline must be `DISABLED` first. See [ALTER operations](/operations/alter) for the full matrix, fail-closed cases, and SkipprLake examples.
+`MERGE COLUMN` drops the sibling and retargets evolution so later values write to the target. Historical src-only rows are not copied. The same `ALTER TABLE` family also renames (including nested `TO` paths such as `detail.region`), drops, and widens types. Prefer `migrations/*.sql` and [`skipprd migrate`](/cli/migrate). See [ALTER operations](/operations/alter) for the full matrix and fail-closed cases.
 
 ## Flatten nested fields
 

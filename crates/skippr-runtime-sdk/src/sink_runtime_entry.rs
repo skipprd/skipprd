@@ -10,8 +10,8 @@ use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
 use skippr_core::helpers::logging::init_logging;
 use skippr_core::plugins::{
-    DataSink, HasSchemaSinkSpec, HasSinkSpec, RecordBatchChunk, SchemaSink, SchemaSyncRequest,
-    SinkCallResult, SinkPreflightOutcome, SinkWriteOutcome,
+    DataSink, HasSchemaSinkSpec, HasSinkSpec, RecordBatchChunk, SchemaSink, SchemaSinkSpec,
+    SchemaSyncRequest, SinkCallResult, SinkPreflightOutcome, SinkWriteOutcome,
 };
 #[cfg(test)]
 use tokio::io::AsyncRead;
@@ -720,6 +720,7 @@ where
             source_capability: None,
             sink_capability: Some(spec_descriptor),
             supports_schema,
+            alter_support: skippr_core::plugins::AlterSupport::Unsupported,
         }))
         .await
         .map_err(|err| with_io_context(err, "runtime sink handshake ack write failed"))?;
@@ -1570,6 +1571,7 @@ where
             source_capability: None,
             sink_capability: None,
             supports_schema: true,
+            alter_support: <P::Spec as skippr_core::plugins::SchemaSinkSpec>::ALTER_SUPPORT,
         }))
         .await?;
 
@@ -1645,6 +1647,25 @@ where
                     &deadletter_plugin,
                 )
                 .await?;
+                control_writer
+                    .write(&PluginFrame::SchemaAck(RuntimeRequestAck {
+                        request_id: request.request_id,
+                    }))
+                    .await?;
+            }
+            HostFrame::ApplyAlter(request) => {
+                let plugin = primary_plugin
+                    .as_ref()
+                    .or(deadletter_plugin.as_ref())
+                    .ok_or_else(|| io::Error::other("schema sink is not installed"))?;
+                plugin
+                    .apply_alter(
+                        &request.namespace,
+                        &request.metadata,
+                        &request.op,
+                        request.field_id,
+                    )
+                    .await?;
                 control_writer
                     .write(&PluginFrame::SchemaAck(RuntimeRequestAck {
                         request_id: request.request_id,

@@ -78,7 +78,8 @@ skippr_runtime_sdk::declare_sink_spec!(
 skippr_runtime_sdk::declare_schema_sink_spec!(
     RedshiftSchemaSinkSpec,
     DataSinkRedshiftPlugin,
-    "Redshift"
+    "Redshift",
+    skippr_runtime_sdk::plugins::AlterSupport::Native
 );
 
 impl DataSinkRedshiftPlugin {
@@ -766,6 +767,34 @@ impl DataSink for DataSinkRedshiftPlugin {
 
 #[async_trait]
 impl SchemaSink for DataSinkRedshiftPlugin {
+    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
+        skippr_runtime_sdk::plugins::AlterSupport::Native
+    }
+
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
+        op: &skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp,
+        _field_id: i32,
+    ) -> Result<(), std::io::Error> {
+        let table_name = self
+            .config
+            .table
+            .clone()
+            .unwrap_or_else(|| Self::namespace_to_table_name(namespace));
+        let fq_table = match &self.config.schema {
+            Some(schema) => format!("\"{}\".\"{}\"", schema, table_name),
+            None => format!("\"{}\"", table_name),
+        };
+        let sql = skippr_runtime_sdk::plugins::alter_ddl::warehouse_alter_sql(
+            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Redshift,
+            &fq_table,
+            op,
+        )?;
+        self.execute_statement(&sql).await.map(|_| ())
+    }
+
     async fn sync_schema(
         &self,
         namespace: &str,

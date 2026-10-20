@@ -3908,6 +3908,36 @@ impl Ingest {
         Ok(_schema_ref)
     }
 
+    /// The only non-superset `ARROW_SCHEMA` writer. Ingest stays `is_schema_superset`.
+    pub fn replace_arrow_schema(
+        config: &Config,
+        namespace: &str,
+        ns_meta: &Metadata,
+        flatten: bool,
+    ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
+        let output = if flatten {
+            OutputMetadata::from_flatterened_metadata(ns_meta)
+        } else {
+            OutputMetadata::from_metadata(ns_meta)
+        };
+        let schema = Arc::new(convert_skippr_to_arrow(output.fields)?);
+        ARROW_SCHEMA.insert(
+            namespace.to_string(),
+            arc_swap::ArcSwap::from(schema.clone()),
+        );
+        let template = create_default_nested_message(&ns_meta.fields);
+        DEFAULT_NESTED_MESSAGE.insert(namespace.to_string(), Arc::new(template));
+        {
+            let entry = ARROW_SCHEMA_VERSION
+                .entry(namespace.to_string())
+                .or_insert_with(|| AtomicU64::new(0));
+            entry.fetch_add(1, Ordering::Release);
+        }
+        bump_pipeline_schema_version();
+        config.sync_output_schema_namespace(namespace);
+        Ok(schema)
+    }
+
     // Version for read-only query context: builds/publishes Arrow schema without external side effects
     pub fn prepare_arrow_schema_with_metadata_for_query(
         skpr_namespace: &str,

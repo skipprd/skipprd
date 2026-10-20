@@ -73,3 +73,19 @@ runs:
         count="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${warehouse}/bronze/file_duckdb_append');")"
         echo "${count}"
         echo "${count}" | tail -n 1 | grep -qx '2'
+        mkdir -p "${work}/migrations"
+        cat > "${work}/migrations/20261020_rename_category.sql" <<'SQL'
+ALTER TABLE file_duckdb_append RENAME COLUMN category TO category_code;
+SQL
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+          target/debug/skipprd migrate --log --pipeline file_duckdb_append \
+          --config "${work}/skippr.yml"
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+          target/debug/skipprd query --plain --sql "SELECT category_code FROM file_duckdb_append.file_duckdb_append LIMIT 1" \
+          --config "${work}/skippr.yml"
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+          target/debug/skipprd sync --log --pipeline file_duckdb_append --once \
+          --config "${work}/skippr.yml"
+        cols="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT column_name FROM (DESCRIBE SELECT * FROM iceberg_scan('${warehouse}/bronze/file_duckdb_append'));")"
+        echo "${cols}"
+        echo "${cols}" | grep -q 'category_code'

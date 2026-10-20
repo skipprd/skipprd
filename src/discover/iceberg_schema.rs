@@ -1,15 +1,12 @@
-//! Apply [`SchemaAlterOp`] to an Iceberg table (field ids preserved).
+//! Field-id-preserving Iceberg schema transform for [`SchemaAlterOp`].
+//! Destination apply lives on IcebergWriter (`SchemaSink::apply_alter`).
 
 use std::sync::Arc;
 
 use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
-use iceberg::transaction::{ApplyTransactionAction, Transaction};
-use iceberg::TableIdent;
 
-use crate::cluster::{IcebergLake, PipelineConfigView, QueryBackend};
 use crate::discover::schema_alter::SchemaAlterOp;
 use crate::discover::SkipprDataType;
-use crate::helpers::configuration::Config;
 
 fn iceberg_name_candidates(name: &str) -> Vec<String> {
     let mut out = vec![name.to_string()];
@@ -148,48 +145,6 @@ fn iceberg_primitive(value: &SkipprDataType) -> Type {
         _ => PrimitiveType::String,
     };
     Type::Primitive(primitive)
-}
-
-pub async fn commit_schema_alter(
-    config: &Config,
-    pipeline: &str,
-    table: &str,
-    op: &SchemaAlterOp,
-    field_id: i32,
-) -> Result<(), String> {
-    let view = PipelineConfigView::for_name(config, pipeline).map_err(|err| err.to_string())?;
-    let lake = match &view.backend {
-        QueryBackend::Iceberg(lake) => lake,
-        QueryBackend::WalOnly => {
-            return Err("ALTER TABLE requires an Iceberg sink".into());
-        }
-    };
-    commit_on_lake(lake, table, op, field_id).await
-}
-
-async fn commit_on_lake(
-    lake: &IcebergLake,
-    table: &str,
-    op: &SchemaAlterOp,
-    field_id: i32,
-) -> Result<(), String> {
-    let catalog = crate::cluster::backend::open_iceberg_catalog(&lake.catalog).await?;
-    let ident = TableIdent::from_strs([lake.ingest_namespace.as_str(), table])
-        .map_err(|err| err.to_string())?;
-    let loaded = catalog
-        .load_table(&ident)
-        .await
-        .map_err(|err| err.to_string())?;
-    let next = iceberg_schema_after_alter(loaded.metadata().current_schema(), op, field_id)?;
-    let tx = Transaction::new(&loaded);
-    let tx = tx
-        .replace_schema(next)
-        .apply(tx)
-        .map_err(|err| err.to_string())?;
-    tx.commit(catalog.as_ref())
-        .await
-        .map_err(|err| err.to_string())?;
-    Ok(())
 }
 
 #[cfg(test)]

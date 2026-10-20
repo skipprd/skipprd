@@ -184,6 +184,10 @@ impl Offsets {
         self.store.as_ref()
     }
 
+    pub fn bytes_store(&self) -> Option<&Arc<dyn OffsetStore>> {
+        self.store.as_ref()
+    }
+
     fn uses_remote_store(&self) -> bool {
         self.store.is_some() && self.local.is_none()
     }
@@ -1233,6 +1237,13 @@ mod tests {
             Err("checkpoint store down".into())
         }
         fn put_bytes(&self, _sk: &str, _bytes: &[u8]) -> Result<(), String> {
+            Err("checkpoint store down".into())
+        }
+        fn fetch_and_update_bytes(
+            &self,
+            _sk: &str,
+            _update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
+        ) -> Result<Option<Vec<u8>>, String> {
             Err("checkpoint store down".into())
         }
         fn get_offset(

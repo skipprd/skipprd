@@ -423,9 +423,9 @@ jobs:
           r2_access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
           r2_secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
-  e2e_s3_schema_alter:
+  e2e_schema_lifecycle:
     if: startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test')
-    name: S3 ALTER TABLE to SkipprLake (linux x86)
+    name: Schema migration lifecycle (linux x86)
     needs:
       - linux_x86
       - publish_runtime_plugins
@@ -656,7 +656,7 @@ jobs:
       - e2e_skipprlake
       - e2e_postgres_cdc
       - e2e_s3_schema_evolution
-      - e2e_s3_schema_alter
+      - e2e_schema_lifecycle
       - e2e_file_postgres
       - e2e_file_copy
       - e2e_s3_file_copy
