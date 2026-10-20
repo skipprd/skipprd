@@ -17,6 +17,12 @@ All notable changes to this project will be documented in this file.
 - `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
 ## [Unreleased]
 
+## [18.3.8]
+
+### Breaking
+
+- Plugin crate patch versions are bumped so catalog paths stay immutable next to the 18.3.6 macOS artifacts. Protocol stays 23. Hosts must run skippr 18.3.8 with the matching plugin bundle.
+
 ## [18.3.7]
 
 ### Fixed
