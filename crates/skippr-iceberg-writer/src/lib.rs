@@ -68,6 +68,7 @@ const SNAPSHOT_SCHEMA_FINGERPRINT: &str = "skippr.schema-fingerprint";
 const SNAPSHOT_WAL_FINGERPRINT: &str = "skippr.wal-refs-fingerprint-v2";
 const SNAPSHOT_WAL_REF_COUNT: &str = "skippr.wal-ref-count";
 
+use skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp;
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::plugins::cdc::EffectiveGuarantee;
 use skippr_runtime_sdk::plugins::source_contract::{
@@ -75,8 +76,8 @@ use skippr_runtime_sdk::plugins::source_contract::{
     FieldPath, SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
 };
 use skippr_runtime_sdk::plugins::{
-    DataSink, SchemaSink, SinkCallResult, SinkPreflightOutcome, SinkSpec, SinkWriteContext,
-    SinkWriteOutcome,
+    AlterSupport, DataSink, SchemaSink, SinkCallResult, SinkPreflightOutcome, SinkSpec,
+    SinkWriteContext, SinkWriteOutcome,
 };
 use skippr_runtime_sdk::protocol::{
     RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState, SchemaDelta, SinkWriteStats,
@@ -381,6 +382,8 @@ pub struct IcebergSchemaSpec<S>(PhantomData<fn() -> S>);
 
 impl<S: SinkSpec> skippr_runtime_sdk::plugins::SchemaSinkSpec for IcebergSchemaSpec<S> {
     const NAME: &'static str = S::NAME;
+    const ALTER_SUPPORT: skippr_runtime_sdk::plugins::AlterSupport =
+        skippr_runtime_sdk::plugins::AlterSupport::Native;
 }
 
 impl<S: SinkSpec> skippr_runtime_sdk::plugins::HasSchemaSinkSpec for IcebergWriter<S> {
@@ -712,6 +715,39 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
 
 #[async_trait]
 impl<S: SinkSpec> SchemaSink for IcebergWriter<S> {
+    fn alter_support(&self) -> AlterSupport {
+        AlterSupport::Native
+    }
+
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        _metadata: &OutputMetadata,
+        op: &SchemaAlterOp,
+        field_id: i32,
+    ) -> Result<(), io::Error> {
+        use skippr_runtime_sdk::discover::iceberg_schema::iceberg_schema_after_alter;
+
+        let ident = self.table_ident(namespace)?;
+        let loaded = self
+            .catalog
+            .load_table(&ident)
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        let next = iceberg_schema_after_alter(loaded.metadata().current_schema(), op, field_id)
+            .map_err(io::Error::other)?;
+        let tx = Transaction::new(&loaded);
+        let tx = tx
+            .replace_schema(next)
+            .apply(tx)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        tx.commit(self.catalog.as_ref())
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        self.table_cache.write().await.remove(namespace);
+        Ok(())
+    }
+
     async fn sync_schema(
         &self,
         namespace: &str,
@@ -4986,6 +5022,99 @@ mod tests {
 
         let ident = TableIdent::from_strs(["lake", "orders"]).unwrap();
         assert!(catalog.table_exists(&ident).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn apply_alter_rename_keeps_field_id_in_memory_catalog() {
+        let catalog: Arc<dyn Catalog> = Arc::new(
+            MemoryCatalogBuilder::default()
+                .load(
+                    "test",
+                    HashMap::from([(
+                        MEMORY_CATALOG_WAREHOUSE.to_string(),
+                        "memory://warehouse-mig-alter".to_string(),
+                    )]),
+                )
+                .await
+                .unwrap(),
+        );
+        catalog
+            .create_namespace(
+                &NamespaceIdent::from_strs(["lake"]).unwrap(),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let writer = IcebergWriter::<TestIcebergSpec>::new(
+            skippr_runtime_sdk::protocol::RuntimeExecutionContext {
+                pipeline_name: "p".to_string(),
+                workspace_name: "w".to_string(),
+                data_dir: "/tmp".to_string(),
+                execution_mode: Default::default(),
+                output_layout: Default::default(),
+                inject_fields: BTreeMap::new(),
+                pipeline_type: Default::default(),
+            },
+            skippr_runtime_sdk::protocol::RuntimeBinding::Primary,
+            "schema".to_string(),
+            Arc::clone(&catalog),
+            IcebergWriterConfig {
+                policies: SinkWritePolicySupport {
+                    supports_merge_by_key: true,
+                    supports_replace_partition: true,
+                    supports_replace_table: true,
+                },
+                table_namespace: "lake".to_string(),
+                location_root: "memory://warehouse-mig-alter/lake".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let metadata = output_metadata(json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "region": {
+                    "out_field_name": "region",
+                    "determined_type": "string",
+                    "determined_type_values": "",
+                    "field_id": 7,
+                    "schema_id": 1,
+                    "lineage_id": "orders:region",
+                    "nullable": true,
+                    "default_value": null,
+                    "fields": {}
+                }
+            }
+        }));
+        <IcebergWriter<TestIcebergSpec> as SchemaSink>::sync_schema(&writer, "orders", &metadata)
+            .await
+            .unwrap();
+        let ident = TableIdent::from_strs(["lake", "orders"]).unwrap();
+        let created = catalog.load_table(&ident).await.unwrap();
+        let field_id = created
+            .metadata()
+            .current_schema()
+            .field_by_name("region")
+            .unwrap()
+            .id;
+        <IcebergWriter<TestIcebergSpec> as SchemaSink>::apply_alter(
+            &writer,
+            "orders",
+            &metadata,
+            &SchemaAlterOp::Rename {
+                from: "region".into(),
+                to: "region_code".into(),
+            },
+            field_id,
+        )
+        .await
+        .unwrap();
+        let loaded = catalog.load_table(&ident).await.unwrap();
+        let schema = loaded.metadata().current_schema();
+        assert_eq!(schema.field_by_name("region_code").unwrap().id, field_id);
+        assert!(schema.field_by_name("region").is_none());
     }
 
     #[tokio::test]

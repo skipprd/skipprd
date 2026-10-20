@@ -157,7 +157,8 @@ skippr_runtime_sdk::declare_sink_spec!(
 skippr_runtime_sdk::declare_schema_sink_spec!(
     SnowflakeSchemaSinkSpec,
     DataSinkSnowflakePlugin,
-    "Snowflake"
+    "Snowflake",
+    skippr_runtime_sdk::plugins::AlterSupport::Native
 );
 
 const TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(50 * 60);
@@ -2790,6 +2791,35 @@ impl DataSink for DataSinkSnowflakePlugin {
 
 #[async_trait]
 impl SchemaSink for DataSinkSnowflakePlugin {
+    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
+        skippr_runtime_sdk::plugins::AlterSupport::Native
+    }
+
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
+        op: &skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp,
+        _field_id: i32,
+    ) -> Result<(), std::io::Error> {
+        let table_name = Self::namespace_to_table_name(namespace);
+        let fq_table = format!(
+            "\"{}\".\"{}\".\"{}\"",
+            self.config.database,
+            self.config.schema,
+            table_name.to_uppercase()
+        );
+        let sql = skippr_runtime_sdk::plugins::alter_ddl::warehouse_alter_sql(
+            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Snowflake,
+            &fq_table,
+            op,
+        )?;
+        self.execute_sql(&sql)
+            .await
+            .map(|_| ())
+            .map_err(|err| std::io::Error::other(err.to_string()))
+    }
+
     async fn sync_schema(
         &self,
         namespace: &str,

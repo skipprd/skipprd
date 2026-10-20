@@ -136,7 +136,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_skipprlake:", text)
         self.assertIn("e2e_postgres_cdc:", text)
         self.assertIn("e2e_s3_schema_evolution:", text)
-        self.assertIn("e2e_s3_schema_alter:", text)
+        self.assertIn("e2e_schema_lifecycle:", text)
         self.assertIn("e2e_file_postgres:", text)
         self.assertIn("e2e_file_copy:", text)
         self.assertIn("e2e_s3_file_copy:", text)
@@ -155,6 +155,10 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("chmod +x target/release/skippr-plugin-*", file_duckdb)
         self.assertIn("unsafe_enable_version_guessing", file_duckdb)
         self.assertIn("DATA_DIR_HIGH_WATERMARK_PCT=0", file_duckdb)
+        file_duckdb_action = (
+            ROOT / ".github" / "actions" / "e2e" / "file_duckdb_append" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("skipprd migrate", file_duckdb_action)
         skipprlake = text.split("\n  e2e_skipprlake:", 1)[1].split("\n  e2e_postgres_cdc:", 1)[0]
         self.assertIn("USE_PUBLISHED_PLUGINS", skipprlake)
         self.assertNotIn("runtime-plugin-binaries-linux_x86", skipprlake)
@@ -181,7 +185,8 @@ class RustCiTests(unittest.TestCase):
             ROOT / ".github" / "actions" / "e2e" / "s3_skipprlake_alter" / "run_matrix.py"
         ).read_text(encoding="utf-8")
         self.assertIn("ALTER TABLE", alter_matrix)
-        self.assertIn("DISABLE PIPELINE s3_alter", alter_matrix)
+        self.assertIn('"migrate"', alter_matrix)
+        self.assertNotIn("DISABLE PIPELINE s3_alter", alter_matrix)
         self.assertIn("MERGE COLUMN", alter_matrix)
         self.assertIn("def sql_ident(", alter_matrix)
         self.assertIn('return f\'"{name}"\'', alter_matrix)
@@ -190,6 +195,7 @@ class RustCiTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("SELECT 1", file_postgres)
         self.assertIn("public.file_postgres_append", file_postgres)
+        self.assertIn("migrate --pipeline file_postgres_append", file_postgres)
         self.assertNotIn("public.people", file_postgres)
         s3_copy = (
             ROOT / ".github" / "actions" / "e2e" / "s3_file_copy" / "action.yaml"
@@ -245,7 +251,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_skipprlake", publish)
         self.assertIn("e2e_postgres_cdc", publish)
         self.assertIn("e2e_s3_schema_evolution", publish)
-        self.assertIn("e2e_s3_schema_alter", publish)
+        self.assertIn("e2e_schema_lifecycle", publish)
         self.assertIn("e2e_file_postgres", publish)
         self.assertIn("e2e_file_copy", publish)
         self.assertIn("e2e_s3_file_copy", publish)

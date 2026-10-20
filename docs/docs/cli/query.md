@@ -102,24 +102,22 @@ skipprd query --sql "RESET PIPELINE bikehire"
 skipprd query --sql "DROP PIPELINE bikehire"
 ```
 
-`RESET PIPELINE` clears the pipeline's offsets and buffered WAL data, so the next sync reads the source from the start. `DROP PIPELINE` removes all schemas and data for the pipeline. When run from `query`, both take effect on the pipeline's next sync.
+`RESET PIPELINE` clears the pipeline's offsets and buffered WAL data immediately, so the next sync reads the source from the start. `DROP PIPELINE` removes all schemas and data for the pipeline immediately.
 
 ### Manage schemas
 
 ```bash
 skipprd query --sql "SCHEMA DUMP bikehire TO 'bikehire-schema.json'"
 skipprd query --sql "LOAD SCHEMA 'bikehire-schema.json' INTO bikehire"
-skipprd query --sql "DISABLE PIPELINE bikehire"
 skipprd query --sql "ALTER TABLE bikehire.rides DROP COLUMN legacy_field"
 skipprd query --sql "ALTER TABLE bikehire.rides ALTER COLUMN n TYPE BIGINT"
 skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN region TO detail.region"
 skipprd query --sql "ALTER TABLE bikehire.rides MERGE COLUMN price_string INTO price"
-skipprd query --sql "ENABLE PIPELINE bikehire"
 ```
 
 Flattened Iceberg names (`detail_truck_reg`) and skippr dotted paths (`detail.truck_reg`) both resolve. Iceberg sequential field ids are matched by name when they differ from skippr's hashed ids.
 
-The pipeline must be disabled for every `ALTER TABLE`. See [ALTER operations](/operations/alter) for rename, merge, drop, type promote, and what fails closed.
+`ALTER TABLE` applies in-stream; `DISABLE PIPELINE` is freeze-only. Prefer [`skipprd migrate`](/cli/migrate) for file-backed batches. See [ALTER operations](/operations/alter) for rename, merge, drop, type promote, and what fails closed.
 
 Run [`skipprd sql-help`](/cli/sql-help) for the syntax of every statement, or `skipprd query --sql "SHOW DOCS"`.
 

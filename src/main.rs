@@ -479,6 +479,39 @@ async fn async_main() {
                 }
             }
         }
+        Mode::Migrate(options) => {
+            let loaded = Config::build_config();
+            let storage = reject_invalid_wal_storage();
+            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Migrate);
+            let named = cli_named_pipeline(options.pipeline.as_deref());
+            let Some(pipeline) = named else {
+                error!("No pipeline name provided, you must provide a pipeline name to migrate");
+                process::exit(1);
+            };
+            let bound = loaded.bind_pipeline(&pipeline);
+            bound.init().await;
+            let direction = if options.down {
+                skipprd::migration::MigrationDirection::Down
+            } else {
+                skipprd::migration::MigrationDirection::Up
+            };
+            match skipprd::migration::apply_pending_with_ingest_lease(&bound, direction).await {
+                Ok(ids) => {
+                    if ids.is_empty() {
+                        println!("No pending migrations for {pipeline}");
+                    } else {
+                        for id in ids {
+                            println!("Applied migration {id}");
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!("Pipeline '{pipeline}' migrate failed: {err}");
+                    eprintln!("{err}");
+                    process::exit(1);
+                }
+            }
+        }
         Mode::Serve(options) => {
             let loaded = Config::build_config();
             let storage = reject_invalid_wal_storage();

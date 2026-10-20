@@ -20,6 +20,7 @@ pub enum CliModeKind {
     Benchmark,
     Connect,
     Serve,
+    Migrate,
 }
 
 impl CliModeKind {
@@ -36,6 +37,7 @@ impl CliModeKind {
             Mode::Df(_) => Self::Query,
             Mode::Connect(_) => Self::Connect,
             Mode::Serve(_) => Self::Serve,
+            Mode::Migrate(_) => Self::Migrate,
         }
     }
 
@@ -51,6 +53,7 @@ impl CliModeKind {
             Self::Benchmark => "benchmark",
             Self::Connect => "connect",
             Self::Serve => "serve",
+            Self::Migrate => "migrate",
         }
     }
 }
@@ -101,7 +104,8 @@ pub fn validate_wal_storage_for_mode(
             CliModeKind::Sync { once: false }
             | CliModeKind::Query
             | CliModeKind::SqlHelp
-            | CliModeKind::Connect => Ok(()),
+            | CliModeKind::Connect
+            | CliModeKind::Migrate => Ok(()),
         },
     }
 }

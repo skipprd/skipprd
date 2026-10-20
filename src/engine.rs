@@ -42,7 +42,6 @@ use crate::runtime_plugins::protocol::{
 use crate::runtime_plugins::schema_state::{
     clear_runtime_source_schema_state, current_runtime_schema_state,
 };
-use crate::sqlrt::query::{query_with_options, QueryExecutionMode, QueryExecutionOptions};
 use crate::{LOGGER, METADATA, METRICS, RUNNING};
 
 fn current_run_id() -> String {
@@ -696,7 +695,7 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
     for (_namespace, metadata) in updated_metadata.metadata.iter_mut() {
         metadata.finalize_field_types(config, flatten);
     }
-    // Keep DISABLED. Discover used to force enabled=true, which undid ALTER's gate.
+    // Discover must not force-enable a DISABLED pipeline; DISABLE is freeze-only.
     METADATA.store(Arc::new(updated_metadata.clone()));
 
     config.set_metadata(&updated_metadata, true).await;
@@ -857,28 +856,6 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
         Ok(pipeline_metadata) => {
             info!("Found existing Skippr metadata");
 
-            match pipeline_metadata.sql {
-                Some(sql) => {
-                    for stmt in sql {
-                        info!("Recieved SQL statement: '{}'", stmt);
-
-                        // Important to exec the SQL before saving metadata, as the SQL may drop or otherwise alter the metadata
-                        query_with_options(
-                            config,
-                            &stmt,
-                            QueryExecutionOptions {
-                                mode: QueryExecutionMode::Sync,
-                                ..QueryExecutionOptions::default()
-                            },
-                        )
-                        .await;
-                    }
-
-                    return Ok(());
-                }
-                None => {}
-            }
-
             if !pipeline_metadata.enabled {
                 info!("Pipeline '{}' disabled, skipping.", pipeline_name);
                 return Ok(());
@@ -984,6 +961,17 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
             .ok_or_else(|| io::Error::other("pipeline writer lease is not installed"))?;
         crate::buffer::wal_store::ensure_disk_durable_store(config, offsets_db.clone(), guard)?;
     }
+
+    let journal = offsets_db
+        .bytes_store()
+        .ok_or_else(|| io::Error::other("migration journal requires a skippr store"))?;
+    crate::migration::apply_pending_files(
+        config,
+        journal.as_ref(),
+        crate::migration::MigrationDirection::Up,
+    )
+    .await
+    .map_err(io::Error::other)?;
 
     let _offsets_clone = offsets_db.clone();
 

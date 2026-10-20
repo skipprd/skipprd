@@ -54,6 +54,24 @@ impl Session {
         Ok(())
     }
 
+    pub async fn migrate(&self, down: bool) -> io::Result<Vec<String>> {
+        let direction = if down {
+            crate::migration::MigrationDirection::Down
+        } else {
+            crate::migration::MigrationDirection::Up
+        };
+        let mut applied = Vec::new();
+        for name in self.pipeline_names() {
+            let bound = self.bound(&name);
+            bound.init().await;
+            let ids = crate::migration::apply_pending_with_ingest_lease(&bound, direction)
+                .await
+                .map_err(io::Error::other)?;
+            applied.extend(ids);
+        }
+        Ok(applied)
+    }
+
     pub async fn sync(&self, once: bool, output_mode: &str) -> io::Result<()> {
         let config = self.config.clone();
         if config.get_wal_storage() == WalStorage::Clustered {

@@ -33,6 +33,7 @@ cfg = skippr.Config.discover()
 s = skippr.Session(cfg.get_pipeline("bikehire"))
 s.doctor()
 s.discover()
+s.migrate()
 s.sync(once=True)
 s.df()
 ```
@@ -40,6 +41,7 @@ s.df()
 ```bash [CLI]
 skipprd doctor
 skipprd discover --pipeline bikehire
+skipprd migrate --pipeline bikehire
 skipprd sync --pipeline bikehire --once
 skipprd df --pipeline bikehire
 ```
@@ -48,7 +50,7 @@ skipprd df --pipeline bikehire
 
 - `Config.discover()` loads `skippr.yml` from the current directory, or starts an empty config that saves there. `Config.load(path)` loads a specific file.
 - `Session` takes a `PipelineRef` from a `Config`, never a name string. To run another pipeline, open another `Session`.
-- `discover()` samples the source and records the schema. `sync(once=True)` runs one pass and returns. `sync()` keeps running, one pass every `sync_frequency_seconds` (900 by default).
+- `discover()` samples the source and records the schema. `migrate()` applies `migrations/*.sql` (see [`skipprd migrate`](/cli/migrate)). `sync(once=True)` runs one pass and returns. `sync()` keeps running, one pass every `sync_frequency_seconds` (900 by default).
 
 When you create a `Session`, it takes a snapshot of its pipeline's config and resolves every `${NAME}` reference from the environment, including a `.env` file next to `skippr.yml`. A missing variable raises `ValueError` there, before any data moves, not halfway through a sync.
 

@@ -1,24 +1,23 @@
 ---
 title: ALTER operations
-description: Disable a pipeline, then rename, merge, drop, or widen columns on Iceberg tables without rewriting history.
+description: Rename, merge, drop, or widen columns with skipprd migrate or ALTER TABLE without stopping the pipeline.
 ---
 
 # ALTER operations
 
-After a pipeline has landed data, you sometimes need to change the table: fold a sibling column back, move a field into a nested record, drop a leftover, or widen a type. `ALTER TABLE` does that on Iceberg destinations. Skipprd keeps the Iceberg field id, so existing files stay readable.
+After a pipeline has landed data, you sometimes need to change the table: fold a sibling column back, move a field into a nested record, drop a leftover, or widen a type. `ALTER TABLE` (and `skipprd migrate`) does that on Iceberg destinations and warehouses that advertise native DDL. Skipprd keeps the Iceberg field id, so existing files stay readable.
 
-This is operator DDL. It is not the same as [schema discovery](/concepts/schema), which adds columns when new fields arrive during sync.
+This is operator DDL. It is not the same as [schema discovery](/concepts/schema), which adds columns when new fields arrive during sync. Apply is in-stream: skipprd may pause ingest internally; you do not stop and start the pipeline. `DISABLE PIPELINE` still freezes ingest, but it is not the ALTER gate.
 
 ## Before you alter
 
-1. The destination must be Iceberg: [SkipprLake](/connectors/outputs/skipprlake), [Athena Iceberg](/connectors/outputs/athenaiceberg), or [DuckDB](/connectors/outputs/duckdb). WAL-only pipelines fail with `ALTER TABLE requires an Iceberg sink`.
-2. Disable the pipeline first. Every `ALTER TABLE` fails if the pipeline is still enabled.
+1. The schema sink must support migrations (`Native`): Iceberg ([SkipprLake](/connectors/outputs/skipprlake), [Athena Iceberg](/connectors/outputs/athenaiceberg), [DuckDB](/connectors/outputs/duckdb)) plus Snowflake, Postgres, BigQuery, Redshift, and MotherDuck. Glue/Hive and ClickHouse fail closed.
+2. Put SQL files in `migrations/` next to `skippr.yml`, or run `skipprd query --sql "ALTER TABLE …"`. Both use the same apply journal.
 3. Target `<pipeline>.<namespace>`. Quote names that contain hyphens.
 
 ```bash
-skipprd query --sql "DISABLE PIPELINE bikehire"
+skipprd migrate --pipeline bikehire
 skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN region TO detail.region"
-skipprd query --sql "ENABLE PIPELINE bikehire"
 ```
 
 Hyphenated pipeline or namespace:

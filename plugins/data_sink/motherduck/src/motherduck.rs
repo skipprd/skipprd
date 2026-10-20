@@ -66,7 +66,8 @@ skippr_runtime_sdk::declare_sink_spec!(
 skippr_runtime_sdk::declare_schema_sink_spec!(
     MotherduckSchemaSinkSpec,
     DataSinkMotherduckPlugin,
-    "Motherduck"
+    "Motherduck",
+    skippr_runtime_sdk::plugins::AlterSupport::Native
 );
 
 const MOTHERDUCK_SQL_ENDPOINT: &str = "https://api.motherduck.com/v1/sql";
@@ -657,6 +658,27 @@ impl DataSink for DataSinkMotherduckPlugin {
 
 #[async_trait]
 impl SchemaSink for DataSinkMotherduckPlugin {
+    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
+        skippr_runtime_sdk::plugins::AlterSupport::Native
+    }
+
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
+        op: &skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp,
+        _field_id: i32,
+    ) -> Result<(), std::io::Error> {
+        let table_name = Self::namespace_to_table_name(namespace);
+        let fq_table = format!("\"{}\"", table_name);
+        let sql = skippr_runtime_sdk::plugins::alter_ddl::warehouse_alter_sql(
+            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::MotherDuck,
+            &fq_table,
+            op,
+        )?;
+        self.execute_sql(&sql).await.map(|_| ())
+    }
+
     async fn sync_schema(
         &self,
         namespace: &str,

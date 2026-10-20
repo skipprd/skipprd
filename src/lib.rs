@@ -34,6 +34,7 @@ pub mod ingest_work;
 pub mod internalfields;
 pub mod lineage;
 pub mod metrics;
+pub mod migration;
 pub mod pipeline_backend;
 pub mod pipeline_type;
 pub mod plugins;

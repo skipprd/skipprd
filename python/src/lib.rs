@@ -1,6 +1,7 @@
 //! PyO3 `skippr` module. `Session` is the same engine as the CLI.
 
 mod config;
+mod migration;
 
 use std::sync::OnceLock;
 
@@ -115,6 +116,16 @@ impl PySession {
         })
     }
 
+    #[pyo3(signature = (down = false))]
+    fn migrate(&self, py: Python<'_>, down: bool) -> PyResult<Vec<String>> {
+        self.admit()?;
+        py.detach(|| {
+            runtime()
+                .block_on(self.inner.migrate(down))
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        })
+    }
+
     #[pyo3(signature = (once = false))]
     fn sync(&self, py: Python<'_>, once: bool) -> PyResult<()> {
         self.admit()?;
@@ -152,5 +163,6 @@ impl PySession {
 #[pymodule]
 fn skippr(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySession>()?;
+    m.add_class::<migration::PyMigration>()?;
     config::register(m)
 }

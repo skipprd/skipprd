@@ -151,6 +151,7 @@ struct RuntimeChildConnection {
     control: TcpStream,
     data: TcpStream,
     installed_schema_versions: BTreeMap<String, u64>,
+    alter_support: crate::plugins::AlterSupport,
 }
 
 static RUNTIME_PLUGIN_CHILD_PIDS: Lazy<std::sync::Mutex<BTreeSet<u32>>> =
@@ -388,6 +389,7 @@ impl RuntimeChildConnection {
             control,
             data,
             installed_schema_versions: BTreeMap::new(),
+            alter_support: crate::plugins::AlterSupport::Unsupported,
         };
         if let Err(err) = connection.handshake().await {
             let _ = connection.child.kill().await;
@@ -432,9 +434,13 @@ impl RuntimeChildConnection {
             ));
         };
         info!(
-            "runtime sink handshake ack plugin={} protocol={} kind={:?}",
-            handshake.plugin_name, handshake.protocol_version, handshake.kind
+            "runtime sink handshake ack plugin={} protocol={} kind={:?} alter_support={:?}",
+            handshake.plugin_name,
+            handshake.protocol_version,
+            handshake.kind,
+            handshake.alter_support
         );
+        self.alter_support = handshake.alter_support;
         self.resolved.manifest.verify_handshake(&handshake)
     }
 
@@ -3997,6 +4003,7 @@ impl DataSink for RuntimeDataSinkPlugin {
 pub struct RuntimeSchemaSinkPlugin {
     install_request: RuntimeSchemaInstallRequest,
     connection: Mutex<RuntimeChildConnection>,
+    alter_support: std::sync::Mutex<crate::plugins::AlterSupport>,
 }
 
 impl RuntimeSchemaSinkPlugin {
@@ -4021,6 +4028,7 @@ impl RuntimeSchemaSinkPlugin {
             RuntimeChildConnection::spawn(app_cfg, resolved, pipeline_name, None, None, 1).await?;
         let plugin = Self {
             install_request,
+            alter_support: std::sync::Mutex::new(connection.alter_support),
             connection: Mutex::new(connection),
         };
         {
@@ -4053,6 +4061,10 @@ impl RuntimeSchemaSinkPlugin {
         connection: &mut RuntimeChildConnection,
     ) -> io::Result<()> {
         connection.restart().await?;
+        *self
+            .alter_support
+            .lock()
+            .expect("schema sink alter_support lock") = connection.alter_support;
         self.install_runtime_state(connection).await
     }
 
@@ -4249,6 +4261,62 @@ impl RuntimeSchemaSinkPlugin {
 
 #[async_trait]
 impl SchemaSink for RuntimeSchemaSinkPlugin {
+    fn alter_support(&self) -> crate::plugins::AlterSupport {
+        *self
+            .alter_support
+            .lock()
+            .expect("schema sink alter_support lock")
+    }
+
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        metadata: &crate::discover::OutputMetadata,
+        op: &crate::discover::schema_alter::SchemaAlterOp,
+        field_id: i32,
+    ) -> Result<(), io::Error> {
+        let request = crate::runtime_plugins::protocol::SchemaAlterRequest {
+            request_id: next_runtime_request_id(),
+            namespace: namespace.to_string(),
+            op: op.clone(),
+            field_id,
+            metadata: metadata.clone(),
+        };
+        let mut retried = false;
+        loop {
+            let mut guard = self.connection.lock().await;
+            self.ensure_connection_ready(&mut guard).await?;
+            let send_result = guard.send(&HostFrame::ApplyAlter(request.clone())).await;
+            let recv_result = match send_result {
+                Ok(_) => guard.recv().await,
+                Err(err) => Err(err),
+            };
+            match recv_result {
+                Ok(PluginFrame::SchemaAck(RuntimeRequestAck { request_id }))
+                    if request_id == request.request_id =>
+                {
+                    return Ok(());
+                }
+                Ok(PluginFrame::Error(err)) => return Err(io::Error::other(err)),
+                Ok(other) => {
+                    return Err(io::Error::other(format!(
+                        "unexpected runtime schema alter frame: {:?}",
+                        other
+                    )));
+                }
+                Err(err)
+                    if !retried
+                        && (guard.has_exited()? || should_retry_runtime_connection(&err)) =>
+                {
+                    self.restart_and_reinstall(&mut guard).await?;
+                    retried = true;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     async fn sync_schema(
         &self,
         namespace: &str,
@@ -4698,6 +4766,23 @@ mod tests {
                 )
                 .unwrap(),
             ))
+        );
+    }
+
+    #[test]
+    fn schema_sink_host_alter_support_comes_from_handshake() {
+        let src = include_str!("host.rs");
+        let start = src
+            .find("impl SchemaSink for RuntimeSchemaSinkPlugin")
+            .expect("RuntimeSchemaSinkPlugin SchemaSink");
+        let body = src[start..].split("async fn apply_alter").next().unwrap();
+        assert!(
+            !body.contains("AlterSupport::Native"),
+            "host must not hardcode Native; guest handshake is SoT"
+        );
+        assert!(
+            body.contains(".lock()"),
+            "host alter_support must be the handshake-cached value"
         );
     }
 }

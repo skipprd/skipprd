@@ -2,7 +2,6 @@ use std::fs::OpenOptions;
 use std::io::BufReader;
 use std::{fs, process};
 // removed unused Write import
-use crate::discover::schema_alter;
 use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
 use crate::helpers::configuration::Config;
 use crate::sqlrt::docs::{print_categorized_sql_docs, SqlDocListingKind};
@@ -61,42 +60,6 @@ pub struct QueryExecutionOptions {
     pub mode: QueryExecutionMode,
     pub plain: bool,
     pub watch: Option<u64>,
-}
-
-async fn apply_alter_table(
-    config: &Config,
-    stmt: &crate::sqlrt::parser::AlterTableStatement,
-) -> Result<String, String> {
-    let pipeline = sql_ident_name(&stmt.pipeline);
-    let mut skippr_metadata = config
-        .get_metadata()
-        .await
-        .map_err(|_| format!("No existing schema for {pipeline}"))?;
-
-    if skippr_metadata.enabled {
-        return Err(format!(
-            "Pipeline '{pipeline}' must be DISABLED before ALTER TABLE"
-        ));
-    }
-
-    let namespace = stmt
-        .namespace
-        .as_ref()
-        .map(sql_ident_name)
-        .unwrap_or_else(|| pipeline.clone());
-    let metadata = skippr_metadata
-        .metadata
-        .get_mut(&namespace)
-        .ok_or_else(|| format!("Schema '{namespace}' not found for pipeline '{pipeline}'"))?;
-    let op = schema_alter::canonicalize_op(metadata, &stmt.op).map_err(|e| e.to_string())?;
-    let field_id = schema_alter::field_id_for_op(metadata, &op).map_err(|e| e.to_string())?;
-    schema_alter::apply(metadata, &op).map_err(|e| e.to_string())?;
-    crate::sqlrt::iceberg_alter::commit_schema_alter(config, &pipeline, &namespace, &op, field_id)
-        .await?;
-
-    METADATA.store(Arc::new(skippr_metadata.clone()));
-    config.persist_pipeline_metadata(&skippr_metadata).await?;
-    Ok(format!("ALTER TABLE {pipeline}.{namespace} {:?}", stmt.op))
 }
 
 fn sql_ident_name(name: &impl std::fmt::Display) -> String {
@@ -362,7 +325,7 @@ pub async fn query_collect(
             Statement::AlterTable(stmt) => {
                 let bound = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
                 bound.init().await;
-                let message = apply_alter_table(&bound, &stmt)
+                let message = crate::migration::apply_query_alter(&bound, &stmt, sql_str)
                     .await
                     .map_err(std::io::Error::other)?;
                 return Ok(extension_message_batch(&message));
@@ -751,28 +714,9 @@ pub async fn query_with_options(
             let pipeline_name = config.get_pipeline_name();
 
             println!("Dropping all schemas and data for: {}", pipeline_name);
-
-            match query_options.mode {
-                QueryExecutionMode::Sync => {
-                    let _ = fs::remove_dir_all(&data_dir)
-                        .expect(format!("Failed to remove dir: {}", data_dir).as_str());
-                    config.delete_metadata().await;
-                    println!("Dropped Pipeline");
-                }
-                QueryExecutionMode::Query => match config.get_metadata().await {
-                    Ok(_metadata) => {
-                        let mut empty_pipeline_metadata = PipelineMetadata::new(&config);
-                        empty_pipeline_metadata.append_sql(sql_str.to_string());
-
-                        config.set_metadata(&empty_pipeline_metadata, false).await;
-
-                        println!("Done. Pipeline will drop on next sync run");
-                    }
-                    Err(_e) => {
-                        println!("No metadata found for pipeline: {}", pipeline_name);
-                    }
-                },
-            }
+            let _ = fs::remove_dir_all(&data_dir);
+            config.delete_metadata().await;
+            println!("Dropped Pipeline");
         }
         Ok(Statement::PipelineReset(stmt)) => {
             config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
@@ -786,49 +730,27 @@ pub async fn query_with_options(
                 pipeline_name, data_dir
             );
 
-            let mut metadata = config
+            let metadata = config
                 .get_metadata()
                 .await
                 .expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
 
-            match query_options.mode {
-                QueryExecutionMode::Sync => {
-                    let mut tries = 15;
-                    let mut _delete = true;
-                    while _delete {
-                        // retries as workaround for https://github.com/rust-lang/rust/issues/29497
-                        match fs::remove_dir_all(&data_dir) {
-                            Ok(_) => {
-                                _delete = false;
-                            }
-                            Err(e) => {
-                                println!("Failed to remove dir: {}.", e);
-                                if tries == 0 {
-                                    _delete = false;
-                                    panic!("Failed to remove dir: {}", data_dir);
-                                } else {
-                                    tries -= 1;
-                                    println!("Retrying in 5 seconds...");
-                                    tokio::time::sleep(Duration::from_secs(5)).await;
-                                }
-                            }
+            let mut tries = 15;
+            loop {
+                match fs::remove_dir_all(&data_dir) {
+                    Ok(_) => break,
+                    Err(e) => {
+                        println!("Failed to remove dir: {}.", e);
+                        if tries == 0 {
+                            panic!("Failed to remove dir: {}", data_dir);
                         }
-                        // .expect(format!("Failed to remove dir: {}", data_dir).as_str());
+                        tries -= 1;
+                        tokio::task::yield_now().await;
                     }
-                    println!("Pipeline reset, on next sync run all data will be re-ingested");
-
-                    // remove the SQL stmt from metadata
-                    metadata.sql = None;
-                    config.set_metadata(&metadata, false).await;
-                }
-                QueryExecutionMode::Query => {
-                    metadata.append_sql(sql_str.to_string());
-
-                    config.set_metadata(&metadata, false).await;
-
-                    println!("Done. Pipeline will reset on next sync run");
                 }
             }
+            println!("Pipeline reset, on next sync run all data will be re-ingested");
+            config.set_metadata(&metadata, false).await;
         }
         Ok(Statement::PipelineToggle(_)) => {
             unreachable!("ENABLE/DISABLE routed through query_collect");
@@ -1970,27 +1892,24 @@ mod plain_query_document_tests {
     }
 
     #[test]
-    fn alter_table_fails_closed_on_enabled_or_non_iceberg() {
+    fn alter_table_goes_through_apply_migration() {
         let src = include_str!("query.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
-        let start = prod
-            .find("async fn apply_alter_table")
-            .expect("apply_alter_table");
-        let body = prod[start..]
-            .split("async fn ")
-            .nth(1)
-            .expect("function body after signature");
         assert!(
-            body.contains("must be DISABLED before ALTER TABLE"),
-            "enabled pipelines must be rejected"
+            prod.contains("apply_query_alter"),
+            "query ALTER must use apply_migration"
         );
         assert!(
-            include_str!("iceberg_alter.rs").contains("ALTER TABLE requires an Iceberg sink"),
-            "non-Iceberg sinks must be rejected by QueryBackend"
+            !prod.contains("async fn apply_alter_table"),
+            "apply_alter_table shim must be deleted"
         );
         assert!(
-            body.contains("persist_pipeline_metadata"),
-            "Iceberg commit must be followed by fail-closed metadata persist"
+            !prod.contains("must be DISABLED before ALTER TABLE"),
+            "DISABLE is freeze-only, not the ALTER gate"
+        );
+        assert!(
+            !std::path::Path::new("src/sqlrt/iceberg_alter.rs").exists(),
+            "host iceberg_alter ALTER path must be deleted"
         );
     }
 

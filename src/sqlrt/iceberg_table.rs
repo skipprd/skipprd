@@ -435,6 +435,49 @@ async fn stream_iceberg_into(
     }
 }
 
+/// Iceberg snapshot scans bind column names against the snapshot schema.
+/// After `replace_schema` (rename), current names must map to snapshot names
+/// by field id so readers keep seeing evolved names.
+pub(crate) fn snapshot_scan_names(
+    current: &iceberg::spec::Schema,
+    snapshot: &iceberg::spec::Schema,
+    current_names: &[String],
+) -> Vec<String> {
+    current_names
+        .iter()
+        .map(|name| {
+            current
+                .field_id_by_name(name)
+                .and_then(|id| snapshot.field_by_id(id))
+                .map(|field| field.name.clone())
+                .unwrap_or_else(|| name.clone())
+        })
+        .collect()
+}
+
+fn rename_batch_fields(batch: RecordBatch, names: &[String]) -> Result<RecordBatch> {
+    if names.is_empty() || batch.num_columns() != names.len() {
+        return Ok(batch);
+    }
+    let fields = batch
+        .schema()
+        .fields()
+        .iter()
+        .zip(names)
+        .map(|(field, name)| {
+            Arc::new(
+                arrow::datatypes::Field::new(name, field.data_type().clone(), field.is_nullable())
+                    .with_metadata(field.metadata().clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    RecordBatch::try_new(
+        Arc::new(arrow::datatypes::Schema::new(fields)),
+        batch.columns().to_vec(),
+    )
+    .map_err(|err| DataFusionError::ArrowError(Box::new(err), None))
+}
+
 async fn iceberg_arrow_stream(
     table: Option<Table>,
     snapshot_id: i64,
@@ -446,6 +489,22 @@ async fn iceberg_arrow_stream(
     let table = match table {
         Some(table) => table,
         None => reload_iceberg_table(&catalog_json, &catalog_ns, &table_name).await?,
+    };
+    let (select, current_names) = match select {
+        IcebergColumnSelect::Named(names) => {
+            let current = table.metadata().current_schema();
+            let snap_schema = table
+                .metadata()
+                .snapshot_by_id(snapshot_id)
+                .ok_or_else(|| {
+                    DataFusionError::Plan(format!("Iceberg snapshot {snapshot_id} not found"))
+                })?
+                .schema(table.metadata())
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
+            let snap_names = snapshot_scan_names(current.as_ref(), snap_schema.as_ref(), &names);
+            (IcebergColumnSelect::Named(snap_names), names)
+        }
+        IcebergColumnSelect::Empty => (IcebergColumnSelect::Empty, Vec::new()),
     };
     let mut builder = table.scan().snapshot_id(snapshot_id);
     builder = match select {
@@ -459,7 +518,12 @@ async fn iceberg_arrow_stream(
         .await
         .map_err(|err| DataFusionError::External(Box::new(err)))?;
     Ok(Box::pin(
-        stream.map_err(|err| DataFusionError::External(Box::new(err))),
+        stream
+            .map_err(|err| DataFusionError::External(Box::new(err)))
+            .and_then(move |batch| {
+                let names = current_names.clone();
+                async move { rename_batch_fields(batch, &names) }
+            }),
     ))
 }
 
@@ -563,6 +627,36 @@ mod tests {
         let src = include_str!("iceberg_table.rs");
         assert!(!src.contains(concat!("Listing", "Table::")));
         assert!(!src.contains(concat!("build_s3", "_df(")));
+    }
+
+    #[test]
+    fn snapshot_scan_names_follow_field_id_across_rename() {
+        use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
+        let snapshot = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![
+                NestedField::optional(1, "name", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::optional(3, "category", Type::Primitive(PrimitiveType::String)).into(),
+            ])
+            .build()
+            .unwrap();
+        let current = Schema::builder()
+            .with_schema_id(1)
+            .with_fields(vec![
+                NestedField::optional(1, "name", Type::Primitive(PrimitiveType::String)).into(),
+                NestedField::optional(3, "category_code", Type::Primitive(PrimitiveType::String))
+                    .into(),
+            ])
+            .build()
+            .unwrap();
+        assert_eq!(
+            super::snapshot_scan_names(
+                &current,
+                &snapshot,
+                &["category_code".into(), "name".into()]
+            ),
+            vec!["category".to_string(), "name".to_string()]
+        );
     }
 
     #[test]

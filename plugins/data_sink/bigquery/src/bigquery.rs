@@ -110,7 +110,8 @@ skippr_runtime_sdk::declare_sink_spec!(
 skippr_runtime_sdk::declare_schema_sink_spec!(
     BigquerySchemaSinkSpec,
     DataSinkBigqueryPlugin,
-    "Bigquery"
+    "Bigquery",
+    skippr_runtime_sdk::plugins::AlterSupport::Native
 );
 
 impl DataSinkBigqueryPlugin {
@@ -954,6 +955,30 @@ impl DataSink for DataSinkBigqueryPlugin {
 
 #[async_trait]
 impl SchemaSink for DataSinkBigqueryPlugin {
+    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
+        skippr_runtime_sdk::plugins::AlterSupport::Native
+    }
+
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
+        op: &skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp,
+        _field_id: i32,
+    ) -> Result<(), std::io::Error> {
+        let table_name = Self::namespace_to_table_name(namespace);
+        let fq_table = format!("`{}`.`{}`", self.config.dataset, table_name);
+        let sql = skippr_runtime_sdk::plugins::alter_ddl::warehouse_alter_sql(
+            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::BigQuery,
+            &fq_table,
+            op,
+        )?;
+        self.execute_sql(&sql)
+            .await
+            .map(|_| ())
+            .map_err(|err| std::io::Error::other(err.to_string()))
+    }
+
     async fn sync_schema(
         &self,
         namespace: &str,

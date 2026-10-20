@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
 
+use crate::discover::iceberg_schema::iceberg_schema_after_alter;
 use crate::discover::schema_alter::{
     apply, canonicalize_op, field_id_for_op, is_iceberg_legal_promote, SchemaAlterOp,
 };
 use crate::discover::{Metadata, SkipprDataType};
-use crate::sqlrt::iceberg_alter::iceberg_schema_after_alter;
 use crate::sqlrt::parser::{SParser, Statement};
 
 #[derive(Clone, Copy)]

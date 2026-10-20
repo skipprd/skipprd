@@ -16,13 +16,6 @@ ACTION = Path(__file__).resolve().parent
 BUCKET = "skippr-e2e-sample-data"
 
 # (name, sql, expect_ok, err_contains)
-FAIL_WHILE_ENABLED = (
-    "fail_closed_enabled_rename",
-    "ALTER TABLE s3_alter RENAME COLUMN region TO region_code",
-    False,
-    "DISABLED",
-)
-
 FAIL_CLOSED = [
     (
         "fail_closed_missing_column",
@@ -271,11 +264,27 @@ def main() -> None:
     if count != "3":
         raise SystemExit(f"wave1 count {count!r} != 3")
 
-    ok, out = query(skipprd, config, bind(FAIL_WHILE_ENABLED[1]), env)
-    expect(FAIL_WHILE_ENABLED[0], ok, out, False, FAIL_WHILE_ENABLED[3])
-
-    ok, out = query(skipprd, config, "DISABLE PIPELINE s3_alter", env)
-    expect("disable", ok, out, True, None)
+    migrations = work / "migrations"
+    migrations.mkdir(parents=True, exist_ok=True)
+    (migrations / "20261020_rename_region.sql").write_text(
+        bind("ALTER TABLE s3_alter RENAME COLUMN region TO region_code;") + "\n",
+        encoding="utf-8",
+    )
+    migrate = run(
+        [skipprd, "--config", str(config), "migrate", "--pipeline", "s3_alter"],
+        env,
+    )
+    print(migrate.stdout, migrate.stderr, flush=True)
+    if migrate.returncode != 0:
+        raise SystemExit(f"migrate failed: {migrate.returncode}")
+    ok, out = query(
+        skipprd,
+        config,
+        f"SELECT region_code FROM {table} LIMIT 1" if namespace else "SELECT 1",
+        env,
+    )
+    expect("query_after_first_migrate", ok, out, True, None)
+    (migrations / "20261020_rename_region.sql").unlink()
 
     for name, sql, expect_ok, needle in FAIL_CLOSED + SUCCESS:
         ok, out = query(skipprd, config, bind(sql), env)
@@ -313,9 +322,6 @@ def main() -> None:
     count = duckdb(scan, f"SELECT count(*) FROM iceberg_scan('{scan}');").splitlines()[-1]
     if count != "3":
         raise SystemExit(f"count changed during ALTER: {count}")
-
-    ok, out = query(skipprd, config, "ENABLE PIPELINE s3_alter", env)
-    expect("enable", ok, out, True, None)
 
     write_config(template, config, warehouse, endpoint, wave2)
     sync = run(

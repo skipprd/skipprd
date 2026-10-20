@@ -261,4 +261,101 @@ mod tests {
             .retry_semantics
             .grouped_writes_are_exact_once());
     }
+
+    fn region_metadata() -> skippr_runtime_sdk::discover::OutputMetadata {
+        serde_json::from_value(serde_json::json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "region": {
+                    "out_field_name": "region",
+                    "determined_type": "string",
+                    "determined_type_values": "",
+                    "field_id": 7,
+                    "schema_id": 1,
+                    "lineage_id": "orders:region",
+                    "nullable": true,
+                    "default_value": null,
+                    "fields": {}
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn runtime_context() -> skippr_runtime_sdk::protocol::RuntimeExecutionContext {
+        skippr_runtime_sdk::protocol::RuntimeExecutionContext {
+            pipeline_name: "p".into(),
+            workspace_name: "w".into(),
+            data_dir: "/tmp".into(),
+            execution_mode: Default::default(),
+            output_layout: Default::default(),
+            inject_fields: std::collections::BTreeMap::new(),
+            pipeline_type: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_alter_rename_keeps_field_id_on_local_fs_catalog() {
+        use iceberg::TableIdent;
+        use skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp;
+        use skippr_runtime_sdk::plugins::{AlterSupport, SchemaSink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let warehouse = format!("file://{}", dir.path().display());
+        let cfg = DuckdbConfig {
+            warehouse,
+            table_namespace: "bronze".into(),
+        };
+        let writer = open_writer(
+            &cfg,
+            runtime_context(),
+            skippr_runtime_sdk::protocol::RuntimeBinding::Primary,
+            "schema".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(writer.alter_support(), AlterSupport::Native);
+
+        let metadata = region_metadata();
+        writer.sync_schema("orders", &metadata).await.unwrap();
+        let catalog = open_fs_catalog(&cfg).await.unwrap();
+        let ident = TableIdent::from_strs(["bronze", "orders"]).unwrap();
+        let created = catalog.load_table(&ident).await.unwrap();
+        let field_id = created
+            .metadata()
+            .current_schema()
+            .field_by_name("region")
+            .unwrap()
+            .id;
+        writer
+            .apply_alter(
+                "orders",
+                &metadata,
+                &SchemaAlterOp::Rename {
+                    from: "region".into(),
+                    to: "region_code".into(),
+                },
+                field_id,
+            )
+            .await
+            .unwrap();
+
+        let loaded = catalog.load_table(&ident).await.unwrap();
+        let schema = loaded.metadata().current_schema();
+        assert_eq!(schema.field_by_name("region_code").unwrap().id, field_id);
+        assert!(schema.field_by_name("region").is_none());
+
+        let table_fs = dir.path().join("bronze/orders");
+        let hint = std::fs::read_to_string(table_fs.join("metadata/version-hint.text")).unwrap();
+        assert_ne!(
+            hint.trim(),
+            "0",
+            "replace_schema must publish a new Hadoop version"
+        );
+        assert!(table_fs
+            .join(format!("metadata/v{}.metadata.json", hint.trim()))
+            .is_file());
+    }
 }

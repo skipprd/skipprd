@@ -209,6 +209,23 @@ impl DataSinkPostgresPlugin {
         self.ensure_table(&fq_table, &col_defs).await
     }
 
+    pub async fn apply_alter(
+        &self,
+        namespace: &str,
+        _metadata: &OutputMetadata,
+        op: &skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp,
+        _field_id: i32,
+    ) -> Result<(), std::io::Error> {
+        let table_name = Self::namespace_to_table_name(namespace);
+        let fq_table = format!("\"{}\".\"{}\"", self.config.schema, table_name);
+        let sql = skippr_runtime_sdk::plugins::alter_ddl::warehouse_alter_sql(
+            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Postgres,
+            &fq_table,
+            op,
+        )?;
+        self.execute_sql(&sql).await
+    }
+
     fn namespace_to_table_name(namespace: &str) -> String {
         namespace.replace('.', "_").to_lowercase()
     }

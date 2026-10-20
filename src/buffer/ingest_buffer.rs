@@ -1016,6 +1016,39 @@ impl Buffers {
             .unwrap_or_default()
     }
 
+    pub(crate) fn map_live_arrow(
+        namespace: &str,
+        mut rewrite: impl FnMut(RecordBatch) -> Result<RecordBatch, String>,
+    ) -> Result<(), String> {
+        let mut seg = SEGMENT_LIVE
+            .lock()
+            .map_err(|_| "WAL live segment lock poisoned".to_string())?;
+        for (key, payload) in seg.batches.iter_mut() {
+            if key.namespace != namespace {
+                continue;
+            }
+            match payload {
+                WalPayload::Raw(_) => {
+                    return Err("copy/non-Arrow WAL parts cannot be rewritten".to_string());
+                }
+                WalPayload::Arrow(batches) => {
+                    for batch in batches.iter_mut() {
+                        *batch = rewrite(batch.clone())?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reregister_disk_segment(
+        config: &Config,
+        path: PathBuf,
+        meta: SegmentFileMetadata,
+    ) {
+        Self::segment_cache_register(config, SegmentSource::Disk(path), meta);
+    }
+
     pub(crate) fn append_batches_to_live(batches: Vec<IngestBufferBatch>) -> Result<u64, String> {
         let mut added_bytes = 0u64;
         for mut ingest_buffer_batch in batches.into_iter() {
@@ -1533,6 +1566,9 @@ impl Buffers {
         _offsets_db: Arc<Offsets>,
         mut control: Option<&mut CompactionCycleControl<'_>>,
     ) -> bool {
+        if crate::migration::schema_barrier_held() {
+            return true;
+        }
         let ingest_paused = crate::data_dir_ingest_paused();
         let drain_requested = force;
         let force = force || ingest_paused;

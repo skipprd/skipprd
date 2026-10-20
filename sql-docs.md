@@ -12,7 +12,7 @@ ALTER TABLE <pipeline>[.<namespace>] ALTER COLUMN <column> TYPE <new_type>
 ```
 
 **Description:**
-Iceberg-legal promotion only (byte/short/integer→long, byte/short→integer, float→double, timestamp_milli→timestamp; Iceberg timestamp is already µs). Nested DROP/MERGE without a top-level Iceberg field id fails closed. Widen to string with MERGE COLUMN. Pipeline must be DISABLED.
+Iceberg-legal promotion only (byte/short/integer→long, byte/short→integer, float→double, timestamp_milli→timestamp; Iceberg timestamp is already µs). Nested DROP/MERGE without a top-level Iceberg field id fails closed. Widen to string with MERGE COLUMN. Applied in-stream; DISABLE is freeze-only.
 
 **Example:**
 ```sql
@@ -27,7 +27,7 @@ ALTER TABLE <pipeline>[.<namespace>] DROP COLUMN <column>
 ```
 
 **Description:**
-Drops a column from skippr metadata and the Iceberg table (same field id). Pipeline must be DISABLED.
+Drops a column from skippr metadata and the destination table (same field id on Iceberg). Applied in-stream; DISABLE is freeze-only.
 
 **Example:**
 ```sql
@@ -42,7 +42,7 @@ ALTER TABLE <pipeline>[.<namespace>] MERGE COLUMN <src> INTO <dst>
 ```
 
 **Description:**
-Drops src from metadata and Iceberg (same field id path as DROP). Retargets type-conflict evolution so later values write to dst. Historical src-only rows are not copied. Pipeline must be DISABLED.
+Drops src from metadata and the destination (same field id path as DROP on Iceberg). Retargets type-conflict evolution so later values write to dst. Historical src-only rows are not copied. Applied in-stream; DISABLE is freeze-only.
 
 **Example:**
 ```sql
@@ -57,7 +57,7 @@ ALTER TABLE <pipeline>[.<namespace>] RENAME COLUMN <from> TO <to>
 ```
 
 **Description:**
-Renames a column, including nested paths (detail.truck_reg). A dotted TO path moves the field into that record; Iceberg flatten names use underscores (detail.region → detail_region). The Iceberg field id is unchanged so existing files stay readable. Pipeline must be DISABLED.
+Renames a column, including nested paths (detail.truck_reg). A dotted TO path moves the field into that record; Iceberg flatten names use underscores (detail.region → detail_region). The Iceberg field id is unchanged so existing files stay readable. Applied in-stream; DISABLE is freeze-only.
 
 **Example:**
 ```sql
@@ -134,7 +134,7 @@ DROP PIPELINE <pipeline_name>
 ```
 
 **Description:**
-Drops all schemas and data for a pipeline. In sync mode, this immediately removes the pipeline data directory. In query mode, the pipeline will be dropped on the next sync run.
+Drops all schemas and data for a pipeline. Removes the pipeline data directory immediately.
 
 **Example:**
 ```sql
@@ -164,7 +164,7 @@ RESET PIPELINE <pipeline_name>
 ```
 
 **Description:**
-Resets the offset database and purges WAL files for a pipeline. In sync mode, this immediately removes the pipeline data directory. In query mode, the pipeline will be reset on the next sync run.
+Resets the offset database and purges WAL files for a pipeline. Removes the pipeline data directory immediately so the next sync re-ingests.
 
 **Example:**
 ```sql

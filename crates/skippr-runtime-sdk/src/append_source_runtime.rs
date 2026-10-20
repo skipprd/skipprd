@@ -401,6 +401,7 @@ pub async fn run_append_data_source_main(
             source_capability,
             sink_capability: None,
             supports_schema: false,
+            alter_support: skippr_core::plugins::AlterSupport::Unsupported,
         }))
         .await?;
 

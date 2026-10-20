@@ -17,9 +17,21 @@ All notable changes to this project will be documented in this file.
 - `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
 ## [Unreleased]
 
+## [18.3.6]
+
+### Added
+
+- `skipprd migrate` and Python `Migration` / `Session.migrate()` apply `migrations/*.sql` in-stream: skippr metadata, live WAL, and native destination DDL. The skippr store journals each file so a retry is idempotent. Iceberg (SkipprLake, Athena Iceberg, DuckDB) plus Snowflake, Postgres, BigQuery, Redshift, and MotherDuck. Glue/Hive and ClickHouse fail closed. `DISABLE PIPELINE` still freezes ingest; it is not the ALTER gate.
+
+### Breaking
+
+- Runtime protocol 23. SchemaSink handshake advertises `alter_support`; `HostFrame::ApplyAlter` is destination DDL. Hosts must run skippr 18.3.6 with the matching plugin bundle. Every runtime plugin crate patch is bumped so catalog paths stay immutable.
+
 ### Fixed
 
 - DATA_DIR min-free (default 5 GB) is tuned down when it is larger than the free space left at the high watermark, so a small volume cannot pause at the floor and then fail to resume.
+- `skipprd query` maps Iceberg column names by field id after a `replace_schema` rename, so `SELECT` uses the evolved name.
+- `skipprd migrate` reuses the open skippr store instead of opening sled twice under the ingest lease.
 
 ## [18.3.5]
 
@@ -105,7 +117,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - `ALTER TABLE` matches Iceberg columns by name (including flattened `detail.truck_reg` → `detail_truck_reg`) when skippr's hashed `field_id` is not the Iceberg id. Glue tables created with sequential Iceberg ids can be renamed, promoted, merged, and dropped.
-- `discover` no longer force-enables a `DISABLED` pipeline, so the host loop cannot undo `DISABLE PIPELINE` before `ALTER TABLE`.
+- `discover` no longer force-enables a `DISABLED` pipeline. `DISABLE PIPELINE` is freeze-only; it is not the `ALTER TABLE` gate.
 
 ## [18.1.0]
 

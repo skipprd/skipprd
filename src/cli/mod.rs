@@ -60,6 +60,7 @@ pub enum Mode {
     Df(DfOptions),
     Connect(connect_generated::ConnectArgs),
     Serve(ServeArgs),
+    Migrate(MigrateOptions),
 }
 
 #[derive(Parser, Clone, PartialEq)]
@@ -170,6 +171,16 @@ pub struct DoctorOptions {
     /// Output mode: text or json
     #[arg(long, default_value = "text")]
     pub output: String,
+}
+
+#[derive(Parser, Clone, PartialEq)]
+pub struct MigrateOptions {
+    /// The pipeline to migrate
+    #[arg(short, long)]
+    pub pipeline: Option<String>,
+    /// Apply down() statements instead of up()
+    #[arg(long, default_value_t = false)]
+    pub down: bool,
 }
 
 #[derive(Parser, Clone, PartialEq)]

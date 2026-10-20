@@ -29,6 +29,7 @@ If the command is not found, follow [Install](/getting-started/install).
 | [`skipprd discover`](/cli/discover) | Read the source and infer the schema of each namespace. Never writes to the destination. |
 | [`skipprd schema`](/cli/schema) | Print the columns of Parquet files a pipeline wrote to its local data directory. |
 | [`skipprd metadata`](/cli/metadata) | Show the schema `discover` saved, or apply a reviewed schema for one namespace. |
+| [`skipprd migrate`](/cli/migrate) | Apply `migrations/*.sql` ALTER batches to skippr metadata, WAL, and the destination. |
 | [`skipprd sync`](/cli/sync) | Ingest from the source, buffer through the write-ahead log (WAL), and land data in the destination. |
 | [`skipprd query`](/cli/query) | Run SQL against your pipelines, interactively or as JSON for scripts. |
 | [`skipprd df`](/cli/df) | Print every row of a pipeline or namespace as JSON. |

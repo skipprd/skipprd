@@ -111,6 +111,7 @@ async fn run() -> io::Result<()> {
             None
         },
         supports_schema: cli.supports_schema,
+        alter_support: skipprd::plugins::AlterSupport::Unsupported,
     };
     write_frame(&mut control_writer, &PluginFrame::HandshakeAck(response)).await?;
 
@@ -876,6 +877,15 @@ async fn run_schema_loop(
                 }
                 state.run_count += 1;
                 write_schema_state_snapshot(cli, &state)?;
+                write_frame(
+                    control_writer,
+                    &PluginFrame::SchemaAck(RuntimeRequestAck {
+                        request_id: request.request_id,
+                    }),
+                )
+                .await?;
+            }
+            HostFrame::ApplyAlter(request) => {
                 write_frame(
                     control_writer,
                     &PluginFrame::SchemaAck(RuntimeRequestAck {

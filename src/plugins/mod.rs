@@ -1,8 +1,10 @@
+pub mod alter_ddl;
 pub mod cdc;
 pub mod source_contract;
 pub mod source_sync;
 pub mod traits;
 
+pub use alter_ddl::{warehouse_alter_sql, WarehouseDialect};
 pub use source_contract::{
     apply_runtime_source_namespace_contracts, ensure_source_contract_for_policy,
     merge_source_contracts_into_pipeline, replace_source_contracts_authoritative,
@@ -13,14 +15,15 @@ pub use source_contract::{
 };
 pub use source_sync::{OffsetValidationEntry, SourcePayloadTask, SourceSyncContext};
 pub use traits::{
-    AtLeastOnceMessageDelivery, ConfiguredSink, DataSink, DataSource, DeterministicObjectOverwrite,
-    FinalStateIdempotentApply, GroupedBatchReader, GroupedBatchReaderConfig, GroupedSinkContract,
-    GroupedSinkWriteContext, GroupedWalKind, GroupedWalPartitionKey, GroupedWalRefs,
-    HasSchemaSinkSpec, HasSinkSpec, LiveWalSegments, NonRetryableDebugOutput, RecordBatchChunk,
-    SchemaSink, SchemaSinkSpec, SchemaSource, SchemaSyncRequest, SftpAtLeastOnce, SftpAtomicRename,
-    SinkCallResult, SinkPreflightOutcome, SinkPreflightResult, SinkSpec, SinkWriteContext,
-    SinkWriteOutcome, SinkWriteRejection, SinkWriteSemantics, SinkWriteSupport, SourceCdcContract,
-    SourceCdcMode, SourceExecutionContract, SourceOnceContract, TransactionalTableCommit,
+    AlterSupport, AtLeastOnceMessageDelivery, ConfiguredSink, DataSink, DataSource,
+    DeterministicObjectOverwrite, FinalStateIdempotentApply, GroupedBatchReader,
+    GroupedBatchReaderConfig, GroupedSinkContract, GroupedSinkWriteContext, GroupedWalKind,
+    GroupedWalPartitionKey, GroupedWalRefs, HasSchemaSinkSpec, HasSinkSpec, LiveWalSegments,
+    NonRetryableDebugOutput, RecordBatchChunk, SchemaSink, SchemaSinkSpec, SchemaSource,
+    SchemaSyncRequest, SftpAtLeastOnce, SftpAtomicRename, SinkCallResult, SinkPreflightOutcome,
+    SinkPreflightResult, SinkSpec, SinkWriteContext, SinkWriteOutcome, SinkWriteRejection,
+    SinkWriteSemantics, SinkWriteSupport, SourceCdcContract, SourceCdcMode,
+    SourceExecutionContract, SourceOnceContract, TransactionalTableCommit,
 };
 
 /// No-op output plugin used by `discover` mode to run the input pipeline
