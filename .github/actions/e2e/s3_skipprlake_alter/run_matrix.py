@@ -250,11 +250,7 @@ def main() -> None:
     except json.JSONDecodeError:
         pass
     print("namespace", namespace, flush=True)
-    table = (
-        f'{sql_ident("s3_alter")}.{sql_ident(namespace)}'
-        if namespace != "s3_alter"
-        else sql_ident("s3_alter")
-    )
+    table = f'{sql_ident("s3_alter")}.{sql_ident(namespace)}'
 
     def bind(sql: str) -> str:
         return sql.replace("ALTER TABLE s3_alter ", f"ALTER TABLE {table} ")

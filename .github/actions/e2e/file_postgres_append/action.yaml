@@ -54,9 +54,9 @@ runs:
         echo "count=${count}"
         test "${count}" = "2"
         mkdir -p "${work}/migrations"
-        cat > "${work}/migrations/20261020_rename_category.sql" <<'SQL'
-ALTER TABLE file_postgres_append RENAME COLUMN category TO category_code;
-SQL
+        printf '%s\n' \
+          'ALTER TABLE file_postgres_append RENAME COLUMN category TO category_code;' \
+          > "${work}/migrations/20261020_rename_category.sql"
         DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
           "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
           migrate --pipeline file_postgres_append
