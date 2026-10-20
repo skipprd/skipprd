@@ -15,6 +15,7 @@ from skippr import (
     DynamoDbStore,
     EnvRef,
     LocalStorage,
+    Migration,
     Pipeline,
     PipelineRef,
     SchemaSinkGlue,
@@ -63,6 +64,11 @@ def run(ref: PipelineRef) -> pyarrow.Table:
     session = skippr.Session(ref)
     name: str = session.pipeline
     assert name == ref.name
+    Migration(
+        "20261020_rename_region",
+        up="ALTER TABLE bikehire.trips RENAME COLUMN region TO region_code;",
+    ).write("migrations")
+    session.migrate()
     return session.query("SELECT 1")
 
 

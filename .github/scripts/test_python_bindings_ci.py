@@ -112,6 +112,19 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertTrue((ROOT / "python" / "tests" / "typing" / "ok.py").is_file())
         self.assertTrue((ROOT / "python" / "tests" / "typing" / "bad.py").is_file())
 
+    def test_stub_core_exports_migration(self):
+        stub = (ROOT / "crates" / "skippr-connect-gen" / "src" / "stub_core.pyi").read_text(
+            encoding="utf-8"
+        )
+        shipped = (ROOT / "skippr.pyi").read_text(encoding="utf-8")
+        typing_ok = (ROOT / "python" / "tests" / "typing" / "ok.py").read_text(encoding="utf-8")
+        self.assertIn("class Migration:", stub)
+        self.assertIn("def migrate(self, down: bool = False) -> list[str]:", stub)
+        self.assertIn("class Migration:", shipped)
+        self.assertIn("def migrate(self, down: bool = False) -> list[str]:", shipped)
+        self.assertIn("session.migrate()", typing_ok)
+        self.assertIn("Migration(", typing_ok)
+
     def test_python_script_pins_every_tool(self):
         script = TEST_PYTHON.read_text(encoding="utf-8")
         installs = [
