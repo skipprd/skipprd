@@ -33,6 +33,7 @@ static DISCOVERY_COMPLETE: once_cell::sync::Lazy<AtomicBool> =
     once_cell::sync::Lazy::new(|| AtomicBool::new(false));
 static DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS: once_cell::sync::Lazy<AtomicU64> =
     once_cell::sync::Lazy::new(|| AtomicU64::new(0));
+static DATA_DIR_MIN_FREE_TUNE_LOGGED: AtomicBool = AtomicBool::new(false);
 use crate::metrics::counters as metrics_hot;
 use crate::metrics::ingest_profile;
 // Bounded concurrency for background metadata writes and Glue schema syncs
@@ -1550,6 +1551,36 @@ impl Ingest {
             .unwrap_or(Self::DEFAULT_MIN_FREE_BYTES)
     }
 
+    /// Cap the absolute free-disk floor so it cannot sit above the free space
+    /// implied by the high watermark. On a 20 GB volume the default 5 GB floor
+    /// is 25% of the disk: ingest pauses at 5 GB free and cannot resume without
+    /// shrinking WAL back over that same line. Tuning the floor down to the
+    /// high-watermark remainder (2 GB at 90%) lets the 90/80% pair keep
+    /// hysteresis.
+    fn negotiate_min_free_bytes(total_bytes: u64, min_free_bytes: u64, high_watermark: u8) -> u64 {
+        if min_free_bytes == 0 || total_bytes == 0 || high_watermark >= 100 {
+            return min_free_bytes;
+        }
+        let free_at_high =
+            total_bytes.saturating_mul(u64::from(100u8.saturating_sub(high_watermark))) / 100;
+        min_free_bytes.min(free_at_high)
+    }
+
+    fn negotiated_min_free_bytes(total_bytes: u64, high_watermark: u8) -> u64 {
+        let configured = Self::min_free_bytes();
+        let tuned = Self::negotiate_min_free_bytes(total_bytes, configured, high_watermark);
+        if tuned < configured && !DATA_DIR_MIN_FREE_TUNE_LOGGED.swap(true, Ordering::Relaxed) {
+            warn!(
+                "DATA_DIR min free tuned down from {} to {} on a {} volume (high watermark {}% would leave less than the floor). Compaction pause/resume uses the percentage watermarks so ingest cannot lock on the remaining-disk limit.",
+                Helpers::human_readable_size(configured),
+                Helpers::human_readable_size(tuned),
+                Helpers::human_readable_size(total_bytes),
+                high_watermark,
+            );
+        }
+        tuned
+    }
+
     fn data_dir_should_block(
         avail_bytes: u64,
         used_pct: f64,
@@ -1683,7 +1714,7 @@ impl Ingest {
                 return true;
             };
 
-            let min_free_bytes = Self::min_free_bytes();
+            let min_free_bytes = Self::negotiated_min_free_bytes(total_bytes, high_watermark);
             let below_min_free = avail_bytes < min_free_bytes;
             let should_block =
                 Self::data_dir_should_block(avail_bytes, used_pct, high_watermark, min_free_bytes);
@@ -4275,6 +4306,45 @@ mod data_dir_watermark_tests {
         assert!(Ingest::data_dir_should_resume(6 * GB, 80.0, 80, min_free));
         // Usage cleared but absolute floor not met.
         assert!(!Ingest::data_dir_should_resume(4 * GB, 75.0, 80, min_free));
+    }
+
+    #[test]
+    fn negotiate_min_free_tunes_down_when_high_watermark_leaves_less_than_floor() {
+        // 20 GB volume: 90% full leaves 2 GB, below the 5 GB floor.
+        assert_eq!(
+            Ingest::negotiate_min_free_bytes(20 * GB, 5 * GB, 90),
+            2 * GB
+        );
+    }
+
+    #[test]
+    fn negotiate_min_free_keeps_floor_when_high_watermark_leaves_enough() {
+        assert_eq!(
+            Ingest::negotiate_min_free_bytes(50 * GB, 5 * GB, 90),
+            5 * GB
+        );
+        assert_eq!(
+            Ingest::negotiate_min_free_bytes(1024 * GB, 5 * GB, 90),
+            5 * GB
+        );
+    }
+
+    #[test]
+    fn negotiate_min_free_leaves_zero_disabled() {
+        assert_eq!(Ingest::negotiate_min_free_bytes(20 * GB, 0, 90), 0);
+    }
+
+    #[test]
+    fn small_volume_at_five_gb_free_does_not_lock_after_negotiate() {
+        let total = 20 * GB;
+        let min_free = Ingest::negotiate_min_free_bytes(total, 5 * GB, 90);
+        // The overnight lock: 5.0 GB free / 75% used on a 20 GB volume.
+        assert!(!Ingest::data_dir_should_block(5 * GB, 75.0, 90, min_free));
+        assert!(Ingest::data_dir_should_resume(5 * GB, 75.0, 80, min_free));
+        // Percentage hysteresis still pauses at 90% and resumes at 80%.
+        assert!(Ingest::data_dir_should_block(2 * GB, 90.0, 90, min_free));
+        assert!(Ingest::data_dir_should_resume(4 * GB, 80.0, 80, min_free));
+        assert!(!Ingest::data_dir_should_resume(3 * GB, 85.0, 80, min_free));
     }
 
     #[test]

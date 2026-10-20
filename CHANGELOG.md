@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- DATA_DIR min-free (default 5 GB) is tuned down when it is larger than the free space left at the high watermark, so a small volume cannot pause at the floor and then fail to resume.
+
 ## [18.3.4]
 
 ### Fixed
