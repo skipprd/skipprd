@@ -102,7 +102,7 @@ With the default local WAL, `DATA_DIR` holds data that may not have reached your
 
 If your compute is ephemeral (containers, Lambda, autoscaled hosts), move the WAL to S3 with `WAL_STORAGE=s3` and the state store to DynamoDB. Then no state lives on the machine. See [WAL and buffering](/configuration/buffering) and [State store](/configuration/skippr-store).
 
-Skipprd pauses reading when the disk holding `DATA_DIR` has less than 5 GB free or is 90% full, and resumes once usage drops back to 80%. A pipeline that stalls on a busy host is often waiting for disk space.
+Skipprd pauses reading when the disk holding `DATA_DIR` has less than 5 GB free or is 90% full, and resumes once usage drops back to 80%. If the 5 GB floor is larger than the free space at 90% full (a 20 GB volume leaves only 2 GB), Skipprd tunes the floor down and warns so pause/resume cannot lock on that remaining-disk limit. A pipeline that stalls on a busy host is often waiting for disk space.
 
 ## How connectors are installed
 
