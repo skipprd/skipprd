@@ -273,7 +273,10 @@ impl ManifestIndex {
         if let Some(old) = self.records.remove(&id) {
             self.remove_fences(&id, &old.txn.refs);
         }
-        if matches!(txn.state, CompactionTransactionState::Tombstoned) {
+        if matches!(
+            txn.state,
+            CompactionTransactionState::Tombstoned | CompactionTransactionState::Acked
+        ) {
             return;
         }
         self.add_fences(&id, &txn.refs);
@@ -422,7 +425,8 @@ fn active_counts_by_sink(
 
 fn manifest_is_ready(txn: &CompactionTransaction, now_secs: u64, sent_stale_secs: u64) -> bool {
     match txn.state {
-        CompactionTransactionState::Pending | CompactionTransactionState::Acked => true,
+        CompactionTransactionState::Pending => true,
+        CompactionTransactionState::Acked => false,
         CompactionTransactionState::Sent => {
             now_secs.saturating_sub(txn.updated_at_secs) >= sent_stale_secs
         }
@@ -466,6 +470,9 @@ pub(crate) struct CompactionIndex {
     lanes: BTreeMap<CompactionLaneKey, LaneState>,
     waiting: BTreeSet<CompactionSliceId>,
     waiting_by_age: BinaryHeap<Reverse<WaitingEntry>>,
+    waiting_ids_by_group: HashMap<CompactionGroupKey, BTreeSet<CompactionSliceId>>,
+    available_bytes_by_group: HashMap<CompactionGroupKey, u64>,
+    available_counted: HashSet<CompactionSliceId>,
     force_only_ready: BTreeSet<CompactionSliceId>,
     ready_count: usize,
     ready_group_count: usize,
@@ -841,6 +848,13 @@ impl CompactionIndex {
         self.ready_group_count
     }
 
+    pub(crate) fn mark_recovered_ready(&mut self, _now_secs: u64) {
+        let ids = self.waiting.iter().cloned().collect::<Vec<_>>();
+        for id in ids {
+            self.set_ready(&id);
+        }
+    }
+
     fn configure_thresholds(
         &mut self,
         byte_threshold: u64,
@@ -862,6 +876,9 @@ impl CompactionIndex {
         self.lanes.clear();
         self.waiting.clear();
         self.waiting_by_age.clear();
+        self.waiting_ids_by_group.clear();
+        self.available_bytes_by_group.clear();
+        self.available_counted.clear();
         self.force_only_ready.clear();
         self.ready_count = 0;
         self.ready_group_count = 0;
@@ -887,30 +904,89 @@ impl CompactionIndex {
         let Some(record) = self.slices.get(id) else {
             return;
         };
-        let bytes_ready = record.slice.index_entry.bytes >= self.byte_threshold.unwrap_or(u64::MAX);
         let late_ready = now_secs.saturating_sub(record.slice.index_entry.updated_at_secs)
             >= self.time_threshold_secs.unwrap_or(u64::MAX);
-        if bytes_ready || late_ready {
+        if late_ready {
             self.set_ready(id);
-        } else {
+            return;
+        }
+        let group = record.slice.group_key.clone();
+        if !self.waiting.contains(id)
+            && !matches!(
+                self.slices.get(id).map(|record| record.state),
+                Some(SliceState::Ready)
+            )
+        {
             self.set_waiting(id);
+        }
+        if self.group_available_bytes(&group) >= self.byte_threshold.unwrap_or(u64::MAX) {
+            self.promote_waiting_group(&group);
+        }
+    }
+
+    fn group_available_bytes(&self, group: &CompactionGroupKey) -> u64 {
+        self.available_bytes_by_group
+            .get(group)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn set_available_bytes(&mut self, id: &CompactionSliceId, on: bool) {
+        let Some(record) = self.slices.get(id) else {
+            return;
+        };
+        let group = record.slice.group_key.clone();
+        let bytes = record.slice.index_entry.bytes;
+        let counted = self.available_counted.contains(id);
+        if on && !counted {
+            let next = self.group_available_bytes(&group).saturating_add(bytes);
+            self.available_bytes_by_group.insert(group, next);
+            self.available_counted.insert(id.clone());
+        } else if !on && counted {
+            let next = self.group_available_bytes(&group).saturating_sub(bytes);
+            if next == 0 {
+                self.available_bytes_by_group.remove(&group);
+            } else {
+                self.available_bytes_by_group.insert(group, next);
+            }
+            self.available_counted.remove(id);
+        }
+    }
+
+    fn promote_waiting_group(&mut self, group: &CompactionGroupKey) {
+        let ids = self
+            .waiting_ids_by_group
+            .get(group)
+            .cloned()
+            .unwrap_or_default();
+        for id in ids {
+            self.set_ready(&id);
         }
     }
 
     fn set_waiting(&mut self, id: &CompactionSliceId) {
         self.force_only_ready.remove(id);
-        let Some(record) = self.slices.get_mut(id) else {
+        let Some((group, generation, eligible_at_secs)) = self.slices.get_mut(id).map(|record| {
+            record.state = SliceState::Waiting;
+            record.wait_generation = record.wait_generation.saturating_add(1);
+            (
+                record.slice.group_key.clone(),
+                record.wait_generation,
+                record
+                    .slice
+                    .index_entry
+                    .updated_at_secs
+                    .saturating_add(self.time_threshold_secs.unwrap_or(u64::MAX)),
+            )
+        }) else {
             return;
         };
-        record.state = SliceState::Waiting;
-        record.wait_generation = record.wait_generation.saturating_add(1);
-        let generation = record.wait_generation;
-        let eligible_at_secs = record
-            .slice
-            .index_entry
-            .updated_at_secs
-            .saturating_add(self.time_threshold_secs.unwrap_or(u64::MAX));
         self.waiting.insert(id.clone());
+        self.waiting_ids_by_group
+            .entry(group)
+            .or_default()
+            .insert(id.clone());
+        self.set_available_bytes(id, true);
         self.waiting_by_age.push(Reverse(WaitingEntry {
             eligible_at_secs,
             id: id.clone(),
@@ -925,8 +1001,21 @@ impl CompactionIndex {
         ) {
             return;
         }
+        if let Some(group) = self
+            .slices
+            .get(id)
+            .map(|record| record.slice.group_key.clone())
+        {
+            if let Some(ids) = self.waiting_ids_by_group.get_mut(&group) {
+                ids.remove(id);
+                if ids.is_empty() {
+                    self.waiting_ids_by_group.remove(&group);
+                }
+            }
+        }
         self.waiting.remove(id);
         self.force_only_ready.remove(id);
+        self.set_available_bytes(id, true);
         let Some(slice) = self.slices.get(id).map(|record| record.slice.clone()) else {
             return;
         };
@@ -955,6 +1044,8 @@ impl CompactionIndex {
     fn set_fenced(&mut self, id: &CompactionSliceId) {
         self.remove_from_current_queue(id);
         self.force_only_ready.remove(id);
+        self.forget_waiting_id(id);
+        self.set_available_bytes(id, false);
         if let Some(record) = self.slices.get_mut(id) {
             record.state = SliceState::Fenced;
         }
@@ -969,9 +1060,27 @@ impl CompactionIndex {
         }
         self.remove_from_current_queue(id);
         self.force_only_ready.remove(id);
+        self.forget_waiting_id(id);
+        self.set_available_bytes(id, false);
         let record = self.slices.get_mut(id)?;
         record.state = SliceState::Reserved;
         Some(record.slice.clone())
+    }
+
+    fn forget_waiting_id(&mut self, id: &CompactionSliceId) {
+        let Some(group) = self
+            .slices
+            .get(id)
+            .map(|record| record.slice.group_key.clone())
+        else {
+            return;
+        };
+        if let Some(ids) = self.waiting_ids_by_group.get_mut(&group) {
+            ids.remove(id);
+            if ids.is_empty() {
+                self.waiting_ids_by_group.remove(&group);
+            }
+        }
     }
 
     fn remove_from_current_queue(&mut self, id: &CompactionSliceId) {
@@ -1057,9 +1166,10 @@ impl CompactionIndex {
         self.slices
             .get(id)
             .map(|record| {
-                record.slice.index_entry.bytes >= self.byte_threshold.unwrap_or(u64::MAX)
-                    || now_secs.saturating_sub(record.slice.index_entry.updated_at_secs)
-                        >= self.time_threshold_secs.unwrap_or(u64::MAX)
+                now_secs.saturating_sub(record.slice.index_entry.updated_at_secs)
+                    >= self.time_threshold_secs.unwrap_or(u64::MAX)
+                    || self.group_available_bytes(&record.slice.group_key)
+                        >= self.byte_threshold.unwrap_or(u64::MAX)
             })
             .unwrap_or(false)
     }
@@ -1072,6 +1182,8 @@ impl CompactionIndex {
         self.remove_from_current_queue(id);
         self.waiting.remove(id);
         self.force_only_ready.remove(id);
+        self.forget_waiting_id(id);
+        self.set_available_bytes(id, false);
         self.slices.remove(id);
 
         let (remaining, groups, lanes, remove_segment) =
@@ -1373,6 +1485,215 @@ mod tests {
         let planned = plan(&mut index, 3, false);
         assert_eq!(planned.groups.len(), 2);
         assert_eq!(planned.slices_examined, 2);
+    }
+
+    #[test]
+    fn group_bytes_across_slices_become_ready_before_any_slice_hits_threshold() {
+        let mut index = CompactionIndex::default();
+        for (segment, start, bytes) in [("seg-a", 0, 40u64), ("seg-b", 1, 40), ("seg-c", 2, 40)] {
+            index.register_segment(
+                segment,
+                vec![slice(
+                    segment,
+                    "sink.a",
+                    "ns",
+                    "v1",
+                    CompactionKind::Append,
+                    start,
+                    bytes,
+                    999,
+                )],
+                100,
+                10_000,
+                1_000,
+            );
+        }
+        let planned = index.plan_ready(
+            3,
+            false,
+            1_000,
+            100,
+            10_000,
+            250,
+            8,
+            1,
+            HashMap::new(),
+            HashSet::new(),
+        );
+        assert_eq!(planned.groups.len(), 1);
+        assert_eq!(planned.groups[0].slices.len(), 3);
+        assert_eq!(
+            planned.groups[0]
+                .slices
+                .iter()
+                .map(|slice| slice.index_entry.bytes)
+                .sum::<u64>(),
+            120
+        );
+    }
+
+    #[test]
+    fn group_bytes_do_not_cross_namespace() {
+        let mut index = CompactionIndex::default();
+        index.register_segment(
+            "seg-a",
+            vec![slice(
+                "seg-a",
+                "sink.a",
+                "ns-a",
+                "v1",
+                CompactionKind::Append,
+                0,
+                80,
+                999,
+            )],
+            100,
+            10_000,
+            1_000,
+        );
+        index.register_segment(
+            "seg-b",
+            vec![slice(
+                "seg-b",
+                "sink.a",
+                "ns-b",
+                "v1",
+                CompactionKind::Append,
+                0,
+                80,
+                999,
+            )],
+            100,
+            10_000,
+            1_000,
+        );
+        let planned = index.plan_ready(
+            2,
+            false,
+            1_000,
+            100,
+            10_000,
+            250,
+            8,
+            2,
+            HashMap::new(),
+            HashSet::new(),
+        );
+        assert!(planned.groups.is_empty());
+    }
+
+    #[test]
+    fn acked_manifests_do_not_fence_leftover_after_recover() {
+        let mut index = CompactionIndex::default();
+        let leftover = slice(
+            "leftover",
+            "sink.a",
+            "old",
+            "v1",
+            CompactionKind::Append,
+            0,
+            20,
+            999,
+        );
+        let acked = CompactionTransaction::new(
+            "sink.a".to_string(),
+            "old".to_string(),
+            "v1".to_string(),
+            WritePolicy::Append,
+            SinkWriteSemantics::ExactOnce,
+            vec![leftover.wal_ref.clone()],
+            "out".to_string(),
+        )
+        .mark_acked();
+        index.install_manifests(vec![acked]);
+        index.register_segment("leftover", vec![leftover], 100, 10_000, 1_000);
+        assert!(index
+            .reserve_ready_manifests(1, 1, 1_000, 300, &HashMap::new(), &HashSet::new())
+            .is_empty());
+        index.mark_recovered_ready(1_000);
+        let planned = index.plan_ready(
+            1,
+            false,
+            1_000,
+            100,
+            10_000,
+            250,
+            1,
+            1,
+            HashMap::new(),
+            HashSet::new(),
+        );
+        assert_eq!(planned.groups.len(), 1);
+        assert_eq!(planned.groups[0].key.namespace, "old");
+    }
+
+    #[test]
+    fn recover_marks_subthreshold_leftover_ready_without_sticky_force() {
+        let mut index = CompactionIndex::default();
+        index.register_segment(
+            "leftover",
+            vec![slice(
+                "leftover",
+                "sink.a",
+                "old",
+                "v1",
+                CompactionKind::Append,
+                0,
+                20,
+                999,
+            )],
+            100,
+            10_000,
+            1_000,
+        );
+        assert!(index
+            .plan_ready(
+                1,
+                false,
+                1_000,
+                100,
+                10_000,
+                250,
+                1,
+                1,
+                HashMap::new(),
+                HashSet::new(),
+            )
+            .groups
+            .is_empty());
+        index.mark_recovered_ready(1_000);
+        assert_eq!(index.ready_queue_depth(), 1);
+
+        index.register_segment(
+            "live",
+            vec![slice(
+                "live",
+                "sink.a",
+                "new",
+                "v1",
+                CompactionKind::Append,
+                0,
+                20,
+                999,
+            )],
+            100,
+            10_000,
+            1_000,
+        );
+        let planned = index.plan_ready(
+            2,
+            false,
+            1_000,
+            100,
+            10_000,
+            250,
+            1,
+            2,
+            HashMap::new(),
+            HashSet::new(),
+        );
+        assert_eq!(planned.groups.len(), 1);
+        assert_eq!(planned.groups[0].key.namespace, "old");
     }
 
     #[test]

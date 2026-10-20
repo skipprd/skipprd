@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [18.3.4]
+
+### Fixed
+
+- Compaction treats `buffer_threshold_bytes` as group bytes (same sink / namespace / partition / time), not per-slice. Partitioned COPY leftover WAL can drain without waiting `buffer_threshold_seconds`.
+- WAL recover marks leftover committed slices ready once. Live ingest after recover still waits for group bytes or the time gate.
+- Acked compaction manifests are terminal: they do not fence leftover slices or get reserved as new work. Recover deletes leftover Acked files. COPY removes the manifest after tombstone, same as Arrow.
+- Dead Sent manifests whose segment files are gone are dropped instead of retrying forever.
+- COPY Identity PUT uses the grouped compaction timeout (default 900s) instead of waiting forever.
+- Runtime sink pool acquire no longer holds a `Notify` future across `maybe_grow_one()`.
+- Durable `mutation.log` replay logs start and finish so a multi-GB open is visible at `info`.
+
 ## [18.3.3]
 
 ### Changed

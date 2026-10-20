@@ -2835,14 +2835,15 @@ impl RuntimeSinkConnectionPool {
         let _wait_metrics = RuntimeSinkPoolWaitMetrics::new();
         self.maybe_shrink_idle().await;
         let worker = loop {
-            let notified = self.slots.notify.notified();
             if let Some(worker) = self.slots.try_acquire() {
                 break worker;
             }
             if self.maybe_grow_one().await? {
                 continue;
             }
-            notified.await;
+            // Subscribe after grow so a release during maybe_grow_one is not
+            // attached to a future we then drop on `continue`.
+            self.slots.notify.notified().await;
         };
         crate::metrics::counters::inc_runtime_sink_active_sessions();
         Ok(RuntimeSinkWorkerLease {

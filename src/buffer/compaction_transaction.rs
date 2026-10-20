@@ -400,9 +400,14 @@ pub fn load_manifest_index(config: &Config) -> io::Result<Vec<CompactionTransact
         if txn.updated_at_secs == 0 {
             txn.updated_at_secs = txn.created_at_secs;
         }
-        if !matches!(txn.state, CompactionTransactionState::Tombstoned) {
-            out.push(txn);
+        if matches!(
+            txn.state,
+            CompactionTransactionState::Tombstoned | CompactionTransactionState::Acked
+        ) {
+            let _ = fs::remove_file(&path);
+            continue;
         }
+        out.push(txn);
     }
     Ok(out)
 }
@@ -571,12 +576,28 @@ mod tests {
         fs::write(comp_dir.join("empty.json"), b"").unwrap();
         fs::write(comp_dir.join("corrupt.json"), b"{not-json").unwrap();
 
+        let acked = CompactionTransaction::new(
+            "sink.main".to_string(),
+            "ns".to_string(),
+            "schema".to_string(),
+            WritePolicy::Append,
+            SinkWriteSemantics::AtLeastOnce,
+            vec![ref_for("acked", 2)],
+            "out.parquet".to_string(),
+        )
+        .mark_acked();
+        persist_manifest(&Config::new(), &acked).unwrap();
+
         let loaded = load_pending_manifests(&Config::new()).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, good.id);
         assert!(!comp_dir.join("empty.json").exists());
         assert!(!comp_dir.join("corrupt.json").exists());
         assert!(comp_dir.join(format!("{}.json", good.id)).exists());
+        assert!(
+            !comp_dir.join(format!("{}.json", acked.id)).exists(),
+            "Acked manifests are terminal and must not fence leftover after restart"
+        );
 
         if let Some(value) = old_data_dir {
             Config::setenv("DATA_DIR", &value);

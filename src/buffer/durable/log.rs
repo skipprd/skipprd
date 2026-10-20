@@ -2,9 +2,11 @@ use crate::buffer::direct_io::DirectIoFile;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use skippr_lease::{CommitIndex, DurableError, PipelinePaths, GENESIS_HASH};
+use tracing::info;
 
 use super::codec::{encode_envelope_proto, envelope_from_proto, proto};
 use super::mutation::{EntryComparison, MutationEnvelope};
@@ -262,6 +264,13 @@ fn replay_log(path: &Path) -> Result<Replayed, DurableError> {
             committed_envelopes: committed,
         });
     }
+    let file_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    info!(
+        path = %path.display(),
+        file_bytes,
+        "Durable mutation log replay starting"
+    );
+    let started = Instant::now();
     let bytes = DirectIoFile::read_path(path)?;
     let mut offset = 0usize;
     while offset + 4 <= bytes.len() {
@@ -309,6 +318,13 @@ fn replay_log(path: &Path) -> Result<Replayed, DurableError> {
             _ => break,
         }
     }
+    info!(
+        committed = committed.len(),
+        pending = pending.len(),
+        parsed_bytes = offset,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "Durable mutation log replay finished"
+    );
     Ok(Replayed {
         state,
         pending_prepared: pending,

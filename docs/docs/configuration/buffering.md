@@ -64,6 +64,8 @@ Leave the defaults unless you have a reason. A larger byte threshold means fewer
 
 These limits are **per slice** — one namespace, partition, and time bucket — not for the whole `sync --once`. A 20 MiB / 300 s pair does not merge a multi-hour historical copy into one object when keys are sparse. For `type: copy` of history, keep a modest byte threshold and a large time threshold (for example `86400`) so each slice grows until drain.
 
+Once slices are in the WAL, compaction uses the same byte threshold across a group (same sink, namespace, partition, and time). Several small leftover parts become ready together when that group reaches the byte limit, when the time gate fires, or when recover/drain asks to send what is already committed.
+
 These optional overrides rarely need a change:
 
 | Variable | Default | Meaning |

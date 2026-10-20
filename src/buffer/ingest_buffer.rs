@@ -2221,10 +2221,32 @@ impl Buffers {
         let mut entries = Vec::with_capacity(txn.refs.len());
         let mut completed_refs = Vec::new();
         for wal_ref in txn.refs.iter() {
-            let cached = SEGMENT_CACHE.get(&wal_ref.segment_id)?;
-            let (ordinal, idx) = cached.meta.index.iter().enumerate().find(|(_, idx)| {
+            let Some(cached) = SEGMENT_CACHE.get(&wal_ref.segment_id) else {
+                warn!(
+                    "Compactor: manifest resume skipped missing segment cache segment_id={} compaction_id={}",
+                    wal_ref.segment_id, txn.id
+                );
+                let seg_path = crate::buffer::wal_store::ingest_segment_dir(config)
+                    .join(format!("{}.seg", wal_ref.segment_id));
+                if !seg_path.exists() {
+                    warn!(
+                        "Compactor: dropping manifest {} because segment {} is gone from disk",
+                        txn.id, wal_ref.segment_id
+                    );
+                    let _ = Self::remove_compaction_manifest(config, &txn.id);
+                }
+                return None;
+            };
+            let Some((ordinal, idx)) = cached.meta.index.iter().enumerate().find(|(_, idx)| {
                 idx.start == wal_ref.start && idx.len == wal_ref.len && idx.key == wal_ref.key
-            })?;
+            }) else {
+                warn!(
+                    "Compactor: dropping manifest {} because slice is missing from segment cache segment_id={} start={} len={}",
+                    txn.id, wal_ref.segment_id, wal_ref.start, wal_ref.len
+                );
+                let _ = Self::remove_compaction_manifest(config, &txn.id);
+                return None;
+            };
             match Self::completion_ledger(config).is_complete(
                 cached.source.segment_id(),
                 &cached.meta.index,
@@ -3655,9 +3677,25 @@ impl Buffers {
         let sent_txn = work.txn.clone().mark_sent();
         Self::persist_compaction_manifest(config, &sent_txn).await?;
         let _sink_permit = budget.acquire_sink().await?;
-        shared_output.sync_bytes(body, rows, sink_ctx).await?;
+        let timeout = Self::grouped_compaction_timeout();
+        match tokio::time::timeout(timeout, shared_output.sync_bytes(body, rows, sink_ctx)).await {
+            Ok(result) => {
+                result?;
+            }
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "copy Identity PUT timed out wal_parts={} timeout_secs={}",
+                        work.entries.len(),
+                        timeout.as_secs(),
+                    ),
+                ));
+            }
+        }
         Self::persist_compaction_manifest(config, &sent_txn.clone().mark_acked()).await?;
         Self::tombstone_grouped_work(config, &work)?;
+        Self::remove_compaction_manifest(config, &work.txn.id)?;
         COMPACT_FAILURES.remove(&format!("{}:{}", work.txn.sink_ref, work.txn.id));
         crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
         crate::metrics::counters::add_wal_compaction_transaction_completed(1);
@@ -4478,9 +4516,16 @@ pub async fn wal_recover(config: &Config, offsets_db: Arc<Offsets>) -> io::Resul
     }
     Buffers::ensure_manifest_index_loaded(config);
     if is_s3_wal(config) {
-        return wal_recover_s3(config, offsets_db).await;
+        wal_recover_s3(config, offsets_db).await?;
+    } else {
+        wal_recover_disk(config, offsets_db)?;
     }
-    wal_recover_disk(config, offsets_db)
+    {
+        let mut index = compaction_index();
+        index.mark_recovered_ready(Buffers::now_secs());
+        metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
