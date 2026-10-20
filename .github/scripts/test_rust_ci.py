@@ -84,6 +84,10 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("test_runtime_e2e_harness.py", text)
         self.assertIn("test_local_runtime_plugins.py", text)
         self.assertIn("test_bump_changed_plugin_crates.py", text)
+        self.assertIn("test_previous_protocol_compatible_release.py", text)
+        self.assertIn("chaos_mode_published:", text)
+        self.assertIn("e2e_prev_plugins:", text)
+        self.assertIn("e2e_prev_host:", text)
         self.assertIn("test_host_dependency_boundaries.py", text)
         self.assertNotIn("check_host_dependency_boundaries.py", text)
         self.assertIn("rust-build-release", text)
@@ -110,12 +114,24 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("[self-hosted", chaos)
         self.assertIn("timeout-minutes: 240", chaos)
         self.assertIn("linux_x86", chaos)
+        self.assertIn("github.ref == 'refs/tags/0.0.0'", chaos)
+        self.assertIn("plugin_binaries_dir: ./runtime-plugin-binaries-linux_x86", chaos)
+        self.assertNotIn("publish_runtime_plugins", chaos)
         self.assertNotIn("- cleanup", chaos)
         self.assertNotIn("secrets.AWS_ACCESS_KEY_ID", chaos)
         self.assertNotIn("secrets.AWS_SECRET_ACCESS_KEY", chaos)
         self.assertIn("secrets.R2_ACCOUNT_ID", chaos)
         self.assertIn("secrets.R2_ACCESS_KEY_ID", chaos)
         self.assertIn("secrets.R2_SECRET_ACCESS_KEY", chaos)
+        published_chaos = text.split("\n  chaos_mode_published:", 1)[1].split(
+            "\n  e2e_skipprlake:", 1
+        )[0]
+        self.assertIn("publish_runtime_plugins", published_chaos)
+        self.assertIn("timeout-minutes: 240", published_chaos)
+        self.assertNotIn("plugin_binaries_dir:", published_chaos)
+        self.assertNotIn("runtime-plugin-binaries-linux_x86", published_chaos)
+        self.assertNotIn("secrets.AWS_ACCESS_KEY_ID", published_chaos)
+        self.assertIn("secrets.R2_ACCOUNT_ID", published_chaos)
         self.assertIn("e2e_file_duckdb:", text)
         self.assertIn("e2e_skipprlake:", text)
         self.assertIn("e2e_postgres_cdc:", text)
@@ -135,12 +151,13 @@ class RustCiTests(unittest.TestCase):
             '["skippr-plugin-data-source-s3","skippr-plugin-data-source-file"',
             text,
         )
-        file_duckdb = text.split("\n  e2e_file_duckdb:", 1)[1].split("\n  e2e_skipprlake:", 1)[0]
+        file_duckdb = text.split("\n  e2e_file_duckdb:", 1)[1].split("\n  e2e_file_copy:", 1)[0]
         self.assertIn("chmod +x target/release/skippr-plugin-*", file_duckdb)
         self.assertIn("unsafe_enable_version_guessing", file_duckdb)
         self.assertIn("DATA_DIR_HIGH_WATERMARK_PCT=0", file_duckdb)
         skipprlake = text.split("\n  e2e_skipprlake:", 1)[1].split("\n  e2e_postgres_cdc:", 1)[0]
-        self.assertIn("chmod +x target/release/skippr-plugin-*", skipprlake)
+        self.assertIn("USE_PUBLISHED_PLUGINS", skipprlake)
+        self.assertNotIn("runtime-plugin-binaries-linux_x86", skipprlake)
         postgres_cdc = (
             ROOT / ".github" / "actions" / "e2e" / "postgres_skipprlake_cdc" / "action.yaml"
         ).read_text(encoding="utf-8")
@@ -204,11 +221,13 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("SKIPPR_RUNTIME_LOG_LEVEL", s3_s3)
         self.assertNotRegex(text, r"(?m)^  cleanup:")
         plugins = text.split("\n  publish_runtime_plugins:", 1)[1].split(
-            "\n  publish_skipprd:", 1
+            "\n  chaos_mode_published:", 1
         )[0]
         self.assertIn("runs-on: ubuntu-latest", plugins)
         self.assertIn("linux_x86", plugins)
         self.assertIn("macos_arm64", plugins)
+        self.assertIn("e2e_file_duckdb", plugins)
+        self.assertIn("e2e_file_copy", plugins)
         self.assertIn("publish_runtime_plugins.py", plugins)
         self.assertIn("runtime-plugin-binaries-linux_x86", plugins)
         self.assertIn("aws s3 sync", plugins)
@@ -218,7 +237,10 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("s3://${BUCKET}/releases/${RELEASE_SUBDIR}/", plugins)
         publish = text.split("\n  publish_skipprd:", 1)[1]
         self.assertIn("runs-on: ubuntu-latest", publish)
-        self.assertIn("chaos_mode_test", publish)
+        self.assertNotIn("- chaos_mode_test", publish)
+        self.assertIn("chaos_mode_published", publish)
+        self.assertIn("e2e_prev_plugins", publish)
+        self.assertIn("e2e_prev_host", publish)
         self.assertIn("e2e_file_duckdb", publish)
         self.assertIn("e2e_skipprlake", publish)
         self.assertIn("e2e_postgres_cdc", publish)
@@ -295,6 +317,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("R2", text)
         self.assertIn("skipprlake", text)
         self.assertIn("file_duckdb", text)
+        self.assertIn("chaos_mode_published", text)
+        self.assertIn("0.0.0", text)
         self.assertIn("postgres", text)
         self.assertIn("5,100,000", text)
         self.assertIn("WAL_COMPACTION_GROUP_MAX_PARTS", text)

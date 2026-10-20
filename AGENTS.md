@@ -41,6 +41,7 @@ Release CI on `skipprd-private` is a **full integration test** of user-facing be
 - CI authenticates with `SKIPPR_API_KEY` (API key exchange → JWT) the same way automation customers use; do **not** add CI-only shortcuts that skip auth, run locks, ingest, or other platform steps.
 - If an E2E job fails, fix the product or the test scenario—do not bypass the failing step for GitHub Actions only.
 - Auth API routes (including `/auth/workspaces/.../runs/lock/*`) must be deployed to production before release tags that depend on them; the CLI assumes those endpoints exist when run locks are enabled.
+- GitHub e2e after plugin publish downloads `{tag}` plugins except File smoke; `0.0.0` still runs local chaos.
 
 ## Release
 

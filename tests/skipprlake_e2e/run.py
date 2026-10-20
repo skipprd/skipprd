@@ -8,6 +8,7 @@ Sibling bins are env-gated: SKIPPRD_BIN, DBT_BIN, SDE_BIN.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import shutil
@@ -137,7 +138,55 @@ schema_sinks:
     )
 
 
-def lake_env(config_path: Path, data_dir: Path, manifests: str) -> dict[str, str]:
+def use_published_plugins() -> bool:
+    return os.environ.get("USE_PUBLISHED_PLUGINS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+PUBLISHED_FILE_LAKE_PLUGIN_PATTERNS = (
+    "skippr-plugin-data-source-file*",
+    "skippr-plugin-data-sink-skipprlake*",
+    "skippr-plugin-schema-sink-skipprlake*",
+)
+
+
+def assert_published_file_lake_plugins(plugin_dir: str) -> None:
+    names = [path.name for path in Path(plugin_dir).rglob("*") if path.is_file()]
+    missing = [
+        pattern
+        for pattern in PUBLISHED_FILE_LAKE_PLUGIN_PATTERNS
+        if not any(fnmatch.fnmatch(name, pattern) for name in names)
+    ]
+    if missing:
+        raise HarnessError(
+            "expected downloaded plugins matching "
+            f"{missing} in {plugin_dir}; found {names}"
+        )
+
+
+def apply_plugin_pins(config_path: Path) -> None:
+    pins = os.environ.get("SKIPPR_PLUGIN_PINS", "").strip()
+    if not pins:
+        return
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / ".github" / "scripts" / "previous_protocol_compatible_release.py"),
+            "--pin-config",
+            str(config_path),
+            "--pins",
+            pins,
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+
+def lake_env(config_path: Path, data_dir: Path, manifests: str | None) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
         {
@@ -150,8 +199,6 @@ def lake_env(config_path: Path, data_dir: Path, manifests: str) -> dict[str, str
             "AWS_EC2_METADATA_DISABLED": "true",
             "SKIPPR_CONFIG_FILE": str(config_path),
             "SKIPPRD_EL_STORAGE_MODE": "local",
-            "USE_LOCAL_PLUGIN_CODE": "1",
-            "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR": manifests,
             "DATA_DIR": str(data_dir),
             "DATA_DIR_MIN_FREE_BYTES": "0",
             "DATA_DIR_HIGH_WATERMARK_PCT": "0",
@@ -159,6 +206,17 @@ def lake_env(config_path: Path, data_dir: Path, manifests: str) -> dict[str, str
             "RUST_LOG": "info",
         }
     )
+    if use_published_plugins():
+        env.pop("USE_LOCAL_PLUGIN_CODE", None)
+        env.pop("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR", None)
+        plugin_dir = os.environ.get("SKIPPR_RUNTIME_PLUGIN_DIR", "").strip()
+        if not plugin_dir:
+            plugin_dir = str(data_dir / "runtime-plugins")
+        Path(plugin_dir).mkdir(parents=True, exist_ok=True)
+        env["SKIPPR_RUNTIME_PLUGIN_DIR"] = plugin_dir
+    else:
+        env["USE_LOCAL_PLUGIN_CODE"] = "1"
+        env["SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR"] = manifests or ""
     return env
 
 
@@ -428,11 +486,14 @@ def main() -> int:
         write_source(source)
         config = workdir / "skippr.yml"
         write_skippr_yml(config, source, warehouse)
+        apply_plugin_pins(config)
         ddb_local.start(port=DDB_PORT, tables=[STORE_TABLE], container=DDB_CONTAINER)
         skipprd = build_skipprd()
-        manifests = stage_plugins(config)
+        manifests = None if use_published_plugins() else stage_plugins(config)
         env = lake_env(config, data_dir, manifests)
         run_sync(skipprd, config, env)
+        if use_published_plugins():
+            assert_published_file_lake_plugins(env["SKIPPR_RUNTIME_PLUGIN_DIR"])
         serve, endpoints = start_serve(skipprd, config, env, workdir)
         log("stage bronze count")
         bronze = flight_sql.query_flight_count(

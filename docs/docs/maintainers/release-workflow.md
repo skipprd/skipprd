@@ -2,16 +2,15 @@
 
 Operator path is **`/skippr-release`**: bump changed plugin crates, move `CHANGELOG` Unreleased into the tag, commit with the pre-commit hook, tag, push, watch both GitHub Actions pipelines until publish jobs succeed, then surgical public docs via **`skipprd-docs`**. Everyday plugin commits do not bump crate versions.
 
-Python wheels publish from `.github/workflows/ci.yml` (**Python CI/CD Pipeline**). Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`) plus macOS arm64 on the self-hosted `skippr-darwin-arm64` runner. Both pipelines run on tags (and `workflow_dispatch`), not on `main` / master pushes. `publish_runtime_plugins` uploads the workspace plugin catalog after both architecture builds. `publish_skipprd` runs after `chaos_mode_test`, the GitHub runner e2e jobs (file/Duckdb, SkipprLake, Postgres CDC upsert, S3 schema evolution, file/Postgres), the Darwin host build, and plugin publish. Windows is not a publish target.
+Python wheels publish from `.github/workflows/ci.yml` (**Python CI/CD Pipeline**). Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`) plus macOS arm64 on the self-hosted `skippr-darwin-arm64` runner. Both pipelines run on tags (and `workflow_dispatch`), not on `main` / master pushes. Local File smoke (`e2e_file_duckdb`, `e2e_file_copy`) gates `publish_runtime_plugins`. Product-tag e2e after that download `{tag}/manifest-index.json` from the CDN. `publish_skipprd` runs after CDN e2e, `chaos_mode_published`, protocol-compat jobs, Darwin, and plugin publish. Scratch `0.0.0` runs File smoke plus local `chaos_mode_test` and does not publish. Windows is not a publish target.
 
 ## High-level flow
 
-1. `plan_runtime_plugin_release`
-2. target-specific build jobs
-3. host and package test/compile jobs
-4. `publish_runtime_plugins`
-5. runtime e2e scenario jobs
-6. `publish_skipprd`
+1. target-specific catalog builds (`linux_x86`, `macos_arm64`) plus Python workflow contracts
+2. local File smoke (`e2e_file_duckdb`, `e2e_file_copy`) — and local `chaos_mode_test` on `0.0.0`
+3. `publish_runtime_plugins` (product tags only)
+4. CDN e2e (`chaos_mode_published`, SkipprLake, S3, Postgres) plus protocol-compat jobs
+5. `publish_skipprd`
 
 ## 1. Plan which plugins need rebuilding
 
@@ -78,18 +77,21 @@ Bump `pyproject.toml` and `python/Cargo.toml` together, then tag the engine (`18
 - `linux_test_suite` — Python workflow contracts (`test_rust_ci.py`, harness/plugin/host-boundary scripts). Cargo tests are skipped for now because they take too long on GitHub-hosted runners.
 - `linux_x86` — `rust-build-release` of skipprd plus the full workspace plugin catalog; starts in parallel with `linux_test_suite`
 - `macos_arm64` — the same catalog build on the self-hosted `skippr-darwin-arm64` runner
-- `chaos_mode_test` — `bike_hire_many` reads 5,100,000 mixed-size bike-hire JSON objects from R2 (`skippr-e2e-sample-data/bike-hire/`) into SkipprLake on the runner (DynamoDB Local catalog, `file://` warehouse) and asserts that exact row count. Mid-sync SIGKILL chaos is off on GitHub-hosted runners so the 5.1M ingest can finish. Pipeline buffers hold until 4 GiB or 7200s so R2 ingest is not overlapping SkipprLake compact; drain then compact in `WAL_COMPACTION_GROUP_MAX_PARTS=16` / 8 MiB groups on GitHub-hosted `ubuntu-latest` (4 cores / 16 GB). The skipprd org is GitHub Free, so larger 8-core hosted runners are not available. R2 secrets only; no AWS.
-- `e2e_file_duckdb` — File source append into Duckdb Iceberg
-- `e2e_skipprlake` — File source into SkipprLake (`tests/skipprlake_e2e`), including atomic dbt replace
+- `e2e_file_duckdb` — local File source append into Duckdb Iceberg; gates plugin publish
+- `e2e_file_copy` — local File → File `type: copy`; gates plugin publish
+- `chaos_mode_test` — local plugins on scratch `0.0.0` only. `bike_hire_many` reads 5,100,000 mixed-size bike-hire JSON objects from R2 (`skippr-e2e-sample-data/bike-hire/`) into SkipprLake on the runner (DynamoDB Local catalog, `file://` warehouse) and asserts that exact row count. Mid-sync SIGKILL chaos is off on GitHub-hosted runners so the 5.1M ingest can finish. Pipeline buffers hold until 4 GiB or 7200s so R2 ingest is not overlapping SkipprLake compact; drain then compact in `WAL_COMPACTION_GROUP_MAX_PARTS=16` / 8 MiB groups on GitHub-hosted `ubuntu-latest` (4 cores / 16 GB). The skipprd org is GitHub Free, so larger 8-core hosted runners are not available. R2 secrets only; no AWS.
+- `publish_runtime_plugins` — on product engine tags, after linux and Darwin catalog builds plus File smoke, stage and upload protocol-matching manifests plus binaries
+- `chaos_mode_published` — same `bike_hire_many` path after plugin publish; skipprd downloads `{tag}/manifest-index.json`. Product tags only (not `0.0.0`).
+- `e2e_skipprlake` — File source into SkipprLake (`tests/skipprlake_e2e`), including atomic dbt replace, against published plugins
 - `e2e_postgres_cdc` — Postgres snapshot-then-CDC upsert into SkipprLake
 - `e2e_s3_schema_evolution` — S3 v1 then backward-compatible v2 into SkipprLake
 - `e2e_s3_schema_alter` — S3 fixture into SkipprLake, then the enumerated `ALTER TABLE` matrix (rename / merge / drop / promote / fail-closed)
 - `e2e_file_postgres` — File source append into Docker Postgres
-- `e2e_file_copy` — File → File `type: copy`
 - `e2e_s3_file_copy` — S3 (R2) → File and File → S3 (R2) `type: copy`
 - `e2e_s3_s3_copy` — S3 (R2) → S3 (R2) `type: copy` Identity PUT (source and sink plugins together)
-- `publish_runtime_plugins` — on engine tags, after linux and Darwin catalog builds, stage and upload protocol-matching manifests plus binaries
-- `publish_skipprd` — on engine tags, after chaos, the GitHub e2e jobs, Darwin, and plugin publish, upload `skipprd-linux_x86.tar.gz` and `skipprd-macos_arm64.tar.gz` to the install CDN and create the GitHub release
+- `e2e_prev_plugins` — this tag’s host with previous protocol-compatible File/S3/SkipprLake crate pins
+- `e2e_prev_host` — previous tag’s `skipprd-linux_x86` with current crate pins (skips if that GitHub release asset is missing)
+- `publish_skipprd` — on engine tags, after CDN e2e, Darwin, and plugin publish, upload `skipprd-linux_x86.tar.gz` and `skipprd-macos_arm64.tar.gz` to the install CDN and create the GitHub release
 
 `check_host_dependency_boundaries.py` and `test_runtime_e2e_harness.py` run on that test lane. Windows is not a publish target.
 
@@ -117,17 +119,15 @@ Only after that validation does CI upload the staged runtime plugin tree to the 
 
 ## 5. Run the runtime acceptance jobs
 
-After runtime plugins are published, the workflow runs the release-style acceptance jobs:
+After runtime plugins are published, skipprd downloads `{tag}/manifest-index.json` (not local `USE_LOCAL_PLUGIN_CODE` artifacts). The live jobs are:
 
-- `published_runtime_plugins_smoke_test` to verify published runtime plugin download behavior
-- `bike_hire_test` using the baseline `bike_hire` scenario
-- `chaos_mode_test` using `bike_hire_many`
-- `s3_wal_test` using `bike_hire_s3_wal_many`
-- `deadletters_test`
+- `chaos_mode_published` using `bike_hire_many` against CDN plugins
+- File → SkipprLake, Postgres CDC, S3 schema evolution / ALTER, File → Postgres, and the S3 copy matrices
+- `e2e_prev_plugins` and `e2e_prev_host` when an older same-protocol engine tag exists
 
-Together these cover baseline runtime execution, exactly-once behavior under load, deadletters, runtime download behavior, and the current release topology. The baseline `bike_hire` run remains useful because it exercises the simplest release-shaped path without the extra load, WAL, or deadletter variations layered on top.
+Scratch `0.0.0` does not publish plugins, so it keeps local File smoke plus `chaos_mode_test` instead of the CDN jobs.
 
-The post-publish acceptance path verifies artifact download behavior with `artifacts[*].sha256`. It does not re-check `build_checksum` after publish.
+The post-publish acceptance path verifies artifact download behavior with `artifacts[*].sha256`. It does not re-check `build_checksum` after publish. Do not `aws s3 sync --delete`. Versioned plugin blobs are never overwritten. Athena/Glue e2e stays disabled until AWS secrets exist.
 
 ## 6. Publish the host binary
 
