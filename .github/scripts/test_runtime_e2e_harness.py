@@ -1008,6 +1008,70 @@ schema_sinks:
 
         assert_downloaded.assert_not_called()
 
+    def test_cdn_scenario_asserts_runtime_plugins_downloaded(self) -> None:
+        scenario = runtime_e2e_harness.Scenario(
+            name="cdn_plugins",
+            config_path=Path("/tmp/cdn_plugins.yml"),
+            smoke_runs=(),
+            full_runs=(),
+        )
+        skipprd = Path("/tmp/skipprd")
+        with (
+            mock.patch.object(
+                runtime_e2e_harness,
+                "prepare_local_state",
+            ),
+            mock.patch.object(
+                runtime_e2e_harness,
+                "prepare_aws_state",
+            ),
+            mock.patch.object(
+                runtime_e2e_harness,
+                "materialize_scenario_config",
+                return_value=Path("/tmp/cdn_plugins.yml"),
+            ),
+            mock.patch.object(
+                runtime_e2e_harness,
+                "base_environment",
+                return_value={},
+            ),
+            mock.patch.object(
+                runtime_e2e_harness,
+                "assert_runtime_plugins_downloaded",
+            ) as assert_downloaded,
+        ):
+            runtime_e2e_harness.run_scenario(
+                scenario,
+                mode="smoke",
+                skipprd=skipprd,
+                prepare=False,
+                skip_dynamodb=True,
+                runtime_plugin_versions=None,
+                local_runtime_manifests=None,
+                namespace=None,
+            )
+
+        assert_downloaded.assert_called_once()
+
+    def test_main_rejects_plugin_version_pins_with_local_manifests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            binary = Path(temp_dir) / "skipprd"
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            status = runtime_e2e_harness.main(
+                [
+                    "run",
+                    "bike_hire_many",
+                    "--skipprd",
+                    str(binary),
+                    "--runtime-plugin-version",
+                    "S3=0.1.6",
+                    "--local-runtime-manifest-dir",
+                    str(Path(temp_dir) / "manifests"),
+                ]
+            )
+        self.assertEqual(status, 1)
+
     def test_bike_hire_many_syncs_r2_into_skipprlake(self) -> None:
         scenario = runtime_e2e_harness.SCENARIOS["bike_hire_many"]
         config = scenario.config_path.read_text(encoding="utf-8")

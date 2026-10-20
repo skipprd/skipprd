@@ -4,7 +4,8 @@ inputs:
   skipprd_path:
     required: true
   plugin_binaries_dir:
-    required: true
+    required: false
+    default: ""
   r2_account_id:
     required: true
   r2_access_key_id:
@@ -80,26 +81,23 @@ runs:
         AWS_DEFAULT_REGION: auto
         AWS_EC2_METADATA_DISABLED: "true"
         AWS_ENDPOINT_URL_DYNAMODB: http://127.0.0.1:18013
-        USE_LOCAL_PLUGIN_CODE: "1"
         R2_ACCOUNT_ID: ${{ inputs.r2_account_id }}
         SKIPPRD_PATH: ${{ inputs.skipprd_path }}
+        PLUGIN_BINARIES_DIR: ${{ inputs.plugin_binaries_dir }}
       run: |
         set -euo pipefail
+        source "${GITHUB_WORKSPACE}/.github/scripts/e2e_stage_plugins.sh"
         work="${RUNNER_TEMP:-/tmp}/skippr-s3-alter"
-        mkdir -p "${work}/warehouse" "${work}/data" "${work}/manifests" target/release
-        cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
-        chmod +x target/release/skippr-plugin-* || true
+        mkdir -p "${work}/warehouse" "${work}/data"
         warehouse_uri="file://${work}/warehouse"
         endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-        python3 .github/scripts/local_runtime_plugins.py \
-          --config .github/actions/e2e/s3_skipprlake_alter/skippr.yml \
-          --pipeline s3_alter \
-          --output-dir "${work}/manifests" \
-          --release \
-          --skip-cargo-build
-        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
+        e2e_stage_plugins .github/actions/e2e/s3_skipprlake_alter/skippr.yml s3_alter "${work}/manifests"
         export ALTER_WORK="${work}"
         export ALTER_WAREHOUSE="${warehouse_uri}"
         export R2_S3_ENDPOINT="${endpoint}"
         export ALTER_S3_PREFIX="bike-hire-alter/${GITHUB_RUN_ID}/"
         python3 .github/actions/e2e/s3_skipprlake_alter/run_matrix.py
+        e2e_assert_downloaded \
+          'skippr-plugin-data-source-s3*' \
+          'skippr-plugin-data-sink-skipprlake*' \
+          'skippr-plugin-schema-sink-skipprlake*'

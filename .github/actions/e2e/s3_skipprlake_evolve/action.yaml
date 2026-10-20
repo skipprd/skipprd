@@ -4,7 +4,8 @@ inputs:
   skipprd_path:
     required: true
   plugin_binaries_dir:
-    required: true
+    required: false
+    default: ""
   r2_account_id:
     required: true
   r2_access_key_id:
@@ -80,23 +81,16 @@ runs:
         AWS_DEFAULT_REGION: auto
         AWS_EC2_METADATA_DISABLED: "true"
         AWS_ENDPOINT_URL_DYNAMODB: http://127.0.0.1:18012
-        USE_LOCAL_PLUGIN_CODE: "1"
         R2_ACCOUNT_ID: ${{ inputs.r2_account_id }}
+        PLUGIN_BINARIES_DIR: ${{ inputs.plugin_binaries_dir }}
       run: |
         set -euo pipefail
+        source "${GITHUB_WORKSPACE}/.github/scripts/e2e_stage_plugins.sh"
         work="${RUNNER_TEMP:-/tmp}/skippr-s3-evolve"
-        mkdir -p "${work}/warehouse" "${work}/data" "${work}/manifests" target/release
-        cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
-        chmod +x target/release/skippr-plugin-* || true
+        mkdir -p "${work}/warehouse" "${work}/data"
         warehouse_uri="file://${work}/warehouse"
         endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-        python3 .github/scripts/local_runtime_plugins.py \
-          --config .github/actions/e2e/s3_skipprlake_evolve/skippr.yml \
-          --pipeline bike_hire_evolve \
-          --output-dir "${work}/manifests" \
-          --release \
-          --skip-cargo-build
-        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
+        e2e_stage_plugins .github/actions/e2e/s3_skipprlake_evolve/skippr.yml bike_hire_evolve "${work}/manifests"
         for prefix in bike-hire-evolve/v1/ bike-hire-evolve/v2/; do
           sed \
             -e "s|LAKE_WAREHOUSE_PLACEHOLDER|${warehouse_uri}|" \
@@ -104,6 +98,7 @@ runs:
             -e "s|S3_PREFIX_PLACEHOLDER|${prefix}|" \
             .github/actions/e2e/s3_skipprlake_evolve/skippr.yml \
             > "${work}/skippr.yml"
+          e2e_pin_config "${work}/skippr.yml"
           DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
             "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
             sync --log --pipeline bike_hire_evolve --once
@@ -115,3 +110,7 @@ runs:
         echo "evolved=${evolved}"
         echo "${count}" | tail -n 1 | grep -qx '2000'
         echo "${evolved}" | tail -n 1 | grep -qx '1000'
+        e2e_assert_downloaded \
+          'skippr-plugin-data-source-s3*' \
+          'skippr-plugin-data-sink-skipprlake*' \
+          'skippr-plugin-schema-sink-skipprlake*'

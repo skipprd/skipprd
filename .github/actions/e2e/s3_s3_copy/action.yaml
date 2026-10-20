@@ -4,7 +4,8 @@ inputs:
   skipprd_path:
     required: true
   plugin_binaries_dir:
-    required: true
+    required: false
+    default: ""
   r2_account_id:
     required: true
   r2_access_key_id:
@@ -24,26 +25,20 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.r2_secret_access_key }}
         AWS_DEFAULT_REGION: auto
         AWS_EC2_METADATA_DISABLED: "true"
-        USE_LOCAL_PLUGIN_CODE: "1"
         R2_ACCOUNT_ID: ${{ inputs.r2_account_id }}
         SKIPPRD_PATH: ${{ inputs.skipprd_path }}
+        PLUGIN_BINARIES_DIR: ${{ inputs.plugin_binaries_dir }}
         SKIPPR_RUNTIME_LOG_LEVEL: info
         SKIPPR_LOG_LEVEL: info
         RUST_LOG: skippr=info
       run: |
         set -euo pipefail
+        source "${GITHUB_WORKSPACE}/.github/scripts/e2e_stage_plugins.sh"
         work="${RUNNER_TEMP:-/tmp}/skippr-s3-s3-copy"
-        mkdir -p "${work}" target/release
-        cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
-        chmod +x target/release/skippr-plugin-* || true
-        python3 .github/scripts/local_runtime_plugins.py \
-          --config .github/actions/e2e/s3_s3_copy/skippr.yml \
-          --pipeline s3_s3_copy \
-          --output-dir "${work}/manifests" \
-          --release \
-          --skip-cargo-build
-        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
+        mkdir -p "${work}"
+        e2e_stage_plugins .github/actions/e2e/s3_s3_copy/skippr.yml s3_s3_copy "${work}/manifests"
         export COPY_WORK="${work}"
         export R2_S3_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
         export COPY_S3_PREFIX="s3-s3-copy/${GITHUB_RUN_ID}/"
         python3 .github/actions/e2e/s3_s3_copy/run.py
+        e2e_assert_downloaded 'skippr-plugin-data-source-s3*' 'skippr-plugin-data-sink-s3*'

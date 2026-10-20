@@ -4,27 +4,22 @@ inputs:
   skipprd_path:
     required: true
   plugin_binaries_dir:
-    required: true
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
     - name: File → File copy matrix
       shell: bash
       env:
-        USE_LOCAL_PLUGIN_CODE: "1"
         SKIPPRD_PATH: ${{ inputs.skipprd_path }}
+        PLUGIN_BINARIES_DIR: ${{ inputs.plugin_binaries_dir }}
       run: |
         set -euo pipefail
+        source "${GITHUB_WORKSPACE}/.github/scripts/e2e_stage_plugins.sh"
         work="${RUNNER_TEMP:-/tmp}/skippr-file-copy"
-        mkdir -p "${work}" target/release
-        cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
-        chmod +x target/release/skippr-plugin-* || true
-        python3 .github/scripts/local_runtime_plugins.py \
-          --config .github/actions/e2e/file_copy/skippr.yml \
-          --pipeline file_copy \
-          --output-dir "${work}/manifests" \
-          --release \
-          --skip-cargo-build
-        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
+        mkdir -p "${work}"
+        e2e_stage_plugins .github/actions/e2e/file_copy/skippr.yml file_copy "${work}/manifests"
         export COPY_WORK="${work}"
         python3 .github/actions/e2e/file_copy/run_matrix.py
+        e2e_assert_downloaded 'skippr-plugin-data-source-file*' 'skippr-plugin-data-sink-file*'

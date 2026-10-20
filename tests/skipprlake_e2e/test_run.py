@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 MODULE_PATH = Path(__file__).resolve().parent / "run.py"
 SPEC = importlib.util.spec_from_file_location("skipprlake_e2e_run", MODULE_PATH)
@@ -49,6 +51,45 @@ class SkipprLakeE2eHarnessTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("name: bronze", sources)
         self.assertIn("name: shop", sources)
+
+    def test_assert_published_file_lake_plugins_requires_all_stems(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_dir = Path(tmp) / "plugins"
+            plugin_dir.mkdir()
+            (plugin_dir / "skippr-plugin-data-source-file").write_text("", encoding="utf-8")
+            with self.assertRaises(harness.HarnessError):
+                harness.assert_published_file_lake_plugins(str(plugin_dir))
+            (plugin_dir / "skippr-plugin-data-sink-skipprlake").write_text("", encoding="utf-8")
+            (plugin_dir / "skippr-plugin-schema-sink-skipprlake").write_text("", encoding="utf-8")
+            harness.assert_published_file_lake_plugins(str(plugin_dir))
+
+    def test_published_plugins_omits_local_manifest_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "skippr.yml"
+            data = Path(tmp) / "data"
+            with mock.patch.dict(
+                os.environ,
+                {"USE_PUBLISHED_PLUGINS": "1", "USE_LOCAL_PLUGIN_CODE": "1"},
+                clear=False,
+            ):
+                env = harness.lake_env(config, data, None)
+            self.assertNotIn("USE_LOCAL_PLUGIN_CODE", env)
+            self.assertNotIn("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR", env)
+            self.assertTrue(env["SKIPPR_RUNTIME_PLUGIN_DIR"])
+
+    def test_local_plugins_set_use_local_plugin_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "skippr.yml"
+            data = Path(tmp) / "data"
+            env_overlay = {
+                key: value
+                for key, value in os.environ.items()
+                if key != "USE_PUBLISHED_PLUGINS"
+            }
+            with mock.patch.dict(os.environ, env_overlay, clear=True):
+                env = harness.lake_env(config, data, "/tmp/manifests")
+            self.assertEqual(env["USE_LOCAL_PLUGIN_CODE"], "1")
+            self.assertEqual(env["SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR"], "/tmp/manifests")
 
     def test_write_source_is_twelve_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

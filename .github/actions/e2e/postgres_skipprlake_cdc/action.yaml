@@ -4,7 +4,8 @@ inputs:
   skipprd_path:
     required: true
   plugin_binaries_dir:
-    required: true
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
@@ -102,24 +103,17 @@ runs:
         AWS_DEFAULT_REGION: us-east-1
         AWS_EC2_METADATA_DISABLED: "true"
         AWS_ENDPOINT_URL_DYNAMODB: http://127.0.0.1:18011
-        USE_LOCAL_PLUGIN_CODE: "1"
+        PLUGIN_BINARIES_DIR: ${{ inputs.plugin_binaries_dir }}
       run: |
         set -euo pipefail
+        source "${GITHUB_WORKSPACE}/.github/scripts/e2e_stage_plugins.sh"
         work="${RUNNER_TEMP:-/tmp}/skippr-postgres-cdc"
-        mkdir -p "${work}/warehouse" "${work}/data" "${work}/manifests" target/release
-        cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
-        chmod +x target/release/skippr-plugin-* || true
+        mkdir -p "${work}/warehouse" "${work}/data"
         warehouse_uri="file://${work}/warehouse"
         sed "s|LAKE_WAREHOUSE_PLACEHOLDER|${warehouse_uri}|" \
           .github/actions/e2e/postgres_skipprlake_cdc/skippr.yml \
           > "${work}/skippr.yml"
-        python3 .github/scripts/local_runtime_plugins.py \
-          --config "${work}/skippr.yml" \
-          --pipeline postgres_skipprlake_cdc \
-          --output-dir "${work}/manifests" \
-          --release \
-          --skip-cargo-build
-        export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests"
+        e2e_stage_plugins "${work}/skippr.yml" postgres_skipprlake_cdc "${work}/manifests"
         DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
           "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
           sync --log --pipeline postgres_skipprlake_cdc --once
@@ -140,3 +134,7 @@ runs:
         echo "updated=${updated}"
         echo "${count}" | tail -n 1 | grep -qx '3'
         echo "${updated}" | tail -n 1 | grep -qx 'alpha-prime'
+        e2e_assert_downloaded \
+          'skippr-plugin-data-source-postgres*' \
+          'skippr-plugin-data-sink-skipprlake*' \
+          'skippr-plugin-schema-sink-skipprlake*'
