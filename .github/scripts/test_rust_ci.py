@@ -83,6 +83,7 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("cargo check --all-features", text)
         self.assertIn("test_runtime_e2e_harness.py", text)
         self.assertIn("test_local_runtime_plugins.py", text)
+        self.assertIn("test_bump_changed_plugin_crates.py", text)
         self.assertIn("test_host_dependency_boundaries.py", text)
         self.assertNotIn("check_host_dependency_boundaries.py", text)
         self.assertIn("rust-build-release", text)

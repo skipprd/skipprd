@@ -44,6 +44,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("test_python_bindings_ci.py", text)
         self.assertIn("test_rust_ci.py", text)
         self.assertIn("test_publish_runtime_plugins.py", text)
+        self.assertIn("test_bump_changed_plugin_crates.py", text)
         self.assertIn("cargo test -p skipprd --lib", text)
         self.assertIn("skippr-connect-gen", text)
         self.assertNotIn("cargo test --workspace", text)
@@ -295,6 +296,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("test_python_bindings_ci.py", script)
         self.assertIn("test_rust_ci.py", script)
         self.assertIn("test_publish_runtime_plugins.py", script)
+        self.assertIn("test_bump_changed_plugin_crates.py", script)
         self.assertIn(".githooks/pre-commit", installer)
 
     def test_python_semver_is_independent_of_engine_tags(self):

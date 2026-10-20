@@ -42,6 +42,19 @@ Release CI on `skipprd-private` is a **full integration test** of user-facing be
 - If an E2E job fails, fix the product or the test scenario—do not bypass the failing step for GitHub Actions only.
 - Auth API routes (including `/auth/workspaces/.../runs/lock/*`) must be deployed to production before release tags that depend on them; the CLI assumes those endpoints exist when run locks are enabled.
 
+## Release
+
+Operator path is **`/skippr-release`** (skill `skippr-release`). It bumps plugin crate patches when checksum inputs changed, updates `CHANGELOG.md`, commits with the pre-commit hook (never `--no-verify`), tags, pushes, watches GitHub Actions, and calls **`skipprd-docs`** for surgical public copy.
+
+Plugin crate `version` in `plugins/**/Cargo.toml` is the CDN path identity (`plugins/<stem>/versions/<crate>/`). Those paths are immutable. If the release contains plugin, `plugins/shared/`, protocol, wire, or `skippr-runtime-sdk` changes, bump that crate (or every catalog crate for shared inputs) **before** the tag:
+
+```bash
+python3 .github/scripts/bump_changed_plugin_crates.py --base <last-engine-tag>
+python3 .github/scripts/runtime_plugin_release_plan.py
+```
+
+Do not bump plugin crates on everyday commits. Do not stamp root `Cargo.toml` locally (stays `0.1.0`; CI stamps the tag). Engine tags are unprefixed semver.
+
 ## Key gotchas
 
 1. **Memory-constrained linking:** test builds can be heavy on memory.
