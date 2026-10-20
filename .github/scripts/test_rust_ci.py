@@ -190,6 +190,11 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("MERGE COLUMN", alter_matrix)
         self.assertIn("def sql_ident(", alter_matrix)
         self.assertIn('return f\'"{name}"\'', alter_matrix)
+        self.assertIn(
+            'table = f\'{sql_ident("s3_alter")}.{sql_ident(namespace)}\'',
+            alter_matrix,
+        )
+        self.assertNotIn("if namespace !=", alter_matrix)
         file_postgres = (
             ROOT / ".github" / "actions" / "e2e" / "file_postgres_append" / "action.yaml"
         ).read_text(encoding="utf-8")
@@ -264,6 +269,21 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("skipprd-macos_arm64.tar.gz", publish)
         self.assertIn("gh release", publish)
         self.assertIn("secrets.GITHUB_TOKEN", publish)
+
+    def test_composite_action_yaml_root_keys_only(self) -> None:
+        allowed = {"name", "description", "inputs", "runs"}
+        actions = list((ROOT / ".github" / "actions").rglob("action.yaml"))
+        self.assertTrue(actions)
+        for path in actions:
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if not line or line[0].isspace() or line.startswith("#"):
+                    continue
+                key = line.split(":", 1)[0]
+                self.assertIn(
+                    key,
+                    allowed,
+                    f"{path.relative_to(ROOT)}:{i}: flush-left {line!r} is not a composite root key",
+                )
 
     def test_composite_action_descriptions_quote_embedded_colons(self) -> None:
         actions = list((ROOT / ".github" / "actions").rglob("action.yaml"))

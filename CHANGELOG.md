@@ -17,6 +17,13 @@ All notable changes to this project will be documented in this file.
 - `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
 ## [Unreleased]
 
+## [18.3.7]
+
+### Fixed
+
+- `skipprd query` after migrate uses the two-part Iceberg name (`s3_alter.s3_alter`). A one-part name resolved as `datafusion.public.*` and missed the table.
+- File-to-Postgres e2e keeps migration SQL inside the composite `run` block so GitHub Actions can load the action.
+
 ## [18.3.6]
 
 ### Added
