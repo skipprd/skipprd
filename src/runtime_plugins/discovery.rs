@@ -18,6 +18,7 @@ use crate::runtime_plugins::manifest::RuntimePluginManifest;
 use crate::runtime_plugins::protocol::RuntimePluginKind;
 
 const DEFAULT_DISCOVERY_BASE_URL: &str = "https://install.skippr.io/releases/runtime-plugins";
+const UNSTAMPED_WORKSPACE_HOST_VERSION: &str = "0.1.0";
 const METADATA_REFRESH_QUERY_PARAM: &str = "skippr_metadata_refresh";
 const LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR_ENV: &str = "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR";
 const USE_LOCAL_PLUGIN_CODE_ENV: &str = "USE_LOCAL_PLUGIN_CODE";
@@ -99,7 +100,7 @@ the published manifest uses a different name or casing, or the requested version
 \n- requested plugin: {}\
 \n- requested kind: {:?}\
 \n- requested version: {}\
-\n- latest index label: {}\
+\n- index label: {}\
 \n- manifest index URL: {}\
 \n- case-insensitive matches: {}\
 \n- available plugins for this kind: {}",
@@ -341,6 +342,29 @@ fn sorted_json_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+fn host_release_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+fn unstamped_workspace_host() -> bool {
+    host_release_version() == UNSTAMPED_WORKSPACE_HOST_VERSION
+}
+
+fn format_host_manifest_index_url(host_version: &str) -> String {
+    format!("{DEFAULT_DISCOVERY_BASE_URL}/{host_version}/manifest-index.json")
+}
+
+fn host_manifest_index_url() -> io::Result<String> {
+    if unstamped_workspace_host() {
+        return Err(io::Error::other(
+            "skipprd was built without a release version stamp (crate version 0.1.0). \
+Set USE_LOCAL_PLUGIN_CODE=1 to use local plugin manifests, or install a tagged skipprd release. \
+Published discovery uses /{host-semver}/manifest-index.json, not /latest/.",
+        ));
+    }
+    Ok(format_host_manifest_index_url(host_release_version()))
+}
+
 async fn discover_runtime_plugin(
     expected_kind: RuntimePluginKind,
     expected_plugin_name: &str,
@@ -348,7 +372,7 @@ async fn discover_runtime_plugin(
 ) -> io::Result<ResolvedRuntimePlugin> {
     let client = reqwest::Client::new();
     let requested_plugin_version = configured_runtime_plugin_version(configured_plugin_version);
-    let index_url = latest_manifest_index_url();
+    let index_url = host_manifest_index_url()?;
     debug!(
         "Resolving runtime {} plugin '{}' from published registry requested_version='{}' index_url={}",
         runtime_plugin_kind_label(expected_kind),
@@ -383,10 +407,6 @@ async fn discover_runtime_plugin(
     );
     let manifest_path = cache_manifest(&client, &cache_key, latest_entry, &manifest_url).await?;
     ResolvedRuntimePlugin::load(manifest_path)
-}
-
-fn latest_manifest_index_url() -> String {
-    format!("{DEFAULT_DISCOVERY_BASE_URL}/latest/manifest-index.json")
 }
 
 fn rewrite_manifest_url_version(manifest_url: &str, version: &str) -> io::Result<String> {
@@ -588,11 +608,13 @@ mod tests {
     use crate::runtime_plugins::protocol::RuntimePluginKind;
 
     use super::{
-        append_metadata_refresh_query, configured_runtime_plugin_version, is_retryable_status,
-        latest_manifest_index_url, manifest_cache_key, manifest_refresh_enabled,
-        metadata_fetch_backoff, missing_runtime_plugin_message, resolve_local_runtime_plugin,
+        append_metadata_refresh_query, configured_runtime_plugin_version,
+        format_host_manifest_index_url, host_manifest_index_url, is_retryable_status,
+        manifest_cache_key, manifest_refresh_enabled, metadata_fetch_backoff,
+        missing_runtime_plugin_message, resolve_local_runtime_plugin,
         resolved_runtime_plugin_cache_key, rewrite_manifest_url_version, runtime_plugin_cache_root,
-        use_local_plugin_code, RuntimePluginIndex, RuntimePluginIndexEntry,
+        unstamped_workspace_host, use_local_plugin_code, RuntimePluginIndex,
+        RuntimePluginIndexEntry,
     };
 
     fn local_manifest_json(plugin_name: &str, kind: RuntimePluginKind, executable: &str) -> String {
@@ -634,11 +656,21 @@ mod tests {
     }
 
     #[test]
-    fn manifest_index_url_uses_latest_prefix() {
+    fn manifest_index_url_uses_host_semver() {
         assert_eq!(
-            latest_manifest_index_url(),
-            "https://install.skippr.io/releases/runtime-plugins/latest/manifest-index.json"
+            format_host_manifest_index_url("18.3.5"),
+            "https://install.skippr.io/releases/runtime-plugins/18.3.5/manifest-index.json"
         );
+    }
+
+    #[test]
+    fn unstamped_workspace_host_fails_closed() {
+        assert!(unstamped_workspace_host());
+        let err = host_manifest_index_url().expect_err("0.1.0 host must not use /latest/");
+        let message = err.to_string();
+        assert!(message.contains("0.1.0"));
+        assert!(message.contains("USE_LOCAL_PLUGIN_CODE=1"));
+        assert!(!message.contains("/latest/manifest-index.json"));
     }
 
     #[test]
@@ -759,7 +791,7 @@ mod tests {
         assert!(message
             .contains("Hint: a plugin with the same letters but different casing exists: S3."));
         assert!(message.contains("- requested version: latest"));
-        assert!(message.contains("- latest index label: 8.1.0"));
+        assert!(message.contains("- index label: 8.1.0"));
         assert!(message.contains("- case-insensitive matches: S3"));
         assert!(message.contains("- available plugins for this kind: File, S3"));
     }

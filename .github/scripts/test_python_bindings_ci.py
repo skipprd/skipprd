@@ -133,6 +133,14 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertTrue((ROOT / "skippr.pyi").is_file(), "maturin ships the root stub")
         self.assertFalse((ROOT / "python" / "skippr.pyi").exists())
 
+    def test_python_script_stamps_skipprd_from_wheel_semver(self):
+        script = TEST_PYTHON.read_text(encoding="utf-8")
+        stamp = script.index("set_root_package_version.py")
+        maturin = script.index("maturin build --release")
+        self.assertLess(stamp, maturin)
+        self.assertIn("python_semver()", script)
+        self.assertIn('--workspace "$ROOT"', script)
+
     def test_release_profile_strips_debug_so_pypi_fits(self):
         text = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
         release = text.split("[profile.release]", 1)[1].split("[profile.", 1)[0]
@@ -291,10 +299,10 @@ class PythonBindingsCiTests(unittest.TestCase):
 
     def test_python_semver_is_independent_of_engine_tags(self):
         module = load_wheel_version()
-        self.assertEqual(module.python_semver(), "18.3.4")
+        self.assertEqual(module.python_semver(), "18.3.5")
         self.assertTrue(
             module.should_publish(
-                "18.3.4", unpublished=["skippr-18.3.4-cp310-abi3-macosx_11_0_arm64.whl"]
+                "18.3.5", unpublished=["skippr-18.3.5-cp310-abi3-macosx_11_0_arm64.whl"]
             )
         )
         self.assertFalse(module.should_publish("18.0.0", unpublished=[]))
@@ -380,9 +388,9 @@ class PythonBindingsCiTests(unittest.TestCase):
             python_cargo = (root / "python" / "Cargo.toml").read_text(encoding="utf-8")
             lock = (root / "Cargo.lock").read_text(encoding="utf-8")
             self.assertRegex((root / "Cargo.toml").read_text(encoding="utf-8"), r'(?m)^version = "9\.8\.7"$')
-            self.assertRegex(pyproject, r'(?m)^version = "18\.3\.4"$')
-            self.assertRegex(python_cargo, r'(?m)^version = "18\.3\.4"$')
-            self.assertIn('name = "skipprd-python"\nversion = "18.3.4"', lock)
+            self.assertRegex(pyproject, r'(?m)^version = "18\.3\.5"$')
+            self.assertRegex(python_cargo, r'(?m)^version = "18\.3\.5"$')
+            self.assertIn('name = "skipprd-python"\nversion = "18.3.5"', lock)
 
     def test_normalize_semver_rejects_v_prefix(self):
         module = load_set_version()

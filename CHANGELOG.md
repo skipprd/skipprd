@@ -8,6 +8,13 @@ All notable changes to this project will be documented in this file.
 
 - DATA_DIR min-free (default 5 GB) is tuned down when it is larger than the free space left at the high watermark, so a small volume cannot pause at the floor and then fail to resume.
 
+## [18.3.5]
+
+### Breaking
+
+- Runtime plugin discovery uses `{skipprd-semver}/manifest-index.json`, not `/latest/`. Unstamped `0.1.0` workspace builds fail closed (`USE_LOCAL_PLUGIN_CODE=1`). YAML `version:` still pins a crate.
+- Publishing a plugin crate version that already exists with a different protocol or sha256 is a hard failure. Protocol bumps must bump the plugin crate. `aws s3 sync --delete` is forbidden on the runtime-plugins prefix.
+
 ## [18.3.4]
 
 ### Fixed

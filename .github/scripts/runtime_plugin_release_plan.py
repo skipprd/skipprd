@@ -143,6 +143,55 @@ def stale_sdk_build_metadata_reason(
     )
 
 
+IMMUTABLE_VERSION_PATH_HELP = "bump the plugin crate; version paths are immutable"
+
+
+def same_version_path_conflict_reason(
+    plugin: dict,
+    published: dict,
+    published_index: dict,
+    published_index_entry: dict,
+    publish_targets: list,
+    protocol_version: int,
+) -> str | None:
+    if published.get("version") != plugin["package_version"]:
+        return None
+    if published_manifest_matches_catalog(
+        published,
+        published_index,
+        published_index_entry,
+        plugin,
+        publish_targets,
+        protocol_version,
+    ):
+        return None
+    details = []
+    published_protocol = published.get("protocol_version")
+    if published_protocol != protocol_version:
+        details.append(
+            f"protocol {published_protocol or '<missing>'} != {protocol_version}"
+        )
+    sdk_build_reason = stale_sdk_build_metadata_reason(
+        published, published_index, published_index_entry, plugin
+    )
+    if sdk_build_reason is not None:
+        details.append(sdk_build_reason)
+    if published.get("build_checksum", "") != plugin["checksum"]:
+        details.append("build checksum changed")
+    stale_build_targets = published_artifacts_with_stale_build_environment(
+        published, publish_targets
+    )
+    if stale_build_targets:
+        details.append(
+            "artifact build environment changed for " + ", ".join(stale_build_targets)
+        )
+    detail = "; ".join(details) if details else "published payload differs"
+    return (
+        f"{plugin['package_name']} version {plugin['package_version']} is already "
+        f"published ({detail}). {IMMUTABLE_VERSION_PATH_HELP}"
+    )
+
+
 def plan_runtime_plugin_release(
     catalog: list[dict],
     publish_targets: list,
@@ -157,6 +206,7 @@ def plan_runtime_plugin_release(
     }
     selected = []
     decision_reasons = {}
+    conflicts = []
     for plugin in catalog:
         published = published_manifests.get(plugin["manifest_filename"])
         if published is None:
@@ -165,8 +215,6 @@ def plan_runtime_plugin_release(
             continue
 
         published_version = published.get("version", "")
-        published_protocol_version = published.get("protocol_version")
-        published_checksum = published.get("build_checksum", "")
         if published_version != plugin["package_version"]:
             selected.append(plugin["package_name"])
             decision_reasons[plugin["package_name"]] = (
@@ -175,41 +223,22 @@ def plan_runtime_plugin_release(
             )
             continue
 
-        if published_protocol_version != protocol_version:
-            selected.append(plugin["package_name"])
-            decision_reasons[plugin["package_name"]] = (
-                "runtime protocol changed from "
-                f"{published_protocol_version or '<missing>'} to {protocol_version}"
-            )
-            continue
-
-        sdk_build_reason = stale_sdk_build_metadata_reason(
+        conflict = same_version_path_conflict_reason(
+            plugin,
             published,
             published_index,
             published_index_entries.get(plugin["manifest_filename"], {}),
-            plugin,
+            publish_targets,
+            protocol_version,
         )
-        if sdk_build_reason is not None:
-            selected.append(plugin["package_name"])
-            decision_reasons[plugin["package_name"]] = sdk_build_reason
-            continue
+        if conflict is not None:
+            conflicts.append(conflict)
 
-        if published_checksum != plugin["checksum"]:
-            selected.append(plugin["package_name"])
-            decision_reasons[plugin["package_name"]] = (
-                "build checksum changed for existing plugin version"
-            )
-            continue
-
-        stale_build_targets = published_artifacts_with_stale_build_environment(
-            published, publish_targets
+    if conflicts:
+        raise SystemExit(
+            "refusing to rebuild runtime plugins onto an existing crate version:\n"
+            + "\n".join(f"- {item}" for item in conflicts)
         )
-        if stale_build_targets:
-            selected.append(plugin["package_name"])
-            decision_reasons[plugin["package_name"]] = (
-                "published artifact build environment changed or is missing for "
-                + ", ".join(stale_build_targets)
-            )
 
     selected = sorted(set(selected))
     build_all = len(selected) == len(catalog)
@@ -221,10 +250,7 @@ def plan_runtime_plugin_release(
             "SDK build fingerprint, build checksum, and build environment"
         )
     else:
-        reason = (
-            "build runtime plugins whose published version, protocol, "
-            "SDK build fingerprint, build checksum, or build environment is stale"
-        )
+        reason = "build runtime plugins whose crate version is new or unpublished"
 
     return {
         "build_all": build_all,

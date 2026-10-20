@@ -41,7 +41,7 @@ The log line starts `Skippr could not find a published runtime`.
 **Fix:**
 
 1. Check the connector name and casing in `skippr.yml` against the [connector catalog](/connectors/).
-2. Remove `version:` if you meant “latest”.
+2. Remove `version:` if you meant the catalog published with this Skipprd release.
 3. Confirm outbound HTTPS to `install.skippr.io`.
 4. On a first run, wait — Skipprd caches the download under `~/.skippr/runtime_plugins`.
 

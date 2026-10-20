@@ -1195,6 +1195,22 @@ def published_latest_manifest_index_url(
     )
 
 
+def published_release_manifest_index_url(
+    releases_bucket: str,
+    runtime_plugin_release_subdir: str,
+    bundle_version: str,
+) -> str:
+    version = bundle_version.strip()
+    if not version or version == "latest":
+        raise HarnessError(
+            "runtime plugin acceptance requires a skipprd semver bundle, not /latest/"
+        )
+    return (
+        f"{public_release_base_url(releases_bucket, runtime_plugin_release_subdir)}"
+        f"/{version}/manifest-index.json"
+    )
+
+
 def versioned_manifest_relative_path_for(entry: dict, version: str) -> Path:
     return (
         Path("plugins")
@@ -1912,14 +1928,19 @@ def run_runtime_plugin_acceptance(
     releases_bucket: str,
     runtime_plugin_versions: dict[str, str] | None,
     runtime_plugin_release_subdir: str,
+    bundle_version: str | None = None,
 ) -> None:
     ensure_tool("cargo")
     skipprd = resolve_skipprd(skipprd_arg)
     assert_no_bundled_runtime_plugins(skipprd)
 
-    latest_index_url = published_latest_manifest_index_url(
+    latest_index_url = published_release_manifest_index_url(
         releases_bucket,
         runtime_plugin_release_subdir,
+        bundle_version
+        or os.environ.get("SKIPPRD_RELEASE_VERSION")
+        or os.environ.get("GITHUB_REF_NAME")
+        or "",
     )
     catalog_entries = load_workspace_plugin_catalog(REPO_ROOT)
     expected_protocol_version = workspace_runtime_protocol_version(REPO_ROOT)
@@ -3097,6 +3118,11 @@ def main(argv: list[str] | None = None) -> int:
         default="runtime-plugins",
         help="Release subdirectory for published runtime plugin assets",
     )
+    runtime_plugins_parser.add_argument(
+        "--bundle-version",
+        default="",
+        help="skipprd semver whose {semver}/manifest-index.json to verify; defaults to SKIPPRD_RELEASE_VERSION or GITHUB_REF_NAME",
+    )
     runtime_plugins_parser.set_defaults(handler=None)
 
     args = parser.parse_args(argv)
@@ -3170,6 +3196,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.runtime_plugin_version
                 ),
                 runtime_plugin_release_subdir=args.runtime_plugin_release_subdir,
+                bundle_version=args.bundle_version or None,
             )
             return 0
 

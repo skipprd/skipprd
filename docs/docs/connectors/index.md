@@ -7,7 +7,7 @@ description: Every Skipprd source, destination, and schema sink — pick a conne
 
 A pipeline reads from one **source** and writes to one **destination**. Some destinations also need a **schema sink** so the warehouse catalog stays in step with the tables Skipprd creates.
 
-Configure them in `skippr.yml`, Python, or `skipprd connect`. Pin a release with `version:` on that entry when you do not want “latest”.
+Configure them in `skippr.yml`, Python, or `skipprd connect`. Skipprd downloads the connector catalog published with that engine release. Pin a crate with `version:` on that entry only when you need a specific published build.
 
 ## Data sources
 

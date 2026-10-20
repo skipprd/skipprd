@@ -73,74 +73,72 @@ class RuntimePluginReleasePlanTests(unittest.TestCase):
         self.assertFalse(plan["build_all"])
         self.assertEqual(plan["packages"], [])
 
-    def test_sdk_build_change_rebuilds_every_plugin_without_version_bumps(
-        self,
-    ) -> None:
+    def test_protocol_change_same_crate_version_is_immutable(self) -> None:
+        index, manifests = self.published_metadata("current-sdk")
+
+        with self.assertRaises(SystemExit) as raised:
+            runtime_plugin_release_plan.plan_runtime_plugin_release(
+                self.catalog("current-sdk"),
+                [],
+                18,
+                index,
+                manifests,
+            )
+
+        message = str(raised.exception)
+        self.assertIn("skippr-plugin-data-sink-athena", message)
+        self.assertIn("0.1.9", message)
+        self.assertIn("version paths are immutable", message)
+
+    def test_sdk_build_change_same_crate_version_is_immutable(self) -> None:
         index, manifests = self.published_metadata("old-sdk")
 
-        plan = runtime_plugin_release_plan.plan_runtime_plugin_release(
-            self.catalog("current-sdk"),
-            [],
-            17,
-            index,
-            manifests,
-        )
-
-        self.assertTrue(plan["build_all"])
-        self.assertEqual(
-            plan["packages"],
-            [
-                "skippr-plugin-data-sink-athena",
-                "skippr-plugin-data-source-s3",
-            ],
-        )
-        self.assertTrue(
-            all(
-                "runtime SDK build fingerprint" in reason
-                for reason in plan["package_reasons"].values()
+        with self.assertRaises(SystemExit) as raised:
+            runtime_plugin_release_plan.plan_runtime_plugin_release(
+                self.catalog("current-sdk"),
+                [],
+                17,
+                index,
+                manifests,
             )
-        )
 
-    def test_stale_catalog_entry_rebuilds_affected_plugin(self) -> None:
+        self.assertIn("version paths are immutable", str(raised.exception))
+
+    def test_stale_catalog_entry_same_crate_version_is_immutable(self) -> None:
         index, manifests = self.published_metadata("current-sdk")
         index["manifests"][0]["sdk_build_fingerprint"] = "stale-sdk"
 
+        with self.assertRaises(SystemExit) as raised:
+            runtime_plugin_release_plan.plan_runtime_plugin_release(
+                self.catalog("current-sdk"),
+                [],
+                17,
+                index,
+                manifests,
+            )
+
+        message = str(raised.exception)
+        self.assertIn("skippr-plugin-data-sink-athena", message)
+        self.assertIn("version paths are immutable", message)
+
+    def test_crate_version_bump_selects_new_path(self) -> None:
+        index, manifests = self.published_metadata("current-sdk")
+        catalog = self.catalog("current-sdk")
+        catalog[0]["package_version"] = "0.1.10"
+
         plan = runtime_plugin_release_plan.plan_runtime_plugin_release(
-            self.catalog("current-sdk"),
+            catalog,
             [],
             17,
             index,
             manifests,
         )
 
-        self.assertFalse(plan["build_all"])
-        self.assertEqual(
-            plan["packages"], ["skippr-plugin-data-sink-athena"]
-        )
+        self.assertEqual(plan["packages"], ["skippr-plugin-data-sink-athena"])
         self.assertIn(
-            "manifest index entry",
+            "version changed from 0.1.9 to 0.1.10",
             plan["package_reasons"]["skippr-plugin-data-sink-athena"],
         )
-
-    def test_legacy_metadata_without_fingerprint_is_backward_readable_but_stale(
-        self,
-    ) -> None:
-        index, manifests = self.published_metadata("current-sdk")
-        index.pop("sdk_build_fingerprint")
-        for entry in index["manifests"]:
-            entry.pop("sdk_build_fingerprint")
-        for manifest in manifests.values():
-            manifest.pop("sdk_build_fingerprint")
-
-        plan = runtime_plugin_release_plan.plan_runtime_plugin_release(
-            self.catalog("current-sdk"),
-            [],
-            17,
-            index,
-            manifests,
-        )
-
-        self.assertTrue(plan["build_all"])
 
 
 if __name__ == "__main__":

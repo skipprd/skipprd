@@ -758,6 +758,22 @@ schema_sinks:
                 download_dir=Path("/tmp"),
             )
 
+    def test_published_release_manifest_index_url_uses_host_semver(self) -> None:
+        self.assertEqual(
+            runtime_e2e_harness.published_release_manifest_index_url(
+                "skippr-web-install",
+                "runtime-plugins",
+                "18.3.5",
+            ),
+            "https://install.skippr.io/releases/runtime-plugins/18.3.5/manifest-index.json",
+        )
+        with self.assertRaises(runtime_e2e_harness.HarnessError):
+            runtime_e2e_harness.published_release_manifest_index_url(
+                "skippr-web-install",
+                "runtime-plugins",
+                "latest",
+            )
+
     def test_public_release_base_url_prefers_install_site(self) -> None:
         self.assertEqual(
             runtime_e2e_harness.public_release_base_url(

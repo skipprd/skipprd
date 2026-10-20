@@ -16,6 +16,18 @@ python -m pip install maturin==1.15.0 pyarrow==25.0.1 pyarrow-stubs==20.0.0.2026
 if [ "$(uname -s)" = Linux ]; then
   python -m pip install ziglang==0.15.2
 fi
+WHEEL_VERSION="$(python3 - <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(".github/scripts").resolve()))
+from python_wheel_version import python_semver
+print(python_semver())
+PY
+)"
+python3 .github/scripts/set_root_package_version.py \
+  --workspace "$ROOT" \
+  --version "$WHEEL_VERSION"
+
 rm -rf target/wheels
 # Maturin sets CARGO_ENCODED_RUSTFLAGS for the cdylib. Cargo applies those
 # flags to build-scripts; Darwin then fails with `cannot execute binary file`.
