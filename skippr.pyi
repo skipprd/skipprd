@@ -3,6 +3,7 @@
 
 import os
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any, ClassVar, Literal, TypeAlias, final, overload
 
 import pyarrow
@@ -199,6 +200,15 @@ class Config:
         ...
 
 @final
+class Migration:
+    """Author a `migrations/<id>.sql` file. The engine never loads Python."""
+
+    def __new__(cls, id: str, up: str, down: str | None = None) -> Migration: ...
+    def write(self, dir: str | os.PathLike[str]) -> Path:
+        """Write `<dir>/<id>.sql` with `-- migrate:up` and optional `-- migrate:down`."""
+        ...
+
+@final
 class Session:
     """The engine bound to one pipeline. It snapshots the pipeline's config, with
     `${ENV}` references resolved, when it is created."""
@@ -215,6 +225,9 @@ class Session:
         ...
     def discover(self) -> None:
         """Discover schemas for this pipeline's source."""
+        ...
+    def migrate(self, down: bool = False) -> list[str]:
+        """Apply `migrations/*.sql`. `down=True` runs `-- migrate:down` for Rename/Promote."""
         ...
     def sync(self, once: bool = False) -> None:
         """Ingest. `once=True` runs a single pass; otherwise loops at `sync_frequency_seconds`."""
