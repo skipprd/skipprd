@@ -189,6 +189,61 @@ def target_binary_name(binary_name: str, target_triple: str) -> str:
     return binary_name
 
 
+IMMUTABLE_VERSION_PATH_HELP = "bump the plugin crate; version paths are immutable"
+
+
+def artifact_sha256_by_triple(manifest: dict) -> dict[str, str]:
+    artifacts = manifest.get("artifacts") or {}
+    shas: dict[str, str] = {}
+    if not isinstance(artifacts, dict):
+        return shas
+    for triple, artifact in artifacts.items():
+        if not isinstance(artifact, dict):
+            continue
+        sha = artifact.get("sha256")
+        if isinstance(sha, str) and sha.strip():
+            shas[str(triple)] = sha.strip()
+    return shas
+
+
+def version_path_clobber_reason(existing: dict, staged: dict) -> str | None:
+    if not existing:
+        return None
+    existing_version = existing.get("version")
+    staged_version = staged.get("version")
+    if existing_version and staged_version and existing_version != staged_version:
+        return None
+    existing_protocol = existing.get("protocol_version")
+    staged_protocol = staged.get("protocol_version")
+    if existing_protocol != staged_protocol:
+        return (
+            f"version {existing_version or staged_version} already uses protocol "
+            f"{existing_protocol}; staged protocol {staged_protocol}. "
+            f"{IMMUTABLE_VERSION_PATH_HELP}"
+        )
+    existing_checksum = existing.get("build_checksum")
+    staged_checksum = staged.get("build_checksum")
+    if (
+        existing_checksum
+        and staged_checksum
+        and existing_checksum != staged_checksum
+    ):
+        return (
+            f"version {existing_version or staged_version} already has a different "
+            f"build_checksum. {IMMUTABLE_VERSION_PATH_HELP}"
+        )
+    existing_shas = artifact_sha256_by_triple(existing)
+    staged_shas = artifact_sha256_by_triple(staged)
+    for triple, sha in staged_shas.items():
+        published_sha = existing_shas.get(triple)
+        if published_sha and sha != published_sha:
+            return (
+                f"version {existing_version or staged_version} artifact {triple} "
+                f"sha256 differs. {IMMUTABLE_VERSION_PATH_HELP}"
+            )
+    return None
+
+
 def artifact_urls_rewritten(manifest: dict, public_base_url: str, subdir: str) -> dict:
     rewritten = copy.deepcopy(manifest)
     artifacts = rewritten.get("artifacts", {})
@@ -315,6 +370,32 @@ def main() -> None:
         validate_manifest_sdk_build_fingerprint(
             manifest_payload, entry, entry["manifest_filename"]
         )
+
+        existing_versioned = published_manifests.get(entry["manifest_filename"]) or {}
+        if existing_versioned.get("version") != entry["package_version"]:
+            try:
+                existing_versioned = fetch_json_url(
+                    public_url(
+                        public_base_url,
+                        args.bucket,
+                        args.subdir,
+                        manifest_relative_path.as_posix(),
+                    )
+                )
+            except urllib.error.HTTPError as err:
+                if err.code in {403, 404}:
+                    existing_versioned = {}
+                else:
+                    raise SystemExit(
+                        f"Failed to load existing runtime manifest "
+                        f"{manifest_relative_path}: HTTP {err.code}"
+                    ) from err
+        clobber = version_path_clobber_reason(existing_versioned, manifest_payload)
+        if clobber:
+            raise SystemExit(
+                f"{entry['manifest_filename']}: refusing to overwrite "
+                f"{manifest_relative_path.as_posix()}: {clobber}"
+            )
 
         with output_manifest_path.open("w", encoding="utf-8") as handle:
             json.dump(manifest_payload, handle, indent=2)

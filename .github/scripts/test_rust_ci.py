@@ -210,6 +210,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("macos_arm64", plugins)
         self.assertIn("publish_runtime_plugins.py", plugins)
         self.assertIn("runtime-plugin-binaries-linux_x86", plugins)
+        self.assertIn("aws s3 sync", plugins)
+        self.assertNotIn("--delete", plugins)
         self.assertIn("runtime-plugin-binaries-macos_arm64", plugins)
         self.assertIn("configure-r2-releases", plugins)
         self.assertIn("s3://${BUCKET}/releases/${RELEASE_SUBDIR}/", plugins)

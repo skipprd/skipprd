@@ -54,21 +54,26 @@ Published layout uses versioned paths like:
 ```text
 plugins/<manifest-stem>/versions/<package-version>/<manifest-filename>
 plugins/<manifest-stem>/versions/<package-version>/<target-triple>/<binary>
+{semver}/manifest-index.json
 latest/manifest-index.json
 ```
 
+`plugins/.../versions/<package-version>/` is immutable. A protocol, checksum, or sha256 change at the same crate version is a publish error — bump the plugin crate. `/latest/` and `{semver}/manifest-index.json` are pointers.
+
 ## Discovery model
 
-By default, the host resolves runtime plugins from:
+By default, a tagged skipprd host resolves runtime plugins from:
 
 ```text
-https://install.skippr.io/releases/runtime-plugins/latest/manifest-index.json
+https://install.skippr.io/releases/runtime-plugins/{CARGO_PKG_VERSION}/manifest-index.json
 ```
+
+That file is written on every engine tag next to `latest/`. Unstamped workspace builds (`0.1.0`) fail closed and must use `USE_LOCAL_PLUGIN_CODE=1`.
 
 Resolution rules:
 
-- default to the latest manifest index
-- if a connector config includes a `version` field, pin only that plugin to that published version
+- default to the host release index, not `/latest/`
+- if a connector config includes a `version` field, pin only that plugin to that published crate version
 - for maintainer and CI validation only, `USE_LOCAL_PLUGIN_CODE=1` can opt into generated local manifests before falling back to published discovery
 
 Downloaded manifests and binaries are cached under `SKIPPR_RUNTIME_PLUGIN_DIR` when set, otherwise under `~/.skippr/runtime_plugins`.

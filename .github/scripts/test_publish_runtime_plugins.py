@@ -206,6 +206,72 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             )
         )
 
+    def test_version_path_clobber_reason_rejects_protocol_change(self) -> None:
+        reason = publish_runtime_plugins.version_path_clobber_reason(
+            {
+                "version": "0.1.10",
+                "protocol_version": 17,
+                "build_checksum": "abc",
+                "artifacts": {
+                    "x86_64-unknown-linux-gnu": {"sha256": "aaa"}
+                },
+            },
+            {
+                "version": "0.1.10",
+                "protocol_version": 21,
+                "build_checksum": "abc",
+                "artifacts": {
+                    "x86_64-unknown-linux-gnu": {"sha256": "aaa"}
+                },
+            },
+        )
+        self.assertIsNotNone(reason)
+        assert reason is not None
+        self.assertIn("protocol 17", reason)
+        self.assertIn("version paths are immutable", reason)
+
+    def test_version_path_clobber_reason_rejects_sha256_change(self) -> None:
+        reason = publish_runtime_plugins.version_path_clobber_reason(
+            {
+                "version": "0.1.10",
+                "protocol_version": 17,
+                "artifacts": {
+                    "x86_64-unknown-linux-gnu": {"sha256": "aaa"}
+                },
+            },
+            {
+                "version": "0.1.10",
+                "protocol_version": 17,
+                "artifacts": {
+                    "x86_64-unknown-linux-gnu": {"sha256": "bbb"}
+                },
+            },
+        )
+        self.assertIsNotNone(reason)
+        assert reason is not None
+        self.assertIn("sha256 differs", reason)
+
+    def test_version_path_clobber_reason_allows_identical_payload(self) -> None:
+        payload = {
+            "version": "0.1.10",
+            "protocol_version": 17,
+            "build_checksum": "abc",
+            "artifacts": {
+                "x86_64-unknown-linux-gnu": {"sha256": "aaa"}
+            },
+        }
+        self.assertIsNone(
+            publish_runtime_plugins.version_path_clobber_reason(payload, payload)
+        )
+
+    def test_version_path_clobber_reason_ignores_different_crate_versions(self) -> None:
+        self.assertIsNone(
+            publish_runtime_plugins.version_path_clobber_reason(
+                {"version": "0.1.10", "protocol_version": 17},
+                {"version": "0.1.12", "protocol_version": 22},
+            )
+        )
+
     def test_latest_manifest_index_url_uses_latest_pointer(self) -> None:
         self.assertEqual(
             publish_runtime_plugins.latest_manifest_index_url(

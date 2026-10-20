@@ -84,7 +84,7 @@ python -c "import skippr; print(skippr.Session)"
 
 ## Connectors
 
-Connectors are not bundled with the engine. The first time a pipeline uses a source or destination, Skipprd downloads that connector from `install.skippr.io` into the connector cache (`~/.skippr/runtime_plugins`). Later runs use the cache.
+Connectors are not bundled with the engine. The first time a pipeline uses a source or destination, Skipprd downloads the connector published with that Skipprd release from `install.skippr.io` into the connector cache (`~/.skippr/runtime_plugins`). Later runs use the cache.
 
 To keep the cache somewhere else — for example, on a persistent volume in a container — set `SKIPPR_RUNTIME_PLUGIN_DIR`:
 

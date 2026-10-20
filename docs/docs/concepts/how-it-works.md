@@ -108,13 +108,13 @@ Skipprd pauses reading when the disk holding `DATA_DIR` has less than 5 GB free 
 
 Each source and destination is a connector Skipprd downloads for you. The first time a pipeline uses one, Skipprd:
 
-1. Looks up the latest version at `install.skippr.io`.
+1. Looks up the connector catalog published with that Skipprd release at `install.skippr.io`.
 2. Downloads it into the connector cache (`~/.skippr/runtime_plugins`).
 3. Reuses that copy on later runs of the same version.
 
 The machine needs outbound HTTPS to `install.skippr.io`. To put the cache on a persistent volume, set `SKIPPR_RUNTIME_PLUGIN_DIR` to that path.
 
-By default Skipprd uses the latest version of each connector. To pin a connector, add `version` to its entry in `skippr.yml`:
+By default Skipprd uses the connectors released with that engine version. To pin a connector, add `version` to its entry in `skippr.yml`:
 
 ```yaml
 data_sources:
