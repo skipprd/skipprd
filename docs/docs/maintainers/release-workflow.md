@@ -1,5 +1,7 @@
 # Release Workflow
 
+Operator path is **`/skippr-release`**: bump changed plugin crates, move `CHANGELOG` Unreleased into the tag, commit with the pre-commit hook, tag, push, watch both GitHub Actions pipelines until publish jobs succeed, then surgical public docs via **`skipprd-docs`**. Everyday plugin commits do not bump crate versions.
+
 Python wheels publish from `.github/workflows/ci.yml` (**Python CI/CD Pipeline**). Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`) plus macOS arm64 on the self-hosted `skippr-darwin-arm64` runner. Both pipelines run on tags (and `workflow_dispatch`), not on `main` / master pushes. `publish_runtime_plugins` uploads the workspace plugin catalog after both architecture builds. `publish_skipprd` runs after `chaos_mode_test`, the GitHub runner e2e jobs (file/Duckdb, SkipprLake, Postgres CDC upsert, S3 schema evolution, file/Postgres), the Darwin host build, and plugin publish. Windows is not a publish target.
 
 ## High-level flow
@@ -141,7 +143,7 @@ Host publishing is separate from runtime plugin binary publishing. Tag builds st
 
 Use these rules when preparing a release:
 
-- bump an individual plugin crate version when its behavior or protocol changes — version paths are immutable
+- bump an individual plugin crate version when its behavior or protocol changes — version paths are immutable (`python3 .github/scripts/bump_changed_plugin_crates.py --base <last-engine-tag>` before the tag)
 - do not reintroduce committed runtime manifest templates
 - do not bundle runtime plugin binaries beside `skipprd`
 - do not `aws s3 sync --delete` the runtime-plugins prefix

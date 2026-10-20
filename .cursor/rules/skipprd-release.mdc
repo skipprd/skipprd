@@ -1,0 +1,20 @@
+---
+description: skipprd release — plugin crate bump before tag; version paths are immutable
+globs: plugins/**,crates/skippr-runtime-sdk/**,src/runtime_plugins/protocol.rs,src/runtime_plugins/wire.rs,CHANGELOG.md
+alwaysApply: false
+---
+
+# skipprd release
+
+Plugin crate `version` in `plugins/**/Cargo.toml` is the CDN path (`plugins/<stem>/versions/<crate>/`). Those paths are immutable.
+
+Tagging or publishing skipprd when plugin checksum inputs changed (`plugins/<crate>/`, `plugins/shared/`, `src/runtime_plugins/protocol.rs`, `wire.rs`, `crates/skippr-runtime-sdk/**`) without a new crate patch is illegal. Run:
+
+```bash
+python3 .github/scripts/bump_changed_plugin_crates.py --base <last-engine-tag>
+python3 .github/scripts/runtime_plugin_release_plan.py
+```
+
+Everyday plugin commits do **not** bump. `/skippr-release` does. Skill: **`skippr-release`**. Public copy: **`skipprd-docs`**.
+
+MUST NOT `--no-verify`, MUST NOT `aws s3 sync --delete`, MUST NOT stamp root `Cargo.toml` locally (CI stamps the tag; crate stays `0.1.0`).
