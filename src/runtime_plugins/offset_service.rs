@@ -100,7 +100,15 @@ async fn handle_offset_connection(
 pub struct OffsetServiceEndpoint {
     pub addr: std::net::SocketAddr,
     pub session_token: String,
-    _task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for OffsetServiceEndpoint {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
 }
 
 impl OffsetServiceEndpoint {
@@ -108,17 +116,22 @@ impl OffsetServiceEndpoint {
         let std_listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
         let addr = std_listener.local_addr()?;
         std_listener.set_nonblocking(true)?;
-        let listener = std::sync::Arc::new(TcpListener::from_std(std_listener)?);
         let token_for_accept = session_token.clone();
-        let offsets_for_accept = offsets.clone();
+        let offsets_for_accept = Arc::downgrade(&offsets);
 
         let task = OFFSET_SERVICE_RT.spawn(async move {
+            let listener = match TcpListener::from_std(std_listener) {
+                Ok(listener) => listener,
+                Err(_) => return,
+            };
             loop {
                 let accept = listener.accept().await;
                 let Ok((stream, _)) = accept else {
                     continue;
                 };
-                let offsets = offsets_for_accept.clone();
+                let Some(offsets) = offsets_for_accept.upgrade() else {
+                    break;
+                };
                 let token = token_for_accept.clone();
                 tokio::spawn(async move {
                     if let Err(err) = handle_offset_connection(stream, offsets, token).await {
@@ -131,7 +144,7 @@ impl OffsetServiceEndpoint {
         Ok(Self {
             addr,
             session_token,
-            _task: task,
+            task: Some(task),
         })
     }
 
@@ -187,6 +200,30 @@ mod tests {
         fn call(&self, _operation: RuntimeOffsetOperation) -> Result<RuntimeOffsetValue, String> {
             Err("transport disconnected".to_string())
         }
+    }
+
+    #[test]
+    #[serial]
+    fn dropping_offset_service_releases_sled_so_sync_can_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("pipeline");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let old_data_dir = std::env::var("DATA_DIR").ok();
+        Config::setenv("DATA_DIR", data_dir.to_str().unwrap());
+        let offsets = Arc::new(Offsets::init(&Config::new()).expect("first offset open"));
+        let service =
+            OffsetServiceEndpoint::spawn(offsets.clone(), "tok".into()).expect("offset service");
+        drop(service);
+        drop(offsets);
+        let reopened = Offsets::init(&Config::new());
+        if let Some(value) = old_data_dir {
+            Config::setenv("DATA_DIR", &value);
+        } else {
+            std::env::remove_var("DATA_DIR");
+            Config::set_evncache("DATA_DIR", "");
+        }
+        reopened
+            .expect("discover-then-sync must reopen sled after the runtime offset service drops");
     }
 
     #[test]
