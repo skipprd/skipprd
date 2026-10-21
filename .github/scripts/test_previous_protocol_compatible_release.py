@@ -86,9 +86,9 @@ class PreviousProtocolCompatibleReleaseTests(unittest.TestCase):
 
     def test_skips_beta_tags_as_previous_release(self) -> None:
         result = compat.previous_protocol_compatible_release(
-            current_tag="18.4.0-beta",
+            current_tag="18.4.0",
             current_protocol=22,
-            tags=["18.4.0-beta", "18.3.9-beta", "18.3.5", "0.0.0"],
+            tags=["18.4.0", "18.3.9-beta", "18.3.5", "0.0.0"],
             protocol_by_tag={
                 "18.3.9-beta": 22,
                 "18.3.5": 22,
@@ -101,6 +101,18 @@ class PreviousProtocolCompatibleReleaseTests(unittest.TestCase):
         )
         self.assertEqual(result["prev_tag"], "18.3.5")
         self.assertEqual(result["previous_versions"]["file"], "0.1.4")
+
+    def test_skips_when_current_tag_is_beta(self) -> None:
+        result = compat.previous_protocol_compatible_release(
+            current_tag="18.3.9-beta",
+            current_protocol=22,
+            tags=["18.3.9-beta", "18.3.8", "0.0.0"],
+            protocol_by_tag={"18.3.8": 22},
+            versions_by_tag={"18.3.8": {"file": "0.1.7"}},
+            current_versions={"file": "0.1.7"},
+        )
+        self.assertTrue(result["skip"])
+        self.assertIsNone(result.get("prev_tag"))
 
     def test_parse_protocol_from_source(self) -> None:
         self.assertEqual(compat.parse_protocol_version(PROTOCOL_22), 22)

@@ -79,6 +79,33 @@ pub async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) {
     }
 }
 
+async fn empty_wal_df_from_metadata(
+    config: &Config,
+    ctx: &SessionContext,
+    pipeline: &str,
+    namespace: &str,
+) -> Result<Option<datafusion::prelude::DataFrame>, DataFusionError> {
+    let bound = config.bind_pipeline(pipeline);
+    let Ok(pipeline_metadata) = bound.get_metadata().await else {
+        return Ok(None);
+    };
+    let flatten = bound.get_transform_flatten_events();
+    let schema = crate::ingest_work::Ingest::prepare_arrow_schema_with_metadata_for_query(
+        namespace,
+        &pipeline_metadata.metadata,
+        flatten,
+    )
+    .map_err(|err| DataFusionError::Plan(err.to_string()))?;
+    if schema.fields().is_empty() {
+        return Ok(None);
+    }
+    let mem = MemTable::try_new(schema, vec![vec![]])
+        .map_err(|e| DataFusionError::Internal(e.to_string()))?;
+    let tname = format!("{}_wal", namespace);
+    ctx.register_table(&tname, Arc::new(mem))?;
+    Ok(Some(ctx.table(&tname).await?))
+}
+
 async fn build_wal_df(
     config: &Config,
     ctx: &SessionContext,
@@ -91,7 +118,7 @@ async fn build_wal_df(
         .load_committed_batches(namespace, usize::MAX)
         .unwrap_or_default();
     if wal_batches.is_empty() {
-        return Ok(None);
+        return empty_wal_df_from_metadata(config, ctx, pipeline, namespace).await;
     }
     let schema = wal_batches[0].schema();
     let filtered: Vec<RecordBatch> = wal_batches
@@ -277,10 +304,9 @@ async fn register_wal_namespace_view(
             let view = ViewTable::new(plan, Some(namespace.to_string()));
             register_table_under_pipeline_schema(ctx, pipeline, namespace, Arc::new(view))
         }
-        None => {
-            warn!("register_wal_namespace_view: no WAL batches for '{pipeline}.{namespace}'");
-            Ok(())
-        }
+        None => Err(DataFusionError::Plan(format!(
+            "table '{pipeline}.{namespace}' not found"
+        ))),
     }
 }
 
@@ -1047,6 +1073,10 @@ mod tests {
         assert!(
             prod.contains("register_wal_namespace_view"),
             "WAL-only File pipelines must register a WAL TableProvider"
+        );
+        assert!(
+            prod.contains("prepare_arrow_schema_with_metadata_for_query"),
+            "empty WAL after reclaim must still register the metadata schema so query/migrate work"
         );
         assert!(
             prod.contains("wal_handle_for"),

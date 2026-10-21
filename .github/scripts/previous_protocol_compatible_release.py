@@ -116,6 +116,13 @@ def previous_protocol_compatible_release(
     versions_by_tag: dict[str, dict[str, str]],
     current_versions: dict[str, str],
 ) -> dict:
+    if current_tag.endswith("-beta"):
+        return {
+            "skip": True,
+            "prev_tag": None,
+            "previous_versions": {},
+            "current_versions": current_versions,
+        }
     for tag in tags:
         if tag in {current_tag, "0.0.0"} or tag.startswith("test") or tag.endswith("-beta"):
             continue

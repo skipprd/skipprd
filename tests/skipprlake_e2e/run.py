@@ -273,6 +273,7 @@ def run_sync(skipprd: Path, config_path: Path, env: dict[str, str]) -> None:
             "--config",
             str(config_path),
             "sync",
+            "--log",
             "--pipeline",
             PIPELINE,
             "--once",
@@ -285,7 +286,9 @@ def run_sync(skipprd: Path, config_path: Path, env: dict[str, str]) -> None:
         text=True,
     )
     if result.returncode != 0:
-        raise HarnessError(f"sync failed:\n{result.stdout}\n{result.stderr}")
+        raise HarnessError(
+            f"sync failed rc={result.returncode}:\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
+        )
 
 
 def start_serve(
