@@ -244,6 +244,10 @@ async fn cleanup_discover_ingest_artifacts(
     config: &Config,
     offsets: &crate::helpers::offsets::Offsets,
 ) -> Result<(), String> {
+    if let Ok(key) = crate::pipeline_backend::pipeline_key(config) {
+        crate::buffer::wal_handle::remove_wal_handle(&key);
+    }
+
     match crate::pipeline_backend::configured_kind(config) {
         Ok(crate::helpers::wal_storage::SkipprStoreKind::Sled) => {
             let fence = skippr_wal_catalog::CatalogFence {
