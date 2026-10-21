@@ -14,7 +14,7 @@ Opt-in. Do not stop because the tag exists. Stop when wheels, host binaries, and
 
 Read `AGENTS.md` and skill **`skipprd-docs`** first. Call skipprd-docs; do not duplicate it.
 
-Plugin crate `version` in `plugins/**/Cargo.toml` is the CDN path identity. Version paths are immutable. Root skipprd crate stays `0.1.0` until CI stamps the tag. Engine tags are unprefixed semver (`18.3.6`), not `v18.3.6`. Repo: `skipprd/skipprd`.
+Plugin crate `version` in `plugins/**/Cargo.toml` is the CDN path identity. Version paths are immutable. Root skipprd crate stays `0.1.0` until CI stamps the tag. Engine tags are unprefixed semver (`18.3.6`), not `v18.3.6`. Repo: `skipprd/skipprd`. Clobberable pre-release testing is **`/skippr-beta-release`** (`x.y.z-beta`), not this skill.
 
 ## Loop (do not skip)
 

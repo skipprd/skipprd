@@ -27,6 +27,16 @@ class ReleaseNotesTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             section("## [4.0.0]\n\n## [3.0.0]\n- c\n", "4.0.0")
 
+    def test_beta_release_notes_fall_back_to_unreleased(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(ROOT / ".github" / "scripts"))
+        from release_notes import notes_for_tag
+
+        changelog = "# Changelog\n\n## [Unreleased]\n\n- wip\n\n## [1.0.0]\n\n- a\n"
+        self.assertEqual(notes_for_tag(changelog, "1.0.1-beta"), "- wip\n")
+        self.assertEqual(notes_for_tag(changelog, "1.0.0"), "- a\n")
+
     def test_github_release_reads_changelog_md_only(self) -> None:
         text = RUST.read_text(encoding="utf-8")
         self.assertNotIn("CHANGELOG.txt", text)
@@ -78,6 +88,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("chaos_mode_test:", text)
         self.assertIn("publish_runtime_plugins:", text)
         self.assertIn("publish_skipprd:", text)
+        self.assertIn("endsWith(github.ref_name, '-beta')", text)
+        self.assertIn("--prerelease", text)
         self.assertNotIn("cargo test -p skipprd", text)
         self.assertNotIn("cargo test -p skippr-lease", text)
         self.assertNotIn("cargo check --all-features", text)
@@ -85,6 +97,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("test_local_runtime_plugins.py", text)
         self.assertIn("test_bump_changed_plugin_crates.py", text)
         self.assertIn("test_previous_protocol_compatible_release.py", text)
+        self.assertIn("test_engine_tag.py", text)
         self.assertIn("chaos_mode_published:", text)
         self.assertIn("e2e_prev_plugins:", text)
         self.assertIn("e2e_prev_host:", text)
@@ -351,6 +364,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("4 GiB", text)
         self.assertIn("schema evolution", text)
         self.assertIn("Python workflow contracts", text)
+        self.assertIn("skippr-beta-release", text)
+        self.assertIn("-beta", text)
         self.assertNotIn("full `cargo test -p skipprd`", text)
         self.assertNotIn("commented out for now", text)
         self.assertNotIn("stay commented", text)

@@ -105,7 +105,7 @@ Skipprd keeps four kinds of state. Know where each one lives before you run a pi
 Set the data directory with the `DATA_DIR` environment variable or per pipeline with `data_dir` in `skippr.yml`.
 
 ::: warning Keep DATA_DIR
-With the default local WAL, `DATA_DIR` holds data that may not have reached your destination yet, plus the position Skipprd resumes from. If you delete it or start on a fresh disk, Skipprd loses those batches and reads the source again from the beginning, which can duplicate rows in append-only destinations.
+With the default local WAL, `DATA_DIR` holds payloads that may not have reached your destination yet, the sled WAL catalog, and the position Skipprd resumes from. If you delete it or start on a fresh disk, Skipprd loses those batches and reads the source again from the beginning, which can duplicate rows in append-only destinations.
 :::
 
 If your compute is ephemeral (containers, Lambda, autoscaled hosts), move the WAL to S3 with `WAL_STORAGE=s3` and the state store to DynamoDB. Then no state lives on the machine. See [WAL and buffering](/configuration/buffering) and [State store](/configuration/skippr-store).

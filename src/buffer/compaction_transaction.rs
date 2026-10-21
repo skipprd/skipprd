@@ -1,5 +1,4 @@
 use crate::buffer::segment_file::PartitionKey;
-use crate::helpers::configuration::Config;
 use crate::plugins::source_contract::WritePolicy;
 use crate::runtime_plugins::protocol::RuntimeWalPartRef;
 use crate::sink_apply_identity::{
@@ -8,11 +7,8 @@ use crate::sink_apply_identity::{
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
-use tracing::warn;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum SegmentSourceDescriptor {
@@ -112,7 +108,6 @@ pub enum CompactionTransactionState {
     Pending,
     Sent,
     Acked,
-    Tombstoned,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -261,12 +256,6 @@ impl CompactionTransaction {
         self.updated_at_secs = now_secs();
         self
     }
-
-    pub fn mark_tombstoned(mut self) -> Self {
-        self.state = CompactionTransactionState::Tombstoned;
-        self.updated_at_secs = now_secs();
-        self
-    }
 }
 
 fn now_secs() -> u64 {
@@ -299,154 +288,9 @@ pub fn deterministic_compaction_id(
     hex::encode(hasher.finalize())
 }
 
-pub fn manifest_dir(config: &Config) -> PathBuf {
-    crate::buffer::wal_store::ingest_compaction_dir(config)
-}
-
-pub fn manifest_path_for(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{id}.json"))
-}
-
-pub fn persist_manifest(config: &Config, txn: &CompactionTransaction) -> io::Result<()> {
-    let dir = manifest_dir(config);
-    fs::create_dir_all(&dir)?;
-    let path = manifest_path_for(&dir, &txn.id);
-    let tmp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(txn).map_err(io::Error::other)?;
-    fs::write(&tmp, bytes)?;
-    fs::rename(tmp, path)?;
-    crate::metrics::counters::add_compaction_completion_ledger_write(1);
-    Ok(())
-}
-
-pub fn remove_manifest(config: &Config, id: &str) -> io::Result<()> {
-    let path = manifest_path_for(&manifest_dir(config), id);
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err),
-    }
-}
-
-fn load_manifest_file(path: &Path) -> Option<CompactionTransaction> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            warn!(
-                "Compactor: failed to read compaction manifest {:?}: {}",
-                path, err
-            );
-            return None;
-        }
-    };
-    if bytes.is_empty() {
-        warn!("Compactor: removing empty compaction manifest {:?}", path);
-        if let Err(err) = fs::remove_file(path) {
-            warn!(
-                "Compactor: failed to remove empty compaction manifest {:?}: {}",
-                path, err
-            );
-        }
-        return None;
-    }
-    match serde_json::from_slice::<CompactionTransaction>(&bytes) {
-        Ok(txn) => Some(txn),
-        Err(err) => {
-            warn!(
-                "Compactor: removing corrupt compaction manifest {:?}: {}",
-                path, err
-            );
-            if let Err(remove_err) = fs::remove_file(path) {
-                warn!(
-                    "Compactor: failed to remove corrupt compaction manifest {:?}: {}",
-                    path, remove_err
-                );
-            }
-            None
-        }
-    }
-}
-
-#[derive(Default)]
-struct ManifestDirectoryScanMetrics {
-    entries_examined: u64,
-}
-
-impl Drop for ManifestDirectoryScanMetrics {
-    fn drop(&mut self) {
-        crate::metrics::counters::record_compaction_manifest_directory_scan(self.entries_examined);
-    }
-}
-
-/// Load every live manifest exactly as persisted. In-memory scheduling applies
-/// Sent staleness without rescanning this directory on every planner cycle.
-pub fn load_manifest_index(config: &Config) -> io::Result<Vec<CompactionTransaction>> {
-    let mut scan_metrics = ManifestDirectoryScanMetrics::default();
-    let dir = manifest_dir(config);
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        scan_metrics.entries_examined = scan_metrics.entries_examined.saturating_add(1);
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(mut txn) = load_manifest_file(&path) else {
-            continue;
-        };
-        if txn.updated_at_secs == 0 {
-            txn.updated_at_secs = txn.created_at_secs;
-        }
-        if matches!(
-            txn.state,
-            CompactionTransactionState::Tombstoned | CompactionTransactionState::Acked
-        ) {
-            let _ = fs::remove_file(&path);
-            continue;
-        }
-        out.push(txn);
-    }
-    Ok(out)
-}
-
-pub fn load_pending_manifests(config: &Config) -> io::Result<Vec<CompactionTransaction>> {
-    let now = now_secs();
-    let sent_stale_secs = Config::getenv("WAL_COMPACTION_SENT_STALE_SECS", "300")
-        .parse::<u64>()
-        .ok()
-        .filter(|value| *value > 0)
-        .unwrap_or(300);
-    let mut out = Vec::new();
-    for mut txn in load_manifest_index(config)? {
-        if matches!(txn.state, CompactionTransactionState::Sent)
-            && now.saturating_sub(txn.updated_at_secs) < sent_stale_secs
-        {
-            continue;
-        }
-        if matches!(txn.state, CompactionTransactionState::Sent) {
-            warn!(
-                "Compactor: retrying stale sent manifest id={} sink_ref={} namespace={} age_secs={} attempts={}",
-                txn.id,
-                txn.sink_ref,
-                txn.namespace,
-                now.saturating_sub(txn.updated_at_secs),
-                txn.attempts,
-            );
-            txn.state = CompactionTransactionState::Pending;
-            txn.updated_at_secs = now;
-        }
-        out.push(txn);
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
 
     fn ref_for(segment_id: &str, start: u64) -> WalPartRef {
         WalPartRef {
@@ -539,77 +383,5 @@ mod tests {
                 &[changed],
             )
         );
-    }
-
-    #[test]
-    #[serial]
-    fn load_pending_manifests_skips_empty_and_corrupt_files() {
-        use crate::helpers::configuration::Config;
-        use std::sync::{Mutex, MutexGuard, OnceLock};
-
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        fn env_lock() -> MutexGuard<'static, ()> {
-            ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-        }
-
-        let _guard = env_lock();
-        Config::reset_envcache();
-        let temp = tempfile::tempdir().unwrap();
-        let old_data_dir = std::env::var("DATA_DIR").ok();
-        let old_root = std::env::var("SKIPPR_PIPELINE_DATA_ROOT").ok();
-        Config::setenv("DATA_DIR", temp.path().to_str().unwrap());
-        Config::setenv("SKIPPR_PIPELINE_DATA_ROOT", "true");
-
-        let comp_dir = manifest_dir(&Config::new());
-        fs::create_dir_all(&comp_dir).unwrap();
-
-        let good = CompactionTransaction::new(
-            "sink.main".to_string(),
-            "ns".to_string(),
-            "schema".to_string(),
-            WritePolicy::Append,
-            SinkWriteSemantics::AtLeastOnce,
-            vec![ref_for("good", 1)],
-            "out.parquet".to_string(),
-        );
-        persist_manifest(&Config::new(), &good).unwrap();
-        fs::write(comp_dir.join("empty.json"), b"").unwrap();
-        fs::write(comp_dir.join("corrupt.json"), b"{not-json").unwrap();
-
-        let acked = CompactionTransaction::new(
-            "sink.main".to_string(),
-            "ns".to_string(),
-            "schema".to_string(),
-            WritePolicy::Append,
-            SinkWriteSemantics::AtLeastOnce,
-            vec![ref_for("acked", 2)],
-            "out.parquet".to_string(),
-        )
-        .mark_acked();
-        persist_manifest(&Config::new(), &acked).unwrap();
-
-        let loaded = load_pending_manifests(&Config::new()).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id, good.id);
-        assert!(!comp_dir.join("empty.json").exists());
-        assert!(!comp_dir.join("corrupt.json").exists());
-        assert!(comp_dir.join(format!("{}.json", good.id)).exists());
-        assert!(
-            !comp_dir.join(format!("{}.json", acked.id)).exists(),
-            "Acked manifests are terminal and must not fence leftover after restart"
-        );
-
-        if let Some(value) = old_data_dir {
-            Config::setenv("DATA_DIR", &value);
-        } else {
-            std::env::remove_var("DATA_DIR");
-            Config::set_evncache("DATA_DIR", "");
-        }
-        if let Some(value) = old_root {
-            Config::setenv("SKIPPR_PIPELINE_DATA_ROOT", &value);
-        } else {
-            std::env::remove_var("SKIPPR_PIPELINE_DATA_ROOT");
-            Config::set_evncache("SKIPPR_PIPELINE_DATA_ROOT", "");
-        }
     }
 }

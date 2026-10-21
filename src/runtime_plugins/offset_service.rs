@@ -170,7 +170,9 @@ mod tests {
         assert_eq!(validate_entries(&offsets, &missing).unwrap(), vec![true]);
 
         let closed_key = OffsetKey::new("ns", "closed-key");
-        offsets.set(&closed_key, OffsetTypes::Closed, 1).unwrap();
+        offsets
+            .seed_published_offset(&closed_key, 0, 0, 1, 1)
+            .unwrap();
         let closed = vec![RuntimeOffsetValidationEntry {
             key: closed_key,
             offset_type: OffsetTypes::Closed,

@@ -5,7 +5,7 @@
 **Work units:** WU-7.3 and WU-7.5 in [`hla-implementation-wbs.md`](./hla-implementation-wbs.md)  
 **Style:** [`AGENTS.md`](../../../AGENTS.md)
 
-This file is the requirements and design contract for replacing the framed-TCP query socket with Arrow Flight SQL 58.3 and executing Iceberg∪WAL UNION on Ballista 53 **inside every clustered `skipprd` process**. Iceberg Rust (vendored `third_party/iceberg`) is compiled into `skipprd`. Replica RPC `CURRENT_PROTOCOL` is **2** (cluster hello, not tenant hello).
+This file is the requirements and design contract for replacing the framed-TCP query socket with Arrow Flight SQL 58.3 and executing Iceberg∪WAL UNION on Ballista 53 **inside every clustered `skipprd` process**. Iceberg Rust (vendored `third_party/iceberg`) is compiled into `skipprd`. Replica RPC `CURRENT_PROTOCOL` is **3** (cluster hello, not tenant hello).
 
 Implementation steps: [`.cursor/plans/embedded_ballista_flight_sql_8f1a2c3d.plan.md`](../../../.cursor/plans/embedded_ballista_flight_sql_8f1a2c3d.plan.md).
 
@@ -28,7 +28,7 @@ Shipped: every clustered `skipprd` process serves Arrow Flight SQL 58.3 on membe
 5. `live_wal_scan` tenant/workspace MUST equal the Flight session `TenantScope` (`Authorization: Basic {tenant}/{workspace}` on **every** RPC). Foreign identity is a typed rejection, not an empty scan. Unknown pipeline is a typed rejection. Cluster membership is **not** a tenant.
 6. SkipprLake catalog listing for UNION registration lists tables in that pipeline's `table_namespace` (see `catalog_table_to_namespace`). Isolation is the Iceberg namespace, not a table name prefix. A pipeline with no catalog tables yet MUST NOT fail registration of another pipeline in the same session.
 7. UNION is a dumb concat of Iceberg snapshot + live WAL. It MUST NOT DISTINCT, wait, or pin. Missing WAL files skip that ordinal. Unreachable WAL is Iceberg-only (complete Iceberg result, not a partial UNION).
-8. Ballista 53 MUST execute that UNION **before** aggregate, join, sort, or limit that is not pushed into a scan. Iceberg parquet MAY run on any executor in the elected cluster (shared warehouse; `IcebergScanExec` reloads from `catalog_json`). Live WAL is always a one-partition `FlightSqlExec` DoGet to the advertised `flight_addr` of the picker winner (best-effort max `committed_index`, including when the winner is this process). `WalTableProvider` / `WalScanExec` MUST NOT enter a Ballista plan (`paths_root` is owner-local). `WalScanExec` runs only inside the owner's `live_wal_scan` DoGet.
+8. Ballista 53 MUST execute that UNION **before** aggregate, join, sort, or limit that is not pushed into a scan. Iceberg parquet MAY run on any executor in the elected cluster (shared warehouse; `IcebergScanExec` reloads from `catalog_json`). Live WAL is always a one-partition `FlightSqlExec` DoGet to the advertised `flight_addr` of the picker winner (best-effort max `catalog_seq_seen` with `payload_ready`, including when the winner is this process). `WalTableProvider` / `WalScanExec` MUST NOT enter a Ballista plan (catalog rows and payload bytes stay on the owner). `WalScanExec` runs only inside the owner's `live_wal_scan` DoGet.
 9. Every clustered `skipprd` node is a query node: in-process Ballista scheduler+executor bind first, then Flight SQL on `flight_addr`, then gossip. Executors and `query_context()` connect to the gossip-elected scheduler (minimum `NodeId` among ads that published `scheduler`, including self; replica `ready` is not a gate). Clustered SELECT fails closed if Ballista is not connected. `clustered query` opens Flight SQL on any ready `flight_addr`. The serving node plans UNION. `SK=query-scheduler#{generation}` is **not** used.
 10. Iceberg metadata is loaded with in-process Iceberg Rust `Catalog` on the serving node. If load/scan setup fails, retry Iceberg scan via another ready node's Flight SQL. Never fall back to parquet listing.
 11. Partial distributed results are forbidden. Executor or replica failure either retries a typed alternative (next WAL head, peer Iceberg Flight, or Iceberg-only) or fails the query. Returning a subset of UNION partitions is not allowed.
@@ -59,7 +59,7 @@ Shipped: every clustered `skipprd` process serves Arrow Flight SQL 58.3 on membe
 | Piece | Location | Rule |
 |---|---|---|
 | Iceberg cold scan | `src/sqlrt/iceberg_table.rs` | Current snapshot, fail closed if none; schema/field IDs authoritative |
-| Live ordinals | `src/query_flight/live_wal.rs` `select_live_ordinals` | Snapshot segments ∪ suffix `CommitSegment`, minus reclaim, minus Iceberg named ids; skip unreadable ordinals. Ledger-complete ordinals stay visible until Iceberg lists the segment. |
+| Live ordinals | `src/query_flight/live_wal.rs` `select_live_ordinals` | Catalog `SegmentRow`s minus Iceberg named ids; skip slice-done and unreadable ordinals. Slice-complete ordinals stay visible until Iceberg lists the segment. |
 | In-process UNION | `IcebergWalUnionProvider` | `UnionExec` + `GlobalLimitExec` on the union; WAL is always `FlightSqlExec` to the picker winner's advertised `flight_addr` |
 | Client | `Session.query` → `clustered_query_collect` | Flight SQL to ready `flight_addr`s in `node_id` contact order; Iceberg-only is inside the serving node; never takes an ingest lease |
 | Catalog listing | `catalog_table_to_namespace` | Iceberg table name is identity; isolation is `table_namespace` |
@@ -68,12 +68,12 @@ Move `select_live_ordinals` with the Flight SQL module. Do not fork a second sel
 
 ### Best-effort WAL head
 
-Gossip `GossipAd.wal_heads` is a bounded hint (`pipeline`, `committed_index`, cap 32). Status RPC remains head truth when the picker confirms.
+Gossip `GossipAd.wal_heads` is a bounded hint (`pipeline`, `catalog_seq_seen`, `payload_ready`, cap 32). Status RPC remains head truth when the picker confirms.
 
 Picker for pipeline P:
 
-1. Ready ads with a hint for P, plus local committed if this process holds a log.
-2. Choose max `committed_index`. Tie → prefer local, else lowest `node_id`.
+1. Ready ads with a hint for P, plus local catalog seq if this process holds payloads.
+2. Choose max `catalog_seq_seen` among `payload_ready` nodes. Tie → prefer local, else lowest `node_id`.
 3. If the winner is unreachable, try the next-highest. Optional Status fill-in when no hints exist.
 4. If nothing reachable → omit WAL (Iceberg-only).
 
@@ -91,7 +91,7 @@ Hard-replace `src/query_socket` framed protocol with `src/query_flight`:
 - `QuerySocketServer` / `QuerySocketTableProvider` / `fetch_query_socket` names go away in the same change.
 - HLA e2e `query_flight_ids` and framed handshake helpers switch to Flight SQL; do not keep a framed compatibility mode.
 
-Replica/Flight/Ballista `CURRENT_PROTOCOL` is 2. Flight SQL is not a mutation-log protocol bump; it is always mTLS.
+Replica/Flight/Ballista `CURRENT_PROTOCOL` is 3. Flight SQL is not a catalog protocol bump; it is always mTLS.
 
 ### Server
 
@@ -118,11 +118,11 @@ Foreign session is a typed rejection. The serving node does not register a DataF
 
 DoGet for `live_wal_scan`:
 
-1. resolve `PipelineDurableStore` or replica-registry session paths for that `PipelineKey`;
-2. open `MutationLog`;
-3. `select_live_ordinals(log, exclude_segment_ids)`;
+1. resolve the pipeline WAL catalog handle for that `PipelineKey`;
+2. query live `SegmentRow`s (payload_ready from local payload presence);
+3. `select_live_ordinals` from catalog rows;
 4. stream `WalTableProvider` batches projected/cast/null-filled to Iceberg schema;
-5. skip missing files and unreadable ledgers; unknown pipeline fails the stream.
+5. skip missing payload bytes; unknown pipeline fails the stream.
 
 ### Host-side scan node
 
@@ -195,7 +195,7 @@ user SQL
 
 Ballista stages MUST place `UnionExec` (and its children) before downstream relational operators. Limit on the union stays `GlobalLimitExec` after concat.
 
-WAL endpoint: `pick_wal_endpoint` returns `Option<SocketAddr>` (max advertised `committed_index`, local on tie **and this process holds WAL paths** → this process's advertised `flight_addr`). Unreachable winner → next. None → Iceberg-only. Do not vote row counts.
+WAL endpoint: `pick_wal_endpoint` returns `Option<SocketAddr>` (max advertised `catalog_seq_seen` with `payload_ready`, local on tie **and this process holds WAL paths** → this process's advertised `flight_addr`). Unreachable winner → next. None → Iceberg-only. Do not vote row counts.
 
 ### `FlightSqlExec::execute`
 

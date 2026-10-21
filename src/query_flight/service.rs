@@ -347,14 +347,9 @@ impl SkipprFlightSql {
                 .map_err(|err| Status::internal(err.to_string()));
             return Ok((schema, Box::pin(stream)));
         }
-        let registry = match &self.engine {
-            FlightEngine::Clustered { registry } => registry,
-            FlightEngine::Local => unreachable!("local engine returned above"),
-        };
         match classify_sql(sql, scope).map_err(|err| Status::invalid_argument(err.to_string()))? {
             ClassifiedSql::LiveWal(request) => {
-                let (schema, stream) =
-                    execute_live_wal(&self.app_config, &request, registry.as_ref()).await?;
+                let (schema, stream) = execute_live_wal(&self.app_config, &request).await?;
                 return Ok((schema, stream));
             }
             ClassifiedSql::Iceberg(namespace) => {
@@ -727,7 +722,6 @@ async fn iceberg_schema_for_namespace(
 async fn execute_live_wal(
     config: &Config,
     request: &crate::query_flight::live_wal::LiveWalScanRequest,
-    registry: Option<&Arc<ReplicaRegistry>>,
 ) -> Result<
     (
         SchemaRef,
@@ -735,21 +729,17 @@ async fn execute_live_wal(
     ),
     Status,
 > {
-    let paths =
-        crate::cluster::wal_head::local_wal_paths(&request.pipeline, registry.map(|r| r.as_ref()))
-            .await
-            .ok_or_else(|| {
-                Status::not_found(format!("unknown pipeline {}", request.pipeline.pipeline()))
-            })?;
+    crate::buffer::wal_handle::wal_handle_for(&request.pipeline).ok_or_else(|| {
+        Status::not_found(format!("unknown pipeline {}", request.pipeline.pipeline()))
+    })?;
     let schema = iceberg_schema_for_namespace(config, &request.namespace)
         .await
         .unwrap_or_else(|_| Arc::new(Schema::empty()));
-    let provider = crate::sqlrt::wal_table::WalTableProvider::live_unpinned(
+    let provider = crate::sqlrt::wal_table::WalTableProvider::new(
         schema.clone(),
         request.pipeline.clone(),
         request.namespace.clone(),
         request.exclude_segment_ids.clone(),
-        paths,
     );
     let ctx = datafusion::prelude::SessionContext::new();
     let plan = provider
@@ -826,11 +816,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_wal_scan_uses_replica_registry_when_ingest_store_is_absent() {
+    async fn live_wal_scan_replica_session_without_handle_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "p").unwrap();
         let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        let log = crate::buffer::durable::log::MutationLog::open(paths.clone()).unwrap();
         let identity = identity();
         let registry = ReplicaRegistry::new(identity.clone());
         let guard = skippr_lease::LeaseGuard::replica(
@@ -839,9 +828,7 @@ mod tests {
             Arc::new(skippr_lease::SystemClock::new()),
         );
         registry
-            .insert(crate::cluster::peer::ReplicaSession::new(
-                key, paths, guard, log,
-            ))
+            .insert(crate::cluster::peer::ReplicaSession::new(key, paths, guard))
             .await;
         let server = QueryFlightServer::start_with_registry(
             "127.0.0.1:0".parse().unwrap(),
@@ -852,14 +839,17 @@ mod tests {
         .await
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let batches = skippr_query_ballista::fetch_statement_batches(
+        let err = skippr_query_ballista::fetch_statement_batches(
             &server.bind_addr().to_string(),
             "SELECT * FROM live_wal_scan('t', 'w', 'p', 'ns')",
         )
         .await
-        .unwrap();
-        let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
-        assert_eq!(rows, 0);
+        .unwrap_err();
+        let text = err.to_string().to_ascii_lowercase();
+        assert!(
+            text.contains("unknown") || text.contains("not found"),
+            "{err}"
+        );
         server.drain().await;
     }
 
@@ -974,27 +964,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "p").unwrap();
         let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        let log = crate::buffer::durable::log::MutationLog::open(paths.clone()).unwrap();
         let identity = identity();
-        let registry = ReplicaRegistry::new(identity.clone());
-        let guard = skippr_lease::LeaseGuard::replica(
+        let clock = Arc::new(skippr_lease::SystemClock::new());
+        let guard = skippr_lease::LeaseGuard::single_node(key.clone(), clock);
+        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
+        let db = sled::open(dir.path().join("offsets")).unwrap();
+        let tree = db.open_tree("offsets").unwrap();
+        let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
+            Arc::new(crate::helpers::offset_store::SledOffsetStore::new(tree));
+        let handle = crate::buffer::wal_handle::PipelineWalHandle::new(
             key.clone(),
-            skippr_lease::LeaseEpoch::new(1),
-            Arc::new(skippr_lease::SystemClock::new()),
+            paths,
+            guard,
+            catalog,
+            offsets,
         );
-        registry
-            .insert(crate::cluster::peer::ReplicaSession::new(
-                key, paths, guard, log,
-            ))
-            .await;
-        let server = QueryFlightServer::start_with_registry(
-            "127.0.0.1:0".parse().unwrap(),
-            identity,
-            Some(registry),
-            Config::new(),
-        )
-        .await
-        .unwrap();
+        crate::buffer::wal_handle::install_wal_handle(handle);
+        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity)
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
         let node = FlightSqlExec::with_authorization(
@@ -1012,6 +1001,7 @@ mod tests {
         let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
         assert_eq!(rows, 0);
         server.drain().await;
+        crate::buffer::wal_handle::remove_wal_handle(&key);
     }
 
     #[test]

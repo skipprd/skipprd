@@ -1,16 +1,13 @@
 use skippr_lease::{
-    CommitIndex, LeaseEpoch, MembershipAd, MemoryLeaseStore, MemoryMembershipStore, NodeId,
-    PipelineKey, PipelineLeaseStore, GENESIS_HASH, WRITE_QUORUM,
+    LeaseEpoch, MembershipAd, MemoryLeaseStore, MemoryMembershipStore, NodeId, PipelineKey,
+    PipelineLeaseStore, WRITE_QUORUM,
 };
-use skipprd::buffer::durable::mutation::{DurableMutation, MutationEnvelope};
 use skipprd::cluster::identity::ClusterIdentity;
 use skipprd::cluster::pipeline_view::PipelineConfigView;
-use skipprd::cluster::promote::{select_highest_hash_consistent, ClusterHead, PeerStatus};
 use skipprd::cluster::validation::{
     validate_clustered_backend, validate_wal_storage_for_mode, CliModeKind,
 };
 use skipprd::helpers::wal_storage::{ConfigError, SkipprStoreKind, WalStorage};
-use skipprd::query_flight::live_wal::select_live_ordinals;
 use std::path::PathBuf;
 use std::sync::Once;
 
@@ -93,60 +90,6 @@ fn write_quorum_is_two() {
 }
 
 #[test]
-fn hash_chain_is_deterministic_across_nodes() {
-    let key = PipelineKey::new("t", "w", "p").unwrap();
-    let envelope = MutationEnvelope {
-        protocol_version: 1,
-        pipeline: key,
-        epoch: LeaseEpoch::new(1),
-        index: CommitIndex::new(1),
-        previous_hash: GENESIS_HASH,
-        payload_sha256: [3u8; 32],
-        body: DurableMutation::ReclaimSegment {
-            segment_id: "seg".into(),
-        },
-    };
-    assert_eq!(
-        envelope.entry_hash().unwrap(),
-        envelope.entry_hash().unwrap()
-    );
-}
-
-fn dummy_endpoint() -> std::net::SocketAddr {
-    "127.0.0.1:9".parse().unwrap()
-}
-
-#[test]
-fn same_index_different_hash_blocks_promotion() {
-    let a = PeerStatus {
-        node_id: NodeId::generate(),
-        committed: CommitIndex::new(2),
-        head_hash: [1u8; 32],
-        initialized: true,
-        endpoint: dummy_endpoint(),
-    };
-    let b = PeerStatus {
-        node_id: NodeId::generate(),
-        committed: CommitIndex::new(2),
-        head_hash: [9u8; 32],
-        initialized: true,
-        endpoint: dummy_endpoint(),
-    };
-    assert!(matches!(
-        select_highest_hash_consistent(&[a, b], true),
-        Err(skippr_lease::PromoteError::Diverged { .. })
-    ));
-}
-
-#[test]
-fn initialized_lease_without_head_fails_closed() {
-    assert!(matches!(
-        select_highest_hash_consistent(&[], true),
-        Err(skippr_lease::PromoteError::NoHeadAvailable)
-    ));
-}
-
-#[test]
 fn clustered_rejects_at_least_once_sink() {
     let view = PipelineConfigView {
         key: PipelineKey::new("t", "w", "p").unwrap(),
@@ -160,40 +103,6 @@ fn clustered_rejects_at_least_once_sink() {
         wal_storage: WalStorage::Clustered,
     };
     assert!(view.validate_clustered_sink().is_err());
-}
-
-#[test]
-fn live_wal_scan_excludes_iceberg_named_segment() {
-    let dir = tempfile::tempdir().unwrap();
-    let key = PipelineKey::new("t", "w", "p").unwrap();
-    let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-    std::fs::create_dir_all(&paths.segs).unwrap();
-    let mut log = skipprd::buffer::durable::log::MutationLog::open(paths).unwrap();
-    let envelope = MutationEnvelope {
-        protocol_version: 1,
-        pipeline: key,
-        epoch: LeaseEpoch::new(1),
-        index: CommitIndex::new(1),
-        previous_hash: GENESIS_HASH,
-        payload_sha256: [9u8; 32],
-        body: DurableMutation::CommitSegment {
-            descriptor: skipprd::buffer::durable::mutation::SegmentDescriptor {
-                segment_id: "iceberg-seg".into(),
-                payload_len: 4,
-                payload_sha256: [9u8; 32],
-                num_partitions: 1,
-                total_bytes: 4,
-                created_at_secs: 0,
-                schema_fingerprints: Vec::new(),
-            },
-            offsets: Vec::new(),
-            checkpoints: Vec::new(),
-        },
-    };
-    log.append_prepared(&envelope).unwrap();
-    log.append_committed(envelope.index, envelope.entry_hash().unwrap())
-        .unwrap();
-    assert!(select_live_ordinals(&log, &["iceberg-seg".into()]).is_empty());
 }
 
 #[test]
@@ -229,49 +138,29 @@ async fn memory_lease_create_is_exclusive() {
 }
 
 struct ModelPipelineState {
-    _role: &'static str,
-    epoch: u64,
-    prepared: u64,
-    committed: u64,
-    applied: u64,
-    published: u64,
+    max_committed: u64,
+    max_published: u64,
 }
 
 impl ModelPipelineState {
     fn recover_from_crash(&self) -> Self {
         Self {
-            _role: "idle",
-            epoch: self.epoch,
-            prepared: self.prepared,
-            committed: self.committed,
-            applied: self.committed.min(self.applied),
-            published: self.published.min(self.committed),
+            max_committed: self.max_committed,
+            max_published: self.max_published.min(self.max_committed),
         }
     }
 }
 
 #[test]
-fn crash_after_commit_before_publish_recovers_committed_prefix() {
+fn crash_after_catalog_commit_before_publish_republishes() {
     let model = ModelPipelineState {
-        _role: "primary",
-        epoch: 1,
-        prepared: 4,
-        committed: 3,
-        applied: 3,
-        published: 2,
+        max_committed: 3,
+        max_published: 2,
     };
     let recovered = model.recover_from_crash();
-    assert_eq!(recovered.committed, 3);
-    assert_eq!(recovered.published, 2);
-    assert!(recovered.published <= recovered.committed);
-}
-
-#[test]
-fn uninitialized_empty_statuses_are_head_zero() {
-    let head = select_highest_hash_consistent(&[], false).unwrap();
-    assert!(matches!(head, ClusterHead::Genesis));
-    assert_eq!(head.committed(), CommitIndex::ZERO);
-    assert_eq!(head.head_hash(), GENESIS_HASH);
+    assert_eq!(recovered.max_committed, 3);
+    assert_eq!(recovered.max_published, 2);
+    assert!(recovered.max_published <= recovered.max_committed);
 }
 
 #[test]
@@ -279,90 +168,27 @@ fn s3_wal_storage_is_not_clustered() {
     assert_ne!(WalStorage::S3, WalStorage::Clustered);
 }
 
-#[tokio::test]
-async fn two_node_replica_applies_committed_entry() {
-    use skippr_lease::{LeaseGuard, PipelinePaths, SystemClock};
-    use skipprd::buffer::durable::log::MutationLog;
-    use skipprd::cluster::identity::ClusterIdentity;
-    use skipprd::cluster::peer::{replicate_to, ReplicaRegistry, ReplicaServer, ReplicaSession};
-    use std::path::Path;
-    use std::sync::Arc;
-
-    install_cluster_tls();
-    let dir = tempfile::tempdir().unwrap();
-    let key = PipelineKey::new("t", "w", "p").unwrap();
-    let identity = ClusterIdentity::new(
-        skippr_lease::ClusterId::new("test-cluster").unwrap(),
-        NodeId::generate(),
-    );
-    let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-    let log = MutationLog::open(paths.clone()).unwrap();
-    let guard = LeaseGuard::replica(
-        key.clone(),
-        LeaseEpoch::new(1),
-        Arc::new(SystemClock::new()),
-    );
-    let session = ReplicaSession::new(key.clone(), paths.clone(), guard, log);
-    session.note_assigned("n".into(), LeaseEpoch::new(1)).await;
-    let registry = ReplicaRegistry::new(identity.clone());
-    registry.insert(session.clone()).await;
-    let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-        .await
-        .unwrap();
-    let envelope = MutationEnvelope {
-        protocol_version: 1,
-        pipeline: key,
-        epoch: LeaseEpoch::new(1),
-        index: CommitIndex::new(1),
-        previous_hash: GENESIS_HASH,
-        payload_sha256: [0u8; 32],
-        body: DurableMutation::ReclaimSegment {
-            segment_id: "seg-1".into(),
-        },
-    };
-    let ack = replicate_to(
-        server.bind_addr(),
-        &envelope,
-        Path::new("/nonexistent"),
-        &identity,
-    )
-    .await
-    .unwrap();
-    assert_eq!(ack.commit_index, 1);
-    assert!(!ack.already_applied);
-    let status = session.status().await;
-    assert_eq!(status.committed_index, 1);
-    assert_eq!(status.applied_index, 1);
-    server.drain().await;
-}
-
 struct FakeNode {
     key: PipelineKey,
-    identity: skipprd::cluster::identity::ClusterIdentity,
+    identity: ClusterIdentity,
     server: skipprd::cluster::peer::ReplicaServer,
     session: std::sync::Arc<skipprd::cluster::peer::ReplicaSession>,
 }
 
 impl FakeNode {
-    async fn start(
-        dir: &std::path::Path,
-        key: PipelineKey,
-        identity: skipprd::cluster::identity::ClusterIdentity,
-    ) -> Self {
+    async fn start(dir: &std::path::Path, key: PipelineKey, identity: ClusterIdentity) -> Self {
         use skippr_lease::{LeaseGuard, PipelinePaths, SystemClock};
-        use skipprd::buffer::durable::log::MutationLog;
         use skipprd::cluster::peer::{ReplicaRegistry, ReplicaServer, ReplicaSession};
         use std::sync::Arc;
 
         install_cluster_tls();
         let paths = PipelinePaths::new(dir, &key).unwrap();
-        let log = MutationLog::open(paths.clone()).unwrap();
         let guard = LeaseGuard::replica(
             key.clone(),
             LeaseEpoch::new(1),
             Arc::new(SystemClock::new()),
         );
-        let session = ReplicaSession::new(key.clone(), paths, guard, log);
+        let session = ReplicaSession::new(key.clone(), paths, guard);
         session
             .note_assigned("n".into(), skippr_lease::LeaseEpoch::new(1))
             .await;
@@ -381,25 +207,84 @@ impl FakeNode {
 }
 
 #[tokio::test]
-async fn fake_node_status_is_not_ready_until_assign_catch_up() {
+async fn two_node_replica_stores_payload() {
+    use skippr_lease::{LeaseGuard, PipelinePaths, SystemClock};
+    use skipprd::cluster::peer::{
+        replicate_payload_to, ReplicaRegistry, ReplicaServer, ReplicaSession,
+    };
+    use std::sync::Arc;
+
+    install_cluster_tls();
+    let dir = tempfile::tempdir().unwrap();
+    let payload_dir = tempfile::tempdir().unwrap();
+    let key = PipelineKey::new("t", "w", "p").unwrap();
+    let identity = ClusterIdentity::new(
+        skippr_lease::ClusterId::new("test-cluster").unwrap(),
+        NodeId::generate(),
+    );
+    let paths = PipelinePaths::new(dir.path(), &key).unwrap();
+    std::fs::create_dir_all(&paths.segs).unwrap();
+    let guard = LeaseGuard::replica(
+        key.clone(),
+        LeaseEpoch::new(1),
+        Arc::new(SystemClock::new()),
+    );
+    let session = ReplicaSession::new(key.clone(), paths.clone(), guard);
+    session.note_assigned("n".into(), LeaseEpoch::new(1)).await;
+    let registry = ReplicaRegistry::new(identity.clone());
+    registry.insert(session.clone()).await;
+    let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
+        .await
+        .unwrap();
+    let payload = payload_dir.path().join("seg-1.seg");
+    let bytes = b"payload-bytes";
+    std::fs::write(&payload, bytes).unwrap();
+    let sha = {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(bytes);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        out
+    };
+    let ack = replicate_payload_to(
+        server.bind_addr(),
+        &key,
+        "seg-1",
+        sha,
+        bytes.len() as u64,
+        1,
+        &payload,
+        &identity,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ack.segment_id, "seg-1");
+    assert_eq!(ack.sha256, sha.to_vec());
+    let status = session.status().await;
+    assert_eq!(status.catalog_seq_seen, 0);
+    assert!(!status.payload_ready);
+    server.drain().await;
+}
+
+#[tokio::test]
+async fn fake_node_status_is_not_payload_ready_until_catch_up() {
     let dir = tempfile::tempdir().unwrap();
     let key = PipelineKey::new("t", "w", "p").unwrap();
-    let identity = skipprd::cluster::identity::ClusterIdentity::new(
+    let identity = ClusterIdentity::new(
         skippr_lease::ClusterId::new("test-cluster").unwrap(),
         NodeId::generate(),
     );
     let node = FakeNode::start(dir.path(), key, identity).await;
     let status = node.session.status().await;
-    assert_eq!(status.committed_index, 0);
-    assert!(!status.ready);
+    assert_eq!(status.catalog_seq_seen, 0);
+    assert!(!status.payload_ready);
     assert_eq!(node.key.pipeline(), "p");
     node.server.drain().await;
 }
 
 #[tokio::test]
 async fn three_replica_replacement_assigns_spare() {
-    use skipprd::cluster::peer::{assign_replica, drop_replica, replicate_to};
-    use std::path::Path;
+    use skipprd::cluster::peer::{assign_replica, drop_replica, replicate_payload_to};
     use std::time::Duration;
 
     let identity = ClusterIdentity::new(
@@ -410,6 +295,7 @@ async fn three_replica_replacement_assigns_spare() {
     let primary_dir = tempfile::tempdir().unwrap();
     let replica_dir = tempfile::tempdir().unwrap();
     let spare_dir = tempfile::tempdir().unwrap();
+    let payload_dir = tempfile::tempdir().unwrap();
     let primary = FakeNode::start(primary_dir.path(), key.clone(), identity.clone()).await;
     let replica = FakeNode::start(replica_dir.path(), key.clone(), identity.clone()).await;
     let spare = FakeNode::start(spare_dir.path(), key.clone(), identity.clone()).await;
@@ -435,99 +321,95 @@ async fn three_replica_replacement_assigns_spare() {
     .await
     .unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !spare.session.status().await.ready {
+    while !spare.session.status().await.payload_ready {
         if std::time::Instant::now() > deadline {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let envelope = MutationEnvelope {
-        protocol_version: 1,
-        pipeline: key,
-        epoch: LeaseEpoch::new(1),
-        index: CommitIndex::new(1),
-        previous_hash: GENESIS_HASH,
-        payload_sha256: [0u8; 32],
-        body: DurableMutation::ReclaimSegment {
-            segment_id: "seg-spare".into(),
-        },
+    let payload = payload_dir.path().join("seg-spare.seg");
+    let bytes = b"spare-payload";
+    std::fs::write(&payload, bytes).unwrap();
+    let sha = {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(bytes);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        out
     };
-    let ack = replicate_to(
+    let ack = replicate_payload_to(
         spare.server.bind_addr(),
-        &envelope,
-        Path::new("/nonexistent"),
+        &key,
+        "seg-spare",
+        sha,
+        bytes.len() as u64,
+        1,
+        &payload,
         &spare.identity,
     )
     .await
     .unwrap();
-    assert_eq!(ack.commit_index, 1);
-    assert_eq!(spare.session.status().await.committed_index, 1);
+    assert_eq!(ack.segment_id, "seg-spare");
     primary.server.drain().await;
     replica.server.drain().await;
     spare.server.drain().await;
 }
 
-#[tokio::test]
-async fn prepared_without_commit_recovers_from_replica() {
-    use skippr_lease::{LeaseGuard, PipelinePaths, SystemClock};
-    use skipprd::buffer::durable::log::MutationLog;
-    use skipprd::buffer::durable::replicate::ReplicationMode;
-    use skipprd::buffer::durable::store::{
-        MemoryOffsetPublisher, OffsetMode, PipelineDurableStore,
+#[test]
+fn protocol_v2_peer_is_rejected() {
+    assert!(!skipprd::cluster::peer::protocol_compatible(2, 2));
+    assert!(skipprd::cluster::peer::protocol_compatible(3, 3));
+}
+
+#[test]
+fn payload_missing_lists_ids() {
+    let err = skippr_lease::PromoteError::PayloadMissing {
+        segment_ids: vec!["seg-a".into(), "seg-b".into()],
     };
-    use skipprd::cluster::peer::replicate_to;
-    use std::path::Path;
-    use std::sync::Arc;
+    let text = err.to_string();
+    assert!(text.contains("seg-a"), "{text}");
+    assert!(text.contains("seg-b"), "{text}");
+}
+
+#[tokio::test]
+async fn prune_to_lower_epoch_is_ignored() {
+    use skipprd::cluster::peer::{assign_replica, prune_to_at};
 
     let identity = ClusterIdentity::new(
         skippr_lease::ClusterId::new("test-cluster").unwrap(),
         NodeId::generate(),
     );
     let key = PipelineKey::new("t", "w", "p").unwrap();
-    let donor_dir = tempfile::tempdir().unwrap();
-    let crash_dir = tempfile::tempdir().unwrap();
-    let donor = FakeNode::start(donor_dir.path(), key.clone(), identity.clone()).await;
-    let envelope = MutationEnvelope {
-        protocol_version: 1,
-        pipeline: key.clone(),
-        epoch: LeaseEpoch::new(1),
-        index: CommitIndex::new(1),
-        previous_hash: GENESIS_HASH,
-        payload_sha256: [0u8; 32],
-        body: DurableMutation::ReclaimSegment {
-            segment_id: "prepared".into(),
-        },
-    };
-    replicate_to(
-        donor.server.bind_addr(),
-        &envelope,
-        Path::new("/nonexistent"),
-        &donor.identity,
+    let replica_dir = tempfile::tempdir().unwrap();
+    let replica = FakeNode::start(replica_dir.path(), key.clone(), identity.clone()).await;
+    assign_replica(
+        replica.server.bind_addr(),
+        &key,
+        LeaseEpoch::new(1),
+        replica.server.bind_addr(),
+        &identity,
     )
     .await
     .unwrap();
-    let paths = PipelinePaths::new(crash_dir.path(), &key).unwrap();
-    let mut log = MutationLog::open(paths.clone()).unwrap();
-    log.append_prepared(&envelope).unwrap();
-    let guard = LeaseGuard::replica(
-        key.clone(),
-        LeaseEpoch::new(1),
-        Arc::new(SystemClock::new()),
+    let segs = replica_dir
+        .path()
+        .join("clustered/t/w/p/segment_buffer/segs");
+    std::fs::create_dir_all(&segs).unwrap();
+    let payload = segs.join("keep.seg");
+    std::fs::write(&payload, b"keep").unwrap();
+    let err = prune_to_at(
+        replica.server.bind_addr(),
+        &key,
+        vec!["other".into()],
+        0,
+        &identity,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, skippr_lease::DurableError::StaleEpoch),
+        "{err:?}"
     );
-    let store = PipelineDurableStore::new(
-        key,
-        paths.clone(),
-        guard,
-        log,
-        ReplicationMode::LocalOnly,
-        OffsetMode::Dynamo(MemoryOffsetPublisher::new()),
-    );
-    store
-        .recover_unknown_prepared(&donor.identity, &[donor.server.bind_addr()])
-        .await
-        .unwrap();
-    let recovered = MutationLog::open(paths).unwrap();
-    assert_eq!(recovered.committed_index(), CommitIndex::new(1));
-    assert!(recovered.pending_prepared().is_empty());
-    donor.server.drain().await;
+    assert!(payload.exists());
+    replica.server.drain().await;
 }

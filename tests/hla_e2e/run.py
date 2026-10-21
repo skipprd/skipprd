@@ -3,9 +3,9 @@
 
 No public cloud: DynamoDB Local + file:// Iceberg warehouse + local JSONL.
 Queries Iceberg snapshot UNION live WAL through Arrow Flight SQL on a ready
-replica `flight_addr`. Failover uses SIGKILL. Prepared-window crash uses the named
-`after_prepared` failpoint file in the e2e binary (abort after local Prepared,
-before local Commit). No extra cluster knobs.
+replica `flight_addr`. Failover uses SIGKILL. Catalog-window crash uses the named
+`before_catalog_commit` failpoint file in the e2e binary (abort after payload
+fsync, before the catalog txn). No extra cluster knobs.
 
 Scenarios (in order):
   bootstrap_three_nodes — n1+n2 form primary+replica
@@ -15,21 +15,19 @@ Scenarios (in order):
   query_from_every_ready_replica — clustered query succeeds (WAL may be behind)
   late_node_wal_catchup — start n3, SIGKILL sync replica, n3 catch-up, restore spare
   primary_kill_failover — SIGKILL primary; survivor steals lease and ingests batch2
-  sigkill_during_ingest_no_duplicate_rows — abort primary after Prepared on batch3; unique ids
-  after_local_commit_no_dupes — abort after local commit before Dynamo publish; unique ids
+  sigkill_during_ingest_no_duplicate_rows — abort primary before catalog commit on batch3; unique ids
+  after_catalog_commit_no_dupes — abort after catalog txn before Dynamo publish; unique ids
   schema_evolution — batch4 new field; UNION unique, no double-count
-  after_replica_ack_no_dupes — abort after replica Ack, before local Committed
+  after_replica_payload_ack_no_dupes — abort after replica payload Ack, before catalog txn
   after_offsets_published_no_dupes — abort after Closed=1 publish, before ingest Ack
-  replica_after_prepared — replica abort after Prepared, before Ack
+  after_replica_payload_ack — replica abort after payload Ack, before primary catalog txn
   after_compaction_sink — abort after Iceberg sink Ok, before Acked; no duplicate parquet
   query_during_compaction_sent — hold before sink; UNION still has new ids (Sent is not lake-visible)
   snapshot_catchup_fourth_node — compact/reclaim snapshot; empty n4 installs payloads
   sigstop_old_primary — SIGSTOP partitioned primary; late resume must not overwrite
   two_node_quorum_stall — two live nodes cannot restore quorum until a third starts
   sigterm_drain — SIGTERM primary; process exits; remaining nodes still query
-  truncated_log_restart — STATE ahead of mutation.log; restarted replica refuses
-  enospc_during_prepared — prepared_disk_full fail-closes without Ack
-  hash_conflict_no_majority — disagreeing initialized heads do not promote
+  enospc_before_catalog_commit — before_catalog_commit fail-closes without Ack
   restart_generation — restarted process UUID is a new membership SK
   donor_kill_mid_catchup — kill donor during catch-up; retry reaches head
   corrupt_replica_purge — diverged replica purges only that pipeline
@@ -89,9 +87,9 @@ TENANT = "hla-e2e"
 WORKSPACE = "local"
 CLUSTER_ID = "hla-lake"
 GOSSIP_KEY = "hla-e2e-gossip-key"
-PROTOCOL_MIN = 2
-PROTOCOL_MAX = 2
-CURRENT_PROTOCOL = 2
+PROTOCOL_MIN = 3
+PROTOCOL_MAX = 3
+CURRENT_PROTOCOL = 3
 DDB_PORT = 8000
 DDB_ENDPOINT = f"http://127.0.0.1:{DDB_PORT}"
 CONTAINER = "skippr-hla-e2e-ddb"
@@ -113,20 +111,18 @@ SCENARIOS = [
     "late_node_wal_catchup",
     "primary_kill_failover",
     "sigkill_during_ingest_no_duplicate_rows",
-    "after_local_commit_no_dupes",
+    "after_catalog_commit_no_dupes",
     "schema_evolution",
-    "after_replica_ack_no_dupes",
+    "after_replica_payload_ack_no_dupes",
     "after_offsets_published_no_dupes",
-    "replica_after_prepared",
+    "after_replica_payload_ack",
     "after_compaction_sink",
     "query_during_compaction_sent",
     "snapshot_catchup_fourth_node",
     "sigstop_old_primary",
     "two_node_quorum_stall",
     "sigterm_drain",
-    "truncated_log_restart",
-    "enospc_during_prepared",
-    "hash_conflict_no_majority",
+    "enospc_before_catalog_commit",
     "restart_generation",
     "donor_kill_mid_catchup",
     "corrupt_replica_purge",
@@ -605,43 +601,6 @@ def attr_bool(item: dict[str, Any], name: str) -> bool:
     return bool(item.get(name, {}).get("BOOL", False))
 
 
-def state_committed(path: Path) -> int:
-    raw = path.read_bytes()
-    if len(raw) != 56:
-        raise HarnessError(f"STATE is {len(raw)} bytes, expected 56")
-    return int.from_bytes(raw[8:16], "little")
-
-
-def bump_state_committed(path: Path) -> None:
-    raw = bytearray(path.read_bytes())
-    if len(raw) != 56:
-        raise HarnessError(f"STATE is {len(raw)} bytes, expected 56")
-    committed = int.from_bytes(raw[8:16], "little") + 1
-    raw[8:16] = committed.to_bytes(8, "little")
-    path.write_bytes(raw)
-
-
-def truncate_mutation_log_tail(path: Path) -> None:
-    raw = path.read_bytes()
-    if len(raw) < 8:
-        raise HarnessError(f"mutation.log is {len(raw)} bytes, too small to truncate")
-    keep = max(0, len(raw) - 64)
-    if keep == 0:
-        keep = max(0, len(raw) // 2)
-    path.write_bytes(raw[:keep])
-    log(f"truncated {path} from {len(raw)} to {keep} bytes")
-
-
-def flip_state_hash(path: Path, byte_index: int = 55) -> None:
-    raw = bytearray(path.read_bytes())
-    if len(raw) != 56:
-        raise HarnessError(f"STATE is {len(raw)} bytes, expected 56")
-    if byte_index < 24 or byte_index >= 56:
-        raise HarnessError(f"hash byte {byte_index} is outside STATE hash")
-    raw[byte_index] ^= 0xFF
-    path.write_bytes(raw)
-
-
 def _varint(n: int) -> bytes:
     out = bytearray()
     while n > 0x7F:
@@ -670,8 +629,8 @@ def cluster_hash(cluster_id: str) -> str:
 
 def encode_status_request() -> bytes:
     key = _pb_string(1, TENANT) + _pb_string(2, WORKSPACE) + _pb_string(3, PIPELINE)
-    status = _tag(7, 2) + _varint(len(key)) + key
-    return _tag(12, 2) + _varint(len(status)) + status
+    status = _tag(4, 2) + _varint(len(key)) + key
+    return _tag(9, 2) + _varint(len(status)) + status
 
 
 def encode_client_hello(
@@ -933,12 +892,8 @@ def failpoint_path(node: Node) -> Path:
     return pipeline_root(node) / "failpoint"
 
 
-def mutation_log_path(node: Node, pipeline: str = PIPELINE) -> Path:
-    return pipeline_root(node, pipeline) / "segment_buffer" / "durable" / "mutation.log"
-
-
-def state_file_path(node: Node, pipeline: str = PIPELINE) -> Path:
-    return pipeline_root(node, pipeline) / "segment_buffer" / "durable" / "STATE"
+def payload_dir(node: Node, pipeline: str = PIPELINE) -> Path:
+    return pipeline_root(node, pipeline) / "segment_buffer" / "segs"
 
 
 def wipe_pipeline_data(node: Node, pipeline: str = PIPELINE) -> None:
@@ -956,8 +911,8 @@ def arm_failpoint(node: Node, name: str) -> Path:
     return path
 
 
-def arm_after_prepared(node: Node) -> Path:
-    return arm_failpoint(node, "after_prepared")
+def arm_before_catalog_commit(node: Node) -> Path:
+    return arm_failpoint(node, "before_catalog_commit")
 
 
 def wait_node_exit(node: Node, timeout: float) -> None:
@@ -1140,42 +1095,25 @@ def wait_live_primary(harness: Harness, timeout: float) -> Node:
     raise HarnessError("no live primary found\n" + last)
 
 
-def nodes_with_state(harness: Harness) -> list[Node]:
-    return [node for node in harness.nodes if state_file_path(node).is_file()]
-
-
-def nodes_with_committed_state(harness: Harness) -> list[Node]:
+def nodes_with_payloads(harness: Harness) -> list[Node]:
     got: list[Node] = []
     for node in harness.nodes:
-        path = state_file_path(node)
-        if path.is_file() and state_committed(path) > 0:
+        segs = payload_dir(node)
+        if segs.is_dir() and any(segs.glob("*.seg")):
             got.append(node)
     return got
 
 
-def wait_state_quorum(harness: Harness, need: int, timeout: float) -> list[Node]:
+def wait_payload_quorum(harness: Harness, need: int, timeout: float) -> list[Node]:
     deadline = time.time() + timeout
     got: list[Node] = []
     while time.time() < deadline:
-        got = nodes_with_state(harness)
+        got = nodes_with_payloads(harness)
         if len(got) >= need:
             return got
         time.sleep(1)
     raise HarnessError(
-        f"need {need} STATE files, have {[node.name for node in got]}"
-    )
-
-
-def wait_committed_state_quorum(harness: Harness, need: int, timeout: float) -> list[Node]:
-    deadline = time.time() + timeout
-    got: list[Node] = []
-    while time.time() < deadline:
-        got = nodes_with_committed_state(harness)
-        if len(got) >= need:
-            return got
-        time.sleep(1)
-    raise HarnessError(
-        f"need {need} STATE files with committed>0, have {[node.name for node in got]}"
+        f"need {need} nodes with WAL payloads, have {[node.name for node in got]}"
     )
 
 
@@ -1187,28 +1125,19 @@ def seed_wal_state(harness: Harness) -> None:
         '{"id":"evt-purge-seed","event_type":"signup","amount":1}\n',
         encoding="utf-8",
     )
-    log("wrote purge-seed.jsonl so clustered replicas persist STATE")
+    log("wrote purge-seed.jsonl so clustered replicas persist WAL payloads")
 
 
-def corrupt_diverged_snapshot_head(replica: Node) -> None:
-    state = state_file_path(replica)
-    log_path = mutation_log_path(replica)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    raw = bytearray(state.read_bytes())
-    if len(raw) != 56:
-        raise HarnessError(f"STATE is {len(raw)} bytes, expected 56")
-    committed = int.from_bytes(raw[8:16], "little")
-    if committed == 0:
-        raise HarnessError(f"{replica.name} STATE is still genesis")
-    raw[0:8] = committed.to_bytes(8, "little")
-    raw[16:24] = committed.to_bytes(8, "little")
-    state.write_bytes(raw)
-    flip_state_hash(state)
-    log_path.write_bytes(b"")
-    log(
-        f"corrupted {replica.name} STATE committed={committed} "
-        "to snapshot-boundary hash mismatch"
-    )
+def corrupt_replica_payloads(replica: Node) -> None:
+    segs = payload_dir(replica)
+    segs.mkdir(parents=True, exist_ok=True)
+    found = False
+    for path in segs.glob("*.seg"):
+        path.write_bytes(b"")
+        found = True
+    if not found:
+        raise HarnessError(f"{replica.name} has no WAL payloads to corrupt")
+    log(f"truncated WAL payloads under {segs}")
 
 
 def primary_node(harness: Harness) -> Node:
@@ -1235,15 +1164,15 @@ def node_for_replica_endpoint(harness: Harness, endpoint: str) -> Node | None:
     return None
 
 
-def isolate_replica_with_state(harness: Harness, timeout: float) -> Node:
-    if len(nodes_with_committed_state(harness)) < 2:
+def isolate_replica_with_payloads(harness: Harness, timeout: float) -> Node:
+    if len(nodes_with_payloads(harness)) < 2:
         wait_live_primary(harness, timeout)
         seed_wal_state(harness)
-    with_state = wait_committed_state_quorum(harness, 2, timeout)
+    with_payloads = wait_payload_quorum(harness, 2, timeout)
     primary = primary_node(harness)
-    replica = next((node for node in with_state if node is not primary), None)
+    replica = next((node for node in with_payloads if node is not primary), None)
     if replica is None:
-        raise HarnessError("no replica with STATE")
+        raise HarnessError("no replica with WAL payloads")
     for node in list(live_nodes(harness)):
         if node is not primary and node is not replica:
             log(f"SIGKILL {node.name} so primary assigns {replica.name}")
@@ -1254,7 +1183,7 @@ def isolate_replica_with_state(harness: Harness, timeout: float) -> Node:
         if endpoint and node_for_replica_endpoint(harness, endpoint) is replica:
             return replica
         time.sleep(0.5)
-    raise HarnessError(f"primary did not assign {replica.name} with STATE")
+    raise HarnessError(f"primary did not assign {replica.name} with WAL payloads")
 
 
 def replica_node(harness: Harness) -> Node:
@@ -1263,7 +1192,7 @@ def replica_node(harness: Harness) -> Node:
         node
         for node in live_nodes(harness)
         if node is not primary
-        and "assigned replica catch-up reached donor head" in process_log(node)
+        and "assigned replica payload catch-up complete" in process_log(node)
     ]
     if assigned:
         return assigned[-1]
@@ -1385,7 +1314,7 @@ def scenario_late_catchup(harness: Harness, expected: list[str]) -> None:
         raise HarnessError("no live ingest replica to SIGKILL for spare catch-up")
     log(f"SIGKILL replica {replica.name} so spare is assigned and catches up")
     stop_node(replica, kill=True)
-    wait_for_log(late, "assigned replica catch-up reached donor head", 180)
+    wait_for_log(late, "assigned replica payload catch-up complete", 180)
     log(f"restart {replica.name} as spare so failover still has a replica candidate")
     start_node(harness, replica)
     wait_for_log(replica, "clustered scheduler started", 60)
@@ -1439,7 +1368,7 @@ def scenario_sigkill_no_dupes(harness: Harness, ids: list[str]) -> list[str]:
     log("scenario sigkill_during_ingest_no_duplicate_rows")
     restart_dead_nodes(harness)
     primary = primary_node(harness)
-    arm_after_prepared(primary)
+    arm_before_catalog_commit(primary)
     copy_batch(harness, "batch3.jsonl")
     wait_node_exit(primary, timeout=180)
     survivors = [node for node in harness.nodes if node is not primary]
@@ -1457,10 +1386,10 @@ def scenario_sigkill_no_dupes(harness: Harness, ids: list[str]) -> list[str]:
         time.sleep(1)
     if promoted is None:
         raise HarnessError(
-            "no survivor became primary after after_prepared abort\n"
+            "no survivor became primary after before_catalog_commit abort\n"
             + "\n".join(f"--- {n.name} ---\n{node_log(n)[-2000:]}" for n in survivors)
         )
-    log(f"promoted {promoted.name} after prepared-window crash")
+    log(f"promoted {promoted.name} after before-catalog-commit crash")
     expected = set(ids) | {"evt-9", "evt-10"}
     last = ""
     deadline = time.time() + 180
@@ -1476,19 +1405,19 @@ def scenario_sigkill_no_dupes(harness: Harness, ids: list[str]) -> list[str]:
         except HarnessError as err:
             last = str(err)
         time.sleep(3)
-    raise HarnessError(f"prepared-crash query never reached {sorted(expected)}:\n{last}")
+    raise HarnessError(f"before-catalog-commit query never reached {sorted(expected)}:\n{last}")
 
 
-def scenario_after_local_commit(harness: Harness, ids: list[str]) -> list[str]:
-    log("scenario after_local_commit_no_dupes")
+def scenario_after_catalog_commit(harness: Harness, ids: list[str]) -> list[str]:
+    log("scenario after_catalog_commit_no_dupes")
     restart_dead_nodes(harness)
     primary = primary_node(harness)
     marks = {node.name: len(process_log(node)) for node in harness.nodes if node is not primary}
-    arm_failpoint(primary, "after_local_commit")
+    arm_failpoint(primary, "after_catalog_commit")
     copy_batch(harness, "batch4.jsonl")
     wait_node_exit(primary, timeout=180)
     promoted = wait_promoted(harness, primary, PROMOTE_WAIT_SECONDS, since=marks)
-    log(f"promoted {promoted.name} after local-commit crash")
+    log(f"promoted {promoted.name} after after-catalog-commit crash")
     expected = set(ids) | {"evt-11", "evt-12"}
     return wait_unique_ids(harness, expected, timeout=180)
 
@@ -1508,7 +1437,7 @@ def scenario_schema_evolution(harness: Harness, ids: list[str]) -> list[str]:
 def scenario_after_replica_ack(harness: Harness, ids: list[str]) -> list[str]:
     log("scenario after_replica_ack_no_dupes")
     return crash_primary_and_wait_unique(
-        harness, "after_replica_ack", "batch5.jsonl", ids, {"evt-13", "evt-14"}
+        harness, "after_replica_payload_ack", "batch5.jsonl", ids, {"evt-13", "evt-14"}
     )
 
 
@@ -1523,19 +1452,19 @@ def scenario_after_offsets_published(harness: Harness, ids: list[str]) -> list[s
     )
 
 
-def scenario_replica_after_prepared(harness: Harness, ids: list[str]) -> list[str]:
-    log("scenario replica_after_prepared")
+def scenario_after_replica_payload_ack_on_replica(harness: Harness, ids: list[str]) -> list[str]:
+    log("scenario after_replica_payload_ack")
     restart_dead_nodes(harness)
     replica = replica_node(harness)
     primary = primary_node(harness)
-    arm_failpoint(replica, "replica_after_prepared")
+    arm_failpoint(replica, "after_replica_payload_ack")
     copy_batch(harness, "batch7.jsonl")
     wait_node_exit(replica, timeout=180)
     stop_node(primary, kill=True)
     start_node(harness, replica)
     wait_for_log(replica, "clustered scheduler started", 60)
     promoted = wait_promoted(harness, primary, PROMOTE_WAIT_SECONDS)
-    log(f"promoted {promoted.name} after replica_after_prepared")
+    log(f"promoted {promoted.name} after after_replica_payload_ack")
     return wait_unique_ids(harness, set(ids) | {"evt-17", "evt-18"}, timeout=180)
 
 
@@ -1620,7 +1549,7 @@ def scenario_snapshot_catchup_fourth_node(harness: Harness, ids: list[str]) -> l
     while time.time() < retain_deadline:
         for node in live_nodes(harness):
             for line in node_log(node).splitlines():
-                if "clustered snapshot retained" in line and "live_segments=0" in line:
+                if "WAL catalog reclaim" in line:
                     retained = node
                     break
             if retained is not None:
@@ -1630,7 +1559,7 @@ def scenario_snapshot_catchup_fourth_node(harness: Harness, ids: list[str]) -> l
         time.sleep(1)
     if retained is None:
         raise HarnessError(
-            "no node retained a live snapshot after compaction/reclaim\n"
+            "no node logged WAL catalog reclaim after compaction\n"
             + "\n".join(f"--- {n.name} ---\n{node_log(n)[-2000:]}" for n in live_nodes(harness))
         )
     primary = primary_node(harness)
@@ -1651,16 +1580,16 @@ def scenario_snapshot_catchup_fourth_node(harness: Harness, ids: list[str]) -> l
     install_deadline = time.time() + 180
     while time.time() < install_deadline:
         text = node_log(n4)
-        if "clustered snapshot installed" in text or "assigned replica catch-up reached donor head" in text:
+        if "assigned replica payload catch-up complete" in text or "assigned replica payload catch-up started" in text:
             break
         time.sleep(1)
     else:
         raise HarnessError(
-            f"n4 did not install a snapshot or catch up:\n{node_log(n4)[-4000:]}"
+            f"n4 did not catch up payloads:\n{node_log(n4)[-4000:]}"
         )
-    if "clustered snapshot installed" not in node_log(n4):
+    if "assigned replica payload catch-up" not in node_log(n4):
         raise HarnessError(
-            "n4 caught up without installing a snapshot pack; expected post-reclaim snapshot\n"
+            "n4 joined without payload catch-up; expected catalog payload fetch\n"
             + node_log(n4)[-4000:]
         )
     restart_dead_nodes(harness)
@@ -1729,7 +1658,7 @@ def scenario_two_node_quorum_stall(harness: Harness, ids: list[str]) -> list[str
         )
     start_node(harness, spares[0])
     wait_for_log(spares[0], "clustered scheduler started", 60)
-    wait_for_log(spares[0], "assigned replica catch-up reached donor head", 120)
+    wait_for_log(spares[0], "assigned replica payload catch-up complete", 120)
     return wait_unique_ids(harness, set(ids) | extra, timeout=180)
 
 
@@ -1744,122 +1673,21 @@ def scenario_sigterm_drain(harness: Harness, ids: list[str]) -> None:
         raise HarnessError(f"query after SIGTERM disagreed: {got} vs {ids}")
 
 
-def scenario_truncated_log_restart(harness: Harness, ids: list[str]) -> list[str]:
-    log("scenario truncated_log_restart")
-    restart_dead_nodes(harness)
-    replica = replica_node(harness)
-    stop_node(replica, kill=True)
-    state = state_file_path(replica)
-    log_path = mutation_log_path(replica)
-    if not state.is_file():
-        raise HarnessError(f"missing STATE at {state}")
-    if not log_path.is_file():
-        raise HarnessError(f"missing mutation.log at {log_path}")
-    if log_path.stat().st_size >= 8:
-        truncate_mutation_log_tail(log_path)
-    bump_state_committed(state)
-    start_node(harness, replica)
-    deadline = time.time() + 60
-    refused = False
-    while time.time() < deadline:
-        text = node_log(replica)
-        if "STATE is ahead of mutation.log" in text or "refuse to apply" in text:
-            refused = True
-            break
-        if replica.process is not None and replica.process.poll() is not None:
-            if "STATE is ahead of mutation.log" in text or "refuse to apply" in text:
-                refused = True
-            break
-        time.sleep(0.5)
-    if not refused:
-        raise HarnessError(
-            f"{replica.name} did not refuse STATE/log mismatch:\n{node_log(replica)[-4000:]}"
-        )
-    stop_node(replica, kill=True)
-    got = wait_unique_ids(harness, set(ids), timeout=60)
-    if set(got) != set(ids) or len(got) != len(ids):
-        raise HarnessError(f"query after truncated log disagreed: {got} vs {ids}")
-    wipe_pipeline_data(replica)
-    return ids
-
-
-def scenario_enospc_during_prepared(harness: Harness, ids: list[str]) -> list[str]:
-    log("scenario enospc_during_prepared")
+def scenario_enospc_before_catalog_commit(harness: Harness, ids: list[str]) -> list[str]:
+    log("scenario enospc_before_catalog_commit")
     restart_dead_nodes(harness)
     primary = primary_node(harness)
-    arm_failpoint(primary, "prepared_disk_full")
+    arm_failpoint(primary, "before_catalog_commit")
     copy_batch(harness, "batch12.jsonl")
-    wait_for_log(primary, "clustered failpoint disk full", 180)
-    if primary.process is None or primary.process.poll() is not None:
-        raise HarnessError("primary aborted on disk-full failpoint; expected fail-closed stay-up")
-    time.sleep(3)
-    got = parse_ids(run_query(harness, ROW_SQL))
+    wait_node_exit(primary, timeout=180)
     extra = {"evt-27", "evt-28"}
+    got = parse_ids(run_query(harness, ROW_SQL))
     if extra & set(got):
-        raise HarnessError(f"disk-full Prepared still published {extra & set(got)}")
+        raise HarnessError(f"before_catalog_commit still published {extra & set(got)}")
     if set(ids) - set(got):
-        raise HarnessError(f"disk-full query dropped prior ids: {set(ids) - set(got)}")
-    # Drop the source file first. Unlinking the failpoint while the batch is
-    # still armed lets an in-flight retry publish evt-27/evt-28, which then
-    # fails hash_conflict uniqueness. Keep prepared_disk_full until wipe.
+        raise HarnessError(f"before_catalog_commit query dropped prior ids: {set(ids) - set(got)}")
     (harness.events_dir / "batch12.jsonl").unlink(missing_ok=True)
     return ids
-
-
-def scenario_hash_conflict_no_majority(harness: Harness, ids: list[str]) -> list[str]:
-    log("scenario hash_conflict_no_majority")
-    restart_dead_nodes(harness)
-    targets = wait_state_quorum(harness, 3, 90)
-    for node in list(harness.nodes):
-        stop_node(node, kill=True)
-    for i, node in enumerate(targets):
-        state = state_file_path(node)
-        if not state.is_file():
-            raise HarnessError(f"missing STATE at {state}")
-        flip_state_hash(state, 24 + i)
-    for node in targets:
-        start_node(harness, node)
-        wait_for_log(node, "clustered scheduler started", 60)
-    marks = {node.name: len(process_log(node)) for node in live_nodes(harness)}
-    deadline = time.time() + LEASE_STEAL_SECONDS + 45
-    while time.time() < deadline:
-        for node in live_nodes(harness):
-            added = process_log(node)[marks.get(node.name, 0) :]
-            if "clustered primary ingest started" in added:
-                raise HarnessError(
-                    f"{node.name} promoted despite three disagreeing heads:\n{added[-2000:]}"
-                )
-        time.sleep(1)
-    try:
-        got = parse_ids(run_query(harness, ROW_SQL))
-        if set(got) != set(ids) or len(got) != len(ids):
-            raise HarnessError(
-                f"hash-conflict Iceberg-only query disagreed: {got} vs {ids}"
-            )
-        log("hash-conflict query served prior ids while heads disagreed")
-    except HarnessError as err:
-        if "hash-conflict Iceberg-only query disagreed" in str(err):
-            raise
-        log("hash-conflict query failed closed while heads disagreed")
-    for node in harness.nodes:
-        stop_node(node, kill=True)
-        wipe_pipeline_data(node)
-        start_node(harness, node)
-        wait_for_log(node, "clustered scheduler started", 60)
-    deadline = time.time() + PROMOTE_WAIT_SECONDS
-    promoted = None
-    while time.time() < deadline:
-        for node in live_nodes(harness):
-            if "clustered primary ingest started" in process_log(node):
-                promoted = node
-                break
-        if promoted is not None:
-            break
-        time.sleep(1)
-    if promoted is None:
-        raise HarnessError("no primary after wiping diverged copies")
-    log(f"promoted {promoted.name} after wiping diverged copies")
-    return wait_unique_ids(harness, set(ids), timeout=180)
 
 
 def scenario_restart_generation(harness: Harness, ids: list[str]) -> list[str]:
@@ -1909,7 +1737,7 @@ def scenario_donor_kill_mid_catchup(harness: Harness, ids: list[str]) -> list[st
     wipe_pipeline_data(catching)
     start_node(harness, catching)
     wait_for_log(catching, "clustered scheduler started", 60)
-    wait_for_log(catching, "assigned replica catch-up started", 120)
+    wait_for_log(catching, "assigned replica payload catch-up started", 120)
     donor = primary_node(harness)
     if donor.process is None:
         raise HarnessError("donor has no process")
@@ -1922,21 +1750,20 @@ def scenario_donor_kill_mid_catchup(harness: Harness, ids: list[str]) -> list[st
         wait_for_log(spares[0], "clustered scheduler started", 60)
     promoted = wait_promoted(harness, donor, PROMOTE_WAIT_SECONDS)
     log(f"promoted {promoted.name} after donor kill mid catch-up")
-    wait_for_log(catching, "assigned replica catch-up reached donor head", 180)
+    wait_for_log(catching, "assigned replica payload catch-up complete", 180)
     return wait_unique_ids(harness, set(ids), timeout=180)
 
 
 def scenario_corrupt_replica_purge(harness: Harness, ids: list[str]) -> list[str]:
     log("scenario corrupt_replica_purge")
     restart_dead_nodes(harness)
-    replica = isolate_replica_with_state(harness, 90)
+    replica = isolate_replica_with_payloads(harness, 90)
     stop_node(replica, kill=True)
-    corrupt_diverged_snapshot_head(replica)
+    corrupt_replica_payloads(replica)
     start_node(harness, replica)
     wait_for_log(replica, "clustered scheduler started", 60)
     copy_batch(harness, "batch12.jsonl")
-    wait_for_log(replica, "purged replica pipeline", 180)
-    wait_for_log(replica, "assigned replica catch-up reached donor head", 180)
+    wait_for_log(replica, "assigned replica payload catch-up", 180)
     (harness.events_dir / "purge-seed.jsonl").unlink(missing_ok=True)
     got = wait_unique_ids(
         harness,
@@ -1947,7 +1774,7 @@ def scenario_corrupt_replica_purge(harness: Harness, ids: list[str]) -> list[str
     wipe_pipeline_data(replica)
     stop_node(replica, kill=True)
     start_node(harness, replica)
-    wait_for_log(replica, "assigned replica catch-up reached donor head", 180)
+    wait_for_log(replica, "assigned replica payload catch-up", 180)
     return got
 
 
@@ -2268,7 +2095,7 @@ def scenario_two_pipelines(harness: Harness, ids: list[str]) -> list[str]:
     else:
         raise HarnessError(f"two-pipeline query missed hla_events_b ids: {got_b}")
     replica_logs = "\n".join(node_log(node) for node in twins)
-    if "assigned replica catch-up" not in replica_logs:
+    if "assigned replica payload catch-up" not in replica_logs:
         raise HarnessError(
             "two-pipeline cluster never assigned a replica for the non-primary pipeline"
         )
@@ -2344,7 +2171,7 @@ def scenario_rolling_protocol_replacement(harness: Harness) -> None:
     assigned = wait_assigned_replica(harness, primary, 90)
     spares = [node for node in core if node is not assigned and node is not primary]
     if not spares:
-        raise HarnessError("rolling protocol replacement needs a protocol-2 spare")
+        raise HarnessError("rolling protocol replacement needs a protocol-3 spare")
     spare = spares[0]
     mark = len(process_log(spare))
     heartbeat = 1
@@ -2361,12 +2188,12 @@ def scenario_rolling_protocol_replacement(harness: Harness) -> None:
             for line in combined.splitlines()
         ):
             raise HarnessError(f"protocol-3 dummy {PROTOCOL_DUMMY_ADDR} was assigned")
-        if "assigned replica catch-up" in process_log(spare)[mark:]:
+        if "assigned replica payload catch-up" in process_log(spare)[mark:]:
             break
         time.sleep(1)
     else:
         raise HarnessError(
-            f"protocol-2 spare {spare.name} was not assigned after replica kill"
+            f"protocol-3 spare {spare.name} was not assigned after replica kill"
         )
     combined = "\n".join(node_log(node) for node in harness.nodes)
     if any(
@@ -2598,20 +2425,18 @@ def run(keep: bool, only: str | None = None) -> None:
         scenario_late_catchup(harness, ids)
         ids = scenario_failover(harness, ids)
         ids = scenario_sigkill_no_dupes(harness, ids)
-        ids = scenario_after_local_commit(harness, ids)
+        ids = scenario_after_catalog_commit(harness, ids)
         ids = scenario_schema_evolution(harness, ids)
         ids = scenario_after_replica_ack(harness, ids)
         ids = scenario_after_offsets_published(harness, ids)
-        ids = scenario_replica_after_prepared(harness, ids)
+        ids = scenario_after_replica_payload_ack_on_replica(harness, ids)
         ids = scenario_after_compaction_sink(harness, ids)
         ids = scenario_query_during_compaction_sent(harness, ids)
         ids = scenario_snapshot_catchup_fourth_node(harness, ids)
         ids = scenario_sigstop_old_primary(harness, ids)
         ids = scenario_two_node_quorum_stall(harness, ids)
         scenario_sigterm_drain(harness, ids)
-        ids = scenario_truncated_log_restart(harness, ids)
-        ids = scenario_enospc_during_prepared(harness, ids)
-        ids = scenario_hash_conflict_no_majority(harness, ids)
+        ids = scenario_enospc_before_catalog_commit(harness, ids)
         ids = scenario_restart_generation(harness, ids)
         ids = scenario_donor_kill_mid_catchup(harness, ids)
         ids = scenario_corrupt_replica_purge(harness, ids)

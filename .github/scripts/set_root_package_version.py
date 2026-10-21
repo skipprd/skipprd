@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
-
-SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from engine_tag import is_engine_tag
 
 
 def normalize_semver(version: str) -> str:
-    if not SEMVER_RE.fullmatch(version):
-        raise SystemExit(f"version must be unprefixed semver (x.y.z), got: {version}")
+    if not is_engine_tag(version):
+        raise SystemExit(f"version must be unprefixed semver (x.y.z or x.y.z-beta), got: {version}")
     return version
 
 
@@ -42,7 +45,11 @@ def replace_lockfile_package_version(cargo_lock_path: Path, package_name: str, v
 def main() -> None:
     parser = argparse.ArgumentParser(description="Set release package versions in checked-in manifests.")
     parser.add_argument("--workspace", required=True, help="Workspace root containing Cargo.toml and Cargo.lock")
-    parser.add_argument("--version", required=True, help="Unprefixed semver version to write (x.y.z)")
+    parser.add_argument(
+        "--version",
+        required=True,
+        help="Unprefixed semver version to write (x.y.z or x.y.z-beta)",
+    )
     args = parser.parse_args()
 
     version = normalize_semver(args.version)

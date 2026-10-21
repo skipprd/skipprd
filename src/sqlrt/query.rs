@@ -609,7 +609,7 @@ pub async fn query_with_options(
                     config = config.bind_pipeline(&pipeline_name);
                     config.init().await;
                     register_catalog(&config, &ctx).await;
-                    // Unified WAL reader (local disk or S3 based on manifest/env)
+                    // Catalog-backed WAL reader keyed by PipelineKey.
                     let reader = crate::sqlrt::wal_reader::WalReaderFactory::for_pipeline_async(
                         &config,
                         &pipeline_name,

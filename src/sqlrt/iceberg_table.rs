@@ -565,8 +565,8 @@ pub async fn load_pinned_iceberg_table(
 const SNAPSHOT_WAL_SEGMENT_IDS: &str = "skippr.wal-segment-ids";
 
 /// WAL segment ids recorded on Iceberg snapshot ancestry after a successful
-/// grouped compaction. Live WAL must exclude these even when CompleteSlices
-/// has not yet reached the current Iceberg snapshot.
+/// grouped compaction. Live WAL must exclude these even when slice-done bits
+/// have not yet reached the current Iceberg snapshot.
 pub fn compacted_wal_segment_ids(table: &Table) -> Vec<String> {
     segment_ids_from_snapshot_properties(table.metadata().snapshots().flat_map(|snapshot| {
         snapshot

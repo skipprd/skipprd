@@ -79,13 +79,18 @@ pub async fn apply_pending_with_ingest_lease(
 ) -> Result<Vec<String>, String> {
     let offsets = Offsets::init(config).map_err(|err| err.to_string())?;
     let store = journal_store(&offsets)?;
-    let _lease = match config.get_wal_storage() {
+    let lease = match config.get_wal_storage() {
         crate::helpers::wal_storage::WalStorage::Disk
         | crate::helpers::wal_storage::WalStorage::S3 => {
             Some(crate::pipeline_backend::acquire_ingest_lease(config, &offsets).await?)
         }
         crate::helpers::wal_storage::WalStorage::Clustered => None,
     };
+    if let Some(lease) = &lease {
+        lease
+            .activate()
+            .map_err(|err| format!("pipeline writer lease activate failed: {err}"))?;
+    }
     apply_pending_files(config, store, direction).await
 }
 
@@ -95,7 +100,8 @@ pub async fn apply_migration(
     apply: &MigrationApply,
     stmts: &[AlterStmt],
 ) -> Result<(), String> {
-    let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name());
+    let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name())
+        .map_err(|err| err.to_string())?;
     let log = journal::load(store, &key).map_err(|err| err.to_string())?;
     if journal::latest_phase(&log, apply).map_err(|err| err.to_string())?
         == Some(MigrationPhase::Committed)
@@ -120,7 +126,8 @@ async fn apply_with(
     apply: &MigrationApply,
     stmts: &[AlterStmt],
 ) -> Result<(), String> {
-    let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name());
+    let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name())
+        .map_err(|err| err.to_string())?;
     let log = journal::load(store, &key).map_err(|err| err.to_string())?;
     let phase = journal::latest_phase(&log, apply).map_err(|err| err.to_string())?;
     if phase == Some(MigrationPhase::Committed) {
@@ -370,6 +377,7 @@ mod tests {
     }
 
     fn write_region_wal(config: &Config) -> std::path::PathBuf {
+        crate::buffer::wal_handle::clear_wal_handles();
         let segs = std::path::PathBuf::from(config.get_data_dir()).join("segment_buffer/segs");
         let seg = SegmentFile::new(&segs, "live1").unwrap();
         let mut field_meta = HashMap::new();
@@ -392,15 +400,91 @@ mod tests {
         batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
         let mut parts_meta = HashMap::new();
         parts_meta.insert(key, (0, SystemTime::now()));
-        let (meta, _, _) = seg
+        let (meta, _, sha) = seg
             .write_snapshot(&HashMap::new(), &batches, &parts_meta, &HashMap::new())
             .unwrap();
-        seg.write_commit_marker(&meta).unwrap();
+        let key = skippr_lease::PipelineKey::new(
+            config.get_tenant(),
+            &config.get_workspace_name(),
+            &config.get_pipeline_name(),
+        )
+        .unwrap();
+        let paths =
+            skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(&config.get_data_dir()));
+        let guard = skippr_lease::LeaseGuard::single_node(
+            key.clone(),
+            Arc::new(skippr_lease::SystemClock::new()),
+        );
+        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
+        let db =
+            sled::open(std::path::Path::new(&config.get_data_dir()).join("mig-offsets")).unwrap();
+        let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> = Arc::new(
+            crate::helpers::offset_store::SledOffsetStore::new(db.open_tree("o").unwrap()),
+        );
+        let handle =
+            crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, guard, catalog, offsets);
+        let seq = skippr_wal_catalog::CatalogSeq::new(1);
+        let row = skippr_wal_catalog::SegmentRow {
+            segment_id: skippr_lease::SegmentId::new("live1").unwrap(),
+            seq,
+            location: skippr_wal_catalog::PayloadLocation::Disk {
+                path: seg.path.to_string_lossy().into_owned(),
+            },
+            payload_len: meta.total_bytes,
+            payload_sha256: sha,
+            slice_count: meta.num_partitions.max(1),
+            done: skippr_wal_catalog::SliceBitmap::new(meta.num_partitions.max(1)),
+            offsets: Vec::new(),
+            checkpoints: Vec::new(),
+            epoch: fence.epoch,
+            version: 0,
+        };
+        let mut txn = skippr_wal_catalog::CatalogTxn::new();
+        txn.put(
+            skippr_wal_catalog::CatalogKey::Segment(row.segment_id.clone()),
+            skippr_wal_catalog::CatalogRow::Segment(row),
+            skippr_wal_catalog::PutCond::NotExists,
+        )
+        .unwrap();
+        txn.put(
+            skippr_wal_catalog::CatalogKey::Seq,
+            skippr_wal_catalog::CatalogRow::Seq(skippr_wal_catalog::SeqRow { max_seq: seq }),
+            skippr_wal_catalog::PutCond::SeqAdvance,
+        )
+        .unwrap();
+        handle.catalog().commit(&txn, fence).unwrap();
+        crate::buffer::wal_handle::ensure_format_clean(handle.catalog(), fence).unwrap();
+        crate::buffer::wal_handle::install_wal_handle(handle);
         seg.path.clone()
     }
 
+    #[test]
+    fn schema_rewrite_runs_after_lease_activate() {
+        let engine = include_str!("../engine.rs");
+        let activate = engine
+            .find("lease.activate()")
+            .expect("engine must activate the ingest lease");
+        let apply = engine
+            .find("apply_pending_files")
+            .expect("engine must apply pending migrations");
+        assert!(
+            activate < apply,
+            "rewrite_live_wal requires require_active_epoch; activate must precede apply_pending_files"
+        );
+        let cli = include_str!("apply.rs");
+        let cli_activate = cli
+            .find("lease\n            .activate()")
+            .or_else(|| cli.find(".activate()"))
+            .expect("CLI migrate must activate the ingest lease");
+        let cli_apply = cli
+            .rfind("apply_pending_files(config, store, direction)")
+            .expect("CLI migrate must apply after activate");
+        assert!(cli_activate < cli_apply);
+    }
+
     fn wal_field_name(path: &std::path::Path) -> String {
-        let admitted = SegmentFile::admit_owned_pair_path(path).unwrap();
+        let admitted = SegmentFile::read_index_path(path).unwrap();
         let mut file = std::fs::File::open(path).unwrap();
         file.seek(std::io::SeekFrom::Start(admitted.index[0].start))
             .unwrap();
@@ -424,7 +508,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sink.calls.lock().unwrap().len(), 1);
-        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name());
+        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
         assert_eq!(
             journal::latest_phase(&journal::load(store.as_ref(), &key).unwrap(), &apply).unwrap(),
             Some(MigrationPhase::Committed)
@@ -454,7 +538,26 @@ mod tests {
             *sink.saw_barrier.lock().unwrap(),
             "dest apply_alter must run under SchemaBarrier"
         );
-        assert_eq!(wal_field_name(&wal), "region_code");
+        let live = crate::buffer::wal_handle::wal_handle_for(
+            &skippr_lease::PipelineKey::new(
+                config.get_tenant(),
+                &config.get_workspace_name(),
+                &config.get_pipeline_name(),
+            )
+            .unwrap(),
+        )
+        .expect("wal handle after apply")
+        .live_disk_payload_paths()
+        .expect("live payload paths")
+        .into_iter()
+        .next()
+        .expect("rewritten segment");
+        assert_ne!(
+            live, wal,
+            "crash-safe rewrite must leave a new catalog payload path"
+        );
+        assert_eq!(wal_field_name(&live), "region_code");
+        crate::buffer::wal_handle::clear_wal_handles();
 
         let persisted = config.get_metadata().await.unwrap();
         assert!(persisted.metadata["trips"]
@@ -462,7 +565,7 @@ mod tests {
             .contains_key("region_code"));
         assert!(!persisted.metadata["trips"].fields.contains_key("region"));
 
-        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name());
+        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
         assert_eq!(
             journal::latest_phase(&journal::load(&store, &key).unwrap(), &apply).unwrap(),
             Some(MigrationPhase::Committed)
@@ -505,10 +608,11 @@ mod tests {
         assert!(err.contains("does not support migrations"), "{err}");
         assert!(sink.calls.lock().unwrap().is_empty());
         assert_eq!(wal_field_name(&wal), "region");
+        crate::buffer::wal_handle::clear_wal_handles();
 
         let persisted = config.get_metadata().await.unwrap();
         assert!(persisted.metadata["trips"].fields.contains_key("region"));
-        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name());
+        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
         assert_eq!(
             journal::latest_phase(&journal::load(&store, &key).unwrap(), &apply).unwrap(),
             None
@@ -524,7 +628,7 @@ mod tests {
         let store = store();
         let sink = RecordingSink::native();
         let (apply, stmts) = rename_apply();
-        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name());
+        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
         journal::commit(&store, &key, &apply, MigrationPhase::DestApplied).unwrap();
 
         apply_with(&config, &store, &sink, &apply, &stmts)

@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking
+
+- WAL metadata lives in the skipprd store catalog (sled / DynamoDB / Cloud Tables). `mutation.log`, completion bitmaps, `.seg.commit`, and clustered protocol v2 are gone. First start imports existing installs once and archives leftover files. Clustered peers must all run protocol v3; start the former primary first. Deleting `DATA_DIR` with sled deletes the catalog.
+
 ## [18.3.8]
 
 ### Breaking

@@ -5,7 +5,7 @@ description: Persist resume positions and catalog pointers so a new machine can 
 
 # State store
 
-Skipprd records how far each source has got and, for some lake destinations, where the catalog lives. That record is the **state store**. The write-ahead log is still the source of truth for data; the store is how a new process finds its place.
+Skipprd records how far each source has got, WAL catalog rows (live segments, compaction, reclaim), and, for some lake destinations, where the Iceberg catalog lives. Payload bytes stay in `.seg` files or S3 objects; the store is the authority for which segments are live. S3 plus local `sled` keeps that catalog on the runner.
 
 You need an external store when the machine is ephemeral. On a long-lived host with `WAL_STORAGE=disk`, the default local store is enough.
 

@@ -77,8 +77,8 @@ runs:
       run: |
         cd "${{ inputs.workspace-root }}"
         version="${{ github.ref_name }}"
-        if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-          echo "::error::engine tags must be unprefixed semver (x.y.z), got ${version}"
+        if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]]; then
+          echo "::error::engine tags must be unprefixed semver (x.y.z or x.y.z-beta), got ${version}"
           exit 1
         fi
         python3 .github/scripts/set_root_package_version.py \
@@ -147,8 +147,8 @@ runs:
         cd "${{ inputs.workspace-root }}"
         VERSION=$(target/release/skipprd --version 2>&1 | awk '{print $2}')
         echo "skipprd version: $VERSION"
-        if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-          echo "::error::Version was not plain semver"
+        if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]]; then
+          echo "::error::Version was not unprefixed semver (x.y.z or x.y.z-beta)"
           exit 1
         fi
     - name: Show sccache stats

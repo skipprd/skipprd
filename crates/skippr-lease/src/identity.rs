@@ -4,7 +4,9 @@ use crate::paths::validate_path_component;
 use std::fmt;
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
 pub struct LeaseEpoch(u64);
 
 impl LeaseEpoch {
@@ -26,34 +28,16 @@ impl LeaseEpoch {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct CommitIndex(u64);
-
-impl CommitIndex {
-    pub const ZERO: Self = Self(0);
-
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-
-    pub fn next(self) -> Result<Self, PathError> {
-        self.0
-            .checked_add(1)
-            .map(Self)
-            .ok_or_else(|| PathError::Overflow("commit index overflow".into()))
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct NodeId(Uuid);
 
 impl NodeId {
     pub fn generate() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    pub fn single_node() -> Self {
+        Self(Uuid::nil())
     }
 
     pub fn from_uuid(id: Uuid) -> Self {
@@ -208,7 +192,9 @@ impl PipelineKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(
+    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
+)]
 pub struct SegmentId(String);
 
 impl SegmentId {

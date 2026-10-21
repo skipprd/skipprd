@@ -127,7 +127,7 @@ skipprd sync --pipeline events --once
 | `buffer_threshold_bytes` | `10485760` (10 MiB) | Flush buffered records to the WAL at this size. Env fallback `BUFFER_THRESHOLD_BYTES`. See [WAL and buffering](/configuration/buffering). These limits are **per slice** (one namespace / partition / time bucket), not for the whole `--once` run. |
 | `buffer_threshold_seconds` | `60` | Flush buffered records to the WAL after this many seconds. Env fallback `BUFFER_THRESHOLD_SECONDS`. For a long historical `type: copy`, raise this (for example `86400`) so slices grow instead of flushing a tiny object every minute. |
 | `sync_frequency_seconds` | `900` | Minimum gap between runs of this pipeline when `skipprd sync` runs every pipeline in a loop. Env fallback `SYNC_FREQUENCY`. |
-| `data_dir` | `./data` | Local directory for this pipeline's WAL and local state. Env fallback `DATA_DIR`. |
+| `data_dir` | `./data` | Local directory for this pipeline's WAL payloads and, with sled, the WAL catalog. Env fallback `DATA_DIR`. |
 | `chaos_mode` | `false` | Kills Skipprd partway through a run to test recovery. Never enable in production. See [Advanced settings](/configuration/advanced). |
 
 A value set here beats the environment variable, which beats the default.

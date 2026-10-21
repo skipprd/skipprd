@@ -11,6 +11,7 @@ members = [
     "crates/skippr-object-writer",
     "crates/skippr-offset-store-dynamodb",
     "crates/skippr-lease",
+    "crates/skippr-wal-catalog",
     "crates/skippr-lease-store-dynamodb",
     "crates/skippr-offset-store-cloud-tables",
     "crates/skippr-lease-store-cloud-tables",
@@ -102,6 +103,7 @@ aws-sdk-s3 = "1.32.0"
 aws-types = "1.3.1"
 skippr-offset-store-dynamodb = { path = "crates/skippr-offset-store-dynamodb", optional = true }
 skippr-lease = { path = "crates/skippr-lease" }
+skippr-wal-catalog = { path = "crates/skippr-wal-catalog" }
 skippr-lease-store-dynamodb = { path = "crates/skippr-lease-store-dynamodb", optional = true }
 skippr-iceberg-catalog = { path = "crates/skippr-iceberg-catalog" }
 skippr-object-writer.workspace = true
@@ -142,7 +144,7 @@ url = "2.3.1"
 aws-sdk-glue = "1.38.0"
 md5 = "0.7.0"
 phf = { version = "0.11.1", default-features = false, features = ["macros"] }
-sled = { version = "0.34.4" }
+sled = { version = "=0.34.4" }
 zerocopy = "0.6.1"
 byteorder = "1.4.3"
 ctrlc = "3.2.5"

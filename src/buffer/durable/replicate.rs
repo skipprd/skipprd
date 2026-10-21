@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use skippr_lease::{DurableError, LeaseGuard};
 
-use super::mutation::MutationEnvelope;
-
 pub enum ReplicationMode {
     LocalOnly,
     Synchronous(Arc<QuorumReplicator>),
@@ -18,9 +16,13 @@ pub struct QuorumReplicator {
 
 #[async_trait::async_trait]
 pub trait ReplicaClient: Send + Sync {
-    async fn replicate(
+    async fn replicate_payload(
         &self,
-        envelope: &MutationEnvelope,
+        pipeline: &skippr_lease::PipelineKey,
+        segment_id: &str,
+        sha256: [u8; 32],
+        len: u64,
+        epoch: u64,
         payload: &Path,
     ) -> Result<(), DurableError>;
 
@@ -28,14 +30,19 @@ pub trait ReplicaClient: Send + Sync {
         None
     }
 
-    async fn replicate_at(
+    async fn replicate_payload_at(
         &self,
         endpoint: SocketAddr,
-        envelope: &MutationEnvelope,
+        pipeline: &skippr_lease::PipelineKey,
+        segment_id: &str,
+        sha256: [u8; 32],
+        len: u64,
+        epoch: u64,
         payload: &Path,
     ) -> Result<(), DurableError> {
         let _ = endpoint;
-        self.replicate(envelope, payload).await
+        self.replicate_payload(pipeline, segment_id, sha256, len, epoch, payload)
+            .await
     }
 }
 
@@ -52,36 +59,58 @@ impl QuorumReplicator {
         self.inner.current_endpoint().unwrap_or(self.assigned)
     }
 
-    pub async fn commit(
+    pub async fn commit_payload(
         &self,
-        envelope: &MutationEnvelope,
+        segment_id: &str,
+        sha256: [u8; 32],
+        len: u64,
+        epoch: u64,
         payload: &Path,
         guard: &LeaseGuard,
     ) -> Result<(), DurableError> {
-        self.commit_at(self.snapshot_endpoint(), envelope, payload, guard)
-            .await
+        self.commit_payload_at(
+            self.snapshot_endpoint(),
+            segment_id,
+            sha256,
+            len,
+            epoch,
+            payload,
+            guard,
+        )
+        .await
     }
 
-    pub async fn commit_at(
+    pub async fn commit_payload_at(
         &self,
         endpoint: SocketAddr,
-        envelope: &MutationEnvelope,
+        segment_id: &str,
+        sha256: [u8; 32],
+        len: u64,
+        epoch: u64,
         payload: &Path,
         guard: &LeaseGuard,
     ) -> Result<(), DurableError> {
         guard
             .require_active_epoch()
             .map_err(|_| DurableError::Fenced)?;
-        match self.inner.replicate_at(endpoint, envelope, payload).await {
+        match self
+            .inner
+            .replicate_payload_at(
+                endpoint,
+                guard.key(),
+                segment_id,
+                sha256,
+                len,
+                epoch,
+                payload,
+            )
+            .await
+        {
             Ok(()) => Ok(()),
             Err(err) => {
                 match &err {
                     DurableError::Timeout => {
                         crate::metrics::counters::add_cluster_quorum_timeout(1);
-                    }
-                    DurableError::Diverged(_) => {
-                        crate::metrics::counters::add_cluster_quorum_nack(1);
-                        crate::metrics::counters::add_cluster_divergence(1);
                     }
                     _ => crate::metrics::counters::add_cluster_quorum_nack(1),
                 }
@@ -106,27 +135,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scripted_peer_nack_is_diverged() {
-        let peer = ScriptedPeer::new(vec![Err(DurableError::Diverged("x".into()))]);
+    async fn scripted_peer_nack_is_disk_full() {
+        let peer = ScriptedPeer::new(vec![Err(DurableError::DiskFull)]);
         let replicator = QuorumReplicator::new(peer, "127.0.0.1:1".parse().unwrap());
         let key = skippr_lease::PipelineKey::new("t", "w", "p").unwrap();
         let guard =
             skippr_lease::LeaseGuard::single_node(key, Arc::new(skippr_lease::SystemClock::new()));
-        let envelope = MutationEnvelope {
-            protocol_version: 1,
-            pipeline: skippr_lease::PipelineKey::new("t", "w", "p").unwrap(),
-            epoch: skippr_lease::LeaseEpoch::new(0),
-            index: skippr_lease::CommitIndex::new(1),
-            previous_hash: skippr_lease::GENESIS_HASH,
-            payload_sha256: [0u8; 32],
-            body: crate::buffer::durable::mutation::DurableMutation::ReclaimSegment {
-                segment_id: "s".into(),
-            },
-        };
         let err = replicator
-            .commit(&envelope, Path::new("/nonexistent"), &guard)
+            .commit_payload("seg-1", [0u8; 32], 0, 1, Path::new("/nonexistent"), &guard)
             .await
             .unwrap_err();
-        assert!(matches!(err, DurableError::Diverged(_)));
+        assert!(matches!(err, DurableError::DiskFull));
     }
 }

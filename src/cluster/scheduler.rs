@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,16 +6,14 @@ use skippr_lease::{
     PromoteError, Sleeper, SystemClock, TokioSleeper,
 };
 
-use crate::buffer::durable::log::MutationLog;
 use crate::buffer::durable::replicate::{QuorumReplicator, ReplicationMode};
-use crate::buffer::durable::store::{
-    install_durable_store, remove_durable_store, OffsetMode, PipelineDurableStore,
-};
+use crate::buffer::wal_handle::{install_wal_handle, remove_wal_handle, PipelineWalHandle};
 use crate::cluster::gossip::{GossipAd, GossipService};
 use crate::cluster::identity::ClusterConfig;
 use crate::cluster::membership::{MembershipEndpoints, MembershipService};
 use crate::cluster::peer::{
-    drop_replica, query_status, ReplicaRegistry, ReplicaServer, ReplicaSession, TcpReplicaClient,
+    drop_replica, prune_to_at, query_status, ReplicaRegistry, ReplicaServer, ReplicaSession,
+    TcpReplicaClient,
 };
 use crate::cluster::pipeline_view::PipelineConfigView;
 use crate::cluster::placement::rank_replicas;
@@ -103,14 +100,30 @@ pub async fn run_clustered(app_cfg: Config, config: ClusterConfig) -> Result<(),
             .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
         let paths = PipelinePaths::new(&config.data_root, &view.key)
             .map_err(|err| DurableError::Io(err.to_string()))?;
-        let log = MutationLog::open(paths.clone())?;
         let guard = skippr_lease::LeaseGuard::replica(
             view.key.clone(),
             skippr_lease::LeaseEpoch::new(1),
             Arc::new(SystemClock::new()),
         );
+        let fence = skippr_wal_catalog::CatalogFence {
+            owner: config.node_id,
+            epoch: skippr_lease::LeaseEpoch::new(1),
+        };
+        let catalog = crate::pipeline_backend::open_wal_catalog_for_config(&app_cfg, None, fence)
+            .map_err(DurableError::Io)?;
+        let offsets =
+            crate::cluster::backend::open_cluster_offset_store(&app_cfg, &config, &view.key)?;
+        let handle = PipelineWalHandle::new(
+            view.key.clone(),
+            paths.clone(),
+            guard.clone(),
+            catalog,
+            offsets,
+        );
+        crate::buffer::wal_handle::install_wal_handle(handle.clone());
+        crate::buffer::wal_startup::wal_attach_replica(handle.as_ref())?;
         registry
-            .insert(ReplicaSession::new(view.key.clone(), paths, guard, log))
+            .insert(ReplicaSession::new(view.key.clone(), paths, guard))
             .await;
     }
     let mut ready_ad = ad;
@@ -127,8 +140,8 @@ pub async fn run_clustered(app_cfg: Config, config: ClusterConfig) -> Result<(),
                         GossipService::apply_fence_rumor(&session.guard, epoch).await;
                         metrics::add_cluster_fence(1);
                     }
-                    if let Some(store) = crate::buffer::durable::durable_store_for(&key) {
-                        GossipService::apply_fence_rumor(store.guard(), epoch).await;
+                    if let Some(handle) = crate::buffer::wal_handle::wal_handle_for(&key) {
+                        GossipService::apply_fence_rumor(handle.guard(), epoch).await;
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -209,8 +222,8 @@ pub async fn run_clustered(app_cfg: Config, config: ClusterConfig) -> Result<(),
         _ = scheduler.wait_until_stopped() => {}
     }
     membership_task.abort();
-    for store in crate::buffer::durable::all_durable_stores() {
-        store.guard().begin_drain();
+    for handle in crate::buffer::wal_handle::all_wal_handles() {
+        handle.guard().begin_drain();
     }
     let catalog_ok = crate::catalog_coordinator::drain_catalog_outboxes(Duration::from_secs(30))
         .await
@@ -226,13 +239,13 @@ pub async fn run_clustered(app_cfg: Config, config: ClusterConfig) -> Result<(),
         }
         Err(_) => false,
     };
-    let release = crate::buffer::durable::all_durable_stores()
+    let release = crate::buffer::wal_handle::all_wal_handles()
         .into_iter()
-        .find_map(|store| {
-            store
+        .find_map(|handle| {
+            handle
                 .guard()
                 .leased_session()
-                .map(|session| (store.key().clone(), session))
+                .map(|session| (handle.key().clone(), session))
         });
     let lease_release = if quiescent {
         release
@@ -263,7 +276,6 @@ async fn run_primary_loop(
     leases: Arc<dyn PipelineLeaseStore>,
 ) {
     let mut suspect_rx = gossip.subscribe_suspects();
-    let mut unproven = HashSet::new();
     loop {
         if matches!(
             *stop.subscribe().borrow(),
@@ -292,9 +304,6 @@ async fn run_primary_loop(
             ) {
                 break;
             }
-            if unproven.contains(&name) {
-                continue;
-            }
             match try_promote_and_ingest(
                 &app_cfg,
                 &config,
@@ -310,14 +319,6 @@ async fn run_primary_loop(
             {
                 Ok(PrimaryRun::HeldUntilFence) => ran = true,
                 Ok(PrimaryRun::ReleasedAfterFinite) => {}
-                Err(DurableError::UnprovenPrepared(index)) => {
-                    tracing::warn!(
-                        pipeline = %name,
-                        index,
-                        "local prepared unproven; remaining ineligible"
-                    );
-                    unproven.insert(name);
-                }
                 Err(err) => tracing::warn!(pipeline = %name, error = %err, "promote skipped"),
             }
             if ran {
@@ -378,7 +379,6 @@ async fn try_promote_and_ingest(
         identity: identity.clone(),
         local_replica,
         gossip: gossip.clone(),
-        legacy_root: resolve_legacy_root(&view.data_root, name),
         flatten_events: view.flatten_events,
     };
     let outcome = promote_pipeline(
@@ -393,10 +393,7 @@ async fn try_promote_and_ingest(
         ctx,
     )
     .await
-    .map_err(|err| match err {
-        PromoteError::UnprovenPrepared { index } => DurableError::UnprovenPrepared(index),
-        other => DurableError::ProtocolMismatch(other.to_string()),
-    })?;
+    .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
     let renew_guard = outcome.guard.clone();
     let renew_key = view.key.clone();
     let renew_clock = clock.clone();
@@ -414,32 +411,47 @@ async fn try_promote_and_ingest(
         metrics::add_cluster_lease_lost(1);
     });
     let prepared = async {
-        let log = MutationLog::open(paths.clone())?;
         let replica_client = TcpReplicaClient::new(outcome.replica_endpoint, identity.clone());
         let replicator = ReplicationMode::Synchronous(QuorumReplicator::new(
             replica_client.clone(),
             outcome.replica_endpoint,
         ));
-        let offsets = offset_mode(app_cfg, config, &view.key)?;
-        let store = PipelineDurableStore::new(
+        let session = outcome.guard.leased_session().ok_or(DurableError::Fenced)?;
+        let fence = skippr_wal_catalog::CatalogFence {
+            owner: session.owner,
+            epoch: session.epoch,
+        };
+        let catalog = crate::pipeline_backend::open_wal_catalog_for_config(app_cfg, None, fence)
+            .map_err(|err| DurableError::Io(err))?;
+        let offsets =
+            crate::cluster::backend::open_cluster_offset_store(app_cfg, config, &view.key)?;
+        let handle = PipelineWalHandle::with_replication(
             view.key.clone(),
             paths.clone(),
             outcome.guard.clone(),
-            log,
-            replicator,
+            catalog,
             offsets,
+            replicator,
         );
-        let peers: Vec<_> = gossip
-            .known_ads()
-            .await
-            .into_iter()
-            .map(|ad| ad.replica)
-            .collect();
-        store.recover_unknown_prepared(&identity, &peers).await?;
-        store.replay_unapplied().await?;
+        install_wal_handle(handle.clone());
+        crate::buffer::wal_startup::wal_startup(handle.as_ref(), app_cfg, true).await?;
+        let live = handle.catalog_segment_ids()?;
+        let prune_epoch = outcome
+            .guard
+            .leased_session()
+            .ok_or(DurableError::Fenced)?
+            .epoch
+            .get();
+        prune_to_at(
+            outcome.replica_endpoint,
+            &view.key,
+            live,
+            prune_epoch,
+            &identity,
+        )
+        .await?;
         let mut session = outcome.guard.leased_session().ok_or(DurableError::Fenced)?;
         session.initialized = true;
-        store.reconcile_published_offsets().await?;
         if outcome.needs_initialize {
             leases
                 .mark_initialized(&view.key, &session)
@@ -450,10 +462,10 @@ async fn try_promote_and_ingest(
             .guard
             .activate(session.clone())
             .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
-        Ok::<_, DurableError>((store, replica_client, session))
+        Ok::<_, DurableError>((handle, replica_client, session))
     }
     .await;
-    let (store, replica_client, session) = match prepared {
+    let (_handle, replica_client, session) = match prepared {
         Ok(parts) => parts,
         Err(err) => {
             outcome.guard.fence();
@@ -470,7 +482,7 @@ async fn try_promote_and_ingest(
             return Err(err);
         }
     };
-    install_durable_store(store);
+    let _ = ();
     tracing::info!(
         pipeline = %name,
         pipeline.type = app_cfg.bind_pipeline(name).pipeline_type_log_label(),
@@ -529,9 +541,9 @@ async fn try_promote_and_ingest(
             let Ok(status) = query_status(endpoint, &replace_key, &replace_identity).await else {
                 continue;
             };
-            if let Some(store) = crate::buffer::durable::durable_store_for(&replace_key) {
-                let local = store.durable_state().await.committed_index.get();
-                metrics::set_cluster_replica_lag(local.saturating_sub(status.committed_index));
+            if let Some(handle) = crate::buffer::wal_handle::wal_handle_for(&replace_key) {
+                let local = handle.catalog_seq_seen().unwrap_or(0);
+                metrics::set_cluster_replica_lag(local.saturating_sub(status.catalog_seq_seen));
             }
             let Ok(_) = wait_until_replica_ready(
                 endpoint,
@@ -580,7 +592,7 @@ async fn try_promote_and_ingest(
                     replace_task.abort();
                     metrics::set_cluster_primary(0);
                     metrics::set_cluster_ready(0);
-                    remove_durable_store(&view.key);
+                    remove_wal_handle(&view.key);
                     return Ok(PrimaryRun::ReleasedAfterFinite);
                 }
                 tracing::info!(
@@ -637,7 +649,7 @@ async fn try_promote_and_ingest(
     replace_task.abort();
     metrics::set_cluster_primary(0);
     metrics::set_cluster_ready(0);
-    remove_durable_store(&view.key);
+    remove_wal_handle(&view.key);
     Ok(PrimaryRun::HeldUntilFence)
 }
 
@@ -694,21 +706,6 @@ async fn replica_candidates_for(
         }
     }
     candidates
-}
-
-fn resolve_legacy_root(data_root: &std::path::Path, pipeline: &str) -> Option<std::path::PathBuf> {
-    let candidates = [data_root.to_path_buf(), data_root.join(pipeline)];
-    candidates
-        .into_iter()
-        .find(|path| path.join("segment_buffer/segs").exists() || path.join("db").exists())
-}
-
-fn offset_mode(
-    app_cfg: &Config,
-    config: &ClusterConfig,
-    key: &PipelineKey,
-) -> Result<OffsetMode, DurableError> {
-    crate::cluster::backend::offset_publisher_for(app_cfg, config, key)
 }
 
 pub async fn clustered_query_collect(
@@ -857,11 +854,15 @@ mod tests {
     }
 
     #[test]
-    fn unproven_prepared_releases_and_skips_retry() {
+    fn payload_missing_is_logged_and_retried() {
         let src = include_str!("scheduler.rs");
-        assert!(src.contains("DurableError::UnprovenPrepared"));
-        assert!(src.contains("remaining ineligible"));
+        assert!(src.contains("promote skipped"));
+        assert!(!src.contains(concat!("Unproven", "Prepared")));
         assert!(src.contains("unactivated primary could not release lease"));
+        assert!(src.contains("prune_to_at"));
+        assert!(src.contains("wal_attach_replica"));
+        assert!(!src.contains(concat!("resolve_legacy", "_root")));
+        assert!(!src.contains(concat!("legacy", "_root")));
     }
 
     #[test]

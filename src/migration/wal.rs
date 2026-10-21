@@ -4,7 +4,6 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{Field, Schema};
 use arrow::ipc::reader::StreamReader;
 use std::collections::HashMap;
-use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -74,57 +73,92 @@ pub fn rewrite_live_wal(
     crate::buffer::ingest_buffer::Buffers::map_live_arrow(namespace, |batch| {
         rewrite_record_batch(batch, op, field_id)
     })?;
-    let paths =
-        skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(&config.get_data_dir()));
-    if !paths.segs.exists() {
+    let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() else {
         return Ok(());
-    }
-    let entries = std::fs::read_dir(&paths.segs).map_err(|err| err.to_string())?;
-    for entry in entries {
-        let path = entry.map_err(|err| err.to_string())?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("seg") {
-            continue;
-        }
-        if path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .is_some_and(|stem| stem.ends_with("-migrating"))
-        {
-            continue;
-        }
-        rewrite_segment_file(config, &path, namespace, op, field_id)?;
+    };
+    for seg in handle.live_segment_rows().map_err(|err| err.to_string())? {
+        rewrite_segment_row(config, &seg, namespace, op, field_id)?;
     }
     Ok(())
+}
+
+fn rewrite_segment_row(
+    config: &crate::helpers::configuration::Config,
+    seg: &skippr_wal_catalog::SegmentRow,
+    namespace: &str,
+    op: &SchemaAlterOp,
+    field_id: i32,
+) -> Result<(), String> {
+    match &seg.location {
+        skippr_wal_catalog::PayloadLocation::Disk { path } => rewrite_segment_file(
+            config,
+            std::path::Path::new(path),
+            seg.segment_id.as_str(),
+            namespace,
+            op,
+            field_id,
+        ),
+        skippr_wal_catalog::PayloadLocation::S3 { .. } => {
+            let bytes =
+                crate::buffer::wal_handle::payload_bytes(&seg.location, &seg.payload_sha256)
+                    .map_err(|err| err.to_string())?;
+            let Some(encoded) = rewrite_wal_bytes(&bytes, namespace, op, field_id)? else {
+                return Ok(());
+            };
+            persist_rewritten_payload(config, &seg.location, seg.segment_id.as_str(), encoded)
+        }
+    }
 }
 
 fn rewrite_segment_file(
     config: &crate::helpers::configuration::Config,
     path: &Path,
+    segment_id: &str,
     namespace: &str,
     op: &SchemaAlterOp,
     field_id: i32,
 ) -> Result<(), String> {
-    let meta = match SegmentFile::admit_owned_pair_path(path) {
-        Ok(meta) => meta,
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
         Err(_) => return Ok(()),
     };
-    let mut file = std::fs::File::open(path).map_err(|err| err.to_string())?;
+    let Some(encoded) = rewrite_wal_bytes(&bytes, namespace, op, field_id)? else {
+        return Ok(());
+    };
+    persist_rewritten_payload(
+        config,
+        &skippr_wal_catalog::PayloadLocation::Disk {
+            path: path.to_string_lossy().into_owned(),
+        },
+        segment_id,
+        encoded,
+    )
+}
+
+fn rewrite_wal_bytes(
+    bytes: &[u8],
+    namespace: &str,
+    op: &SchemaAlterOp,
+    field_id: i32,
+) -> Result<Option<crate::buffer::segment_file::EncodedSnapshot>, String> {
+    let meta = SegmentFile::read_metadata_from_bytes(bytes).map_err(|err| err.to_string())?;
     let mut batches: HashMap<_, WalPayload> = HashMap::new();
     let mut partitions_meta = HashMap::new();
     let mut part_meta_blobs = HashMap::new();
     let mut mutated = false;
     for idx in &meta.index {
         if idx.codec == PART_CODEC_COPY && idx.key.namespace == namespace {
-            return Err(format!(
-                "copy/non-Arrow WAL parts cannot be rewritten ({})",
-                path.display()
-            ));
+            return Err("copy/non-Arrow WAL parts cannot be rewritten".to_string());
         }
-        file.seek(std::io::SeekFrom::Start(idx.start))
-            .map_err(|err| err.to_string())?;
-        let mut take = (&mut file).take(idx.len);
+        let start = idx.start as usize;
+        let end = start.saturating_add(idx.len as usize);
+        if end > bytes.len() {
+            return Err("WAL part exceeds payload length".to_string());
+        }
+        let slice = &bytes[start..end];
         let payload = if idx.codec == PART_CODEC_ARROW {
-            let reader = StreamReader::try_new(&mut take, None).map_err(|err| err.to_string())?;
+            let mut cursor = std::io::Cursor::new(slice);
+            let reader = StreamReader::try_new(&mut cursor, None).map_err(|err| err.to_string())?;
             let mut arrow_batches = Vec::new();
             for batch in reader {
                 let batch = batch.map_err(|err| err.to_string())?;
@@ -137,20 +171,18 @@ fn rewrite_segment_file(
             }
             WalPayload::Arrow(arrow_batches)
         } else {
-            let mut bytes = Vec::new();
-            take.read_to_end(&mut bytes)
-                .map_err(|err| err.to_string())?;
             WalPayload::Raw(
-                crate::buffer::segment_file::decode_copy_part(&bytes)
+                crate::buffer::segment_file::decode_copy_part(slice)
                     .map_err(|err| err.to_string())?,
             )
         };
         if idx.part_meta_len > 0 {
-            let mut blob = vec![0u8; idx.part_meta_len as usize];
-            file.seek(std::io::SeekFrom::Start(idx.part_meta_start))
-                .map_err(|err| err.to_string())?;
-            file.read_exact(&mut blob).map_err(|err| err.to_string())?;
-            part_meta_blobs.insert(idx.key.clone(), blob);
+            let meta_start = idx.part_meta_start as usize;
+            let meta_end = meta_start.saturating_add(idx.part_meta_len as usize);
+            if meta_end > bytes.len() {
+                return Err("WAL part metadata exceeds payload length".to_string());
+            }
+            part_meta_blobs.insert(idx.key.clone(), bytes[meta_start..meta_end].to_vec());
         }
         partitions_meta.insert(
             idx.key.clone(),
@@ -159,33 +191,97 @@ fn rewrite_segment_file(
         batches.insert(idx.key.clone(), payload);
     }
     if !mutated {
-        return Ok(());
+        return Ok(None);
     }
-    let dir = path
-        .parent()
-        .ok_or_else(|| "WAL segment has no parent".to_string())?;
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| "WAL segment has no stem".to_string())?;
-    let tmp = SegmentFile::new(dir, &format!("{stem}-migrating")).map_err(|err| err.to_string())?;
-    let (new_meta, _, _) = tmp
-        .write_snapshot(&meta.offsets, &batches, &partitions_meta, &part_meta_blobs)
-        .map_err(|err| err.to_string())?;
-    tmp.write_commit_marker(&new_meta)
-        .map_err(|err| err.to_string())?;
-    std::fs::rename(&tmp.path, path).map_err(|err| err.to_string())?;
-    std::fs::rename(
-        SegmentFile::commit_path_for_seg(&tmp.path),
-        SegmentFile::commit_path_for_seg(path),
+    crate::buffer::segment_file::encode_snapshot(
+        &meta.offsets,
+        &batches,
+        &partitions_meta,
+        &part_meta_blobs,
     )
-    .map_err(|err| err.to_string())?;
-    let admitted = SegmentFile::admit_owned_pair_path(path).map_err(|err| err.to_string())?;
-    crate::buffer::ingest_buffer::Buffers::reregister_disk_segment(
-        config,
-        path.to_path_buf(),
-        admitted,
-    );
+    .map(Some)
+    .map_err(|err| err.to_string())
+}
+
+fn persist_rewritten_payload(
+    config: &crate::helpers::configuration::Config,
+    old_location: &skippr_wal_catalog::PayloadLocation,
+    segment_id: &str,
+    encoded: crate::buffer::segment_file::EncodedSnapshot,
+) -> Result<(), String> {
+    let handle = crate::buffer::wal_store::ingest_wal_handle()
+        .ok_or_else(|| "WAL rewrite requires an installed catalog handle".to_string())?;
+    let new_location = match old_location {
+        skippr_wal_catalog::PayloadLocation::Disk { path } => {
+            let path = std::path::Path::new(path);
+            let dir = path
+                .parent()
+                .ok_or_else(|| "WAL segment has no parent".to_string())?;
+            let tmp = SegmentFile::new(dir, &format!("{segment_id}-migrating"))
+                .map_err(|err| err.to_string())?;
+            crate::buffer::direct_io::DirectIoFile::write_path_sync(&tmp.path, &encoded.bytes)
+                .map_err(|err| err.to_string())?;
+            crate::helpers::fsync::fsync_dir(dir).map_err(|err| err.to_string())?;
+            skippr_wal_catalog::PayloadLocation::Disk {
+                path: tmp.path.to_string_lossy().into_owned(),
+            }
+        }
+        skippr_wal_catalog::PayloadLocation::S3 { bucket, key } => {
+            let new_key = format!("{key}-migrating");
+            let put_bucket = bucket.clone();
+            let put_key = new_key.clone();
+            let body = encoded.bytes.clone();
+            crate::buffer::wal_store::block_on_async(async move {
+                crate::helpers::s3::put_bytes(
+                    &put_bucket,
+                    &put_key,
+                    &body,
+                    "application/octet-stream",
+                )
+                .await
+                .map_err(|err| std::io::Error::other(err.to_string()))
+            })
+            .map_err(|err| err.to_string())?;
+            skippr_wal_catalog::PayloadLocation::S3 {
+                bucket: bucket.clone(),
+                key: new_key,
+            }
+        }
+    };
+    handle
+        .replace_payload_location(
+            segment_id,
+            new_location.clone(),
+            encoded.meta.total_bytes,
+            encoded.sha256,
+        )
+        .map_err(|err| err.to_string())?;
+    match old_location {
+        skippr_wal_catalog::PayloadLocation::Disk { path } => {
+            let old = std::path::Path::new(path);
+            if let skippr_wal_catalog::PayloadLocation::Disk { path: ref new_path } = new_location {
+                if old != std::path::Path::new(new_path) {
+                    let _ = std::fs::remove_file(old);
+                }
+                let admitted = SegmentFile::read_index_path(std::path::Path::new(new_path))
+                    .map_err(|err| err.to_string())?;
+                crate::buffer::ingest_buffer::Buffers::reregister_disk_segment(
+                    config,
+                    std::path::PathBuf::from(new_path),
+                    admitted,
+                );
+            }
+        }
+        skippr_wal_catalog::PayloadLocation::S3 { bucket, key } => {
+            let bucket = bucket.clone();
+            let key = key.clone();
+            let _ = crate::buffer::wal_store::block_on_async(async move {
+                crate::helpers::s3::delete_object(&bucket, &key)
+                    .await
+                    .map_err(|err| std::io::Error::other(err.to_string()))
+            });
+        }
+    }
     Ok(())
 }
 
@@ -196,6 +292,7 @@ mod tests {
     use arrow::array::Int64Array;
     use arrow::datatypes::DataType;
     use std::collections::HashMap;
+    use std::io::{Read, Seek};
 
     #[test]
     fn rename_rewrites_arrow_name_and_keeps_field_id() {
@@ -228,11 +325,29 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rewrite_segment_persists_renamed_field() {
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn rewrite_segment_persists_renamed_field() {
         let dir = std::env::temp_dir().join(format!("skippr_mig_wal_{}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
-        let seg = SegmentFile::new(&dir, "t1").unwrap();
+        let pipeline_key = skippr_lease::PipelineKey::new("t", "w", "p").unwrap();
+        let paths = skippr_lease::PipelinePaths::legacy_disk(&dir);
+        let clock = Arc::new(skippr_lease::SystemClock::new());
+        let guard = skippr_lease::LeaseGuard::single_node(pipeline_key.clone(), clock);
+        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
+        let db = sled::open(dir.join("offsets")).unwrap();
+        let tree = db.open_tree("offsets").unwrap();
+        let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
+            Arc::new(crate::helpers::offset_store::SledOffsetStore::new(tree));
+        let handle = crate::buffer::wal_handle::PipelineWalHandle::new(
+            pipeline_key.clone(),
+            paths,
+            guard,
+            catalog,
+            offsets,
+        );
+        crate::buffer::wal_handle::install_wal_handle(handle.clone());
         let mut field_meta = HashMap::new();
         field_meta.insert("PARQUET:field_id".into(), "7".into());
         let field = Field::new("price", DataType::Int64, true).with_metadata(field_meta);
@@ -251,19 +366,24 @@ mod tests {
         };
         let mut batches = HashMap::new();
         batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
-        let mut parts_meta = HashMap::new();
-        parts_meta.insert(key, (0, SystemTime::now()));
-        let offsets = HashMap::new();
-        let empty_blobs = HashMap::new();
-        let (meta, _, _) = seg
-            .write_snapshot(&offsets, &batches, &parts_meta, &empty_blobs)
+        handle
+            .persist_segment(
+                "t1",
+                &HashMap::new(),
+                &batches,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .await
             .unwrap();
-        seg.write_commit_marker(&meta).unwrap();
+        let path = handle.live_disk_payload_paths().unwrap()[0].clone();
 
         let config = crate::helpers::configuration::Config::new();
         rewrite_segment_file(
             &config,
-            &seg.path,
+            &path,
+            "t1",
             "trips",
             &SchemaAlterOp::Rename {
                 from: "price".into(),
@@ -273,14 +393,85 @@ mod tests {
         )
         .unwrap();
 
-        let admitted = SegmentFile::admit_owned_pair_path(&seg.path).unwrap();
-        let mut file = std::fs::File::open(&seg.path).unwrap();
+        let rewritten_path = handle.live_disk_payload_paths().unwrap()[0].clone();
+        let admitted = SegmentFile::read_index_path(&rewritten_path).unwrap();
+        let mut file = std::fs::File::open(&rewritten_path).unwrap();
         file.seek(std::io::SeekFrom::Start(admitted.index[0].start))
             .unwrap();
         let mut take = (&mut file).take(admitted.index[0].len);
         let reader = StreamReader::try_new(&mut take, None).unwrap();
         let rewritten = reader.into_iter().next().unwrap().unwrap();
         assert_eq!(rewritten.schema().field(0).name(), "amount");
+        crate::buffer::wal_handle::remove_wal_handle(&pipeline_key);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn rewrite_live_wal_does_not_skip_s3_rows() {
+        let src = include_str!("wal.rs");
+        assert!(
+            !src.contains(concat!("PayloadLocation::S3 { .. } => con", "tinue")),
+            "S3 live rows must be rewritten, not skipped"
+        );
+        let dir = std::env::temp_dir().join(format!("skippr_mig_s3_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pipeline_key = skippr_lease::PipelineKey::new("t", "w", "p").unwrap();
+        let paths = skippr_lease::PipelinePaths::legacy_disk(&dir);
+        let clock = Arc::new(skippr_lease::SystemClock::new());
+        let guard = skippr_lease::LeaseGuard::single_node(pipeline_key.clone(), clock);
+        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
+        let db = sled::open(dir.join("offsets")).unwrap();
+        let tree = db.open_tree("offsets").unwrap();
+        let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
+            Arc::new(crate::helpers::offset_store::SledOffsetStore::new(tree));
+        let handle = crate::buffer::wal_handle::PipelineWalHandle::new(
+            pipeline_key.clone(),
+            paths,
+            guard,
+            catalog,
+            offsets,
+        );
+        crate::buffer::wal_handle::install_wal_handle(handle.clone());
+        let seq = skippr_wal_catalog::CatalogSeq::new(1);
+        let row = skippr_wal_catalog::SegmentRow {
+            segment_id: skippr_lease::SegmentId::new("s3live").unwrap(),
+            seq,
+            location: skippr_wal_catalog::PayloadLocation::S3 {
+                bucket: "wal-bucket".into(),
+                key: "wal/s3live.seg".into(),
+            },
+            payload_len: 1,
+            payload_sha256: [0u8; 32],
+            slice_count: 1,
+            done: skippr_wal_catalog::SliceBitmap::new(1),
+            offsets: Vec::new(),
+            checkpoints: Vec::new(),
+            epoch: fence.epoch,
+            version: 0,
+        };
+        let mut txn = skippr_wal_catalog::CatalogTxn::new();
+        txn.put(
+            skippr_wal_catalog::CatalogKey::Segment(row.segment_id.clone()),
+            skippr_wal_catalog::CatalogRow::Segment(row),
+            skippr_wal_catalog::PutCond::NotExists,
+        )
+        .unwrap();
+        handle.catalog().commit(&txn, fence).unwrap();
+        let config = crate::helpers::configuration::Config::new();
+        let err = rewrite_live_wal(
+            &config,
+            "trips",
+            &SchemaAlterOp::Rename {
+                from: "price".into(),
+                to: "amount".into(),
+            },
+            7,
+        )
+        .expect_err("S3 rewrite must fail closed, not skip");
+        crate::buffer::wal_handle::remove_wal_handle(&pipeline_key);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!err.is_empty(), "{err}");
     }
 }

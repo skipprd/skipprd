@@ -11,6 +11,7 @@ use skippr_lease::{
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::Offsets;
 use crate::helpers::wal_storage::SkipprStoreKind;
+use skippr_wal_catalog::{CatalogFence, WalCatalogStore};
 
 pub async fn open_pipeline_lease_store(
     kind: SkipprStoreKind,
@@ -135,6 +136,82 @@ pub async fn acquire_ingest_lease(
     })
 }
 
+pub fn open_wal_catalog(
+    kind: SkipprStoreKind,
+    offsets: Option<&Offsets>,
+    table: String,
+    pk: String,
+    fence: CatalogFence,
+) -> Result<Arc<dyn WalCatalogStore>, String> {
+    match kind {
+        SkipprStoreKind::Sled => {
+            let _ = (table, pk);
+            let offsets = offsets.ok_or_else(|| {
+                "sled WAL catalog requires an open local offset database".to_string()
+            })?;
+            let catalog = offsets.open_sled_wal_catalog(fence)?;
+            Ok(Arc::new(catalog))
+        }
+        SkipprStoreKind::DynamoDb => {
+            #[cfg(feature = "offset-store-dynamodb")]
+            {
+                let catalog = skippr_offset_store_dynamodb::DynamoWalCatalog::new(table, pk);
+                Ok(Arc::new(catalog))
+            }
+            #[cfg(not(feature = "offset-store-dynamodb"))]
+            {
+                let _ = (table, pk);
+                Err("skippr.store.type=dynamodb requires --features offset-store-dynamodb".into())
+            }
+        }
+        SkipprStoreKind::CloudTables => {
+            #[cfg(feature = "offset-store-cloud-tables")]
+            {
+                let catalog =
+                    skippr_offset_store_cloud_tables::CloudTablesWalCatalog::new(table, pk);
+                Ok(Arc::new(catalog))
+            }
+            #[cfg(not(feature = "offset-store-cloud-tables"))]
+            {
+                let _ = (table, pk);
+                Err(
+                    "skippr.store.type=cloud-tables requires --features offset-store-cloud-tables"
+                        .into(),
+                )
+            }
+        }
+    }
+}
+
+pub fn open_wal_catalog_for_config(
+    config: &Config,
+    offsets: Option<&Offsets>,
+    fence: CatalogFence,
+) -> Result<Arc<dyn WalCatalogStore>, String> {
+    open_wal_catalog(
+        configured_kind(config)?,
+        offsets,
+        config.get_skippr_store_name(),
+        config.offset_store_partition_key(),
+        fence,
+    )
+}
+
+/// Discover reset: catalog rows (`wal#`) plus published offset/checkpoint
+/// items. The pipeline lease row is untouched.
+pub fn reset_pipeline_state(
+    config: &Config,
+    offsets: &Offsets,
+    fence: CatalogFence,
+) -> Result<(), String> {
+    let catalog = open_wal_catalog_for_config(config, Some(offsets), fence)?;
+    skippr_wal_catalog::reset_catalog(catalog.as_ref(), fence).map_err(|err| err.to_string())?;
+    if let Some(store) = offsets.bytes_store() {
+        store.reset_published_ingest()?;
+    }
+    Ok(())
+}
+
 impl AcquiredPipelineLease {
     pub fn activate(&self) -> Result<(), FenceError> {
         self.guard.activate(self.session.clone())
@@ -188,5 +265,95 @@ mod tests {
             std::env::remove_var("WAL_STORAGE");
             Config::set_evncache("WAL_STORAGE", "");
         }
+    }
+
+    #[test]
+    fn sled_wal_catalog_opens_from_the_same_db_as_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sled::open(dir.path()).unwrap();
+        let offsets = Offsets::from_local_db_for_test(db);
+        let fence = CatalogFence {
+            owner: skippr_lease::NodeId::generate(),
+            epoch: skippr_lease::LeaseEpoch::new(1),
+        };
+        let catalog = open_wal_catalog(
+            SkipprStoreKind::Sled,
+            Some(&offsets),
+            String::new(),
+            String::new(),
+            fence,
+        )
+        .unwrap();
+        let mut txn = skippr_wal_catalog::CatalogTxn::new();
+        txn.put(
+            skippr_wal_catalog::CatalogKey::Format,
+            skippr_wal_catalog::CatalogRow::Format(skippr_wal_catalog::FormatRow {
+                version: skippr_wal_catalog::FORMAT_VERSION,
+                phase: skippr_wal_catalog::FormatPhase::Clean,
+                row_version: 0,
+            }),
+            skippr_wal_catalog::PutCond::NotExists,
+        )
+        .unwrap();
+        catalog.commit(&txn, fence).unwrap();
+        assert!(matches!(
+            catalog
+                .get(&skippr_wal_catalog::CatalogKey::Format)
+                .unwrap(),
+            Some(skippr_wal_catalog::CatalogRow::Format(_))
+        ));
+    }
+
+    #[test]
+    fn discover_reset_keeps_pipeline_leases_and_drops_catalog_and_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sled::open(dir.path()).unwrap();
+        let lease = db.open_tree("pipeline_leases").unwrap();
+        lease.insert(b"lease-row", b"held").unwrap();
+        let offsets = Offsets::from_local_db_for_test(db);
+        let fence = CatalogFence {
+            owner: skippr_lease::NodeId::single_node(),
+            epoch: skippr_lease::LeaseEpoch::SINGLE_NODE,
+        };
+        let catalog = offsets.open_sled_wal_catalog(fence).unwrap();
+        let mut txn = skippr_wal_catalog::CatalogTxn::new();
+        txn.put(
+            skippr_wal_catalog::CatalogKey::Format,
+            skippr_wal_catalog::CatalogRow::Format(skippr_wal_catalog::FormatRow {
+                version: skippr_wal_catalog::FORMAT_VERSION,
+                phase: skippr_wal_catalog::FormatPhase::Clean,
+                row_version: 0,
+            }),
+            skippr_wal_catalog::PutCond::NotExists,
+        )
+        .unwrap();
+        catalog.commit(&txn, fence).unwrap();
+        offsets
+            .seed_published_offset(
+                &crate::helpers::offsets::OffsetKey::new("ns", "p"),
+                1,
+                2,
+                0,
+                1,
+            )
+            .unwrap();
+        skippr_wal_catalog::reset_catalog(&catalog, fence).unwrap();
+        offsets
+            .bytes_store()
+            .unwrap()
+            .reset_published_ingest()
+            .unwrap();
+        assert!(catalog
+            .get(&skippr_wal_catalog::CatalogKey::Format)
+            .unwrap()
+            .is_none());
+        assert!(offsets
+            .get(&crate::helpers::offsets::OffsetKey::new("ns", "p"))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            lease.get(b"lease-row").unwrap().as_deref(),
+            Some(b"held".as_slice())
+        );
     }
 }

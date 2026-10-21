@@ -5,8 +5,8 @@
 //! or `config.get_data_dir()`.
 
 pub mod backend;
-pub mod baseline;
 pub mod catchup;
+pub mod codec;
 pub mod disk;
 pub mod failpoint;
 pub mod gossip;

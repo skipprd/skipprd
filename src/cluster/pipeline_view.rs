@@ -144,20 +144,6 @@ impl PipelineConfigView {
             .map_err(|err| ConfigError::InvalidIdentity(err.to_string()))
     }
 
-    /// WAL segs for `skipprd query` when no durable store is installed.
-    /// Layout follows `WAL_STORAGE` (`WalStorage`), not directory existence.
-    pub fn query_wal_paths(&self) -> Result<Option<PipelinePaths>, ConfigError> {
-        match self.wal_storage {
-            WalStorage::Clustered => self.paths().map(Some),
-            WalStorage::Disk => {
-                Ok(Some(PipelinePaths::legacy_disk(&self.data_root.join(
-                    format!("{}_{}", self.key.workspace(), self.key.pipeline()),
-                ))))
-            }
-            WalStorage::S3 => Ok(None),
-        }
-    }
-
     pub fn sink_capability(&self) -> Option<&'static SinkCapability> {
         crate::plugins::cdc::sink_capabilities::by_name(&self.sink_plugin)
     }
@@ -350,42 +336,6 @@ mod tests {
         let key = PipelineKey::new("system", "platform", "otel-logs").unwrap();
         let err = PipelineConfigView::for_registry(&config, &key).unwrap_err();
         assert!(matches!(err, ConfigError::PipelineNotFound(_)));
-    }
-
-    #[test]
-    fn query_wal_paths_follow_wal_storage() {
-        let dir = tempfile::tempdir().unwrap();
-        let data_root = dir.path();
-        let key = PipelineKey::new("default", "de-query-r2", "orders_el").unwrap();
-        let disk = PipelineConfigView {
-            key: key.clone(),
-            data_root: data_root.to_path_buf(),
-            source_plugin: "File".into(),
-            sink_plugin: String::new(),
-            schema_plugin: None,
-            sink_ref: None,
-            backend: QueryBackend::WalOnly,
-            flatten_events: false,
-            wal_storage: WalStorage::Disk,
-        };
-        let disk_root = data_root.join("de-query-r2_orders_el");
-        let paths = disk.query_wal_paths().unwrap().unwrap();
-        assert_eq!(paths.segs, disk_root.join("segment_buffer/segs"));
-
-        let clustered = PipelineConfigView {
-            wal_storage: WalStorage::Clustered,
-            ..disk.clone()
-        };
-        let clustered_paths = clustered.query_wal_paths().unwrap().unwrap();
-        assert!(clustered_paths
-            .root
-            .ends_with("clustered/default/de-query-r2/orders_el"));
-
-        let s3 = PipelineConfigView {
-            wal_storage: WalStorage::S3,
-            ..disk
-        };
-        assert!(s3.query_wal_paths().unwrap().is_none());
     }
 
     fn config_with_sink(plugin: &str, body: serde_json::Value) -> Config {

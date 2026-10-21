@@ -477,12 +477,6 @@ impl RuntimeChildConnection {
     }
 }
 
-fn store_checkpoint_update(offsets: &Offsets, update: &RuntimeCheckpointUpdate) -> io::Result<()> {
-    offsets
-        .store_checkpoint_envelope(&update.key, &update.envelope)
-        .map_err(io::Error::other)
-}
-
 #[cfg(test)]
 fn handle_runtime_offset_request(
     offsets: &Offsets,
@@ -507,23 +501,6 @@ fn handle_runtime_offset_request(
         request_id: request.request_id,
         result,
     }
-}
-
-fn materialize_runtime_offset_hints(
-    offsets: &Offsets,
-    hints: Vec<RuntimeOffsetMaterializationHint>,
-) -> Result<(), String> {
-    for hint in hints {
-        offsets
-            .set(&hint.key, OffsetTypes::Position, hint.position)
-            .map_err(|err| err.to_string())?;
-        if hint.closed {
-            offsets
-                .set(&hint.key, OffsetTypes::Closed, 1)
-                .map_err(|err| err.to_string())?;
-        }
-    }
-    Ok(())
 }
 
 struct BufferedRuntimeFrameReader {
@@ -1453,7 +1430,14 @@ pub async fn sync_runtime_input_plugin(
                             .map_err(|err| io::Error::other(err.to_string()))?;
                         saw_unflushed_batches = false;
                     }
-                    store_checkpoint_update(&offsets, &update)?;
+                    let handle =
+                        crate::buffer::wal_store::ingest_wal_handle().ok_or_else(|| {
+                            io::Error::other("checkpoint update requires a WAL catalog handle")
+                        })?;
+                    handle
+                        .persist_checkpoint(&update.key, &update.envelope)
+                        .await
+                        .map_err(|err| io::Error::other(err.to_string()))?;
                 }
                 PluginDataFrame::OffsetMaterializationHints { hints } => {
                     drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone()).await?;
@@ -1463,7 +1447,21 @@ pub async fn sync_runtime_input_plugin(
                             .map_err(|err| io::Error::other(err.to_string()))?;
                         saw_unflushed_batches = false;
                     }
-                    materialize_runtime_offset_hints(&offsets, hints).map_err(io::Error::other)?;
+                    let handle =
+                        crate::buffer::wal_store::ingest_wal_handle().ok_or_else(|| {
+                            io::Error::other("offset hints require a WAL catalog handle")
+                        })?;
+                    for hint in hints {
+                        handle
+                            .persist_offset_hint(
+                                &hint.key.namespace,
+                                &hint.key.partition,
+                                hint.position,
+                                hint.closed,
+                            )
+                            .await
+                            .map_err(|err| io::Error::other(err.to_string()))?;
+                    }
                 }
             }
             continue;
@@ -4719,15 +4717,16 @@ mod tests {
             RuntimeOffsetValue::Validate(None)
         );
 
-        offsets.set(&key, OffsetTypes::Closed, 1).unwrap();
+        offsets.seed_published_offset(&key, 0, 0, 1, 1).unwrap();
+        let envelope = CheckpointEnvelope::from_payload(
+            CheckpointAuthority::AdvisoryHint,
+            CheckpointKind::AdvisoryProgress,
+            1,
+            &b"checkpoint".to_vec(),
+        )
+        .unwrap();
         offsets
-            .store_checkpoint_payload(
-                "runtime-host-checkpoint",
-                CheckpointAuthority::AdvisoryHint,
-                CheckpointKind::AdvisoryProgress,
-                1,
-                &b"checkpoint".to_vec(),
-            )
+            .seed_published_checkpoint("runtime-host-checkpoint", &envelope, 2)
             .unwrap();
 
         let validate_response = handle_runtime_offset_request(

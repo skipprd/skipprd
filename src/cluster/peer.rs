@@ -7,26 +7,19 @@ use std::sync::Arc;
 use skippr_lease::{
     race_deadline, Clock, DurableError, LeaseEpoch, LeaseGuard, PipelineKey, PipelinePaths,
     ReplicaNack, SegmentId, Sleeper, CONTROL_FRAME_MAX_BYTES, CURRENT_PROTOCOL,
-    FETCH_ENTRIES_MAX_COUNT, PAYLOAD_CHUNK_BYTES, PROTOCOL_MAX, PROTOCOL_MIN, RPC_IDLE_TIMEOUT,
+    PAYLOAD_CHUNK_BYTES, PROTOCOL_MAX, PROTOCOL_MIN, RPC_IDLE_TIMEOUT,
 };
 
+use crate::buffer::wal_handle;
+use crate::cluster::codec::{
+    decode_control, encode_control, hash32, pipeline_from_proto, pipeline_to_proto, proto,
+};
 use crate::cluster::identity::ClusterIdentity;
 use crate::cluster::tls::{self, MaybeTlsStream};
 use std::sync::{OnceLock, RwLock as StdRwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex, RwLock};
-
-use crate::buffer::durable::apply::DurableApplicator;
-use crate::buffer::durable::codec::{
-    decode_control, encode_control, envelope_from_proto, envelope_to_proto, hash32,
-    pipeline_from_proto, pipeline_to_proto, proto,
-};
-use crate::buffer::durable::log::MutationLog;
-use crate::buffer::durable::mutation::{EntryComparison, MutationEnvelope};
-use crate::buffer::durable::snapshot::{
-    install_snapshot_from_stream, write_transfer_pack, TransferPack,
-};
 
 static RPC_CLOCK: OnceLock<StdRwLock<Option<(Arc<dyn Clock>, Arc<dyn Sleeper>)>>> = OnceLock::new();
 static PROCESS_REGISTRY: OnceLock<StdRwLock<Option<Arc<ReplicaRegistry>>>> = OnceLock::new();
@@ -82,30 +75,18 @@ pub struct ReplicaSession {
     pub key: PipelineKey,
     pub paths: PipelinePaths,
     pub guard: Arc<LeaseGuard>,
-    pub log: Mutex<MutationLog>,
-    pub applicator: DurableApplicator,
     pub assigned_primary: Mutex<Option<(String, LeaseEpoch)>>,
     pub ready: AtomicBool,
-    pub diverged: AtomicBool,
 }
 
 impl ReplicaSession {
-    pub fn new(
-        key: PipelineKey,
-        paths: PipelinePaths,
-        guard: Arc<LeaseGuard>,
-        log: MutationLog,
-    ) -> Arc<Self> {
-        let applicator = DurableApplicator::new(paths.clone());
+    pub fn new(key: PipelineKey, paths: PipelinePaths, guard: Arc<LeaseGuard>) -> Arc<Self> {
         Arc::new(Self {
             key,
             paths,
             guard,
-            log: Mutex::new(log),
-            applicator,
             assigned_primary: Mutex::new(None),
             ready: AtomicBool::new(false),
-            diverged: AtomicBool::new(false),
         })
     }
 
@@ -115,31 +96,18 @@ impl ReplicaSession {
     }
 
     pub async fn status(&self) -> proto::ReplicaStatus {
-        match durable_state_for_rpc(self).await {
-            Ok(state) => proto::ReplicaStatus {
-                epoch_seen: epoch_seen_for_rpc(self),
-                base_index: state.base_index.get(),
-                committed_index: state.committed_index.get(),
-                applied_index: state.applied_index.get(),
-                head_hash: state.head_hash.to_vec(),
-                ready: self.ready.load(Ordering::SeqCst)
-                    && !self.diverged.load(Ordering::SeqCst)
-                    && state.committed_index == state.applied_index,
-                pipeline: Some(pipeline_to_proto(&self.key)),
-            },
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    pipeline = %self.key.pipeline(),
-                    "durable log unreadable; advertising not ready"
-                );
-                proto::ReplicaStatus {
-                    epoch_seen: epoch_seen_for_rpc(self),
-                    ready: false,
-                    pipeline: Some(pipeline_to_proto(&self.key)),
-                    ..Default::default()
-                }
-            }
+        let (catalog_seq_seen, payload_ready) = match wal_handle::wal_handle_for(&self.key) {
+            Some(handle) => (
+                handle.catalog_seq_seen().unwrap_or(0),
+                handle.payload_ready().unwrap_or(false) && self.ready.load(Ordering::SeqCst),
+            ),
+            None => (0, false),
+        };
+        proto::ReplicaStatus {
+            epoch_seen: epoch_seen_for_rpc(self),
+            catalog_seq_seen,
+            payload_ready,
+            pipeline: Some(pipeline_to_proto(&self.key)),
         }
     }
 }
@@ -154,61 +122,7 @@ fn epoch_seen_for_rpc(session: &ReplicaSession) -> u64 {
 }
 
 fn replica_paths(session: &ReplicaSession) -> PipelinePaths {
-    crate::buffer::durable::durable_store_for(&session.key)
-        .map(|store| store.paths().clone())
-        .unwrap_or_else(|| session.paths.clone())
-}
-
-async fn reload_session_log(session: &ReplicaSession) -> Result<(), DurableError> {
-    let log = MutationLog::open(session.paths.clone())?;
-    *session.log.lock().await = log;
-    Ok(())
-}
-
-async fn durable_state_for_rpc(
-    session: &ReplicaSession,
-) -> Result<crate::buffer::durable::log::DurableState, DurableError> {
-    if let Some(store) = crate::buffer::durable::durable_store_for(&session.key) {
-        return Ok(store.durable_state().await);
-    }
-    Ok(MutationLog::open(replica_paths(session))?.state())
-}
-
-async fn rpc_committed_index(session: &ReplicaSession) -> u64 {
-    durable_state_for_rpc(session)
-        .await
-        .map(|state| state.committed_index.get())
-        .unwrap_or(0)
-}
-
-async fn commit_segment_payload_file(
-    session: &ReplicaSession,
-    envelope: &MutationEnvelope,
-) -> Result<Option<std::path::PathBuf>, DurableError> {
-    let crate::buffer::durable::mutation::DurableMutation::CommitSegment { descriptor, .. } =
-        &envelope.body
-    else {
-        return Ok(None);
-    };
-    if descriptor.payload_len == 0 {
-        return Ok(None);
-    }
-    let id = skippr_lease::SegmentId::new(&descriptor.segment_id)
-        .map_err(|err| DurableError::Io(err.to_string()))?;
-    let path = replica_paths(session).segment(&id);
-    let meta = tokio::fs::metadata(&path).await.map_err(|_| {
-        DurableError::Io(format!(
-            "missing payload for segment {}",
-            descriptor.segment_id
-        ))
-    })?;
-    if meta.len() == 0 {
-        return Err(DurableError::Io(format!(
-            "empty payload for segment {}",
-            descriptor.segment_id
-        )));
-    }
-    Ok(Some(path))
+    session.paths.clone()
 }
 
 #[derive(Clone)]
@@ -245,15 +159,12 @@ impl ReplicaRegistry {
     }
 
     pub async fn advertised_ready(&self) -> bool {
-        if crate::buffer::durable::all_durable_stores()
-            .iter()
-            .any(|store| {
-                matches!(
-                    store.guard().role(),
-                    skippr_lease::PipelineRole::ActivePrimary(_)
-                )
-            })
-        {
+        if wal_handle::all_wal_handles().iter().any(|handle| {
+            matches!(
+                handle.guard().role(),
+                skippr_lease::PipelineRole::ActivePrimary(_)
+            )
+        }) {
             return true;
         }
         let sessions = self.sessions.read().await;
@@ -262,11 +173,8 @@ impl ReplicaRegistry {
         }
         let mut ready = true;
         for session in sessions.values() {
-            if session.diverged.load(Ordering::SeqCst) {
-                continue;
-            }
             let status = session.status().await;
-            ready &= status.ready;
+            ready &= status.payload_ready;
         }
         ready
     }
@@ -391,27 +299,6 @@ pub async fn stream_payload_from_path(
         stream.write_all(&buf[..n]).await?;
     }
     Ok(())
-}
-
-async fn stream_length_prefixed_file(
-    stream: &mut MaybeTlsStream,
-    path: &Path,
-) -> Result<(), DurableError> {
-    let len = tokio::fs::metadata(path).await?.len();
-    stream.write_all(&len.to_le_bytes()).await?;
-    stream_payload_from_path(stream, path).await
-}
-
-async fn read_length_prefixed_payload(
-    stream: &mut MaybeTlsStream,
-) -> Result<Vec<u8>, DurableError> {
-    let mut len_buf = [0u8; 8];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u64::from_le_bytes(len_buf);
-    if len == 0 {
-        return Ok(Vec::new());
-    }
-    stream_payload_to_vec(stream, len).await
 }
 
 pub fn protocol_compatible(peer_min: u32, peer_max: u32) -> bool {
@@ -552,21 +439,21 @@ async fn serve_replica_conn(
             Some(proto::control_frame::Msg::Assign(assign)) => {
                 handle_assign(stream, registry, assign).await?;
             }
-            Some(proto::control_frame::Msg::Fetch(fetch)) => {
-                handle_fetch(stream, registry, fetch).await?;
+            Some(proto::control_frame::Msg::FetchPayload(fetch)) => {
+                handle_fetch_payload(stream, registry, fetch).await?;
             }
-            Some(proto::control_frame::Msg::FetchSnapshot(fetch)) => {
-                handle_fetch_snapshot(stream, registry, fetch).await?;
+            Some(proto::control_frame::Msg::DropPayload(drop)) => {
+                handle_drop_payload(stream, registry, drop).await?;
             }
-            Some(proto::control_frame::Msg::Install(header)) => {
-                handle_install(stream, registry, header).await?;
+            Some(proto::control_frame::Msg::PruneTo(prune)) => {
+                handle_prune_to(stream, registry, prune).await?;
             }
             Some(proto::control_frame::Msg::Drop(drop)) => {
                 let key = pipeline_from_proto(drop.pipeline.as_ref())?;
                 if let Some(session) = registry.remove(&key).await {
                     purge_replica_pipeline(&session).await;
                 }
-                write_ack(stream, 0, [0u8; 32], true).await?;
+                write_ack(stream, "", [0u8; 32]).await?;
             }
             _ => return Ok(()),
         }
@@ -579,152 +466,72 @@ async fn purge_replica_pipeline(session: &ReplicaSession) {
         "purged replica pipeline"
     );
     session.ready.store(false, Ordering::SeqCst);
-    for dir in [
-        &session.paths.segs,
-        &session.paths.completions,
-        &session.paths.compactions,
-        &session.paths.durable,
-        &session.paths.snapshots,
-    ] {
-        let _ = tokio::fs::remove_dir_all(dir).await;
-    }
-    if let Err(err) = reload_session_log(session).await {
-        tracing::error!(error = %err, "purged replica log did not reopen empty");
-    }
+    let _ = tokio::fs::remove_dir_all(&session.paths.segs).await;
 }
 
-async fn purge_diverged_replica(
-    stream: &mut MaybeTlsStream,
+async fn session_for_payload(
     registry: &ReplicaRegistry,
-    session: &ReplicaSession,
-    pipeline: &PipelineKey,
-) -> Result<(), DurableError> {
-    session.diverged.store(true, Ordering::SeqCst);
-    session.ready.store(false, Ordering::SeqCst);
-    crate::metrics::counters::add_cluster_divergence(1);
-    crate::metrics::counters::add_cluster_purge(1);
-    purge_replica_pipeline(session).await;
-    registry.remove(pipeline).await;
-    let head = session.log.lock().await.committed_index().get();
-    write_nack(stream, ReplicaNack::Diverged, head).await
+    pipeline: Option<&proto::PipelineKey>,
+) -> Result<Arc<ReplicaSession>, ReplicaNack> {
+    let Ok(key) = pipeline_from_proto(pipeline) else {
+        return Err(ReplicaNack::UnknownPipeline);
+    };
+    registry.get(&key).await.ok_or(ReplicaNack::UnknownPipeline)
 }
 
 async fn handle_replicate(
     stream: &mut MaybeTlsStream,
     registry: &ReplicaRegistry,
-    req: proto::ReplicateRequest,
+    req: proto::ReplicatePayload,
 ) -> Result<(), DurableError> {
-    let proto_env = req
-        .envelope
-        .ok_or_else(|| DurableError::ProtocolMismatch("replicate missing envelope".into()))?;
-    let envelope = envelope_from_proto(proto_env)?;
-    let session = registry.get(&envelope.pipeline).await.ok_or_else(|| {
-        DurableError::ProtocolMismatch(format!("unknown pipeline {}", envelope.pipeline.pipeline()))
-    })?;
-    if session.guard.reject_stale_epoch(envelope.epoch).is_err() {
-        let head = session.log.lock().await.committed_index().get();
-        return write_nack(stream, ReplicaNack::StaleEpoch, head).await;
+    let session = match session_for_payload(registry, req.pipeline.as_ref()).await {
+        Ok(session) => session,
+        Err(nack) => return write_nack(stream, nack).await,
+    };
+    let epoch = LeaseEpoch::new(req.epoch);
+    if session.guard.reject_stale_epoch(epoch).is_err() {
+        return write_nack(stream, ReplicaNack::StaleEpoch).await;
     }
     let assigned_epoch = {
         let assigned = session.assigned_primary.lock().await;
         match assigned.as_ref() {
-            Some((_, epoch)) => *epoch,
-            None => {
-                let head = session.log.lock().await.committed_index().get();
-                return write_nack(stream, ReplicaNack::NotAssigned, head).await;
-            }
+            Some((_, assigned_epoch)) => *assigned_epoch,
+            None => return write_nack(stream, ReplicaNack::NotAssigned).await,
         }
     };
-    if envelope.epoch != assigned_epoch {
-        let head = session.log.lock().await.committed_index().get();
-        return write_nack(stream, ReplicaNack::StaleEpoch, head).await;
+    if epoch != assigned_epoch {
+        return write_nack(stream, ReplicaNack::StaleEpoch).await;
     }
-    let comparison = match {
-        let log = session.log.lock().await;
-        log.compare(&envelope)
-    } {
-        Ok(comparison) => comparison,
-        Err(DurableError::Diverged(_)) => {
-            return purge_diverged_replica(stream, registry, &session, &envelope.pipeline).await;
-        }
-        Err(err) => return Err(err),
-    };
-    match comparison {
-        EntryComparison::AlreadyAppliedSameHash => {
-            write_ack(stream, envelope.index.get(), envelope.entry_hash()?, true).await
-        }
-        EntryComparison::SameIndexDifferentHash => {
-            purge_diverged_replica(stream, registry, &session, &envelope.pipeline).await
-        }
-        EntryComparison::Gap { head } => {
-            write_nack(stream, ReplicaNack::NotCaughtUp, head.get()).await
-        }
-        EntryComparison::Next => {
-            if crate::cluster::disk::disk_under_pressure(&session.paths.root)
-                && req.payload_len == 0
-            {
-                return write_nack(
-                    stream,
-                    ReplicaNack::DiskFull,
-                    session.log.lock().await.committed_index().get(),
-                )
-                .await;
-            }
-            if req.payload_len > 0 {
-                let dest = match &envelope.body {
-                    crate::buffer::durable::mutation::DurableMutation::CommitSegment {
-                        descriptor,
-                        ..
-                    } => {
-                        let id = SegmentId::new(&descriptor.segment_id)
-                            .map_err(|err| DurableError::Io(err.to_string()))?;
-                        session.paths.segment(&id)
-                    }
-                    _ => session.paths.durable.join("payload.bin"),
-                };
-                let hash = match stream_payload_to_path(stream, req.payload_len, &dest).await {
-                    Ok(hash) => hash,
-                    Err(DurableError::DiskFull) => {
-                        let head = session.log.lock().await.committed_index().get();
-                        return write_nack(stream, ReplicaNack::DiskFull, head).await;
-                    }
-                    Err(err) => return Err(err),
-                };
-                let expected = hash32(&req.payload_sha256)?;
-                if hash != expected {
-                    let _ = tokio::fs::remove_file(dest.with_extension("part")).await;
-                    return write_nack(stream, ReplicaNack::PayloadHashMismatch, 0).await;
-                }
-            }
-            if crate::cluster::disk::disk_under_pressure(&session.paths.root) {
-                let head = session.log.lock().await.committed_index().get();
-                return write_nack(stream, ReplicaNack::DiskFull, head).await;
-            }
-            let mut log = session.log.lock().await;
-            log.append_prepared(&envelope)?;
-            crate::cluster::failpoint::hit(
-                crate::cluster::failpoint::FailpointName::ReplicaAfterPrepared,
-                &session.paths.root,
-            )?;
-            let hash = envelope.entry_hash()?;
-            log.append_committed(envelope.index, hash)?;
-            session.applicator.apply(&envelope)?;
-            log.mark_applied(envelope.index, hash)?;
-            if matches!(
-                envelope.body,
-                crate::buffer::durable::mutation::DurableMutation::ReclaimSegment { .. }
-            ) {
-                let snapshot = crate::buffer::durable::snapshot::retain_live_snapshot(
-                    &mut log,
-                    &session.paths,
-                    &session.key,
-                )?;
-                crate::buffer::ingest_buffer::Buffers::sync_planner_from_snapshot(&snapshot);
-            }
-            drop(log);
-            write_ack(stream, envelope.index.get(), hash, false).await
+    let id = SegmentId::new(&req.segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
+    let paths = replica_paths(&session);
+    let dest = paths.segment(&id);
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    if crate::cluster::disk::disk_under_pressure(&paths.root) && req.len == 0 {
+        return write_nack(stream, ReplicaNack::DiskFull).await;
+    }
+    if req.len > 0 {
+        let hash = match stream_payload_to_path(stream, req.len, &dest).await {
+            Ok(hash) => hash,
+            Err(DurableError::DiskFull) => return write_nack(stream, ReplicaNack::DiskFull).await,
+            Err(err) => return Err(err),
+        };
+        let expected = hash32(&req.sha256)?;
+        if hash != expected {
+            let _ = tokio::fs::remove_file(&dest).await;
+            return write_nack(stream, ReplicaNack::PayloadHashMismatch).await;
         }
     }
+    if crate::cluster::disk::disk_under_pressure(&session.paths.root) {
+        return write_nack(stream, ReplicaNack::DiskFull).await;
+    }
+    crate::cluster::failpoint::hit(
+        crate::cluster::failpoint::FailpointName::AfterReplicaPayloadAck,
+        &session.paths.root,
+    )?;
+    let sha = hash32(&req.sha256).unwrap_or([0u8; 32]);
+    write_ack(stream, &req.segment_id, sha).await
 }
 
 async fn handle_assign(
@@ -734,11 +541,11 @@ async fn handle_assign(
 ) -> Result<(), DurableError> {
     let key = pipeline_from_proto(assign.pipeline.as_ref())?;
     let Some(session) = registry.get(&key).await else {
-        return write_nack(stream, ReplicaNack::UnknownPipeline, 0).await;
+        return write_nack(stream, ReplicaNack::UnknownPipeline).await;
     };
     let Ok(endpoint) = assign.primary_endpoint.parse::<SocketAddr>() else {
         session.ready.store(false, Ordering::SeqCst);
-        return write_nack(stream, ReplicaNack::InvalidPrimaryEndpoint, 0).await;
+        return write_nack(stream, ReplicaNack::InvalidPrimaryEndpoint).await;
     };
     let epoch = LeaseEpoch::new(assign.epoch);
     let assignment = (assign.primary_node.clone(), epoch);
@@ -746,7 +553,7 @@ async fn handle_assign(
         let current = session.assigned_primary.lock().await;
         if current.as_ref() == Some(&assignment) && session.ready.load(Ordering::SeqCst) {
             session.guard.observe_epoch(epoch);
-            write_ack(stream, 0, [0u8; 32], true).await?;
+            write_ack(stream, "", [0u8; 32]).await?;
             return Ok(());
         }
     }
@@ -754,198 +561,127 @@ async fn handle_assign(
         .note_assigned(assign.primary_node.clone(), epoch)
         .await;
     session.ready.store(false, Ordering::SeqCst);
-    write_ack(stream, 0, [0u8; 32], true).await?;
+    write_ack(stream, "", [0u8; 32]).await?;
     let identity = registry.identity.clone();
     tokio::spawn(async move {
-        // Catch-up must not hold `session.log` across donor RPCs: Status
-        // and advertised_ready take the same mutex.
-        let mut result = catch_up_assigned_session(&session, endpoint, &identity).await;
-        if let Err(DurableError::Diverged(reason)) = &result {
-            tracing::warn!(
-                error = %reason,
-                "assigned replica catch-up diverged; purging and retrying"
-            );
-            purge_replica_pipeline(&session).await;
-            result = catch_up_assigned_session(&session, endpoint, &identity).await;
-        }
+        let result =
+            crate::cluster::catchup::catch_up_payloads(&session, endpoint, &identity).await;
         session.ready.store(result.is_ok(), Ordering::SeqCst);
         if let Err(err) = result {
-            tracing::warn!(error = %err, "assigned replica catch-up failed");
+            tracing::warn!(error = %err, "assigned replica payload catch-up failed");
         } else {
             tracing::info!(
                 pipeline = %session.key.pipeline(),
-                "assigned replica catch-up reached donor head"
+                "assigned replica payload catch-up complete"
             );
         }
     });
     Ok(())
 }
 
-async fn catch_up_assigned_session(
-    session: &ReplicaSession,
-    endpoint: SocketAddr,
-    identity: &ClusterIdentity,
-) -> Result<(), DurableError> {
-    let mut log = MutationLog::open(session.paths.clone())?;
-    crate::cluster::catchup::catch_up_from_donor(
-        &mut log,
-        &session.paths,
-        &session.key,
-        endpoint,
-        identity,
-    )
-    .await?;
-    *session.log.lock().await = log;
-    Ok(())
-}
-
-async fn handle_fetch_snapshot(
+async fn handle_fetch_payload(
     stream: &mut MaybeTlsStream,
     registry: &ReplicaRegistry,
-    fetch: proto::FetchSnapshotRequest,
+    fetch: proto::FetchPayload,
 ) -> Result<(), DurableError> {
-    let key = pipeline_from_proto(fetch.pipeline.as_ref())?;
-    let session = registry
-        .get(&key)
-        .await
-        .ok_or_else(|| DurableError::ProtocolMismatch("unknown pipeline".into()))?;
-    let pack = match crate::buffer::durable::durable_store_for(&key) {
-        Some(store) => store.write_transfer_pack().await?,
-        None => {
-            let log = session.log.lock().await;
-            write_transfer_pack(&session.paths, &log, &session.key)?
-        }
+    let session = match session_for_payload(registry, fetch.pipeline.as_ref()).await {
+        Ok(session) => session,
+        Err(nack) => return write_nack(stream, nack).await,
     };
-    let streamed = stream_transfer_pack(stream, &key, &pack).await;
-    let _ = tokio::fs::remove_file(&pack.path).await;
-    streamed
-}
-
-async fn stream_transfer_pack(
-    stream: &mut MaybeTlsStream,
-    key: &PipelineKey,
-    pack: &TransferPack,
-) -> Result<(), DurableError> {
-    let payload_bytes = tokio::fs::metadata(&pack.path).await?.len();
-    let hash = sha256_path(&pack.path).await?;
-    let header = proto::ControlFrame {
-        msg: Some(proto::control_frame::Msg::Install(
-            proto::InstallSnapshotHeader {
-                pipeline: Some(pipeline_to_proto(key)),
-                base_index: pack.base_index,
-                base_hash: pack.base_hash.to_vec(),
-                payload_bytes,
-                snapshot_sha256: hash.to_vec(),
-            },
-        )),
-    };
-    write_frame(stream, &encode_control(&header)?).await?;
-    stream_payload_from_path(stream, &pack.path).await
-}
-
-async fn handle_fetch(
-    stream: &mut MaybeTlsStream,
-    registry: &ReplicaRegistry,
-    fetch: proto::FetchEntriesRequest,
-) -> Result<(), DurableError> {
-    let key = pipeline_from_proto(fetch.pipeline.as_ref())?;
-    let session = registry
-        .get(&key)
-        .await
-        .ok_or_else(|| DurableError::ProtocolMismatch("unknown pipeline".into()))?;
-    let envelopes: Vec<_> = if let Some(store) = crate::buffer::durable::durable_store_for(&key) {
-        store
-            .committed_envelopes_in_range(fetch.from_index, fetch.to_index, FETCH_ENTRIES_MAX_COUNT)
-            .await
-    } else {
-        let log = MutationLog::open(replica_paths(&session))?;
-        log.envelopes_in_range(fetch.from_index, fetch.to_index)
-            .take(FETCH_ENTRIES_MAX_COUNT)
-            .cloned()
-            .collect()
-    };
-    let mut payload_paths = Vec::new();
-    for envelope in &envelopes {
-        match commit_segment_payload_file(&session, envelope).await {
-            Ok(path) => payload_paths.push(path),
-            Err(_) => {
-                return write_nack(
-                    stream,
-                    ReplicaNack::SnapshotUnavailable,
-                    rpc_committed_index(&session).await,
-                )
-                .await;
-            }
-        }
+    let id = SegmentId::new(&fetch.segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
+    let path = replica_paths(session.as_ref()).segment(&id);
+    if !path.exists() {
+        return write_nack(stream, ReplicaNack::NotCaughtUp).await;
     }
-    let mut entries = Vec::new();
-    for envelope in &envelopes {
-        entries.push(envelope_to_proto(envelope)?);
-    }
+    let sha = sha256_path(&path).await?;
+    let len = tokio::fs::metadata(&path).await?.len();
     let reply = proto::ControlFrame {
-        msg: Some(proto::control_frame::Msg::FetchOk(
-            proto::FetchEntriesResponse {
-                entries,
-                payloads: Vec::new(),
+        msg: Some(proto::control_frame::Msg::FetchPayloadOk(
+            proto::FetchPayloadResponse {
+                segment_id: fetch.segment_id.clone(),
+                sha256: sha.to_vec(),
+                len,
             },
         )),
     };
     write_frame(stream, &encode_control(&reply)?).await?;
-    for path in payload_paths.into_iter().flatten() {
-        stream_length_prefixed_file(stream, &path).await?;
-    }
-    Ok(())
+    stream_payload_from_path(stream, &path).await
 }
 
-async fn handle_install(
+async fn handle_drop_payload(
     stream: &mut MaybeTlsStream,
     registry: &ReplicaRegistry,
-    header: proto::InstallSnapshotHeader,
+    drop: proto::DropPayload,
 ) -> Result<(), DurableError> {
-    let key = pipeline_from_proto(header.pipeline.as_ref())?;
-    let session = registry
-        .get(&key)
-        .await
-        .ok_or_else(|| DurableError::ProtocolMismatch("unknown pipeline".into()))?;
-    let dest = session.paths.durable.join("incoming.snapshot");
-    let hash = stream_payload_to_path(stream, header.payload_bytes, &dest).await?;
-    let expected = hash32(&header.snapshot_sha256)?;
-    if hash != expected {
-        return write_nack(stream, ReplicaNack::SnapshotHashMismatch, 0).await;
+    let session = match session_for_payload(registry, drop.pipeline.as_ref()).await {
+        Ok(session) => session,
+        Err(nack) => return write_nack(stream, nack).await,
+    };
+    let epoch = LeaseEpoch::new(drop.epoch);
+    if session.guard.reject_stale_epoch(epoch).is_err() {
+        return write_nack(stream, ReplicaNack::StaleEpoch).await;
     }
-    let bytes = tokio::fs::read(&dest).await?;
-    install_snapshot_from_stream(&session.paths, &uuid::Uuid::new_v4().to_string(), &bytes).await?;
-    crate::buffer::ingest_buffer::Buffers::sync_planner_from_pipeline_paths(&session.paths);
-    reload_session_log(&session).await?;
-    write_ack(stream, header.base_index, expected, false).await
+    if let Ok(id) = SegmentId::new(&drop.segment_id) {
+        let path = replica_paths(session.as_ref()).segment(&id);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    write_ack(stream, &drop.segment_id, [0u8; 32]).await
+}
+
+async fn handle_prune_to(
+    stream: &mut MaybeTlsStream,
+    registry: &ReplicaRegistry,
+    prune: proto::PruneTo,
+) -> Result<(), DurableError> {
+    let session = match session_for_payload(registry, prune.pipeline.as_ref()).await {
+        Ok(session) => session,
+        Err(nack) => return write_nack(stream, nack).await,
+    };
+    let epoch = LeaseEpoch::new(prune.epoch);
+    if session.guard.reject_stale_epoch(epoch).is_err() {
+        return write_nack(stream, ReplicaNack::StaleEpoch).await;
+    }
+    let live: std::collections::HashSet<&str> =
+        prune.live_segment_ids.iter().map(String::as_str).collect();
+    let segs = replica_paths(session.as_ref()).segs;
+    if segs.exists() {
+        let mut dir = tokio::fs::read_dir(&segs).await?;
+        while let Some(entry) = dir.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("seg") {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if !live.contains(id) {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+        }
+    }
+    write_ack(stream, "", [0u8; 32]).await
 }
 
 async fn write_ack(
     stream: &mut MaybeTlsStream,
-    commit_index: u64,
-    entry_hash: [u8; 32],
-    already_applied: bool,
+    segment_id: &str,
+    sha256: [u8; 32],
 ) -> Result<(), DurableError> {
     let reply = proto::ControlFrame {
         msg: Some(proto::control_frame::Msg::Ack(proto::ReplicaAck {
-            commit_index,
-            entry_hash: entry_hash.to_vec(),
-            already_applied,
+            segment_id: segment_id.to_string(),
+            sha256: sha256.to_vec(),
         })),
     };
     write_frame(stream, &encode_control(&reply)?).await?;
     Ok(())
 }
 
-async fn write_nack(
-    stream: &mut MaybeTlsStream,
-    nack: ReplicaNack,
-    head_index: u64,
-) -> Result<(), DurableError> {
+async fn write_nack(stream: &mut MaybeTlsStream, nack: ReplicaNack) -> Result<(), DurableError> {
     let reply = proto::ControlFrame {
         msg: Some(proto::control_frame::Msg::Nack(proto::ReplicaNack {
             code: replica_nack_code(nack) as i32,
-            head_index,
         })),
     };
     write_frame(stream, &encode_control(&reply)?).await?;
@@ -957,15 +693,10 @@ fn replica_nack_code(nack: ReplicaNack) -> proto::ReplicaNackCode {
         ReplicaNack::StaleEpoch => proto::ReplicaNackCode::StaleEpoch,
         ReplicaNack::NotAssigned => proto::ReplicaNackCode::NotAssigned,
         ReplicaNack::NotCaughtUp => proto::ReplicaNackCode::NotCaughtUp,
-        ReplicaNack::Diverged => proto::ReplicaNackCode::Diverged,
         ReplicaNack::DiskFull => proto::ReplicaNackCode::DiskFull,
         ReplicaNack::PayloadHashMismatch => proto::ReplicaNackCode::PayloadHashMismatch,
         ReplicaNack::UnknownPipeline => proto::ReplicaNackCode::UnknownPipeline,
         ReplicaNack::InvalidPrimaryEndpoint => proto::ReplicaNackCode::InvalidPrimaryEndpoint,
-        ReplicaNack::NoSnapshot => proto::ReplicaNackCode::NoSnapshot,
-        ReplicaNack::EmptySnapshot => proto::ReplicaNackCode::EmptySnapshot,
-        ReplicaNack::SnapshotHashMismatch => proto::ReplicaNackCode::SnapshotHashMismatch,
-        ReplicaNack::SnapshotUnavailable => proto::ReplicaNackCode::SnapshotUnavailable,
     }
 }
 
@@ -974,17 +705,12 @@ fn replica_nack_from_proto(nack: &proto::ReplicaNack) -> Result<ReplicaNack, Dur
         Ok(proto::ReplicaNackCode::StaleEpoch) => Ok(ReplicaNack::StaleEpoch),
         Ok(proto::ReplicaNackCode::NotAssigned) => Ok(ReplicaNack::NotAssigned),
         Ok(proto::ReplicaNackCode::NotCaughtUp) => Ok(ReplicaNack::NotCaughtUp),
-        Ok(proto::ReplicaNackCode::Diverged) => Ok(ReplicaNack::Diverged),
         Ok(proto::ReplicaNackCode::DiskFull) => Ok(ReplicaNack::DiskFull),
         Ok(proto::ReplicaNackCode::PayloadHashMismatch) => Ok(ReplicaNack::PayloadHashMismatch),
         Ok(proto::ReplicaNackCode::UnknownPipeline) => Ok(ReplicaNack::UnknownPipeline),
         Ok(proto::ReplicaNackCode::InvalidPrimaryEndpoint) => {
             Ok(ReplicaNack::InvalidPrimaryEndpoint)
         }
-        Ok(proto::ReplicaNackCode::NoSnapshot) => Ok(ReplicaNack::NoSnapshot),
-        Ok(proto::ReplicaNackCode::EmptySnapshot) => Ok(ReplicaNack::EmptySnapshot),
-        Ok(proto::ReplicaNackCode::SnapshotHashMismatch) => Ok(ReplicaNack::SnapshotHashMismatch),
-        Ok(proto::ReplicaNackCode::SnapshotUnavailable) => Ok(ReplicaNack::SnapshotUnavailable),
         Ok(proto::ReplicaNackCode::Unspecified) | Err(_) => Err(DurableError::ProtocolMismatch(
             "unspecified replica nack".into(),
         )),
@@ -1023,41 +749,33 @@ async fn handshake(
     }
 }
 
-pub async fn replicate_to(
+pub async fn replicate_payload_to(
     endpoint: SocketAddr,
-    envelope: &MutationEnvelope,
+    key: &PipelineKey,
+    segment_id: &str,
+    sha256: [u8; 32],
+    len: u64,
+    epoch: u64,
     payload: &Path,
     identity: &ClusterIdentity,
 ) -> Result<proto::ReplicaAck, DurableError> {
     let mut stream = connect_replica(endpoint).await?;
     handshake(&mut stream, identity).await?;
-    let payload_len = if payload.exists() {
-        tokio::fs::metadata(payload)
-            .await
-            .map_err(|err| DurableError::Io(err.to_string()))?
-            .len()
-    } else {
-        0
-    };
-    let payload_sha256 = if payload_len > 0 {
-        sha256_path(payload).await?.to_vec()
-    } else {
-        envelope.payload_sha256.to_vec()
-    };
     let req = proto::ControlFrame {
         msg: Some(proto::control_frame::Msg::Replicate(
-            proto::ReplicateRequest {
-                envelope: Some(envelope_to_proto(envelope)?),
-                payload_len,
-                payload_sha256,
-                entry_hash: envelope.entry_hash()?.to_vec(),
+            proto::ReplicatePayload {
+                segment_id: segment_id.to_string(),
+                sha256: sha256.to_vec(),
+                len,
+                epoch,
+                pipeline: Some(pipeline_to_proto(key)),
             },
         )),
     };
     write_frame(&mut stream, &encode_control(&req)?)
         .await
         .map_err(rpc_io_error)?;
-    if payload_len > 0 {
+    if len > 0 && payload.exists() {
         stream_payload_from_path(&mut stream, payload).await?;
     }
     let ack_bytes = read_frame(&mut stream).await.map_err(rpc_io_error)?;
@@ -1078,11 +796,8 @@ pub async fn query_status(
     let req = proto::ControlFrame {
         msg: Some(proto::control_frame::Msg::Status(proto::ReplicaStatus {
             epoch_seen: 0,
-            base_index: 0,
-            committed_index: 0,
-            applied_index: 0,
-            head_hash: Vec::new(),
-            ready: false,
+            catalog_seq_seen: 0,
+            payload_ready: false,
             pipeline: Some(pipeline_to_proto(key)),
         })),
     };
@@ -1098,105 +813,19 @@ pub async fn query_status(
     }
 }
 
-#[derive(Debug)]
-pub struct FetchedWalEntry {
-    pub envelope: MutationEnvelope,
-    pub payload: Vec<u8>,
-}
-
-pub async fn fetch_entries_from(
+pub async fn fetch_payload_from(
     endpoint: SocketAddr,
     key: &PipelineKey,
-    from_index: u64,
-    to_index: u64,
+    segment_id: &str,
+    dest: &Path,
     identity: &ClusterIdentity,
-) -> Result<Vec<FetchedWalEntry>, DurableError> {
-    if from_index > to_index {
-        return Ok(Vec::new());
-    }
-    let mut stream = connect_replica(endpoint).await?;
-    handshake(&mut stream, identity).await?;
-    let mut from = from_index;
-    let mut out = Vec::new();
-    while from <= to_index {
-        let req = proto::ControlFrame {
-            msg: Some(proto::control_frame::Msg::Fetch(
-                proto::FetchEntriesRequest {
-                    pipeline: Some(pipeline_to_proto(key)),
-                    from_index: from,
-                    to_index,
-                },
-            )),
-        };
-        write_frame(&mut stream, &encode_control(&req)?)
-            .await
-            .map_err(rpc_io_error)?;
-        let reply = read_frame(&mut stream).await.map_err(rpc_io_error)?;
-        match decode_control(&reply)?.msg {
-            Some(proto::control_frame::Msg::FetchOk(ok)) => {
-                let proto::FetchEntriesResponse { entries, payloads } = ok;
-                if !payloads.is_empty() {
-                    return Err(DurableError::ProtocolMismatch(
-                        "fetch payloads must stream after the control frame".into(),
-                    ));
-                }
-                if entries.is_empty() {
-                    break;
-                }
-                for proto in entries {
-                    let envelope = envelope_from_proto(proto)?;
-                    let mut payload = Vec::new();
-                    if let crate::buffer::durable::mutation::DurableMutation::CommitSegment {
-                        descriptor,
-                        ..
-                    } = &envelope.body
-                    {
-                        if descriptor.payload_len > 0 {
-                            payload = read_length_prefixed_payload(&mut stream).await?;
-                            if payload.is_empty() {
-                                return Err(DurableError::Io(format!(
-                                    "missing payload for segment {}",
-                                    descriptor.segment_id
-                                )));
-                            }
-                            crate::metrics::counters::add_cluster_catchup_bytes(
-                                payload.len() as u64
-                            );
-                        }
-                    }
-                    from = envelope.index.get().saturating_add(1);
-                    out.push(FetchedWalEntry { envelope, payload });
-                }
-            }
-            Some(proto::control_frame::Msg::Nack(nack)) => {
-                return Err(replica_nack_error(&nack));
-            }
-            other => return Err(DurableError::QuorumLost(format!("{other:?}"))),
-        }
-    }
-    Ok(out)
-}
-
-async fn stream_payload_to_vec(
-    stream: &mut MaybeTlsStream,
-    total: u64,
-) -> Result<Vec<u8>, DurableError> {
-    let mut buf = vec![0u8; total as usize];
-    stream.read_exact(&mut buf).await?;
-    Ok(buf)
-}
-
-pub async fn fetch_snapshot_from(
-    endpoint: SocketAddr,
-    key: &PipelineKey,
-    identity: &ClusterIdentity,
-    paths: &PipelinePaths,
-) -> Result<(), DurableError> {
+) -> Result<[u8; 32], DurableError> {
     let mut stream = connect_replica(endpoint).await?;
     handshake(&mut stream, identity).await?;
     let req = proto::ControlFrame {
-        msg: Some(proto::control_frame::Msg::FetchSnapshot(
-            proto::FetchSnapshotRequest {
+        msg: Some(proto::control_frame::Msg::FetchPayload(
+            proto::FetchPayload {
+                segment_id: segment_id.to_string(),
                 pipeline: Some(pipeline_to_proto(key)),
             },
         )),
@@ -1206,26 +835,75 @@ pub async fn fetch_snapshot_from(
         .map_err(rpc_io_error)?;
     let reply = read_frame(&mut stream).await.map_err(rpc_io_error)?;
     match decode_control(&reply)?.msg {
-        Some(proto::control_frame::Msg::Install(header)) => {
-            if header.payload_bytes == 0 {
-                return Err(DurableError::ProtocolMismatch(
-                    "empty snapshot payload".into(),
-                ));
+        Some(proto::control_frame::Msg::FetchPayloadOk(ok)) => {
+            if let Some(parent) = dest.parent() {
+                tokio::fs::create_dir_all(parent).await?;
             }
-            let dest = paths.durable.join("incoming.snapshot");
-            let hash = stream_payload_to_path(&mut stream, header.payload_bytes, &dest).await?;
-            let expected = hash32(&header.snapshot_sha256)?;
+            let hash = stream_payload_to_path(&mut stream, ok.len, dest).await?;
+            let expected = hash32(&ok.sha256)?;
             if hash != expected {
+                let _ = tokio::fs::remove_file(dest).await;
                 return Err(DurableError::ProtocolMismatch(
-                    "snapshot hash mismatch".into(),
+                    "fetched payload hash mismatch".into(),
                 ));
             }
-            let bytes = tokio::fs::read(&dest).await?;
-            crate::metrics::counters::add_cluster_catchup_bytes(bytes.len() as u64);
-            install_snapshot_from_stream(paths, &uuid::Uuid::new_v4().to_string(), &bytes).await?;
-            crate::buffer::ingest_buffer::Buffers::sync_planner_from_pipeline_paths(paths);
-            Ok(())
+            crate::metrics::counters::add_cluster_catchup_bytes(ok.len);
+            Ok(hash)
         }
+        Some(proto::control_frame::Msg::Nack(nack)) => Err(replica_nack_error(&nack)),
+        other => Err(DurableError::QuorumLost(format!("{other:?}"))),
+    }
+}
+
+pub async fn drop_payload_at(
+    endpoint: SocketAddr,
+    key: &PipelineKey,
+    segment_id: &str,
+    epoch: u64,
+    identity: &ClusterIdentity,
+) -> Result<(), DurableError> {
+    let mut stream = connect_replica(endpoint).await?;
+    handshake(&mut stream, identity).await?;
+    let req = proto::ControlFrame {
+        msg: Some(proto::control_frame::Msg::DropPayload(proto::DropPayload {
+            segment_id: segment_id.to_string(),
+            epoch,
+            pipeline: Some(pipeline_to_proto(key)),
+        })),
+    };
+    write_frame(&mut stream, &encode_control(&req)?)
+        .await
+        .map_err(rpc_io_error)?;
+    let reply = read_frame(&mut stream).await.map_err(rpc_io_error)?;
+    match decode_control(&reply)?.msg {
+        Some(proto::control_frame::Msg::Ack(_)) => Ok(()),
+        Some(proto::control_frame::Msg::Nack(nack)) => Err(replica_nack_error(&nack)),
+        other => Err(DurableError::QuorumLost(format!("{other:?}"))),
+    }
+}
+
+pub async fn prune_to_at(
+    endpoint: SocketAddr,
+    key: &PipelineKey,
+    live_segment_ids: Vec<String>,
+    epoch: u64,
+    identity: &ClusterIdentity,
+) -> Result<(), DurableError> {
+    let mut stream = connect_replica(endpoint).await?;
+    handshake(&mut stream, identity).await?;
+    let req = proto::ControlFrame {
+        msg: Some(proto::control_frame::Msg::PruneTo(proto::PruneTo {
+            live_segment_ids,
+            epoch,
+            pipeline: Some(pipeline_to_proto(key)),
+        })),
+    };
+    write_frame(&mut stream, &encode_control(&req)?)
+        .await
+        .map_err(rpc_io_error)?;
+    let reply = read_frame(&mut stream).await.map_err(rpc_io_error)?;
+    match decode_control(&reply)?.msg {
+        Some(proto::control_frame::Msg::Ack(_)) => Ok(()),
         Some(proto::control_frame::Msg::Nack(nack)) => Err(replica_nack_error(&nack)),
         other => Err(DurableError::QuorumLost(format!("{other:?}"))),
     }
@@ -1308,23 +986,49 @@ impl crate::buffer::durable::replicate::ReplicaClient for TcpReplicaClient {
         Some(self.endpoint())
     }
 
-    async fn replicate_at(
+    async fn replicate_payload_at(
         &self,
         endpoint: SocketAddr,
-        envelope: &MutationEnvelope,
+        pipeline: &PipelineKey,
+        segment_id: &str,
+        sha256: [u8; 32],
+        len: u64,
+        epoch: u64,
         payload: &Path,
     ) -> Result<(), DurableError> {
-        replicate_to(endpoint, envelope, payload, &self.identity)
-            .await
-            .map(|_| ())
+        replicate_payload_to(
+            endpoint,
+            pipeline,
+            segment_id,
+            sha256,
+            len,
+            epoch,
+            payload,
+            &self.identity,
+        )
+        .await
+        .map(|_| ())
     }
 
-    async fn replicate(
+    async fn replicate_payload(
         &self,
-        envelope: &MutationEnvelope,
+        pipeline: &PipelineKey,
+        segment_id: &str,
+        sha256: [u8; 32],
+        len: u64,
+        epoch: u64,
         payload: &Path,
     ) -> Result<(), DurableError> {
-        self.replicate_at(self.endpoint(), envelope, payload).await
+        self.replicate_payload_at(
+            self.endpoint(),
+            pipeline,
+            segment_id,
+            sha256,
+            len,
+            epoch,
+            payload,
+        )
+        .await
     }
 }
 
@@ -1342,821 +1046,44 @@ impl ScriptedPeer {
 
 #[async_trait::async_trait]
 impl crate::buffer::durable::replicate::ReplicaClient for ScriptedPeer {
-    async fn replicate(
+    async fn replicate_payload(
         &self,
-        _envelope: &MutationEnvelope,
+        _pipeline: &PipelineKey,
+        _segment_id: &str,
+        _sha256: [u8; 32],
+        _len: u64,
+        _epoch: u64,
         _payload: &Path,
     ) -> Result<(), DurableError> {
         let mut responses = self.responses.lock().await;
-        if responses.is_empty() {
-            return Err(DurableError::QuorumLost("scripted peer exhausted".into()));
-        }
-        responses.remove(0)
+        responses
+            .pop()
+            .unwrap_or(Err(DurableError::QuorumLost("script exhausted".into())))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::durable::mutation::DurableMutation;
-    use skippr_lease::{CommitIndex, LeaseEpoch, NodeId, PipelineKey, SystemClock, GENESIS_HASH};
+    use skippr_lease::{LeaseEpoch, PipelineKey, SystemClock};
 
-    fn identity() -> ClusterIdentity {
-        ClusterIdentity::new(
-            skippr_lease::ClusterId::new("test-cluster").unwrap(),
-            NodeId::generate(),
-        )
+    #[test]
+    fn protocol_v3_rejects_v2_peer() {
+        assert!(!protocol_compatible(2, 2));
+        assert!(protocol_compatible(3, 3));
     }
 
     #[test]
-    fn oversized_len_is_rejected_before_allocating_announced_total() {
-        assert!(CONTROL_FRAME_MAX_BYTES < 64 * 1024 * 1024);
-        let announced = CONTROL_FRAME_MAX_BYTES + 1;
-        assert!(announced > CONTROL_FRAME_MAX_BYTES);
-    }
-
-    #[test]
-    fn protocol_intersection_requires_overlap() {
-        assert!(protocol_compatible(PROTOCOL_MIN, PROTOCOL_MAX));
-        assert!(!protocol_compatible(1, 1));
-        assert!(!protocol_compatible(PROTOCOL_MAX + 1, PROTOCOL_MAX + 2));
-    }
-
-    #[test]
-    fn replica_nack_codes_round_trip_to_durable() {
-        let codes = [
-            ReplicaNack::StaleEpoch,
-            ReplicaNack::NotAssigned,
-            ReplicaNack::NotCaughtUp,
-            ReplicaNack::Diverged,
-            ReplicaNack::DiskFull,
-            ReplicaNack::PayloadHashMismatch,
-            ReplicaNack::UnknownPipeline,
-            ReplicaNack::InvalidPrimaryEndpoint,
-            ReplicaNack::NoSnapshot,
-            ReplicaNack::EmptySnapshot,
-            ReplicaNack::SnapshotHashMismatch,
-            ReplicaNack::SnapshotUnavailable,
-        ];
-        for nack in codes {
-            let wire = proto::ReplicaNack {
-                code: replica_nack_code(nack.clone()) as i32,
-                head_index: 7,
-            };
-            assert_eq!(replica_nack_from_proto(&wire).unwrap(), nack);
-            assert_eq!(replica_nack_error(&wire), nack.into_durable());
-        }
-    }
-
-    #[test]
-    fn unspecified_and_unknown_nack_codes_fail_closed() {
-        let unspecified = proto::ReplicaNack {
-            code: proto::ReplicaNackCode::Unspecified as i32,
-            head_index: 0,
-        };
-        assert!(matches!(
-            replica_nack_from_proto(&unspecified),
-            Err(DurableError::ProtocolMismatch(_))
-        ));
-        let unknown = proto::ReplicaNack {
-            code: 99,
-            head_index: 0,
-        };
-        assert!(matches!(
-            replica_nack_error(&unknown),
-            DurableError::ProtocolMismatch(_)
-        ));
-    }
-
-    #[test]
-    fn hello_ok_must_match_cluster_hash_and_protocol() {
-        let id = identity();
-        let ok = proto::ServerHello {
-            cluster_hash: id.hash(),
-            node_id: id.node_label(),
-            protocol: CURRENT_PROTOCOL,
-        };
-        accept_hello_ok(&ok, &id).unwrap();
-        let mut bad_hash = ok.clone();
-        bad_hash.cluster_hash = "other".into();
-        assert!(accept_hello_ok(&bad_hash, &id).is_err());
-        let mut bad_protocol = ok;
-        bad_protocol.protocol = PROTOCOL_MAX + 1;
-        assert!(accept_hello_ok(&bad_protocol, &id).is_err());
-    }
-
-    #[tokio::test]
-    async fn unassigned_replicate_is_nacked() {
-        let dir = tempfile::tempdir().unwrap();
+    fn replica_session_status_is_payload_ready() {
         let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let log = MutationLog::open(paths.clone()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = PipelinePaths::legacy_disk(dir.path());
         let guard = LeaseGuard::replica(
             key.clone(),
             LeaseEpoch::new(1),
             Arc::new(SystemClock::new()),
         );
-        let session = ReplicaSession::new(key.clone(), paths, guard, log);
-        let identity = identity();
-        let registry = ReplicaRegistry::new(identity.clone());
-        registry.insert(session).await;
-        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-            .await
-            .unwrap();
-        let err = replicate_to(
-            server.bind_addr(),
-            &MutationEnvelope {
-                protocol_version: 1,
-                pipeline: key,
-                epoch: LeaseEpoch::new(1),
-                index: CommitIndex::new(1),
-                previous_hash: GENESIS_HASH,
-                payload_sha256: [0u8; 32],
-                body: DurableMutation::ReclaimSegment {
-                    segment_id: "s".into(),
-                },
-            },
-            Path::new("/nonexistent"),
-            &identity,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, DurableError::NotCaughtUp));
-        server.drain().await;
-    }
-
-    #[tokio::test]
-    async fn replicate_after_newer_assign_is_stale() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let log = MutationLog::open(paths.clone()).unwrap();
-        let guard = LeaseGuard::replica(
-            key.clone(),
-            LeaseEpoch::new(1),
-            Arc::new(SystemClock::new()),
-        );
-        let session = ReplicaSession::new(key.clone(), paths, guard, log);
-        session.note_assigned("n".into(), LeaseEpoch::new(2)).await;
-        let identity = identity();
-        let registry = ReplicaRegistry::new(identity.clone());
-        registry.insert(session).await;
-        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-            .await
-            .unwrap();
-        let err = replicate_to(
-            server.bind_addr(),
-            &MutationEnvelope {
-                protocol_version: 1,
-                pipeline: key,
-                epoch: LeaseEpoch::new(1),
-                index: CommitIndex::new(1),
-                previous_hash: GENESIS_HASH,
-                payload_sha256: [0u8; 32],
-                body: DurableMutation::ReclaimSegment {
-                    segment_id: "s".into(),
-                },
-            },
-            Path::new("/nonexistent"),
-            &identity,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, DurableError::StaleEpoch));
-        server.drain().await;
-    }
-
-    #[tokio::test]
-    async fn replica_server_applies_replicate() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let log = MutationLog::open(paths.clone()).unwrap();
-        let guard = LeaseGuard::replica(
-            key.clone(),
-            LeaseEpoch::new(1),
-            Arc::new(SystemClock::new()),
-        );
-        let session = ReplicaSession::new(key.clone(), paths, guard, log);
-        session.note_assigned("n".into(), LeaseEpoch::new(1)).await;
-        let identity = identity();
-        let registry = ReplicaRegistry::new(identity.clone());
-        registry.insert(session).await;
-        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-            .await
-            .unwrap();
-        let envelope = MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key,
-            epoch: LeaseEpoch::new(1),
-            index: CommitIndex::new(1),
-            previous_hash: GENESIS_HASH,
-            payload_sha256: [0u8; 32],
-            body: DurableMutation::ReclaimSegment {
-                segment_id: "s".into(),
-            },
-        };
-        let ack = replicate_to(
-            server.bind_addr(),
-            &envelope,
-            Path::new("/nonexistent"),
-            &identity,
-        )
-        .await
-        .unwrap();
-        assert!(!ack.already_applied);
-        assert_eq!(ack.commit_index, 1);
-        server.drain().await;
-    }
-
-    #[tokio::test]
-    async fn replicate_payload_hash_is_the_streamed_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let log = MutationLog::open(paths.clone()).unwrap();
-        let guard = LeaseGuard::replica(
-            key.clone(),
-            LeaseEpoch::new(1),
-            Arc::new(SystemClock::new()),
-        );
-        let session = ReplicaSession::new(key.clone(), paths, guard, log);
-        session.note_assigned("n".into(), LeaseEpoch::new(1)).await;
-        let identity = identity();
-        let registry = ReplicaRegistry::new(identity.clone());
-        registry.insert(session).await;
-        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-            .await
-            .unwrap();
-        let payload = dir.path().join("segment.seg");
-        std::fs::write(&payload, b"footer-included-bytes").unwrap();
-        let envelope = MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key,
-            epoch: LeaseEpoch::new(1),
-            index: CommitIndex::new(1),
-            previous_hash: GENESIS_HASH,
-            payload_sha256: [9u8; 32],
-            body: DurableMutation::ReclaimSegment {
-                segment_id: "s".into(),
-            },
-        };
-        let ack = replicate_to(server.bind_addr(), &envelope, &payload, &identity)
-            .await
-            .unwrap();
-        assert_eq!(ack.commit_index, 1);
-        server.drain().await;
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn fetch_entries_uses_ingest_store_when_session_log_is_behind() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "fetch-ingest-store").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let identity = identity();
-        let session_log = MutationLog::open(paths.clone()).unwrap();
-        let guard = LeaseGuard::replica(
-            key.clone(),
-            LeaseEpoch::new(1),
-            Arc::new(SystemClock::new()),
-        );
-        let session = ReplicaSession::new(key.clone(), paths.clone(), guard, session_log);
-        let registry = ReplicaRegistry::new(identity.clone());
-        registry.insert(session).await;
-        let mut store_log = MutationLog::open(paths.clone()).unwrap();
-        let envelope = MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key.clone(),
-            epoch: LeaseEpoch::new(1),
-            index: CommitIndex::new(1),
-            previous_hash: GENESIS_HASH,
-            payload_sha256: [0u8; 32],
-            body: DurableMutation::ReclaimSegment {
-                segment_id: "s".into(),
-            },
-        };
-        store_log.append_prepared(&envelope).unwrap();
-        let hash = envelope.entry_hash().unwrap();
-        store_log.append_committed(envelope.index, hash).unwrap();
-        store_log.mark_applied(envelope.index, hash).unwrap();
-        let store = crate::buffer::durable::store::PipelineDurableStore::new(
-            key.clone(),
-            paths,
-            LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new())),
-            store_log,
-            crate::buffer::durable::replicate::ReplicationMode::LocalOnly,
-            crate::buffer::durable::store::OffsetMode::Dynamo(
-                crate::buffer::durable::store::MemoryOffsetPublisher::new(),
-            ),
-        );
-        crate::buffer::durable::install_durable_store(store);
-        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-            .await
-            .unwrap();
-        let entries = fetch_entries_from(server.bind_addr(), &key, 1, 1, &identity).await;
-        crate::buffer::durable::remove_durable_store(&key);
-        let entries = entries.unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].envelope.index.get(), 1);
-        server.drain().await;
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn fetch_entries_uses_disk_when_session_log_is_behind() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "fetch-disk-behind").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let identity = identity();
-        let session_log = MutationLog::open(paths.clone()).unwrap();
-        let guard = LeaseGuard::replica(
-            key.clone(),
-            LeaseEpoch::new(1),
-            Arc::new(SystemClock::new()),
-        );
-        let session = ReplicaSession::new(key.clone(), paths.clone(), guard, session_log);
-        let registry = ReplicaRegistry::new(identity.clone());
-        registry.insert(session).await;
-        let mut disk = MutationLog::open(paths).unwrap();
-        let envelope = MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key.clone(),
-            epoch: LeaseEpoch::new(1),
-            index: CommitIndex::new(1),
-            previous_hash: GENESIS_HASH,
-            payload_sha256: [0u8; 32],
-            body: DurableMutation::ReclaimSegment {
-                segment_id: "s".into(),
-            },
-        };
-        disk.append_prepared(&envelope).unwrap();
-        let hash = envelope.entry_hash().unwrap();
-        disk.append_committed(envelope.index, hash).unwrap();
-        disk.mark_applied(envelope.index, hash).unwrap();
-        drop(disk);
-        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-            .await
-            .unwrap();
-        let entries = fetch_entries_from(server.bind_addr(), &key, 1, 1, &identity)
-            .await
-            .unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].envelope.index.get(), 1);
-        server.drain().await;
-    }
-
-    #[tokio::test]
-    async fn mismatched_cluster_identity_is_rejected() {
-        let registry = ReplicaRegistry::new(ClusterIdentity::new(
-            skippr_lease::ClusterId::new("test-cluster").unwrap(),
-            NodeId::generate(),
-        ));
-        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-            .await
-            .unwrap();
-        let err = replicate_to(
-            server.bind_addr(),
-            &MutationEnvelope {
-                protocol_version: 1,
-                pipeline: PipelineKey::new("t", "w", "p").unwrap(),
-                epoch: LeaseEpoch::new(1),
-                index: CommitIndex::new(1),
-                previous_hash: GENESIS_HASH,
-                payload_sha256: [0u8; 32],
-                body: DurableMutation::ReclaimSegment {
-                    segment_id: "s".into(),
-                },
-            },
-            Path::new("/nonexistent"),
-            &ClusterIdentity::new(
-                skippr_lease::ClusterId::new("other-cluster").unwrap(),
-                NodeId::generate(),
-            ),
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            DurableError::QuorumLost(_) | DurableError::ProtocolMismatch(_)
-        ));
-        server.drain().await;
-    }
-
-    #[tokio::test]
-    async fn diverged_purge_removes_only_that_pipeline_dirs() {
-        let dir = tempfile::tempdir().unwrap();
-        let keep = PipelineKey::new("t", "w", "keep").unwrap();
-        let drop_key = PipelineKey::new("t", "w", "drop").unwrap();
-        let keep_paths = PipelinePaths::new(dir.path(), &keep).unwrap();
-        let drop_paths = PipelinePaths::new(dir.path(), &drop_key).unwrap();
-        std::fs::create_dir_all(&keep_paths.segs).unwrap();
-        std::fs::create_dir_all(&drop_paths.segs).unwrap();
-        std::fs::write(keep_paths.segs.join("keep.seg"), b"keep").unwrap();
-        std::fs::write(drop_paths.segs.join("drop.seg"), b"drop").unwrap();
-        let clock = Arc::new(SystemClock::new());
-        let keep_session = ReplicaSession::new(
-            keep.clone(),
-            keep_paths.clone(),
-            LeaseGuard::replica(keep, LeaseEpoch::new(1), clock.clone()),
-            MutationLog::open(keep_paths.clone()).unwrap(),
-        );
-        let drop_session = ReplicaSession::new(
-            drop_key.clone(),
-            drop_paths.clone(),
-            LeaseGuard::replica(drop_key, LeaseEpoch::new(1), clock),
-            MutationLog::open(drop_paths.clone()).unwrap(),
-        );
-        drop_session.diverged.store(true, Ordering::SeqCst);
-        purge_replica_pipeline(&drop_session).await;
-        assert!(!drop_paths.segs.join("drop.seg").exists());
-        assert!(keep_paths.segs.join("keep.seg").exists());
-        assert!(!keep_session.diverged.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn fetch_entries_nacks_missing_commit_segment_payload() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "fetch-missing-payload").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let mut log = MutationLog::open(paths.clone()).unwrap();
-        let envelope = MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key.clone(),
-            epoch: LeaseEpoch::new(1),
-            index: CommitIndex::new(1),
-            previous_hash: GENESIS_HASH,
-            payload_sha256: [7u8; 32],
-            body: DurableMutation::CommitSegment {
-                descriptor: crate::buffer::durable::mutation::SegmentDescriptor {
-                    segment_id: "missing".into(),
-                    payload_len: 4,
-                    payload_sha256: [7u8; 32],
-                    num_partitions: 1,
-                    total_bytes: 4,
-                    created_at_secs: 0,
-                    schema_fingerprints: Vec::new(),
-                },
-                offsets: Vec::new(),
-                checkpoints: Vec::new(),
-            },
-        };
-        log.append_prepared(&envelope).unwrap();
-        log.append_committed(envelope.index, envelope.entry_hash().unwrap())
-            .unwrap();
-        let session = ReplicaSession::new(
-            key.clone(),
-            paths,
-            LeaseGuard::replica(
-                key.clone(),
-                LeaseEpoch::new(1),
-                Arc::new(SystemClock::new()),
-            ),
-            log,
-        );
-        let identity = identity();
-        let registry = ReplicaRegistry::new(identity.clone());
-        registry.insert(session).await;
-        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-            .await
-            .unwrap();
-        let err = fetch_entries_from(server.bind_addr(), &key, 1, 1, &identity)
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("snapshot unavailable"));
-        assert_eq!(FETCH_ENTRIES_MAX_COUNT, 8);
-        server.drain().await;
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn fetch_snapshot_installs_donor_payload_at_head_and_drops_transfer_pack() {
-        let donor_dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "fetch-snapshot").unwrap();
-        let paths = PipelinePaths::new(donor_dir.path(), &key).unwrap();
-        std::fs::create_dir_all(&paths.segs).unwrap();
-        let id = SegmentId::new("live").unwrap();
-        std::fs::write(paths.segment(&id), b"live-segment-bytes").unwrap();
-        let mut log = MutationLog::open(paths.clone()).unwrap();
-        let envelope = MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key.clone(),
-            epoch: LeaseEpoch::new(1),
-            index: CommitIndex::new(1),
-            previous_hash: GENESIS_HASH,
-            payload_sha256: [7u8; 32],
-            body: DurableMutation::CommitSegment {
-                descriptor: crate::buffer::durable::mutation::SegmentDescriptor {
-                    segment_id: "live".into(),
-                    payload_len: 18,
-                    payload_sha256: [7u8; 32],
-                    num_partitions: 1,
-                    total_bytes: 18,
-                    created_at_secs: 0,
-                    schema_fingerprints: Vec::new(),
-                },
-                offsets: Vec::new(),
-                checkpoints: Vec::new(),
-            },
-        };
-        log.append_prepared(&envelope).unwrap();
-        log.append_committed(envelope.index, envelope.entry_hash().unwrap())
-            .unwrap();
-        let head_hash = log.head_hash();
-        let session = ReplicaSession::new(
-            key.clone(),
-            paths.clone(),
-            LeaseGuard::replica(
-                key.clone(),
-                LeaseEpoch::new(1),
-                Arc::new(SystemClock::new()),
-            ),
-            log,
-        );
-        let identity = identity();
-        let registry = ReplicaRegistry::new(identity.clone());
-        registry.insert(session).await;
-        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-            .await
-            .unwrap();
-        let replica_dir = tempfile::tempdir().unwrap();
-        let replica = PipelinePaths::new(replica_dir.path(), &key).unwrap();
-        std::fs::create_dir_all(&replica.durable).unwrap();
-
-        fetch_snapshot_from(server.bind_addr(), &key, &identity, &replica)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            std::fs::read(replica.segment(&id)).unwrap(),
-            b"live-segment-bytes"
-        );
-        let installed = MutationLog::open(replica.clone()).unwrap();
-        assert_eq!(installed.base_index(), CommitIndex::new(1));
-        assert_eq!(installed.head_hash(), head_hash);
-        let leftover: Vec<_> = std::fs::read_dir(&paths.snapshots)
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name())
-            .collect();
-        assert!(
-            leftover.is_empty(),
-            "transfer pack left behind: {leftover:?}"
-        );
-        server.drain().await;
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn fetch_entries_streams_whole_segment_file_not_data_payload_len() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "fetch-whole-segment").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        std::fs::create_dir_all(&paths.segs).unwrap();
-        let id = SegmentId::new("live").unwrap();
-        let bytes = b"SEGF-header-and-parts-larger-than-data-len";
-        std::fs::write(paths.segment(&id), bytes).unwrap();
-        let mut log = MutationLog::open(paths.clone()).unwrap();
-        let envelope = MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key.clone(),
-            epoch: LeaseEpoch::new(1),
-            index: CommitIndex::new(1),
-            previous_hash: GENESIS_HASH,
-            payload_sha256: [7u8; 32],
-            body: DurableMutation::CommitSegment {
-                descriptor: crate::buffer::durable::mutation::SegmentDescriptor {
-                    segment_id: "live".into(),
-                    payload_len: 4,
-                    payload_sha256: [7u8; 32],
-                    num_partitions: 1,
-                    total_bytes: 4,
-                    created_at_secs: 0,
-                    schema_fingerprints: Vec::new(),
-                },
-                offsets: Vec::new(),
-                checkpoints: Vec::new(),
-            },
-        };
-        log.append_prepared(&envelope).unwrap();
-        log.append_committed(envelope.index, envelope.entry_hash().unwrap())
-            .unwrap();
-        let session = ReplicaSession::new(
-            key.clone(),
-            paths,
-            LeaseGuard::replica(
-                key.clone(),
-                LeaseEpoch::new(1),
-                Arc::new(SystemClock::new()),
-            ),
-            log,
-        );
-        let identity = identity();
-        let registry = ReplicaRegistry::new(identity.clone());
-        registry.insert(session).await;
-        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-            .await
-            .unwrap();
-        let entries = fetch_entries_from(server.bind_addr(), &key, 1, 1, &identity)
-            .await
-            .unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].payload, bytes);
-        server.drain().await;
-    }
-
-    #[tokio::test]
-    async fn new_replica_session_is_not_ready() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let log = MutationLog::open(paths.clone()).unwrap();
-        let session = ReplicaSession::new(
-            key,
-            paths,
-            LeaseGuard::replica(
-                PipelineKey::new("t", "w", "p").unwrap(),
-                LeaseEpoch::new(1),
-                Arc::new(SystemClock::new()),
-            ),
-            log,
-        );
-        let status = session.status().await;
-        assert!(!status.ready);
-    }
-
-    #[tokio::test]
-    async fn status_reads_disk_log_when_session_is_behind() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let session_log = MutationLog::open(paths.clone()).unwrap();
-        let session = ReplicaSession::new(
-            key.clone(),
-            paths.clone(),
-            LeaseGuard::replica(
-                key.clone(),
-                LeaseEpoch::new(1),
-                Arc::new(SystemClock::new()),
-            ),
-            session_log,
-        );
-        let mut disk = MutationLog::open(paths).unwrap();
-        let envelope = MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key,
-            epoch: LeaseEpoch::new(1),
-            index: CommitIndex::new(1),
-            previous_hash: GENESIS_HASH,
-            payload_sha256: [0u8; 32],
-            body: DurableMutation::ReclaimSegment {
-                segment_id: "s".into(),
-            },
-        };
-        disk.append_prepared(&envelope).unwrap();
-        let hash = envelope.entry_hash().unwrap();
-        disk.append_committed(envelope.index, hash).unwrap();
-        disk.mark_applied(envelope.index, hash).unwrap();
-        drop(disk);
-        let status = session.status().await;
-        assert_eq!(status.committed_index, 1);
-        assert_eq!(session.log.lock().await.committed_index().get(), 0);
-    }
-
-    #[test]
-    fn diverged_assign_catch_up_purges_and_retries() {
-        let src = include_str!("peer.rs");
-        assert!(src.contains("assigned replica catch-up diverged; purging and retrying"));
-        assert!(src.contains("catch_up_assigned_session"));
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn advertised_ready_when_this_node_is_active_primary() {
-        use crate::buffer::durable::log::MutationLog;
-        use crate::buffer::durable::replicate::ReplicationMode;
-        use crate::buffer::durable::store::{
-            install_durable_store, remove_durable_store, MemoryOffsetPublisher, OffsetMode,
-            PipelineDurableStore,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let session = ReplicaSession::new(
-            key.clone(),
-            paths.clone(),
-            LeaseGuard::replica(
-                key.clone(),
-                LeaseEpoch::new(1),
-                Arc::new(SystemClock::new()),
-            ),
-            MutationLog::open(paths.clone()).unwrap(),
-        );
-        let identity = identity();
-        let registry = ReplicaRegistry::new(identity);
-        crate::buffer::durable::store::clear_active_durable_store();
-        registry.insert(session).await;
-        assert!(!registry.advertised_ready().await);
-        let store_key = PipelineKey::new("t", "w", "ingest").unwrap();
-        let store_paths = PipelinePaths::new(dir.path(), &store_key).unwrap();
-        let store = PipelineDurableStore::new(
-            store_key.clone(),
-            store_paths.clone(),
-            LeaseGuard::single_node(store_key.clone(), Arc::new(SystemClock::new())),
-            MutationLog::open(store_paths).unwrap(),
-            ReplicationMode::LocalOnly,
-            OffsetMode::Dynamo(MemoryOffsetPublisher::new()),
-        );
-        install_durable_store(store);
-        assert!(registry.advertised_ready().await);
-        remove_durable_store(&store_key);
-        assert!(!registry.advertised_ready().await);
-    }
-
-    #[tokio::test]
-    async fn assign_unknown_pipeline_nacks() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let log = MutationLog::open(paths.clone()).unwrap();
-        let session = ReplicaSession::new(
-            key,
-            paths,
-            LeaseGuard::replica(
-                PipelineKey::new("t", "w", "p").unwrap(),
-                LeaseEpoch::new(1),
-                Arc::new(SystemClock::new()),
-            ),
-            log,
-        );
-        let identity = identity();
-        let registry = ReplicaRegistry::new(identity.clone());
-        registry.insert(session).await;
-        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-            .await
-            .unwrap();
-        let other = PipelineKey::new("t", "w", "other").unwrap();
-        let err = assign_replica(
-            server.bind_addr(),
-            &other,
-            LeaseEpoch::new(1),
-            server.bind_addr(),
-            &identity,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("unknown pipeline"));
-        server.drain().await;
-    }
-
-    #[tokio::test]
-    async fn assign_invalid_endpoint_nacks() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let log = MutationLog::open(paths.clone()).unwrap();
-        let session = ReplicaSession::new(
-            key.clone(),
-            paths,
-            LeaseGuard::replica(
-                key.clone(),
-                LeaseEpoch::new(1),
-                Arc::new(SystemClock::new()),
-            ),
-            log,
-        );
-        let identity = identity();
-        let registry = ReplicaRegistry::new(identity.clone());
-        registry.insert(session.clone()).await;
-        let server = ReplicaServer::start_with_registry("127.0.0.1:0".parse().unwrap(), registry)
-            .await
-            .unwrap();
-        let mut stream = connect_replica(server.bind_addr()).await.unwrap();
-        handshake(&mut stream, &identity).await.unwrap();
-        let req = proto::ControlFrame {
-            msg: Some(proto::control_frame::Msg::Assign(proto::AssignReplica {
-                pipeline: Some(pipeline_to_proto(&key)),
-                epoch: 1,
-                primary_node: identity.node_label(),
-                primary_endpoint: "not-an-addr".into(),
-            })),
-        };
-        write_frame(&mut stream, &encode_control(&req).unwrap())
-            .await
-            .unwrap();
-        let reply = read_frame(&mut stream).await.unwrap();
-        match decode_control(&reply).unwrap().msg {
-            Some(proto::control_frame::Msg::Nack(nack)) => {
-                assert_eq!(
-                    nack.code,
-                    proto::ReplicaNackCode::InvalidPrimaryEndpoint as i32
-                );
-            }
-            other => panic!("expected Nack, got {other:?}"),
-        }
+        let session = ReplicaSession::new(key, paths, guard);
         assert!(!session.ready.load(Ordering::SeqCst));
-        server.drain().await;
     }
 }

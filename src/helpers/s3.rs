@@ -251,11 +251,7 @@ pub async fn delete_prefix(bucket: &str, prefix: &str) -> Result<usize, String> 
             .iter()
             .filter_map(|o| o.key().map(|s| s.to_string()))
             .collect();
-        if keys.is_empty() {
-            if resp.next_continuation_token().is_none() {
-                break;
-            }
-        } else {
+        if !keys.is_empty() {
             let mut batch: Vec<ObjectIdentifier> = Vec::new();
             for k in keys.iter() {
                 if let Ok(obj) = ObjectIdentifier::builder().key(k).build() {
@@ -299,10 +295,13 @@ pub async fn delete_prefix(bucket: &str, prefix: &str) -> Result<usize, String> 
         if total >= max_objects {
             break;
         }
-        if resp.next_continuation_token().is_none() {
-            break;
+        match continuation_after_page(
+            resp.is_truncated().unwrap_or(false),
+            resp.next_continuation_token().map(|s| s.to_string()),
+        )? {
+            None => break,
+            Some(next) => token = Some(next),
         }
-        token = resp.next_continuation_token().map(|s| s.to_string());
     }
     Ok(total)
 }
@@ -341,11 +340,7 @@ pub async fn delete_prefix_in_bucket(bucket: &str, prefix: &str) -> Result<usize
             .iter()
             .filter_map(|o| o.key().map(|s| s.to_string()))
             .collect();
-        if keys.is_empty() {
-            if resp.next_continuation_token().is_none() {
-                break;
-            }
-        } else {
+        if !keys.is_empty() {
             let mut batch: Vec<ObjectIdentifier> = Vec::new();
             for k in keys.iter() {
                 if let Ok(obj) = ObjectIdentifier::builder().key(k).build() {
@@ -388,12 +383,78 @@ pub async fn delete_prefix_in_bucket(bucket: &str, prefix: &str) -> Result<usize
         if total >= max_objects {
             break;
         }
-        if resp.next_continuation_token().is_none() {
-            break;
+        match continuation_after_page(
+            resp.is_truncated().unwrap_or(false),
+            resp.next_continuation_token().map(|s| s.to_string()),
+        )? {
+            None => break,
+            Some(next) => token = Some(next),
         }
-        token = resp.next_continuation_token().map(|s| s.to_string());
     }
     Ok(total)
+}
+
+pub(crate) fn continuation_after_page(
+    is_truncated: bool,
+    token: Option<String>,
+) -> Result<Option<String>, String> {
+    if !is_truncated {
+        return Ok(None);
+    }
+    match token {
+        Some(t) if !t.is_empty() => Ok(Some(t)),
+        _ => Err("truncated S3 list without continuation token".into()),
+    }
+}
+
+/// List object keys under bucket+prefix. Refuses empty or top-level prefixes.
+pub async fn list_object_keys(
+    bucket: &str,
+    prefix: &str,
+    max: usize,
+) -> Result<Vec<String>, String> {
+    if prefix.is_empty() || prefix == "/" || prefix == "." || prefix == ".." {
+        return Err("Refusing to list unsafe or empty prefix".to_string());
+    }
+    if !prefix.contains('/') {
+        return Err("Refusing to list top-level prefix without '/'".to_string());
+    }
+    let client = get_s3_client().await;
+    let mut out = Vec::new();
+    let mut token: Option<String> = None;
+    loop {
+        if out.len() >= max {
+            break;
+        }
+        let mut req = client
+            .list_objects_v2()
+            .bucket(bucket)
+            .prefix(prefix)
+            .max_keys(1000);
+        if let Some(t) = token.as_ref() {
+            req = req.continuation_token(t);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("list_objects_v2 error: {:?}", e))?;
+        for object in resp.contents() {
+            if let Some(key) = object.key() {
+                out.push(key.to_string());
+                if out.len() >= max {
+                    break;
+                }
+            }
+        }
+        match continuation_after_page(
+            resp.is_truncated().unwrap_or(false),
+            resp.next_continuation_token().map(|s| s.to_string()),
+        )? {
+            None => break,
+            Some(next) => token = Some(next),
+        }
+    }
+    Ok(out)
 }
 
 /// List up to `max` Parquet object keys under the given bucket+prefix, ordered by LastModified ascending
@@ -461,6 +522,48 @@ pub async fn head_etag(
                 }
             }
             Err(e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncated_list_without_token_fails_closed() {
+        match continuation_after_page(true, None) {
+            Err(message) => assert!(message.contains("continuation token")),
+            Ok(_) => panic!("truncated list without a token must fail closed"),
+        }
+        match continuation_after_page(true, Some(String::new())) {
+            Err(_) => {}
+            Ok(_) => panic!("empty continuation token must fail closed"),
+        }
+        assert_eq!(continuation_after_page(false, None).unwrap(), None);
+        assert_eq!(
+            continuation_after_page(true, Some("page-2".into())).unwrap(),
+            Some("page-2".into())
+        );
+    }
+
+    #[test]
+    fn wal_prefix_lists_fail_closed_on_truncated_pages() {
+        let src = include_str!("s3.rs");
+        for fn_name in [
+            "pub async fn list_object_keys(",
+            "pub async fn delete_prefix(",
+            "pub async fn delete_prefix_in_bucket(",
+        ] {
+            let after = src
+                .split(fn_name)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{fn_name} missing"));
+            let body = after.split("pub async fn").next().unwrap();
+            assert!(
+                body.contains("continuation_after_page"),
+                "{fn_name} must fail closed on a truncated S3 page without a continuation token"
+            );
         }
     }
 }

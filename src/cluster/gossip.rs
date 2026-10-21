@@ -45,7 +45,9 @@ pub fn clear_gossip() {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalHeadHint {
     pub pipeline: String,
-    pub committed_index: u64,
+    pub catalog_seq_seen: u64,
+    #[serde(default)]
+    pub payload_ready: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -596,7 +598,8 @@ mod tests {
         );
         ad.wal_heads = vec![WalHeadHint {
             pipeline: "events".into(),
-            committed_index: 7,
+            catalog_seq_seen: 7,
+            payload_ready: true,
         }];
         ad.scheduler = Some("127.0.0.1:4".parse().unwrap());
         let json = serde_json::to_string(&ad).unwrap();

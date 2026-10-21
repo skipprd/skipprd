@@ -62,6 +62,7 @@ flowchart LR
 ```text
 crates/skippr-lease/
 crates/skippr-lease-store-dynamodb/
+crates/skippr-wal-catalog/
 crates/skippr-iceberg-catalog/
 crates/skippr-iceberg-catalog-dynamodb/
 crates/skippr-query-ballista/
@@ -75,12 +76,12 @@ src/cluster/
   scheduler.rs
   lifecycle.rs
 src/buffer/durable/
-  mutation.rs
-  log.rs
-  snapshot.rs
-  apply.rs
   store.rs
   replicate.rs
+src/buffer/
+  wal_handle.rs
+  wal_startup.rs
+  wal_catalog_import.rs
 src/query_flight/          # Arrow Flight SQL 58.3 on flight_addr; in-process Ballista
   service.rs
   live_wal.rs
@@ -144,7 +145,6 @@ Update operator/config/concept/README docs with:
 
 ```rust
 pub struct LeaseEpoch(u64);
-pub struct CommitIndex(u64);
 pub struct NodeId(uuid::Uuid);
 pub struct HostId(String);
 pub struct PipelineKey {
@@ -154,12 +154,14 @@ pub struct PipelineKey {
 }
 ```
 
+Catalog sequence is `skippr_wal_catalog::CatalogSeq`, not a lease `CommitIndex`.
+
 **Deliverables:**
 
 - UUID process generation.
 - Host ID derived from platform metadata/machine ID/hostname.
 - `Clock` and `AsyncSleeper` production/test implementations.
-- Typed lease/fence/quorum/divergence/store/protocol errors.
+- Typed lease/fence/quorum/store/protocol errors.
 
 **Tests:** deterministic monotonic advance and host-ID fallback.
 
@@ -261,35 +263,25 @@ host_id, addresses, heartbeat, protocol range, capabilities
 
 # Phase 2 — Durable mutation state
 
-## WU-2.1 Protobuf domain and hash chain
+## WU-2.1 Cluster protocol v3 (payload-only)
 
-**Create:** `proto/cluster.proto`, `src/buffer/durable/mutation.rs`.
+**Create:** `proto/cluster.proto`. Catalog rows replace the mutation-log hash chain.
 
-Envelope fields:
-
-- protocol version;
-- pipeline key;
-- epoch;
-- commit index;
-- previous hash;
-- typed body.
-
-Hash canonical protobuf plus previous hash and payload hash. Sort every repeated identity collection.
-
-Mutations:
+Control frames:
 
 ```text
-CommitSegment
-PutCompaction
-CompleteSlices
-ReclaimSegment
+Status / StatusOk
+AssignReplica
+ReplicatePayload
+DropPayload
+PruneTo
+FetchPayload
+DropReplica
 ```
 
-`CommitSegment` contains segment descriptor, sorted offsets, and checkpoint envelopes. Segment bytes are an out-of-band payload belonging to the same mutation.
+Payload bytes are out-of-band of the catalog `SegmentRow`. Mixed v2 peers are rejected. `CURRENT_PROTOCOL` is 3.
 
-`PutCompaction` contains the whole portable transaction for every state transition.
-
-**Tests:** codec/current-previous version, canonical ordering, chain mismatch, unknown field/version, all variants.
+**Tests:** codec/current-previous version, protocol mismatch, payload sha, unknown field/version.
 
 ## WU-2.2 Portable refs and `PipelinePaths`
 
@@ -309,67 +301,61 @@ ReclaimSegment
 
 **Tests:** identical compaction ID/fingerprint across different local roots; path-isolation property.
 
-## WU-2.3 Mutation log state machine
+## WU-2.3 WAL catalog write path
 
-**Create:** `log.rs`.
+**Create:** `wal_handle.rs` + `skippr-wal-catalog`.
 
-Records:
+Rows:
 
 ```text
-Prepared(envelope)
-Committed(index, hash)
-STATE(base, committed, applied, head_hash)
-OFFSET_PUBLISHED(index)
+SegmentRow
+SeqRow
+ControlRow
+CompactionRow
+FormatRow
 ```
 
 **Primary order:**
 
 1. epoch check;
-2. payload temp write/hash/fsync/rename/dir fsync;
-3. Prepared append/fsync;
-4. remote replication;
-5. local Committed append/fsync;
-6. apply;
-7. DDB offsets/checkpoints;
-8. ingest Ack.
+2. payload write/hash/fsync or S3 PUT;
+3. clustered replica payload ack;
+4. catalog txn (`SegmentRow` + `SeqRow`);
+5. `publish_wal_commit`;
+6. ingest Ack.
 
 **Recovery:**
 
-- replay committed-not-applied;
-- reconcile prepared unknown outcome with peer Status;
-- matching remote commit finalizes locally;
-- no peer proof: preserve Prepared, return `QuorumLost`, do not `abort_pending_prepared`, do not activate ingest;
-- never commit orphan payload by existence;
-- fail closed on chain/hash divergence;
-- missing suffix-log envelope at `base < index < committed` is `Diverged`.
+- import legacy owned pairs once;
+- hydrate RAM from catalog rows;
+- republish unpublished rows;
+- GC orphan payloads with no row;
+- never commit orphan payload by existence.
 
-**Tests:** subprocess crash at every boundary, truncated records, STATE mismatch, ENOSPC, duplicate request, unknown outcome.
+**Tests:** subprocess crash at every boundary, catalog failpoints, duplicate request, unknown outcome.
 
-## WU-2.4 Durable applicator
+## WU-2.4 Catalog applicator
 
-**Create:** `apply.rs` as one production struct.
+**Create:** `crates/skippr-wal-catalog/src/apply.rs` as the only txn builder.
 
 **Deliverables:**
 
-- Commit marker via existing fsync helper.
-- Whole-manifest write/fsync/rename/dir fsync.
-- Completion through existing ledger.
-- Reclaim through existing cleanup/cache/index helpers.
-- Idempotent `(index, hash)` apply.
-- Apply error marks node ineligible but remains replayable.
+- Lease-fenced `CatalogTxn` with `NotExists` / `SameSha` / `Version` / `SeqAdvance`.
+- Slice-done bit OR on `SegmentRow`.
+- Compaction put/delete.
+- No mutation log, snapshot, or hash apply.
 
-**Tests:** every mutation, duplicate apply, partial failure, corrupt segment/ledger/manifest.
+**Tests:** every catalog op, duplicate commit, condition fail, stale fence.
 
-## WU-2.5 `PipelineDurableStore`
+## WU-2.5 `PipelineWalHandle`
 
-**Create:** `store.rs`.
+**Create:** `wal_handle.rs`.
 
 **Deliverables:**
 
-- Disk: `PipelineDurableStore` with `PipelinePaths::legacy_disk`, sled offsets, no network. `ensure_disk_durable_store` installs it before ingest.
-- Clustered: leased `PipelineDurableStore`, synchronous replica, DDB offsets, tenant `PipelinePaths`.
-- S3: existing store.
-- `WalStoreFactory` / `WalReaderFactory` Disk and Clustered arms share `ClusteredWalStore` / `ClusteredWalReader`. `DiskWalStore` is deleted.
+- Disk: `PipelineWalHandle` with `PipelinePaths::legacy_disk`, sled catalog and offsets, no network.
+- Clustered: leased `PipelineWalHandle`, synchronous payload replica, remote catalog, tenant `PipelinePaths`.
+- S3: payload objects plus the same catalog handle.
 
 **Tests:** existing disk behavior parity and factory exhaustiveness.
 
@@ -377,12 +363,12 @@ OFFSET_PUBLISHED(index)
 
 Replace direct compaction state writes:
 
-1. quorum Pending;
-2. quorum Sent;
+1. catalog Pending;
+2. catalog Sent;
 3. sink call;
-4. quorum Acked;
-5. quorum CompleteSlices;
-6. quorum Tombstoned/Reclaim.
+4. catalog Acked;
+5. slice-done bits;
+6. delete CompactionRow, then payload, then DropPayload.
 
 Recovery of Sent calls sink preflight. Clustered connector validation guarantees replay is safe.
 
@@ -390,36 +376,19 @@ Recovery of Sent calls sink preflight. Clustered connector validation guarantees
 
 ## WU-2.7 State snapshots and retention
 
-**Create:** `snapshot.rs`.
-
-Snapshot contains:
-
-- base index/hash;
-- live segment descriptors/payload hashes;
-- live compaction transactions;
-- completion bitmaps plus compaction/ref mapping;
-- latest offset/checkpoint payloads with WAL tuple;
-- required schema fingerprints.
-
-Build under commit-queue cut, fsync staging, atomic install. Prune logs/payloads only after snapshot durability.
-
-**Tests:** install crash, cold bootstrap, retained-history boundary.
+Deleted. The store catalog is the live set; there is no snapshot-plus-suffix WAL. Payload GC is orphan objects with no `SegmentRow`. Catch-up fetches missing payloads by catalog id.
 
 ## WU-2.8 Existing disk migration
 
-Only while lease `initialized=false`:
+Lease-holder-only import in `wal_catalog_import.rs`:
 
-- require drained/no live manifests;
-- read committed segments/completion/current offset backend;
-- build baseline state snapshot;
-- seed DDB offsets/checkpoints;
-- write cluster marker;
-- bootstrap remote;
-- conditionally set initialized.
+- admit owned `.seg` + `.seg.commit` pairs into `SegmentRow`s;
+- fold completion bitmaps into `SliceBitmap` and compaction JSON into `CompactionRow`s;
+- log leftover as counts (never path lists); fail closed on unreadable bitmap/JSON with the one filename;
+- `FormatRow` Imported → archive leftover (`mutation.log`, snapshots, `done/`, compaction JSON, `.seg.commit`) → Clean;
+- clustered protocol v3; mixed v2 peers rejected.
 
-Existing initialized lease with no hard state fails.
-
-**Tests:** empty/new, old committed WAL, compacted/reclaimed with sled offsets, live manifest refusal, crash before/after initialized.
+**Tests:** owned pair, payload without marker skipped, leftover archived after import, crash in Imported resumes, unreadable compaction JSON is a short error.
 
 # Phase 3 — Replica protocol and quorum
 
@@ -437,9 +406,9 @@ Use protobuf control frames and raw streamed payload chunks:
 - partial frame cleanup;
 - current and previous protocol negotiation.
 
-RPCs: Status, AssignReplica, InstallSnapshot, FetchEntries, Replicate, DropReplica.
+RPCs: Status, AssignReplica, ReplicatePayload, DropPayload, PruneTo, FetchPayload, DropReplica.
 
-Handshake `ClientHello` has cluster hash (`ClusterId`), node id, protocol range. No tenant/workspace (`reserved 5, 6, 7`). `CURRENT_PROTOCOL` is 2. Client verifies `HelloOk.cluster_hash` and protocol range. mTLS is required.
+Handshake `ClientHello` has cluster hash (`ClusterId`), node id, protocol range. No tenant/workspace (`reserved 5, 6, 7`). `CURRENT_PROTOCOL` is 3. Client verifies `HelloOk.cluster_hash` and protocol range. mTLS is required.
 
 Assign: `ready` starts false; unknown pipeline and unparseable `primary_endpoint` Nack. Assign calls `observe_epoch` and records `assigned_primary`. Unassigned or wrong-epoch Replicate Nacks.
 
@@ -463,37 +432,36 @@ Assign: `ready` starts false; unknown pipeline and unparseable `primary_endpoint
 
 **Create:** `replicate.rs`.
 
-- Local fsynced Prepared is vote one.
-- One caught-up remote Ack is vote two.
-- Replica Acks after durable commit/apply.
+- Local fsynced payload is vote one.
+- One caught-up remote payload Ack is vote two.
+- Replica Acks after durable payload fsync and sha verify.
 - Lagging/stale/corrupt/disk-full/timeout does not count.
-- Timeout/unknown live replicate error: keep Prepared, fence ingest.
-- Definite Nack (stale, not caught up, disk full, pinned, diverged): abort Prepared.
-- No commit marker/offset/Ack without quorum.
+- Timeout/unknown live replicate error: no catalog commit, fence ingest.
+- Definite Nack (stale, not caught up, disk full, pinned, diverged): abort payload, no catalog row.
+- Catalog SegmentRow + Fresh publish only after payload quorum.
 
 **Tests:** quorum success/loss, stale epoch, gap, hash mismatch, timeout, offset unchanged.
 
 ## WU-3.4 Unknown outcome
 
-- Reconcile remote Ack lost before local commit.
-- Finalize matching peer hash.
-- Preserve potentially committed Prepared record until proof; without proof, `QuorumLost` and no ingest activate.
-- Reconcile offsets through head before source starts.
+- Payload without a catalog row is an orphan; startup GC deletes it when Format is Clean.
+- Catalog row without publication is republished before ingest activate.
+- Without payload quorum, `QuorumLost` and no ingest activate.
+- Republish offsets from catalog rows in seq order before source starts.
 
 **Tests:** response loss, primary SIGKILL, promoted replica, idempotent offset repair.
 
 # Phase 4 — Catch-up and promotion
 
-## WU-4.1 Snapshot plus incremental catch-up
+## WU-4.1 Catalog payload catch-up
 
-- Status returns epoch, base/committed/applied indexes, head hash, health. Empty hash is genesis; non-32-byte is `ProtocolMismatch`.
-- Local committed ahead of donor is `Diverged`.
-- Install snapshot when requester predates base.
-- Fetch committed entries in order.
-- Re-poll and verify index/hash.
+- Status returns epoch, `catalog_seq_seen`, `payload_ready`.
+- Catch-up queries live catalog rows and fetches missing payloads by `segment_id` from any reachable peer, including the old primary.
+- Payload reads are not fenced. `PromoteError::PayloadMissing` lists ids no peer still holds.
+- `PruneTo { live digest, epoch }` repairs lost `DropPayload`s; replicas ignore a lower epoch and never self-delete.
 - No S3 archive or DDB head hint.
 
-**Tests:** empty fetch, 1..N, snapshot boundary, donor failure/retry, corrupt snapshot.
+**Tests:** empty fetch, 1..N, truncated payload, donor failure/retry, PayloadMissing.
 
 ## WU-4.2 Promotion
 
@@ -501,16 +469,16 @@ Sequence:
 
 1. lease acquisition and OwnerElect;
 2. higher-epoch rumor;
-3. highest hash-consistent catch-up (always hash-check vs donor endpoint; local ahead is `Diverged`);
+3. catalog-seq + `payload_ready` catch-up from every reachable peer including the old primary;
 4. offset/checkpoint reconciliation (OwnerElect; before activate);
 5. schema load/install from object-store `metadata.json` (steal already waited one `LEASE_TIMEOUT`; do not wait again before GET; install plugin schema state; live WAL namespaces must be in the document; initialized pipelines fail closed without it);
 6. new remote replica bootstrap;
 7. ActivePrimary;
 8. source/compactor start.
 
-No implicit majority on hash disagreement. Initialized head loss is fatal.
+Initialized payload loss is fatal (`PayloadMissing`).
 
-**Tests:** missed rumor, old renew, hash conflict, no head, new head zero, missing metadata.json / live namespace, steal observation is the previous-writer TTL (no second wait), no replacement.
+**Tests:** missed rumor, old renew, PayloadMissing, no head, new head zero, missing metadata.json / live namespace, steal observation is the previous-writer TTL (no second wait), no replacement.
 
 ## WU-4.3 Lag/replacement/purge
 
@@ -635,11 +603,11 @@ Iceberg config/catalog errors fail registration. Non-Iceberg/deadletter listing 
 
 **Replace:** [src/sqlrt/wal_table.rs](../../../src/sqlrt/wal_table.rs) and `src/query_flight/live_wal.rs` (selector lives with Flight SQL).
 
-`select_live_ordinals(log, exclude_segment_ids)` is the only selector.
+`select_live_ordinals(handle, exclude_segment_ids)` is the only selector.
 
-- Live ids = `StateSnapshot.segments` ∪ suffix `CommitSegment`.
-- Skip ledger-complete ordinals; skip unreadable ledgers and missing files.
-- `ReclaimSegment` and Iceberg `skippr.wal-segment-ids` exclude the whole segment.
+- Live ids = catalog `SegmentRow`s.
+- Skip slice-done ordinals; skip unreadable or missing payloads.
+- Iceberg `skippr.wal-segment-ids` exclude the whole segment.
 - No pins, no client head cut, no compaction-id maps.
 - Stream batches; no MemTable.
 - Project/cast/null-fill to Iceberg schema.
@@ -660,7 +628,7 @@ Implement read-only Flight SQL metadata, statements, prepared statements, bounde
 live_wal_scan(tenant, workspace, pipeline, namespace, exclude_segment_ids)
 ```
 
-- TVF, not a public custom ticket. Mutation-log / replica `CURRENT_PROTOCOL` is 2 (cluster hello). Flight SQL is not a second protocol family.
+- TVF, not a public custom ticket. Replica `CURRENT_PROTOCOL` is 3 (cluster hello). Flight SQL is not a second protocol family.
 - GetFlightInfo returns a ticket/prepared handle that does **not** freeze ordinals. DoGet calls `select_live_ordinals` now.
 - Foreign tenant/workspace and unknown pipeline fail closed. DDL/update rejected.
 - Membership `flight_addr` becomes the gRPC bind. Same ephemeral wildcard, no new knobs.
@@ -689,7 +657,7 @@ Distributed Flight/Ballista UNION remains WU-7.3 / WU-7.5 ([`hla-flight-sql-ball
 
 - Compile Ballista 53 + Iceberg Rust + Flight SQL into `skipprd`. Delete wrapper bins.
 - Every clustered node starts a Ballista scheduler + executor + query frontend in `run_clustered`. Executors poll the gossip-elected scheduler (min `NodeId`).
-- WAL picker: max advertised `committed_index` (gossip hint, Status fallback); local on tie returns this node's advertised `flight_addr` as `FlightSqlExec`; Iceberg-only if none reachable.
+- WAL picker: max advertised `catalog_seq_seen` with `payload_ready` (gossip hint, Status fallback); local on tie returns this node's advertised `flight_addr` as `FlightSqlExec`; Iceberg-only if none reachable.
 - Iceberg: in-process Catalog first; parquet on any cluster executor; peer Flight SQL scan if load fails; never listing.
 - `FlightSqlExec::execute` DoGets; prost schema-in-payload codec; delete `FLSQ`. `WalScanExec` must not enter a Ballista plan.
 - `clustered query` uses any ready `flight_addr`. `query-scheduler#` is not used.
@@ -706,7 +674,7 @@ Distributed Flight/Ballista UNION remains WU-7.3 / WU-7.5 ([`hla-flight-sql-ball
 - File sources keep mtime wait and retain the lease.
 - Other finite sources: `begin_drain`, `release_after_drain`, return `ReleasedAfterFinite` so the loop can try the next pipeline.
 - Indefinite source retains lease.
-- Ingest store is this process's writer `PipelineDurableStore` (ActivePrimary, OwnerElect, or Idle after fence; not Replica), not scheduler-written `PIPELINE_NAME`.
+- Ingest store is this process's writer `PipelineWalHandle` (ActivePrimary, OwnerElect, or Idle after fence; not Replica), not scheduler-written `PIPELINE_NAME`.
 - Renew is `renew_until_lost`.
 
 **Tests:** two pipelines, lease held elsewhere, finite switch, no concurrent primary.
@@ -725,15 +693,15 @@ Distributed Flight/Ballista UNION remains WU-7.3 / WU-7.5 ([`hla-flight-sql-ball
 
 ## WU-8.3 Readiness and metrics
 
-Readiness requires payload, committed/applied index, head hash, and healthy state.
+Readiness requires catalog seq, `payload_ready`, and a healthy lease.
 
 Metrics (no partition or compaction-ID labels):
 
 - lease/membership;
 - quorum/nacks/timeouts;
-- committed/applied/published indexes;
-- lag/catch-up/snapshot;
-- divergence/purge;
+- catalog seq / payload_ready;
+- lag/catch-up;
+- purge;
 - promotion;
 - query request/fail (`cluster_flight_*`; Arrow Flight SQL 58.3);
 - Iceberg CAS.
@@ -785,7 +753,7 @@ Failpoint
 Subprocess crash helper
 ```
 
-Model state includes role, epoch, prepared/committed/applied/published indexes, hash chain, live segments, compaction transactions, completion bits, and DDB values.
+Model state includes role, epoch, catalog seq, published seq, payload_ready, live segment rows, compaction rows, and store values.
 
 ## Required failure groups
 
@@ -800,14 +768,14 @@ Model state includes role, epoch, prepared/committed/applied/published indexes, 
 - initialized crash;
 - all WAL storage values and invalid mode/config combinations.
 
-### Filesystem/log
+### Filesystem/catalog
 
 - crash at every durable boundary;
 - unknown outcome;
-- truncation/corruption/hash-chain failure;
+- truncation/corruption/payload-hash failure;
 - ENOSPC;
-- snapshot install/prune;
-- old disk migration;
+- orphan payload GC and `PruneTo`;
+- owned-pair import, leftover archive, unreadable compaction JSON fail-closed;
 - pipeline path isolation.
 
 ### Network/replication
@@ -818,8 +786,7 @@ Model state includes role, epoch, prepared/committed/applied/published indexes, 
 - oversized/partial frames;
 - reconnect/backpressure;
 - membership change mid-commit;
-- snapshot/catch-up;
-- same-index hash divergence;
+- payload catch-up (`FetchPayload` / `PruneTo`);
 - two-node versus three-node availability.
 
 ### Offset/source
@@ -863,7 +830,8 @@ Model state includes role, epoch, prepared/committed/applied/published indexes, 
 ```bash
 cargo test -p skippr-lease
 cargo test -p skipprd cluster::
-cargo test -p skipprd buffer::durable::
+cargo test -p skipprd --lib buffer::wal_handle::
+cargo test -p skippr-wal-catalog
 cargo test -p skipprd query_flight::
 # after WU-7.3: cargo test -p skipprd query_flight::
 cargo test -p skippr-query-ballista

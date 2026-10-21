@@ -26,20 +26,18 @@ class HlaE2eHarnessTests(unittest.TestCase):
                 "late_node_wal_catchup",
                 "primary_kill_failover",
                 "sigkill_during_ingest_no_duplicate_rows",
-                "after_local_commit_no_dupes",
+                "after_catalog_commit_no_dupes",
                 "schema_evolution",
-                "after_replica_ack_no_dupes",
+                "after_replica_payload_ack_no_dupes",
                 "after_offsets_published_no_dupes",
-                "replica_after_prepared",
+                "after_replica_payload_ack",
                 "after_compaction_sink",
                 "query_during_compaction_sent",
                 "snapshot_catchup_fourth_node",
                 "sigstop_old_primary",
                 "two_node_quorum_stall",
                 "sigterm_drain",
-                "truncated_log_restart",
-                "enospc_during_prepared",
-                "hash_conflict_no_majority",
+                "enospc_before_catalog_commit",
                 "restart_generation",
                 "donor_kill_mid_catchup",
                 "corrupt_replica_purge",
@@ -103,25 +101,24 @@ class HlaE2eHarnessTests(unittest.TestCase):
             Path("/tmp/node1/clustered/hla-e2e/local/hla_events/failpoint"),
         )
 
-    def test_prepared_crash_scenario_uses_failpoint_and_batch3(self) -> None:
+    def test_before_catalog_commit_scenario_uses_failpoint_and_batch3(self) -> None:
         src = Path(hla_e2e.__file__).read_text(encoding="utf-8")
-        self.assertIn("arm_after_prepared", src)
+        self.assertIn("arm_before_catalog_commit", src)
         self.assertIn("wait_node_exit", src)
         self.assertIn("batch3.jsonl", src)
         self.assertTrue((hla_e2e.TESTDATA / "batch3.jsonl").is_file())
 
     def test_local_commit_and_schema_batches_exist(self) -> None:
         src = Path(hla_e2e.__file__).read_text(encoding="utf-8")
-        self.assertIn("after_local_commit", src)
-        self.assertIn("after_replica_ack", src)
+        self.assertIn("after_catalog_commit", src)
+        self.assertIn("after_replica_payload_ack", src)
         self.assertIn("after_offsets_published", src)
-        self.assertIn("replica_after_prepared", src)
         self.assertIn("after_compaction_sink", src)
         self.assertIn("hold_before_compaction_sink", src)
-        self.assertIn("prepared_disk_full", src)
+        self.assertIn("before_catalog_commit", src)
         self.assertIn('harness.events_dir / "batch12.jsonl"', src)
         self.assertIn("clustered failpoint hold", src)
-        self.assertIn("clustered snapshot retained", src)
+        self.assertIn("WAL catalog reclaim", src)
         self.assertTrue((hla_e2e.TESTDATA / "batch11.jsonl").is_file())
         self.assertTrue((hla_e2e.TESTDATA / "batch12.jsonl").is_file())
         self.assertTrue((hla_e2e.TESTDATA / "batch14.jsonl").is_file())
@@ -137,19 +134,15 @@ class HlaE2eHarnessTests(unittest.TestCase):
         self.assertIn("current_primary", src)
         self.assertIn("process_log", src)
         self.assertIn("wait_assigned_replica(harness, primary, 90)", src)
-        self.assertIn("wait_state_quorum(harness, 3, 90)", src)
-        self.assertIn("isolate_replica_with_state", src)
-        self.assertNotIn("wait_assigned_replica_with_state", src)
-        self.assertIn("corrupt_diverged_snapshot_head", src)
+        self.assertIn("wait_payload_quorum", src)
+        self.assertIn("isolate_replica_with_payloads", src)
+        self.assertIn("corrupt_replica_payloads", src)
         self.assertIn("purge-seed.jsonl", src)
         self.assertNotIn("query succeeded while initialized heads disagreed", src)
-        self.assertIn("hash-conflict query served prior ids", src)
         wait_promoted = src[src.index("def wait_promoted") :]
         wait_promoted = wait_promoted[: wait_promoted.index("\ndef ")]
         self.assertIn("marks", wait_promoted)
         self.assertIn("added", wait_promoted)
-        self.assertIn("truncate_mutation_log_tail", src)
-        self.assertIn("st_size >= 8", src)
         self.assertIn("query_flight_ids", src)
         self.assertIn("query_flight_count", src)
         self.assertIn("elected_scheduler=", src)
@@ -173,10 +166,12 @@ class HlaE2eHarnessTests(unittest.TestCase):
         self.assertIn("restart_dead_nodes(harness)", sigstop)
         self.assertIn("SIGSTOP", sigstop)
 
-    def test_cluster_id_mtls_and_protocol_2_hello(self) -> None:
+    def test_cluster_id_mtls_and_protocol_3_hello(self) -> None:
         src = Path(hla_e2e.__file__).read_text(encoding="utf-8")
         self.assertEqual(hla_e2e.CLUSTER_ID, "hla-lake")
-        self.assertEqual(hla_e2e.CURRENT_PROTOCOL, 2)
+        self.assertEqual(hla_e2e.CURRENT_PROTOCOL, 3)
+        self.assertEqual(hla_e2e.PROTOCOL_MIN, 3)
+        self.assertEqual(hla_e2e.PROTOCOL_MAX, 3)
         self.assertIn("SKIPPR_CLUSTER_GOSSIP_KEY", src)
         self.assertIn("mint_cluster_tls", src)
         self.assertIn("replica_ssl_context", src)
@@ -184,11 +179,14 @@ class HlaE2eHarnessTests(unittest.TestCase):
         self.assertIn("cluster#{CLUSTER_ID}", src)
         self.assertIn("put_protocol3_dummy", src)
         hello = hla_e2e.encode_client_hello(
-            cluster_id=hla_e2e.CLUSTER_ID, protocol_min=2, protocol_max=2
+            cluster_id=hla_e2e.CLUSTER_ID, protocol_min=3, protocol_max=3
         )
         self.assertNotIn(b"hla-e2e", hello)
         digest = __import__("hashlib").sha256(b"hla-lake").hexdigest().encode()
         self.assertIn(digest, hello)
+        status = hla_e2e.encode_status_request()
+        self.assertEqual(status[0], (9 << 3) | 2)
+        self.assertNotEqual(status[0], (12 << 3) | 2)
 
     def test_offset_closed_decodes_le_u64(self) -> None:
         import base64
@@ -197,7 +195,7 @@ class HlaE2eHarnessTests(unittest.TestCase):
         payload[16:24] = (1).to_bytes(8, "little")
         self.assertEqual(hla_e2e.offset_closed(base64.b64encode(payload).decode()), 1)
 
-    def test_corrupt_diverged_snapshot_head_matches_committed_and_empties_log(self) -> None:
+    def test_corrupt_replica_payloads_truncates_seg_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             node = hla_e2e.Node(
                 name="n1",
@@ -205,23 +203,16 @@ class HlaE2eHarnessTests(unittest.TestCase):
                 data_dir=Path(tmp) / "node1",
                 log_path=Path(tmp) / "n1.log",
             )
-            state = hla_e2e.state_file_path(node)
-            log_path = hla_e2e.mutation_log_path(node)
-            state.parent.mkdir(parents=True)
-            raw = bytearray(56)
-            raw[0:8] = (1).to_bytes(8, "little")
-            raw[8:16] = (3).to_bytes(8, "little")
-            raw[16:24] = (2).to_bytes(8, "little")
-            raw[55] = 0x10
-            state.write_bytes(raw)
-            log_path.write_bytes(b"not-empty")
-            hla_e2e.corrupt_diverged_snapshot_head(node)
-            out = state.read_bytes()
-            self.assertEqual(int.from_bytes(out[0:8], "little"), 3)
-            self.assertEqual(int.from_bytes(out[8:16], "little"), 3)
-            self.assertEqual(int.from_bytes(out[16:24], "little"), 3)
-            self.assertEqual(out[55], 0xEF)
-            self.assertEqual(log_path.read_bytes(), b"")
+            segs = (
+                hla_e2e.pipeline_root(node)
+                / "segment_buffer"
+                / "segs"
+            )
+            segs.mkdir(parents=True)
+            payload = segs / "seg-1.seg"
+            payload.write_bytes(b"not-empty")
+            hla_e2e.corrupt_replica_payloads(node)
+            self.assertEqual(payload.read_bytes(), b"")
 
     def test_primary_node_picks_latest_ingest_started(self) -> None:
         class Alive:
@@ -283,7 +274,7 @@ class HlaE2eHarnessTests(unittest.TestCase):
                 (2, "2026-08-17T08:00:00.000000Z  INFO clustered scheduler started\n"),
                 (
                     3,
-                    "assigned replica catch-up reached donor head\nreplica=127.0.0.1:9\n",
+                    "assigned replica payload catch-up complete\nreplica=127.0.0.1:9\n",
                 ),
             ):
                 log_path = root / f"n{idx}.log"
@@ -299,7 +290,7 @@ class HlaE2eHarnessTests(unittest.TestCase):
             stale_dir = nodes[1].data_dir / "logs"
             stale_dir.mkdir(parents=True)
             (stale_dir / "skipprd.log").write_text(
-                "assigned replica catch-up reached donor head\n",
+                "assigned replica payload catch-up complete\n",
                 encoding="utf-8",
             )
             harness = hla_e2e.Harness(

@@ -12,5 +12,7 @@ base64 = "0.22.1"
 chrono = "0.4.44"
 once_cell = "1.17.0"
 sha2 = "0.10"
+skippr-lease = { path = "../skippr-lease" }
+skippr-wal-catalog = { path = "../skippr-wal-catalog" }
 tokio = { version = "1", features = ["rt", "macros"] }
 tracing = "0.1"

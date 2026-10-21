@@ -77,7 +77,7 @@ These optional overrides rarely need a change:
 
 | Mode | Back up |
 |---|---|
-| `disk` | `DATA_DIR` and `skippr.yml` |
+| `disk` | `DATA_DIR` (payloads and, with sled, the WAL catalog) and `skippr.yml` |
 | `s3` | The WAL bucket and the SkipprStore table |
 | `clustered` | The SkipprStore table and the disks on the live nodes |
 

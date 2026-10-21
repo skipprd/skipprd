@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use aws_sdk_dynamodb::types::{AttributeValue, ReturnValue};
 use aws_sdk_dynamodb::Client;
 use skippr_lease::{
-    LeaseEpoch, LeaseError, LeaseObservation, LeaseSession, NodeId, PipelineKey, PipelineLeaseStore,
+    LeaseEpoch, LeaseError, LeaseObservation, LeaseSession, NodeId, PipelineKey,
+    PipelineLeaseStore, LEASE_ATTR_EPOCH, LEASE_ATTR_OWNER, LEASE_ATTR_RELEASED, LEASE_SK,
 };
 use tracing::warn;
 use uuid::Uuid;
@@ -34,20 +35,20 @@ impl DynamoDbLeaseStore {
     fn keys(key: &PipelineKey) -> (AttributeValue, AttributeValue) {
         (
             AttributeValue::S(key.dynamo_pk()),
-            AttributeValue::S("lease".to_string()),
+            AttributeValue::S(LEASE_SK.to_string()),
         )
     }
 
     fn decode(item: &HashMap<String, AttributeValue>) -> Result<LeaseObservation, LeaseError> {
         let owner = item
-            .get("owner_node")
+            .get(LEASE_ATTR_OWNER)
             .and_then(|v| v.as_s().ok())
             .ok_or_else(|| LeaseError::StoreUnavailable("lease missing owner_node".into()))?;
         let owner = Uuid::from_str(owner)
             .map(NodeId::from_uuid)
             .map_err(|err| LeaseError::StoreUnavailable(format!("invalid owner_node: {err}")))?;
         let epoch = item
-            .get("epoch")
+            .get(LEASE_ATTR_EPOCH)
             .and_then(|v| v.as_n().ok())
             .and_then(|n| n.parse::<u64>().ok())
             .ok_or_else(|| LeaseError::StoreUnavailable("lease missing epoch".into()))?;
@@ -57,7 +58,7 @@ impl DynamoDbLeaseStore {
             .and_then(|n| n.parse::<u64>().ok())
             .ok_or_else(|| LeaseError::StoreUnavailable("lease missing heartbeat".into()))?;
         let released = item
-            .get("released")
+            .get(LEASE_ATTR_RELEASED)
             .and_then(|v| v.as_bool().ok())
             .copied()
             .unwrap_or(false);

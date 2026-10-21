@@ -11,7 +11,7 @@
 This architecture adds:
 
 - one exclusive ingest primary per pipeline;
-- synchronous local-disk WAL and compaction-state replication;
+- synchronous payload replication; store catalog as WAL and compaction hard-state;
 - DynamoDB lease fencing and cluster-visible offsets/checkpoints;
 - peer bootstrap, catch-up, promotion, and replica replacement;
 - DDB cold discovery plus gossip membership/fence rumors;
@@ -27,12 +27,12 @@ The architecture preserves the current single-process ingest engine and runtime-
 `WAL_STORAGE` is a typed enum:
 
 ```text
-disk       local WAL via PipelineDurableStore (PipelinePaths::legacy_disk), sled offsets, pipeline writer lease, no cluster services
-s3         existing S3 WAL behavior, pipeline writer lease, no peer quorum
-clustered  local WAL via the same PipelineDurableStore + ClusteredWalStore, synchronous replica + DDB lease/offsets
+disk       local WAL via PipelineWalHandle (PipelinePaths::legacy_disk), sled catalog and offsets, pipeline writer lease, no cluster services
+s3         payload objects plus the same catalog handle, pipeline writer lease, no peer quorum
+clustered  leased PipelineWalHandle, synchronous payload replica, remote catalog, tenant PipelinePaths
 ```
 
-`DiskWalStore` does not exist. Disk and clustered share one local-disk writer. Disk still starts no replica, gossip, or cluster membership services.
+`DiskWalStore` does not exist. Disk and clustered share one catalog-backed writer. Disk still starts no replica, gossip, or cluster membership services.
 
 `WAL_STORAGE=clustered` is the only cluster-mode switch. It reuses SkipprStore (`skippr.store.name` / `SKIPPR_STORE_NAME`) for offsets, leases, membership, and (optionally) SkipprLake catalog pointers. Product env (not impl knobs): `SKIPPR_CLUSTER_ID`, `SKIPPR_CLUSTER_GOSSIP_KEY`, cluster TLS PEM contents, and Flight session tenant/workspace. No lease, quorum, TTL, bind-address, or peer-list knobs. `SkipprLake.catalog_table` MAY be the SkipprStore table.
 
@@ -41,7 +41,7 @@ Cluster constants:
 - lease timeout: 30 seconds;
 - lease/membership heartbeat: 10 seconds;
 - durable copies: two;
-- write quorum: local prepared copy plus one caught-up remote Ack;
+- write quorum: local payload fsync plus one caught-up remote payload Ack;
 - replica TCP, Flight SQL, and Ballista gRPC: ephemeral ports, **always mTLS** (SAN `skippr-cluster`);
 - gossip UDP: ephemeral port on the advertised IP (not `0.0.0.0` in `ChitchatId`).
 
@@ -77,14 +77,14 @@ DynamoDB Local remains the OSS HLA harness.
 ### Authority boundaries
 
 - DynamoDB lease item: ownership and fencing authority.
-- Mutation-log quorum: WAL and compaction hard-state authority.
-- DynamoDB offset/checkpoint items: cluster-wide source ingest gate after quorum.
+- Store catalog: WAL and compaction hard-state authority (`SegmentRow`, `CompactionRow`, `SeqRow`, slice-done bits).
+- DynamoDB offset/checkpoint items: cluster-wide source ingest gate after catalog commit.
 - Shared object storage: schema and Iceberg data/metadata.
 - Iceberg catalog pointer CAS: lakehouse table authority.
 - DDB membership: cold endpoint discovery only.
 - Gossip: live membership, suspicion, endpoint hints, fence rumors. Transport is authenticated Chitchat (`src/cluster/gossip.rs`, WU-5.1). Cluster id is `SKIPPR_CLUSTER_ID` (not tenant/workspace). HMAC key is `SKIPPR_CLUSTER_GOSSIP_KEY` (required).
 - Logical tenancy: `PipelineKey` `{tenant, workspace, pipeline}` on every lease/offset/WAL/replica frame. Flight SQL session `TenantScope` on every RPC. Cluster membership is **not** a tenant.
-- Status RPC: peer head/health truth. `StatusOk.head_hash` is empty (genesis) or exactly 32 bytes; other lengths are skipped / `ProtocolMismatch`.
+- Status RPC: peer head/health truth. `StatusOk` is `catalog_seq_seen` plus `payload_ready`.
 - Auth workspace run-lock: CLI product concern only; never ingest ownership.
 
 ## Implementation status
@@ -184,63 +184,38 @@ DynamoDB offsets are required in clustered mode because immutable sources such a
 Commit order:
 
 1. local epoch check;
-2. local WAL prepare;
-3. remote durable apply/Ack;
-4. local commit/apply;
-5. conditional DynamoDB offset/checkpoint publication;
+2. payload write/hash/fsync or S3 PUT;
+3. clustered replica payload ack;
+4. catalog txn (`SegmentRow` + `SeqRow`);
+5. `publish_wal_commit`;
 6. ingest Ack.
 
-Never publish `Closed` before WAL quorum.
+Never publish `Closed` before catalog commit.
 
 Clustered offset publication:
 
 - strongly read the prior item;
 - merge Closed with OR and Position/Filesize with max;
-- conditionally write against the exact prior WAL tuple/hash;
+- conditionally write against the exact prior WAL tuple;
 - retry on conditional race;
 - same tuple/same hash is idempotent;
 - same tuple/different hash is corruption;
 - older tuple cannot overwrite newer.
 
-Partial multi-key publication is recoverable. Ingest is not acknowledged until all keys publish. Startup/promotion reconciles through the committed WAL head with strongly consistent reads before constructing the source plugin.
+Partial multi-key publication is recoverable. Ingest is not acknowledged until all keys publish. Startup/promotion reconciles through catalog rows with strongly consistent reads before constructing the source plugin.
 
-## Durable mutation log
+## WAL catalog
 
-### Envelope
+The skipprd store catalog is the only authority for live segments, delivered slices, compaction state, reclaim, and the commit sequence. Payload files and objects hold bytes only. Rows are lease-fenced transactions (`SegmentRow`, `CompactionRow`, `SeqRow`, `FormatRow`). There is no mutation log, hash chain, or snapshot-plus-suffix SoT.
 
-Every mutation carries:
-
-- protocol version;
-- pipeline key;
-- lease epoch;
-- per-pipeline commit index;
-- previous entry hash;
-- typed body;
-- payload hash when present.
-
-Entry hash is SHA-256 over previous hash, canonical protobuf envelope, and payload hash. Repeated fields are sorted. This creates a verifiable chain. `entry_hash()` returns `Result`; encode failure is `DurableError`, never empty placeholder bytes.
-
-### Mutations
+Catalog commits:
 
 ```text
-CommitSegment
-  segment descriptor and payload hash/length
-  sorted offsets
-  checkpoint envelopes
-
-PutCompaction
-  complete portable transaction
-  Pending, Sent, Acked, or Tombstoned
-
-CompleteSlices
-  compaction id
-  segment ids and ordinals
-
-ReclaimSegment
-  segment id
+SegmentRow   payload location, sha, offsets, checkpoints, slice-done bits
+CompactionRow Pending | Sent | Acked (tombstoned = row deleted)
+SeqRow        high-water mark, never derived from live rows
+FormatRow     Imported | Clean
 ```
-
-There is no separate Append mutation. Segment payload and `CommitSegment` form one logical operation.
 
 There is no schema or Glue catalog-outbox mutation.
 
@@ -258,23 +233,20 @@ Absolute disk paths are never serialized or included in clustered compaction IDs
 {DATA_DIR}/clustered/{encoded_tenant}/{encoded_workspace}/{encoded_pipeline}
 ```
 
-Legacy `disk` layout remains `{DATA_DIR}/segment_buffer/...` via `PipelinePaths::legacy_disk`. Disk writes go through the same `PipelineDurableStore` as clustered. First clustered migration installs a tenant-scoped baseline under the new root.
+Legacy `disk` layout remains `{DATA_DIR}/segment_buffer/...` via `PipelinePaths::legacy_disk`. Disk writes go through the same `PipelineWalHandle` as clustered. Existing installs import owned `.seg` + `.seg.commit` pairs once, then archive leftover `mutation.log` / snapshots / bitmaps / compaction JSON.
 
 ### Durable states
 
-- Prepared: payload and mutation record fsynced locally.
-- Committed: quorum decision fsynced.
-- Applied: segment marker/manifest/ledger/reclaim side effect completed.
-- OffsetPublished: all offset/checkpoint rows reconciled.
+- Payload durable: `.seg` fsync or S3 PUT, plus clustered replica payload ack.
+- Catalog committed: lease-fenced `SegmentRow` + `SeqRow`.
+- Offsets published: `publish_wal_commit` in seq order.
 - IngestAcked: source-facing success returned.
 
-The primary fsyncs Prepared before sending. Prepared/Committed/STATE/segment/commit-marker durability I/O is Direct I/O (`O_DIRECT` on Linux, `F_NOCACHE` on macOS) plus `fdatasync`. Recovery and compaction read those files the same way, so commit/ACK/sink never trust the kernel page cache. `fsync`/`fdatasync` failure poisons that file handle (no retry on the same fd) and fails the persist: clustered fences ingest; disk does not ACK the source. Cloud skipprd guests (XFS) must succeed at Direct I/O — clustered WAL volumes do not fall back to the page cache. SQL live WAL is a separate buffered `File::open` path and may be served from the page cache; it is not a durability vote.
+Payload I/O is Direct I/O (`O_DIRECT` on Linux, `F_NOCACHE` on macOS) plus `fdatasync`. `fsync`/`fdatasync` failure poisons that file handle (no retry on the same fd) and fails the persist: clustered fences ingest; disk does not ACK the source. Cloud skipprd guests (XFS) must succeed at Direct I/O — clustered WAL volumes do not fall back to the page cache. SQL live WAL is a separate buffered `File::open` path and may be served from the page cache; it is not a durability vote.
 
-The replica verifies payload, appends/fsyncs Prepared and Committed, applies, then Acks. The primary records Committed, applies, publishes offsets, then Acks ingest.
+The replica fsyncs payload bytes, verifies sha, then Acks. The primary commits the catalog row, publishes offsets, then Acks ingest.
 
-A prepared record with unknown outcome is retained. Recovery queries peer Status/hash; matching remote commit finalizes it locally. If no peer proves the Prepared hash, keep the record, return `QuorumLost`, and do not activate ingest (`abort_pending_prepared` is not used for this case). Orphan segment bytes alone are never promoted to committed state.
-
-Log `compare` of a missing historical envelope at `base < index < committed` is `Diverged`, not `AlreadyAppliedSameHash`. Pruned indexes at or below `base_index` may still be treated as already applied.
+A payload without a catalog row is an orphan for startup GC. A catalog row without publication is republished before ingest. Orphan segment bytes alone are never promoted to committed state.
 
 ## Compaction and sink safety
 
@@ -282,40 +254,41 @@ Clustered pipelines require a sink capability whose `SinkRetrySemantics` support
 
 Compaction sequence:
 
-1. quorum `PutCompaction(Pending)`;
+1. catalog `CompactionRow` Pending;
 2. build grouped stream;
-3. quorum `PutCompaction(Sent)`;
+3. catalog `CompactionRow` Sent;
 4. call sink with deterministic compaction ID/idempotency key/portable refs;
-5. quorum `PutCompaction(Acked)` after sink success;
-6. quorum `CompleteSlices`;
-7. quorum Tombstoned and Reclaim mutations.
+5. catalog `CompactionRow` Acked after sink success;
+6. lease-fenced slice-done bits on each `SegmentRow`;
+7. payload delete and `DropPayload`, then delete `CompactionRow`. Acked is the redo anchor until that delete.
 
 On ambiguous Sent recovery, sink preflight decides whether the apply already happened. AtLeastOnce and NonRetryable sinks are rejected in clustered mode because a crash after external success but before Acked cannot provide an exactly-once guarantee.
 
-`CompactionIndex` and in-memory caches are a cache of the snapshot-plus-suffix-log SoT, not leftover compaction JSON. Complete transaction manifests, completion ordinals, and reclaim decisions are replicated.
+`CompactionIndex` and in-memory caches are a cache of catalog rows, not leftover compaction JSON. Compaction rows and slice-done bits live in the store catalog.
 
 ## Replication protocol
 
 Transport is TCP with protobuf control frames and streamed raw payload chunks.
 
-- Control/mutation metadata maximum: 16 MiB.
+- Control metadata maximum: 16 MiB.
 - Payload chunk: 1 MiB.
 - Oversized metadata causes the ingest buffer to split before commit.
 - Payload is streamed to a temp file; no full segment allocation.
 - Length, hash, deadlines, bounded queues, and partial-frame handling are mandatory.
-- One mutation per pipeline is in flight.
+- One payload replicate per pipeline is in flight.
 
 RPCs:
 
 - handshake (`ClientHello` / `ServerHello`);
 - Status;
 - AssignReplica;
-- InstallSnapshot;
-- FetchEntries;
-- Replicate;
+- ReplicatePayload;
+- DropPayload;
+- PruneTo;
+- FetchPayload;
 - DropReplica.
 
-`CURRENT_PROTOCOL` / `PROTOCOL_MIN` / `PROTOCOL_MAX` are **2**. `ClientHello` carries cluster hash (SHA-256 of `ClusterId`), node id, and protocol range. Tenant/workspace are not on hello (`reserved 5, 6, 7`). The TCP connection is mTLS. The server verifies `cluster_hash` and protocol overlap. Each later frame carries a `PipelineKey`. The client verifies `HelloOk.cluster_hash` and `HelloOk.protocol` is in `[PROTOCOL_MIN, PROTOCOL_MAX]`.
+`CURRENT_PROTOCOL` / `PROTOCOL_MIN` / `PROTOCOL_MAX` are **3**. `ClientHello` carries cluster hash (SHA-256 of `ClusterId`), node id, and protocol range. Tenant/workspace are not on hello (`reserved 5, 6, 7`). The TCP connection is mTLS. The server verifies `cluster_hash` and protocol overlap. Each later frame carries a `PipelineKey`. The client verifies `HelloOk.cluster_hash` and `HelloOk.protocol` is in `[PROTOCOL_MIN, PROTOCOL_MAX]`. Mixed-version peers are rejected.
 
 Replica assign:
 
@@ -329,14 +302,10 @@ Replica acceptance:
 
 - not assigned: reject;
 - stale epoch (`epoch < epoch_seen` or `epoch != assigned epoch`): reject;
-- gap: NotCaughtUp;
-- same index/same hash: idempotent Ack;
-- same index/different hash: Diverged and quarantine;
-- next index with matching previous hash: persist/apply/Ack.
+- payload sha mismatch: reject;
+- payload fsync then Ack `{ segment_id, sha256 }`.
 
-The local fsynced Prepared record counts as one vote; one caught-up remote Ack completes quorum two.
-
-Live replicate Timeout, I/O, or other non-definite errors keep the Prepared record and fence ingest (`abort_pending_prepared` is not used). Definite replica rejects (stale epoch, not caught up, disk full, pinned, diverged) abort Prepared.
+The local fsynced payload counts as one vote; one caught-up remote payload Ack completes quorum two. Catalog commit happens on the primary after that quorum. `PruneTo` with a lower epoch is ignored.
 
 ## Replica placement, snapshots, and catch-up
 
@@ -347,36 +316,23 @@ Live replicate Timeout, I/O, or other non-definite errors keep the Prepared reco
 - Membership ads are hints; Status proves eligibility.
 - In-flight commits capture an immutable peer-set snapshot.
 
-Catch-up: if local `committed_index` is ahead of the donor, fail `DurableError::Diverged` (do not treat “ahead” as success). Empty `head_hash` is genesis; non-empty must be 32 bytes (`replica_status_hash`). Install a snapshot when the requester predates donor `base_index`.
-
-Reclaimed payloads prevent infinite log replay. Every segment reclaim retains a metadata-only state snapshot and prunes the log through the committed head. Retention is O(metadata); it never copies live payloads. A state snapshot contains:
-
-- base index/hash;
-- live segment inventory and hashes;
-- non-tombstoned compaction transactions;
-- completion bitmaps and compaction/ref mapping for live segments;
-- latest offset/checkpoint values with commit tuples;
-- schema fingerprints on live segment descriptors (coverage against `metadata.json` at promote; not a second schema SoT).
-
-If a requested index predates retained history, the donor builds a transfer pack under its log lock: the state snapshot at its committed head plus the live payloads. Bootstrap installs that pack in a staging directory, fsyncs, then atomically replaces pipeline state. Incremental entries follow. After prune, that snapshot is the mutation log; the compaction planner reads the same snapshot-plus-suffix-log SoT.
+Catch-up queries live catalog rows and fetches missing payloads by `segment_id` from any reachable peer, including the old primary. Payload reads are not fenced. `PromoteError::PayloadMissing` lists ids no peer still holds. `PruneTo { live digest, epoch }` repairs lost `DropPayload`s; replicas ignore a lower epoch and never self-delete.
 
 A corrupt/unusable replica stops advertising and purges only that pipeline. A healthy replica does not voluntarily leave until replacement is caught up.
 
 ## Promotion
 
-1. Acquire/steal lease and enter OwnerElect.
+1. Acquire/steal lease and enter OwnerElect (epoch+1 fences old primary catalog txns).
 2. Gossip higher epoch.
-3. Poll reachable Status endpoints.
-4. Catch up to the highest hash-consistent committed head. When that donor has an RPC endpoint, catch-up always hash-checks (equal index still verifies hash; local committed ahead of the donor is `Diverged`). Non-32-byte Status hashes are skipped; empty may be genesis.
-5. Reject same-index hash disagreement.
-6. Reconcile DynamoDB offsets/checkpoints.
+3. Poll reachable Status endpoints (`catalog_seq_seen` + `payload_ready`).
+4. Fetch missing live payloads from every reachable peer including the old primary.
+5. Fail `PromoteError::PayloadMissing { segment_ids }` if none holds a copy.
+6. Republish offsets/checkpoints from catalog rows in ascending seq.
 7. Load object-store `metadata.json` (steal already waited one `LEASE_TIMEOUT` observing the previous epoch; do not wait again), install plugin schema state, and refuse activate if the document is missing on an initialized pipeline or any live WAL namespace is absent from it.
-8. Assign/bootstrap a new synchronous replica.
+8. Assign/bootstrap a new synchronous replica; `PruneTo` after catch-up.
 9. Enter ActivePrimary and start source/compactor.
 
-An initialized pipeline with no reachable hard state fails `NoHeadAvailable`. Head zero is allowed only while the lease item has `initialized=false`.
-
-The first clustered owner creates a baseline snapshot from existing drained disk state, seeds DDB offsets/checkpoints, bootstraps a remote, writes the cluster-format marker, and then conditionally marks the lease initialized.
+An initialized pipeline whose live payloads cannot be assembled fails `PayloadMissing`. Existing installs import once under `FormatRow`, then archive leftover `mutation.log` / snapshots.
 
 ## Membership and gossip
 
@@ -385,7 +341,7 @@ DDB / Cloud tables membership provides cold seeds. Live membership is authentica
 Gossip never:
 
 - grants a lease;
-- commits a mutation;
+- commits a catalog row;
 - advances an offset;
 - applies hard state.
 
@@ -393,7 +349,7 @@ Suspicion starts lease observation. It does not immediately promote.
 
 ## Schema
 
-Skippr pipeline metadata JSON (`{tenant}/{workspace}/{pipeline}/metadata/metadata.json` on the configured object store) is the schema source of truth. It is not replicated in the mutation log. Live segment descriptors carry schema fingerprints; promotion decodes live `.seg` files (the snapshot-plus-suffix-log inventory) for namespaces and checks those namespaces against the document.
+Skippr pipeline metadata JSON (`{tenant}/{workspace}/{pipeline}/metadata/metadata.json` on the configured object store) is the schema source of truth. It is not stored in the WAL catalog. Live segment rows carry schema fingerprints; promotion decodes live `.seg` files named by catalog rows for namespaces and checks those namespaces against the document.
 
 Promotion cannot enter ActivePrimary until:
 
@@ -445,9 +401,9 @@ Iceberg snapshot summaries preserve Skippr compaction ID, idempotency key, schem
 
 ### Table history and the live-WAL fence
 
-Every grouped commit also records `skippr.pipeline` and `skippr.wal-segment-ids`. Those snapshot properties are two things at once: the replay gate for a crash between the lake commit and the WAL completion quorum (`already_committed`), and the exclude set the live-WAL selector subtracts. Expiry therefore MUST NOT remove a snapshot whose segments the host still holds.
+Every grouped commit also records `skippr.pipeline` and `skippr.wal-segment-ids`. Those snapshot properties are two things at once: the replay gate for a crash between the lake commit and slice-done bits (`already_committed`), and the exclude set the live-WAL selector subtracts. Expiry therefore MUST NOT remove a snapshot whose segments the host still holds.
 
-The host sends the live set on every grouped sink request as `live_wal_segments`: `StateSnapshot.segments` ∪ suffix `CommitSegment`, minus `ReclaimSegment`, the same derivation as `select_live_ordinals`. An unreadable snapshot sends `None`, and `None` expires nothing.
+The host sends the live set on every grouped sink request as `live_wal_segments`: catalog `SegmentRow` ids, the same derivation as `select_live_ordinals`. An unreadable catalog sends `None`, and `None` expires nothing.
 
 Under the table lane, after the commit and its idempotency manifest, the writer expires a snapshot only when all of these hold:
 
@@ -491,11 +447,11 @@ Iceberg catalog schema is authoritative. WAL batches project/cast into it; missi
 
 Iceberg is the only snapshot. WAL is a best-effort tail of that snapshot: it MAY omit not-yet-compacted rows. A later query MAY see more WAL. Writes never observe query state.
 
-`select_live_ordinals` is the only selector. Live segments are `StateSnapshot.segments` ∪ suffix `CommitSegment`, minus `ReclaimSegment`, minus Iceberg `skippr.wal-segment-ids`. For each remaining segment, skip ledger-complete ordinals. If the ledger is unreadable or the file is gone, skip that ordinal (do not scan it, do not fail the query).
+`select_live_ordinals` is the only selector. Live segments are catalog `SegmentRow`s minus Iceberg `skippr.wal-segment-ids`. For each remaining segment, skip slice-done ordinals. If the payload is unreadable or gone, skip that ordinal (do not scan it, do not fail the query).
 
-`CompleteSlices` is applied into the ordinal ledger; the selector does not re-parse those mutations. Iceberg-named segment ids close the window after the lake pointer commit and before completion quorum.
+Slice-done bits live on the `SegmentRow`; the selector does not re-parse a mutation log. Iceberg-named segment ids close the window after the lake pointer commit and before bits are set.
 
-There are no query pins. `ReclaimSegment` un-owns by deleting `.seg.commit` first, then drops `.seg`, even if a scan is in flight; that scan skips the missing file. Readers MUST NOT nack reclaim.
+There are no query pins. Reclaim deletes the catalog row, then the payload; a scan that misses the file skips it. Readers MUST NOT nack reclaim.
 
 ### Query transport
 
@@ -506,9 +462,9 @@ Locked here so other HLA docs do not drift:
 - Skippr SQL extension remains `live_wal_scan(tenant, workspace, pipeline, namespace, exclude_segment_ids)` as an internal sole-FROM statement, not a public custom ticket.
 - DoGet re-selects `select_live_ordinals` at execution time (unpinned). Handles MUST NOT freeze ordinals.
 - Flight SQL is read-only. Foreign tenant/workspace and unknown pipeline fail closed.
-- `CURRENT_PROTOCOL` is **2** (cluster hello). There is no query-planner protocol on DynamoDB.
+- `CURRENT_PROTOCOL` is **3** (cluster hello). There is no query-planner protocol on DynamoDB.
 - No new address/port/scheduler knobs. Dual framed+Flight protocols are forbidden.
-- Each clustered `skipprd` node runs Flight SQL plus a Ballista scheduler and executor. Gossip elects one scheduler (minimum `NodeId` among published `scheduler` addrs). `clustered query` talks Flight SQL to any ready `flight_addr`. WAL is a one-partition `FlightSqlExec` to the serving node's best-effort max advertised `committed_index` (local on tie if this process holds paths → this process's advertised `flight_addr`). Iceberg parquet may run on any executor.
+- Each clustered `skipprd` node runs Flight SQL plus a Ballista scheduler and executor. Gossip elects one scheduler (minimum `NodeId` among published `scheduler` addrs). `clustered query` talks Flight SQL to any ready `flight_addr`. WAL is a one-partition `FlightSqlExec` to the serving node's best-effort max advertised `catalog_seq_seen` with `payload_ready` (local on tie if this process holds paths → this process's advertised `flight_addr`). Iceberg parquet may run on any executor.
 - UNION stays a dumb concat before aggregate/join. Iceberg-only is a valid behind read.
 
 ### UNION
@@ -556,13 +512,13 @@ Replica RPC and the query socket v1 assume a trusted private routed network and 
 ## Failure behavior
 
 - DDB unavailable: renew fails, local deadline fences primary.
-- Replica unavailable or Timeout: quorum lost; keep Prepared and fence ingest on Timeout/unknown RPC; definite Nacks abort Prepared. No offset publication until Committed.
+- Replica unavailable or Timeout: quorum lost; do not catalog-commit; fence ingest on Timeout/unknown RPC; definite Nacks abort payload. No offset publication until catalog commit.
 - Offset publication fails after quorum: committed WAL remains; pipeline pauses/reconciles before source restart. Promotion reconciles offsets while still OwnerElect (`require_offset_epoch`, not WAL `require_active_epoch`), then activates.
 - Old primary alive: local deadline/fence stops commits; replicas reject stale epoch.
-- Hash disagreement: quarantine/fail promotion.
+- Live payloads missing on every reachable peer: `PromoteError::PayloadMissing`; no promotion.
 - All head copies lost: no promotion.
 - Disk full/corruption: node becomes ineligible; primary replaces it before new writes. Unmeasurable free space is treated as disk pressure.
-- Sink success with lost Acked mutation: idempotent preflight resolves.
+- Sink success with lost Acked `CompactionRow`: idempotent preflight resolves.
 - Query peer failure: skip that replica; use another Flight endpoint or Iceberg-only.
 - Iceberg CAS conflict: reload/retry; orphan metadata is safe.
 - Dynamo conditional writes detect `ConditionalCheckFailedException` via SDK error `code()`, not substring match.
@@ -576,11 +532,11 @@ Shipped:
 - No lease DDB operation occurs per flush.
 - Every acknowledged segment has cluster-visible offsets/checkpoints.
 - WAL, compaction transactions, completion state, and reclaim survive failover.
-- Promotion requires hash-consistent state, schemas, reconciled offsets, and a synchronous replica.
+- Promotion requires catalog-seq + `payload_ready` state, schemas, reconciled offsets, and a synchronous replica.
 - No absolute disk path appears in clustered durable identity.
-- Iceberg snapshot reads are consistent. Live WAL is eventually consistent and unpinned; UNION must not double-count Iceberg-named or ledger-complete slices (in-process `UnionExec` over Iceberg Rust + local WAL or `FlightSqlExec`).
+- Iceberg snapshot reads are consistent. Live WAL is eventually consistent and unpinned; UNION must not double-count Iceberg-named segments or slices whose `SegmentRow` bits are all done (in-process `UnionExec` over Iceberg Rust + local WAL or `FlightSqlExec`).
 - Iceberg pipelines never fall back to Parquet listing.
-- Disk and clustered share one local-disk writer (`PipelineDurableStore`).
+- Disk and clustered share one catalog-backed writer (`PipelineWalHandle`).
 - Deterministic failure, DDB contract (`tests/hla_e2e/ddb_cas.py`), subprocess crash, protocol-version, and query-consistency tests exist in the harness (process ticks wait on `run.py`).
 
 Shipped for query (contract: [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md)):

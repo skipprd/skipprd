@@ -31,6 +31,7 @@ jobs:
       - run: python3 .github/scripts/test_runtime_plugin_catalog.py
       - run: python3 .github/scripts/test_bump_changed_plugin_crates.py
       - run: python3 .github/scripts/test_previous_protocol_compatible_release.py
+      - run: python3 .github/scripts/test_engine_tag.py
 
   linux_x86:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
@@ -299,6 +300,12 @@ jobs:
           BUCKET="${{ env.RELEASES_BUCKET }}"
           RELEASE_SUBDIR="${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}"
           aws s3 sync runtime-plugin-release "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/"
+      - name: Point latest plugin index at this release
+        if: ${{ !endsWith(github.ref_name, '-beta') }}
+        run: |
+          set -euo pipefail
+          BUCKET="${{ env.RELEASES_BUCKET }}"
+          RELEASE_SUBDIR="${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}"
           aws s3 cp runtime-plugin-release/latest/manifest-index.json \
             "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/latest/manifest-index.json" \
             --cache-control "no-cache, no-store, must-revalidate"
@@ -710,6 +717,13 @@ jobs:
           LATEST_POINTER="${{ env.SKIPPRD_LATEST_POINTER }}"
           aws s3 cp skipprd-linux_x86.tar.gz "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/skipprd-linux_x86.tar.gz"
           aws s3 cp skipprd-macos_arm64.tar.gz "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/skipprd-macos_arm64.tar.gz"
+      - name: Point latest skipprd at this release
+        if: ${{ !endsWith(github.ref_name, '-beta') }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          BUCKET="${{ env.RELEASES_BUCKET }}"
+          LATEST_POINTER="${{ env.SKIPPRD_LATEST_POINTER }}"
           printf '%s' "$TAG" > "$LATEST_POINTER"
           aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
       - name: Create or update GitHub Release
@@ -718,16 +732,24 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ github.ref_name }}"
+          PRE_ARGS=()
+          TITLE="Release $TAG"
+          if [[ "$TAG" == *-beta ]]; then
+            PRE_ARGS+=(--prerelease)
+            TITLE="Beta $TAG"
+          fi
           if gh release view "$TAG" --repo skipprd/skipprd >/dev/null 2>&1; then
             gh release edit "$TAG" \
               --repo skipprd/skipprd \
-              --title "Release $TAG" \
-              --notes-file release-notes.md
+              --title "$TITLE" \
+              --notes-file release-notes.md \
+              "${PRE_ARGS[@]}"
           else
             gh release create "$TAG" \
               --repo skipprd/skipprd \
-              --title "Release $TAG" \
-              --notes-file release-notes.md
+              --title "$TITLE" \
+              --notes-file release-notes.md \
+              "${PRE_ARGS[@]}"
           fi
           gh release upload "$TAG" \
             install.sh \

@@ -10,9 +10,7 @@ Skipprd treats each source partition as an **immutable whole object** (S3 key, l
 
 ## Clustered mode (`WAL_STORAGE=clustered`)
 
-Clustered ingest publishes `Closed=1` / `Position` to **DynamoDB only**, after WAL quorum (`publish_wal_commit`). It does not write offsets into sled or call `mark_offsets_durable_in_wal`. A new primary must not treat an empty local sled database as “nothing closed.” Disk mode (`WAL_STORAGE=disk`) still uses sled via `mark_offsets_durable_in_wal`.
-
-`CommitSegment` still carries offset tuples. Those tuples are the DynamoDB publication payload and snapshot/reconcile input, not a second ingest-gate store.
+Every backend publishes `Closed=1` / `Position` through `publish_wal_commit` after the catalog row is durable. Disk uses sled; clustered and S3 use the configured SkipprStore. Offsets are not a second WAL authority.
 
 ## When `Position` matters
 

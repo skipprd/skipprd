@@ -1,4 +1,4 @@
-use crate::identity::{CommitIndex, NodeId};
+use crate::identity::NodeId;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
@@ -17,8 +17,6 @@ pub enum LeaseError {
     Fenced,
     #[error("quorum lost: {0}")]
     QuorumLost(String),
-    #[error("diverged: {0}")]
-    Diverged(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
@@ -41,23 +39,34 @@ pub enum PathError {
     Overflow(String),
 }
 
+/// Hard cap on `DurableError` `Display` for stringly details. Import/inventory
+/// must never format thousands of paths into a log line.
+pub const DURABLE_ERROR_DISPLAY_CEILING: usize = 512;
+
+fn clip_error_detail(detail: &str) -> String {
+    if detail.len() <= DURABLE_ERROR_DISPLAY_CEILING {
+        return detail.to_string();
+    }
+    format!(
+        "{}… (truncated, {} bytes)",
+        &detail[..DURABLE_ERROR_DISPLAY_CEILING],
+        detail.len()
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum DurableError {
     #[error("fenced")]
     Fenced,
     #[error("fenced after commit")]
     FencedAfterCommit,
-    #[error("quorum lost: {0}")]
+    #[error("quorum lost: {display}", display = clip_error_detail(.0))]
     QuorumLost(String),
-    #[error("quorum lost: prepared index {0} has no committed peer copy")]
-    UnprovenPrepared(u64),
-    #[error("diverged: {0}")]
-    Diverged(String),
-    #[error("corrupt offset: {0}")]
+    #[error("corrupt offset: {display}", display = clip_error_detail(.0))]
     CorruptOffset(String),
-    #[error("io: {0}")]
+    #[error("io: {display}", display = clip_error_detail(.0))]
     Io(String),
-    #[error("protocol mismatch: {0}")]
+    #[error("protocol mismatch: {display}", display = clip_error_detail(.0))]
     ProtocolMismatch(String),
     #[error("stale epoch")]
     StaleEpoch,
@@ -69,28 +78,66 @@ pub enum DurableError {
     Timeout,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublishMode {
+    Fresh,
+    Republish,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublishAction {
+    Commit,
+    AlreadyApplied,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum OffsetPublishError {
     #[error("corrupt offset payload: {0}")]
     Corrupt(String),
     #[error("transient offset publish error: {0}")]
     Transient(String),
+    #[error("offset fence regression")]
+    FenceRegression,
+}
+
+/// Shared fence tuple compare for sled sibling keys and Dynamo/Cloud Tables attributes.
+pub fn decide_wal_publish(
+    stored: Option<(u64, u64, &str)>,
+    epoch: u64,
+    seq: u64,
+    payload_sha256: &str,
+    mode: PublishMode,
+) -> Result<PublishAction, OffsetPublishError> {
+    let Some((old_epoch, old_seq, old_hash)) = stored else {
+        return Ok(PublishAction::Commit);
+    };
+    if (old_epoch, old_seq) == (epoch, seq) {
+        if old_hash == payload_sha256 {
+            return Ok(PublishAction::AlreadyApplied);
+        }
+        return Err(OffsetPublishError::Corrupt(
+            "same WAL tuple with different hash".into(),
+        ));
+    }
+    if (old_epoch, old_seq) > (epoch, seq) {
+        return match mode {
+            PublishMode::Republish => Ok(PublishAction::AlreadyApplied),
+            PublishMode::Fresh => Err(OffsetPublishError::FenceRegression),
+        };
+    }
+    Ok(PublishAction::Commit)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum PromoteError {
     #[error("lease error: {0}")]
     Lease(LeaseError),
-    #[error("no hash-consistent head is reachable")]
-    NoHeadAvailable,
-    #[error("diverged at index {index:?}: {detail}")]
-    Diverged { index: CommitIndex, detail: String },
+    #[error("payload missing for segments: {segment_ids:?}")]
+    PayloadMissing { segment_ids: Vec<String> },
     #[error("required schema missing: {0}")]
     SchemaMissing(String),
     #[error("replica assignment failed: {0}")]
     Replica(String),
-    #[error("prepared index {index} has no committed peer copy")]
-    UnprovenPrepared { index: u64 },
     #[error("{0}")]
     Other(String),
 }
@@ -103,8 +150,6 @@ pub enum ReplicaNack {
     NotAssigned,
     #[error("not caught up")]
     NotCaughtUp,
-    #[error("diverged")]
-    Diverged,
     #[error("disk full")]
     DiskFull,
     #[error("payload hash mismatch")]
@@ -113,14 +158,6 @@ pub enum ReplicaNack {
     UnknownPipeline,
     #[error("invalid primary endpoint")]
     InvalidPrimaryEndpoint,
-    #[error("no snapshot")]
-    NoSnapshot,
-    #[error("empty snapshot")]
-    EmptySnapshot,
-    #[error("snapshot hash mismatch")]
-    SnapshotHashMismatch,
-    #[error("snapshot unavailable")]
-    SnapshotUnavailable,
 }
 
 impl ReplicaNack {
@@ -128,15 +165,10 @@ impl ReplicaNack {
         match self {
             Self::StaleEpoch => DurableError::StaleEpoch,
             Self::NotAssigned | Self::NotCaughtUp => DurableError::NotCaughtUp,
-            Self::Diverged => DurableError::Diverged(self.to_string()),
             Self::DiskFull => DurableError::DiskFull,
             Self::PayloadHashMismatch | Self::UnknownPipeline | Self::InvalidPrimaryEndpoint => {
                 DurableError::ProtocolMismatch(self.to_string())
             }
-            Self::NoSnapshot
-            | Self::EmptySnapshot
-            | Self::SnapshotHashMismatch
-            | Self::SnapshotUnavailable => DurableError::Io(self.to_string()),
         }
     }
 }
@@ -154,7 +186,7 @@ impl From<std::io::Error> for DurableError {
         if is_enospc(&err) {
             Self::DiskFull
         } else {
-            Self::Io(err.to_string())
+            Self::Io(clip_error_detail(&err.to_string()))
         }
     }
 }
@@ -179,5 +211,55 @@ impl From<FenceError> for DurableError {
 impl From<FenceError> for PromoteError {
     fn from(err: FenceError) -> Self {
         Self::Other(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_errors_on_newer_stored_tuple() {
+        let err =
+            decide_wal_publish(Some((2, 10, "h")), 1, 9, "h", PublishMode::Fresh).unwrap_err();
+        assert_eq!(err, OffsetPublishError::FenceRegression);
+    }
+
+    #[test]
+    fn republish_skips_newer_stored_tuple() {
+        assert_eq!(
+            decide_wal_publish(Some((2, 10, "h")), 1, 9, "h", PublishMode::Republish).unwrap(),
+            PublishAction::AlreadyApplied
+        );
+    }
+
+    #[test]
+    fn same_tuple_same_hash_is_idempotent() {
+        assert_eq!(
+            decide_wal_publish(Some((1, 4, "abc")), 1, 4, "abc", PublishMode::Fresh).unwrap(),
+            PublishAction::AlreadyApplied
+        );
+    }
+
+    #[test]
+    fn same_tuple_different_hash_is_corrupt() {
+        assert!(matches!(
+            decide_wal_publish(Some((1, 4, "abc")), 1, 4, "xyz", PublishMode::Fresh),
+            Err(OffsetPublishError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn durable_error_display_clips_huge_protocol_detail() {
+        let huge = "x".repeat(200_000);
+        let err = DurableError::ProtocolMismatch(huge);
+        let rendered = err.to_string();
+        assert!(
+            rendered.len() <= DURABLE_ERROR_DISPLAY_CEILING + 64,
+            "error display was {} bytes",
+            rendered.len()
+        );
+        assert!(rendered.contains("truncated"));
+        assert!(rendered.contains("200000"));
     }
 }

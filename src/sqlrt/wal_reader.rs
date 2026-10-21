@@ -1,17 +1,16 @@
 //! Buffered (page-cache) WAL scan for SQL. Durability code must not construct this.
 
-use std::fs;
 use std::io::{self, Read, Seek};
 use std::path::PathBuf;
 
 use arrow::array::RecordBatch;
 use arrow::ipc::reader::StreamReader;
-use url::Url;
+use skippr_wal_catalog::{CatalogKey, CatalogRow, PayloadLocation};
 
 use crate::buffer::segment_file::SegmentFile;
+use crate::buffer::wal_handle;
 use crate::buffer::wal_store::block_on_async;
 use crate::helpers::configuration::Config;
-use crate::helpers::wal_storage::WalStorage;
 
 pub trait WalReader {
     fn load_committed_batches(
@@ -21,305 +20,237 @@ pub trait WalReader {
     ) -> io::Result<Vec<RecordBatch>>;
 }
 
-pub struct ClusteredWalReader;
+pub struct CatalogWalReader {
+    key: skippr_lease::PipelineKey,
+}
 
-impl WalReader for ClusteredWalReader {
+struct InvalidPipelineReader {
+    message: String,
+}
+
+impl WalReader for InvalidPipelineReader {
+    fn load_committed_batches(
+        &self,
+        _name: &str,
+        _limit_files: usize,
+    ) -> io::Result<Vec<RecordBatch>> {
+        Err(io::Error::other(self.message.clone()))
+    }
+}
+
+impl WalReader for CatalogWalReader {
     fn load_committed_batches(
         &self,
         name: &str,
         limit_files: usize,
     ) -> io::Result<Vec<RecordBatch>> {
-        let stores = crate::buffer::durable::all_durable_stores();
-        let store = stores
-            .iter()
-            .find(|store| store.key().pipeline() == name)
-            .cloned()
-            .ok_or_else(|| {
-                io::Error::other(format!(
-                    "clustered WAL read has no PipelineDurableStore for pipeline {name}"
-                ))
-            })?;
-        load_seg_dir_batches(store.paths().segs.clone(), name, limit_files)
-    }
-}
-
-pub struct DiskWalReader {
-    segs: PathBuf,
-}
-
-impl WalReader for DiskWalReader {
-    fn load_committed_batches(
-        &self,
-        name: &str,
-        limit_files: usize,
-    ) -> io::Result<Vec<RecordBatch>> {
-        load_seg_dir_batches(self.segs.clone(), name, limit_files)
-    }
-}
-
-fn load_seg_dir_batches(
-    seg_dir: PathBuf,
-    namespace_or_pipeline: &str,
-    limit_files: usize,
-) -> io::Result<Vec<RecordBatch>> {
-    let mut out: Vec<RecordBatch> = Vec::new();
-    if !seg_dir.exists() {
-        return Ok(out);
-    }
-    let mut used = 0usize;
-    for entry in fs::read_dir(&seg_dir)? {
-        if used >= limit_files {
-            break;
-        }
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("seg") {
-            continue;
-        }
-        let commit = SegmentFile::commit_path_for_seg(&path);
-        if !commit.exists() {
-            continue;
-        }
-        let meta = match SegmentFile::admit_owned_pair_path(&path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        for idx in meta.index.iter() {
-            if idx.key.namespace != namespace_or_pipeline {
+        let handle = wal_handle::wal_handle_for(&self.key).ok_or_else(|| {
+            io::Error::other(format!(
+                "WAL read has no PipelineWalHandle for pipeline {}",
+                self.key.pipeline()
+            ))
+        })?;
+        let ordinals = handle.select_live_ordinals(&[]);
+        let mut out = Vec::new();
+        let mut used_segments = 0usize;
+        let mut seen = std::collections::HashSet::new();
+        for (segment_id, _ordinal) in ordinals {
+            if used_segments >= limit_files {
+                break;
+            }
+            if !seen.insert(segment_id.clone()) {
                 continue;
             }
-            let mut file = match fs::File::open(&path) {
-                Ok(f) => f,
-                Err(_) => continue,
+            let Ok(id) = skippr_lease::SegmentId::new(&segment_id) else {
+                continue;
             };
-            if idx.codec != crate::buffer::segment_file::PART_CODEC_ARROW {
-                return Err(io::Error::other("sqlrt does not read copy WAL parts"));
-            }
-            if file.seek(std::io::SeekFrom::Start(idx.start)).is_err() {
+            let Ok(Some(CatalogRow::Segment(seg))) = handle.catalog().get(&CatalogKey::Segment(id))
+            else {
                 continue;
+            };
+            let batches = match &seg.location {
+                PayloadLocation::Disk { path } => {
+                    load_disk_segment_batches(PathBuf::from(path), name, &seg.payload_sha256)?
+                }
+                PayloadLocation::S3 { bucket, key } => {
+                    load_s3_segment_batches(bucket, key, name, &seg.payload_sha256)?
+                }
+            };
+            if !batches.is_empty() {
+                used_segments += 1;
             }
-            let reader = std::io::BufReader::new(file);
-            let mut take = reader.take(idx.len);
-            if let Ok(sr) = StreamReader::try_new(&mut take, None) {
-                for it in sr {
-                    if let Ok(b) = it {
-                        out.push(b);
-                    }
+            out.extend(batches);
+        }
+        Ok(out)
+    }
+}
+
+fn decode_arrow_parts(
+    bytes: &[u8],
+    namespace_or_pipeline: &str,
+    expected_sha: &[u8; 32],
+) -> io::Result<Vec<RecordBatch>> {
+    let claimed = SegmentFile::verify_body_checksum(bytes)?;
+    if &claimed != expected_sha {
+        return Ok(Vec::new());
+    }
+    let meta = SegmentFile::read_metadata_from_bytes(bytes)?;
+    let mut out = Vec::new();
+    for idx in meta.index.iter() {
+        if idx.key.namespace != namespace_or_pipeline {
+            continue;
+        }
+        if idx.codec != crate::buffer::segment_file::PART_CODEC_ARROW {
+            return Err(io::Error::other("sqlrt does not read copy WAL parts"));
+        }
+        let start = idx.start as usize;
+        let end = start.saturating_add(idx.len as usize);
+        if end > bytes.len() {
+            continue;
+        }
+        let slice = &bytes[start..end];
+        let mut cursor = std::io::Cursor::new(slice);
+        if let Ok(sr) = StreamReader::try_new(&mut cursor, None) {
+            for it in sr {
+                if let Ok(b) = it {
+                    out.push(b);
                 }
             }
-        }
-        used += 1;
-        if used >= limit_files {
-            break;
         }
     }
     Ok(out)
 }
 
-pub struct S3WalReader {
-    pub prefix_url: String,
+fn load_disk_segment_batches(
+    path: PathBuf,
+    namespace_or_pipeline: &str,
+    expected_sha: &[u8; 32],
+) -> io::Result<Vec<RecordBatch>> {
+    let Ok(meta) = SegmentFile::admit_payload_path(&path, expected_sha) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for idx in meta.index.iter() {
+        if idx.key.namespace != namespace_or_pipeline {
+            continue;
+        }
+        if idx.codec != crate::buffer::segment_file::PART_CODEC_ARROW {
+            return Err(io::Error::other("sqlrt does not read copy WAL parts"));
+        }
+        let mut file = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        if file.seek(std::io::SeekFrom::Start(idx.start)).is_err() {
+            continue;
+        }
+        let reader = std::io::BufReader::new(file);
+        let mut take = reader.take(idx.len);
+        if let Ok(sr) = StreamReader::try_new(&mut take, None) {
+            for it in sr {
+                if let Ok(b) = it {
+                    out.push(b);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
-impl WalReader for S3WalReader {
-    fn load_committed_batches(
-        &self,
-        pipeline: &str,
-        limit_files: usize,
-    ) -> io::Result<Vec<RecordBatch>> {
-        let prefix = self.prefix_url.clone();
-        let pipe = pipeline.to_string();
-        let fut = async move {
-            let mut out: Vec<RecordBatch> = Vec::new();
-            let u = match Url::parse(&prefix) {
-                Ok(u) => u,
-                Err(_) => return Ok(out),
-            };
-            if u.scheme() != "s3" {
-                return Ok(out);
-            }
-            let bucket = match u.host_str() {
-                Some(b) => b.to_string(),
-                None => return Ok(out),
-            };
-            let base = u
-                .path()
-                .trim_start_matches('/')
-                .trim_end_matches('/')
-                .to_string();
-            let client = crate::helpers::s3::get_s3_client().await;
-            let mut token: Option<String> = None;
-            let mut all: Vec<String> = Vec::new();
-            loop {
-                let mut req = client.list_objects_v2().bucket(&bucket).prefix(&base);
-                if let Some(t) = &token {
-                    req = req.continuation_token(t);
-                }
-                match req.send().await {
-                    Ok(resp) => {
-                        for obj in resp.contents() {
-                            if let Some(k) = obj.key() {
-                                all.push(k.to_string());
-                            }
-                        }
-                        if resp.is_truncated().unwrap_or(false) {
-                            token = resp.next_continuation_token().map(|s| s.to_string());
-                        } else {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-                if all.len() > 10_000 {
-                    break;
-                }
-            }
-            use std::collections::HashSet;
-            let set: HashSet<String> = all.iter().cloned().collect();
-            let mut used = 0usize;
-            for k in all.into_iter().filter(|k| k.ends_with(".seg")) {
-                if used >= limit_files {
-                    break;
-                }
-                let commit = format!("{}.commit", k);
-                if !set.contains(&commit) {
-                    continue;
-                }
-                let commit_bytes =
-                    match crate::helpers::s3::get_object_bytes_for_bucket(&bucket, &commit).await {
-                        Ok(bytes) => bytes,
-                        Err(_) => continue,
-                    };
-                match client.get_object().bucket(&bucket).key(&k).send().await {
-                    Ok(resp) => match resp.body.collect().await {
-                        Ok(agg) => {
-                            let bytes = agg.into_bytes().to_vec();
-                            if let Ok(meta) =
-                                SegmentFile::admit_owned_pair_bytes(&bytes, &commit_bytes)
-                            {
-                                for idx in meta.index.iter() {
-                                    if idx.key.namespace != pipe {
-                                        continue;
-                                    }
-                                    if idx.codec != crate::buffer::segment_file::PART_CODEC_ARROW {
-                                        return Err(io::Error::other(
-                                            "sqlrt does not read copy WAL parts",
-                                        ));
-                                    }
-                                    let start = idx.start as usize;
-                                    let end = start.saturating_add(idx.len as usize);
-                                    if end > bytes.len() {
-                                        continue;
-                                    }
-                                    let slice = &bytes[start..end];
-                                    let mut cursor = std::io::Cursor::new(slice);
-                                    if let Ok(sr) = StreamReader::try_new(&mut cursor, None) {
-                                        for it in sr {
-                                            if let Ok(b) = it {
-                                                out.push(b);
-                                            }
-                                        }
-                                    }
-                                }
-                                used += 1;
-                            }
-                        }
-                        Err(_) => {}
-                    },
-                    Err(_) => {}
-                }
-            }
-            Ok(out)
-        };
-        block_on_async(fut)
-    }
+fn load_s3_segment_batches(
+    bucket: &str,
+    key: &str,
+    namespace_or_pipeline: &str,
+    expected_sha: &[u8; 32],
+) -> io::Result<Vec<RecordBatch>> {
+    let bucket = bucket.to_string();
+    let key = key.to_string();
+    let filter = namespace_or_pipeline.to_string();
+    let sha = *expected_sha;
+    block_on_async(async move {
+        let bytes = crate::helpers::s3::get_object_bytes_for_bucket(&bucket, &key)
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        decode_arrow_parts(&bytes, &filter, &sha)
+    })
 }
 
 pub struct WalReaderFactory;
 
 impl WalReaderFactory {
-    pub fn for_pipeline(config: &Config, _pipeline: &str) -> Box<dyn WalReader + Send + Sync> {
-        match config.get_wal_storage() {
-            WalStorage::S3 => {
-                let bucket = config.get_wal_s3_bucket();
-                let base = config.get_wal_s3_prefix();
-                let prefix_url = format!("s3://{}/{}", bucket, base.trim_start_matches('/'));
-                Box::new(S3WalReader { prefix_url })
-            }
-            WalStorage::Disk => {
-                let bound = if _pipeline.is_empty() {
-                    config.clone()
-                } else {
-                    config.bind_pipeline(_pipeline)
-                };
-                let paths = skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(
-                    &bound.get_data_dir(),
-                ));
-                Box::new(DiskWalReader { segs: paths.segs })
-            }
-            WalStorage::Clustered => Box::new(ClusteredWalReader),
+    pub fn for_pipeline(config: &Config, pipeline: &str) -> Box<dyn WalReader + Send + Sync> {
+        match skippr_lease::PipelineKey::new(
+            config.get_tenant(),
+            config.get_workspace_name(),
+            pipeline,
+        ) {
+            Ok(key) => Box::new(CatalogWalReader { key }),
+            Err(err) => Box::new(InvalidPipelineReader {
+                message: err.to_string(),
+            }),
         }
     }
 
     pub async fn for_pipeline_async(
         config: &Config,
-        _pipeline: &str,
+        pipeline: &str,
     ) -> Box<dyn WalReader + Send + Sync> {
-        Self::for_pipeline(config, _pipeline)
+        Self::for_pipeline(config, pipeline)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::durable::log::MutationLog;
-    use crate::buffer::durable::replicate::ReplicationMode;
-    use crate::buffer::durable::store::{
-        install_durable_store, remove_durable_store, MemoryOffsetPublisher, OffsetMode,
-        PipelineDurableStore,
+    use crate::buffer::segment_file::{PartitionKey, WalPayload};
+    use crate::buffer::wal_handle::{
+        clear_wal_handles, install_wal_handle, memory_catalog_for_test, remove_wal_handle,
+        PipelineWalHandle,
     };
+    use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
     use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SystemClock};
+    use skippr_wal_catalog::CatalogFence;
+    use std::collections::HashMap;
     use std::sync::Arc;
+
+    fn leased_handle(dir: &std::path::Path, pipeline: &str) -> Arc<PipelineWalHandle> {
+        let key = PipelineKey::new("t", "w", pipeline).unwrap();
+        let paths = PipelinePaths::legacy_disk(dir);
+        let clock = Arc::new(SystemClock::new());
+        let guard = LeaseGuard::single_node(key.clone(), clock);
+        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let catalog = memory_catalog_for_test(fence);
+        let db = sled::open(dir.join("offsets")).unwrap();
+        let tree = db.open_tree("offsets").unwrap();
+        let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
+        PipelineWalHandle::new(key, paths, guard, catalog, offsets)
+    }
 
     #[test]
     #[serial_test::serial]
     fn clustered_wal_reader_does_not_fall_back_to_another_pipeline() {
         let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "other").unwrap();
-        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
-        let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-        let log = MutationLog::open(paths.clone()).unwrap();
-        let store = PipelineDurableStore::new(
-            key.clone(),
-            paths,
-            guard,
-            log,
-            ReplicationMode::LocalOnly,
-            OffsetMode::Dynamo(MemoryOffsetPublisher::new()),
-        );
-        install_durable_store(store);
-        let err = ClusteredWalReader
-            .load_committed_batches("missing", 1)
-            .unwrap_err();
-        remove_durable_store(&key);
+        let handle = leased_handle(dir.path(), "other");
+        install_wal_handle(handle.clone());
+        let err = CatalogWalReader {
+            key: PipelineKey::new("t", "w", "missing").unwrap(),
+        }
+        .load_committed_batches("missing", 1)
+        .unwrap_err();
+        remove_wal_handle(handle.key());
+        clear_wal_handles();
         assert!(err.to_string().contains("missing"));
     }
 
-    #[test]
-    fn disk_wal_reader_loads_committed_seg_without_durable_store() {
-        use crate::buffer::segment_file::{PartitionKey, SegmentFile};
-        use arrow::array::StringArray;
-        use arrow::datatypes::{DataType, Field, Schema};
-        use std::collections::HashMap;
-        use std::sync::Arc;
-
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn catalog_wal_reader_loads_persisted_segment() {
         let dir = tempfile::tempdir().unwrap();
-        let segs = dir.path().join("segment_buffer/segs");
-        std::fs::create_dir_all(&segs).unwrap();
-        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
-        let seg = SegmentFile::new(&segs, "file-seg").unwrap();
+        let handle = leased_handle(dir.path(), "orders");
+        install_wal_handle(handle.clone());
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Utf8, true),
+        ]));
         let mut batches = HashMap::new();
         batches.insert(
             PartitionKey {
@@ -329,22 +260,30 @@ mod tests {
                 time: None,
                 schema_fingerprint: "fp".into(),
             },
-            crate::buffer::segment_file::WalPayload::Arrow(vec![
-                arrow::array::RecordBatch::try_new(
-                    schema,
-                    vec![Arc::new(StringArray::from(vec!["row-1"]))],
-                )
-                .unwrap(),
-            ]),
+            WalPayload::Arrow(vec![arrow::array::RecordBatch::try_new(
+                schema,
+                vec![Arc::new(arrow::array::StringArray::from(vec!["row-1"]))],
+            )
+            .unwrap()]),
         );
-        let (meta, _rows, _sha) = seg
-            .write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())
+        handle
+            .persist_segment(
+                "file-seg",
+                &HashMap::new(),
+                &batches,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .await
             .unwrap();
-        seg.write_commit_marker(&meta).unwrap();
-        let reader = DiskWalReader { segs };
-        let loaded = reader
-            .load_committed_batches("orders_el", usize::MAX)
-            .unwrap();
+        let loaded = CatalogWalReader {
+            key: PipelineKey::new("t", "w", "orders").unwrap(),
+        }
+        .load_committed_batches("orders_el", usize::MAX)
+        .unwrap();
+        remove_wal_handle(handle.key());
+        clear_wal_handles();
         assert_eq!(loaded.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
     }
 }

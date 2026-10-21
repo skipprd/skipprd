@@ -10,6 +10,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def notes_for_tag(changelog: str, tag: str) -> str:
+    if tag.endswith("-beta"):
+        try:
+            return section(changelog, tag)
+        except SystemExit:
+            return section(changelog, "Unreleased")
+    return section(changelog, tag)
+
+
 def section(changelog: str, tag: str) -> str:
     heading = f"## [{tag}]"
     lines = changelog.splitlines()
@@ -29,7 +38,9 @@ def section(changelog: str, tag: str) -> str:
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("usage: release_notes.py <tag>")
-    sys.stdout.write(section((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), sys.argv[1]))
+    sys.stdout.write(
+        notes_for_tag((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), sys.argv[1])
+    )
 
 
 if __name__ == "__main__":

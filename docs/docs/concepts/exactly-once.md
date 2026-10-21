@@ -49,7 +49,7 @@ If a run cannot finish writing its committed batches before it exits, it exits n
 
 The guarantee depends on the WAL and the resume position surviving. Watch for these:
 
-- **Losing `DATA_DIR`.** With the default local WAL, `DATA_DIR` holds both. A fresh disk means Skipprd re-reads the source from the beginning. On ephemeral compute, use `WAL_STORAGE=s3` and a DynamoDB state store instead. See [WAL and buffering](/configuration/buffering) and [State store](/configuration/skippr-store).
+- **Losing `DATA_DIR`.** With the default local WAL, `DATA_DIR` holds payloads, the sled catalog, and resume positions. A fresh disk means Skipprd re-reads the source from the beginning. On ephemeral compute, use `WAL_STORAGE=s3` and a DynamoDB state store instead. See [WAL and buffering](/configuration/buffering) and [State store](/configuration/skippr-store).
 - **Running `RESET PIPELINE`.** It deliberately deletes the WAL and the resume position. The next sync starts from scratch, which duplicates rows in append-only tables unless you clear them too.
 - **Two copies of one pipeline.** Run one `skipprd sync` per pipeline at a time, always against the same `DATA_DIR`. Two copies with separate state each keep their own resume position and both write to the destination.
 

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -13,6 +14,15 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from engine_tag import (
+    allow_version_path_clobber,
+    is_engine_tag,
+    should_write_latest_pointer,
+    staged_relative_path as prefixed_release_path,
+)
 from runtime_plugin_catalog import (
     catalog_sdk_build_fingerprint,
     load_workspace_plugin_catalog,
@@ -69,8 +79,7 @@ def release_bundle_version(raw: Optional[str] = None) -> Optional[str]:
     value = (raw if raw is not None else os.environ.get("SKIPPRD_RELEASE_VERSION") or os.environ.get("GITHUB_REF_NAME") or "").strip()
     if not value or value == "latest":
         return None
-    parts = value.split(".")
-    if len(parts) == 3 and all(part.isdigit() for part in parts):
+    if is_engine_tag(value):
         return value
     return None
 
@@ -273,8 +282,12 @@ def main() -> None:
     catalog_entries = load_workspace_plugin_catalog(workspace)
     publish_targets = published_runtime_plugin_targets(workspace)
     protocol_version = workspace_runtime_protocol_version(workspace)
-    published_index_url = args.published_index_url.strip() or latest_manifest_index_url(
-        public_base_url, args.bucket, args.subdir
+    bundle_version = release_bundle_version(args.bundle_version or None) or ""
+    clobber = allow_version_path_clobber(bundle_version)
+    published_index_url = args.published_index_url.strip() or (
+        ""
+        if clobber
+        else latest_manifest_index_url(public_base_url, args.bucket, args.subdir)
     )
     published_index, published_manifests = load_latest_published_manifests(
         published_index_url
@@ -302,10 +315,11 @@ def main() -> None:
             binary_name = target_binary_name(entry["binary_name"], target.triple)
             source_binary = workspace / target.publish_artifact_dir / binary_name
             if source_binary.exists():
-                staged_relative_path = versioned_artifact_relative_path(
-                    entry, target.triple, binary_name
+                artifact_relative_path = prefixed_release_path(
+                    versioned_artifact_relative_path(entry, target.triple, binary_name),
+                    bundle_version,
                 )
-                staged_binary = output_dir / staged_relative_path
+                staged_binary = output_dir / artifact_relative_path
                 staged_binary.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source_binary, staged_binary)
                 artifacts[target.triple] = {
@@ -314,7 +328,7 @@ def main() -> None:
                         public_base_url,
                         args.bucket,
                         args.subdir,
-                        staged_relative_path.as_posix(),
+                        artifact_relative_path.as_posix(),
                     ),
                     # This is the release/download integrity checksum for the staged binary.
                     "sha256": sha256(source_binary),
@@ -341,7 +355,9 @@ def main() -> None:
                 f"No runtime plugin artifacts were available for {entry['manifest_filename']}"
             )
 
-        manifest_relative_path = versioned_manifest_relative_path(entry)
+        manifest_relative_path = prefixed_release_path(
+            versioned_manifest_relative_path(entry), bundle_version
+        )
         output_manifest_path = output_dir / manifest_relative_path
         output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -390,11 +406,11 @@ def main() -> None:
                         f"Failed to load existing runtime manifest "
                         f"{manifest_relative_path}: HTTP {err.code}"
                     ) from err
-        clobber = version_path_clobber_reason(existing_versioned, manifest_payload)
-        if clobber:
+        clobber_reason = version_path_clobber_reason(existing_versioned, manifest_payload)
+        if clobber_reason and not clobber:
             raise SystemExit(
                 f"{entry['manifest_filename']}: refusing to overwrite "
-                f"{manifest_relative_path.as_posix()}: {clobber}"
+                f"{manifest_relative_path.as_posix()}: {clobber_reason}"
             )
 
         with output_manifest_path.open("w", encoding="utf-8") as handle:
@@ -417,21 +433,21 @@ def main() -> None:
             }
         )
 
-    latest_dir = output_dir / "latest"
-    latest_dir.mkdir(parents=True, exist_ok=True)
-    latest_index_path = latest_dir / "manifest-index.json"
-    latest_index = {
-        "bundle_version": "latest",
-        "sdk_build_fingerprint": catalog_sdk_build_fingerprint(catalog_entries),
-        "manifests": latest_entries,
-    }
-    validate_manifest_index_sdk_build_fingerprint(latest_index, catalog_entries)
-    with latest_index_path.open("w", encoding="utf-8") as handle:
-        json.dump(latest_index, handle, indent=2)
-        handle.write("\n")
-    versioned = release_bundle_version(args.bundle_version or None)
-    if versioned:
-        write_manifest_index(output_dir, versioned, catalog_entries, latest_entries)
+    if should_write_latest_pointer(bundle_version) or not bundle_version:
+        latest_dir = output_dir / "latest"
+        latest_dir.mkdir(parents=True, exist_ok=True)
+        latest_index_path = latest_dir / "manifest-index.json"
+        latest_index = {
+            "bundle_version": "latest",
+            "sdk_build_fingerprint": catalog_sdk_build_fingerprint(catalog_entries),
+            "manifests": latest_entries,
+        }
+        validate_manifest_index_sdk_build_fingerprint(latest_index, catalog_entries)
+        with latest_index_path.open("w", encoding="utf-8") as handle:
+            json.dump(latest_index, handle, indent=2)
+            handle.write("\n")
+    if bundle_version:
+        write_manifest_index(output_dir, bundle_version, catalog_entries, latest_entries)
 
 
 if __name__ == "__main__":
