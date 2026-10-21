@@ -199,6 +199,11 @@ class RustCiTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("ALTER TABLE", alter_matrix)
         self.assertIn('"migrate"', alter_matrix)
+        self.assertLess(
+            alter_matrix.find("for name, sql, expect_ok, needle in FAIL_CLOSED"),
+            alter_matrix.find("20261020_rename_region.sql"),
+            "fail-closed ALTER cases need column region before migrate renames it",
+        )
         self.assertNotIn("DISABLE PIPELINE s3_alter", alter_matrix)
         self.assertIn("MERGE COLUMN", alter_matrix)
         self.assertIn("def sql_ident(", alter_matrix)

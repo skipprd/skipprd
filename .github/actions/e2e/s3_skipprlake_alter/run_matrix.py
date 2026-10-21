@@ -260,28 +260,6 @@ def main() -> None:
     if count != "3":
         raise SystemExit(f"wave1 count {count!r} != 3")
 
-    migrations = work / "migrations"
-    migrations.mkdir(parents=True, exist_ok=True)
-    (migrations / "20261020_rename_region.sql").write_text(
-        bind("ALTER TABLE s3_alter RENAME COLUMN region TO region_code;") + "\n",
-        encoding="utf-8",
-    )
-    migrate = run(
-        [skipprd, "--config", str(config), "migrate", "--pipeline", "s3_alter"],
-        env,
-    )
-    print(migrate.stdout, migrate.stderr, flush=True)
-    if migrate.returncode != 0:
-        raise SystemExit(f"migrate failed: {migrate.returncode}")
-    ok, out = query(
-        skipprd,
-        config,
-        f"SELECT region_code FROM {table} LIMIT 1" if namespace else "SELECT 1",
-        env,
-    )
-    expect("query_after_first_migrate", ok, out, True, None)
-    (migrations / "20261020_rename_region.sql").unlink()
-
     for name, sql, expect_ok, needle in FAIL_CLOSED + SUCCESS:
         ok, out = query(skipprd, config, bind(sql), env)
         expect(name, ok, out, expect_ok, needle)
@@ -318,6 +296,28 @@ def main() -> None:
     count = duckdb(scan, f"SELECT count(*) FROM iceberg_scan('{scan}');").splitlines()[-1]
     if count != "3":
         raise SystemExit(f"count changed during ALTER: {count}")
+
+    migrations = work / "migrations"
+    migrations.mkdir(parents=True, exist_ok=True)
+    (migrations / "20261020_rename_region.sql").write_text(
+        bind("ALTER TABLE s3_alter RENAME COLUMN region TO region_code;") + "\n",
+        encoding="utf-8",
+    )
+    migrate = run(
+        [skipprd, "--config", str(config), "migrate", "--pipeline", "s3_alter"],
+        env,
+    )
+    print(migrate.stdout, migrate.stderr, flush=True)
+    if migrate.returncode != 0:
+        raise SystemExit(f"migrate failed: {migrate.returncode}")
+    ok, out = query(
+        skipprd,
+        config,
+        f"SELECT region_code FROM {table} LIMIT 1" if namespace else "SELECT 1",
+        env,
+    )
+    expect("query_after_first_migrate", ok, out, True, None)
+    (migrations / "20261020_rename_region.sql").unlink()
 
     write_config(template, config, warehouse, endpoint, wave2)
     sync = run(
