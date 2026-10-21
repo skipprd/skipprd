@@ -1,4 +1,4 @@
-use crate::helpers::offset_store::OffsetStore;
+use crate::helpers::offset_store::{JournalKey, OffsetStore};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
@@ -79,8 +79,8 @@ impl Display for MigrationId {
     }
 }
 
-pub fn journal_key(workspace: &str, pipeline: &str) -> String {
-    format!("migration:{workspace}:{pipeline}")
+pub fn journal_key(workspace: &str, pipeline: &str) -> Result<JournalKey, JournalError> {
+    JournalKey::migration(workspace, pipeline).map_err(JournalError::Store)
 }
 
 pub fn latest_phase(
@@ -108,8 +108,8 @@ pub fn committed(log: &MigrationLog, apply: &MigrationApply) -> Result<bool, Jou
     Ok(latest_phase(log, apply)? == Some(MigrationPhase::Committed))
 }
 
-pub fn load(store: &dyn OffsetStore, key: &str) -> Result<MigrationLog, JournalError> {
-    match store.get_bytes(key).map_err(JournalError::Store)? {
+pub fn load(store: &dyn OffsetStore, key: &JournalKey) -> Result<MigrationLog, JournalError> {
+    match store.get_bytes(key.as_str()).map_err(JournalError::Store)? {
         None => Ok(MigrationLog::default()),
         Some(bytes) => {
             bincode::deserialize(&bytes).map_err(|err| JournalError::Store(err.to_string()))
@@ -119,7 +119,7 @@ pub fn load(store: &dyn OffsetStore, key: &str) -> Result<MigrationLog, JournalE
 
 pub fn commit(
     store: &dyn OffsetStore,
-    key: &str,
+    key: &JournalKey,
     apply: &MigrationApply,
     phase: MigrationPhase,
 ) -> Result<(), JournalError> {
@@ -146,7 +146,7 @@ pub fn commit(
     });
     let bytes = bincode::serialize(&log).map_err(|err| JournalError::Store(err.to_string()))?;
     store
-        .fetch_and_update_bytes(key, Box::new(move |_| Some(bytes.clone())))
+        .fetch_and_update_journal(key, Box::new(move |_| Some(bytes.clone())))
         .map_err(JournalError::Store)?;
     Ok(())
 }
@@ -161,19 +161,19 @@ mod tests {
         let db = sled::Config::new().temporary(true).open().unwrap();
         let tree = db.open_tree("t").unwrap();
         let store = SledOffsetStore::new(tree);
-        let key = "migration:ws:p";
+        let key = journal_key("ws", "p").unwrap();
         let first = MigrationApply {
             id: MigrationId::new("m1"),
             checksum: MigrationChecksum::of("one"),
             direction: MigrationDirection::Up,
         };
-        commit(&store, key, &first, MigrationPhase::Committed).unwrap();
+        commit(&store, &key, &first, MigrationPhase::Committed).unwrap();
         let second = MigrationApply {
             id: MigrationId::new("m1"),
             checksum: MigrationChecksum::of("two"),
             direction: MigrationDirection::Up,
         };
-        let err = commit(&store, key, &second, MigrationPhase::Committed).unwrap_err();
+        let err = commit(&store, &key, &second, MigrationPhase::Committed).unwrap_err();
         assert!(matches!(err, JournalError::ChecksumMismatch { .. }));
     }
 
@@ -182,26 +182,26 @@ mod tests {
         let db = sled::Config::new().temporary(true).open().unwrap();
         let tree = db.open_tree("t").unwrap();
         let store = SledOffsetStore::new(tree);
-        let key = "migration:ws:p";
+        let key = journal_key("ws", "p").unwrap();
         let apply = MigrationApply {
             id: MigrationId::new("m1"),
             checksum: MigrationChecksum::of("one"),
             direction: MigrationDirection::Up,
         };
         assert_eq!(
-            latest_phase(&load(&store, key).unwrap(), &apply).unwrap(),
+            latest_phase(&load(&store, &key).unwrap(), &apply).unwrap(),
             None
         );
-        commit(&store, key, &apply, MigrationPhase::WalRewritten).unwrap();
+        commit(&store, &key, &apply, MigrationPhase::WalRewritten).unwrap();
         assert_eq!(
-            latest_phase(&load(&store, key).unwrap(), &apply).unwrap(),
+            latest_phase(&load(&store, &key).unwrap(), &apply).unwrap(),
             Some(MigrationPhase::WalRewritten)
         );
-        commit(&store, key, &apply, MigrationPhase::DestApplied).unwrap();
+        commit(&store, &key, &apply, MigrationPhase::DestApplied).unwrap();
         assert_eq!(
-            latest_phase(&load(&store, key).unwrap(), &apply).unwrap(),
+            latest_phase(&load(&store, &key).unwrap(), &apply).unwrap(),
             Some(MigrationPhase::DestApplied)
         );
-        assert!(!committed(&load(&store, key).unwrap(), &apply).unwrap());
+        assert!(!committed(&load(&store, &key).unwrap(), &apply).unwrap());
     }
 }

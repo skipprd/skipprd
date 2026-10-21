@@ -275,19 +275,6 @@ fn is_no_such_key(
     err.as_service_error().is_some_and(|e| e.is_no_such_key())
 }
 
-fn continuation_after_page(
-    is_truncated: bool,
-    token: Option<String>,
-) -> Result<Option<String>, String> {
-    if !is_truncated {
-        return Ok(None);
-    }
-    match token {
-        Some(t) if !t.is_empty() => Ok(Some(t)),
-        _ => Err("truncated S3 list without continuation token".into()),
-    }
-}
-
 #[async_trait]
 impl WalObjectStore for S3WalObjectStore {
     async fn put(&self, key: &str, body: Vec<u8>) -> PutOutcome {
@@ -364,7 +351,7 @@ impl WalObjectStore for S3WalObjectStore {
                             keys.push(k.to_string());
                         }
                     }
-                    match continuation_after_page(
+                    match crate::helpers::s3::continuation_after_page(
                         resp.is_truncated().unwrap_or(false),
                         resp.next_continuation_token().map(|s| s.to_string()),
                     ) {
@@ -542,10 +529,7 @@ pub fn parse_s3_prefix(prefix_url: &str) -> std::io::Result<(String, String)> {
     Ok((bucket, base))
 }
 
-pub fn snapshot_pair_keys(
-    prefix_url: &str,
-    snapshot_id: &str,
-) -> std::io::Result<(String, String, String)> {
+pub fn snapshot_body_key(prefix_url: &str, snapshot_id: &str) -> std::io::Result<(String, String)> {
     let (bucket, base) = parse_s3_prefix(prefix_url)?;
     let now = chrono::Utc::now();
     let key_prefix = format!(
@@ -556,75 +540,5 @@ pub fn snapshot_pair_keys(
         now.format("%d")
     );
     let seg_key = format!("{}/{}.seg", key_prefix, snapshot_id);
-    let commit_key = format!("{}.commit", seg_key);
-    Ok((bucket, seg_key, commit_key))
-}
-
-/// Un-own then drop the pair. Commit is deleted first; a missing key is fine.
-pub fn commit_key_for_body(seg_key: &str) -> String {
-    format!("{seg_key}.commit")
-}
-
-pub async fn reclaim_owned_pair(
-    store: &dyn WalObjectStore,
-    seg_key: &str,
-    lease: &skippr_lease::LeaseGuard,
-) -> Result<(), String> {
-    lease
-        .require_active_epoch()
-        .map_err(|err| format!("s3 wal reclaim fenced: {err}"))?;
-    store.delete(&commit_key_for_body(seg_key)).await?;
-    lease
-        .require_active_epoch()
-        .map_err(|err| format!("s3 wal reclaim fenced: {err}"))?;
-    store.delete(seg_key).await?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use skippr_lease::{LeaseGuard, PipelineKey, SystemClock};
-    use std::sync::Arc;
-
-    fn test_guard() -> Arc<LeaseGuard> {
-        let key = PipelineKey::new("t", "w", "p").expect("pipeline key");
-        LeaseGuard::single_node(key, Arc::new(SystemClock::new()))
-    }
-
-    #[test]
-    fn reclaim_deletes_commit_before_body() {
-        assert_eq!(commit_key_for_body("p/id.seg"), "p/id.seg.commit");
-    }
-
-    #[tokio::test]
-    async fn reclaim_owned_pair_uses_typed_delete() {
-        let store = MemoryObjectStore::new();
-        store.put("p/id.seg", b"body".to_vec()).await;
-        store.put("p/id.seg.commit", b"commit".to_vec()).await;
-        let guard = test_guard();
-        reclaim_owned_pair(&store, "p/id.seg", guard.as_ref())
-            .await
-            .unwrap();
-        assert!(!store.contains("p/id.seg"));
-        assert!(!store.contains("p/id.seg.commit"));
-    }
-
-    #[test]
-    fn truncated_list_without_token_fails_closed() {
-        match continuation_after_page(true, None) {
-            Err(message) => assert!(message.contains("continuation token")),
-            Ok(_) => panic!("truncated list without a token must fail closed"),
-        }
-        match continuation_after_page(true, Some(String::new())) {
-            Err(_) => {}
-            Ok(_) => panic!("empty continuation token must fail closed"),
-        }
-        assert_eq!(continuation_after_page(false, None).unwrap(), None);
-        assert_eq!(
-            continuation_after_page(true, Some("page-2".into())).unwrap(),
-            Some("page-2".into())
-        );
-    }
+    Ok((bucket, seg_key))
 }

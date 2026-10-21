@@ -282,12 +282,34 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             "https://install.skippr.io/releases/runtime-plugins/latest/manifest-index.json",
         )
 
+    def test_beta_plugin_objects_are_tag_prefixed(self) -> None:
+        from engine_tag import staged_relative_path
+        from runtime_plugin_catalog import versioned_manifest_relative_path
+
+        entry = {
+            "manifest_stem": "s3-source",
+            "package_version": "0.1.1",
+            "manifest_filename": "s3-source.json",
+        }
+        relative = versioned_manifest_relative_path(entry)
+        self.assertEqual(
+            relative,
+            Path("plugins/s3-source/versions/0.1.1/s3-source.json"),
+        )
+        self.assertEqual(
+            staged_relative_path(relative, "18.3.9-beta"),
+            Path("18.3.9-beta/plugins/s3-source/versions/0.1.1/s3-source.json"),
+        )
+        self.assertEqual(staged_relative_path(relative, "18.3.9"), relative)
+
     def test_release_bundle_version_parses_semver_tags(self) -> None:
         self.assertEqual(publish_runtime_plugins.release_bundle_version("15.13.0"), "15.13.0")
+        self.assertEqual(publish_runtime_plugins.release_bundle_version("15.13.0-beta"), "15.13.0-beta")
         self.assertIsNone(publish_runtime_plugins.release_bundle_version("v15.13.0"))
         self.assertIsNone(publish_runtime_plugins.release_bundle_version("python-v0.1.0"))
         self.assertIsNone(publish_runtime_plugins.release_bundle_version("latest"))
         self.assertIsNone(publish_runtime_plugins.release_bundle_version("main"))
+        self.assertIsNone(publish_runtime_plugins.release_bundle_version("15.13.0-rc1"))
 
     def test_fresh_metadata_url_appends_cache_buster(self) -> None:
         fresh_url = publish_runtime_plugins.fresh_metadata_url(

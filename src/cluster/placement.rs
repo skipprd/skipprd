@@ -9,7 +9,6 @@ pub struct ReplicaCandidate {
     pub protocol_min: u32,
     pub protocol_max: u32,
     pub endpoint: std::net::SocketAddr,
-    pub committed_lag: u64,
     pub disk_pressure: bool,
 }
 
@@ -32,11 +31,7 @@ pub fn rank_replicas(
             && !c.disk_pressure
             && crate::cluster::peer::protocol_compatible(c.protocol_min, c.protocol_max)
     });
-    candidates.sort_by(|a, b| {
-        a.committed_lag
-            .cmp(&b.committed_lag)
-            .then_with(|| replica_rank(key, &b.node_id).cmp(&replica_rank(key, &a.node_id)))
-    });
+    candidates.sort_by(|a, b| replica_rank(key, &b.node_id).cmp(&replica_rank(key, &a.node_id)));
     candidates
 }
 
@@ -73,7 +68,6 @@ mod tests {
                 protocol_min: skippr_lease::PROTOCOL_MIN,
                 protocol_max: skippr_lease::PROTOCOL_MAX,
                 endpoint: "127.0.0.1:9".parse().unwrap(),
-                committed_lag: 0,
                 disk_pressure: false,
             }],
         );
@@ -104,7 +98,6 @@ mod tests {
                 protocol_min: skippr_lease::PROTOCOL_MIN,
                 protocol_max: skippr_lease::PROTOCOL_MAX,
                 endpoint: "127.0.0.1:9".parse().unwrap(),
-                committed_lag: 0,
                 disk_pressure: true,
             }],
         );
@@ -128,7 +121,6 @@ mod tests {
                 protocol_min: skippr_lease::PROTOCOL_MIN,
                 protocol_max: skippr_lease::PROTOCOL_MAX,
                 endpoint: "127.0.0.1:9".parse().unwrap(),
-                committed_lag: 0,
                 disk_pressure: false,
             }],
         );
@@ -154,7 +146,6 @@ mod tests {
                     protocol_min: skippr_lease::PROTOCOL_MIN,
                     protocol_max: skippr_lease::PROTOCOL_MAX,
                     endpoint: "127.0.0.1:9".parse().unwrap(),
-                    committed_lag: 0,
                     disk_pressure: false,
                 },
                 ReplicaCandidate {
@@ -164,7 +155,6 @@ mod tests {
                     protocol_min: skippr_lease::PROTOCOL_MIN,
                     protocol_max: skippr_lease::PROTOCOL_MAX,
                     endpoint: "127.0.0.1:10".parse().unwrap(),
-                    committed_lag: 0,
                     disk_pressure: false,
                 },
             ],

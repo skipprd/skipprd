@@ -25,7 +25,7 @@ There is no stdio compatibility path. Runtime plugins now speak the same TCP pro
 
 - WAL persistence and visibility
 - offsets DB writes
-- recovery and WAL replay
+- recovery and WAL catalog hydrate/republish
 - sink/schema orchestration
 - schema state distribution
 
@@ -46,9 +46,9 @@ There is no stdio compatibility path. Runtime plugins now speak the same TCP pro
 
 On restart, the host recovers from committed WAL state first and rebuilds the rest from there:
 
-1. Scan committed WAL segments.
-2. Re-materialize offsets/checkpoint view from committed WAL state.
-3. Re-run any remaining compaction work.
+1. Hydrate live `SegmentRow`s from the WAL catalog.
+2. Republish offsets and checkpoints from those rows.
+3. Re-run any remaining compaction work from `CompactionRow`s.
 4. Resume sources from host-provided checkpoint and materialized offsets.
 
 The offsets DB is therefore a cache of host-owned durable progress, not an authority on its own.
@@ -58,10 +58,10 @@ The offsets DB is therefore a cache of host-owned durable progress, not an autho
 | Crash point | What must be true after restart |
 | --- | --- |
 | Before committed WAL visibility | The batch is not durable yet. The source resumes from the last materialized host state. |
-| After committed WAL visibility, before offsets materialization | WAL replay re-materializes offsets and re-queues compaction. |
+| After committed WAL visibility, before offsets materialization | Catalog republish materializes offsets and re-queues compaction. |
 | After offsets materialization, before sink/schema ack | The host may replay the same compaction with the same `compaction_id`. |
-| After sink/schema ack, before WAL cleanup/tombstone | Replaying the same compaction must still be safe and idempotent. |
-| After WAL cleanup/tombstone | Recovery skips that compaction because the durable work is already complete. |
+| After sink/schema ack, before catalog reclaim | Replaying the same compaction must still be safe and idempotent. |
+| After catalog reclaim (row deleted, payload gone) | Recovery skips that compaction because the durable work is already complete. |
 
 ## Practical implications
 

@@ -223,6 +223,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("github.ref != 'refs/tags/0.0.0'", publish)
         self.assertIn("!startsWith(github.ref, 'refs/tags/test')", publish)
         self.assertIn("!startsWith(github.ref, 'refs/tags/python-')", publish)
+        self.assertIn("!endsWith(github.ref_name, '-beta')", publish)
         self.assertNotIn("startsWith(github.ref, 'refs/tags/python-v')", publish)
         self.assertIn("python_wheel_version.py", publish)
         self.assertIn("SKIPPR_WHEEL_DIST", publish)
@@ -269,14 +270,14 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertNotIn("SKIPPR_VERSION=v", install)
         script = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("unprefixed semver", script)
-        self.assertIn(r"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$", script)
+        self.assertIn(r"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*(-beta)?$", script)
 
     def test_host_release_action_stamps_unprefixed_tags_only(self):
         action = (
             ROOT / ".github" / "actions" / "rust-build-release" / "action.yaml"
         ).read_text(encoding="utf-8")
         self.assertIn("set_root_package_version.py", action)
-        self.assertIn("^[0-9]+\\.[0-9]+\\.[0-9]+$", action)
+        self.assertIn("^[0-9]+\\.[0-9]+\\.[0-9]+(-beta)?$", action)
         self.assertIn("unprefixed semver", action)
         self.assertIn('echo "SKIPPR_CLI_VERSION=$version" >> "$GITHUB_ENV"', action)
         self.assertNotIn('export SKIPPR_CLI_VERSION="${GITHUB_REF_NAME}"', action)
@@ -410,10 +411,13 @@ class PythonBindingsCiTests(unittest.TestCase):
     def test_normalize_semver_rejects_v_prefix(self):
         module = load_set_version()
         self.assertEqual(module.normalize_semver("1.2.3"), "1.2.3")
+        self.assertEqual(module.normalize_semver("1.2.3-beta"), "1.2.3-beta")
         with self.assertRaises(SystemExit):
             module.normalize_semver("v1.2.3")
         with self.assertRaises(SystemExit):
             module.normalize_semver("v0.0.0-rc1")
+        with self.assertRaises(SystemExit):
+            module.normalize_semver("1.2.3-rc1")
         with self.assertRaises(SystemExit):
             module.normalize_semver("python-v0.1.0")
 
@@ -426,6 +430,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         assert spec.loader is not None
         spec.loader.exec_module(module)
         self.assertEqual(module.release_bundle_version("15.13.0"), "15.13.0")
+        self.assertEqual(module.release_bundle_version("15.13.0-beta"), "15.13.0-beta")
         self.assertIsNone(module.release_bundle_version("v15.13.0"))
         self.assertIsNone(module.release_bundle_version("python-v0.1.0"))
         self.assertIsNone(module.release_bundle_version("latest"))

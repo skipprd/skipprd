@@ -53,7 +53,7 @@ pub fn get_namespace_cdc_contract(namespace: &str) -> Option<NamespaceContract> 
 /// WAL-authoritative ownership state from advisory operational hints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CheckpointAuthority {
-    /// Derived from a committed WAL segment (`.seg` + `.seg.commit`).
+    /// Derived from a committed WAL segment (catalog row + payload bytes).
     /// This is the sole proof that Skippr durably owns the corresponding
     /// source events. Recovery rebuilds these from committed segments.
     WalOwnership,

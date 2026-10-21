@@ -97,13 +97,10 @@ pub struct PartitionKey {
 const MAGIC: &[u8; 4] = b"SEGF";
 const PART: &[u8; 4] = b"PART";
 const FOOT: &[u8; 4] = b"FOOT";
-const COMMIT_MAGIC: &[u8; 4] = b"SEGC";
 /// Segment format version. v4 writes a PART `codec` u8 before `data_len`.
 /// v3 (Arrow IPC, no codec byte) remains readable.
 const VERSION: u32 = 4;
-const COMMIT_HEADER_VERSION: u32 = 1;
 const FOOTER_LEN: usize = 4 + 4 + 32;
-const COMMIT_HEADER_LEN: usize = 60;
 
 /// Compact, in-memory-only summary of a WAL PART metadata sidecar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -159,25 +156,8 @@ pub struct SegmentFileMetadata {
     pub num_partitions: u32,
     pub offsets: std::collections::HashMap<OffsetKey, u64>,
     pub index: Vec<SegmentPartitionIndexEntry>,
-    /// SHA-256 of the body prefix (bytes before FOOT). Same digest SEGC carries.
+    /// SHA-256 of the body prefix (bytes before FOOT). Catalog rows store this digest.
     pub body_sha256: [u8; 32],
-}
-
-/// 60-byte `SEGC` commit marker. Presence owns the pair; the digest binds the body.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SegCommitHeader {
-    pub version: u32,
-    pub created_at_secs: u64,
-    pub total_bytes: u64,
-    pub parts_count: u32,
-    pub sha256: [u8; 32],
-}
-
-/// Result of un-owning then dropping a local `.seg` / `.seg.commit` pair.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WalPairReclaim {
-    Removed,
-    AlreadyUnowned,
 }
 
 /// Encoded SEGF body plus FOOT. Offsets live in the body; SEGC is a sibling object.
@@ -295,74 +275,6 @@ pub(crate) fn summarize_part_meta_blob(blob: &[u8]) -> io::Result<SegmentPartMet
 }
 
 impl SegmentFile {
-    /// Build the 60-byte commit header used to gate visibility of a segment file.
-    /// Layout: MAGIC("SEGC"), VERSION(u32 LE), created_at(u64 LE), size(u64 LE), parts(u32 LE), sha256([u8;32])
-    pub fn build_commit_header_bytes(
-        parts_count: u32,
-        total_bytes: u64,
-        sha256: &[u8; 32],
-    ) -> [u8; 60] {
-        let mut buf: [u8; 60] = [0u8; 60];
-        // MAGIC
-        buf[0..4].copy_from_slice(b"SEGC");
-        // VERSION=1
-        buf[4..8].copy_from_slice(&(COMMIT_HEADER_VERSION).to_le_bytes());
-        // created_at
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        buf[8..16].copy_from_slice(&created_at.to_le_bytes());
-        // size
-        buf[16..24].copy_from_slice(&total_bytes.to_le_bytes());
-        // parts
-        buf[24..28].copy_from_slice(&parts_count.to_le_bytes());
-        // sha256
-        buf[28..60].copy_from_slice(sha256);
-        buf
-    }
-
-    pub fn commit_path_for_seg(seg_path: &Path) -> PathBuf {
-        seg_path.with_extension("seg.commit")
-    }
-
-    pub fn parse_commit_header(bytes: &[u8]) -> io::Result<SegCommitHeader> {
-        if bytes.len() < COMMIT_HEADER_LEN {
-            return Err(invalid_data("commit header truncated"));
-        }
-        if &bytes[0..4] != COMMIT_MAGIC {
-            return Err(invalid_data("bad commit magic"));
-        }
-        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        if version != COMMIT_HEADER_VERSION {
-            return Err(invalid_data(format!("commit refused version={version}")));
-        }
-        let mut sha256 = [0u8; 32];
-        sha256.copy_from_slice(&bytes[28..60]);
-        Ok(SegCommitHeader {
-            version,
-            created_at_secs: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
-            total_bytes: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
-            parts_count: u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
-            sha256,
-        })
-    }
-
-    pub fn bind_commit(commit: &SegCommitHeader, meta: &SegmentFileMetadata) -> io::Result<()> {
-        if commit.sha256 != meta.body_sha256 {
-            return Err(invalid_data(
-                "SEGC sha256 does not match FOOT; commit does not name this body",
-            ));
-        }
-        if commit.parts_count != meta.num_partitions {
-            return Err(invalid_data("SEGC parts_count does not match FOOT"));
-        }
-        if commit.total_bytes != meta.total_bytes {
-            return Err(invalid_data("SEGC size does not match segment total_bytes"));
-        }
-        Ok(())
-    }
-
     pub fn verify_body_checksum(bytes: &[u8]) -> io::Result<[u8; 32]> {
         if bytes.len() < FOOTER_LEN {
             return Err(invalid_data("segment too short for FOOT"));
@@ -381,63 +293,36 @@ impl SegmentFile {
         Ok(claimed)
     }
 
-    pub fn admit_owned_pair_bytes(
-        body: &[u8],
-        commit_bytes: &[u8],
-    ) -> io::Result<SegmentFileMetadata> {
-        let claimed = Self::verify_body_checksum(body)?;
-        let commit = Self::parse_commit_header(commit_bytes)?;
-        let meta = Self::read_metadata_from_bytes(body)?;
-        if claimed != meta.body_sha256 {
-            return Err(invalid_data("FOOT digest disagrees with metadata scan"));
-        }
-        Self::bind_commit(&commit, &meta)?;
-        Ok(meta)
-    }
-
-    pub fn admit_owned_pair_path(seg_path: &Path) -> io::Result<SegmentFileMetadata> {
-        let commit_path = Self::commit_path_for_seg(seg_path);
-        let mut buf = [0u8; COMMIT_HEADER_LEN];
-        let mut commit_file = DirectIoFile::open(&commit_path)?;
-        commit_file.read_exact(&mut buf)?;
-        let mut body_file = DirectIoFile::open(seg_path)?;
-        let mut body = Vec::new();
-        body_file.read_to_end(&mut body)?;
-        Self::admit_owned_pair_bytes(&body, &buf)
-    }
-
-    /// SEGF/PART headers of an owned pair, bound to its SEGC marker. Seeks past
-    /// payloads and never hashes the body: payload integrity is proven once at
-    /// admission, startup reconcile, catch-up install, and by readers.
+    /// SEGF/PART headers. Seeks past payloads and never hashes the body:
+    /// payload integrity is proven against the catalog sha on admit.
     pub fn read_index_path(seg_path: &Path) -> io::Result<SegmentFileMetadata> {
         #[cfg(test)]
         INDEX_READS.with(|reads| reads.set(reads.get() + 1));
-        let mut buf = [0u8; COMMIT_HEADER_LEN];
-        fs::File::open(Self::commit_path_for_seg(seg_path))?.read_exact(&mut buf)?;
-        let commit = Self::parse_commit_header(&buf)?;
         let mut reader = io::BufReader::new(fs::File::open(seg_path)?);
-        let meta = Self::read_metadata_from_reader(&mut reader)?;
-        Self::bind_commit(&commit, &meta)?;
+        Self::read_metadata_from_reader(&mut reader)
+    }
+
+    pub fn admit_payload_path(
+        seg_path: &Path,
+        expected_sha: &[u8; 32],
+    ) -> io::Result<SegmentFileMetadata> {
+        let mut body_file = DirectIoFile::open(seg_path)?;
+        let mut body = Vec::new();
+        body_file.read_to_end(&mut body)?;
+        let claimed = Self::verify_body_checksum(&body)?;
+        if &claimed != expected_sha {
+            return Err(invalid_data("payload sha256 does not match catalog row"));
+        }
+        let meta = Self::read_metadata_from_bytes(&body)?;
+        if claimed != meta.body_sha256 {
+            return Err(invalid_data("FOOT digest disagrees with metadata scan"));
+        }
         Ok(meta)
     }
 
     #[cfg(test)]
     pub(crate) fn index_read_count() -> usize {
         INDEX_READS.with(std::cell::Cell::get)
-    }
-
-    pub fn reclaim_local_pair(seg_path: &Path) -> io::Result<WalPairReclaim> {
-        let commit_path = Self::commit_path_for_seg(seg_path);
-        match fs::remove_file(&commit_path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
-        }
-        match fs::remove_file(seg_path) {
-            Ok(()) => Ok(WalPairReclaim::Removed),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(WalPairReclaim::AlreadyUnowned),
-            Err(err) => Err(err),
-        }
     }
 
     /// Read segment metadata from an in-memory buffer.
@@ -594,7 +479,7 @@ impl SegmentFile {
 
     pub fn new(dir: &Path, snapshot_id: &str) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
-        // Record the final path; we write directly and publish via a sibling .seg.commit
+        // Record the final payload path; catalog commit is the ownership record.
         let p_final = dir.join(format!("{}.seg", snapshot_id));
         Ok(SegmentFile { path: p_final })
     }
@@ -773,15 +658,6 @@ pub fn encode_snapshot(
 }
 
 impl SegmentFile {
-    pub fn write_commit_marker(&self, meta: &SegmentFileMetadata) -> io::Result<()> {
-        let buf = Self::build_commit_header_bytes(
-            meta.num_partitions,
-            meta.total_bytes,
-            &meta.body_sha256,
-        );
-        fs::write(Self::commit_path_for_seg(&self.path), buf)
-    }
-
     /// Read one selected PART metadata sidecar directly from its indexed range.
     pub fn read_part_meta_from_reader<R: Read + Seek>(
         reader: &mut R,
@@ -1191,28 +1067,18 @@ mod tests_wal_writer {
     }
 
     #[test]
-    fn admit_owned_pair_binds_segc_to_foot() {
-        let (_dir, seg, sha, meta) = snapshot_one_part("bind");
-        let commit =
-            SegmentFile::build_commit_header_bytes(meta.num_partitions, meta.total_bytes, &sha);
-        fs::write(SegmentFile::commit_path_for_seg(&seg.path), commit).unwrap();
-        let admitted = SegmentFile::admit_owned_pair_path(&seg.path).unwrap();
+    fn admit_payload_path_binds_catalog_sha() {
+        let (_dir, seg, sha, _meta) = snapshot_one_part("bind");
+        let admitted = SegmentFile::admit_payload_path(&seg.path, &sha).unwrap();
         assert_eq!(admitted.body_sha256, sha);
-        let body = fs::read(&seg.path).unwrap();
-        let from_bytes = SegmentFile::admit_owned_pair_bytes(&body, &commit).unwrap();
-        assert_eq!(from_bytes.body_sha256, sha);
     }
 
     #[test]
-    fn admit_owned_pair_refuses_mismatched_segc_digest() {
-        let (_dir, seg, _sha, meta) = snapshot_one_part("mismatch");
-        let wrong = [0u8; 32];
-        let commit =
-            SegmentFile::build_commit_header_bytes(meta.num_partitions, meta.total_bytes, &wrong);
-        let body = fs::read(&seg.path).unwrap();
-        let err = SegmentFile::admit_owned_pair_bytes(&body, &commit).unwrap_err();
+    fn admit_payload_path_refuses_mismatched_catalog_sha() {
+        let (_dir, seg, _sha, _meta) = snapshot_one_part("mismatch");
+        let err = SegmentFile::admit_payload_path(&seg.path, &[0u8; 32]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("SEGC"));
+        assert!(err.to_string().contains("catalog row"));
     }
 
     #[test]
@@ -1226,26 +1092,20 @@ mod tests_wal_writer {
     }
 
     #[test]
-    fn admit_owned_pair_path_refuses_flipped_payload() {
-        let (_dir, seg, sha, meta) = snapshot_one_part("flip-path");
-        let commit =
-            SegmentFile::build_commit_header_bytes(meta.num_partitions, meta.total_bytes, &sha);
-        fs::write(SegmentFile::commit_path_for_seg(&seg.path), commit).unwrap();
+    fn admit_payload_path_refuses_flipped_payload() {
+        let (_dir, seg, sha, _meta) = snapshot_one_part("flip-path");
         let mut body = fs::read(&seg.path).unwrap();
         let flip_at = body.len() - FOOTER_LEN - 1;
         body[flip_at] ^= 0xff;
         fs::write(&seg.path, &body).unwrap();
-        let err = SegmentFile::admit_owned_pair_path(&seg.path).unwrap_err();
+        let err = SegmentFile::admit_payload_path(&seg.path, &sha).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("FOOT sha256"));
     }
 
     #[test]
-    fn read_index_path_binds_segc_without_hashing_the_body() {
+    fn read_index_path_does_not_hash_the_body() {
         let (_dir, seg, sha, meta) = snapshot_one_part("index-only");
-        let commit =
-            SegmentFile::build_commit_header_bytes(meta.num_partitions, meta.total_bytes, &sha);
-        fs::write(SegmentFile::commit_path_for_seg(&seg.path), commit).unwrap();
         let mut body = fs::read(&seg.path).unwrap();
         let flip_at = body.len() - FOOTER_LEN - 1;
         body[flip_at] ^= 0xff;
@@ -1255,64 +1115,14 @@ mod tests_wal_writer {
         assert_eq!(indexed.body_sha256, sha);
         assert_eq!(indexed.index.len(), meta.index.len());
         assert_eq!(indexed.index[0].start, meta.index[0].start);
-        assert!(SegmentFile::admit_owned_pair_path(&seg.path).is_err());
+        assert!(SegmentFile::admit_payload_path(&seg.path, &sha).is_err());
     }
 
     #[test]
-    fn read_index_path_refuses_segc_naming_another_body() {
-        let (_dir, seg, _sha, meta) = snapshot_one_part("index-mismatch");
-        let commit = SegmentFile::build_commit_header_bytes(
-            meta.num_partitions,
-            meta.total_bytes,
-            &[7u8; 32],
-        );
-        fs::write(SegmentFile::commit_path_for_seg(&seg.path), commit).unwrap();
-        let err = SegmentFile::read_index_path(&seg.path).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn read_index_path_requires_the_commit_marker() {
-        let (_dir, seg, _sha, _meta) = snapshot_one_part("index-unowned");
-        let err = SegmentFile::read_index_path(&seg.path).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
-    }
-
-    #[test]
-    fn reclaim_local_pair_unowns_before_dropping_body() {
-        let dir = temp_dir();
-        let seg_path = dir.join("gate.seg");
-        let commit_path = SegmentFile::commit_path_for_seg(&seg_path);
-        fs::create_dir(&seg_path).unwrap();
-        fs::write(&commit_path, b"SEGC").unwrap();
-        let err = SegmentFile::reclaim_local_pair(&seg_path).unwrap_err();
-        assert_ne!(err.kind(), io::ErrorKind::NotFound);
-        assert!(!commit_path.exists(), "commit must be un-owned first");
-        assert!(seg_path.exists(), "body must not be deleted if drop fails");
-    }
-
-    #[test]
-    fn reclaim_local_pair_retries_body_after_commit_already_gone() {
-        let dir = temp_dir();
-        let seg_path = dir.join("orphan-body.seg");
-        fs::write(&seg_path, b"body").unwrap();
-        let result = SegmentFile::reclaim_local_pair(&seg_path).unwrap();
-        assert_eq!(result, WalPairReclaim::Removed);
-        assert!(!seg_path.exists());
-        assert!(!SegmentFile::commit_path_for_seg(&seg_path).exists());
-    }
-
-    #[test]
-    fn reclaim_local_pair_deletes_commit_then_body() {
-        let dir = temp_dir();
-        let seg_path = dir.join("ok.seg");
-        let commit_path = SegmentFile::commit_path_for_seg(&seg_path);
-        fs::write(&seg_path, b"body").unwrap();
-        fs::write(&commit_path, b"commit").unwrap();
-        let result = SegmentFile::reclaim_local_pair(&seg_path).unwrap();
-        assert_eq!(result, WalPairReclaim::Removed);
-        assert!(!seg_path.exists());
-        assert!(!commit_path.exists());
+    fn read_index_path_reads_payload_bytes() {
+        let (_dir, seg, _sha, meta) = snapshot_one_part("index-payload");
+        let admitted = SegmentFile::read_index_path(&seg.path).unwrap();
+        assert_eq!(admitted.num_partitions, meta.num_partitions);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::time::Duration;
 use Result;
 
 use crate::helpers::configuration::Config;
-use crate::helpers::offset_store::{apply_offset_field, OffsetStore, SledOffsetStore};
+use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
 use crate::helpers::offsets::OffsetsError::VacuumError;
 use crate::helpers::Helpers;
 use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
@@ -132,7 +132,6 @@ pub struct Offsets {
     local: Option<LocalOffsets>,
     store: Option<Arc<dyn OffsetStore>>,
     transport: Option<Arc<dyn OffsetTransport>>,
-    checkpoint_transport: Option<Arc<dyn CheckpointTransport>>,
 }
 
 // #[derive(Debug, Error)]
@@ -161,18 +160,10 @@ impl Offsets {
     }
 
     pub fn from_transport(transport: Arc<dyn OffsetTransport>) -> Self {
-        Self::from_runtime_transports(transport, None)
-    }
-
-    pub fn from_runtime_transports(
-        transport: Arc<dyn OffsetTransport>,
-        checkpoint_transport: Option<Arc<dyn CheckpointTransport>>,
-    ) -> Self {
         Self {
             local: None,
             store: None,
             transport: Some(transport),
-            checkpoint_transport,
         }
     }
 
@@ -198,10 +189,6 @@ impl Offsets {
 
     fn transport(&self) -> Option<&Arc<dyn OffsetTransport>> {
         self.transport.as_ref()
-    }
-
-    fn checkpoint_transport(&self) -> Option<&Arc<dyn CheckpointTransport>> {
-        self.checkpoint_transport.as_ref()
     }
 
     pub fn is_remote(&self) -> bool {
@@ -290,7 +277,6 @@ impl Offsets {
                     local: None,
                     store: Some(remote),
                     transport: None,
-                    checkpoint_transport: None,
                 });
             }
             #[cfg(not(any(
@@ -388,7 +374,6 @@ impl Offsets {
             local: Some(LocalOffsets { db, tree }),
             store: Some(backend),
             transport: None,
-            checkpoint_transport: None,
         };
 
         Ok(store)
@@ -659,6 +644,21 @@ impl Offsets {
         crate::store::SledLeaseStore::open(&local.db)
     }
 
+    pub fn open_sled_wal_catalog(
+        &self,
+        fence: skippr_wal_catalog::CatalogFence,
+    ) -> Result<skippr_wal_catalog::SledWalCatalog, String> {
+        let local = self
+            .local
+            .as_ref()
+            .ok_or_else(|| "sled WAL catalog requires a local offset database".to_string())?;
+        let tree = local
+            .db
+            .open_tree("wal_catalog")
+            .map_err(|err| format!("open wal_catalog tree: {err}"))?;
+        Ok(skippr_wal_catalog::SledWalCatalog::open(tree, fence))
+    }
+
     #[cfg(test)]
     pub(crate) fn from_local_db_for_test(db: sled::Db) -> Self {
         let tree = db.open_tree("offsets").expect("Could not open offset tree");
@@ -667,7 +667,6 @@ impl Offsets {
             local: Some(LocalOffsets { db, tree }),
             store: Some(backend),
             transport: None,
-            checkpoint_transport: None,
         }
     }
 
@@ -677,71 +676,50 @@ impl Offsets {
             local: None,
             store: Some(store),
             transport: None,
-            checkpoint_transport: None,
         }
     }
 
-    pub fn set(
+    #[cfg(test)]
+    pub(crate) fn seed_published_offset(
         &self,
         key: &OffsetKey,
-        offset_type: OffsetTypes,
-        offset: u64,
-    ) -> Result<Option<IVec>, OffsetsError> {
-        if self.store.is_none() {
-            return Err(OffsetsError::Store(format!(
-                "remote/source offset handles are read-only; attempted set for {}:{} type={:?} offset={}",
-                key.namespace, key.partition, offset_type, offset
-            )));
-        }
-        self.upsert(key, offset_type, offset)
-            .map_err(|err| OffsetsError::Store(err.to_string()))
-    }
-
-    pub fn insert(
-        &self,
-        key: &OffsetKey,
-        offset_type: OffsetTypes,
-        offset: u64,
-    ) -> Result<Option<IVec>, OffsetsError> {
-        self.merge_offset(key, offset_type, offset, true)
-            .map_err(|err| OffsetsError::Store(err.to_string()))
-    }
-
-    fn merge_offset(
-        &self,
-        key: &OffsetKey,
-        offset_type: OffsetTypes,
-        offset: u64,
-        position_max: bool,
-    ) -> Result<Option<IVec>, sled::Error> {
-        let Some(store) = self.offset_backend() else {
-            return Err(sled::Error::ReportableBug(format!(
-                "Remote offsets are read-only; refusing write for {}:{} type={:?} offset={}",
-                key.namespace, key.partition, offset_type, offset
-            )));
+        filesize: u64,
+        position: u64,
+        closed: u64,
+        seq: u64,
+    ) -> Result<(), String> {
+        let store = self.offset_backend().ok_or("offset store missing")?;
+        let mut bytes = Vec::with_capacity(24);
+        bytes.extend_from_slice(&filesize.to_le_bytes());
+        bytes.extend_from_slice(&position.to_le_bytes());
+        bytes.extend_from_slice(&closed.to_le_bytes());
+        let sha = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&bytes))
         };
-        let schema_err = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-        let schema_err_cb = schema_err.clone();
-        let result = store.fetch_and_update_offset(
-            &key.namespace,
-            &key.partition,
-            Box::new(move |value_opt| {
-                match apply_offset_field(value_opt.clone(), offset_type, offset, position_max) {
-                    Ok(bytes) => Some(bytes),
-                    Err(err) => {
-                        *schema_err_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(err);
-                        value_opt
-                    }
-                }
-            }),
-        );
-        if let Some(err) = schema_err.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            return Err(sled::Error::ReportableBug(err));
-        }
-        match result {
-            Ok(val) => Ok(val.map(IVec::from)),
-            Err(e) => Err(sled::Error::ReportableBug(e.to_string())),
-        }
+        let sk = store.offset_publish_sk(&key.namespace, &key.partition);
+        store
+            .publish_wal_commit(&sk, &bytes, 1, seq, &sha, skippr_lease::PublishMode::Fresh)
+            .map_err(|err| err.to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_published_checkpoint(
+        &self,
+        key: &str,
+        envelope: &CheckpointEnvelope,
+        seq: u64,
+    ) -> Result<(), String> {
+        let store = self.offset_backend().ok_or("offset store missing")?;
+        let bytes = bincode::serialize(envelope).map_err(|err| err.to_string())?;
+        let sha = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&bytes))
+        };
+        let sk = store.checkpoint_publish_sk(key);
+        store
+            .publish_wal_commit(&sk, &bytes, 1, seq, &sha, skippr_lease::PublishMode::Fresh)
+            .map_err(|err| err.to_string())
     }
 
     /// Read the durable offset tuple for a partition with a single store lookup.
@@ -830,25 +808,6 @@ impl Offsets {
         self.try_get(key)
     }
 
-    pub fn remove(&self, key: &OffsetKey) -> Result<Option<IVec>, sled::Error> {
-        let Some(tree) = self.local_tree() else {
-            return Err(sled::Error::ReportableBug(
-                "Remote offsets do not support remove".to_string(),
-            ));
-        };
-        let key = self.build_key(key);
-        let bytes: &[u8] = key.as_bytes();
-
-        match tree.remove(bytes) {
-            Ok(val) => Ok(val),
-            // @todo - enumerate the possible sled::Error errors that can occur
-            Err(err) => Err(sled::Error::ReportableBug(format!(
-                "Failed removing offset for key {:?}, Error: {:?}",
-                key, err
-            ))),
-        }
-    }
-
     #[allow(dead_code)]
     unsafe fn any_as_u8_slice<T: Sized>(&self, p: &T) -> &[u8] {
         ::core::slice::from_raw_parts((p as *const T) as *const u8, ::core::mem::size_of::<T>())
@@ -921,53 +880,6 @@ impl Offsets {
         Ok(resp)
     }
 
-    pub fn upsert(
-        &self,
-        key: &OffsetKey,
-        offset_type: OffsetTypes,
-        offset: u64,
-    ) -> Result<Option<IVec>, sled::Error> {
-        self.merge_offset(key, offset_type, offset, false)
-    }
-
-    pub fn store_checkpoint_envelope(
-        &self,
-        key: &str,
-        envelope: &CheckpointEnvelope,
-    ) -> Result<(), String> {
-        if let Some(store) = self.offset_backend() {
-            let value = bincode::serialize(envelope).map_err(|err| err.to_string())?;
-            return store.put_checkpoint(key, &value);
-        }
-        if self.local_tree().is_none() {
-            let transport = self.checkpoint_transport().ok_or_else(|| {
-                format!("remote offsets have no checkpoint transport for '{}'", key)
-            })?;
-            return transport.store_checkpoint(key, envelope);
-        }
-        let Some(tree) = self.local_tree() else {
-            return Err(format!("offset checkpoint tree missing for '{}'", key));
-        };
-        let sled_key = Self::checkpoint_storage_key(key);
-        let value = bincode::serialize(envelope).map_err(|err| err.to_string())?;
-        tree.insert(sled_key.as_bytes(), value)
-            .map_err(|err| err.to_string())?;
-        Ok(())
-    }
-
-    pub fn store_checkpoint_payload<T: serde::Serialize>(
-        &self,
-        key: &str,
-        authority: CheckpointAuthority,
-        kind: CheckpointKind,
-        payload_version: u32,
-        payload: &T,
-    ) -> Result<(), String> {
-        let envelope = CheckpointEnvelope::from_payload(authority, kind, payload_version, payload)
-            .map_err(|err| err.to_string())?;
-        self.store_checkpoint_envelope(key, &envelope)
-    }
-
     pub fn load_checkpoint_envelope(
         &self,
         key: &str,
@@ -1034,8 +946,8 @@ mod tests {
 
     use crate::helpers::configuration::Config;
     use crate::helpers::offsets::{
-        CheckpointTransport, OffsetKey, OffsetTransport, OffsetTypes, OffsetValue, Offsets,
-        OffsetsError, RuntimeOffsetOperation, RuntimeOffsetValue,
+        OffsetKey, OffsetTransport, OffsetTypes, OffsetValue, Offsets, OffsetsError,
+        RuntimeOffsetOperation, RuntimeOffsetValue,
     };
     use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 
@@ -1077,24 +989,9 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct RecordingCheckpointTransport {
-        calls: Mutex<Vec<(String, CheckpointEnvelope)>>,
-    }
-
-    impl CheckpointTransport for RecordingCheckpointTransport {
-        fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((key.to_string(), envelope.clone()));
-            Ok(())
-        }
-    }
-
     #[test]
     #[serial]
-    fn test_insert_position() {
+    fn published_position_is_readable() {
         let db = match Offsets::init(&Config::new()) {
             Ok(offsets) => offsets,
             Err(e) => {
@@ -1110,7 +1007,7 @@ mod tests {
             partition: "bar".to_string(),
         };
 
-        assert_eq!(db.insert(key, OffsetTypes::Position, 1).unwrap(), None);
+        db.seed_published_offset(key, 0, 1, 0, 1).unwrap();
         assert_eq!(
             db.validate(key, OffsetTypes::Position, 1).unwrap(),
             Some(false)
@@ -1120,51 +1017,7 @@ mod tests {
             Some(true)
         );
 
-        let return_val = sled::IVec::from(
-            OffsetValue {
-                filesize: U64::new(0),
-                line: U64::new(1),
-                closed: U64::new(0),
-            }
-            .as_bytes(),
-        );
-        assert_eq!(
-            db.insert(key, OffsetTypes::Position, 2).unwrap(),
-            Some(return_val)
-        );
-        assert_eq!(
-            db.validate(key, OffsetTypes::Position, 1).unwrap(),
-            Some(false)
-        );
-        assert_eq!(
-            db.validate(key, OffsetTypes::Position, 2).unwrap(),
-            Some(false)
-        );
-        assert_eq!(
-            db.validate(key, OffsetTypes::Position, 3).unwrap(),
-            Some(true)
-        );
-
-        let return_val = sled::IVec::from(
-            OffsetValue {
-                filesize: U64::new(0),
-                line: U64::new(2),
-                closed: U64::new(0),
-            }
-            .as_bytes(),
-        );
-        assert_eq!(
-            db.insert(key, OffsetTypes::Position, 3).unwrap(),
-            Some(return_val)
-        );
-        assert_eq!(
-            db.validate(key, OffsetTypes::Position, 1).unwrap(),
-            Some(false)
-        );
-        assert_eq!(
-            db.validate(key, OffsetTypes::Position, 2).unwrap(),
-            Some(false)
-        );
+        db.seed_published_offset(key, 0, 3, 0, 2).unwrap();
         assert_eq!(
             db.validate(key, OffsetTypes::Position, 3).unwrap(),
             Some(false)
@@ -1173,37 +1026,13 @@ mod tests {
             db.validate(key, OffsetTypes::Position, 4).unwrap(),
             Some(true)
         );
-
-        let return_val = sled::IVec::from(
-            OffsetValue {
-                filesize: U64::new(0),
-                line: U64::new(3),
-                closed: U64::new(0),
-            }
-            .as_bytes(),
-        );
-        assert_eq!(
-            db.insert(key, OffsetTypes::Position, 3).unwrap(),
-            Some(return_val)
-        );
-
-        let return_val = sled::IVec::from(
-            OffsetValue {
-                filesize: U64::new(0),
-                line: U64::new(3),
-                closed: U64::new(0),
-            }
-            .as_bytes(),
-        );
-        assert_eq!(
-            db.insert(key, OffsetTypes::Position, 2).unwrap(),
-            Some(return_val)
-        );
+        let snap = db.snapshot_value(key).unwrap().unwrap();
+        assert_eq!(snap.line.get(), 3);
     }
 
     #[test]
     #[serial]
-    fn insert_position_preserves_closed() {
+    fn published_tuple_keeps_closed_and_position() {
         let db = match Offsets::init(&Config::new()) {
             Ok(offsets) => offsets,
             Err(e) => {
@@ -1216,8 +1045,7 @@ mod tests {
             namespace: "foo".to_string(),
             partition: "closed-preserve".to_string(),
         };
-        db.insert(key, OffsetTypes::Closed, 1).unwrap();
-        db.insert(key, OffsetTypes::Position, 42).unwrap();
+        db.seed_published_offset(key, 0, 42, 1, 1).unwrap();
         let snap = db.snapshot_value(key).unwrap().unwrap();
         assert_eq!(snap.closed.get(), 1);
         assert_eq!(snap.line.get(), 42);
@@ -1236,12 +1064,9 @@ mod tests {
         fn get_bytes(&self, _sk: &str) -> Result<Option<Vec<u8>>, String> {
             Err("checkpoint store down".into())
         }
-        fn put_bytes(&self, _sk: &str, _bytes: &[u8]) -> Result<(), String> {
-            Err("checkpoint store down".into())
-        }
-        fn fetch_and_update_bytes(
+        fn fetch_and_update_journal(
             &self,
-            _sk: &str,
+            _key: &crate::helpers::offset_store::JournalKey,
             _update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
         ) -> Result<Option<Vec<u8>>, String> {
             Err("checkpoint store down".into())
@@ -1253,21 +1078,32 @@ mod tests {
         ) -> Result<Option<Vec<u8>>, String> {
             Err("checkpoint store down".into())
         }
-        fn fetch_and_update_offset(
-            &self,
-            _namespace: &str,
-            _partition: &str,
-            _update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
-        ) -> Result<Option<Vec<u8>>, String> {
-            Err("checkpoint store down".into())
-        }
         fn get_checkpoint(&self, _key: &str) -> Result<Option<Vec<u8>>, String> {
             Err("checkpoint store down".into())
         }
-        fn put_checkpoint(&self, _key: &str, _bytes: &[u8]) -> Result<(), String> {
+        fn flush(&self) -> Result<(), String> {
             Err("checkpoint store down".into())
         }
-        fn flush(&self) -> Result<(), String> {
+        fn publish_wal_commit(
+            &self,
+            _sk: &str,
+            _bytes: &[u8],
+            _epoch: u64,
+            _seq: u64,
+            _payload_sha256: &str,
+            _mode: skippr_lease::PublishMode,
+        ) -> Result<(), skippr_lease::OffsetPublishError> {
+            Err(skippr_lease::OffsetPublishError::Transient(
+                "checkpoint store down".into(),
+            ))
+        }
+        fn offset_publish_sk(&self, namespace: &str, partition: &str) -> String {
+            format!("{namespace}-{partition}")
+        }
+        fn checkpoint_publish_sk(&self, key: &str) -> String {
+            format!("cdc_checkpoint:{key}")
+        }
+        fn reset_published_ingest(&self) -> Result<(), String> {
             Err("checkpoint store down".into())
         }
     }
@@ -1308,7 +1144,7 @@ mod tests {
         };
 
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 1).unwrap(), None);
-        db.set(key, OffsetTypes::Filesize, 1).unwrap();
+        db.seed_published_offset(key, 1, 0, 0, 1).unwrap();
         assert_eq!(
             db.validate(key, OffsetTypes::Filesize, 1).unwrap(),
             Some(false)
@@ -1317,7 +1153,7 @@ mod tests {
             db.validate(key, OffsetTypes::Filesize, 2).unwrap(),
             Some(true)
         );
-        db.set(key, OffsetTypes::Filesize, 2).unwrap();
+        db.seed_published_offset(key, 2, 0, 0, 2).unwrap();
         assert_eq!(
             db.validate(key, OffsetTypes::Filesize, 1).unwrap(),
             Some(false)
@@ -1346,7 +1182,7 @@ mod tests {
 
         assert_eq!(db.validate(key, OffsetTypes::Closed, 0).unwrap(), None);
         assert_eq!(db.validate(key, OffsetTypes::Closed, 1).unwrap(), None);
-        db.set(key, OffsetTypes::Closed, 1).unwrap();
+        db.seed_published_offset(key, 0, 0, 1, 1).unwrap();
         assert_eq!(
             db.validate(key, OffsetTypes::Closed, 1).unwrap(),
             Some(true)
@@ -1355,7 +1191,7 @@ mod tests {
             db.validate(key, OffsetTypes::Closed, 0).unwrap(),
             Some(false)
         );
-        db.set(key, OffsetTypes::Closed, 42).unwrap();
+        db.seed_published_offset(key, 0, 0, 42, 2).unwrap();
         assert_eq!(
             db.validate(key, OffsetTypes::Closed, 1).unwrap(),
             Some(true)
@@ -1377,24 +1213,13 @@ mod tests {
     #[test]
     fn test_remote_offsets_route_transport_calls() {
         let transport = Arc::new(RecordingOffsetTransport::default());
-        let checkpoints = Arc::new(RecordingCheckpointTransport::default());
-        let offsets =
-            Offsets::from_runtime_transports(transport.clone(), Some(checkpoints.clone()));
+        let offsets = Offsets::from_transport(transport.clone());
         let key = OffsetKey::new("remote-ns", "remote-partition");
 
         assert_eq!(
             offsets.validate(&key, OffsetTypes::Closed, 1).unwrap(),
             Some(true)
         );
-        offsets
-            .store_checkpoint_payload(
-                "remote-key",
-                CheckpointAuthority::AdvisoryHint,
-                CheckpointKind::AdvisoryProgress,
-                1,
-                &b"value".to_vec(),
-            )
-            .unwrap();
         assert_eq!(
             offsets
                 .load_checkpoint_payload::<Vec<u8>>("remote-key")
@@ -1417,28 +1242,16 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(
-            checkpoints.calls.lock().unwrap().clone(),
-            vec![(
-                "remote-key".to_string(),
-                CheckpointEnvelope::from_payload(
-                    CheckpointAuthority::AdvisoryHint,
-                    CheckpointKind::AdvisoryProgress,
-                    1,
-                    &b"value".to_vec(),
-                )
-                .unwrap(),
-            )]
-        );
     }
 
     #[test]
-    fn remote_offset_writes_fail_instead_of_silently_nooping() {
-        let offsets = Offsets::from_transport(Arc::new(RecordingOffsetTransport::default()));
-        let key = OffsetKey::new("remote-ns", "remote-partition");
-
-        let err = offsets.set(&key, OffsetTypes::Position, 42).unwrap_err();
-        assert!(err.to_string().contains("read-only"));
+    fn remote_offset_store_has_no_write_api() {
+        let offsets = include_str!("offsets.rs");
+        assert!(!offsets.contains(concat!("pub fn set", "(")));
+        assert!(!offsets.contains(concat!("pub fn insert", "(")));
+        assert!(!offsets.contains(concat!("pub fn store_checkpoint", "_envelope")));
+        assert!(!offsets.contains(concat!("pub fn rem", "ove(")));
+        assert!(!offsets.contains(concat!("checkpoint_trans", "port:")));
     }
 
     #[test]

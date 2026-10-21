@@ -18,7 +18,7 @@ use datafusion::prelude::*;
 use serde_json::{json, Value};
 use tracing::{error, info, warn};
 
-use crate::buffer::ingest_buffer::{wal_recover, Buffers};
+use crate::buffer::ingest_buffer::Buffers;
 use crate::buffer::BufferChunker;
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::helpers::configuration::Config;
@@ -240,33 +240,55 @@ fn sync_status_telemetry(
     }
 }
 
-async fn cleanup_discover_ingest_artifacts(config: &Config) {
+async fn cleanup_discover_ingest_artifacts(
+    config: &Config,
+    offsets: &crate::helpers::offsets::Offsets,
+) -> Result<(), String> {
+    match crate::pipeline_backend::configured_kind(config) {
+        Ok(crate::helpers::wal_storage::SkipprStoreKind::Sled) => {
+            let fence = skippr_wal_catalog::CatalogFence {
+                owner: skippr_lease::NodeId::single_node(),
+                epoch: skippr_lease::LeaseEpoch::SINGLE_NODE,
+            };
+            crate::pipeline_backend::reset_pipeline_state(config, offsets, fence)?;
+        }
+        Ok(
+            crate::helpers::wal_storage::SkipprStoreKind::DynamoDb
+            | crate::helpers::wal_storage::SkipprStoreKind::CloudTables,
+        ) => {
+            let lease = crate::pipeline_backend::acquire_ingest_lease(config, offsets).await?;
+            let fence = skippr_wal_catalog::CatalogFence {
+                owner: lease.session.owner,
+                epoch: lease.session.epoch,
+            };
+            let reset = crate::pipeline_backend::reset_pipeline_state(config, offsets, fence);
+            lease.release_after_quiesce(true).await;
+            reset?;
+        }
+        Err(err) => return Err(err),
+    }
+
     match config.get_wal_storage() {
         crate::helpers::wal_storage::WalStorage::S3 => {
             let prefix = config.get_wal_s3_prefix();
-            match crate::helpers::s3::delete_prefix(&config.get_skippr_s3_bucket(), &prefix).await {
-                Ok(deleted) if deleted > 0 => {
-                    info!(
-                        "Discover cleanup: removed {} leaked S3 WAL objects under {}",
-                        deleted, prefix
-                    );
-                }
-                Ok(_) => {}
-                Err(err) => warn!(
-                    "Discover cleanup: failed to remove S3 WAL prefix {}: {}",
-                    prefix, err
-                ),
+            let deleted =
+                crate::helpers::s3::delete_prefix(&config.get_skippr_s3_bucket(), &prefix).await?;
+            if deleted > 0 {
+                info!(
+                    "Discover cleanup: removed {} leaked S3 WAL objects under {}",
+                    deleted, prefix
+                );
             }
         }
         crate::helpers::wal_storage::WalStorage::Disk
         | crate::helpers::wal_storage::WalStorage::Clustered => {}
     }
 
-    // Do not `remove_dir_all(DATA_DIR)`: for `SKIPPRD_EL_STORAGE_MODE=local`, pipeline metadata
-    // and config live under DATA_DIR (`{tenant}/{workspace}/{pipeline}/...`). Only strip
-    // transient ingest/WAL/runtime-child paths so implicit discover cannot leave recoverable
-    // WAL/offsets while keeping persisted metadata intact.
+    // Do not `remove_dir_all(DATA_DIR)` or the sled `db` directory: pipeline metadata
+    // and the `pipeline_leases` tree live under DATA_DIR. Prefix-delete catalog and
+    // offset rows; only strip transient ingest/WAL/runtime-child paths.
     cleanup_discover_local_pipeline_artifacts(&config.get_data_dir());
+    Ok(())
 }
 
 fn cleanup_discover_local_pipeline_artifacts(data_dir: &str) {
@@ -296,12 +318,11 @@ fn cleanup_discover_local_pipeline_artifacts(data_dir: &str) {
         }
     }
 
-    let paths: [&str; 5] = [
+    let paths: [&str; 4] = [
         "source",
         "output",
         "segment_buffer",
         "runtime_source_children",
-        SLED_NAME,
     ];
     for rel in paths {
         best_effort_remove_dir(Path::new(data_dir).join(rel).as_path());
@@ -699,7 +720,9 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
     METADATA.store(Arc::new(updated_metadata.clone()));
 
     config.set_metadata(&updated_metadata, true).await;
-    cleanup_discover_ingest_artifacts(config).await;
+    cleanup_discover_ingest_artifacts(config, offsets_db.as_ref())
+        .await
+        .map_err(io::Error::other)?;
 
     let namespaces_discovered = updated_metadata.metadata.len();
     let total_fields = updated_metadata
@@ -951,15 +974,29 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
         ),
     };
 
-    if matches!(
-        config.get_wal_storage(),
-        crate::helpers::wal_storage::WalStorage::Disk | crate::helpers::wal_storage::WalStorage::S3
-    ) {
-        let guard = pipeline_lease
-            .as_ref()
-            .map(|lease| lease.guard.clone())
-            .ok_or_else(|| io::Error::other("pipeline writer lease is not installed"))?;
-        crate::buffer::wal_store::ensure_disk_durable_store(config, offsets_db.clone(), guard)?;
+    match config.get_wal_storage() {
+        crate::helpers::wal_storage::WalStorage::Disk
+        | crate::helpers::wal_storage::WalStorage::S3 => {
+            let guard = pipeline_lease
+                .as_ref()
+                .map(|lease| lease.guard.clone())
+                .ok_or_else(|| io::Error::other("pipeline writer lease is not installed"))?;
+            let handle = crate::buffer::wal_store::ensure_disk_wal_handle(
+                config,
+                offsets_db.clone(),
+                guard,
+            )?;
+            crate::buffer::wal_startup::wal_startup(handle.as_ref(), config, true)
+                .await
+                .map_err(|err| io::Error::other(format!("Failed to start WAL catalog: {err}")))?;
+        }
+        crate::helpers::wal_storage::WalStorage::Clustered => {}
+    }
+
+    if let Some(lease) = &pipeline_lease {
+        lease.activate().map_err(|err| {
+            io::Error::other(format!("pipeline writer lease activate failed: {err}"))
+        })?;
     }
 
     let journal = offsets_db
@@ -972,18 +1009,6 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
     )
     .await
     .map_err(io::Error::other)?;
-
-    let _offsets_clone = offsets_db.clone();
-
-    wal_recover(config, offsets_db.clone())
-        .await
-        .map_err(|err| io::Error::other(format!("Failed to recover WAL index: {err}")))?;
-
-    if let Some(lease) = &pipeline_lease {
-        lease.activate().map_err(|err| {
-            io::Error::other(format!("pipeline writer lease activate failed: {err}"))
-        })?;
-    }
 
     {
         METRICS.write().status = MetricsStatus::Running;
@@ -1290,12 +1315,7 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
             error!("{}", message);
             finalization_error = Some(message);
         }
-        let (scanned_commits, removed_orphans, orphan_errors) =
-            Buffers::cleanup_orphan_seg_commits(config, 200_000);
-        info!(
-            "Finalising: orphan commit cleanup scanned={} removed={} errors={}",
-            scanned_commits, removed_orphans, orphan_errors
-        );
+        info!("Finalising: catalog reclaim is driven by CompactionRow Acked rows");
         info!(
             "Finalising: compaction+cleanup finished in {:?}",
             finalising_started.elapsed()
@@ -1739,6 +1759,77 @@ mod wal_only_tests {
         .unwrap();
         let bound = config.bind_pipeline("bikehire");
         assert!(!wal_only(&bound));
+    }
+}
+
+#[cfg(test)]
+mod discover_cleanup_tests {
+    use super::{cleanup_discover_ingest_artifacts, cleanup_discover_local_pipeline_artifacts};
+    use crate::helpers::configuration::Config;
+    use crate::helpers::offsets::{Offsets, SLED_NAME};
+    use serde_json::json;
+    use serial_test::serial;
+
+    #[test]
+    fn discover_cleanup_keeps_sled_db_and_strips_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join(SLED_NAME);
+        std::fs::create_dir_all(&db).unwrap();
+        std::fs::write(db.join("keep"), b"x").unwrap();
+        std::fs::create_dir_all(dir.path().join("segment_buffer")).unwrap();
+        cleanup_discover_local_pipeline_artifacts(dir.path().to_str().unwrap());
+        assert!(db.join("keep").exists());
+        assert!(!dir.path().join("segment_buffer").exists());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn discover_cleanup_does_not_delete_payloads_when_reset_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_root = dir.path().join("data");
+        let old_wal = std::env::var("WAL_STORAGE").ok();
+        Config::set_wal_storage("disk");
+        let config: Config = serde_json::from_value(json!({
+            "skippr": {
+                "workspace": "ws",
+                "tenant": "t",
+                "store": { "type": "dynamodb", "name": "offsets" }
+            },
+            "pipelines": {
+                "orders": {
+                    "data_source": "data_sources.sample",
+                    "data_dir": data_root.to_str().unwrap()
+                }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p/" } }
+            }
+        }))
+        .unwrap();
+        let bound = config.bind_pipeline("orders");
+        let data_dir = bound.try_data_dir().unwrap();
+        let payload = std::path::Path::new(&data_dir)
+            .join("segment_buffer")
+            .join("keep.seg");
+        std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        std::fs::write(&payload, b"owned").unwrap();
+        let offsets = Offsets::from_local_db_for_test(sled::open(dir.path().join("db")).unwrap());
+        let result = cleanup_discover_ingest_artifacts(&bound, &offsets).await;
+        if let Some(value) = old_wal {
+            Config::set_wal_storage(&value);
+        } else {
+            std::env::remove_var("WAL_STORAGE");
+            Config::set_evncache("WAL_STORAGE", "");
+        }
+        let err = result.expect_err("reset failure must fail closed");
+        assert!(
+            err.contains("dynamodb") || err.contains("lease") || err.contains("feature"),
+            "{err}"
+        );
+        assert!(
+            payload.exists(),
+            "payloads must outlive a failed catalog reset"
+        );
     }
 }
 

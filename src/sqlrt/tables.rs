@@ -814,33 +814,21 @@ async fn wal_child_provider(
         Some(gossip) => gossip.known_ads().await,
         None => Vec::new(),
     };
-    let paths = match crate::cluster::wal_head::local_wal_paths(&view.key, opts.registry.as_deref())
-        .await
-    {
-        Some(paths) => Some(paths),
-        None => view
-            .query_wal_paths()
-            .map_err(|err| DataFusionError::Plan(err.to_string()))?,
-    };
     if crate::cluster::identity::process_query_bind().is_none() {
-        let Some(paths) = paths else {
+        if crate::buffer::wal_handle::wal_handle_for(&view.key).is_none() {
             return Ok(None);
-        };
+        }
         return Ok(Some(Arc::new(
-            crate::sqlrt::wal_table::WalTableProvider::live_unpinned(
+            crate::sqlrt::wal_table::WalTableProvider::new(
                 schema,
                 view.key.clone(),
                 namespace.to_string(),
                 exclude_segment_ids.to_vec(),
-                paths,
             ),
         )));
     }
-    let local_committed = if paths.is_some() {
-        crate::cluster::wal_head::local_committed_for(&view.key, opts.registry.as_deref()).await
-    } else {
-        None
-    };
+    let local_committed =
+        crate::cluster::wal_head::local_catalog_seq_for(&view.key, opts.registry.as_deref()).await;
     let pipeline = view.key.clone();
     let identity = opts.identity.clone();
     let pick = crate::cluster::wal_head::pick_wal_endpoint(
@@ -1061,8 +1049,8 @@ mod tests {
             "WAL-only File pipelines must register a WAL TableProvider"
         );
         assert!(
-            prod.contains("query_wal_paths"),
-            "query() has no durable store; WAL paths come from PipelineConfigView"
+            prod.contains("wal_handle_for"),
+            "WAL child is catalog-backed PipelineWalHandle, not PipelineConfigView paths"
         );
         assert!(
             !prod.contains("falling back to {}"),

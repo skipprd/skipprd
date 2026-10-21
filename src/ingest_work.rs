@@ -998,7 +998,7 @@ type IngestPartitionKey = (String, String, String, Option<i64>, String);
 /// when there is no deadletter sink. Returns false if the request already failed.
 fn commit_deadletters(
     config: &Config,
-    offset_db: &Offsets,
+    _offset_db: &Offsets,
     submit_id: u64,
     buf: &mut HashMap<IngestPartitionKey, IngestBufferBatch>,
     dl_records: Vec<DeadletterRecord>,
@@ -1068,27 +1068,28 @@ fn commit_deadletters(
         }
     }
     if !dl_offsets_committed && !dl_offsets.is_empty() {
-        for (ok, pos) in dl_offsets.drain() {
-            let offset_key = OffsetKey {
-                namespace: ok.namespace.clone(),
-                partition: ok.partition.clone(),
-            };
-            if let Err(err) = offset_db.set(&offset_key, OffsetTypes::Closed, 1) {
-                warn!("deadletter offset closed publish failed: {err}");
-                if submit_id != 0 {
-                    crate::buffer::wal_writer::fail_request(
-                        submit_id,
-                        format!("deadletter offset closed publish failed: {err}"),
-                    );
-                }
-                return false;
+        let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() else {
+            warn!("deadletter offset publish failed: WAL catalog handle missing");
+            if submit_id != 0 {
+                crate::buffer::wal_writer::fail_request(
+                    submit_id,
+                    "deadletter offset publish failed: WAL catalog handle missing".to_string(),
+                );
             }
-            if let Err(err) = offset_db.set(&offset_key, OffsetTypes::Position, pos) {
-                warn!("deadletter offset position publish failed: {err}");
+            return false;
+        };
+        for (ok, pos) in dl_offsets.drain() {
+            if let Err(err) = crate::buffer::wal_store::block_on_async(async {
+                handle
+                    .persist_offset_hint(&ok.namespace, &ok.partition, pos, true)
+                    .await
+                    .map_err(|err| std::io::Error::other(err.to_string()))
+            }) {
+                warn!("deadletter offset publish failed: {err}");
                 if submit_id != 0 {
                     crate::buffer::wal_writer::fail_request(
                         submit_id,
-                        format!("deadletter offset position publish failed: {err}"),
+                        format!("deadletter offset publish failed: {err}"),
                     );
                 }
                 return false;
@@ -1670,8 +1671,7 @@ impl Ingest {
         low_watermark: u8,
     ) -> DataDirCapacityDecision {
         let _sweep = crate::buffer::ingest_buffer::Buffers::sweep_pressure_safe(config);
-        let reconcile =
-            crate::buffer::ingest_buffer::Buffers::reconcile_missing_cache_entries(config);
+        let reconcile = crate::buffer::ingest_buffer::Buffers::catalog_pressure_reconcile(config);
         let refreshed = Self::data_dir_disk_usage(config);
         let (avail_bytes, total_bytes, used_pct) =
             refreshed.unwrap_or((avail_bytes, total_bytes, used_pct));
@@ -2898,11 +2898,20 @@ impl Ingest {
             arrow_bytes,
             done: done_tx,
         };
+        let wal_started = Instant::now();
         if let Err(err) = handle.block_on(crate::buffer::wal_writer::submit(unit)) {
-            error!("Copy: WAL writer enqueue failed: {}", err);
+            error!(
+                elapsed_ms = wal_started.elapsed().as_millis() as u64,
+                "Copy: WAL writer enqueue failed: {err}"
+            );
             if submit_id != 0 {
                 crate::buffer::wal_writer::fail_request(submit_id, err.to_string());
             }
+        } else if wal_started.elapsed() >= Duration::from_secs(1) {
+            info!(
+                elapsed_ms = wal_started.elapsed().as_millis() as u64,
+                raw_bytes, arrow_bytes, "Copy: WAL writer enqueue was slow"
+            );
         }
     }
 

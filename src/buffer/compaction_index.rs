@@ -273,10 +273,7 @@ impl ManifestIndex {
         if let Some(old) = self.records.remove(&id) {
             self.remove_fences(&id, &old.txn.refs);
         }
-        if matches!(
-            txn.state,
-            CompactionTransactionState::Tombstoned | CompactionTransactionState::Acked
-        ) {
+        if matches!(txn.state, CompactionTransactionState::Acked) {
             return;
         }
         self.add_fences(&id, &txn.refs);
@@ -430,7 +427,6 @@ fn manifest_is_ready(txn: &CompactionTransaction, now_secs: u64, sent_stale_secs
         CompactionTransactionState::Sent => {
             now_secs.saturating_sub(txn.updated_at_secs) >= sent_stale_secs
         }
-        CompactionTransactionState::Tombstoned => false,
     }
 }
 

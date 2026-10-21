@@ -87,7 +87,7 @@ jobs:
           path: skipprd/target/wheels/*.whl
           if-no-files-found: error
   python-publish:
-    if: github.repository == 'skipprd/skipprd' && startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test') && !startsWith(github.ref, 'refs/tags/python-')
+    if: github.repository == 'skipprd/skipprd' && startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test') && !startsWith(github.ref, 'refs/tags/python-') && !endsWith(github.ref_name, '-beta')
     needs: [linux, darwin]
     runs-on: ubuntu-latest
     permissions:

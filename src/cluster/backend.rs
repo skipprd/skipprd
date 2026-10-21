@@ -157,12 +157,11 @@ pub async fn reopen_iceberg_catalog(
     open_iceberg_catalog_spec(&spec).await
 }
 
-pub fn offset_publisher_for(
+pub fn open_cluster_offset_store(
     app_cfg: &Config,
     config: &ClusterConfig,
     key: &skippr_lease::PipelineKey,
-) -> Result<crate::buffer::durable::store::OffsetMode, skippr_lease::DurableError> {
-    use crate::buffer::durable::store::OffsetMode;
+) -> Result<Arc<dyn crate::helpers::offset_store::OffsetStore>, skippr_lease::DurableError> {
     use skippr_lease::DurableError;
     if uses_cloud_tables(app_cfg) {
         #[cfg(feature = "offset-store-cloud-tables")]
@@ -173,9 +172,7 @@ pub fn offset_publisher_for(
                 false,
             )
             .map_err(DurableError::ProtocolMismatch)?;
-            return Ok(OffsetMode::Dynamo(
-                crate::buffer::durable::store::CloudOffsetPublisher::new(Arc::new(store)),
-            ));
+            return Ok(Arc::new(store));
         }
         #[cfg(not(feature = "offset-store-cloud-tables"))]
         {
@@ -194,9 +191,7 @@ pub fn offset_publisher_for(
             false,
         )
         .map_err(DurableError::ProtocolMismatch)?;
-        Ok(OffsetMode::Dynamo(
-            crate::buffer::durable::store::DynamoOffsetPublisher::new(Arc::new(store)),
-        ))
+        Ok(Arc::new(store))
     }
     #[cfg(not(feature = "offset-store-dynamodb"))]
     {

@@ -36,6 +36,7 @@ pub enum PipelineLifecycle {
 enum WriterKind {
     WalCommit,
     OffsetPublish,
+    CatalogRecovery,
 }
 
 pub struct LeaseGuard {
@@ -115,6 +116,12 @@ impl LeaseGuard {
         self.require_writer_epoch(WriterKind::OffsetPublish)
     }
 
+    /// OwnerElect or ActivePrimary. Legacy import, FormatRow, and Acked
+    /// compaction redo may run before activate. Does not authorize ingest.
+    pub fn require_recovery_epoch(&self) -> Result<LeaseEpoch, FenceError> {
+        self.require_writer_epoch(WriterKind::CatalogRecovery)
+    }
+
     pub fn require_same_active_epoch(&self, expected: LeaseEpoch) -> Result<(), FenceError> {
         self.require_same_epoch(self.require_active_epoch()?, expected)
     }
@@ -154,13 +161,22 @@ impl LeaseGuard {
                     return Ok(session.epoch);
                 }
                 PipelineRole::OwnerElect(session)
-                    if matches!(kind, WriterKind::OffsetPublish)
-                        && self.clock.monotonic_now() < session.local_deadline =>
+                    if matches!(
+                        kind,
+                        WriterKind::OffsetPublish | WriterKind::CatalogRecovery
+                    ) && self.clock.monotonic_now() < session.local_deadline =>
                 {
                     return Ok(session.epoch);
                 }
                 PipelineRole::ActivePrimary(WriteAuthority::Leased(_)) => true,
-                PipelineRole::OwnerElect(_) if matches!(kind, WriterKind::OffsetPublish) => true,
+                PipelineRole::OwnerElect(_)
+                    if matches!(
+                        kind,
+                        WriterKind::OffsetPublish | WriterKind::CatalogRecovery
+                    ) =>
+                {
+                    true
+                }
                 PipelineRole::OwnerElect(_) | PipelineRole::Idle | PipelineRole::Replica { .. } => {
                     return Err(FenceError::NotActive);
                 }
@@ -334,6 +350,10 @@ mod tests {
             guard.require_offset_epoch().unwrap(),
             LeaseEpoch::SINGLE_NODE
         );
+        assert_eq!(
+            guard.require_recovery_epoch().unwrap(),
+            LeaseEpoch::SINGLE_NODE
+        );
     }
 
     #[test]
@@ -443,5 +463,39 @@ mod tests {
         assert_eq!(guard.require_offset_epoch().unwrap(), LeaseEpoch::new(1));
         guard.require_same_offset_epoch(LeaseEpoch::new(1)).unwrap();
         assert_eq!(guard.lifecycle(), PipelineLifecycle::OwnerElect);
+    }
+
+    #[test]
+    fn catalog_recovery_allowed_for_owner_elect_and_active() {
+        let clock = crate::clock::TestClock::new();
+        let session = leased_session(MonoInstant::from_nanos(u64::MAX));
+        let guard = LeaseGuard::owner_elect(key(), session.clone(), clock);
+        assert_eq!(guard.require_recovery_epoch().unwrap(), LeaseEpoch::new(1));
+        assert_eq!(
+            guard.require_active_epoch().unwrap_err(),
+            FenceError::NotActive
+        );
+        guard.activate(session).unwrap();
+        assert_eq!(guard.require_recovery_epoch().unwrap(), LeaseEpoch::new(1));
+        assert_eq!(guard.require_active_epoch().unwrap(), LeaseEpoch::new(1));
+    }
+
+    #[test]
+    fn catalog_recovery_rejected_when_fenced_or_draining() {
+        let clock = crate::clock::TestClock::new();
+        let session = leased_session(MonoInstant::from_nanos(u64::MAX));
+        let guard = LeaseGuard::owner_elect(key(), session, clock);
+        guard.fence();
+        assert_eq!(
+            guard.require_recovery_epoch().unwrap_err(),
+            FenceError::NotActive
+        );
+
+        let guard = LeaseGuard::single_node(key(), Arc::new(SystemClock::new()));
+        guard.begin_drain();
+        assert_eq!(
+            guard.require_recovery_epoch().unwrap_err(),
+            FenceError::NotActive
+        );
     }
 }

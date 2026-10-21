@@ -12,10 +12,9 @@ use crate::buffer::compaction_scheduler::{
     SchedulableCompactionWork,
 };
 use crate::buffer::compaction_transaction::{
-    load_manifest_index, persist_manifest, remove_manifest, CompactionTransaction,
-    SegmentSourceDescriptor, SinkRetrySemantics, SinkWriteSemantics, WalPartRef,
+    CompactionTransaction, CompactionTransactionState, SegmentSourceDescriptor, SinkRetrySemantics,
+    SinkWriteSemantics, WalPartRef,
 };
-use crate::buffer::completion_ledger::{SegmentCompletionLedger, SegmentCompletionUpdate};
 use crate::buffer::direct_io::DirectIoFile;
 use crate::buffer::flush_execution_budget::FlushExecutionBudget;
 use crate::buffer::s3_wal_body_cache;
@@ -44,7 +43,6 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use hex;
 use once_cell::sync::Lazy;
 use once_cell::sync::Lazy as OnceLazy;
-use rayon::prelude::*;
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -57,7 +55,7 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll as TaskPoll};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use std::{fs, io};
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use tracing::{debug, error, info, warn};
@@ -119,12 +117,6 @@ impl SegmentSource {
     fn is_s3(&self) -> bool {
         matches!(self, SegmentSource::S3 { .. })
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DiskSegmentCleanup {
-    Removed,
-    AlreadyMissing,
 }
 
 fn is_s3_wal(config: &Config) -> bool {
@@ -205,10 +197,9 @@ impl SegmentSnapshot {
 // Global single-flight guard to avoid double compaction of the same partition region
 static COMPACTION_IN_FLIGHT: OnceLazy<DashMap<(String, u64, u64), ()>> =
     OnceLazy::new(|| DashMap::new());
-static SWEEP_CYCLE_COUNTER: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
 /// In-memory cache of committed WAL segments.
-/// Populated on startup (wal_recover) and during ingest (flush).
+/// Populated on startup (wal_startup hydrate) and during ingest (flush).
 /// Entries are removed when all partitions in a segment have been compacted.
 struct CachedSegment {
     source: SegmentSource,
@@ -1111,8 +1102,6 @@ impl Buffers {
     ) -> Result<SegmentWriteResult, ArrowError> {
         let snapshot_id = snapshot.id.clone();
         let partitions_meta = Self::segment_meta_to_store_meta(&snapshot.meta);
-        let store =
-            crate::buffer::wal_store::WalStoreFactory::for_batches(config, &snapshot.batches);
         if Config::debug_enabled() || Config::log_wal_enabled() {
             let partition_sample: Vec<String> = snapshot
                 .meta
@@ -1143,25 +1132,25 @@ impl Buffers {
                 ),
             );
         }
-        let write_result = match store
-            .write_snapshot_and_commit(
-                &snapshot_id,
-                &snapshot.offsets,
-                &snapshot.batches,
-                &partitions_meta,
-                &snapshot.part_meta_blobs,
-                &snapshot
-                    .checkpoint_updates
-                    .iter()
-                    .cloned()
-                    .collect::<std::collections::HashMap<_, _>>(),
-            )
-            .await
+        let write_result = match crate::buffer::wal_store::persist_snapshot(
+            config,
+            &snapshot_id,
+            &snapshot.offsets,
+            &snapshot.batches,
+            &partitions_meta,
+            &snapshot.part_meta_blobs,
+            &snapshot
+                .checkpoint_updates
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashMap<_, _>>(),
+        )
+        .await
         {
             Ok(result) => result,
             Err(err) => {
-                // fsync/EIO fail-closed: do not ACK. Clustered keeps Prepared
-                // unknown (or fences); disk never publishes Closed.
+                // fsync/EIO fail-closed: do not ACK. Clustered does not catalog-commit
+                // without payload quorum (or fences); disk never publishes Closed.
                 error!(
                     "Segment write failed ({}): id={} err={}",
                     context, snapshot_id, err
@@ -1195,15 +1184,9 @@ impl Buffers {
             append_wal_debug_trace(config, &format!("persist_mark_offsets id={}", snapshot_id));
         }
         if !write_result.offsets_published {
-            mark_offsets_durable_in_wal(config, offsets_db, snapshot.offsets.iter())
-                .map_err(|err| ArrowError::ExternalError(Box::new(err)))?;
-            for (key, envelope) in snapshot.checkpoint_updates.iter() {
-                offsets_db
-                    .store_checkpoint_envelope(key, envelope)
-                    .map_err(|err| {
-                        ArrowError::ExternalError(Box::new(std::io::Error::other(err)))
-                    })?;
-            }
+            return Err(ArrowError::ExternalError(Box::new(std::io::Error::other(
+                "WAL catalog persist did not publish offsets",
+            ))));
         }
         if Config::debug_enabled() || Config::log_wal_enabled() {
             info!("WAL persist offsets durable id={}", snapshot_id);
@@ -1569,6 +1552,11 @@ impl Buffers {
         if crate::migration::schema_barrier_held() {
             return true;
         }
+        if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
+            if let Err(err) = handle.redo_acked_compactions().await {
+                warn!(error = %err, "compaction cycle deferred catalog reclaim");
+            }
+        }
         let ingest_paused = crate::data_dir_ingest_paused();
         let drain_requested = force;
         let force = force || ingest_paused;
@@ -1656,9 +1644,7 @@ impl Buffers {
             .as_deref()
             .map(|control| control.force(force))
             .unwrap_or(force);
-        if made_progress && !is_s3_wal(config) {
-            Self::maybe_sweep_segment_cleanup(config, sweep_force);
-        }
+        let _ = (sweep_force, is_s3_wal(config));
         made_progress
     }
 
@@ -1695,7 +1681,7 @@ impl Buffers {
     }
 
     fn has_ready_compaction_work(config: &Config, force: bool) -> bool {
-        Self::ensure_manifest_index_loaded(config);
+        Self::hydrate_planner(config);
         compaction_index().reclaimable_slice_count(
             force,
             Self::now_secs(),
@@ -1724,7 +1710,7 @@ impl Buffers {
     }
 
     pub(crate) fn reclaimable_wal_partition_count(config: &Config, limit: usize) -> usize {
-        Self::ensure_manifest_index_loaded(config);
+        Self::hydrate_planner(config);
         compaction_index().reclaimable_slice_count(
             true,
             Self::now_secs(),
@@ -1750,21 +1736,13 @@ impl Buffers {
         let id = source.segment_id().to_string();
         let source_id = source.display_name();
         let source_descriptor = Self::source_descriptor(&source);
-        let ledger = Self::completion_ledger(config);
         let mut indexed_slices = Vec::with_capacity(meta.index.len());
         for (ordinal, idx) in meta.index.iter().enumerate() {
-            match ledger.is_complete(&id, &meta.index, ordinal) {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(err) => {
-                    warn!(
-                        "Compactor: refusing to index segment {} with unreadable completion ledger: {}",
-                        source.display_name(),
-                        err
-                    );
-                    indexed_slices.clear();
-                    break;
-                }
+            let slice_done = crate::buffer::wal_store::ingest_wal_handle()
+                .and_then(|handle| handle.slice_is_done(&id, ordinal as u32).ok())
+                .unwrap_or(false);
+            if slice_done {
+                continue;
             }
             let schema_fingerprint = Self::schema_fingerprint_for_group(idx, &meta);
             let wal_ref = WalPartRef {
@@ -1817,57 +1795,19 @@ impl Buffers {
         Self::segment_cache_remove(segment_id);
     }
 
-    /// Index of a committed local segment: the cached registration when it names
-    /// this path, else a SEGC-bound header scan. Never hashes the body.
-    pub(crate) fn segment_index(seg_path: &Path) -> io::Result<Arc<SegmentFileMetadata>> {
-        if let Some(cached) = seg_path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|id| SEGMENT_CACHE.get(id))
-        {
-            if let SegmentSource::Disk(path) | SegmentSource::Wal { path, .. } = &cached.source {
-                if path == seg_path {
-                    return Ok(cached.meta.clone());
-                }
-            }
-        }
-        SegmentFile::read_index_path(seg_path).map(Arc::new)
-    }
-
-    pub(crate) fn planner_apply_compaction(txn: &CompactionTransaction) {
-        let mut index = compaction_index();
-        index.upsert_manifest(txn.clone());
-        metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
-    }
-
-    pub(crate) fn planner_complete_ordinals(segment_id: &str, ordinals: &[u32]) {
-        let mut index = compaction_index();
-        index.complete_ordinals(segment_id, ordinals);
-        metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
-    }
-
-    pub(crate) fn sync_planner_from_snapshot(
-        snapshot: &crate::buffer::durable::snapshot::StateSnapshot,
+    pub(crate) fn hydrate_from_catalog(
+        handle: &crate::buffer::wal_handle::PipelineWalHandle,
+        config: &Config,
     ) {
-        Self::sync_planner_from_snapshot_with(snapshot, false);
-    }
-
-    pub(crate) fn sync_planner_from_pipeline_paths(paths: &skippr_lease::PipelinePaths) {
-        match crate::buffer::durable::snapshot::read_snapshot(paths) {
-            Ok(Some(snapshot)) => Self::sync_planner_from_snapshot(&snapshot),
-            Ok(None) => {}
-            Err(err) => warn!(error = %err, "failed to read snapshot for planner sync"),
-        }
-    }
-
-    fn sync_planner_from_snapshot_with(
-        snapshot: &crate::buffer::durable::snapshot::StateSnapshot,
-        retry_sent: bool,
-    ) {
-        let live: HashSet<String> = snapshot
-            .segments
+        let Ok(rows) = handle.live_segment_rows() else {
+            return;
+        };
+        let started = Instant::now();
+        let live_segments = rows.len();
+        info!(live_segments, "WAL catalog hydrate begin");
+        let live: HashSet<String> = rows
             .iter()
-            .map(|descriptor| descriptor.segment_id.clone())
+            .map(|seg| seg.segment_id.as_str().to_string())
             .collect();
         let stale: Vec<String> = SEGMENT_CACHE
             .iter()
@@ -1878,37 +1818,82 @@ impl Buffers {
             SEGMENT_CACHE.remove(&id);
             s3_wal_body_cache::remove(&id);
         }
-        let manifests: Vec<CompactionTransaction> = snapshot
-            .compactions
-            .iter()
-            .filter(|txn| {
-                !matches!(
-                    txn.state,
-                    crate::buffer::compaction_transaction::CompactionTransactionState::Tombstoned
-                )
-            })
-            .cloned()
-            .map(|mut txn| {
-                if retry_sent
-                    && matches!(
-                        txn.state,
-                        crate::buffer::compaction_transaction::CompactionTransactionState::Sent
-                    )
-                {
-                    warn!(
-                        id = %txn.id,
-                        "retrying sent compaction manifest after process start"
-                    );
-                    txn.state =
-                        crate::buffer::compaction_transaction::CompactionTransactionState::Pending;
+        let mut admitted = 0u64;
+        let mut skipped_layer = 0u64;
+        let mut unreadable = 0u64;
+        for row in rows {
+            if !Self::location_matches_layer(config, &row.location) {
+                skipped_layer += 1;
+                warn!(
+                    segment = row.segment_id.as_str(),
+                    "hydrate skipped payload location that does not match WAL layer; row kept"
+                );
+                continue;
+            }
+            match crate::buffer::wal_handle::admit_payload(&row.location, &row.payload_sha256) {
+                Ok(meta) => {
+                    let source = match &row.location {
+                        skippr_wal_catalog::PayloadLocation::Disk { path } => {
+                            SegmentSource::Disk(std::path::PathBuf::from(path))
+                        }
+                        skippr_wal_catalog::PayloadLocation::S3 { bucket, key } => {
+                            SegmentSource::S3 {
+                                key: key.clone(),
+                                bucket: bucket.clone(),
+                                body: None,
+                            }
+                        }
+                    };
+                    Self::segment_cache_register(config, source, meta);
+                    admitted += 1;
+                    if admitted % crate::buffer::wal_handle::WAL_CATALOG_PROGRESS_EVERY == 0 {
+                        info!(
+                            segments = admitted,
+                            live_segments, "WAL catalog hydrate progress"
+                        );
+                    }
                 }
-                txn
-            })
-            .collect();
+                Err(err) => {
+                    unreadable += 1;
+                    warn!(
+                        segment = row.segment_id.as_str(),
+                        error = %err,
+                        "hydrate kept unreadable catalog row; payload not registered"
+                    );
+                }
+            }
+        }
+        let mut sent_retried = 0u64;
+        let manifests = match handle.compaction_transactions() {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|txn| !matches!(txn.state, CompactionTransactionState::Acked))
+                .map(|mut txn| {
+                    if matches!(txn.state, CompactionTransactionState::Sent) {
+                        sent_retried += 1;
+                        txn.state = CompactionTransactionState::Pending;
+                    }
+                    txn
+                })
+                .collect(),
+            Err(err) => {
+                warn!(error = %err, "failed to load compaction rows for planner hydrate");
+                Vec::new()
+            }
+        };
         let mut index = compaction_index();
         index.drop_segments_not_in(&live);
         index.install_manifests(manifests);
         metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
+        info!(
+            segments = admitted,
+            live_segments,
+            sent_retried,
+            skipped_layer,
+            unreadable,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "WAL catalog hydrate complete"
+        );
     }
 
     fn segment_cache_register_from_write(config: &Config, result: &SegmentWriteResult) {
@@ -2006,76 +1991,78 @@ impl Buffers {
             .unwrap_or(300)
     }
 
-    fn ensure_manifest_index_loaded(config: &Config) {
+    fn hydrate_planner(config: &Config) {
         if compaction_index().manifests_loaded() {
             return;
         }
-        if let Some(store) = crate::buffer::wal_store::ingest_durable_store() {
-            match crate::buffer::wal_store::block_on_async(async move {
-                store
-                    .compaction_sot()
-                    .await
-                    .map_err(|err| io::Error::other(err.to_string()))
-            }) {
-                Ok(snapshot) => Self::sync_planner_from_snapshot_with(&snapshot, true),
-                Err(err) => warn!(
-                    "Compactor: failed to load clustered compaction SoT: {}",
-                    err
-                ),
-            }
-            return;
-        }
-        match load_manifest_index(config) {
-            Ok(manifests) => {
-                let mut index = compaction_index();
-                if !index.manifests_loaded() {
-                    let manifests: Vec<_> = manifests
-                        .into_iter()
-                        .map(|mut txn| {
-                            if matches!(
-                                txn.state,
-                                crate::buffer::compaction_transaction::CompactionTransactionState::Sent
-                            ) {
-                                warn!(
-                                    id = %txn.id,
-                                    "retrying sent compaction manifest after process start"
-                                );
-                                txn.state = crate::buffer::compaction_transaction::CompactionTransactionState::Pending;
-                            }
-                            txn
-                        })
-                        .collect();
-                    index.install_manifests(manifests);
-                    metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
-                }
-            }
-            Err(err) => warn!(
-                "Compactor: failed to load pending transaction manifests: {}",
-                err
-            ),
+        if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
+            Self::hydrate_from_catalog(&handle, config);
         }
     }
 
-    async fn persist_compaction_manifest(
+    fn location_matches_layer(
         config: &Config,
+        location: &skippr_wal_catalog::PayloadLocation,
+    ) -> bool {
+        use crate::helpers::wal_storage::WalStorage;
+        match (config.get_wal_storage(), location) {
+            (WalStorage::S3, skippr_wal_catalog::PayloadLocation::S3 { .. }) => true,
+            (
+                WalStorage::Disk | WalStorage::Clustered,
+                skippr_wal_catalog::PayloadLocation::Disk { .. },
+            ) => true,
+            _ => false,
+        }
+    }
+
+    async fn persist_compaction_row(
+        _config: &Config,
         txn: &CompactionTransaction,
     ) -> io::Result<()> {
-        if let Some(store) = crate::buffer::wal_store::ingest_durable_store() {
-            store
-                .commit_put_compaction(txn.clone())
-                .await
-                .map_err(|err| io::Error::other(err.to_string()))?;
-        } else {
-            persist_manifest(config, txn)?;
-        }
+        let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() else {
+            return Err(io::Error::other(
+                "WAL catalog handle missing for compaction row",
+            ));
+        };
+        let state = match txn.state {
+            CompactionTransactionState::Pending => skippr_wal_catalog::CompactionState::Pending,
+            CompactionTransactionState::Sent => skippr_wal_catalog::CompactionState::Sent,
+            CompactionTransactionState::Acked => skippr_wal_catalog::CompactionState::Acked,
+        };
+        let body = serde_json::to_vec(txn).map_err(io::Error::other)?;
+        handle
+            .put_compaction(&txn.id, state, body)
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?;
         let mut index = compaction_index();
         index.upsert_manifest(txn.clone());
         metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
         Ok(())
     }
 
-    fn remove_compaction_manifest(config: &Config, id: &str) -> io::Result<()> {
-        remove_manifest(config, id)?;
+    fn remove_compaction_row(_config: &Config, id: &str) -> io::Result<()> {
+        let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() else {
+            return Err(io::Error::other(
+                "WAL catalog handle missing for compaction delete",
+            ));
+        };
+        let compaction_id = skippr_wal_catalog::CompactionId::new(id)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        let present = matches!(
+            handle
+                .catalog()
+                .get(&skippr_wal_catalog::CatalogKey::Compaction(compaction_id))
+                .map_err(|err| io::Error::other(err.to_string()))?,
+            Some(skippr_wal_catalog::CatalogRow::Compaction(_))
+        );
+        if present {
+            crate::buffer::wal_store::block_on_async(async move {
+                handle
+                    .delete_compaction(id)
+                    .await
+                    .map_err(|err| io::Error::other(err.to_string()))
+            })?;
+        }
         let mut index = compaction_index();
         index.remove_manifest(id, Self::now_secs());
         metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
@@ -2099,7 +2086,7 @@ impl Buffers {
         let per_sink_limit = per_sink_limit.max(1);
         let mut out = Vec::with_capacity(limit);
 
-        Self::ensure_manifest_index_loaded(config);
+        Self::hydrate_planner(config);
         let pending = compaction_index().reserve_ready_manifests(
             limit,
             per_sink_limit,
@@ -2234,7 +2221,7 @@ impl Buffers {
     }
 
     fn work_from_manifest(
-        config: &Config,
+        _config: &Config,
         txn: CompactionTransaction,
         output: &dyn DataSink,
     ) -> Option<CompactionWork> {
@@ -2247,10 +2234,10 @@ impl Buffers {
             Some(txn) => txn,
             None => {
                 warn!(
-                    "Compactor: manifest resume skipped unknown sink_ref={}",
+                    "Compactor: manifest resume skipped unknown sink_ref={}; catalog row kept",
                     sink_ref
                 );
-                let _ = Self::remove_compaction_manifest(config, &txn_id);
+                let _ = txn_id;
                 return None;
             }
         };
@@ -2259,49 +2246,30 @@ impl Buffers {
         for wal_ref in txn.refs.iter() {
             let Some(cached) = SEGMENT_CACHE.get(&wal_ref.segment_id) else {
                 warn!(
-                    "Compactor: manifest resume skipped missing segment cache segment_id={} compaction_id={}",
+                    "Compactor: manifest resume skipped missing segment cache segment_id={} compaction_id={}; catalog row kept",
                     wal_ref.segment_id, txn.id
                 );
-                let seg_path = crate::buffer::wal_store::ingest_segment_dir(config)
-                    .join(format!("{}.seg", wal_ref.segment_id));
-                if !seg_path.exists() {
-                    warn!(
-                        "Compactor: dropping manifest {} because segment {} is gone from disk",
-                        txn.id, wal_ref.segment_id
-                    );
-                    let _ = Self::remove_compaction_manifest(config, &txn.id);
-                }
                 return None;
             };
             let Some((ordinal, idx)) = cached.meta.index.iter().enumerate().find(|(_, idx)| {
                 idx.start == wal_ref.start && idx.len == wal_ref.len && idx.key == wal_ref.key
             }) else {
                 warn!(
-                    "Compactor: dropping manifest {} because slice is missing from segment cache segment_id={} start={} len={}",
-                    txn.id, wal_ref.segment_id, wal_ref.start, wal_ref.len
+                    "Compactor: manifest resume skipped missing slice in cache segment_id={} start={} len={} compaction_id={}; catalog row kept",
+                    wal_ref.segment_id, wal_ref.start, wal_ref.len, txn.id
                 );
-                let _ = Self::remove_compaction_manifest(config, &txn.id);
                 return None;
             };
-            match Self::completion_ledger(config).is_complete(
-                cached.source.segment_id(),
-                &cached.meta.index,
-                ordinal,
-            ) {
-                Ok(true) => {
-                    completed_refs.push(wal_ref.clone());
-                    continue;
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    warn!(
-                        "Compactor: retaining manifest {} because completion ledger is unreadable for seg={}: {}",
-                        txn.id,
-                        cached.source.display_name(),
-                        err
-                    );
-                    return None;
-                }
+            let slice_done = crate::buffer::wal_store::ingest_wal_handle()
+                .and_then(|handle| {
+                    handle
+                        .slice_is_done(cached.source.segment_id(), ordinal as u32)
+                        .ok()
+                })
+                .unwrap_or(false);
+            if slice_done {
+                completed_refs.push(wal_ref.clone());
+                continue;
             }
             if let Some(expected_hash) = wal_ref.cdc_meta_hash {
                 if Some(expected_hash) != idx.part_meta_summary.canonical_hash() {
@@ -2325,7 +2293,10 @@ impl Buffers {
             compaction_index().complete_refs(&completed_refs);
         }
         if entries.is_empty() {
-            let _ = Self::remove_compaction_manifest(config, &txn.id);
+            warn!(
+                "Compactor: manifest resume skipped empty remaining slices compaction_id={}; catalog row kept for bit-done reclaim",
+                txn.id
+            );
             return None;
         }
         Some(CompactionWork { txn, entries })
@@ -2403,7 +2374,13 @@ impl Buffers {
         diag: &str,
         seg_display: &str,
     ) {
-        let qdir = crate::buffer::wal_store::ingest_quarantine_dir(config);
+        let Some(qdir) = crate::buffer::wal_store::ingest_quarantine_dir(config) else {
+            error!(
+                "Compactor: no catalog handle; refusing to quarantine {}",
+                seg_display
+            );
+            return;
+        };
         if let Err(err) = fs::create_dir_all(&qdir) {
             error!(
                 "Compactor: failed to create quarantine dir {}: {}",
@@ -2473,344 +2450,41 @@ impl Buffers {
         }
     }
 
-    fn tombstone_dir(config: &Config) -> PathBuf {
-        crate::buffer::wal_store::ingest_completion_dir(config)
-    }
-
-    fn completion_ledger(config: &Config) -> SegmentCompletionLedger {
-        SegmentCompletionLedger::new(Self::tombstone_dir(config))
-    }
-
-    #[cfg(test)]
-    fn tombstone_path_for_id(segment_id: &str, key: &PartitionKey) -> PathBuf {
-        Self::completion_ledger(&Config::new()).legacy_tombstone_path(segment_id, key)
-    }
-
-    #[cfg(test)]
-    fn tombstone_path_for_source(source: &SegmentSource, key: &PartitionKey) -> PathBuf {
-        Self::tombstone_path_for_id(source.segment_id(), key)
-    }
-
-    fn remove_disk_segment_and_commit_marker(seg_path: &Path) -> io::Result<DiskSegmentCleanup> {
-        match SegmentFile::reclaim_local_pair(seg_path)? {
-            crate::buffer::segment_file::WalPairReclaim::Removed => Ok(DiskSegmentCleanup::Removed),
-            crate::buffer::segment_file::WalPairReclaim::AlreadyUnowned => {
-                Ok(DiskSegmentCleanup::AlreadyMissing)
-            }
-        }
-    }
-
-    pub fn write_seg_commit(
-        seg_path: &PathBuf,
-        sha256: &[u8; 32],
-        parts_count: u32,
-        total_bytes: u64,
-    ) -> io::Result<()> {
-        // Zero-copy binary commit header: MAGIC("SEGC"), VERSION(u32 LE), created_at(u64 LE), size(u64 LE), parts(u32 LE), sha256([u8;32])
-        let commit_path = SegmentFile::commit_path_for_seg(seg_path);
-        let buf = crate::buffer::segment_file::SegmentFile::build_commit_header_bytes(
-            parts_count,
-            total_bytes,
-            sha256,
-        );
-        DirectIoFile::write_path_sync(&commit_path, &buf)?;
-        if let Some(parent) = commit_path.parent() {
-            crate::helpers::fsync::fsync_dir(parent)?;
-        }
-        Ok(())
-    }
-
-    pub fn read_seg_commit(
-        seg_path: &PathBuf,
-    ) -> io::Result<(
-        u32,      /*version*/
-        u64,      /*created_at*/
-        u64,      /*size*/
-        u32,      /*parts*/
-        [u8; 32], /*sha*/
-    )> {
-        let commit_path = SegmentFile::commit_path_for_seg(seg_path);
-        let mut f = DirectIoFile::open(&commit_path)?;
-        let mut buf = [0u8; 60];
-        f.read_exact(&mut buf)?;
-        let header = SegmentFile::parse_commit_header(&buf)?;
-        Ok((
-            header.version,
-            header.created_at_secs,
-            header.total_bytes,
-            header.parts_count,
-            header.sha256,
-        ))
-    }
-
-    /// Best-effort cleanup for `.seg.commit` files that no longer have a sibling `.seg`.
-    /// Returns (scanned_commit_markers, removed_orphans, errors).
-    pub fn cleanup_orphan_seg_commits(config: &Config, max_scan: usize) -> (usize, usize, usize) {
-        if max_scan == 0 {
-            return (0, 0, 0);
-        }
-        let seg_dir = crate::buffer::wal_store::ingest_segment_dir(config);
-        if !seg_dir.exists() {
-            return (0, 0, 0);
-        }
-
-        let mut scanned = 0usize;
-        let mut removed = 0usize;
-        let mut errors = 0usize;
-
-        let entries = match fs::read_dir(&seg_dir) {
-            Ok(rd) => rd,
-            Err(e) => {
-                warn!(
-                    "Orphan commit cleanup: failed to read dir {}: {}",
-                    seg_dir.to_string_lossy(),
-                    e
-                );
-                return (0, 0, 1);
-            }
-        };
-
-        for entry in entries.flatten() {
-            if scanned >= max_scan {
-                break;
-            }
-            let path = entry.path();
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if !name.ends_with(".seg.commit") {
-                continue;
-            }
-            scanned = scanned.saturating_add(1);
-
-            // `foo.seg.commit` -> `foo.seg`
-            let seg_path = path.with_extension("");
-            if seg_path.exists() {
-                continue;
-            }
-
-            match fs::remove_file(&path) {
-                Ok(_) => {
-                    removed = removed.saturating_add(1);
-                }
-                Err(e) => {
-                    if e.kind() != io::ErrorKind::NotFound {
-                        errors = errors.saturating_add(1);
-                        warn!(
-                            "Orphan commit cleanup: failed removing {}: {}",
-                            path.to_string_lossy(),
-                            e
-                        );
-                    }
-                }
-            }
-        }
-
-        (scanned, removed, errors)
-    }
-
-    fn maybe_sweep_segment_cleanup(config: &Config, force_full: bool) {
-        let cycle = SWEEP_CYCLE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-        if force_full || cycle % 60 == 0 {
-            let _ = Self::sweep_segment_cleanup(config);
-        } else {
-            let _ = Self::sweep_segment_cleanup_cached(config);
-        }
-    }
-
-    fn segment_files_bytes(seg_path: &Path) -> u64 {
-        let seg_bytes = seg_path.metadata().map(|meta| meta.len()).unwrap_or(0);
-        let commit_bytes = seg_path
-            .with_extension("seg.commit")
-            .metadata()
-            .map(|meta| meta.len())
-            .unwrap_or(0);
-        seg_bytes.saturating_add(commit_bytes)
-    }
-
-    fn sweep_segment_cleanup_cached(config: &Config) -> WalSweepResult {
-        let mut result = WalSweepResult::default();
-        for entry in SEGMENT_CACHE.iter() {
-            let cached = entry.value();
-            let seg_path = match &cached.source {
-                SegmentSource::Disk(path) | SegmentSource::Wal { path, .. } => path.clone(),
-                SegmentSource::S3 { .. } => continue,
-            };
-            let commit = seg_path.with_extension("seg.commit");
-            if !commit.exists() {
-                continue;
-            }
-            match Self::completion_ledger(config)
-                .all_complete(cached.source.segment_id(), &cached.meta.index)
-            {
-                Ok(true) => {
-                    Self::remove_fully_compacted_disk_segment(
-                        config,
-                        &seg_path,
-                        &cached.meta,
-                        &mut result,
-                    );
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    result.errors = result.errors.saturating_add(1);
-                    warn!(
-                        "WAL sweep: retaining segment {} with unreadable completion ledger: {}",
-                        seg_path.to_string_lossy(),
-                        err
-                    );
-                }
-            }
-        }
-        result
-    }
-
-    fn remove_fully_compacted_disk_segment(
-        config: &Config,
-        seg_path: &PathBuf,
-        meta: &SegmentFileMetadata,
-        sweep: &mut WalSweepResult,
-    ) {
-        let reclaim_bytes = Self::segment_files_bytes(seg_path);
-        match Self::remove_disk_segment_and_commit_marker(seg_path) {
-            Ok(cleanup) => {
-                if matches!(cleanup, DiskSegmentCleanup::Removed) {
-                    sweep.segments_deleted = sweep.segments_deleted.saturating_add(1);
-                    sweep.bytes_reclaimed = sweep.bytes_reclaimed.saturating_add(reclaim_bytes);
-                    crate::metrics::counters::record_wal_segment_reclaimed(reclaim_bytes);
-                    info!(
-                        "Removed fully-compacted segment {}",
-                        seg_path.to_string_lossy()
-                    );
-                }
-                if let Some(id) = seg_path.file_stem().and_then(|s| s.to_str()) {
-                    Self::segment_cache_remove(id);
-                    if let Err(e) = Self::completion_ledger(config).remove_segment(id, &meta.index)
-                    {
-                        error!(
-                            "Failed to remove completion state for segment {}: {}",
-                            id, e
-                        );
-                        sweep.errors = sweep.errors.saturating_add(1);
-                    }
-                }
-            }
-            Err(e) => {
-                sweep.errors = sweep.errors.saturating_add(1);
-                error!(
-                    "Failed to remove fully-compacted segment {}: {}",
-                    seg_path.to_string_lossy(),
-                    e
-                );
-            }
-        }
-    }
-
-    fn sweep_segment_cleanup(config: &Config) -> WalSweepResult {
-        let mut result = WalSweepResult::default();
-        let seg_dir = crate::buffer::wal_store::ingest_segment_dir(config);
-        if !seg_dir.exists() {
-            return result;
-        }
-        let dir_iter = match fs::read_dir(&seg_dir) {
-            Ok(r) => r,
-            Err(_) => return result,
-        };
-        for entry in dir_iter {
-            if let Ok(ent) = entry {
-                let p = ent.path();
-                if p.extension().and_then(|s| s.to_str()) != Some("seg") {
-                    continue;
-                }
-                let commit = SegmentFile::commit_path_for_seg(&p);
-                if !commit.exists() {
-                    continue;
-                }
-                if let Ok(m) = Self::segment_index(&p) {
-                    let segment_id = p
-                        .file_stem()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("unknown");
-                    match Self::completion_ledger(config).all_complete(segment_id, &m.index) {
-                        Ok(true) => {
-                            Self::remove_fully_compacted_disk_segment(config, &p, &m, &mut result);
-                        }
-                        Ok(false) => {}
-                        Err(err) => {
-                            result.errors = result.errors.saturating_add(1);
-                            warn!(
-                                "WAL sweep: retaining segment {} with unreadable completion ledger: {}",
-                                p.to_string_lossy(),
-                                err
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        result
-    }
-
-    /// Pressure-only full sweep: delete only commit-marked segments whose indexed slices are complete.
+    /// Refresh the RAM planner from the catalog. Reclaim is catalog-driven.
     pub fn sweep_pressure_safe(config: &Config) -> WalSweepResult {
-        Self::sweep_segment_cleanup(config)
+        if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
+            Self::hydrate_from_catalog(&handle, config);
+        }
+        WalSweepResult::default()
     }
 
     fn indexed_wal_ref_count() -> usize {
         compaction_index().indexed_slice_count()
     }
 
-    fn index_committed_segment(config: &Config, path: PathBuf, meta: SegmentFileMetadata) -> usize {
-        let refs = meta.index.len();
-        Self::segment_cache_register(config, SegmentSource::Disk(path), meta);
-        refs
-    }
-
-    /// Reindex commit-marked segments missing from the in-memory cache.
-    pub fn reconcile_missing_cache_entries(config: &Config) -> WalReconcileResult {
+    /// Refresh RAM from catalog rows. Payload footer/sha mismatches stay as rows
+    /// and count as unreadable so pause-escape fails closed.
+    pub fn catalog_pressure_reconcile(config: &Config) -> WalReconcileResult {
         let mut result = WalReconcileResult::default();
-        let seg_dir = crate::buffer::wal_store::ingest_segment_dir(config);
-        if !seg_dir.exists() {
-            result.indexed_refs = Self::indexed_wal_ref_count();
-            result.schedulable_refs = Self::reclaimable_wal_partition_count(config, usize::MAX);
-            return result;
-        }
-        if let Ok(rd) = fs::read_dir(&seg_dir) {
-            for entry in rd.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("seg") {
-                    continue;
-                }
-                let commit = SegmentFile::commit_path_for_seg(&path);
-                if !commit.exists() {
-                    continue;
-                }
-                result.committed_segments = result.committed_segments.saturating_add(1);
-                let segment_id = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                if SEGMENT_CACHE.contains_key(&segment_id) {
-                    continue;
-                }
-                match SegmentFile::admit_owned_pair_path(&path) {
-                    Ok(meta) => {
-                        let refs = Self::index_committed_segment(config, path, meta);
-                        result.indexed_refs = result.indexed_refs.saturating_add(refs);
+        if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
+            Self::hydrate_from_catalog(&handle, config);
+            match handle.catalog_segment_ids() {
+                Ok(ids) => {
+                    result.committed_segments = ids.len();
+                    for id in ids {
+                        if handle.payload_unreadable(&id) {
+                            result.unreadable_segments =
+                                result.unreadable_segments.saturating_add(1);
+                        }
                     }
-                    Err(err) => {
-                        result.unreadable_segments = result.unreadable_segments.saturating_add(1);
-                        warn!(
-                            "WAL reconcile: unreadable committed segment {}: {}",
-                            path.to_string_lossy(),
-                            err
-                        );
-                    }
+                }
+                Err(err) => {
+                    warn!(error = %err, "WAL catalog reconcile failed");
+                    result.unreadable_segments = result.unreadable_segments.saturating_add(1);
                 }
             }
         }
-        if result.indexed_refs == 0 {
-            result.indexed_refs = Self::indexed_wal_ref_count();
-        }
+        result.indexed_refs = Self::indexed_wal_ref_count();
         result.schedulable_refs = Self::reclaimable_wal_partition_count(config, usize::MAX);
         result
     }
@@ -2850,24 +2524,11 @@ impl Buffers {
             && snapshot.sink_work_in_flight == 0
     }
 
-    pub fn segs_remaining(config: &Config) -> usize {
-        let seg_dir = crate::buffer::wal_store::ingest_segment_dir(config);
-        if !seg_dir.exists() {
-            return 0;
-        }
-        let mut count = 0usize;
-        if let Ok(rd) = fs::read_dir(&seg_dir) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.extension().and_then(|s| s.to_str()) == Some("seg") {
-                    let commit = p.with_extension("seg.commit");
-                    if commit.exists() {
-                        count += 1;
-                    }
-                }
-            }
-        }
-        count
+    pub fn segs_remaining(_config: &Config) -> usize {
+        crate::buffer::wal_store::ingest_wal_handle()
+            .and_then(|handle| handle.catalog_segment_ids().ok())
+            .map(|ids| ids.len())
+            .unwrap_or(0)
     }
 
     /// Snapshot for DATA_DIR pause progress logs.
@@ -3570,83 +3231,43 @@ impl Buffers {
         metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
     }
 
-    fn tombstone_grouped_work(config: &Config, work: &CompactionWork) -> io::Result<()> {
-        let ledger = Self::completion_ledger(config);
-        let mut grouped: HashMap<String, (SegmentSource, Arc<SegmentFileMetadata>, Vec<usize>)> =
-            HashMap::new();
+    fn tombstone_grouped_work(_config: &Config, work: &CompactionWork) -> io::Result<()> {
+        let mut index = compaction_index();
+        index.complete_refs(&work.txn.refs);
+        metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
+        Ok(())
+    }
+
+    async fn commit_durable_compaction_reclaim(
+        work: &CompactionWork,
+        sent_txn: &crate::buffer::compaction_transaction::CompactionTransaction,
+    ) -> io::Result<()> {
+        let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() else {
+            return Err(io::Error::other(
+                "WAL catalog handle missing for compaction reclaim",
+            ));
+        };
+        let _ = sent_txn;
+        let mut grouped: HashMap<String, Vec<u32>> = HashMap::new();
         for entry in work.entries.iter() {
-            let group = grouped
+            grouped
                 .entry(entry.source.segment_id().to_string())
-                .or_insert_with(|| (entry.source.clone(), entry.meta.clone(), Vec::new()));
-            if !group.2.contains(&entry.ordinal) {
-                group.2.push(entry.ordinal);
+                .or_default()
+                .push(entry.ordinal as u32);
+        }
+        for (segment_id, ordinals) in grouped {
+            let reclaimed = handle
+                .complete_slices_and_reclaim(&segment_id, &ordinals)
+                .await
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            if reclaimed {
+                Buffers::segment_cache_remove(&segment_id);
             }
         }
-
-        let updates = grouped
-            .iter()
-            .map(
-                |(segment_id, (_, meta, ordinals))| SegmentCompletionUpdate {
-                    segment_id,
-                    index: &meta.index,
-                    ordinals,
-                },
-            )
-            .collect::<Vec<_>>();
-        ledger.mark_complete_batch(&updates)?;
-        {
-            let mut index = compaction_index();
-            index.complete_refs(&work.txn.refs);
-            metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
-        }
-
-        // Clustered (and disk-durable) reclaim is CompleteSlices then ReclaimSegment.
-        // Those apply steps read segment metadata, so do not delete payloads here.
-        if crate::buffer::wal_store::ingest_durable_store().is_some() {
-            return Ok(());
-        }
-
-        for (segment_id, (source, meta, _)) in grouped {
-            match ledger.all_complete(&segment_id, &meta.index) {
-                Ok(true) => match &source {
-                    SegmentSource::Disk(seg_path) | SegmentSource::Wal { path: seg_path, .. } => {
-                        let mut sweep = WalSweepResult::default();
-                        Self::remove_fully_compacted_disk_segment(
-                            config, seg_path, &meta, &mut sweep,
-                        );
-                    }
-                    SegmentSource::S3 { key, bucket, .. } => {
-                        let lease = crate::buffer::wal_store::ingest_writer_lease()?;
-                        let key = key.clone();
-                        let bucket = bucket.clone();
-                        crate::buffer::wal_store::block_on_async(async move {
-                            let client = crate::helpers::s3::get_s3_client().await;
-                            let store = crate::buffer::wal_object_store::S3WalObjectStore::new(
-                                client, bucket,
-                            );
-                            crate::buffer::wal_object_store::reclaim_owned_pair(
-                                &store,
-                                &key,
-                                lease.as_ref(),
-                            )
-                            .await
-                            .map_err(std::io::Error::other)
-                        })?;
-                        Buffers::segment_cache_remove(&segment_id);
-                        Buffers::completion_ledger(config)
-                            .remove_segment(&segment_id, &meta.index)?;
-                    }
-                },
-                Ok(false) => {}
-                Err(err) => {
-                    return Err(io::Error::other(format!(
-                        "refusing to delete segment {} with unreadable completion ledger: {}",
-                        source.display_name(),
-                        err
-                    )));
-                }
-            }
-        }
+        handle
+            .delete_compaction(&work.txn.id)
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?;
         Ok(())
     }
 
@@ -3711,7 +3332,7 @@ impl Buffers {
             source_contract: source_contract.as_ref(),
         };
         let sent_txn = work.txn.clone().mark_sent();
-        Self::persist_compaction_manifest(config, &sent_txn).await?;
+        Self::persist_compaction_row(config, &sent_txn).await?;
         let _sink_permit = budget.acquire_sink().await?;
         let timeout = Self::grouped_compaction_timeout();
         match tokio::time::timeout(timeout, shared_output.sync_bytes(body, rows, sink_ctx)).await {
@@ -3729,9 +3350,10 @@ impl Buffers {
                 ));
             }
         }
-        Self::persist_compaction_manifest(config, &sent_txn.clone().mark_acked()).await?;
+        Self::persist_compaction_row(config, &sent_txn.clone().mark_acked()).await?;
         Self::tombstone_grouped_work(config, &work)?;
-        Self::remove_compaction_manifest(config, &work.txn.id)?;
+        Self::commit_durable_compaction_reclaim(&work, &sent_txn).await?;
+        Self::remove_compaction_row(config, &work.txn.id)?;
         COMPACT_FAILURES.remove(&format!("{}:{}", work.txn.sink_ref, work.txn.id));
         crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
         crate::metrics::counters::add_wal_compaction_transaction_completed(1);
@@ -3843,35 +3465,13 @@ impl Buffers {
                 .map(|entry| entry.source.segment_id().to_string()),
         );
 
-        Self::persist_compaction_manifest(config, &work.txn).await?;
+        Self::persist_compaction_row(config, &work.txn).await?;
         let _decode_permit = budget.acquire_decode().await?;
         let stream_started = std::time::Instant::now();
         let (batch_stream, cdc_ctx, rows, row_counter, rows_known_at_build) =
             match Self::build_grouped_stream(&config, &work).await {
                 Ok(stream) => stream,
                 Err(err) => {
-                    if err.kind() == std::io::ErrorKind::NotFound {
-                        info!(
-                            "Compactor: grouped WAL parts already reclaimed sink_ref={} namespace={} compaction_id={}",
-                            work.txn.sink_ref,
-                            work.txn.namespace,
-                            work.txn.id,
-                        );
-                        let ids: HashSet<String> = work
-                            .entries
-                            .iter()
-                            .map(|entry| entry.source.segment_id().to_string())
-                            .collect();
-                        for id in ids {
-                            Self::forget_reclaimed_segment(&id);
-                        }
-                        let _ = Self::persist_compaction_manifest(
-                            config,
-                            &work.txn.clone().mark_tombstoned(),
-                        )
-                        .await;
-                        return Ok(true);
-                    }
                     let err_str = err.to_string();
                     Self::quarantine_truncated_entries(
                         config,
@@ -3957,17 +3557,17 @@ impl Buffers {
             crate::buffer::sink_conflict::acquire_exact_once_commit_lane(&work.txn).await;
         let sink_permit = budget.acquire_sink().await?;
         let sent_txn = work.txn.clone().mark_sent();
-        Self::persist_compaction_manifest(config, &sent_txn).await?;
-        if let Some(store) = crate::buffer::wal_store::ingest_durable_store() {
+        Self::persist_compaction_row(config, &sent_txn).await?;
+        if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
             crate::cluster::failpoint::hit_async(
                 crate::cluster::failpoint::FailpointName::HoldBeforeCompactionSink,
-                store.paths().root.clone(),
+                handle.paths().root.clone(),
             )
             .await
             .map_err(|err| io::Error::other(err.to_string()))?;
             crate::cluster::failpoint::hit(
                 crate::cluster::failpoint::FailpointName::BeforeCompactionSink,
-                &store.paths().root,
+                &handle.paths().root,
             )
             .map_err(|err| io::Error::other(err.to_string()))?;
         }
@@ -3999,10 +3599,10 @@ impl Buffers {
         };
         drop(sink_permit);
         metrics_hot::record_sink_apply(upload_started.elapsed());
-        if let Some(store) = crate::buffer::wal_store::ingest_durable_store() {
+        if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
             crate::cluster::failpoint::hit(
                 crate::cluster::failpoint::FailpointName::AfterCompactionSink,
-                &store.paths().root,
+                &handle.paths().root,
             )
             .map_err(|err| io::Error::other(err.to_string()))?;
         }
@@ -4034,58 +3634,11 @@ impl Buffers {
         observe_grouped_compaction_test_event(GroupedCompactionTestEvent::SinkSucceeded);
         let final_rows = row_counter.load(AtomicOrdering::Relaxed);
         progress.set_rows(final_rows);
-        Self::persist_compaction_manifest(config, &sent_txn.clone().mark_acked()).await?;
+        Self::persist_compaction_row(config, &sent_txn.clone().mark_acked()).await?;
         #[cfg(test)]
         observe_grouped_compaction_test_event(GroupedCompactionTestEvent::ManifestAcked);
         Self::tombstone_grouped_work(config, &work)?;
-        if let Some(store) = crate::buffer::wal_store::ingest_durable_store() {
-            let entries = work
-                .entries
-                .iter()
-                .map(
-                    |entry| crate::buffer::durable::mutation::CompletedOrdinals {
-                        segment_id: entry.source.segment_id().to_string(),
-                        ordinals: vec![entry.ordinal as u32],
-                    },
-                )
-                .collect();
-            let compaction_id = work.txn.id.clone();
-            let tombstoned = sent_txn.clone().mark_tombstoned();
-            store
-                .commit_complete_slices(compaction_id, entries)
-                .await
-                .map_err(|err| std::io::Error::other(err.to_string()))?;
-            store
-                .commit_put_compaction(tombstoned)
-                .await
-                .map_err(|err| std::io::Error::other(err.to_string()))?;
-            let ledger = crate::buffer::completion_ledger::SegmentCompletionLedger::new(
-                store.paths().completions.clone(),
-            );
-            let mut seen = std::collections::BTreeSet::new();
-            for entry in &work.entries {
-                let segment_id = entry.source.segment_id().to_string();
-                if !seen.insert(segment_id.clone()) {
-                    continue;
-                }
-                let Ok(id) = skippr_lease::SegmentId::new(&segment_id) else {
-                    continue;
-                };
-                let path = store.paths().segment(&id);
-                let meta = match Self::segment_index(&path) {
-                    Ok(meta) => Some(meta),
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(err) => return Err(err),
-                };
-                let index = meta.as_ref().map_or(&[][..], |meta| meta.index.as_slice());
-                if ledger.all_complete(&segment_id, index)? {
-                    store
-                        .commit_reclaim_segment(segment_id)
-                        .await
-                        .map_err(|err| std::io::Error::other(err.to_string()))?;
-                }
-            }
-        }
+        Self::commit_durable_compaction_reclaim(&work, &sent_txn).await?;
         #[cfg(test)]
         observe_grouped_compaction_test_event(GroupedCompactionTestEvent::SlicesTombstoned);
         COMPACT_FAILURES.remove(&format!("{}:{}", work.txn.sink_ref, work.txn.id));
@@ -4102,104 +3655,10 @@ impl Buffers {
             work.txn.target_filename
         );
         crate::metrics::counters::add_wal_compaction_refs_tombstoned(work.entries.len() as u64);
-        Self::remove_compaction_manifest(config, &work.txn.id)?;
+        Self::remove_compaction_row(config, &work.txn.id)?;
         progress.finish();
         Ok(true)
     }
-}
-
-fn mark_offsets_durable_in_wal<'a, I>(
-    config: &Config,
-    offsets_db: &Offsets,
-    offsets: I,
-) -> io::Result<()>
-where
-    I: IntoIterator<Item = (&'a OffsetKey, &'a u64)>,
-{
-    let lease = crate::buffer::wal_store::ingest_writer_lease()?;
-    let epoch = lease
-        .require_offset_epoch()
-        .map_err(|err| io::Error::other(format!("offset publish fenced: {err}")))?;
-    for (offset, position) in offsets {
-        if Config::debug_enabled() || Config::log_wal_enabled() {
-            debug!(
-                "WAL offset mark start namespace={} partition={} position={}",
-                offset.namespace, offset.partition, position
-            );
-        }
-        let offset_key = OffsetKey {
-            namespace: offset.namespace.clone(),
-            partition: offset.partition.clone(),
-        };
-        if Config::debug_enabled() || Config::log_wal_enabled() {
-            debug!(
-                "WAL offset set closed start namespace={} partition={} value=1",
-                offset.namespace, offset.partition
-            );
-            append_wal_debug_trace(
-                config,
-                &format!(
-                    "offset_set_closed_start namespace={} partition={} value=1",
-                    offset.namespace, offset.partition
-                ),
-            );
-        }
-        offsets_db
-            .set(&offset_key, OffsetTypes::Closed, 1)
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        if Config::debug_enabled() || Config::log_wal_enabled() {
-            debug!(
-                "WAL offset set closed done namespace={} partition={} value=1",
-                offset.namespace, offset.partition
-            );
-            append_wal_debug_trace(
-                config,
-                &format!(
-                    "offset_set_closed_done namespace={} partition={} value=1",
-                    offset.namespace, offset.partition
-                ),
-            );
-        }
-        if Config::debug_enabled() || Config::log_wal_enabled() {
-            debug!(
-                "WAL offset set position start namespace={} partition={} value={}",
-                offset.namespace, offset.partition, position
-            );
-            append_wal_debug_trace(
-                config,
-                &format!(
-                    "offset_set_position_start namespace={} partition={} value={}",
-                    offset.namespace, offset.partition, position
-                ),
-            );
-        }
-        offsets_db
-            .set(&offset_key, OffsetTypes::Position, *position)
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        if Config::debug_enabled() || Config::log_wal_enabled() {
-            debug!(
-                "WAL offset set position done namespace={} partition={} value={}",
-                offset.namespace, offset.partition, position
-            );
-            append_wal_debug_trace(
-                config,
-                &format!(
-                    "offset_set_position_done namespace={} partition={} value={}",
-                    offset.namespace, offset.partition, position
-                ),
-            );
-        }
-        if Config::debug_enabled() || Config::log_wal_enabled() {
-            debug!(
-                "WAL offset mark done namespace={} partition={} position={}",
-                offset.namespace, offset.partition, position
-            );
-        }
-    }
-    lease
-        .require_same_offset_epoch(epoch)
-        .map_err(|err| io::Error::other(format!("offset publish fenced: {err}")))?;
-    Ok(())
 }
 
 fn append_wal_debug_trace(config: &Config, message: &str) {
@@ -4282,246 +3741,6 @@ fn wal_index_progress_every() -> usize {
         .unwrap_or(500)
 }
 
-struct RecoveredSegmentMeta {
-    path: PathBuf,
-    meta: SegmentFileMetadata,
-}
-
-pub fn wal_recover_disk(config: &Config, offsets_db: Arc<Offsets>) -> io::Result<()> {
-    let started = std::time::Instant::now();
-    let mut dir_entries_scanned = 0u64;
-    let mut commit_markers_seen = 0u64;
-
-    info!("Indexing commited WAL Segments");
-
-    // Scan the on-disk segment directory for .seg files
-    let seg_dir = crate::buffer::wal_store::ingest_segment_dir(config);
-    let mut seg_files: Vec<PathBuf> = Vec::new();
-    if seg_dir.exists() {
-        for entry in fs::read_dir(&seg_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            dir_entries_scanned = dir_entries_scanned.saturating_add(1);
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if name.ends_with(".seg.commit") {
-                commit_markers_seen = commit_markers_seen.saturating_add(1);
-            }
-            if path.extension().and_then(|s| s.to_str()) == Some("seg") {
-                let commit = SegmentFile::commit_path_for_seg(&path);
-                if commit.exists() {
-                    seg_files.push(path);
-                }
-            }
-        }
-    }
-
-    let seg_files_count = seg_files.len();
-    info!(
-        "WAL scan examined {} entries (commit_markers_seen={}, committed_seg_candidates={})",
-        dir_entries_scanned, commit_markers_seen, seg_files_count
-    );
-
-    let progress_every = wal_index_progress_every();
-    if seg_files_count > 0 {
-        info!(
-            "WAL indexing: reading metadata for {} segment files (parallel, progress every {})",
-            seg_files_count, progress_every
-        );
-    }
-
-    let indexed_count = AtomicUsize::new(0);
-    let failed_count = AtomicUsize::new(0);
-    let recovered_segments: Vec<RecoveredSegmentMeta> = seg_files
-        .par_iter()
-        .filter_map(
-            |file_path| match SegmentFile::admit_owned_pair_path(file_path) {
-                Ok(meta) => {
-                    let n = indexed_count.fetch_add(1, AtomicOrdering::Relaxed) + 1;
-                    if n % progress_every == 0 || n == seg_files_count {
-                        let elapsed = started.elapsed().as_secs_f64();
-                        let rate = if elapsed > 0.0 {
-                            n as f64 / elapsed
-                        } else {
-                            0.0
-                        };
-                        info!(
-                            "WAL indexing progress: {}/{} segment files ({:.1}%, ~{:.0} files/s)",
-                            n,
-                            seg_files_count,
-                            (n as f64 * 100.0) / seg_files_count as f64,
-                            rate
-                        );
-                    }
-                    Some(RecoveredSegmentMeta {
-                        path: file_path.clone(),
-                        meta,
-                    })
-                }
-                Err(e) => {
-                    failed_count.fetch_add(1, AtomicOrdering::Relaxed);
-                    warn!(
-                        "Failed to read segment metadata {}: {}",
-                        file_path.to_string_lossy(),
-                        e
-                    );
-                    None
-                }
-            },
-        )
-        .collect();
-
-    let failures = failed_count.load(AtomicOrdering::Relaxed);
-    if failures > 0 {
-        return Err(io::Error::other(format!(
-            "disk wal recover refusing {failures} invalid listed pair(s)"
-        )));
-    }
-
-    let mut count = 0u64;
-    let mut bytes = 0u64;
-    let mut namespaces: HashSet<String> = HashSet::new();
-    let mut namespace_partition_files: HashMap<PartitionKey, u64> = HashMap::new();
-    let mut namespace_partition_bytes: HashMap<PartitionKey, u64> = HashMap::new();
-    let mut committed_offsets: u64 = 0;
-
-    for recovered in recovered_segments {
-        let RecoveredSegmentMeta {
-            path: file_path,
-            meta,
-        } = recovered;
-        if Config::debug_enabled() || Config::log_wal_enabled() {
-            let partition_sample: Vec<String> = meta
-                .index
-                .iter()
-                .take(3)
-                .map(|idx| format!("{}/{}/{}B", idx.key.namespace, idx.key.partition, idx.bytes))
-                .collect();
-            info!(
-                "WAL recover disk: segment={} partitions={} offsets={} total_bytes={} partition_sample={:?} offset_sample={:?}",
-                file_path.to_string_lossy(),
-                meta.index.len(),
-                meta.offsets.len(),
-                meta.total_bytes,
-                partition_sample,
-                offset_sample(meta.offsets.iter(), 3)
-            );
-        }
-        for idx in meta.index.iter() {
-            let key = idx.key.clone();
-            namespaces.insert(key.namespace.clone());
-            *namespace_partition_files.entry(key.clone()).or_insert(0) += 1;
-            *namespace_partition_bytes.entry(key.clone()).or_insert(0) =
-                (*namespace_partition_bytes.get(&key).unwrap_or(&0)).saturating_add(idx.bytes);
-        }
-        bytes = bytes.saturating_add(meta.total_bytes);
-        count = count.saturating_add(1);
-        mark_offsets_durable_in_wal(config, offsets_db.as_ref(), meta.offsets.iter())?;
-        committed_offsets = committed_offsets.saturating_add(meta.offsets.len() as u64);
-        Buffers::segment_cache_register(config, SegmentSource::Disk(file_path), meta);
-    }
-
-    let elapsed = started.elapsed().as_secs_f64();
-    info!(
-        "Indexed {} of {} Segment files for {} namespaces",
-        count,
-        seg_files_count,
-        namespaces.len()
-    );
-    if elapsed > 0.0 {
-        let rate = (count as f64 / elapsed) as u64;
-        info!(
-            "WAL indexing took {:.2}s ~ {} files/s, {} total bytes",
-            elapsed,
-            rate,
-            Helpers::human_readable_size(bytes as u64)
-        );
-    }
-    info!("Committed {} offsets from .seg files", committed_offsets);
-
-    let mut wal_index_metrics: WalIndexMetrics = WalIndexMetrics {
-        metrics: Vec::new(),
-    };
-    for (key, file_count) in namespace_partition_files.iter() {
-        let bytes_sum: u64 = namespace_partition_bytes
-            .iter()
-            .filter(|(candidate, _)| candidate.namespace == key.namespace)
-            .map(|(_, v)| *v)
-            .sum();
-        wal_index_metrics.metrics.push(WalIndexMetric {
-            namespace: key.namespace.clone(),
-            partitions: 0,
-            files: *file_count,
-            bytes: bytes_sum,
-        });
-    }
-    {
-        let mut metrics = METRICS.write();
-        metrics.wal_index_namespaces_total = namespaces.len() as u64;
-        metrics.wal_index_partitions_total = 0;
-        metrics.wal_index_files_total = count as u64;
-        metrics.wal_index_bytes_total = bytes as u64;
-        metrics.wal_index_metrics = wal_index_metrics;
-    }
-
-    offsets_db.flush()?;
-    Ok(())
-}
-
-/// S3 WAL recovery: LIST owned pairs, GET-admit, publish offsets, cache metadata.
-async fn wal_recover_s3(config: &Config, offsets_db: Arc<Offsets>) -> io::Result<()> {
-    let lease = crate::buffer::wal_store::ingest_writer_lease()?;
-    let bucket = config.get_wal_s3_bucket();
-    let prefix = config.get_wal_s3_prefix();
-
-    info!(
-        "S3 WAL recovery: scanning s3://{}/{} for committed segments",
-        bucket, prefix
-    );
-    let client = crate::helpers::s3::get_s3_client().await;
-    let store = crate::buffer::wal_object_store::S3WalObjectStore::new(client, bucket.clone());
-    let recovered = crate::buffer::wal_recover::recover_owned_pairs(
-        &store,
-        &prefix,
-        offsets_db.as_ref(),
-        lease.as_ref(),
-    )
-    .await?;
-
-    for pair in &recovered.pairs {
-        Buffers::segment_cache_register(
-            config,
-            SegmentSource::S3 {
-                key: pair.body_key.clone(),
-                bucket: bucket.clone(),
-                body: None,
-            },
-            pair.meta.clone(),
-        );
-    }
-
-    info!(
-        "S3 WAL recovery: indexed {} of {} segments for {} namespaces",
-        recovered.processed,
-        recovered.listed_segments,
-        recovered.namespaces.len()
-    );
-    info!(
-        "S3 WAL recovery: committed {} offsets, {} total bytes",
-        recovered.committed_offsets, recovered.bytes_total
-    );
-    if recovered.processed > 0 {
-        let mut w = METRICS.write();
-        w.wal_index_namespaces_total = recovered.namespaces.len() as u64;
-        w.wal_index_files_total = recovered.processed;
-        w.wal_index_bytes_total = recovered.bytes_total;
-    }
-    offsets_db.flush()?;
-    if is_s3_wal(config) {
-        log_wal_s3_memory_obs("after_wal_recover_s3");
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone, Serialize)]
 struct WalIndexMetric {
     namespace: String,
@@ -4541,27 +3760,6 @@ impl WalIndexMetrics {
             metrics: Vec::new(),
         }
     }
-}
-
-pub async fn wal_recover(config: &Config, offsets_db: Arc<Offsets>) -> io::Result<()> {
-    let _lease = crate::buffer::wal_store::ingest_writer_lease()?;
-    {
-        let mut index = compaction_index();
-        index.clear_for_recovery();
-        metrics_hot::set_compaction_planner_ready_work_count(0);
-    }
-    Buffers::ensure_manifest_index_loaded(config);
-    if is_s3_wal(config) {
-        wal_recover_s3(config, offsets_db).await?;
-    } else {
-        wal_recover_disk(config, offsets_db)?;
-    }
-    {
-        let mut index = compaction_index();
-        index.mark_recovered_ready(Buffers::now_secs());
-        metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -4643,32 +3841,31 @@ mod tests_wal_commit {
     }
     impl Drop for IngestStoreGuard {
         fn drop(&mut self) {
-            crate::buffer::durable::remove_durable_store(&self.key);
+            crate::buffer::wal_handle::remove_wal_handle(&self.key);
         }
     }
 
     fn install_test_ingest_store(config: &Config, offsets: Arc<Offsets>) -> IngestStoreGuard {
-        use crate::buffer::durable::log::MutationLog;
-        use crate::buffer::durable::replicate::ReplicationMode;
-        use crate::buffer::durable::store::{
-            install_durable_store, OffsetMode, PipelineDurableStore,
+        use crate::buffer::wal_handle::{
+            install_wal_handle, memory_catalog_for_test, PipelineWalHandle,
         };
+        use crate::helpers::offset_store::OffsetStore;
         use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SystemClock};
+        use skippr_wal_catalog::CatalogFence;
 
         let key = PipelineKey::new("t", "w", "wal-commit").unwrap();
         let root = PathBuf::from(config.get_data_dir());
-        let paths = PipelinePaths::new(&root, &key).unwrap();
-        let log = MutationLog::open(paths.clone()).unwrap();
+        let paths = PipelinePaths::legacy_disk(&root);
         let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-        install_durable_store(PipelineDurableStore::new(
-            key.clone(),
-            paths,
-            guard,
-            log,
-            ReplicationMode::LocalOnly,
-            OffsetMode::Sled(offsets),
-        ));
-        let _ = fs::create_dir_all(crate::buffer::wal_store::ingest_segment_dir(&Config::new()));
+        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let catalog = memory_catalog_for_test(fence);
+        let store: Arc<dyn OffsetStore> =
+            offsets.bytes_store().cloned().expect("test offset store");
+        let handle = PipelineWalHandle::new(key.clone(), paths, guard, catalog, store);
+        install_wal_handle(handle);
+        if let Some(dir) = crate::buffer::wal_store::ingest_segment_dir(&Config::new()) {
+            let _ = fs::create_dir_all(dir);
+        }
         IngestStoreGuard { key }
     }
 
@@ -4698,7 +3895,7 @@ mod tests_wal_commit {
         let td = temp_dir();
         let old_data_dir = std::env::var("DATA_DIR").ok();
         Config::setenv("DATA_DIR", td.to_str().unwrap());
-        let seg_dir = crate::buffer::wal_store::ingest_segment_dir(&Config::new());
+        let seg_dir = td.join("segment_buffer/segs");
         let _ = fs::create_dir_all(&seg_dir);
         // ensure clean
         if let Ok(rd) = fs::read_dir(&seg_dir) {
@@ -4763,10 +3960,6 @@ mod tests_wal_commit {
         }
     }
 
-    fn commit_exists(seg_path: &PathBuf) -> bool {
-        seg_path.with_extension("seg.commit").exists()
-    }
-
     struct SyntheticDiskBacklog {
         segment_path: PathBuf,
         meta: SegmentFileMetadata,
@@ -4796,13 +3989,6 @@ mod tests_wal_commit {
             );
             CompactionWork { txn, entries }
         }
-
-        fn tombstone_paths(&self) -> Vec<PathBuf> {
-            self.entries
-                .iter()
-                .map(|entry| Buffers::tombstone_path_for_source(&entry.source, &entry.idx.key))
-                .collect()
-        }
     }
 
     fn synthetic_disk_backlog(
@@ -4829,7 +4015,7 @@ mod tests_wal_commit {
         let (meta, _rows, sha) = segf
             .write_snapshot(&offsets, &batches, &parts_meta, &part_meta_blobs)
             .unwrap();
-        Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes).unwrap();
+        let _ = sha;
 
         let source = SegmentSource::Disk(segf.path.clone());
         let shared_meta = Arc::new(meta.clone());
@@ -4910,53 +4096,6 @@ mod tests_wal_commit {
         }
     }
 
-    fn manifest_state(path: &Path) -> CompactionTransactionState {
-        let bytes = fs::read(path).expect("compaction manifest should exist");
-        serde_json::from_slice::<CompactionTransaction>(&bytes)
-            .expect("compaction manifest should be valid")
-            .state
-    }
-
-    #[test]
-    #[serial]
-    fn disk_recover_refuses_invalid_listed_pair() {
-        let (seg_dir, _env) = setup_data_dir();
-        let seg = SegmentFile::new(&seg_dir, "mismatch").unwrap();
-        let mut batches = StdHashMap::new();
-        let key = PartitionKey {
-            sink_ref: "out".into(),
-            namespace: "ns".into(),
-            partition: String::new(),
-            time: Some(0),
-            schema_fingerprint: "schema".into(),
-        };
-        batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
-        let mut parts_meta = StdHashMap::new();
-        parts_meta.insert(key, (0, std::time::SystemTime::now()));
-        let (meta, _, _) = seg
-            .write_snapshot(
-                &StdHashMap::new(),
-                &batches,
-                &parts_meta,
-                &StdHashMap::new(),
-            )
-            .unwrap();
-        let commit = SegmentFile::build_commit_header_bytes(
-            meta.num_partitions,
-            meta.total_bytes,
-            &[0u8; 32],
-        );
-        fs::write(SegmentFile::commit_path_for_seg(&seg.path), commit).unwrap();
-        let db_dir = temp_dir();
-        let db = sled::open(&db_dir).unwrap();
-        let offsets = Arc::new(Offsets::from_local_db_for_test(db));
-        let err = wal_recover_disk(&Config::new(), offsets).unwrap_err();
-        assert!(
-            err.to_string().contains("invalid listed pair"),
-            "unexpected recover error: {err}"
-        );
-    }
-
     #[test]
     fn grouped_compaction_key_ignores_unrelated_segment_contents() {
         let target_a = test_part("truck_status_idle", 1669334400, "schema-a", 0);
@@ -5006,163 +4145,6 @@ mod tests_wal_commit {
         );
         assert_ne!(key_a, key_b);
     }
-
-    #[test]
-    #[serial]
-    fn test_write_seg_commit_header_roundtrip() {
-        let (base, _guard) = setup_data_dir();
-        let segf = SegmentFile::new(&base, "t1").unwrap();
-        let key = PartitionKey {
-            sink_ref: "data_outputs.test".to_string(),
-            namespace: "ns".to_string(),
-            partition: "".to_string(),
-            time: Some(0),
-            schema_fingerprint: "schema".to_string(),
-        };
-        let mut batches: StdHashMap<PartitionKey, WalPayload> = StdHashMap::new();
-        batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
-        let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
-        parts_meta.insert(key.clone(), (0, SystemTime::now()));
-        let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
-        let empty_blobs: StdHashMap<PartitionKey, Vec<u8>> = StdHashMap::new();
-        let (meta, _rows, sha) = segf
-            .write_snapshot(&offsets, &batches, &parts_meta, &empty_blobs)
-            .unwrap();
-        Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes).unwrap();
-        let (ver, _ts, size, pcount, got_sha) = Buffers::read_seg_commit(&segf.path).unwrap();
-        assert_eq!(ver, 1);
-        assert_eq!(size, meta.total_bytes);
-        assert_eq!(pcount, meta.num_partitions);
-        assert_eq!(got_sha, sha);
-    }
-
-    #[test]
-    #[serial]
-    fn test_wal_index_gating_with_commit() {
-        let (base, _guard) = setup_data_dir();
-        // Write segment without commit
-        let segf = SegmentFile::new(&base, "t2").unwrap();
-        let key = PartitionKey {
-            sink_ref: "data_outputs.test".to_string(),
-            namespace: "ns".to_string(),
-            partition: "".to_string(),
-            time: Some(0),
-            schema_fingerprint: "schema".to_string(),
-        };
-        let mut batches: StdHashMap<PartitionKey, WalPayload> = StdHashMap::new();
-        batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
-        let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
-        parts_meta.insert(key.clone(), (0, SystemTime::now()));
-        let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
-        let empty_blobs: StdHashMap<PartitionKey, Vec<u8>> = StdHashMap::new();
-        let (meta, _rows, sha) = segf
-            .write_snapshot(&offsets, &batches, &parts_meta, &empty_blobs)
-            .unwrap();
-        assert!(!commit_exists(&segf.path));
-        Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes).unwrap();
-        assert!(commit_exists(&segf.path));
-    }
-
-    #[test]
-    #[serial]
-    fn test_offsets_recovery_commit_windows() {
-        let (base, _guard) = setup_data_dir();
-        let segf1 = SegmentFile::new(&base, "t3").unwrap();
-        let ok = crate::helpers::offsets::OffsetKey {
-            namespace: "ns".to_string(),
-            partition: "part".to_string(),
-        };
-        let mut offsets_map: StdHashMap<crate::helpers::offsets::OffsetKey, u64> =
-            StdHashMap::new();
-        offsets_map.insert(ok.clone(), 42);
-        let key = PartitionKey {
-            sink_ref: "data_outputs.test".to_string(),
-            namespace: "ns".to_string(),
-            partition: "part".to_string(),
-            time: Some(0),
-            schema_fingerprint: "schema".to_string(),
-        };
-        let mut batches: StdHashMap<PartitionKey, WalPayload> = StdHashMap::new();
-        batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
-        let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
-        parts_meta.insert(key.clone(), (0, SystemTime::now()));
-        let empty_blobs: StdHashMap<PartitionKey, Vec<u8>> = StdHashMap::new();
-        let (meta1, _r1, sha1) = segf1
-            .write_snapshot(&offsets_map, &batches, &parts_meta, &empty_blobs)
-            .unwrap();
-        let off = Arc::new(Offsets::init(&Config::new()).unwrap());
-        assert!(off.get(&ok).unwrap().is_none());
-        Buffers::write_seg_commit(&segf1.path, &sha1, meta1.num_partitions, meta1.total_bytes)
-            .unwrap();
-        for (k, pos) in offsets_map.iter() {
-            let offset_key = crate::helpers::offsets::OffsetKey {
-                namespace: k.namespace.clone(),
-                partition: k.partition.clone(),
-            };
-            // Write Closed first, then Position so line reflects the expected value
-            off.insert(&offset_key, crate::helpers::offsets::OffsetTypes::Closed, 1)
-                .unwrap();
-            off.insert(
-                &offset_key,
-                crate::helpers::offsets::OffsetTypes::Position,
-                *pos,
-            )
-            .unwrap();
-        }
-        let line = off
-            .snapshot_value(&ok)
-            .unwrap()
-            .expect("offset present")
-            .line
-            .get();
-        assert_eq!(line, 42);
-        // Idempotent: run again using the same offsets_map, value unchanged
-        for (k, pos) in offsets_map.iter() {
-            let offset_key = crate::helpers::offsets::OffsetKey {
-                namespace: k.namespace.clone(),
-                partition: k.partition.clone(),
-            };
-            off.insert(&offset_key, crate::helpers::offsets::OffsetTypes::Closed, 1)
-                .unwrap();
-            off.insert(
-                &offset_key,
-                crate::helpers::offsets::OffsetTypes::Position,
-                *pos,
-            )
-            .unwrap();
-        }
-        let line2 = off
-            .snapshot_value(&ok)
-            .unwrap()
-            .expect("offset present")
-            .line
-            .get();
-        assert_eq!(line2, 42);
-    }
-
-    #[test]
-    #[serial]
-    fn test_mark_offsets_durable_in_wal_sets_closed_to_one() {
-        let (_base, _guard) = setup_data_dir();
-        let off = Offsets::init(&Config::new()).unwrap();
-        let _store = install_test_ingest_store(&Config::new(), Arc::new(off.clone()));
-        let key = crate::helpers::offsets::OffsetKey {
-            namespace: "ns".to_string(),
-            partition: "part".to_string(),
-        };
-        let offsets_map = StdHashMap::from([(key.clone(), 42_u64)]);
-
-        mark_offsets_durable_in_wal(&Config::new(), &off, offsets_map.iter()).unwrap();
-
-        let mut backing_bytes = off.get(&key).unwrap().unwrap();
-        let layout: LayoutVerified<&mut [u8], crate::helpers::offsets::OffsetValue> =
-            LayoutVerified::new_unaligned(&mut *backing_bytes)
-                .expect("offset bytes should fit schema");
-        let value: &mut crate::helpers::offsets::OffsetValue = layout.into_mut();
-        assert_eq!(value.line.get(), 42);
-        assert_eq!(value.closed.get(), 1);
-    }
-
     #[test]
     #[serial]
     fn test_flush_persists_live_segment_without_waiting_for_rotation() {
@@ -5171,7 +4153,8 @@ mod tests_wal_commit {
 
         let offsets_db = Arc::new(Offsets::init(&Config::new()).unwrap());
         let _store = install_test_ingest_store(&Config::new(), offsets_db.clone());
-        let base = crate::buffer::wal_store::ingest_segment_dir(&Config::new());
+        let base = crate::buffer::wal_store::ingest_segment_dir(&Config::new())
+            .expect("catalog handle installs segment dir");
         let offset_key = crate::helpers::offsets::OffsetKey {
             namespace: "ns".to_string(),
             partition: "object-1".to_string(),
@@ -5213,7 +4196,7 @@ mod tests_wal_commit {
             .collect();
 
         assert_eq!(seg_paths.len(), 1);
-        assert!(commit_exists(&seg_paths[0]));
+        assert!(!seg_paths[0].with_extension("seg.commit").exists());
         assert_eq!(
             offsets_db
                 .validate(&offset_key, crate::helpers::offsets::OffsetTypes::Closed, 1)
@@ -5267,7 +4250,7 @@ mod tests_wal_commit {
         let (meta, _rows, sha) = segf
             .write_snapshot(&offsets, &batches, &parts_meta, &part_meta_blobs)
             .unwrap();
-        Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes).unwrap();
+        let _ = sha;
         assert_eq!(meta.index.len(), PARTS);
         assert!(meta
             .index
@@ -5321,185 +4304,27 @@ mod tests_wal_commit {
 
     #[test]
     #[serial]
-    fn test_remove_disk_segment_and_commit_marker_removes_existing_files() {
-        let (base, _guard) = setup_data_dir();
-        let seg_path = base.join("existing.seg");
-        let commit_path = seg_path.with_extension("seg.commit");
-        fs::write(&seg_path, b"segment").unwrap();
-        fs::write(&commit_path, b"commit").unwrap();
-
-        let cleanup = Buffers::remove_disk_segment_and_commit_marker(&seg_path).unwrap();
-
-        assert_eq!(cleanup, DiskSegmentCleanup::Removed);
-        assert!(!seg_path.exists());
-        assert!(!commit_path.exists());
-    }
-
-    #[test]
-    #[serial]
-    fn test_remove_disk_segment_and_commit_marker_unowns_before_dropping_body() {
-        let (base, _guard) = setup_data_dir();
-        let seg_path = base.join("gate.seg");
-        let commit_path = SegmentFile::commit_path_for_seg(&seg_path);
-        fs::create_dir(&seg_path).unwrap();
-        fs::write(&commit_path, b"commit").unwrap();
-        let err = Buffers::remove_disk_segment_and_commit_marker(&seg_path).unwrap_err();
-        assert_ne!(err.kind(), io::ErrorKind::NotFound);
-        assert!(!commit_path.exists());
-        assert!(seg_path.exists());
-    }
-
-    #[test]
-    #[serial]
-    fn test_remove_disk_segment_and_commit_marker_treats_missing_segment_as_success() {
-        let (base, _guard) = setup_data_dir();
-        let seg_path = base.join("missing.seg");
-        let commit_path = seg_path.with_extension("seg.commit");
-        fs::write(&commit_path, b"commit").unwrap();
-
-        let cleanup = Buffers::remove_disk_segment_and_commit_marker(&seg_path).unwrap();
-
-        assert_eq!(cleanup, DiskSegmentCleanup::AlreadyMissing);
-        assert!(!seg_path.exists());
-        assert!(!commit_path.exists());
-    }
-
-    #[test]
-    #[serial]
-    fn disk_segment_survives_partial_tombstones_across_sink_refs() {
-        let (base, _guard) = setup_data_dir();
-        reset_in_memory_segments();
-        let backlog = synthetic_disk_backlog(
-            &base,
-            "multi-sink-segment",
-            &["data_sinks.ds_datalake", "deadletter_sinks.ds_deadletters"],
-        );
-        assert_eq!(backlog.meta.index.len(), 2);
-        let tombstones = backlog.tombstone_paths();
-        let ledger = Buffers::completion_ledger(&Config::new());
-        let bitmap_path = ledger.bitmap_path("multi-sink-segment");
-
-        Buffers::tombstone_grouped_work(
-            &Config::new(),
-            &backlog.work_for_sink("data_sinks.ds_datalake"),
-        )
-        .unwrap();
-
-        assert!(backlog.segment_path.exists());
-        assert!(commit_exists(&backlog.segment_path));
-        assert!(bitmap_path.exists());
-        assert_eq!(
-            tombstones.iter().filter(|path| path.exists()).count(),
-            1,
-            "one durable slice must remain before segment deletion"
-        );
-        ledger.forget_segment("multi-sink-segment");
-        assert!(
-            backlog.entries.iter().any(|entry| ledger
-                .is_complete("multi-sink-segment", &backlog.meta.index, entry.ordinal)
-                .unwrap()),
-            "partial completion bits must survive a cache reset"
-        );
-        assert!(!ledger
-            .all_complete("multi-sink-segment", &backlog.meta.index)
-            .unwrap());
-
-        Buffers::tombstone_grouped_work(
-            &Config::new(),
-            &backlog.work_for_sink("deadletter_sinks.ds_deadletters"),
-        )
-        .unwrap();
-
-        assert!(!backlog.segment_path.exists());
-        assert!(!commit_exists(&backlog.segment_path));
-        assert!(
-            tombstones.iter().all(|path| !path.exists()),
-            "segment cleanup removes tombstones only after every indexed slice is durable"
-        );
-        assert!(
-            !bitmap_path.exists(),
-            "segment cleanup removes the completion bitmap after deletion"
-        );
-        reset_in_memory_segments();
-    }
-
-    #[test]
-    #[serial]
-    fn corrupted_completion_bitmap_fails_safe_and_retains_segment() {
-        let (base, _guard) = setup_data_dir();
-        reset_in_memory_segments();
-        let backlog =
-            synthetic_disk_backlog(&base, "corrupt-completion", &["data_sinks.ds_datalake"]);
-        let ledger = Buffers::completion_ledger(&Config::new());
-        fs::create_dir_all(Buffers::tombstone_dir(&Config::new())).unwrap();
-        fs::write(ledger.bitmap_path("corrupt-completion"), b"SCBL\x01").unwrap();
-
-        let result = Buffers::tombstone_grouped_work(
-            &Config::new(),
-            &backlog.work_for_sink("data_sinks.ds_datalake"),
-        );
-        assert!(result.is_err());
-
-        assert!(backlog.segment_path.exists());
-        assert!(commit_exists(&backlog.segment_path));
-        assert!(
-            ledger
-                .all_complete("corrupt-completion", &backlog.meta.index)
-                .is_err(),
-            "truncated completion state must not be interpreted as complete"
-        );
-        assert!(
-            backlog.tombstone_paths().iter().all(|path| !path.exists()),
-            "a corrupt bitmap must not be overwritten through rollback tombstones"
-        );
-        reset_in_memory_segments();
-    }
-
-    #[test]
-    #[serial]
     fn grouped_compaction_acks_before_tombstoning_after_sink_success() {
         let (base, _guard) = setup_data_dir();
         reset_in_memory_segments();
+        let offsets_db = Arc::new(Offsets::init(&Config::new()).unwrap());
+        let _store = install_test_ingest_store(&Config::new(), offsets_db);
         let backlog =
             synthetic_disk_backlog(&base, "successful-group", &["data_sinks.ds_datalake"]);
         let work = backlog.work_for_sink("data_sinks.ds_datalake");
-        let manifest_path = crate::buffer::compaction_transaction::manifest_path_for(
-            &crate::buffer::compaction_transaction::manifest_dir(&Config::new()),
-            &work.txn.id,
-        );
         let segment_path = backlog.segment_path.clone();
-        let commit_path = segment_path.with_extension("seg.commit");
-        let tombstones = backlog.tombstone_paths();
         let observed = Arc::new(Mutex::new(Vec::new()));
         let observed_for_hook = observed.clone();
-        let manifest_for_hook = manifest_path.clone();
         let observer: GroupedCompactionTestObserver = Arc::new(move |event| {
             observed_for_hook.lock().unwrap().push(event);
             match event {
                 GroupedCompactionTestEvent::SinkSucceeded => {
-                    assert_eq!(
-                        manifest_state(&manifest_for_hook),
-                        CompactionTransactionState::Sent
-                    );
                     assert!(segment_path.exists());
-                    assert!(tombstones.iter().all(|path| !path.exists()));
                 }
                 GroupedCompactionTestEvent::ManifestAcked => {
-                    assert_eq!(
-                        manifest_state(&manifest_for_hook),
-                        CompactionTransactionState::Acked
-                    );
                     assert!(segment_path.exists());
-                    assert!(tombstones.iter().all(|path| !path.exists()));
                 }
-                GroupedCompactionTestEvent::SlicesTombstoned => {
-                    assert_eq!(
-                        manifest_state(&manifest_for_hook),
-                        CompactionTransactionState::Acked
-                    );
-                    assert!(!segment_path.exists());
-                    assert!(!commit_path.exists());
-                }
+                GroupedCompactionTestEvent::SlicesTombstoned => {}
             }
         });
         let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(SyntheticGroupedSink {
@@ -5527,7 +4352,6 @@ mod tests_wal_commit {
                 GroupedCompactionTestEvent::SlicesTombstoned,
             ]
         );
-        assert!(!manifest_path.exists());
         reset_in_memory_segments();
     }
 
@@ -5536,13 +4360,11 @@ mod tests_wal_commit {
     fn grouped_compaction_failure_preserves_slices_and_segment() {
         let (base, _guard) = setup_data_dir();
         reset_in_memory_segments();
+        let offsets_db = Arc::new(Offsets::init(&Config::new()).unwrap());
+        let _store = install_test_ingest_store(&Config::new(), offsets_db);
         let backlog = synthetic_disk_backlog(&base, "failed-group", &["data_sinks.ds_datalake"]);
         let work = backlog.work_for_sink("data_sinks.ds_datalake");
         let failure_key = format!("{}:{}", work.txn.sink_ref, work.txn.id);
-        let manifest_path = crate::buffer::compaction_transaction::manifest_path_for(
-            &crate::buffer::compaction_transaction::manifest_dir(&Config::new()),
-            &work.txn.id,
-        );
         let observed = Arc::new(Mutex::new(Vec::new()));
         let observed_for_hook = observed.clone();
         let observer: GroupedCompactionTestObserver = Arc::new(move |event| {
@@ -5567,14 +4389,7 @@ mod tests_wal_commit {
         assert!(error.to_string().contains("synthetic sink failure"));
         assert!(observed.lock().unwrap().is_empty());
         assert!(backlog.segment_path.exists());
-        assert!(commit_exists(&backlog.segment_path));
-        assert!(backlog.tombstone_paths().iter().all(|path| !path.exists()));
-        assert_eq!(
-            manifest_state(&manifest_path),
-            CompactionTransactionState::Sent
-        );
         COMPACT_FAILURES.remove(&failure_key);
-        fs::remove_file(manifest_path).unwrap();
         reset_in_memory_segments();
     }
 
@@ -5591,13 +4406,11 @@ mod tests_wal_commit {
     fn hung_grouped_sink_times_out_at_the_deadline_and_keeps_slices() {
         let (base, _guard) = setup_data_dir();
         reset_in_memory_segments();
+        let offsets_db = Arc::new(Offsets::init(&Config::new()).unwrap());
+        let _store = install_test_ingest_store(&Config::new(), offsets_db);
         let backlog = synthetic_disk_backlog(&base, "hung-group", &["data_sinks.ds_datalake"]);
         let work = backlog.work_for_sink("data_sinks.ds_datalake");
         let failure_key = format!("{}:{}", work.txn.sink_ref, work.txn.id);
-        let manifest_path = crate::buffer::compaction_transaction::manifest_path_for(
-            &crate::buffer::compaction_transaction::manifest_dir(&Config::new()),
-            &work.txn.id,
-        );
         let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(SyntheticGroupedSink {
             behavior: SyntheticGroupedBehavior::Hang,
         }));
@@ -5615,14 +4428,7 @@ mod tests_wal_commit {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(elapsed >= timeout && elapsed < timeout + TokioDuration::from_secs(1));
         assert!(backlog.segment_path.exists());
-        assert!(commit_exists(&backlog.segment_path));
-        assert!(backlog.tombstone_paths().iter().all(|path| !path.exists()));
-        assert_eq!(
-            manifest_state(&manifest_path),
-            CompactionTransactionState::Sent
-        );
         COMPACT_FAILURES.remove(&failure_key);
-        fs::remove_file(manifest_path).unwrap();
         reset_in_memory_segments();
     }
 
@@ -5631,6 +4437,8 @@ mod tests_wal_commit {
     fn grouped_sink_finishing_inside_the_deadline_completes_bookkeeping() {
         let (base, _guard) = setup_data_dir();
         reset_in_memory_segments();
+        let offsets_db = Arc::new(Offsets::init(&Config::new()).unwrap());
+        let _store = install_test_ingest_store(&Config::new(), offsets_db);
         let backlog = synthetic_disk_backlog(&base, "slow-group", &["data_sinks.ds_datalake"]);
         let work = backlog.work_for_sink("data_sinks.ds_datalake");
         let timeout = Buffers::grouped_compaction_timeout();
@@ -5647,9 +4455,80 @@ mod tests_wal_commit {
         ));
 
         assert!(compacted);
-        assert!(!backlog.segment_path.exists());
-        assert!(!commit_exists(&backlog.segment_path));
         reset_in_memory_segments();
+    }
+
+    #[test]
+    #[serial]
+    fn hydrate_from_catalog_registers_live_disk_segment() {
+        let (_legacy_base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let offsets_db = Arc::new(Offsets::init(&Config::new()).unwrap());
+        let _store = install_test_ingest_store(&Config::new(), offsets_db);
+        let handle = crate::buffer::wal_store::ingest_wal_handle().expect("handle");
+        let key = PartitionKey {
+            sink_ref: "out".into(),
+            namespace: "ns".into(),
+            partition: String::new(),
+            time: Some(0),
+            schema_fingerprint: "schema".into(),
+        };
+        let schema = arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "v",
+            arrow_schema::DataType::Int32,
+            false,
+        )]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(arrow::array::Int32Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+        let mut batches = HashMap::new();
+        batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
+        let mut parts_meta = HashMap::new();
+        parts_meta.insert(key, (0, SystemTime::now()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(handle.persist_segment(
+                "hydrate-seg",
+                &HashMap::new(),
+                &batches,
+                &parts_meta,
+                &HashMap::new(),
+                &HashMap::new(),
+            ))
+            .unwrap();
+        SEGMENT_CACHE.clear();
+        compaction_index().clear_all();
+        Buffers::hydrate_from_catalog(&handle, &Config::new());
+        assert!(
+            SEGMENT_CACHE.contains_key("hydrate-seg"),
+            "hydrate must register live catalog payloads into SEGMENT_CACHE"
+        );
+        assert!(Buffers::indexed_wal_ref_count() > 0);
+        reset_in_memory_segments();
+    }
+
+    #[test]
+    fn cache_miss_keeps_catalog_compaction_row() {
+        let src = include_str!("ingest_buffer.rs");
+        assert!(!src.contains(concat!("gone from ", "disk")));
+        assert!(src.contains("catalog row kept"));
+        let work_fn = src
+            .split("fn work_from_manifest")
+            .nth(1)
+            .unwrap()
+            .split("fn manifest_refs_in_flight")
+            .next()
+            .unwrap();
+        assert!(
+            !work_fn.contains("remove_compaction_row"),
+            "planner resume must not delete CompactionRow on cache miss"
+        );
+        assert!(!src.contains(concat!("already ", "reclaimed")));
     }
 }
 
@@ -5871,67 +4750,6 @@ mod clustered_flush_retry_tests {
         let restore = concat!("restore_after_", "failed_flush");
         assert!(!src.contains(restore));
         assert!(src.contains("concatenate those retries into one segment"));
-    }
-}
-
-#[cfg(test)]
-mod planner_sot_tests {
-    use super::*;
-    use crate::buffer::durable::mutation::SegmentDescriptor;
-    use crate::buffer::durable::snapshot::StateSnapshot;
-    use serial_test::serial;
-    use skippr_lease::GENESIS_HASH;
-
-    #[test]
-    #[serial]
-    fn sync_planner_from_snapshot_drops_reclaimed_cache_and_manifests() {
-        SEGMENT_CACHE.clear();
-        compaction_index().clear_all();
-        SEGMENT_CACHE.insert(
-            "gone".into(),
-            CachedSegment {
-                source: SegmentSource::Disk(PathBuf::from("/tmp/gone.seg")),
-                meta: Arc::new(SegmentFileMetadata {
-                    created_at_secs: 0,
-                    total_bytes: 1,
-                    num_partitions: 0,
-                    offsets: HashMap::new(),
-                    index: Vec::new(),
-                    body_sha256: [0u8; 32],
-                }),
-            },
-        );
-        compaction_index().upsert_manifest(CompactionTransaction {
-            id: "c-dead".into(),
-            sink_ref: "sink".into(),
-            namespace: "ns".into(),
-            schema_fingerprint: "fp".into(),
-            write_policy: crate::plugins::source_contract::WritePolicy::Append,
-            semantics: SinkWriteSemantics::default(),
-            refs: Vec::new(),
-            target_filename: "out.parquet".into(),
-            created_at_secs: 1,
-            updated_at_secs: 1,
-            attempts: 0,
-            state: crate::buffer::compaction_transaction::CompactionTransactionState::Pending,
-        });
-        let snapshot = StateSnapshot {
-            pipeline_tenant: "t".into(),
-            pipeline_workspace: "w".into(),
-            pipeline_name: "p".into(),
-            base_index: 1,
-            base_hash: GENESIS_HASH,
-            segments: Vec::<SegmentDescriptor>::new(),
-            compactions: Vec::new(),
-            completions: Vec::new(),
-            offsets: Vec::new(),
-            checkpoints: Vec::new(),
-            schema_fingerprints: Vec::new(),
-        };
-        Buffers::sync_planner_from_snapshot(&snapshot);
-        assert!(SEGMENT_CACHE.is_empty());
-        assert!(compaction_index().live_compaction_ids().is_empty());
-        assert_eq!(compaction_index().indexed_slice_count(), 0);
     }
 }
 

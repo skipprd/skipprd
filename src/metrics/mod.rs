@@ -489,8 +489,6 @@ impl Metrics {
                 "compaction_planner_slices_examined_total": flush_metrics.compaction_planner_slices_examined_total,
                 "cdc_metadata_segment_scans_total": flush_metrics.cdc_metadata_segment_scans_total,
                 "cdc_metadata_segment_bytes_examined_total": flush_metrics.cdc_metadata_segment_bytes_examined_total,
-                "compaction_manifest_directory_scans_total": flush_metrics.compaction_manifest_directory_scans_total,
-                "compaction_manifest_entries_examined_total": flush_metrics.compaction_manifest_entries_examined_total,
                 "compaction_planner_ready_work_count": flush_metrics.compaction_planner_ready_work_count,
                 "compaction_inflight_slice_count": flush_metrics.compaction_inflight_slice_count,
                 "wal_snapshot_ready_count": flush_metrics.wal_snapshot_ready_count,
@@ -519,8 +517,8 @@ impl Metrics {
                 "runtime_schema_state_publications_skipped_total": flush_metrics.runtime_schema_state_publications_skipped_total,
                 "sink_apply_calls_total": flush_metrics.sink_apply_calls_total,
                 "sink_apply_duration_ns_total": flush_metrics.sink_apply_duration_ns_total,
-                "compaction_completion_ledger_writes_total": flush_metrics.compaction_completion_ledger_writes_total,
                 "compaction_tombstone_writes_total": flush_metrics.compaction_tombstone_writes_total,
+                "compaction_catalog_bit_writes_total": flush_metrics.compaction_catalog_bit_writes_total,
                 "wal_segment_closures_total": flush_metrics.wal_segment_closures_total,
                 "wal_segment_closure_latency_ns_total": flush_metrics.wal_segment_closure_latency_ns_total,
                 // Upload telemetry
@@ -569,8 +567,6 @@ impl Metrics {
             json!(counters::CLUSTER_LEASE_LOST_TOTAL.load(Ordering::Relaxed));
         data["metrics"]["cluster_catchup_bytes_total"] =
             json!(counters::CLUSTER_CATCHUP_BYTES_TOTAL.load(Ordering::Relaxed));
-        data["metrics"]["cluster_snapshot_install_total"] =
-            json!(counters::CLUSTER_SNAPSHOT_INSTALL_TOTAL.load(Ordering::Relaxed));
         data["metrics"]["cluster_flight_request_total"] =
             json!(counters::CLUSTER_FLIGHT_REQUEST_TOTAL.load(Ordering::Relaxed));
         data["metrics"]["cluster_flight_fail_total"] =
@@ -581,10 +577,6 @@ impl Metrics {
             json!(counters::CLUSTER_MEMBERSHIP_DIAL_FAIL_TOTAL.load(Ordering::Relaxed));
         data["metrics"]["cluster_suspect_total"] =
             json!(counters::CLUSTER_SUSPECT_TOTAL.load(Ordering::Relaxed));
-        data["metrics"]["cluster_committed_index"] =
-            json!(counters::CLUSTER_COMMITTED_INDEX.load(Ordering::Relaxed));
-        data["metrics"]["cluster_applied_index"] =
-            json!(counters::CLUSTER_APPLIED_INDEX.load(Ordering::Relaxed));
         data["metrics"]["cluster_published_index"] =
             json!(counters::CLUSTER_PUBLISHED_INDEX.load(Ordering::Relaxed));
         data["metrics"]["cluster_replica_lag"] =
@@ -796,7 +788,7 @@ impl Metrics {
                         let active_by_sink =
                             crate::metrics::counters::compaction_active_by_sink_snapshot();
                         info!(
-                            "Flush stages: planner={} avg={:.2}ms segments={} slices={} cdc_scans={} cdc_bytes={} manifest_scans={} ready={} inflight_slices={} active_jobs={} active_by_sink={:?} topups={} idle_ready_slots={} decode_wait_avg={:.2}ms sink_permit_wait_avg={:.2}ms wal_snapshots={} grouped=eager:{}/streaming:{} avg={:.2}ms pool_waiters={} pool_wait_avg={:.2}ms ipc={}/{}chunks schema_installs={} schema_publications_skipped={} sink_applies={} sink_avg={:.2}ms ledger_writes={} tombstones={} closures={} closure_avg={:.2}ms",
+                            "Flush stages: planner={} avg={:.2}ms segments={} slices={} cdc_scans={} cdc_bytes={} ready={} inflight_slices={} active_jobs={} active_by_sink={:?} topups={} idle_ready_slots={} decode_wait_avg={:.2}ms sink_permit_wait_avg={:.2}ms wal_snapshots={} grouped=eager:{}/streaming:{} avg={:.2}ms pool_waiters={} pool_wait_avg={:.2}ms ipc={}/{}chunks schema_installs={} schema_publications_skipped={} sink_applies={} sink_avg={:.2}ms tombstones={} closures={} closure_avg={:.2}ms",
                             flush.compaction_planner_cycles_total,
                             average_duration_ms(
                                 flush.compaction_planner_duration_ns_total,
@@ -808,7 +800,6 @@ impl Metrics {
                             Helpers::human_readable_size(
                                 flush.cdc_metadata_segment_bytes_examined_total,
                             ),
-                            flush.compaction_manifest_directory_scans_total,
                             flush.compaction_planner_ready_work_count,
                             flush.compaction_inflight_slice_count,
                             flush.compaction_active_jobs,
@@ -844,7 +835,6 @@ impl Metrics {
                                 flush.sink_apply_duration_ns_total,
                                 flush.sink_apply_calls_total,
                             ),
-                            flush.compaction_completion_ledger_writes_total,
                             flush.compaction_tombstone_writes_total,
                             flush.wal_segment_closures_total,
                             average_duration_ms(

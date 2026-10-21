@@ -79,30 +79,6 @@ impl PipelinePaths {
         self.segs.join(format!("{}.seg", id.as_str()))
     }
 
-    pub fn segment_commit(&self, id: &SegmentId) -> PathBuf {
-        self.segs.join(format!("{}.seg.commit", id.as_str()))
-    }
-
-    pub fn mutation_log(&self) -> PathBuf {
-        self.durable.join("mutation.log")
-    }
-
-    pub fn state_file(&self) -> PathBuf {
-        self.durable.join("STATE")
-    }
-
-    pub fn offset_published_file(&self) -> PathBuf {
-        self.durable.join("OFFSET_PUBLISHED")
-    }
-
-    pub fn format_marker(&self) -> PathBuf {
-        self.durable.join("CLUSTER_FORMAT_V1")
-    }
-
-    pub fn snapshot_current(&self) -> PathBuf {
-        self.snapshots.join("current")
-    }
-
     pub fn wal_uri(&self, key: &PipelineKey, segment_id: &SegmentId) -> String {
         format!(
             "wal://{}/{}/{}/{}",

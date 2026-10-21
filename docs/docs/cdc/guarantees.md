@@ -27,7 +27,7 @@ Deletes are explicit. Skipprd tells the destination to remove the row (or mark i
 
 After a crash, Skipprd writes the same committed batches again. Destinations that support exactly-once apply recognise a retry and do not insert a second copy. Destinations that only append can duplicate those batches — pick a warehouse from the exactly-once list in [Exactly-once delivery](/concepts/exactly-once) when duplicates matter.
 
-The resume position Skipprd stores is a cache of progress. The write-ahead log is the source of truth. If you delete `DATA_DIR` (or the S3 WAL), Skipprd has nothing to resume from and the source starts again.
+The resume position Skipprd stores is materialized from the WAL catalog. If you delete `DATA_DIR` with sled (or the S3 WAL and remote store), Skipprd has nothing to resume from and the source starts again.
 
 ## What this is not
 

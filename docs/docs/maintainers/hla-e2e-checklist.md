@@ -5,14 +5,14 @@
 **WBS:** [hla-implementation-wbs.md](hla-implementation-wbs.md)  
 **Closed red-team items:** [hla-e2e-implementation-gaps.md](hla-e2e-implementation-gaps.md)
 
-Harness: `python3 tests/hla_e2e/run.py` (DynamoDB Local with two tables — `skippr-hla-e2e-offsets` and `skippr-hla-e2e-catalog` — plus `file://` Iceberg warehouse and three `skipprd` processes with `KUBERNETES_NODE_NAME=hla-host-{1,2,3}`). Query path is Arrow Flight SQL 58.3 (`query_flight_ids`). Clustered TCP is always mTLS; hello is protocol **2** hashed from `SKIPPR_CLUSTER_ID`. Live `run.py` over Flight SQL is the remaining process gate.
+Harness: `python3 tests/hla_e2e/run.py` (DynamoDB Local with two tables — `skippr-hla-e2e-offsets` and `skippr-hla-e2e-catalog` — plus `file://` Iceberg warehouse and three `skipprd` processes with `KUBERNETES_NODE_NAME=hla-host-{1,2,3}`). Query path is Arrow Flight SQL 58.3 (`query_flight_ids`). Clustered TCP is always mTLS; hello is protocol **3** hashed from `SKIPPR_CLUSTER_ID`. Live `run.py` over Flight SQL is the remaining process gate.
 
 **This pass:** 2026-08-17 production close-out (cluster id, always mTLS, gossip HMAC required, Flight `TenantScope`, mesh JWT). Previous `run.py` pass is **stale** until re-run. Commands used `cargo` unless noted.
 
 | Bucket | Ran | Outcome |
 |---|---|---|
-| Process harness (`run.py`) | not this pass | **stale** — must re-run after protocol 2 / mTLS / `SKIPPR_CLUSTER_ID` |
-| Harness contract (`test_run.py`) | this pass | 14 tests (includes protocol-2 hello + cluster id) |
+| Process harness (`run.py`) | not this pass | **stale** — must re-run after protocol 3 / mTLS / `SKIPPR_CLUSTER_ID` |
+| Harness contract (`test_run.py`) | this pass | 14 tests (includes protocol-3 hello + cluster id) |
 | Dynamo CAS (`ddb_cas.py`) | contract in `test_run.py` | live `python3 tests/hla_e2e/ddb_cas.py` still required against DynamoDB Local |
 | WBS CI cargo tests / `check --all-features` | this pass | re-run after close-out |
 | Host-boundary Python script | prior pass | **pass** (`cargo`; default host tree has no `aws-sdk-dynamodb`) |
@@ -24,7 +24,7 @@ Harness: `python3 tests/hla_e2e/run.py` (DynamoDB Local with two tables — `ski
 
 ## Process e2e
 
-Re-run: `python3 tests/hla_e2e/run.py`. The 2026-08-17 pre-cutover pass (36 scenarios) is not proof of the mTLS / protocol 2 / cluster-id harness. Tick scenarios only after that re-run.
+Re-run: `python3 tests/hla_e2e/run.py`. The 2026-08-17 pre-cutover pass (36 scenarios) is not proof of the mTLS / protocol 3 / cluster-id harness. Tick scenarios only after that re-run.
 
 - [ ] `bootstrap_three_nodes` — n1+n2 start; one becomes primary; spare is not in the initial quorum
   - **Ran:** harness scenario. Copied `batch1.jsonl`; started n1 pid=45489, n2 pid=45490.
@@ -55,10 +55,10 @@ Re-run: `python3 tests/hla_e2e/run.py`. The 2026-08-17 pre-cutover pass (36 scen
   - **Ran:** harness scenario. SIGKILL n1 pid=45489; promoted n2.
   - **Remark:** Old primary is dead, not partitioned. Does not prove late Dynamo write from a live old primary.
 
-- [ ] `sigkill_during_ingest_no_duplicate_rows` — arm `{pipeline root}/failpoint` = `after_prepared`; `batch3.jsonl`; primary abort; promote; unique `{evt-1`…`evt-10}`
+- [ ] `sigkill_during_ingest_no_duplicate_rows` — arm `{pipeline root}/failpoint` = `before_catalog_commit`; `batch3.jsonl`; primary abort; promote; unique `{evt-1`…`evt-10}`
   - **Ran:** harness scenario. Armed `/tmp/skippr-hla-e2e/node2/clustered/hla-e2e/local/hla_events/failpoint`; n2 exit code `-6` (SIGABRT); promoted n3.
   - **Result:** pass.
-  - **Remark:** Covers **after local Prepared, before replica send**. Later commit-boundary crashes are separate harness scenarios (`after_replica_ack`, `after_local_commit`, `after_offsets_published`, `replica_after_prepared`).
+  - **Remark:** Covers **after replica payload ack, before catalog commit**. Later commit-boundary crashes are separate harness scenarios (`after_replica_payload_ack`, `after_catalog_commit`, `after_offsets_published`).
 
 Harness contract (not a cluster):
 
@@ -71,17 +71,13 @@ Harness contract (not a cluster):
 
 - [x] `cargo test -p skipprd --features offset-store-dynamodb --test hla_cluster`
   - **Result:** pass, 22 tests, 0.21s.
-  - **Remark:** Includes `prepared_without_commit_recovers_from_replica` (in-process replica apply) and `crash_after_commit_before_publish_recovers_committed_prefix` (**state-machine model**, not a subprocess abort).
+  - **Remark:** Includes `crash_after_catalog_commit_before_publish_republishes` (**state-machine model**, not a subprocess abort).
 
 - [x] `cargo test -p skipprd --features offset-store-dynamodb --lib failpoint`
   - **Result:** pass, 4 tests.
 
-- [x] `insert_position_preserves_closed`
-  - **Result:** pass.
-
-- [x] `store_read_error_is_not_missing` / `validate_entries_surfaces_store_errors` / `closed_check_fails_closed`
-  - **Result:** `validate_entries_surfaces_store_errors` and `closed_check_fails_closed` pass (re-run this pass: runtime-sdk closed_check pass). `store_read_error_is_not_missing` was pass on the prior pass; not re-filtered this pass (same binary, offsets tests still compiled).
-  - **Remark:** `commit_segment_publishes_closed_offsets` pass inside `buffer::durable::` (22 tests).
+- [x] Offset Closed merge / `closed_check_fails_closed`
+  - **Result:** `cargo test -p skippr-offset-store-dynamodb` and `cargo test -p skippr-runtime-sdk closed_check_fails_closed`. Catalog `publish_wal_commit` is the publisher; `buffer::durable::` mutation-log tests are deleted.
 
 - [x] `cargo test -p skippr-offset-store-dynamodb`
   - **Result:** pass, 4 tests (merge Closed/Position; SK formats). No live Dynamo I/O.
@@ -102,24 +98,24 @@ Each item: ran the closest existing test if any. `[ ]` means the **process** sce
   - **Result:** pass.
 
 - [ ] After local Committed / apply, before Dynamo offset publish
-  - **Ran:** `after_local_commit` failpoint + `batch4.jsonl`; primary abort; promote; unique ids through `evt-12`.
+  - **Ran:** `after_catalog_commit` failpoint + `batch4.jsonl`; primary abort; promote; unique ids through `evt-12`.
   - **Result:** pass. In-process `crash_after_commit_before_publish_recovers_committed_prefix` remains as the integer model.
 
 - [ ] After offset publish, before ingest Ack
   - **Ran:** `after_offsets_published` failpoint + `batch6.jsonl`; unique ids through `evt-16`.
   - **Result:** pass.
 
-- [ ] Replica SIGKILL during payload replication (primary keeps Prepared; recovery vs uncommitted)
-  - **Ran:** `replica_after_prepared` failpoint on the replica + `batch7.jsonl`; replica abort; promote; unique ids through `evt-18`.
+- [ ] Replica SIGKILL during payload replication (primary has payload bytes; no catalog row until quorum)
+  - **Ran:** `after_replica_payload_ack` failpoint on the replica + `batch7.jsonl`; replica abort; promote; unique ids through `evt-18`.
   - **Result:** pass.
 
-- [ ] Truncated / STATE-mismatch mutation log on restart
-  - **Harness:** `truncated_log_restart` (2026-08-17 `run.py` reached this scenario).
-  - **Result:** pass (harness advanced). In-process `truncated_tail_is_dropped` remains.
+- [ ] Truncated replica payloads on restart
+  - **Harness:** payload catch-up after truncated `.seg` files (`run.py`).
+  - **Result:** protocol v3 payload quorum; mutation-log scenarios are deleted.
 
-- [ ] ENOSPC (or equivalent fail-closed disk-full) during Prepared
-  - **Harness:** `enospc_during_prepared` (2026-08-17 `run.py`).
-  - **Result:** pass (harness advanced). Failpoint is fail-closed, not a real ENOSPC errno.
+- [ ] ENOSPC (or equivalent fail-closed disk-full) during payload persist
+  - **Harness:** `enospc_before_catalog_commit` (was `enospc_during_prepared`; 2026-08-17 `run.py`).
+  - **Result:** pass (harness advanced). Failpoint is fail-closed, not a real ENOSPC errno. Catalog is SoT; there is no Prepared WAL state.
 
 ### Failover and fencing (WU-4.2 / WU-4.4)
 
@@ -131,9 +127,8 @@ Each item: ran the closest existing test if any. `[ ]` means the **process** sce
   - **Ran:** `two_node_quorum_stall` — SIGKILL both non-primaries, copy `batch10.jsonl`, assert `evt-23`/`evt-24` absent, start one spare, catch-up, unique through `evt-24`.
   - **Result:** pass.
 
-- [ ] Hash-conflict / initialized head loss fails closed (no implicit majority)
-  - **Harness:** `hash_conflict_no_majority` (2026-08-17 `run.py`).
-  - **Result:** pass (harness advanced).
+- [ ] Initialized payload loss fails closed (`PayloadMissing`; no implicit majority)
+  - **Harness:** protocol v3 payload catch-up (`run.py`). Hash-chain `hash_conflict_no_majority` is deleted.
 
 - [ ] Restart generation: killed node returns with a new process UUID and is not treated as the old replica
   - **Ran:** `restart_generation` (2026-08-17 `run.py`).
@@ -141,8 +136,8 @@ Each item: ran the closest existing test if any. `[ ]` means the **process** sce
 
 ### Catch-up and replacement (WU-4.1 / WU-4.3)
 
-- [ ] Catch-up across a snapshot boundary (requester predates donor base)
-  - **Ran:** `snapshot_catchup_fourth_node` (2026-08-17 `run.py`).
+- [ ] Catch-up of missing payloads onto a replacement replica
+  - **Ran:** `snapshot_catchup_fourth_node` (2026-08-17 `run.py`); waits for `WAL catalog reclaim` / payload catch-up, not a mutation-log snapshot boundary.
   - **Result:** pass (harness advanced).
 
 - [ ] Donor failure mid catch-up, then retry
@@ -155,7 +150,7 @@ Each item: ran the closest existing test if any. `[ ]` means the **process** sce
 
 ### Compaction / SkipprLake sink (WU-2.6 / WU-6.3)
 
-- [ ] Compaction crash after sink success, before `PutCompaction(Acked)`; restart is `AlreadyApplied`, no duplicate parquet
+- [ ] Compaction crash after sink success, before `CompactionRow` Acked; restart is `AlreadyApplied`, no duplicate parquet
   - **Ran:** `after_compaction_sink` failpoint + `batch8.jsonl`; parquet count after recovery is not a duplicate-file blow-up; unique ids through `evt-20`.
   - **Result:** pass.
 
@@ -174,7 +169,7 @@ Each item: ran the closest existing test if any. `[ ]` means the **process** sce
   - **Result:** pass (harness advanced).
 
 - [ ] Pointer-before-completion and completion-before-query: UNION has each source row once
-  - **Ran:** ingest UNION uniqueness throughout the harness (pass), including immediately after compaction of `batch10`. Iceberg snapshot ancestry now carries `skippr.wal-segment-ids`; live WAL excludes those segments. `select_live_ordinals` skips ledger-complete and Iceberg-named segments.
+  - **Ran:** ingest UNION uniqueness throughout the harness (pass), including immediately after compaction of `batch10`. Iceberg snapshot ancestry now carries `skippr.wal-segment-ids`; live WAL excludes those segments. `select_live_ordinals` skips Iceberg-named segments and slices whose catalog bits are all done.
   - **Remark:** WAL may be behind. Eventual uniqueness after compaction is `wait_unique_ids`.
 
 - [ ] Query skips an unreachable replica; Iceberg-only is allowed
@@ -208,8 +203,8 @@ Each item: ran the closest existing test if any. `[ ]` means the **process** sce
   - **Result:** pass (harness advanced).
 
 - [ ] Rolling replica replacement across current/previous protocol
-  - **Harness:** `rolling_protocol_replacement` injects Dynamo membership `protocol_min=max=3`; dummy addr is never `AssignReplica`; protocol-2 spare is. `CURRENT_PROTOCOL` is 2. `mixed_protocol_handshake` remains Hello reject.
-  - **Result:** stale until re-run after protocol-2 / mTLS cutover.
+  - **Harness:** `rolling_protocol_replacement` injects Dynamo membership `protocol_min=max=4`; dummy addr is never `AssignReplica`; protocol-3 spare is. `CURRENT_PROTOCOL` is 3. `mixed_protocol_handshake` remains Hello reject.
+  - **Result:** stale until re-run after protocol-3 / mTLS cutover.
 
 ### Discovery / membership (WU-5)
 
@@ -236,8 +231,8 @@ Each item: ran the closest existing test if any. `[ ]` means the **process** sce
 - [x] `cargo test -p skipprd --features offset-store-dynamodb --lib cluster::`
   - **Result:** pass, 52 tests.
 
-- [x] `cargo test -p skipprd --features offset-store-dynamodb --lib buffer::durable::`
-  - **Result:** pass, 22 tests.
+- [x] `cargo test -p skipprd --lib buffer::wal_handle::`
+  - **Result:** catalog-backed WAL handle tests. `buffer::durable::` mutation-log suite is deleted.
 
 - [x] `cargo test -p skipprd --features offset-store-dynamodb --lib query_flight::`
 

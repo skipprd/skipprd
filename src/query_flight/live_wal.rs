@@ -1,9 +1,6 @@
-use skippr_lease::{PipelineKey, SegmentId};
-use std::collections::HashSet;
+use skippr_lease::PipelineKey;
 
-use crate::buffer::durable::log::MutationLog;
-use crate::buffer::durable::snapshot::live_segment_ids;
-use crate::buffer::segment_file::SegmentFile;
+use crate::buffer::wal_handle::{self, PipelineWalHandle};
 
 #[derive(Clone, Debug)]
 pub struct LiveWalScanRequest {
@@ -12,86 +9,54 @@ pub struct LiveWalScanRequest {
     pub exclude_segment_ids: Vec<String>,
 }
 
-/// Live incomplete ordinals: snapshot segments ∪ suffix `CommitSegment`, minus
-/// `ReclaimSegment`, minus Iceberg `skippr.wal-segment-ids`. Unreadable
-/// ordinals are skipped. Ledger-complete ordinals stay visible until Iceberg
-/// lists the segment (Sent is not lake-visible).
+/// Live incomplete ordinals from catalog SegmentRows, minus Iceberg-named
+/// excludes. Unreadable payloads are skipped. Slice-complete ordinals stay
+/// visible until Iceberg lists the segment (the row is deleted only when every
+/// slice is done).
 pub fn select_live_ordinals(
-    log: &MutationLog,
+    handle: &PipelineWalHandle,
     exclude_segment_ids: &[String],
 ) -> Vec<(String, u32)> {
-    let exclude: HashSet<&str> = exclude_segment_ids.iter().map(String::as_str).collect();
-    let mut live = match live_segment_ids(log) {
-        Ok(live) => live,
-        Err(err) => {
-            tracing::warn!("live WAL scan skipped unreadable durable state: {err}");
-            return Vec::new();
-        }
-    };
-    live.retain(|id| !exclude.contains(id.as_str()));
+    handle.select_live_ordinals(exclude_segment_ids)
+}
 
-    let mut out = Vec::new();
-    for id in live {
-        let Ok(seg_id) = SegmentId::new(&id) else {
-            continue;
-        };
-        let path = log.paths().segment(&seg_id);
-        let Ok(meta) = SegmentFile::admit_owned_pair_path(&path) else {
-            continue;
-        };
-        for ordinal in 0..meta.index.len() as u32 {
-            out.push((id.clone(), ordinal));
-        }
+pub fn select_live_ordinals_for(
+    pipeline: &PipelineKey,
+    exclude_segment_ids: &[String],
+) -> Vec<(String, u32)> {
+    match wal_handle::wal_handle_for(pipeline) {
+        Some(handle) => handle.select_live_ordinals(exclude_segment_ids),
+        None => Vec::new(),
     }
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::durable::mutation::DurableMutation;
-    use skippr_lease::{CommitIndex, PipelineKey, GENESIS_HASH};
+    use crate::buffer::segment_file::{PartitionKey, WalPayload};
+    use crate::buffer::wal_handle::memory_catalog_for_test;
+    use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
+    use skippr_lease::{LeaseGuard, PipelinePaths, SystemClock};
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
-    fn commit_segment_envelope(
-        key: &PipelineKey,
-        index: u64,
-        previous: [u8; 32],
-        segment_id: &str,
-    ) -> crate::buffer::durable::mutation::MutationEnvelope {
-        crate::buffer::durable::mutation::MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key.clone(),
-            epoch: skippr_lease::LeaseEpoch::new(1),
-            index: CommitIndex::new(index),
-            previous_hash: previous,
-            payload_sha256: [9u8; 32],
-            body: DurableMutation::CommitSegment {
-                descriptor: crate::buffer::durable::mutation::SegmentDescriptor {
-                    segment_id: segment_id.into(),
-                    payload_len: 4,
-                    payload_sha256: [9u8; 32],
-                    num_partitions: 1,
-                    total_bytes: 4,
-                    created_at_secs: 0,
-                    schema_fingerprints: Vec::new(),
-                },
-                offsets: Vec::new(),
-                checkpoints: Vec::new(),
-            },
-        }
+    fn leased_handle(dir: &std::path::Path) -> Arc<PipelineWalHandle> {
+        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let paths = PipelinePaths::legacy_disk(dir);
+        let clock = Arc::new(SystemClock::new());
+        let guard = LeaseGuard::single_node(key.clone(), clock);
+        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let catalog = memory_catalog_for_test(fence);
+        let db = sled::open(dir.join("offsets")).unwrap();
+        let tree = db.open_tree("offsets").unwrap();
+        let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
+        PipelineWalHandle::new(key, paths, guard, catalog, offsets)
     }
 
-    fn write_segment(paths: &skippr_lease::PipelinePaths, segment_id: &str, ids: &[&str]) {
-        use crate::buffer::segment_file::{PartitionKey, SegmentFile};
-        use arrow::array::StringArray;
-        use arrow::datatypes::{DataType, Field, Schema};
-        use arrow::record_batch::RecordBatch;
-        use std::collections::HashMap;
-        use std::sync::Arc;
-
-        std::fs::create_dir_all(&paths.segs).unwrap();
-        let seg = SegmentFile::new(&paths.segs, segment_id).unwrap();
-        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+    async fn persist_named(handle: &PipelineWalHandle, segment_id: &str, ids: &[&str]) {
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Utf8, true),
+        ]));
         let mut batches = HashMap::new();
         for (i, id) in ids.iter().enumerate() {
             let part = PartitionKey {
@@ -101,199 +66,98 @@ mod tests {
                 time: None,
                 schema_fingerprint: "fp".into(),
             };
-            let batch =
-                RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(vec![*id]))])
-                    .unwrap();
-            batches.insert(
-                part,
-                crate::buffer::segment_file::WalPayload::Arrow(vec![batch]),
-            );
+            let batch = arrow::record_batch::RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(arrow::array::StringArray::from(vec![*id]))],
+            )
+            .unwrap();
+            batches.insert(part, WalPayload::Arrow(vec![batch]));
         }
-        let (meta, _rows, _sha) = seg
-            .write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())
-            .unwrap();
-        seg.write_commit_marker(&meta).unwrap();
-    }
-
-    fn commit(
-        log: &mut crate::buffer::durable::log::MutationLog,
-        envelope: &crate::buffer::durable::mutation::MutationEnvelope,
-    ) {
-        log.append_prepared(envelope).unwrap();
-        log.append_committed(envelope.index, envelope.entry_hash().unwrap())
+        handle
+            .persist_segment(
+                segment_id,
+                &HashMap::new(),
+                &batches,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .await
             .unwrap();
     }
 
-    #[test]
-    fn iceberg_named_segment_is_not_selected() {
+    #[tokio::test]
+    async fn iceberg_named_segment_is_not_selected() {
         let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        write_segment(&paths, "iceberg-seg", &["evt-a"]);
-        write_segment(&paths, "live-seg", &["evt-b"]);
-        let mut log = crate::buffer::durable::log::MutationLog::open(paths).unwrap();
-        let first = commit_segment_envelope(&key, 1, GENESIS_HASH, "iceberg-seg");
-        commit(&mut log, &first);
-        let second = commit_segment_envelope(&key, 2, first.entry_hash().unwrap(), "live-seg");
-        commit(&mut log, &second);
-        let selected = select_live_ordinals(&log, &["iceberg-seg".into()]);
+        let handle = leased_handle(dir.path());
+        persist_named(&handle, "iceberg-seg", &["evt-a"]).await;
+        persist_named(&handle, "live-seg", &["evt-b"]).await;
+        let selected = select_live_ordinals(&handle, &["iceberg-seg".into()]);
         assert_eq!(selected, vec![("live-seg".to_string(), 0)]);
     }
 
-    #[test]
-    fn complete_ordinal_stays_visible_until_iceberg_exclude() {
-        use crate::buffer::completion_ledger::{SegmentCompletionLedger, SegmentCompletionUpdate};
-
+    #[tokio::test]
+    async fn complete_ordinal_stays_visible_until_iceberg_exclude() {
         let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        write_segment(&paths, "live-seg", &["evt-0", "evt-1"]);
-        let seg = crate::buffer::segment_file::SegmentFile::new(&paths.segs, "live-seg").unwrap();
-        let meta = seg.read_metadata_durable().unwrap();
-        assert!(meta.index.len() >= 2);
-        let ledger = SegmentCompletionLedger::new(paths.completions.clone());
-        ledger
-            .mark_complete_batch(&[SegmentCompletionUpdate {
-                segment_id: "live-seg",
-                index: &meta.index,
-                ordinals: &[0],
-            }])
+        let handle = leased_handle(dir.path());
+        persist_named(&handle, "live-seg", &["evt-0", "evt-1"]).await;
+        handle
+            .complete_slices_and_reclaim("live-seg", &[0])
+            .await
             .unwrap();
-        let mut log = crate::buffer::durable::log::MutationLog::open(paths).unwrap();
-        let commit_env = commit_segment_envelope(&key, 1, GENESIS_HASH, "live-seg");
-        commit(&mut log, &commit_env);
-        let selected = select_live_ordinals(&log, &[]);
-        let expected: Vec<(String, u32)> = (0..meta.index.len() as u32)
-            .map(|ordinal| ("live-seg".to_string(), ordinal))
-            .collect();
-        assert_eq!(selected, expected);
-        assert!(select_live_ordinals(&log, &["live-seg".into()]).is_empty());
+        let selected = select_live_ordinals(&handle, &[]);
+        assert!(selected.contains(&("live-seg".to_string(), 0)));
+        assert!(selected.contains(&("live-seg".to_string(), 1)));
+        assert!(select_live_ordinals(&handle, &["live-seg".into()]).is_empty());
     }
 
-    #[test]
-    fn fully_completed_ledger_stays_visible_without_iceberg_exclude() {
-        use crate::buffer::completion_ledger::{SegmentCompletionLedger, SegmentCompletionUpdate};
-
+    #[tokio::test]
+    async fn fully_completed_row_is_reclaimed() {
         let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        write_segment(&paths, "live-seg", &["evt-23"]);
-        let seg = crate::buffer::segment_file::SegmentFile::new(&paths.segs, "live-seg").unwrap();
-        let meta = seg.read_metadata_durable().unwrap();
-        let ledger = SegmentCompletionLedger::new(paths.completions.clone());
-        let ordinals: Vec<usize> = (0..meta.index.len()).collect();
-        ledger
-            .mark_complete_batch(&[SegmentCompletionUpdate {
-                segment_id: "live-seg",
-                index: &meta.index,
-                ordinals: &ordinals,
-            }])
+        let handle = leased_handle(dir.path());
+        persist_named(&handle, "live-seg", &["evt-23"]).await;
+        handle
+            .complete_slices_and_reclaim("live-seg", &[0])
+            .await
             .unwrap();
-        let mut log = crate::buffer::durable::log::MutationLog::open(paths).unwrap();
-        let commit_env = commit_segment_envelope(&key, 1, GENESIS_HASH, "live-seg");
-        commit(&mut log, &commit_env);
-        assert_eq!(
-            select_live_ordinals(&log, &[]),
-            vec![("live-seg".to_string(), 0)]
-        );
-        assert!(select_live_ordinals(&log, &["live-seg".into()]).is_empty());
+        assert!(select_live_ordinals(&handle, &[]).is_empty());
     }
 
-    #[test]
-    fn missing_segment_file_is_skipped() {
+    #[tokio::test]
+    async fn missing_payload_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        std::fs::create_dir_all(&paths.segs).unwrap();
-        let mut log = crate::buffer::durable::log::MutationLog::open(paths).unwrap();
-        let commit_env = commit_segment_envelope(&key, 1, GENESIS_HASH, "gone-seg");
-        commit(&mut log, &commit_env);
-        assert!(select_live_ordinals(&log, &[]).is_empty());
+        let handle = leased_handle(dir.path());
+        persist_named(&handle, "gone-seg", &["evt-a"]).await;
+        let path = handle.paths().segs.join("gone-seg.seg");
+        let _ = std::fs::remove_file(&path);
+        assert!(select_live_ordinals(&handle, &[]).is_empty());
     }
 
-    #[test]
-    fn snapshot_prune_still_lists_uncompacted_segment() {
+    #[tokio::test]
+    async fn catalog_segment_ids_are_catalog_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        write_segment(&paths, "live", &["evt-live"]);
-        let mut log = crate::buffer::durable::log::MutationLog::open(paths.clone()).unwrap();
-        let commit_env = commit_segment_envelope(&key, 1, GENESIS_HASH, "live");
-        commit(&mut log, &commit_env);
-        crate::buffer::durable::snapshot::retain_live_snapshot(&mut log, &paths, &key).unwrap();
-        assert!(log.committed_envelopes().is_empty());
-        assert_eq!(
-            select_live_ordinals(&log, &[]),
-            vec![("live".to_string(), 0)]
-        );
+        let handle = leased_handle(dir.path());
+        persist_named(&handle, "old", &["evt-old"]).await;
+        persist_named(&handle, "new", &["evt-new"]).await;
+        persist_named(&handle, "gone", &["evt-gone"]).await;
+        handle
+            .complete_slices_and_reclaim("gone", &[0])
+            .await
+            .unwrap();
+        let mut ids = handle.catalog_segment_ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["new".to_string(), "old".to_string()]);
     }
 
-    #[test]
-    fn live_segment_ids_span_snapshot_and_suffix_minus_reclaimed() {
+    #[tokio::test]
+    async fn reclaimed_segment_is_not_selected() {
         let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        write_segment(&paths, "old", &["evt-old"]);
-        let mut log = crate::buffer::durable::log::MutationLog::open(paths.clone()).unwrap();
-        let first = commit_segment_envelope(&key, 1, GENESIS_HASH, "old");
-        commit(&mut log, &first);
-        crate::buffer::durable::snapshot::retain_live_snapshot(&mut log, &paths, &key).unwrap();
-        let second = commit_segment_envelope(&key, 2, first.entry_hash().unwrap(), "new");
-        commit(&mut log, &second);
-        let third = commit_segment_envelope(&key, 3, second.entry_hash().unwrap(), "gone");
-        commit(&mut log, &third);
-        let reclaim = crate::buffer::durable::mutation::MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key,
-            epoch: skippr_lease::LeaseEpoch::new(1),
-            index: CommitIndex::new(4),
-            previous_hash: third.entry_hash().unwrap(),
-            payload_sha256: [0u8; 32],
-            body: DurableMutation::ReclaimSegment {
-                segment_id: "gone".into(),
-            },
-        };
-        commit(&mut log, &reclaim);
-
-        assert_eq!(
-            crate::buffer::durable::snapshot::live_segment_ids(&log).unwrap(),
-            vec!["old".to_string(), "new".to_string()]
-        );
-    }
-
-    #[test]
-    fn live_segment_ids_fail_closed_on_a_corrupt_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        std::fs::create_dir_all(&paths.snapshots).unwrap();
-        std::fs::write(paths.snapshot_current(), b"not a snapshot").unwrap();
-        let log = crate::buffer::durable::log::MutationLog::open(paths).unwrap();
-
-        assert!(crate::buffer::durable::snapshot::live_segment_ids(&log).is_err());
-    }
-
-    #[test]
-    fn reclaimed_segment_is_not_selected() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        write_segment(&paths, "live-seg", &["evt-a"]);
-        let mut log = crate::buffer::durable::log::MutationLog::open(paths).unwrap();
-        let first = commit_segment_envelope(&key, 1, GENESIS_HASH, "live-seg");
-        commit(&mut log, &first);
-        let reclaim = crate::buffer::durable::mutation::MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key,
-            epoch: skippr_lease::LeaseEpoch::new(1),
-            index: CommitIndex::new(2),
-            previous_hash: first.entry_hash().unwrap(),
-            payload_sha256: [0u8; 32],
-            body: DurableMutation::ReclaimSegment {
-                segment_id: "live-seg".into(),
-            },
-        };
-        commit(&mut log, &reclaim);
-        assert!(select_live_ordinals(&log, &[]).is_empty());
+        let handle = leased_handle(dir.path());
+        persist_named(&handle, "live-seg", &["evt-a"]).await;
+        handle
+            .complete_slices_and_reclaim("live-seg", &[0])
+            .await
+            .unwrap();
+        assert!(select_live_ordinals(&handle, &[]).is_empty());
     }
 }

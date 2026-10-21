@@ -1,6 +1,6 @@
-//! S3 WAL persist: encode once, PUT body then SEGC commit, reconcile the
-//! same snapshot ID on timeout, never restore live bytes, never mint a
-//! second ID on a fenced writer lease.
+//! S3 WAL persist: encode once, PUT body only, reconcile the same snapshot
+//! ID on timeout, never restore live bytes, never mint a second ID on a
+//! fenced writer lease. Catalog commit is the ownership record.
 
 use std::collections::HashMap;
 use std::io;
@@ -10,7 +10,7 @@ use skippr_lease::LeaseGuard;
 use tracing::error;
 
 use crate::buffer::segment_file::{encode_snapshot, PartitionKey, SegmentFile, WalPayload};
-use crate::buffer::wal_object_store::{snapshot_pair_keys, GetOutcome, PutOutcome, WalObjectStore};
+use crate::buffer::wal_object_store::{snapshot_body_key, GetOutcome, PutOutcome, WalObjectStore};
 use crate::buffer::wal_store::{SegmentWriteLocation, SegmentWriteResult};
 use crate::helpers::offsets::OffsetKey;
 
@@ -21,7 +21,6 @@ pub const RECONCILE_GET_ATTEMPTS: u32 = 2;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PersistStage {
     Body,
-    Commit,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,44 +169,6 @@ async fn put_or_reconcile(
     }
 }
 
-async fn get_required(
-    store: &dyn WalObjectStore,
-    key: &str,
-    snapshot_id: &str,
-    stage: PersistStage,
-) -> Result<Vec<u8>, PersistError> {
-    match reconcile_get(store, key).await {
-        GetOutcome::Found(bytes) => Ok(bytes),
-        GetOutcome::Missing => Err(PersistError::Definite {
-            snapshot_id: snapshot_id.to_string(),
-            stage,
-            message: format!("{key} missing while admitting timed-out pair"),
-        }),
-        GetOutcome::Unknown => Err(PersistError::Unreconciled {
-            snapshot_id: snapshot_id.to_string(),
-            stage,
-            message: format!("{key} GET unknown while admitting timed-out pair"),
-        }),
-    }
-}
-
-async fn admit_pair_from_store(
-    store: &dyn WalObjectStore,
-    body_key: &str,
-    commit_key: &str,
-    snapshot_id: &str,
-) -> Result<crate::buffer::segment_file::SegmentFileMetadata, PersistError> {
-    let body = get_required(store, body_key, snapshot_id, PersistStage::Body).await?;
-    let commit = get_required(store, commit_key, snapshot_id, PersistStage::Commit).await?;
-    crate::buffer::segment_file::SegmentFile::admit_owned_pair_bytes(&body, &commit).map_err(
-        |err| PersistError::Unreconciled {
-            snapshot_id: snapshot_id.to_string(),
-            stage: PersistStage::Commit,
-            message: format!("bound pair failed after timeout reconcile: {err}"),
-        },
-    )
-}
-
 pub async fn persist_snapshot_pair(
     store: &dyn WalObjectStore,
     prefix_url: &str,
@@ -219,8 +180,8 @@ pub async fn persist_snapshot_pair(
     lease: &LeaseGuard,
 ) -> Result<SegmentWriteResult, PersistError> {
     let epoch = require_epoch(lease, snapshot_id)?;
-    let (bucket, body_key, commit_key) =
-        snapshot_pair_keys(prefix_url, snapshot_id).map_err(|err| PersistError::Definite {
+    let (bucket, body_key) =
+        snapshot_body_key(prefix_url, snapshot_id).map_err(|err| PersistError::Definite {
             snapshot_id: snapshot_id.to_string(),
             stage: PersistStage::Body,
             message: err.to_string(),
@@ -229,7 +190,6 @@ pub async fn persist_snapshot_pair(
         store,
         &bucket,
         &body_key,
-        &commit_key,
         snapshot_id,
         offsets,
         batches,
@@ -245,7 +205,6 @@ pub async fn persist_snapshot_keys(
     store: &dyn WalObjectStore,
     bucket: &str,
     body_key: &str,
-    commit_key: &str,
     snapshot_id: &str,
     offsets: &HashMap<OffsetKey, u64>,
     batches: &HashMap<PartitionKey, WalPayload>,
@@ -254,11 +213,10 @@ pub async fn persist_snapshot_keys(
     lease: &LeaseGuard,
     epoch: skippr_lease::LeaseEpoch,
 ) -> Result<SegmentWriteResult, PersistError> {
-    let result = persist_owned_pair(
+    let result = persist_payload_object(
         store,
         bucket,
         body_key,
-        commit_key,
         snapshot_id,
         offsets,
         batches,
@@ -272,11 +230,10 @@ pub async fn persist_snapshot_keys(
     result
 }
 
-async fn persist_owned_pair(
+async fn persist_payload_object(
     store: &dyn WalObjectStore,
     bucket: &str,
     body_key: &str,
-    commit_key: &str,
     snapshot_id: &str,
     offsets: &HashMap<OffsetKey, u64>,
     batches: &HashMap<PartitionKey, WalPayload>,
@@ -302,33 +259,15 @@ async fn persist_owned_pair(
         PersistStage::Body,
     )
     .await?;
+    let _ = body_reconciled;
     require_same_epoch(lease, snapshot_id, epoch)?;
-    let commit_bytes = SegmentFile::build_commit_header_bytes(
-        encoded.meta.num_partitions,
-        encoded.meta.total_bytes,
-        &encoded.sha256,
-    )
-    .to_vec();
-    let (commit_bytes, commit_reconciled) = put_or_reconcile(
-        store,
-        commit_key,
-        commit_bytes,
-        snapshot_id,
-        PersistStage::Commit,
-    )
-    .await?;
-    require_same_epoch(lease, snapshot_id, epoch)?;
-    let meta = if body_reconciled || commit_reconciled {
-        admit_pair_from_store(store, body_key, commit_key, snapshot_id).await?
-    } else {
-        SegmentFile::admit_owned_pair_bytes(&body_bytes, &commit_bytes).map_err(|err| {
-            PersistError::Unreconciled {
-                snapshot_id: snapshot_id.to_string(),
-                stage: PersistStage::Commit,
-                message: format!("bound pair failed after publication: {err}"),
-            }
-        })?
-    };
+    let meta = SegmentFile::read_metadata_from_bytes(&body_bytes).map_err(|err| {
+        PersistError::Unreconciled {
+            snapshot_id: snapshot_id.to_string(),
+            stage: PersistStage::Body,
+            message: format!("payload metadata failed after publication: {err}"),
+        }
+    })?;
     require_same_epoch(lease, snapshot_id, epoch)?;
     Ok(SegmentWriteResult {
         meta,
@@ -410,7 +349,6 @@ mod tests {
             store,
             "bucket",
             &format!("{id}.seg"),
-            &format!("{id}.seg.commit"),
             id,
             &offsets,
             &batches,
@@ -440,22 +378,12 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn applied_body_and_commit_acks_same_id() {
+    async fn applied_body_acks_same_id() {
         let store = ScriptedObjectStore::new();
         let result = persist(&store, "snap-ok", None).await.unwrap();
         assert!(store.inner().contains("snap-ok.seg"));
-        assert!(store.inner().contains("snap-ok.seg.commit"));
+        assert!(!store.inner().contains("snap-ok.seg.commit"));
         assert_eq!(result.location_key(), "snap-ok.seg");
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn lost_commit_response_reconciles_same_id() {
-        let store = ScriptedObjectStore::new();
-        store.script_put("snap-lost.seg.commit", vec![ScriptedPut::ApplyLostResponse]);
-        let result = persist(&store, "snap-lost", None).await.unwrap();
-        assert_eq!(result.location_key(), "snap-lost.seg");
-        assert!(store.inner().contains("snap-lost.seg.commit"));
     }
 
     #[tokio::test]
@@ -466,7 +394,7 @@ mod tests {
         let result = persist(&store, "snap-lost-body", None).await.unwrap();
         assert_eq!(result.location_key(), "snap-lost-body.seg");
         assert!(store.inner().contains("snap-lost-body.seg"));
-        assert!(store.inner().contains("snap-lost-body.seg.commit"));
+        assert!(!store.inner().contains("snap-lost-body.seg.commit"));
     }
 
     #[tokio::test]
@@ -507,78 +435,10 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn lost_commit_admits_from_store_pair() {
-        let store = ScriptedObjectStore::new();
-        store.script_put("snap-pair.seg.commit", vec![ScriptedPut::ApplyLostResponse]);
-        store.script_get("snap-pair.seg", ScriptedGet::FailOnceThenLive);
-        let result = persist(&store, "snap-pair", None).await.unwrap();
-        assert_eq!(result.location_key(), "snap-pair.seg");
-        assert!(store.inner().contains("snap-pair.seg.commit"));
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn never_landed_commit_is_definite_and_does_not_restore() {
-        let store = ScriptedObjectStore::new();
-        store.script_put("snap-miss.seg.commit", vec![ScriptedPut::NeverLand]);
-        let err = persist_err(&store, "snap-miss", None).await;
-        assert!(matches!(
-            err,
-            PersistError::Definite {
-                stage: PersistStage::Commit,
-                ..
-            }
-        ));
-        assert_eq!(err.snapshot_id(), "snap-miss");
-        assert!(!store.inner().contains("snap-miss.seg.commit"));
-        assert!(!err.is_fatal());
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn pair_admit_missing_companion_is_definite_and_allows_retry() {
-        let store = ScriptedObjectStore::new();
-        store.script_put("snap-gone.seg", vec![ScriptedPut::ApplyLostResponse]);
-        store.script_get("snap-gone.seg", ScriptedGet::FoundThenMissing);
-        let err = persist_err(&store, "snap-gone", None).await;
-        assert!(matches!(
-            err,
-            PersistError::Definite {
-                stage: PersistStage::Body,
-                ..
-            }
-        ));
-        assert!(!err.is_fatal());
-        let second = persist(&store, "snap-gone-retry", None).await.unwrap();
-        assert_eq!(second.location_key(), "snap-gone-retry.seg");
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_failure_after_unknown_put_is_fatal_and_blocks_second_id() {
-        let guard = test_guard();
-        let store = ScriptedObjectStore::new();
-        store.script_put("snap-unk.seg.commit", vec![ScriptedPut::ApplyLostResponse]);
-        store.script_get("snap-unk.seg.commit", ScriptedGet::AlwaysFail);
-        let err = persist_err(&store, "snap-unk", Some(guard.as_ref())).await;
-        assert!(matches!(err, PersistError::Unreconciled { .. }));
-        assert!(err.is_fatal());
-        assert!(guard.require_active_epoch().is_err());
-        let second = persist_err(&store, "snap-other", Some(guard.as_ref())).await;
-        assert_eq!(second.snapshot_id(), "snap-other");
-        assert!(matches!(second, PersistError::Fenced { .. }));
-        assert!(!store.inner().contains("snap-other.seg"));
-    }
-
-    #[tokio::test]
-    #[serial]
     async fn get_retry_then_admit_same_id() {
         let store = ScriptedObjectStore::new();
-        store.script_put(
-            "snap-retry.seg.commit",
-            vec![ScriptedPut::ApplyLostResponse],
-        );
-        store.script_get("snap-retry.seg.commit", ScriptedGet::FailOnceThenLive);
+        store.script_put("snap-retry.seg", vec![ScriptedPut::ApplyLostResponse]);
+        store.script_get("snap-retry.seg", ScriptedGet::FailOnceThenLive);
         let result = persist(&store, "snap-retry", None).await.unwrap();
         assert_eq!(result.location_key(), "snap-retry.seg");
     }
@@ -612,9 +472,8 @@ mod tests {
         let persist = include_str!("wal_persist.rs");
         let object_store = include_str!("wal_object_store.rs");
         assert!(persist.contains("persist_snapshot_pair"));
-        assert!(object_store.contains("reclaim_owned_pair"));
         assert!(persist.contains("lease: &LeaseGuard"));
-        assert!(object_store.contains("lease: &skippr_lease::LeaseGuard"));
+        assert!(!object_store.contains(concat!("reclaim_owned", "_pair")));
         assert!(!persist.contains(concat!("WAL_WRITER", "_FATAL")));
         assert!(!persist.contains(concat!("wal_is", "_fatal")));
         assert!(!persist.contains(concat!("mark_wal", "_fatal")));

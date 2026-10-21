@@ -56,7 +56,7 @@ Cloud UI is the sellable console; it is not where durability or multi-node corre
 ## 2. Assumptions (already in prod)
 
 - Per-pipeline exclusive leases; failover with fence + TTL + WAL/compaction catch-up.  
-- Sync-replicated disk WAL (+ compaction hard-state) and/or S3 WAL as configured.  
+- Payload-replicated disk WAL and/or S3 WAL as configured; store catalog is WAL/compaction hard-state.  
 - Query: lakehouse (Iceberg) ∪ live WAL via `IcebergWalUnionProvider`; clustered query is Arrow Flight SQL + in-process Ballista ([`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md)).  
 - Schema and Iceberg metadata on shared object store + catalog.  
 - Platform already provides multi-tenant AuthZ (ABAC policy engine).

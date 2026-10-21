@@ -12,14 +12,15 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::Expr;
 use datafusion::physical_expr::expressions::col;
-use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::projection::{ProjectionExec, ProjectionExpr};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
-use skippr_lease::{PipelineKey, PipelinePaths, SegmentId};
+use skippr_lease::{PipelineKey, SegmentId};
+use skippr_wal_catalog::{CatalogKey, CatalogRow, PayloadLocation};
 
 use crate::buffer::segment_file::SegmentFile;
-use crate::query_flight::live_wal::select_live_ordinals;
+use crate::buffer::wal_handle;
+use crate::query_flight::live_wal::select_live_ordinals_for;
 
 /// Unpinned live WAL provider. DoGet/`execute` re-selects ordinals now.
 #[derive(Debug)]
@@ -28,52 +29,21 @@ pub struct WalTableProvider {
     pub pipeline: PipelineKey,
     pub namespace: String,
     pub exclude_segment_ids: Vec<String>,
-    pub live_ordinals: Vec<(String, u32)>,
-    pub paths: Option<PipelinePaths>,
 }
 
 impl WalTableProvider {
-    pub fn live(
-        schema: SchemaRef,
-        pipeline: PipelineKey,
-        namespace: String,
-        live_ordinals: Vec<(String, u32)>,
-    ) -> Self {
-        Self {
-            schema,
-            pipeline,
-            namespace,
-            exclude_segment_ids: Vec::new(),
-            live_ordinals,
-            paths: None,
-        }
-    }
-
-    pub fn live_unpinned(
+    pub fn new(
         schema: SchemaRef,
         pipeline: PipelineKey,
         namespace: String,
         exclude_segment_ids: Vec<String>,
-        paths: PipelinePaths,
     ) -> Self {
         Self {
             schema,
             pipeline,
             namespace,
             exclude_segment_ids,
-            live_ordinals: Vec::new(),
-            paths: Some(paths),
         }
-    }
-
-    pub fn with_paths(mut self, paths: PipelinePaths) -> Self {
-        self.paths = Some(paths);
-        self
-    }
-
-    pub fn with_exclude_segment_ids(mut self, ids: Vec<String>) -> Self {
-        self.exclude_segment_ids = ids;
-        self
     }
 }
 
@@ -166,20 +136,46 @@ fn field_id_or_name(src: &arrow::datatypes::Field, target: &arrow::datatypes::Fi
 }
 
 fn read_ordinal_batches(
-    paths: &PipelinePaths,
+    pipeline: &PipelineKey,
     segment_id: &str,
     ordinal: u32,
     namespace: &str,
     schema: &SchemaRef,
 ) -> Result<Vec<RecordBatch>> {
+    let Some(handle) = wal_handle::wal_handle_for(pipeline) else {
+        return Ok(Vec::new());
+    };
     let Ok(id) = SegmentId::new(segment_id) else {
         return Ok(Vec::new());
     };
-    let path = paths.segment(&id);
-    if !path.exists() {
+    let Ok(Some(CatalogRow::Segment(seg))) = handle.catalog().get(&CatalogKey::Segment(id)) else {
+        return Ok(Vec::new());
+    };
+    if crate::buffer::wal_handle::admit_payload(&seg.location, &seg.payload_sha256).is_err() {
         return Ok(Vec::new());
     }
-    let Ok(meta) = SegmentFile::admit_owned_pair_path(&path) else {
+    match &seg.location {
+        PayloadLocation::Disk { path } => {
+            read_disk_ordinal_batches(std::path::PathBuf::from(path), ordinal, namespace, schema)
+        }
+        PayloadLocation::S3 { .. } => {
+            let Ok(bytes) =
+                crate::buffer::wal_handle::payload_bytes(&seg.location, &seg.payload_sha256)
+            else {
+                return Ok(Vec::new());
+            };
+            batches_from_bytes(&bytes, ordinal, namespace, schema)
+        }
+    }
+}
+
+fn read_disk_ordinal_batches(
+    path: std::path::PathBuf,
+    ordinal: u32,
+    namespace: &str,
+    schema: &SchemaRef,
+) -> Result<Vec<RecordBatch>> {
+    let Ok(meta) = SegmentFile::read_index_path(&path) else {
         return Ok(Vec::new());
     };
     let mut file = match fs::File::open(&path) {
@@ -202,7 +198,40 @@ fn read_ordinal_batches(
     }
     let reader = std::io::BufReader::new(file);
     let mut take = reader.take(idx.len);
-    let sr = match StreamReader::try_new(&mut take, None) {
+    decode_arrow_stream(&mut take, schema)
+}
+
+fn batches_from_bytes(
+    bytes: &[u8],
+    ordinal: u32,
+    namespace: &str,
+    schema: &SchemaRef,
+) -> Result<Vec<RecordBatch>> {
+    let Ok(meta) = SegmentFile::read_metadata_from_bytes(bytes) else {
+        return Ok(Vec::new());
+    };
+    let Some(idx) = meta.index.get(ordinal as usize) else {
+        return Ok(Vec::new());
+    };
+    if idx.key.namespace != namespace {
+        return Ok(Vec::new());
+    }
+    if idx.codec != crate::buffer::segment_file::PART_CODEC_ARROW {
+        return Err(DataFusionError::Execution(
+            "sqlrt does not read copy WAL parts".to_string(),
+        ));
+    }
+    let start = idx.start as usize;
+    let end = start.saturating_add(idx.len as usize);
+    if end > bytes.len() {
+        return Ok(Vec::new());
+    }
+    let mut cursor = std::io::Cursor::new(&bytes[start..end]);
+    decode_arrow_stream(&mut cursor, schema)
+}
+
+fn decode_arrow_stream<R: Read>(reader: &mut R, schema: &SchemaRef) -> Result<Vec<RecordBatch>> {
+    let sr = match StreamReader::try_new(reader, None) {
         Ok(sr) => sr,
         Err(err) => {
             if schema.fields().is_empty() {
@@ -245,20 +274,11 @@ impl TableProvider for WalTableProvider {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let schema = projected_schema(&self.schema, projection)?;
-        let Some(paths) = self.paths.as_ref() else {
-            if self.live_ordinals.is_empty() {
-                return Ok(Arc::new(EmptyExec::new(schema)));
-            }
-            return Err(DataFusionError::Plan(
-                "clustered WAL scan requires PipelinePaths".into(),
-            ));
-        };
         Ok(Arc::new(WalScanExec::new(
             schema,
             self.pipeline.clone(),
             self.namespace.clone(),
             self.exclude_segment_ids.clone(),
-            paths.clone(),
             limit,
         )?))
     }
@@ -272,7 +292,6 @@ pub struct WalScanExec {
     pipeline: PipelineKey,
     namespace: String,
     exclude_segment_ids: Vec<String>,
-    paths: PipelinePaths,
     limit: Option<usize>,
 }
 
@@ -282,7 +301,6 @@ impl WalScanExec {
         pipeline: PipelineKey,
         namespace: String,
         exclude_segment_ids: Vec<String>,
-        paths: PipelinePaths,
         limit: Option<usize>,
     ) -> Result<Self> {
         let properties = Arc::new(PlanProperties::new(
@@ -297,7 +315,6 @@ impl WalScanExec {
             pipeline,
             namespace,
             exclude_segment_ids,
-            paths,
             limit,
         })
     }
@@ -307,13 +324,11 @@ impl WalScanExec {
     }
 
     fn read_batches(&self) -> Result<Vec<RecordBatch>> {
-        let log = crate::buffer::durable::log::MutationLog::open(self.paths.clone())
-            .map_err(|err| DataFusionError::Execution(err.to_string()))?;
-        let ordinals = select_live_ordinals(&log, &self.exclude_segment_ids);
+        let ordinals = select_live_ordinals_for(&self.pipeline, &self.exclude_segment_ids);
         let mut batches = Vec::new();
         for (segment_id, ordinal) in &ordinals {
             batches.extend(read_ordinal_batches(
-                &self.paths,
+                &self.pipeline,
                 segment_id,
                 *ordinal,
                 &self.namespace,
@@ -412,36 +427,20 @@ mod tests {
     }
 
     #[test]
-    fn provider_scans_selected_ordinals_only() {
+    fn provider_stores_pipeline_identity() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
         let key = PipelineKey::new("t", "w", "events").unwrap();
-        let provider = WalTableProvider::live(
-            schema,
-            key,
-            "ns".into(),
-            vec![("seg-a".into(), 0), ("seg-a".into(), 2)],
-        );
+        let provider = WalTableProvider::new(schema, key, "ns".into(), vec!["gone".into()]);
         assert_eq!(provider.namespace, "ns");
-        assert_eq!(
-            provider.live_ordinals,
-            vec![("seg-a".to_string(), 0), ("seg-a".to_string(), 2)]
-        );
+        assert_eq!(provider.exclude_segment_ids, vec!["gone".to_string()]);
     }
 
     #[tokio::test]
     async fn missing_segment_file_skips_ordinal() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
         let key = PipelineKey::new("t", "w", "events").unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        std::fs::create_dir_all(&paths.segs).unwrap();
-        let provider = WalTableProvider::live(
-            schema.clone(),
-            key,
-            "ns".into(),
-            vec![("gone-seg".into(), 0)],
-        )
-        .with_paths(paths);
+        let provider =
+            WalTableProvider::new(schema.clone(), key, "ns".into(), vec!["gone-seg".into()]);
         let ctx = datafusion::prelude::SessionContext::new();
         let plan = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
         assert_eq!(plan.schema().fields().len(), 1);
@@ -488,7 +487,7 @@ mod tests {
             Field::new("ts", DataType::Int64, true),
         ]));
         let key = PipelineKey::new("t", "w", "events").unwrap();
-        let provider = WalTableProvider::live(schema, key, "ns".into(), vec![]);
+        let provider = WalTableProvider::new(schema, key, "ns".into(), vec![]);
         let ctx = datafusion::prelude::SessionContext::new();
         let plan = provider
             .scan(&ctx.state(), Some(&vec![0]), &[], None)
@@ -502,11 +501,7 @@ mod tests {
     async fn unpinned_wal_scan_reselects_ordinals_at_execute() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
         let key = PipelineKey::new("t", "w", "events").unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        std::fs::create_dir_all(&paths.segs).unwrap();
-        let provider =
-            WalTableProvider::live_unpinned(schema, key, "ns".into(), vec!["gone".into()], paths);
+        let provider = WalTableProvider::new(schema, key, "ns".into(), vec!["gone".into()]);
         let ctx = datafusion::prelude::SessionContext::new();
         let plan = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
         assert_eq!(plan.name(), "WalScanExec");
@@ -519,20 +514,29 @@ mod tests {
 
     #[tokio::test]
     async fn reclaim_between_scan_and_execute_skips_file() {
-        use crate::buffer::durable::mutation::{
-            DurableMutation, MutationEnvelope, SegmentDescriptor,
+        use crate::buffer::segment_file::{PartitionKey, WalPayload};
+        use crate::buffer::wal_handle::{
+            install_wal_handle, memory_catalog_for_test, remove_wal_handle, PipelineWalHandle,
         };
-        use crate::buffer::segment_file::{PartitionKey, SegmentFile};
+        use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
         use arrow::array::StringArray;
-        use skippr_lease::{CommitIndex, GENESIS_HASH};
+        use skippr_lease::{LeaseGuard, PipelinePaths, SystemClock};
         use std::collections::HashMap;
+        use std::sync::Arc as StdArc;
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
         let key = PipelineKey::new("t", "w", "events").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        std::fs::create_dir_all(&paths.segs).unwrap();
-        let seg = SegmentFile::new(&paths.segs, "live-seg").unwrap();
+        let paths = PipelinePaths::legacy_disk(dir.path());
+        let clock = StdArc::new(SystemClock::new());
+        let guard = LeaseGuard::single_node(key.clone(), clock);
+        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let catalog = memory_catalog_for_test(fence);
+        let db = sled::open(dir.path().join("offsets")).unwrap();
+        let tree = db.open_tree("offsets").unwrap();
+        let offsets: StdArc<dyn OffsetStore> = StdArc::new(SledOffsetStore::new(tree));
+        let handle = PipelineWalHandle::new(key.clone(), paths.clone(), guard, catalog, offsets);
+        install_wal_handle(handle.clone());
         let mut batches = HashMap::new();
         let part = PartitionKey {
             sink_ref: "data_sinks.iceberg".into(),
@@ -543,63 +547,73 @@ mod tests {
         };
         batches.insert(
             part,
-            crate::buffer::segment_file::WalPayload::Arrow(vec![RecordBatch::try_new(
+            WalPayload::Arrow(vec![RecordBatch::try_new(
                 schema.clone(),
                 vec![Arc::new(StringArray::from(vec!["evt-a"]))],
             )
             .unwrap()]),
         );
-        let (meta, _rows, _sha) = seg
-            .write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())
+        handle
+            .persist_segment(
+                "live-seg",
+                &HashMap::new(),
+                &batches,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .await
             .unwrap();
-        seg.write_commit_marker(&meta).unwrap();
-        let mut log = crate::buffer::durable::log::MutationLog::open(paths.clone()).unwrap();
-        let commit = MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key.clone(),
-            epoch: skippr_lease::LeaseEpoch::new(1),
-            index: CommitIndex::new(1),
-            previous_hash: GENESIS_HASH,
-            payload_sha256: [9u8; 32],
-            body: DurableMutation::CommitSegment {
-                descriptor: SegmentDescriptor {
-                    segment_id: "live-seg".into(),
-                    payload_len: 4,
-                    payload_sha256: [9u8; 32],
-                    num_partitions: 1,
-                    total_bytes: 4,
-                    created_at_secs: 0,
-                    schema_fingerprints: Vec::new(),
-                },
-                offsets: Vec::new(),
-                checkpoints: Vec::new(),
-            },
-        };
-        log.append_prepared(&commit).unwrap();
-        log.append_committed(commit.index, commit.entry_hash().unwrap())
-            .unwrap();
-        let provider =
-            WalTableProvider::live_unpinned(schema, key.clone(), "ns".into(), Vec::new(), paths);
+        let provider = WalTableProvider::new(schema, key.clone(), "ns".into(), Vec::new());
         let ctx = datafusion::prelude::SessionContext::new();
         let plan = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
-        let reclaim = MutationEnvelope {
-            protocol_version: 1,
-            pipeline: key,
-            epoch: skippr_lease::LeaseEpoch::new(1),
-            index: CommitIndex::new(2),
-            previous_hash: commit.entry_hash().unwrap(),
-            payload_sha256: [0u8; 32],
-            body: DurableMutation::ReclaimSegment {
-                segment_id: "live-seg".into(),
-            },
-        };
-        log.append_prepared(&reclaim).unwrap();
-        log.append_committed(reclaim.index, reclaim.entry_hash().unwrap())
+        handle
+            .complete_slices_and_reclaim("live-seg", &[0])
+            .await
             .unwrap();
         let batches =
             datafusion::physical_plan::common::collect(plan.execute(0, ctx.task_ctx()).unwrap())
                 .await
                 .unwrap();
+        remove_wal_handle(&key);
         assert!(batches.iter().all(|batch| batch.num_rows() == 0) || batches.is_empty());
+    }
+
+    #[test]
+    fn s3_payloads_are_decoded_from_catalog_bytes() {
+        let src = include_str!("wal_table.rs");
+        assert!(
+            !src.contains(concat!(
+                "PayloadLocation::S3 { .. } => return Ok",
+                "(Vec::new())"
+            )),
+            "S3 catalog rows must be scanned, not treated as empty"
+        );
+        use crate::buffer::segment_file::{encode_snapshot, PartitionKey, WalPayload};
+        use arrow::array::StringArray;
+        use std::collections::HashMap;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let part = PartitionKey {
+            sink_ref: "data_sinks.iceberg".into(),
+            namespace: "ns".into(),
+            partition: "p0".into(),
+            time: None,
+            schema_fingerprint: "fp".into(),
+        };
+        let mut batches = HashMap::new();
+        batches.insert(
+            part,
+            WalPayload::Arrow(vec![RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(StringArray::from(vec!["evt-s3"]))],
+            )
+            .unwrap()]),
+        );
+        let encoded =
+            encode_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new()).unwrap();
+        let out = batches_from_bytes(&encoded.bytes, 0, "ns", &schema).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].num_rows(), 1);
     }
 }

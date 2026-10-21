@@ -44,13 +44,10 @@ pub static CLUSTER_LEASE_RENEW_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::
 pub static CLUSTER_LEASE_LOST_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CLUSTER_MEMBERSHIP_DIAL_FAIL_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CLUSTER_CATCHUP_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-pub static CLUSTER_SNAPSHOT_INSTALL_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CLUSTER_FLIGHT_REQUEST_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CLUSTER_FLIGHT_FAIL_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CLUSTER_ICEBERG_CAS_CONFLICT_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CLUSTER_SUSPECT_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-pub static CLUSTER_COMMITTED_INDEX: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-pub static CLUSTER_APPLIED_INDEX: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CLUSTER_PUBLISHED_INDEX: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CLUSTER_REPLICA_LAG: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CLUSTER_QUORUM_NACK_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
@@ -86,10 +83,6 @@ pub fn add_cluster_catchup_bytes(n: u64) {
     CLUSTER_CATCHUP_BYTES_TOTAL.fetch_add(n, Ordering::Relaxed);
 }
 
-pub fn add_cluster_snapshot_install(n: u64) {
-    CLUSTER_SNAPSHOT_INSTALL_TOTAL.fetch_add(n, Ordering::Relaxed);
-}
-
 pub fn add_cluster_flight_request(n: u64) {
     CLUSTER_FLIGHT_REQUEST_TOTAL.fetch_add(n, Ordering::Relaxed);
 }
@@ -108,14 +101,6 @@ pub fn add_cluster_lease_acquire(n: u64) {
 
 pub fn add_cluster_lease_renew(n: u64) {
     CLUSTER_LEASE_RENEW_TOTAL.fetch_add(n, Ordering::Relaxed);
-}
-
-pub fn set_cluster_committed_index(index: u64) {
-    CLUSTER_COMMITTED_INDEX.store(index, Ordering::Relaxed);
-}
-
-pub fn set_cluster_applied_index(index: u64) {
-    CLUSTER_APPLIED_INDEX.store(index, Ordering::Relaxed);
 }
 
 pub fn set_cluster_published_index(index: u64) {
@@ -231,10 +216,6 @@ pub static COMPACTION_PLANNER_SLICES_EXAMINED_TOTAL: Lazy<AtomicU64> =
 pub static CDC_METADATA_SEGMENT_SCANS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CDC_METADATA_SEGMENT_BYTES_EXAMINED_TOTAL: Lazy<AtomicU64> =
     Lazy::new(|| AtomicU64::new(0));
-pub static COMPACTION_MANIFEST_DIRECTORY_SCANS_TOTAL: Lazy<AtomicU64> =
-    Lazy::new(|| AtomicU64::new(0));
-pub static COMPACTION_MANIFEST_ENTRIES_EXAMINED_TOTAL: Lazy<AtomicU64> =
-    Lazy::new(|| AtomicU64::new(0));
 /// Current number of compaction groups with at least one eligible queued slice.
 pub static COMPACTION_PLANNER_READY_WORK_COUNT: Lazy<AtomicUsize> =
     Lazy::new(|| AtomicUsize::new(0));
@@ -270,10 +251,8 @@ pub static RUNTIME_SCHEMA_STATE_PUBLICATIONS_SKIPPED_TOTAL: Lazy<AtomicU64> =
     Lazy::new(|| AtomicU64::new(0));
 pub static SINK_APPLY_CALLS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static SINK_APPLY_DURATION_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-/// The current completion ledger is the durable compaction manifest.
-pub static COMPACTION_COMPLETION_LEDGER_WRITES_TOTAL: Lazy<AtomicU64> =
-    Lazy::new(|| AtomicU64::new(0));
 pub static COMPACTION_TOMBSTONE_WRITES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static COMPACTION_CATALOG_BIT_WRITES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static WAL_SEGMENT_CLOSURES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static WAL_SEGMENT_CLOSURE_LATENCY_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
@@ -285,8 +264,6 @@ pub struct FlushMetricsSnapshot {
     pub compaction_planner_slices_examined_total: u64,
     pub cdc_metadata_segment_scans_total: u64,
     pub cdc_metadata_segment_bytes_examined_total: u64,
-    pub compaction_manifest_directory_scans_total: u64,
-    pub compaction_manifest_entries_examined_total: u64,
     pub compaction_planner_ready_work_count: usize,
     pub compaction_inflight_slice_count: usize,
     pub wal_snapshot_ready_count: usize,
@@ -310,8 +287,8 @@ pub struct FlushMetricsSnapshot {
     pub runtime_schema_state_publications_skipped_total: u64,
     pub sink_apply_calls_total: u64,
     pub sink_apply_duration_ns_total: u64,
-    pub compaction_completion_ledger_writes_total: u64,
     pub compaction_tombstone_writes_total: u64,
+    pub compaction_catalog_bit_writes_total: u64,
     pub wal_segment_closures_total: u64,
     pub wal_segment_closure_latency_ns_total: u64,
 }
@@ -332,10 +309,6 @@ pub fn flush_metrics_snapshot() -> FlushMetricsSnapshot {
             .load(Ordering::Relaxed),
         cdc_metadata_segment_scans_total: CDC_METADATA_SEGMENT_SCANS_TOTAL.load(Ordering::Relaxed),
         cdc_metadata_segment_bytes_examined_total: CDC_METADATA_SEGMENT_BYTES_EXAMINED_TOTAL
-            .load(Ordering::Relaxed),
-        compaction_manifest_directory_scans_total: COMPACTION_MANIFEST_DIRECTORY_SCANS_TOTAL
-            .load(Ordering::Relaxed),
-        compaction_manifest_entries_examined_total: COMPACTION_MANIFEST_ENTRIES_EXAMINED_TOTAL
             .load(Ordering::Relaxed),
         compaction_planner_ready_work_count: COMPACTION_PLANNER_READY_WORK_COUNT
             .load(Ordering::Relaxed),
@@ -374,9 +347,9 @@ pub fn flush_metrics_snapshot() -> FlushMetricsSnapshot {
             RUNTIME_SCHEMA_STATE_PUBLICATIONS_SKIPPED_TOTAL.load(Ordering::Relaxed),
         sink_apply_calls_total: SINK_APPLY_CALLS_TOTAL.load(Ordering::Relaxed),
         sink_apply_duration_ns_total: SINK_APPLY_DURATION_NS_TOTAL.load(Ordering::Relaxed),
-        compaction_completion_ledger_writes_total: COMPACTION_COMPLETION_LEDGER_WRITES_TOTAL
-            .load(Ordering::Relaxed),
         compaction_tombstone_writes_total: COMPACTION_TOMBSTONE_WRITES_TOTAL
+            .load(Ordering::Relaxed),
+        compaction_catalog_bit_writes_total: COMPACTION_CATALOG_BIT_WRITES_TOTAL
             .load(Ordering::Relaxed),
         wal_segment_closures_total: WAL_SEGMENT_CLOSURES_TOTAL.load(Ordering::Relaxed),
         wal_segment_closure_latency_ns_total: WAL_SEGMENT_CLOSURE_LATENCY_NS_TOTAL
@@ -396,12 +369,6 @@ pub fn record_compaction_planner_cycle(duration: Duration, segments: u64, slices
 pub fn record_cdc_metadata_segment_scan(bytes_examined: u64) {
     CDC_METADATA_SEGMENT_SCANS_TOTAL.fetch_add(1, Ordering::Relaxed);
     CDC_METADATA_SEGMENT_BYTES_EXAMINED_TOTAL.fetch_add(bytes_examined, Ordering::Relaxed);
-}
-
-#[inline]
-pub fn record_compaction_manifest_directory_scan(entries_examined: u64) {
-    COMPACTION_MANIFEST_DIRECTORY_SCANS_TOTAL.fetch_add(1, Ordering::Relaxed);
-    COMPACTION_MANIFEST_ENTRIES_EXAMINED_TOTAL.fetch_add(entries_examined, Ordering::Relaxed);
 }
 
 #[inline]
@@ -537,13 +504,13 @@ pub fn record_sink_apply(duration: Duration) {
 }
 
 #[inline]
-pub fn add_compaction_completion_ledger_write(n: u64) {
-    COMPACTION_COMPLETION_LEDGER_WRITES_TOTAL.fetch_add(n, Ordering::Relaxed);
+pub fn add_compaction_tombstone_write(n: u64) {
+    COMPACTION_TOMBSTONE_WRITES_TOTAL.fetch_add(n, Ordering::Relaxed);
 }
 
 #[inline]
-pub fn add_compaction_tombstone_write(n: u64) {
-    COMPACTION_TOMBSTONE_WRITES_TOTAL.fetch_add(n, Ordering::Relaxed);
+pub fn add_compaction_catalog_bit_write(n: u64) {
+    COMPACTION_CATALOG_BIT_WRITES_TOTAL.fetch_add(n, Ordering::Relaxed);
 }
 
 #[inline]
@@ -759,8 +726,6 @@ pub fn reset_flush_metrics() {
     COMPACTION_PLANNER_SLICES_EXAMINED_TOTAL.store(0, Ordering::Relaxed);
     CDC_METADATA_SEGMENT_SCANS_TOTAL.store(0, Ordering::Relaxed);
     CDC_METADATA_SEGMENT_BYTES_EXAMINED_TOTAL.store(0, Ordering::Relaxed);
-    COMPACTION_MANIFEST_DIRECTORY_SCANS_TOTAL.store(0, Ordering::Relaxed);
-    COMPACTION_MANIFEST_ENTRIES_EXAMINED_TOTAL.store(0, Ordering::Relaxed);
     COMPACTION_PLANNER_READY_WORK_COUNT.store(0, Ordering::Relaxed);
     COMPACTION_INFLIGHT_SLICE_COUNT.store(0, Ordering::Relaxed);
     WAL_SNAPSHOT_READY_COUNT.store(0, Ordering::Relaxed);
@@ -785,8 +750,8 @@ pub fn reset_flush_metrics() {
     RUNTIME_SCHEMA_STATE_PUBLICATIONS_SKIPPED_TOTAL.store(0, Ordering::Relaxed);
     SINK_APPLY_CALLS_TOTAL.store(0, Ordering::Relaxed);
     SINK_APPLY_DURATION_NS_TOTAL.store(0, Ordering::Relaxed);
-    COMPACTION_COMPLETION_LEDGER_WRITES_TOTAL.store(0, Ordering::Relaxed);
     COMPACTION_TOMBSTONE_WRITES_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_CATALOG_BIT_WRITES_TOTAL.store(0, Ordering::Relaxed);
     WAL_SEGMENT_CLOSURES_TOTAL.store(0, Ordering::Relaxed);
     WAL_SEGMENT_CLOSURE_LATENCY_NS_TOTAL.store(0, Ordering::Relaxed);
 }

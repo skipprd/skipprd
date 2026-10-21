@@ -15,19 +15,19 @@ This is not a Ballista/Flight-protocol backlog. Query transport is Arrow Flight 
 | `query_from_every_ready_replica` | One `clustered query` client; WAL may be behind. |
 | `late_node_wal_catchup` | n3 start, SIGKILL replica, catch-up log, restore spare. |
 | `primary_kill_failover` | SIGKILL primary, batch2, promote, unique ids. |
-| `sigkill_during_ingest_no_duplicate_rows` | Restore three nodes, arm `after_prepared` on the primary, copy batch3, abort after local Prepared, promote, unique `{prior ids} ∪ {evt-9, evt-10}`. |
+| `sigkill_during_ingest_no_duplicate_rows` | Restore three nodes, arm `before_catalog_commit` on the primary, copy batch3, abort before catalog commit, promote, unique `{prior ids} ∪ {evt-9, evt-10}`. |
 
 `HostId` is still the failure domain (`KUBERNETES_NODE_NAME=hla-host-{1,2,3}`). That is correct product behaviour.
 
 ---
 
-## 1. Prepared/Commit crash in the e2e binary — closed
+## 1. Catalog-commit crash in the e2e binary — closed
 
-Named point `FailpointName::AfterPrepared`. The e2e binary arms it by writing that name to `{PipelinePaths.root}/failpoint`. The file is consumed once; unknown names abort. No cluster env knobs.
+Named point `FailpointName::BeforeCatalogCommit`. The e2e binary arms it by writing that name to `{PipelinePaths.root}/failpoint`. The file is consumed once; unknown names abort. No cluster env knobs.
 
-`commit_segment` / `commit_mutation` call `failpoint::hit(FailpointName::AfterPrepared, &self.paths.root)` after local Prepared and before replica Commit. In the release/e2e binary that aborts the process. In-process tests return `DurableError`.
+The writer hits `failpoint::hit(FailpointName::BeforeCatalogCommit, &self.paths.root)` after replica payload ack and before the catalog txn. In the release/e2e binary that aborts the process. In-process tests return `DurableError`.
 
-**Tests:** `cluster::failpoint::*`, `python3 tests/hla_e2e/test_run.py`, scenario `sigkill_during_ingest_no_duplicate_rows` in `python3 tests/hla_e2e/run.py` (primary exit code -6 / SIGABRT). In-process `recover_unknown_prepared` remains in `tests/hla_cluster.rs`.
+**Tests:** `cluster::failpoint::*`, `python3 tests/hla_e2e/test_run.py`, scenario `sigkill_during_ingest_no_duplicate_rows` in `python3 tests/hla_e2e/run.py` (primary exit code -6 / SIGABRT). In-process `crash_after_catalog_commit_before_publish_republishes` remains in `tests/hla_cluster.rs`.
 
 ## 2. Dynamo offset read errors are not “never ingested” — closed
 
@@ -35,15 +35,15 @@ Named point `FailpointName::AfterPrepared`. The e2e binary arms it by writing th
 
 **Tests:** `store_read_error_is_not_missing`, `validate_entries_surfaces_store_errors`, `closed_check_fails_closed_on_offset_service_error`.
 
-## 3. One Dynamo offset write protocol — closed
+## 3. One offset/checkpoint write protocol — closed
 
-`insert` and `upsert` share `merge_offset` / `apply_offset_field` (in-place; Position insert uses max). `insert_dynamo` is gone. `put_bytes` get-merges offset SKs (`Closed` OR, Position/Filesize max) and preserves an existing `wal_epoch` / `wal_commit_index` fence under OCC. `publish_wal_commit` remains the fence-advancing WAL path.
+`publish_wal_commit` is the only offset and checkpoint write. Raw `insert` / `upsert` / `put_bytes` / `Offsets::set` are gone. Inside that publisher, Closed is OR-merged and Position/Filesize take max so a Closed bit cannot regress; the fence tuple advances only on `Fresh` / `Republish`.
 
-**Tests:** `insert_position_preserves_closed`, `put_bytes_merges_offsets_so_closed_survives_position_write`, `merge_offset_or_closed_and_max_position`.
+**Tests:** `insert_position_preserves_closed`, `put_bytes_merges_offsets_so_closed_survives_position_write`, `merge_offset_or_closed_and_max_position`, `remote_offset_store_has_no_write_api`.
 
-## 4. Harness Prepared-window crash — closed
+## 4. Harness catalog-commit-window crash — closed
 
-`sigkill_during_ingest_no_duplicate_rows` arms `after_prepared`, copies `batch3.jsonl`, waits for the primary to abort, waits for promote, then asserts unique ids including `evt-9` and `evt-10`. It is not a renamed uniqueness re-check.
+`sigkill_during_ingest_no_duplicate_rows` arms `before_catalog_commit`, copies `batch3.jsonl`, waits for the primary to abort, waits for promote, then asserts unique ids including `evt-9` and `evt-10`. It is not a renamed uniqueness re-check.
 
 ---
 

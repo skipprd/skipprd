@@ -12,7 +12,11 @@ use aws_sdk_dynamodb::Client;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::Utc;
 use once_cell::sync::OnceCell;
+use skippr_lease::{decide_wal_publish, OffsetPublishError, PublishAction, PublishMode};
 use tracing::{info, warn};
+
+mod catalog;
+pub use catalog::DynamoWalCatalog;
 
 fn is_conditional_check_failed(err: &impl aws_sdk_dynamodb::error::ProvideErrorMetadata) -> bool {
     err.code() == Some("ConditionalCheckFailedException")
@@ -61,7 +65,7 @@ fn dynamo_worker() -> &'static DynamoIoWorker {
     })
 }
 
-fn run_on_worker<T, F>(f: F) -> T
+pub(crate) fn run_on_worker<T, F>(f: F) -> T
 where
     T: Send + 'static,
     F: FnOnce(&tokio::runtime::Runtime, Arc<Client>) -> T + Send + 'static,
@@ -119,6 +123,52 @@ impl DynamoDbOffsetStore {
         format!("checkpoint#{}", logical_key)
     }
 
+    pub fn reset_published_ingest(&self) -> Result<(), String> {
+        let table = self.table.clone();
+        let pk = self.pk.clone();
+        run_on_worker(move |rt, client| {
+            rt.block_on(async move {
+                for prefix in ["offset#", "checkpoint#"] {
+                    loop {
+                        let page = client
+                            .query()
+                            .table_name(&table)
+                            .key_condition_expression("PK = :pk AND begins_with(SK, :p)")
+                            .expression_attribute_values(":pk", AttributeValue::S(pk.clone()))
+                            .expression_attribute_values(
+                                ":p",
+                                AttributeValue::S(prefix.to_string()),
+                            )
+                            .consistent_read(true)
+                            .limit(99)
+                            .send()
+                            .await
+                            .map_err(|err| format!("DynamoDB query failed: {err}"))?;
+                        let items = page.items();
+                        if items.is_empty() {
+                            break;
+                        }
+                        for item in items {
+                            let sk = item
+                                .get("SK")
+                                .and_then(|v| v.as_s().ok())
+                                .ok_or_else(|| "DynamoDB item missing SK".to_string())?;
+                            client
+                                .delete_item()
+                                .table_name(&table)
+                                .key("PK", AttributeValue::S(pk.clone()))
+                                .key("SK", AttributeValue::S(sk.clone()))
+                                .send()
+                                .await
+                                .map_err(|err| format!("DynamoDB delete_item failed: {err}"))?;
+                        }
+                    }
+                }
+                Ok(())
+            })
+        })
+    }
+
     pub fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String> {
         let table = self.table.clone();
         let pk = self.pk.clone();
@@ -155,7 +205,7 @@ impl DynamoDbOffsetStore {
         })
     }
 
-    pub fn put_bytes(&self, sk: &str, bytes: &[u8]) -> Result<(), String> {
+    pub(crate) fn put_bytes(&self, sk: &str, bytes: &[u8]) -> Result<(), String> {
         loop {
             match self.put_bytes_once(sk, bytes)? {
                 PublishOutcome::Ok => return Ok(()),
@@ -203,7 +253,11 @@ impl DynamoDbOffsetStore {
         })
     }
 
-    pub fn fetch_and_update_bytes<F>(&self, sk: &str, update: F) -> Result<Option<Vec<u8>>, String>
+    pub fn fetch_and_update_journal<F>(
+        &self,
+        sk: &str,
+        update: F,
+    ) -> Result<Option<Vec<u8>>, String>
     where
         F: FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>>,
     {
@@ -220,28 +274,8 @@ impl DynamoDbOffsetStore {
         self.get_bytes(&Self::offset_sk(namespace, partition))
     }
 
-    pub fn put_offset(&self, namespace: &str, partition: &str, bytes: &[u8]) -> Result<(), String> {
-        self.put_bytes(&Self::offset_sk(namespace, partition), bytes)
-    }
-
-    pub fn fetch_and_update_offset<F>(
-        &self,
-        namespace: &str,
-        partition: &str,
-        update: F,
-    ) -> Result<Option<Vec<u8>>, String>
-    where
-        F: FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>>,
-    {
-        self.fetch_and_update_bytes(&Self::offset_sk(namespace, partition), update)
-    }
-
     pub fn get_checkpoint(&self, logical_key: &str) -> Result<Option<Vec<u8>>, String> {
         self.get_bytes(&Self::checkpoint_sk(logical_key))
-    }
-
-    pub fn put_checkpoint(&self, logical_key: &str, bytes: &[u8]) -> Result<(), String> {
-        self.put_bytes(&Self::checkpoint_sk(logical_key), bytes)
     }
 
     /// Clustered publication: conditional write of payload plus WAL epoch/index/hash.
@@ -252,9 +286,17 @@ impl DynamoDbOffsetStore {
         epoch: u64,
         commit_index: u64,
         payload_sha256: &str,
-    ) -> Result<(), String> {
+        mode: PublishMode,
+    ) -> Result<(), OffsetPublishError> {
         loop {
-            match self.publish_wal_commit_once(sk, bytes, epoch, commit_index, payload_sha256)? {
+            match self.publish_wal_commit_once(
+                sk,
+                bytes,
+                epoch,
+                commit_index,
+                payload_sha256,
+                mode,
+            )? {
                 PublishOutcome::Ok => return Ok(()),
                 PublishOutcome::Retry => continue,
             }
@@ -268,7 +310,8 @@ impl DynamoDbOffsetStore {
         epoch: u64,
         commit_index: u64,
         payload_sha256: &str,
-    ) -> Result<PublishOutcome, String> {
+        mode: PublishMode,
+    ) -> Result<PublishOutcome, OffsetPublishError> {
         let table = self.table.clone();
         let pk = self.pk.clone();
         let sk = sk.to_string();
@@ -285,7 +328,9 @@ impl DynamoDbOffsetStore {
                     .consistent_read(true)
                     .send()
                     .await
-                    .map_err(|e| format!("DynamoDB get_item failed: {e}"))?;
+                    .map_err(|e| {
+                        OffsetPublishError::Transient(format!("DynamoDB get_item failed: {e}"))
+                    })?;
                 let existing = get.item;
                 if let Some(item) = existing.as_ref() {
                     let old_epoch = attr_u64(item, "wal_epoch");
@@ -297,22 +342,22 @@ impl DynamoDbOffsetStore {
                     if let (Some(old_epoch), Some(old_index), Some(old_hash)) =
                         (old_epoch, old_index, old_hash)
                     {
-                        if old_epoch == epoch && old_index == commit_index {
-                            if old_hash == incoming_hash {
-                                return Ok(PublishOutcome::Ok);
-                            }
-                            return Err(format!(
-                                "corrupt offset SK={sk}: same WAL tuple with different hash"
-                            ));
-                        }
-                        if (old_epoch, old_index) > (epoch, commit_index) {
-                            return Ok(PublishOutcome::Ok);
+                        match decide_wal_publish(
+                            Some((old_epoch, old_index, old_hash.as_str())),
+                            epoch,
+                            commit_index,
+                            &incoming_hash,
+                            mode,
+                        )? {
+                            PublishAction::AlreadyApplied => return Ok(PublishOutcome::Ok),
+                            PublishAction::Commit => {}
                         }
                     }
                 }
                 let existing_payload = existing.as_ref().and_then(decode_payload_b64);
                 let write_bytes = if merge_offsets {
-                    merge_offset_value_bytes(existing_payload.as_deref(), &incoming)?
+                    merge_offset_value_bytes(existing_payload.as_deref(), &incoming)
+                        .map_err(OffsetPublishError::Transient)?
                 } else {
                     incoming
                 };
@@ -365,7 +410,9 @@ impl DynamoDbOffsetStore {
                 match put.send().await {
                     Ok(_) => Ok(PublishOutcome::Ok),
                     Err(err) if is_conditional_check_failed(&err) => Ok(PublishOutcome::Retry),
-                    Err(err) => Err(format!("DynamoDB put_item failed: {err}")),
+                    Err(err) => Err(OffsetPublishError::Transient(format!(
+                        "DynamoDB put_item failed: {err}"
+                    ))),
                 }
             })
         })
@@ -454,7 +501,7 @@ async fn put_item_conditional(
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
         .iter()

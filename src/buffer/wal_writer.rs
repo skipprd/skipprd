@@ -37,6 +37,10 @@ enum WalWriterCommand {
     },
 }
 
+type PendingAck = (oneshot::Sender<WalPersistResult>, Instant, u64, u64);
+type PersistJoin =
+    tokio::task::JoinHandle<(Vec<PendingAck>, Result<(u64, u64), ArrowError>, Instant)>;
+
 static WAL_WRITER_TX: OnceCell<mpsc::Sender<WalWriterCommand>> = OnceCell::new();
 static WAL_WRITER_CAPACITY: AtomicUsize = AtomicUsize::new(0);
 static WAL_WRITER_PENDING_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -50,8 +54,8 @@ static WAL_WRITER_ACK_COUNT: AtomicU64 = AtomicU64::new(0);
 static REQUEST_ACKS: Lazy<Mutex<HashMap<u64, RequestAckState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 fn ingest_lease_refuses_snapshots() -> bool {
-    crate::buffer::wal_store::ingest_durable_store()
-        .map(|store| store.guard().require_active_epoch().is_err())
+    crate::buffer::wal_store::ingest_wal_handle()
+        .map(|handle| handle.guard().require_active_epoch().is_err())
         .unwrap_or(false)
 }
 
@@ -59,6 +63,31 @@ const ACK_DELAY_MIN_MS: u64 = 100;
 const ACK_DELAY_COLD_START_MS: u64 = 250;
 const ACK_DELAY_MAX_MS: u64 = 500;
 const ACK_DELAY_PERSIST_LATENCY_MULTIPLIER: f64 = 4.0;
+/// COPY ingest parks every pool thread on `submit`. A hung writer used to fill
+/// this channel and leave admission in `queue_cv.wait()` forever. Fail closed
+/// so the pool can return and the monitor can wake waiters.
+#[cfg(not(test))]
+const WAL_SUBMIT_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const WAL_SUBMIT_TIMEOUT: Duration = Duration::from_millis(80);
+
+async fn send_with_timeout<T>(tx: &mpsc::Sender<T>, msg: T) -> Result<(), String> {
+    match tokio::time::timeout(WAL_SUBMIT_TIMEOUT, tx.send(msg)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err("WAL writer is stopped".to_string()),
+        Err(_) => Err(format!(
+            "WAL writer submit timed out after {}ms; writer is not draining",
+            WAL_SUBMIT_TIMEOUT.as_millis()
+        )),
+    }
+}
+
+async fn send_command(
+    tx: &mpsc::Sender<WalWriterCommand>,
+    cmd: WalWriterCommand,
+) -> Result<(), String> {
+    send_with_timeout(tx, cmd).await
+}
 
 fn writer_capacity(ingest_threads: usize) -> usize {
     ingest_threads.clamp(1, 32)
@@ -137,20 +166,17 @@ pub fn start(config: &Config, ingest_threads: usize) {
 }
 
 pub fn submit_blocking(unit: WalCommitUnit) -> Result<(), String> {
-    let tx = WAL_WRITER_TX
-        .get()
-        .ok_or_else(|| "WAL writer has not been started".to_string())?;
-    tx.blocking_send(WalWriterCommand::Submit(unit))
-        .map_err(|_| "WAL writer is stopped".to_string())
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(submit(unit)),
+        Err(_) => crate::ingest_work::INGEST_RT.block_on(submit(unit)),
+    }
 }
 
 pub async fn submit(unit: WalCommitUnit) -> Result<(), String> {
     let tx = WAL_WRITER_TX
         .get()
         .ok_or_else(|| "WAL writer has not been started".to_string())?;
-    tx.send(WalWriterCommand::Submit(unit))
-        .await
-        .map_err(|_| "WAL writer is stopped".to_string())
+    send_command(tx, WalWriterCommand::Submit(unit)).await
 }
 
 pub fn register_request_ack(
@@ -205,14 +231,15 @@ pub async fn flush_and_drain(config: &Config, offsets_db: Arc<Offsets>) -> Resul
         return crate::buffer::ingest_buffer::flush_all_segments_direct(config, offsets_db).await;
     };
     let (done_tx, done_rx) = oneshot::channel();
-    tx.send(WalWriterCommand::Flush {
-        offsets_db,
-        done: done_tx,
-    })
+    send_command(
+        tx,
+        WalWriterCommand::Flush {
+            offsets_db,
+            done: done_tx,
+        },
+    )
     .await
-    .map_err(|_| {
-        ArrowError::ExternalError(Box::new(std::io::Error::other("WAL writer is stopped")))
-    })?;
+    .map_err(|err| ArrowError::ExternalError(Box::new(std::io::Error::other(err))))?;
     done_rx.await.map_err(|_| {
         ArrowError::ExternalError(Box::new(std::io::Error::other(
             "WAL writer flush response dropped",
@@ -263,161 +290,17 @@ pub fn has_pending_work() -> bool {
     pending_count() > 0 || Buffers::live_segment_bytes() > 0
 }
 
-async fn run_writer(config: Config, mut rx: mpsc::Receiver<WalWriterCommand>) {
-    let mut pending_acks: Vec<(oneshot::Sender<WalPersistResult>, Instant, u64, u64)> = Vec::new();
-    let mut pending_offsets: Option<Arc<Offsets>> = None;
-    let mut last_flush = Instant::now();
-    let mut last_submit_at: Option<Instant> = None;
-    let mut submit_rate_bytes_per_sec = 0.0f64;
-
-    loop {
-        let max_delay = Duration::from_secs(config.get_wal_max_delay_seconds().max(1));
-        let next = if pending_acks.is_empty() {
-            rx.recv().await
-        } else {
-            let deadline = next_ack_deadline(
-                &config,
-                &pending_acks,
-                Buffers::live_segment_bytes(),
-                submit_rate_bytes_per_sec,
-                max_delay,
-            )
-            .unwrap_or_else(|| last_flush + max_delay);
-            tokio::select! {
-                cmd = rx.recv() => cmd,
-                _ = tokio::time::sleep_until(deadline.into()) => None,
-            }
-        };
-
-        match next {
-            Some(WalWriterCommand::Submit(unit)) => {
-                pending_offsets = Some(unit.offsets_db.clone());
-                let ack_started = Instant::now();
-                let arrow_bytes = unit.arrow_bytes as u64;
-                WAL_WRITER_PENDING_COUNT.fetch_add(1, Ordering::Relaxed);
-                WAL_WRITER_PENDING_BYTES.fetch_add(unit.arrow_bytes, Ordering::Relaxed);
-                match Buffers::append_batches_to_live(unit.batches) {
-                    Ok(added_bytes) => {
-                        WAL_WRITER_COALESCE_BYTES_TOTAL.fetch_add(added_bytes, Ordering::Relaxed);
-                        WAL_WRITER_COALESCE_BATCHES_TOTAL.fetch_add(1, Ordering::Relaxed);
-                        let now = Instant::now();
-                        if let Some(previous) = last_submit_at {
-                            let elapsed = now.saturating_duration_since(previous);
-                            if elapsed >= Duration::from_millis(1) && added_bytes > 0 {
-                                let instant_rate =
-                                    added_bytes as f64 / elapsed.as_secs_f64().max(0.001);
-                                submit_rate_bytes_per_sec = if submit_rate_bytes_per_sec > 0.0 {
-                                    (submit_rate_bytes_per_sec * 0.8) + (instant_rate * 0.2)
-                                } else {
-                                    instant_rate
-                                };
-                            }
-                        }
-                        last_submit_at = Some(now);
-                        pending_acks.push((unit.done, ack_started, arrow_bytes, unit.submit_id));
-                        if Config::log_wal_enabled() {
-                            debug!(
-                                "WAL writer queued submit_id={} raw_bytes={} arrow_bytes={} live_bytes={} pending_count={} submit_rate_bps={:.0}",
-                                unit.submit_id,
-                                unit.raw_bytes,
-                                unit.arrow_bytes,
-                                Buffers::live_segment_bytes(),
-                                pending_acks.len(),
-                                submit_rate_bytes_per_sec
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        WAL_WRITER_PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
-                        WAL_WRITER_PENDING_BYTES.fetch_sub(unit.arrow_bytes, Ordering::Relaxed);
-                        complete_request_unit(unit.submit_id, &Err(err.clone()));
-                        let _ = unit.done.send(Err(err));
-                    }
-                }
-                if Buffers::live_segment_bytes() >= config.get_wal_bytes_per_file() {
-                    if let Some(offsets) = pending_offsets.clone() {
-                        flush_live_and_ack(&config, &offsets, &mut pending_acks, &mut last_flush)
-                            .await;
-                    }
-                } else if let Some(deadline) = next_ack_deadline(
-                    &config,
-                    &pending_acks,
-                    Buffers::live_segment_bytes(),
-                    submit_rate_bytes_per_sec,
-                    max_delay,
-                ) {
-                    if Instant::now() >= deadline {
-                        if let Some(offsets) = pending_offsets.clone() {
-                            flush_live_and_ack(
-                                &config,
-                                &offsets,
-                                &mut pending_acks,
-                                &mut last_flush,
-                            )
-                            .await;
-                        }
-                    }
-                }
-            }
-            Some(WalWriterCommand::Flush { offsets_db, done }) => {
-                let result =
-                    flush_everything(&config, &offsets_db, &mut pending_acks, &mut last_flush)
-                        .await;
-                let _ = done.send(result);
-                pending_offsets = None;
-            }
-            None => {
-                if pending_acks.is_empty() {
-                    break;
-                }
-                if let Some(offsets) = pending_offsets.clone() {
-                    flush_live_and_ack(&config, &offsets, &mut pending_acks, &mut last_flush).await;
-                }
-            }
-        }
-    }
-    error!("WAL writer stopped");
-}
-
-async fn flush_everything(
-    config: &Config,
-    offsets_db: &Arc<Offsets>,
-    pending_acks: &mut Vec<(oneshot::Sender<WalPersistResult>, Instant, u64, u64)>,
-    last_flush: &mut Instant,
-) -> Result<(), ArrowError> {
-    flush_live_and_ack(config, offsets_db, pending_acks, last_flush).await;
-    Ok(())
-}
-
-async fn flush_live_and_ack(
-    config: &Config,
-    offsets_db: &Arc<Offsets>,
-    pending_acks: &mut Vec<(oneshot::Sender<WalPersistResult>, Instant, u64, u64)>,
+fn apply_persist_result(
+    acked: Vec<PendingAck>,
+    result: Result<(u64, u64), ArrowError>,
+    started: Instant,
     last_flush: &mut Instant,
 ) {
-    if pending_acks.is_empty() && Buffers::live_segment_bytes() == 0 {
-        return;
-    }
-    if ingest_lease_refuses_snapshots() {
-        let ack_result: WalPersistResult =
-            Err("ingest lease has no active epoch; refusing further snapshots".into());
-        let acked = std::mem::take(pending_acks);
-        for (done, _, bytes, submit_id) in acked {
-            WAL_WRITER_PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
-            WAL_WRITER_PENDING_BYTES.fetch_sub(bytes as usize, Ordering::Relaxed);
-            complete_request_unit(submit_id, &ack_result);
-            let _ = done.send(ack_result.clone());
-        }
-        return;
-    }
-    let started = Instant::now();
-    let result = Buffers::flush_live_segment_for_writer(config, offsets_db.as_ref()).await;
     let elapsed_ns = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
     WAL_WRITER_PERSIST_LATENCY_NS_TOTAL.fetch_add(elapsed_ns, Ordering::Relaxed);
     WAL_WRITER_PERSIST_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let ack_result = result.as_ref().map(|_| ()).map_err(|err| err.to_string());
-    let acked = std::mem::take(pending_acks);
     for (done, queued_at, bytes, submit_id) in acked {
         WAL_WRITER_PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
         WAL_WRITER_PENDING_BYTES.fetch_sub(bytes as usize, Ordering::Relaxed);
@@ -431,15 +314,252 @@ async fn flush_live_and_ack(
     }
     *last_flush = Instant::now();
 
-    if let Ok((rows, bytes)) = result {
-        if Config::log_wal_enabled() {
+    match &result {
+        Ok((rows, bytes)) => {
             info!(
-                "WAL writer flushed live segment rows={} bytes={}",
                 rows,
-                Helpers::human_readable_size(bytes)
+                bytes,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "WAL writer flush finished"
+            );
+            if Config::log_wal_enabled() {
+                info!(
+                    "WAL writer flushed live segment rows={} bytes={}",
+                    rows,
+                    Helpers::human_readable_size(*bytes)
+                );
+            }
+        }
+        Err(err) => {
+            error!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "WAL writer flush failed: {err}"
             );
         }
     }
+}
+
+fn fail_pending_acks(pending_acks: &mut Vec<PendingAck>, message: &str) {
+    let ack_result: WalPersistResult = Err(message.to_string());
+    let acked = std::mem::take(pending_acks);
+    for (done, _, bytes, submit_id) in acked {
+        WAL_WRITER_PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
+        WAL_WRITER_PENDING_BYTES.fetch_sub(bytes as usize, Ordering::Relaxed);
+        complete_request_unit(submit_id, &ack_result);
+        let _ = done.send(ack_result.clone());
+    }
+}
+
+fn try_start_persist(
+    persist: &mut Option<PersistJoin>,
+    config: &Config,
+    pending_acks: &mut Vec<PendingAck>,
+    pending_offsets: &Option<Arc<Offsets>>,
+) {
+    if persist.is_some() {
+        return;
+    }
+    if pending_acks.is_empty() && Buffers::live_segment_bytes() == 0 {
+        return;
+    }
+    let Some(offsets_db) = pending_offsets.clone() else {
+        return;
+    };
+    if ingest_lease_refuses_snapshots() {
+        fail_pending_acks(
+            pending_acks,
+            "ingest lease has no active epoch; refusing further snapshots",
+        );
+        return;
+    }
+    let acked = std::mem::take(pending_acks);
+    info!(
+        pending = acked.len(),
+        live_bytes = Buffers::live_segment_bytes(),
+        "WAL writer flush starting"
+    );
+    let cfg = config.clone();
+    *persist = Some(tokio::spawn(async move {
+        let started = Instant::now();
+        let result = Buffers::flush_live_segment_for_writer(&cfg, offsets_db.as_ref()).await;
+        (acked, result, started)
+    }));
+}
+
+fn queue_submit(
+    unit: WalCommitUnit,
+    pending_acks: &mut Vec<PendingAck>,
+    pending_offsets: &mut Option<Arc<Offsets>>,
+    last_submit_at: &mut Option<Instant>,
+    submit_rate_bytes_per_sec: &mut f64,
+) {
+    *pending_offsets = Some(unit.offsets_db.clone());
+    let ack_started = Instant::now();
+    let arrow_bytes = unit.arrow_bytes as u64;
+    WAL_WRITER_PENDING_COUNT.fetch_add(1, Ordering::Relaxed);
+    WAL_WRITER_PENDING_BYTES.fetch_add(unit.arrow_bytes, Ordering::Relaxed);
+    match Buffers::append_batches_to_live(unit.batches) {
+        Ok(added_bytes) => {
+            WAL_WRITER_COALESCE_BYTES_TOTAL.fetch_add(added_bytes, Ordering::Relaxed);
+            WAL_WRITER_COALESCE_BATCHES_TOTAL.fetch_add(1, Ordering::Relaxed);
+            let now = Instant::now();
+            if let Some(previous) = *last_submit_at {
+                let elapsed = now.saturating_duration_since(previous);
+                if elapsed >= Duration::from_millis(1) && added_bytes > 0 {
+                    let instant_rate = added_bytes as f64 / elapsed.as_secs_f64().max(0.001);
+                    *submit_rate_bytes_per_sec = if *submit_rate_bytes_per_sec > 0.0 {
+                        (*submit_rate_bytes_per_sec * 0.8) + (instant_rate * 0.2)
+                    } else {
+                        instant_rate
+                    };
+                }
+            }
+            *last_submit_at = Some(now);
+            pending_acks.push((unit.done, ack_started, arrow_bytes, unit.submit_id));
+            if Config::log_wal_enabled() {
+                debug!(
+                    "WAL writer queued submit_id={} raw_bytes={} arrow_bytes={} live_bytes={} pending_count={} submit_rate_bps={:.0}",
+                    unit.submit_id,
+                    unit.raw_bytes,
+                    unit.arrow_bytes,
+                    Buffers::live_segment_bytes(),
+                    pending_acks.len(),
+                    *submit_rate_bytes_per_sec
+                );
+            }
+        }
+        Err(err) => {
+            WAL_WRITER_PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
+            WAL_WRITER_PENDING_BYTES.fetch_sub(unit.arrow_bytes, Ordering::Relaxed);
+            complete_request_unit(unit.submit_id, &Err(err.clone()));
+            let _ = unit.done.send(Err(err));
+        }
+    }
+}
+
+async fn join_persist(persist: &mut Option<PersistJoin>, last_flush: &mut Instant) {
+    let Some(handle) = persist.take() else {
+        return;
+    };
+    match handle.await {
+        Ok((acks, result, started)) => {
+            apply_persist_result(acks, result, started, last_flush);
+        }
+        Err(err) => {
+            error!("WAL persist task panicked: {err}");
+        }
+    }
+}
+
+async fn run_writer(config: Config, mut rx: mpsc::Receiver<WalWriterCommand>) {
+    let mut pending_acks: Vec<PendingAck> = Vec::new();
+    let mut pending_offsets: Option<Arc<Offsets>> = None;
+    let mut last_flush = Instant::now();
+    let mut last_submit_at: Option<Instant> = None;
+    let mut submit_rate_bytes_per_sec = 0.0f64;
+    let mut persist: Option<PersistJoin> = None;
+
+    loop {
+        let max_delay = Duration::from_secs(config.get_wal_max_delay_seconds().max(1));
+        let persist_running = persist.is_some();
+        let should_timer = !persist_running && !pending_acks.is_empty();
+        let deadline = if should_timer {
+            next_ack_deadline(
+                &config,
+                &pending_acks,
+                Buffers::live_segment_bytes(),
+                submit_rate_bytes_per_sec,
+                max_delay,
+            )
+            .unwrap_or_else(|| last_flush + max_delay)
+        } else {
+            last_flush + max_delay
+        };
+
+        tokio::select! {
+            biased;
+            joined = async {
+                persist
+                    .as_mut()
+                    .expect("persist branch is disabled when idle")
+                    .await
+            }, if persist_running => {
+                persist = None;
+                match joined {
+                    Ok((acks, result, started)) => {
+                        apply_persist_result(acks, result, started, &mut last_flush);
+                    }
+                    Err(err) => {
+                        error!("WAL persist task panicked: {err}");
+                    }
+                }
+                try_start_persist(
+                    &mut persist,
+                    &config,
+                    &mut pending_acks,
+                    &pending_offsets,
+                );
+            }
+            cmd = rx.recv() => {
+                match cmd {
+                    Some(WalWriterCommand::Submit(unit)) => {
+                        queue_submit(
+                            unit,
+                            &mut pending_acks,
+                            &mut pending_offsets,
+                            &mut last_submit_at,
+                            &mut submit_rate_bytes_per_sec,
+                        );
+                        try_start_persist(
+                            &mut persist,
+                            &config,
+                            &mut pending_acks,
+                            &pending_offsets,
+                        );
+                    }
+                    Some(WalWriterCommand::Flush { offsets_db, done }) => {
+                        pending_offsets = Some(offsets_db.clone());
+                        join_persist(&mut persist, &mut last_flush).await;
+                        try_start_persist(
+                            &mut persist,
+                            &config,
+                            &mut pending_acks,
+                            &pending_offsets,
+                        );
+                        join_persist(&mut persist, &mut last_flush).await;
+                        let _ = done.send(Ok(()));
+                        pending_offsets = None;
+                    }
+                    None => {
+                        join_persist(&mut persist, &mut last_flush).await;
+                        try_start_persist(
+                            &mut persist,
+                            &config,
+                            &mut pending_acks,
+                            &pending_offsets,
+                        );
+                        join_persist(&mut persist, &mut last_flush).await;
+                        break;
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(deadline.into()), if should_timer => {
+                try_start_persist(
+                    &mut persist,
+                    &config,
+                    &mut pending_acks,
+                    &pending_offsets,
+                );
+            }
+        }
+        if persist.is_none()
+            && !pending_acks.is_empty()
+            && Buffers::live_segment_bytes() >= config.get_wal_bytes_per_file()
+        {
+            try_start_persist(&mut persist, &config, &mut pending_acks, &pending_offsets);
+        }
+    }
+    error!("WAL writer stopped");
 }
 
 #[cfg(test)]
@@ -519,5 +639,20 @@ mod tests {
     async fn empty_request_ack_completes_immediately() {
         let rx = register_request_ack(9_000_004, 0);
         assert_eq!(rx.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn submit_times_out_when_writer_does_not_recv() {
+        let (tx, _rx) = mpsc::channel::<u8>(1);
+        tx.send(1).await.unwrap();
+        let started = Instant::now();
+        let err = send_with_timeout(&tx, 2)
+            .await
+            .expect_err("full channel must time out");
+        assert!(err.contains("timed out"), "expected timeout, got {err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout must not park the ingest pool"
+        );
     }
 }

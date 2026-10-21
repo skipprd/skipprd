@@ -294,10 +294,8 @@ mod tests {
         assert_eq!(decoded.name(), "IcebergScanExec");
 
         let key = skippr_lease::PipelineKey::new("t", "w", "p").unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
         let wal = Arc::new(
-            WalScanExec::new(schema(), key, "ns".into(), vec!["seg".into()], paths, None).unwrap(),
+            WalScanExec::new(schema(), key, "ns".into(), vec!["seg".into()], None).unwrap(),
         ) as Arc<dyn ExecutionPlan>;
         buf.clear();
         let err = codec.try_encode(wal, &mut buf).unwrap_err();
@@ -365,7 +363,7 @@ mod tests {
     #[test]
     fn logical_codec_rejects_wal_table_provider() {
         let key = skippr_lease::PipelineKey::new("t", "w", "p").unwrap();
-        let wal = Arc::new(WalTableProvider::live(
+        let wal = Arc::new(WalTableProvider::new(
             schema(),
             key,
             "ns".into(),

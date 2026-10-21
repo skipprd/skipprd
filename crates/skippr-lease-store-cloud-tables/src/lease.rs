@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use skippr_cloud::{attr_bool, attr_n, attr_s, bflag, n, s, Client, Error};
 use skippr_lease::{
-    LeaseEpoch, LeaseError, LeaseObservation, LeaseSession, NodeId, PipelineKey, PipelineLeaseStore,
+    LeaseEpoch, LeaseError, LeaseObservation, LeaseSession, NodeId, PipelineKey,
+    PipelineLeaseStore, LEASE_SK,
 };
 use tracing::warn;
 use uuid::Uuid;
@@ -80,7 +81,7 @@ impl CloudTablesLeaseStore {
             .update_item(
                 &self.table,
                 &key.dynamo_pk(),
-                "lease",
+                LEASE_SK,
                 "SET owner_node = :new_owner, epoch = epoch + :one, heartbeat = :one, released = :false, updated_at = :debug_now",
                 values,
                 Some("owner_node = :old_owner AND epoch = :old_epoch AND heartbeat = :old_heartbeat AND released = :released"),
@@ -107,7 +108,7 @@ impl PipelineLeaseStore for CloudTablesLeaseStore {
         let now = chrono::Utc::now().to_rfc3339();
         let item = json!({
             "PK": s(key.dynamo_pk()),
-            "SK": s("lease"),
+            "SK": s(LEASE_SK),
             "owner_node": s(owner.to_string()),
             "epoch": n(1),
             "heartbeat": n(1),
@@ -137,7 +138,7 @@ impl PipelineLeaseStore for CloudTablesLeaseStore {
     ) -> Result<Option<LeaseObservation>, LeaseError> {
         let item = self
             .client
-            .get_item(&self.table, &key.dynamo_pk(), "lease", true)
+            .get_item(&self.table, &key.dynamo_pk(), LEASE_SK, true)
             .await
             .map_err(|err| LeaseError::StoreUnavailable(err.to_string()))?;
         item.as_ref().map(Self::decode).transpose()
@@ -179,7 +180,7 @@ impl PipelineLeaseStore for CloudTablesLeaseStore {
             .update_item(
                 &self.table,
                 &key.dynamo_pk(),
-                "lease",
+                LEASE_SK,
                 "SET heartbeat = heartbeat + :one, updated_at = :debug_now",
                 values,
                 Some("owner_node = :owner AND epoch = :epoch AND released = :false"),
@@ -219,7 +220,7 @@ impl PipelineLeaseStore for CloudTablesLeaseStore {
             .update_item(
                 &self.table,
                 &key.dynamo_pk(),
-                "lease",
+                LEASE_SK,
                 "SET initialized = :true, updated_at = :debug_now",
                 values,
                 Some("owner_node = :owner AND epoch = :epoch AND released = :false"),
@@ -252,7 +253,7 @@ impl PipelineLeaseStore for CloudTablesLeaseStore {
             .update_item(
                 &self.table,
                 &key.dynamo_pk(),
-                "lease",
+                LEASE_SK,
                 "SET released = :true, heartbeat = heartbeat + :one, updated_at = :debug_now",
                 values,
                 Some("owner_node = :owner AND epoch = :epoch AND released = :false"),

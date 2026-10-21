@@ -12,5 +12,7 @@ once_cell.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 skippr-cloud.workspace = true
+skippr-lease = { path = "../skippr-lease" }
+skippr-wal-catalog = { path = "../skippr-wal-catalog" }
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 tracing = "0.1"

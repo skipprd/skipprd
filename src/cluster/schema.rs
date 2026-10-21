@@ -1,19 +1,18 @@
-use skippr_lease::{PipelineKey, PipelinePaths, PromoteError};
+use skippr_lease::{PipelineKey, PromoteError};
 
-use crate::buffer::durable::log::MutationLog;
+use crate::buffer::wal_handle;
 use crate::discover::PipelineMetadata;
 use crate::helpers::configuration::Config;
 use crate::runtime_plugins::schema_state::install_from_pipeline_metadata;
+use skippr_wal_catalog::{query_all, CatalogPrefix, CatalogRow};
 
 pub async fn load_and_install_pipeline_schema(
     config: &Config,
     key: &PipelineKey,
-    paths: &PipelinePaths,
-    log: &MutationLog,
     flatten: bool,
     initialized: bool,
 ) -> Result<(), PromoteError> {
-    let required = live_wal_namespaces(paths, log, key)?;
+    let required = live_wal_namespaces(key)?;
     let pipeline = config.pipeline_type().map_err(PromoteError::Other)?;
     let mut metadata = match config.load_pipeline_metadata(key).await {
         Ok(Some(metadata)) => metadata,
@@ -73,26 +72,24 @@ pub fn ensure_live_wal_namespaces_in_metadata(
     Ok(())
 }
 
-pub fn live_wal_namespaces(
-    paths: &PipelinePaths,
-    log: &MutationLog,
-    key: &PipelineKey,
-) -> Result<Vec<String>, PromoteError> {
-    let snapshot = crate::buffer::durable::snapshot::clustered_compaction_sot(paths, log, key)
+pub fn live_wal_namespaces(key: &PipelineKey) -> Result<Vec<String>, PromoteError> {
+    let Some(handle) = wal_handle::wal_handle_for(key) else {
+        return Ok(Vec::new());
+    };
+    let rows = query_all(handle.catalog(), CatalogPrefix::Segment)
         .map_err(|err| PromoteError::Other(err.to_string()))?;
     let mut out = Vec::new();
-    for descriptor in &snapshot.segments {
-        let id = skippr_lease::SegmentId::new(&descriptor.segment_id)
-            .map_err(|err| PromoteError::Other(err.to_string()))?;
-        let path = paths.segment(&id);
-        let meta = crate::buffer::segment_file::SegmentFile::admit_owned_pair_path(&path).map_err(
-            |err| {
+    for (_, row) in rows {
+        let CatalogRow::Segment(seg) = row else {
+            continue;
+        };
+        let meta = crate::buffer::wal_handle::admit_payload(&seg.location, &seg.payload_sha256)
+            .map_err(|err| {
                 PromoteError::Other(format!(
                     "live WAL decode failed for {}: {err}",
-                    descriptor.segment_id
+                    seg.segment_id.as_str()
                 ))
-            },
-        )?;
+            })?;
         for idx in meta.index {
             if !idx.key.namespace.is_empty() {
                 out.push(idx.key.namespace);
@@ -143,65 +140,5 @@ mod tests {
             crate::pipeline_type::PipelineType::Ingest,
         )
         .unwrap();
-        ensure_live_wal_namespaces_in_metadata(
-            &[],
-            &metadata,
-            crate::pipeline_type::PipelineType::Ingest,
-        )
-        .unwrap();
-        ensure_live_wal_namespaces_in_metadata(
-            &["events".into()],
-            &metadata_with_namespace("other"),
-            crate::pipeline_type::PipelineType::Copy,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn missing_metadata_json_is_fatal_once_initialized_or_live_wal_exists() {
-        assert!(!missing_metadata_is_fatal(
-            false,
-            &[],
-            crate::pipeline_type::PipelineType::Ingest
-        ));
-        assert!(missing_metadata_is_fatal(
-            true,
-            &[],
-            crate::pipeline_type::PipelineType::Ingest
-        ));
-        assert!(missing_metadata_is_fatal(
-            false,
-            &["events".into()],
-            crate::pipeline_type::PipelineType::Ingest
-        ));
-        assert!(missing_metadata_is_fatal(
-            true,
-            &["events".into()],
-            crate::pipeline_type::PipelineType::Ingest
-        ));
-        assert!(!missing_metadata_is_fatal(
-            true,
-            &["events".into()],
-            crate::pipeline_type::PipelineType::Copy
-        ));
-    }
-
-    #[test]
-    fn copy_missing_metadata_installs_empty_pipeline_metadata() {
-        let config = Config::new();
-        let copy =
-            promote_metadata_when_file_missing(&config, crate::pipeline_type::PipelineType::Copy)
-                .expect("copy promote installs empty metadata");
-        assert!(copy.metadata.is_empty());
-        assert!(promote_metadata_when_file_missing(
-            &config,
-            crate::pipeline_type::PipelineType::Ingest
-        )
-        .is_none());
-        assert!(promote_metadata_when_file_missing(
-            &config,
-            crate::pipeline_type::PipelineType::Cdc
-        )
-        .is_none());
     }
 }

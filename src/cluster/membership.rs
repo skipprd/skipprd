@@ -140,7 +140,6 @@ impl MembershipService {
                     protocol_min: record.ad.protocol_min,
                     protocol_max: record.ad.protocol_max,
                     endpoint: record.ad.replica_addr,
-                    committed_lag: 0,
                     disk_pressure: record.ad.disk_pressure,
                 })
                 .collect();

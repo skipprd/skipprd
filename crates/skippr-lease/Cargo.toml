@@ -7,10 +7,11 @@ description = "Clock-free pipeline lease domain types, guard, and in-memory test
 
 [dependencies]
 async-trait.workspace = true
+serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

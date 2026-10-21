@@ -662,6 +662,10 @@ mod tests {
             "https://install.skippr.io/releases/runtime-plugins/15.12.1/manifest-index.json"
         );
         assert!(!format_host_manifest_index_url("15.12.1").contains("/latest/manifest-index.json"));
+        assert_eq!(
+            format_host_manifest_index_url("18.3.9-beta"),
+            "https://install.skippr.io/releases/runtime-plugins/18.3.9-beta/manifest-index.json"
+        );
     }
 
     #[test]

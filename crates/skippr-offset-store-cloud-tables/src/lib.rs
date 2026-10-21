@@ -9,7 +9,11 @@ use chrono::Utc;
 use once_cell::sync::OnceCell;
 use serde_json::{json, Value};
 use skippr_cloud::{attr_n, attr_s, n, s, Client};
+use skippr_lease::{decide_wal_publish, OffsetPublishError, PublishAction, PublishMode};
 use tracing::{info, warn};
+
+mod catalog;
+pub use catalog::CloudTablesWalCatalog;
 
 type Job = Box<dyn FnOnce(&tokio::runtime::Runtime, Arc<Client>) + Send>;
 
@@ -51,7 +55,7 @@ fn cloud_worker() -> Result<&'static CloudIoWorker, String> {
     })
 }
 
-fn run_on_worker<T, F>(f: F) -> Result<T, String>
+pub(crate) fn run_on_worker<T, F>(f: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&tokio::runtime::Runtime, Arc<Client>) -> T + Send + 'static,
@@ -110,6 +114,68 @@ impl CloudTablesOffsetStore {
         format!("checkpoint#{}", logical_key)
     }
 
+    pub fn reset_published_ingest(&self) -> Result<(), String> {
+        let table = self.table.clone();
+        let pk = self.pk.clone();
+        run_on_worker(move |rt, client| {
+            rt.block_on(async move {
+                for prefix in ["offset#", "checkpoint#"] {
+                    loop {
+                        let body = json!({
+                            "tableName": table,
+                            "keyConditionExpression": "PK = :pk AND begins_with(SK, :p)",
+                            "expressionAttributeValues": {
+                                ":pk": s(&pk),
+                                ":p": s(prefix),
+                            },
+                            "scanIndexForward": true,
+                            "consistentRead": true,
+                        });
+                        let payload = client
+                            .call_json("tables", "Query", body)
+                            .await
+                            .map_err(|err| format!("Cloud tables Query failed: {err}"))?;
+                        let items = payload
+                            .body
+                            .get("items")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        if items.is_empty() {
+                            break;
+                        }
+                        let mut deletes = Vec::new();
+                        for item in &items {
+                            let Some(sk) = attr_s(item, "SK") else {
+                                continue;
+                            };
+                            deletes.push(json!({
+                                "delete": {
+                                    "tableName": table,
+                                    "key": {
+                                        "PK": s(&pk),
+                                        "SK": s(sk),
+                                    },
+                                }
+                            }));
+                            if deletes.len() == 99 {
+                                break;
+                            }
+                        }
+                        if deletes.is_empty() {
+                            break;
+                        }
+                        client
+                            .transact_write(Value::Array(deletes))
+                            .await
+                            .map_err(|err| format!("Cloud tables transact delete failed: {err}"))?;
+                    }
+                }
+                Ok(())
+            })
+        })?
+    }
+
     pub fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String> {
         let table = self.table.clone();
         let pk = self.pk.clone();
@@ -133,7 +199,7 @@ impl CloudTablesOffsetStore {
         })?
     }
 
-    pub fn put_bytes(&self, sk: &str, bytes: &[u8]) -> Result<(), String> {
+    pub(crate) fn put_bytes(&self, sk: &str, bytes: &[u8]) -> Result<(), String> {
         loop {
             match self.put_bytes_once(sk, bytes)? {
                 PublishOutcome::Ok => return Ok(()),
@@ -175,7 +241,11 @@ impl CloudTablesOffsetStore {
         })?
     }
 
-    pub fn fetch_and_update_bytes<F>(&self, sk: &str, update: F) -> Result<Option<Vec<u8>>, String>
+    pub fn fetch_and_update_journal<F>(
+        &self,
+        sk: &str,
+        update: F,
+    ) -> Result<Option<Vec<u8>>, String>
     where
         F: FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>>,
     {
@@ -191,28 +261,8 @@ impl CloudTablesOffsetStore {
         self.get_bytes(&Self::offset_sk(namespace, partition))
     }
 
-    pub fn put_offset(&self, namespace: &str, partition: &str, bytes: &[u8]) -> Result<(), String> {
-        self.put_bytes(&Self::offset_sk(namespace, partition), bytes)
-    }
-
-    pub fn fetch_and_update_offset<F>(
-        &self,
-        namespace: &str,
-        partition: &str,
-        update: F,
-    ) -> Result<Option<Vec<u8>>, String>
-    where
-        F: FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>>,
-    {
-        self.fetch_and_update_bytes(&Self::offset_sk(namespace, partition), update)
-    }
-
     pub fn get_checkpoint(&self, logical_key: &str) -> Result<Option<Vec<u8>>, String> {
         self.get_bytes(&Self::checkpoint_sk(logical_key))
-    }
-
-    pub fn put_checkpoint(&self, logical_key: &str, bytes: &[u8]) -> Result<(), String> {
-        self.put_bytes(&Self::checkpoint_sk(logical_key), bytes)
     }
 
     pub fn publish_wal_commit(
@@ -222,9 +272,17 @@ impl CloudTablesOffsetStore {
         epoch: u64,
         commit_index: u64,
         payload_sha256: &str,
-    ) -> Result<(), String> {
+        mode: PublishMode,
+    ) -> Result<(), OffsetPublishError> {
         loop {
-            match self.publish_wal_commit_once(sk, bytes, epoch, commit_index, payload_sha256)? {
+            match self.publish_wal_commit_once(
+                sk,
+                bytes,
+                epoch,
+                commit_index,
+                payload_sha256,
+                mode,
+            )? {
                 PublishOutcome::Ok => return Ok(()),
                 PublishOutcome::Retry => continue,
             }
@@ -238,7 +296,8 @@ impl CloudTablesOffsetStore {
         epoch: u64,
         commit_index: u64,
         payload_sha256: &str,
-    ) -> Result<PublishOutcome, String> {
+        mode: PublishMode,
+    ) -> Result<PublishOutcome, OffsetPublishError> {
         let table = self.table.clone();
         let pk = self.pk.clone();
         let sk = sk.to_string();
@@ -247,10 +306,9 @@ impl CloudTablesOffsetStore {
         let merge_offsets = sk.starts_with("offset#");
         run_on_worker(move |rt, client| {
             rt.block_on(async move {
-                let existing = client
-                    .get_item(&table, &pk, &sk, true)
-                    .await
-                    .map_err(|e| format!("Cloud tables get_item failed: {e}"))?;
+                let existing = client.get_item(&table, &pk, &sk, true).await.map_err(|e| {
+                    OffsetPublishError::Transient(format!("Cloud tables get_item failed: {e}"))
+                })?;
                 if let Some(item) = existing.as_ref() {
                     let old_epoch = attr_n(item, "wal_epoch");
                     let old_index = attr_n(item, "wal_commit_index");
@@ -258,22 +316,22 @@ impl CloudTablesOffsetStore {
                     if let (Some(old_epoch), Some(old_index), Some(old_hash)) =
                         (old_epoch, old_index, old_hash)
                     {
-                        if old_epoch == epoch && old_index == commit_index {
-                            if old_hash == incoming_hash {
-                                return Ok(PublishOutcome::Ok);
-                            }
-                            return Err(format!(
-                                "corrupt offset SK={sk}: same WAL tuple with different hash"
-                            ));
-                        }
-                        if (old_epoch, old_index) > (epoch, commit_index) {
-                            return Ok(PublishOutcome::Ok);
+                        match decide_wal_publish(
+                            Some((old_epoch, old_index, old_hash.as_str())),
+                            epoch,
+                            commit_index,
+                            &incoming_hash,
+                            mode,
+                        )? {
+                            PublishAction::AlreadyApplied => return Ok(PublishOutcome::Ok),
+                            PublishAction::Commit => {}
                         }
                     }
                 }
                 let existing_payload = existing.as_ref().and_then(decode_payload_b64);
                 let write_bytes = if merge_offsets {
-                    merge_offset_value_bytes(existing_payload.as_deref(), &incoming)?
+                    merge_offset_value_bytes(existing_payload.as_deref(), &incoming)
+                        .map_err(OffsetPublishError::Transient)?
                 } else {
                     incoming
                 };
@@ -290,8 +348,10 @@ impl CloudTablesOffsetStore {
                     existing.as_ref(),
                 )
                 .await
+                .map_err(OffsetPublishError::Transient)
             })
-        })?
+        })
+        .map_err(OffsetPublishError::Transient)?
     }
 }
 
@@ -408,7 +468,7 @@ async fn put_wal_commit(
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
         .iter()

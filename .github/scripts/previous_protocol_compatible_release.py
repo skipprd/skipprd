@@ -117,7 +117,7 @@ def previous_protocol_compatible_release(
     current_versions: dict[str, str],
 ) -> dict:
     for tag in tags:
-        if tag in {current_tag, "0.0.0"} or tag.startswith("test"):
+        if tag in {current_tag, "0.0.0"} or tag.startswith("test") or tag.endswith("-beta"):
             continue
         protocol = protocol_by_tag.get(tag)
         if protocol != current_protocol:
