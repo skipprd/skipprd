@@ -9,6 +9,7 @@ SystemExits. Everyday commits do not run this; /skippr-release does.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -111,6 +112,18 @@ def replace_package_version(text: str, new_version: str) -> str:
     return "".join(lines)
 
 
+def git_env(workspace: Path | None = None) -> dict[str, str]:
+    """Drop inherited GIT_* so nested git uses cwd, not a parent hook's repo."""
+    env = os.environ.copy()
+    for key in list(env):
+        if key.startswith("GIT_"):
+            del env[key]
+    if workspace is not None:
+        env["GIT_DIR"] = str(workspace / ".git")
+        env["GIT_WORK_TREE"] = str(workspace.resolve())
+    return env
+
+
 def git_changed_paths(workspace: Path, base: str) -> list[str]:
     seen: set[str] = set()
     commands = (
@@ -118,8 +131,9 @@ def git_changed_paths(workspace: Path, base: str) -> list[str]:
         ["git", "diff", "--name-only", "--cached", base],
         ["git", "ls-files", "--others", "--exclude-standard"],
     )
+    env = git_env(workspace)
     for command in commands:
-        output = subprocess.check_output(command, cwd=workspace, text=True)
+        output = subprocess.check_output(command, cwd=workspace, text=True, env=env)
         for line in output.splitlines():
             path = posix_path(line.strip())
             if path:
@@ -134,6 +148,7 @@ def git_base_package_version(workspace: Path, base: str, rel_dir: str) -> str | 
         cwd=workspace,
         text=True,
         capture_output=True,
+        env=git_env(workspace),
     )
     if result.returncode != 0:
         return None

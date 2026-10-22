@@ -10,8 +10,11 @@ from pathlib import Path
 
 
 def keep_artifact(name: str) -> bool:
-    return name.startswith("perf-") or name.startswith("skippr-perf-") or name.startswith(
-        "heaptrack-"
+    return (
+        name.startswith("perf-")
+        or name.startswith("skippr-perf-")
+        or name.startswith("skippr-perf-db")
+        or name.startswith("heaptrack-")
     )
 
 
@@ -29,14 +32,14 @@ def download_argv(
     return argv
 
 
-def latest_run_id(branch: str, repo: str) -> str:
+def latest_run_id(branch: str, repo: str, workflow: str = "perf.yml") -> str:
     proc = subprocess.run(
         [
             "gh",
             "run",
             "list",
             "--workflow",
-            "perf.yml",
+            workflow,
             "--branch",
             branch,
             "--limit",
@@ -54,7 +57,7 @@ def latest_run_id(branch: str, repo: str) -> str:
         raise SystemExit(proc.stderr.strip() or "gh run list failed")
     rows = json.loads(proc.stdout or "[]")
     if not rows:
-        raise SystemExit(f"no skippr-perf runs on {branch}")
+        raise SystemExit(f"no {workflow} runs on {branch}")
     return str(rows[0]["databaseId"])
 
 
@@ -80,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="artifacts/skippr-perf")
     parser.add_argument("--repo", default="skipprd/skipprd")
     parser.add_argument("--branch", default="")
+    parser.add_argument("--workflow", default="perf.yml", help="perf.yml or perf-db.yml")
     args = parser.parse_args(argv)
     run_id = args.run_id.strip()
     if not run_id:
@@ -94,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             branch = (branch_proc.stdout or "").strip()
         if not branch:
             raise SystemExit("pass --run-id or --branch")
-        run_id = latest_run_id(branch, args.repo)
+        run_id = latest_run_id(branch, args.repo, args.workflow)
     dest = Path(args.out)
     dest.mkdir(parents=True, exist_ok=True)
     names = list_artifact_names(run_id, args.repo)

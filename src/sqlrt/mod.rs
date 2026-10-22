@@ -19,5 +19,5 @@ pub mod stream_plan;
 pub mod tables;
 pub mod tui;
 pub mod udfs;
-pub mod wal_reader;
+pub mod wal_slice;
 pub mod wal_table;

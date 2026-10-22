@@ -273,6 +273,7 @@ fn seq_value(row: &CatalogRow) -> Result<u64, CatalogError> {
 fn row_version(row: &CatalogRow) -> Option<u64> {
     match row {
         CatalogRow::Segment(r) => Some(r.version),
+        CatalogRow::Slice(r) => Some(r.version),
         CatalogRow::Compaction(r) => Some(r.version),
         CatalogRow::Control(r) => Some(r.version),
         CatalogRow::Format(r) => Some(r.row_version),

@@ -3,14 +3,292 @@ name: skippr-perf-db
 on:
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
 jobs:
-  register:
-    name: registered on default branch
+  linux_contracts:
+    name: perf-db workflow contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
-      - name: Dispatch this workflow with --ref of a branch that has the suite
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 tests/perf_db/test_run.py
+      - run: python3 tests/perf/test_analyze.py
+      - run: python3 .github/scripts/test_rust_ci.py
+
+  build_linux:
+    name: release host + query plugins (linux x86)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/cloud
+          path: cloud
+          token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
+          submodules: true
+      - name: Build linux x86 release (query plugin subset)
+        uses: ./skipprd/.github/actions/rust-build-release
+        with:
+          rust-version: "1.94.1"
+          architecture_name: linux_x86
+          workspace-root: skipprd
+          runtime_plugin_packages_json: >-
+            ["skippr-plugin-data-source-file","skippr-plugin-data-sink-file","skippr-plugin-data-sink-duckdb","skippr-plugin-schema-sink-duckdb","skippr-plugin-data-sink-skipprlake","skippr-plugin-schema-sink-skipprlake"]
+
+  linux_matrix:
+    name: perf-db ${{ matrix.scenario }}
+    needs: build_linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - q-wal-count-file
+          - q-wal-point-file
+          - q-union-count-duckdb
+          - q-wal-group-file
+          - q-stream-tail-file
+          - q-union-point-duckdb
+          - q-union-group-duckdb
+          - q-iceberg-only-duckdb
+          - q-union-count-skipprlake
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: skipprd-linux_x86
+          path: skipprd/skipprd-linux_x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-plugin-binaries-linux_x86
+          path: skipprd/runtime-plugin-binaries-linux_x86
+      - name: Make skipprd executable
+        run: chmod +x skipprd/skipprd-linux_x86/skipprd skipprd/runtime-plugin-binaries-linux_x86/skippr-plugin-*
+      - name: Install DuckDB CLI
+        working-directory: skipprd
+        shell: bash
         run: |
-          echo "perf-db.yml is registered so GitHub can workflow_dispatch it."
-          echo "Run the suite with: gh workflow run perf-db.yml --ref <branch>"
-          echo "This default-branch stub is not the matrix; the run uses the workflow file from --ref."
+          set -euo pipefail
+          if command -v duckdb >/dev/null 2>&1; then
+            duckdb --version
+            exit 0
+          fi
+          curl -fsSL https://install.duckdb.org | sh
+          echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
+      - name: Run scenario
+        uses: ./skipprd/.github/actions/e2e/perf-db
+        with:
+          scenario: ${{ matrix.scenario }}
+          skipprd_path: ${{ github.workspace }}/skipprd/skipprd-linux_x86/skipprd
+          plugin_binaries_dir: ${{ github.workspace }}/skipprd/runtime-plugin-binaries-linux_x86
+          scale: ci
+          workspace-root: skipprd
+          work: ${{ runner.temp }}/skippr-perf-db
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: skippr-perf-db-${{ matrix.scenario }}-linux
+          path: |
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf-db-report.json
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf-report.json
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf.log
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/*.svg
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/profile.json.gz
+          if-no-files-found: error
+
+  build_linux_profile:
+    name: frame-pointer host + inferno (linux x86)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/cloud
+          path: cloud
+          token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
+          submodules: true
+      - name: Install system deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev libssl-dev pkg-config
+      - name: Release build with frame pointers
+        working-directory: skipprd
+        env:
+          RUSTFLAGS: "-C force-frame-pointers=yes -C debuginfo=1"
+        run: |
+          set -euo pipefail
+          cargo build --profile profiling -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables
+          cargo build --profile profiling \
+            -p skippr-plugin-data-source-file \
+            -p skippr-plugin-data-sink-file \
+            -p skippr-plugin-data-sink-duckdb \
+            -p skippr-plugin-schema-sink-duckdb \
+            -p skippr-plugin-data-sink-skipprlake \
+            -p skippr-plugin-schema-sink-skipprlake
+          mkdir -p skipprd-linux_x86-profile runtime-plugin-binaries-linux_x86-profile
+          cp target/profiling/skipprd skipprd-linux_x86-profile/skipprd
+          cp target/profiling/skippr-plugin-data-source-file \
+             target/profiling/skippr-plugin-data-sink-file \
+             target/profiling/skippr-plugin-data-sink-duckdb \
+             target/profiling/skippr-plugin-schema-sink-duckdb \
+             target/profiling/skippr-plugin-data-sink-skipprlake \
+             target/profiling/skippr-plugin-schema-sink-skipprlake \
+             runtime-plugin-binaries-linux_x86-profile/
+      - name: Install inferno
+        run: |
+          set -euo pipefail
+          cargo install inferno
+          mkdir -p inferno-linux_x86
+          cp "${CARGO_HOME:-$HOME/.cargo}/bin/inferno-flamegraph" inferno-linux_x86/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skipprd-linux_x86-profile
+          path: skipprd/skipprd-linux_x86-profile
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-plugin-binaries-linux_x86-profile
+          path: skipprd/runtime-plugin-binaries-linux_x86-profile
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inferno-linux_x86
+          path: inferno-linux_x86
+          if-no-files-found: error
+
+  linux_profile:
+    name: linux ${{ matrix.scenario }} ${{ matrix.profile }}
+    needs: build_linux_profile
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: q-wal-count-file
+            profile: flamegraph
+          - scenario: q-wal-point-file
+            profile: flamegraph
+          - scenario: q-union-count-duckdb
+            profile: flamegraph
+          - scenario: q-wal-count-file
+            profile: perf-stat
+          - scenario: q-wal-point-file
+            profile: perf-stat
+          - scenario: q-union-count-duckdb
+            profile: perf-stat
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: skipprd-linux_x86-profile
+          path: skipprd/skipprd-linux_x86-profile
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-plugin-binaries-linux_x86-profile
+          path: skipprd/runtime-plugin-binaries-linux_x86-profile
+      - uses: actions/download-artifact@v4
+        with:
+          name: inferno-linux_x86
+          path: skipprd/inferno-linux_x86
+      - name: Make profiled binaries executable
+        run: |
+          set -euo pipefail
+          chmod +x skipprd/skipprd-linux_x86-profile/skipprd \
+            skipprd/runtime-plugin-binaries-linux_x86-profile/skippr-plugin-* \
+            skipprd/inferno-linux_x86/inferno-flamegraph
+          echo "${{ github.workspace }}/skipprd/inferno-linux_x86" >> "$GITHUB_PATH"
+      - name: Install profiling tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r)
+          if ! command -v duckdb >/dev/null 2>&1; then
+            curl -fsSL https://install.duckdb.org | sh
+            echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
+          fi
+      - name: Run flamegraph or perf-stat cell
+        uses: ./skipprd/.github/actions/e2e/perf-db
+        with:
+          scenario: ${{ matrix.scenario }}
+          skipprd_path: ${{ github.workspace }}/skipprd/skipprd-linux_x86-profile/skipprd
+          plugin_binaries_dir: ${{ github.workspace }}/skipprd/runtime-plugin-binaries-linux_x86-profile
+          scale: linux
+          profile: ${{ matrix.profile }}
+          workspace-root: skipprd
+          work: ${{ runner.temp }}/skippr-perf-db
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: skippr-perf-db-${{ matrix.scenario }}-linux-${{ matrix.profile }}
+          path: |
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf-db-report.json
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf-report.json
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf.log
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf.folded
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/flamegraph.svg
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/*.svg
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf.data
+            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf-stat.txt
+          if-no-files-found: error
+
+  linux_analyze:
+    name: bottlenecks vs new code
+    needs:
+      - linux_profile
+    if: needs.linux_profile.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch diff base
+        run: git fetch origin main
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: skippr-perf-db-*-linux-flamegraph
+          path: artifacts
+      - name: Rank flamegraph leaves in new code
+        run: python3 tests/perf/analyze.py --artifacts artifacts --base origin/main --out bottlenecks.json --repo-root .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skippr-perf-db-bottlenecks
+          path: bottlenecks.json
+          if-no-files-found: error

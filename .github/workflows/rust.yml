@@ -53,7 +53,7 @@ jobs:
       - name: Build linux x86 release
         uses: ./skipprd/.github/actions/rust-build-release
         with:
-          rust-version: "1.92.0"
+          rust-version: "1.94.1"
           architecture_name: linux_x86
           workspace-root: skipprd
 
@@ -77,7 +77,7 @@ jobs:
       - name: Build macos arm64 release
         uses: ./skipprd/.github/actions/rust-build-release
         with:
-          rust-version: "1.92.0"
+          rust-version: "1.94.1"
           architecture_name: macos_arm64
           workspace-root: skipprd
 

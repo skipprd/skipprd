@@ -332,11 +332,12 @@ fn commit_imported_segment(
     };
     let mut txn = CatalogTxn::new();
     txn.put(
-        CatalogKey::Segment(id),
+        CatalogKey::Segment(id.clone()),
         CatalogRow::Segment(row),
         PutCond::NotExists,
     )
     .map_err(|err| DurableError::Io(err.to_string()))?;
+    crate::buffer::wal_handle::put_slice_index(&mut txn, &id, meta)?;
     txn.put(
         CatalogKey::Seq,
         CatalogRow::Seq(SeqRow { max_seq }),

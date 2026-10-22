@@ -28,6 +28,10 @@ KNOWN_ASSERT_KEYS = frozenset(
         "leftover_seg_count",
         "identity",
         "row_count",
+        "query_count",
+        "query_point",
+        "query_group",
+        "stream_limit",
     }
 )
 
@@ -40,6 +44,7 @@ SCENARIO_KINDS = frozenset(
         "wrap_existing",
         "ingest_s3_skipprlake",
         "duckdb_ingest",
+        "query_after_ingest",
     }
 )
 

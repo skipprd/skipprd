@@ -17,7 +17,6 @@ use super::catalog::{
 };
 use super::trace::spans_schema;
 use super::MAX_TRACES;
-use std::any::Any;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaterfallSpan {
@@ -231,10 +230,6 @@ struct WaterfallTable {
 
 #[async_trait::async_trait]
 impl TableProvider for WaterfallTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         waterfall_schema()
     }

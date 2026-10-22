@@ -1,11 +1,11 @@
 # HLA e2e checklist
 
 **Architecture:** [hla-distributed-query-iceberg-catalog.md](hla-distributed-query-iceberg-catalog.md)  
-**Flight SQL / Ballista:** [hla-flight-sql-ballista.md](hla-flight-sql-ballista.md)  
+**Flight SQL / QueryRuntime:** [hla-flight-sql-query-runtime.md](hla-flight-sql-query-runtime.md)  
 **WBS:** [hla-implementation-wbs.md](hla-implementation-wbs.md)  
 **Closed red-team items:** [hla-e2e-implementation-gaps.md](hla-e2e-implementation-gaps.md)
 
-Harness: `python3 tests/hla_e2e/run.py` (DynamoDB Local with two tables — `skippr-hla-e2e-offsets` and `skippr-hla-e2e-catalog` — plus `file://` Iceberg warehouse and three `skipprd` processes with `KUBERNETES_NODE_NAME=hla-host-{1,2,3}`). Query path is Arrow Flight SQL 58.3 (`query_flight_ids`). Clustered TCP is always mTLS; hello is protocol **3** hashed from `SKIPPR_CLUSTER_ID`. Live `run.py` over Flight SQL is the remaining process gate.
+Harness: `python3 tests/hla_e2e/run.py` (DynamoDB Local with two tables — `skippr-hla-e2e-offsets` and `skippr-hla-e2e-catalog` — plus `file://` Iceberg warehouse and three `skipprd` processes with `KUBERNETES_NODE_NAME=hla-host-{1,2,3}`). Query path is Arrow Flight SQL 59.2 (`query_flight_ids`). Clustered TCP is always mTLS; hello is protocol **3** hashed from `SKIPPR_CLUSTER_ID`. Live `run.py` over Flight SQL is the remaining process gate.
 
 **This pass:** 2026-08-17 production close-out (cluster id, always mTLS, gossip HMAC required, Flight `TenantScope`, mesh JWT). Previous `run.py` pass is **stale** until re-run. Commands used `cargo` unless noted.
 
@@ -34,11 +34,11 @@ Re-run: `python3 tests/hla_e2e/run.py`. The 2026-08-17 pre-cutover pass (36 scen
 - [ ] `ingest_and_query_union` — `batch1.jsonl` → Iceberg parquet + WAL; `SELECT id` / `count(*)` unique (`evt-1`…`evt-5`)
   - **Ran:** harness scenario.
   - **Result:** pass. Log: `queried 5 rows from Iceberg UNION live WAL`.
-  - **Remark:** `clustered query` Flight SQL UNION. Ballista cluster proof is `ballista_cluster_query`.
+  - **Remark:** `clustered query` Flight SQL UNION. QueryRuntime cluster proof is `distributed_cluster_query`.
 
-- [ ] `ballista_cluster_query` — every ready `flight_addr` returns the same unique ids and `count(*)`; live nodes share `elected_scheduler=`
+- [ ] `distributed_cluster_query` — every ready `flight_addr` returns the same unique ids and `count(*)`; live nodes share `QueryRuntime worker=`
   - **Harness:** after ingest, n1+n2 still ingesting; `query_flight_ids` + `query_flight_count` on each ready membership `flight_addr`.
-  - **Ran:** 2026-08-17 `run.py`. Log: `shared elected_scheduler=127.0.0.1:56868`; both Flight addrs returned ids `evt-1`…`evt-5` count=5.
+  - **Ran:** 2026-08-17 `run.py`. Log: `shared QueryRuntime worker=127.0.0.1:56868`; both Flight addrs returned ids `evt-1`…`evt-5` count=5.
   - **Result:** pass.
 
 - [ ] `query_from_every_ready_replica` — clustered query succeeds (WAL may be behind)
@@ -164,12 +164,12 @@ Each item: ran the closest existing test if any. `[ ]` means the **process** sce
 
 ### Query consistency (WU-7.2 / WU-7.4)
 
-- [ ] Query socket on each ready replica (WAL may differ; Iceberg is the snapshot)
+- [ ] Flight SQL on each ready replica (WAL may differ; Iceberg is the snapshot)
   - **Harness:** `query_each_replica_socket` (2026-08-17 `run.py`).
   - **Result:** pass (harness advanced).
 
 - [ ] Pointer-before-completion and completion-before-query: UNION has each source row once
-  - **Ran:** ingest UNION uniqueness throughout the harness (pass), including immediately after compaction of `batch10`. Iceberg snapshot ancestry now carries `skippr.wal-segment-ids`; live WAL excludes those segments. `select_live_ordinals` skips Iceberg-named segments and slices whose catalog bits are all done.
+  - **Ran:** ingest UNION uniqueness throughout the harness (pass), including immediately after compaction of `batch10`. Iceberg snapshot ancestry now carries `skippr.wal-segment-ids`; live WAL excludes those segments. `select_live_ordinals` is catalog `SliceIndexEntry` minus Iceberg-named segment ids.
   - **Remark:** WAL may be behind. Eventual uniqueness after compaction is `wait_unique_ids`.
 
 - [ ] Query skips an unreachable replica; Iceberg-only is allowed
@@ -182,11 +182,11 @@ Each item: ran the closest existing test if any. `[ ]` means the **process** sce
 
 ### Query protocol (WU-7.3 / WU-7.5 in tree; live `run.py` still the gate)
 
-- [ ] Arrow Flight SQL 58.3 `GetFlightInfo` / `DoGet` (WU-7.3) — unit/lib tests in `query_flight::`
+- [ ] Arrow Flight SQL 59.2 `GetFlightInfo` / `DoGet` (WU-7.3) — unit/lib tests in `query_flight::`
   - **Remark:** Framed `query_socket` is deleted. Live process proof is `python3 tests/hla_e2e/run.py` via `query_flight_ids`.
 
-- [ ] Ballista 53 elected cluster UNION (WU-7.5) — codec + `start(advertised_ip)` + UNION-before-aggregate unit tests
-  - **Remark:** No standalone Ballista OS processes. Live distributed proof is `ballista_cluster_query` in `python3 tests/hla_e2e/run.py`.
+- [ ] datafusion-distributed QueryRuntime UNION (WU-7.5) — codec + `start(advertised_ip)` + UNION-before-aggregate unit tests
+  - **Remark:** No standalone query-engine OS processes. Live distributed proof is `distributed_cluster_query` in `python3 tests/hla_e2e/run.py`.
 
 ### Lifecycle (WU-8.1 / WU-8.2)
 

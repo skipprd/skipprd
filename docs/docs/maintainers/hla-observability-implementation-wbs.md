@@ -1,7 +1,7 @@
 # Implementation WBS: Observability (OTel lakehouse + SQL/UDFs)
 
 **Architecture:** [`hla-observability-otel-console.md`](./hla-observability-otel-console.md)  
-**Query substrate:** [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md) (shipped)  
+**Query substrate:** [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md) (shipped)  
 **Style:** [`AGENTS.md`](../../../AGENTS.md)  
 **Boundary:** [`repository-map.md`](./repository-map.md)
 
@@ -19,7 +19,7 @@ skipprd stays JWT-ignorant. Fully functional on `skipprd sync` + `sde query` (an
 - No env/config knobs for payload ceilings, series caps, lookback, or timeouts (code constants).
 - No `skippr observe`, `src/observe/`, `console/`, or skipprd alarm store.
 - No one-implementor trait hierarchy for telemetry.
-- No new WAL, lease protocol, catalog, or Ballista scheduler. Registering UDFs on the existing `SessionStateBuilder` is in scope (B.26).
+- No new WAL, lease protocol, catalog, or QueryRuntime worker. Registering UDFs on the existing `SessionStateBuilder` is in scope (B.26).
 - No work unit is complete without its named deterministic tests.
 
 ## Locked decisions
@@ -69,7 +69,7 @@ docs/docs/query/observability-udfs.md
 | --- | --- | --- |
 | 0.1 | This file + HLA header + maintainer nav | docs |
 | 0.2 | Cancelled — no `Mode::Observe` | — |
-| 0.3 | `build_query_context` used by `query.rs` / `engine.rs` | `SELECT 1`; no direct `SessionContext::new_with_config` in those files |
+| 0.3 | `coordinating_query_context` used by `query.rs` / `engine.rs` | `SELECT 1`; no direct `SessionContext::new_with_config` in those files |
 | 0.4 | `src/sqlrt/udfs` MUST NOT mention `PIPELINE_NAME` | grep guard; `PipelineConfigView::for_name` missing → error |
 | 0.5 | Checked-in OTLP protobuf + JSON fixtures | parse in A.7–A.9 |
 
@@ -112,11 +112,11 @@ docs/docs/query/observability-udfs.md
 | B.15 | Cookbook SQL | `examples/otel/cookbook.sql` |
 | B.16–B.17 | `otel_services` / `otel_service_map` | caps |
 | B.18 | Row caps + `truncated` column | overflow sets truncated |
-| B.19 | Session timeout constant | factory / Ballista |
+| B.19 | Session timeout constant | factory / QueryRuntime |
 | B.21 | MemTable golden harness | waterfall/search/rate |
 | B.22 | TUI UDF name list | names match registry |
 | B.23 | `otel_trace_search` TVF | service/time/error |
-| B.26 | Register UDFs on Ballista `SessionStateBuilder` **before** `BallistaFunctionRegistry::from` | names present |
+| B.26 | Register UDFs on QueryRuntime `SessionStateBuilder` **before** `WorkerSessionBuilder::from` | names present |
 
 B.10–B.14, B.20 cancelled (no skipprd HTTP/SSE).
 

@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
@@ -14,7 +13,7 @@ use futures::{StreamExt, TryStreamExt};
 use iceberg::table::Table;
 use iceberg::Catalog;
 
-use skippr_query_ballista::{schema_from_ipc, schema_to_ipc, IcebergScanNode};
+use skippr_query_plan::{schema_from_ipc, schema_to_ipc, IcebergScanNode};
 
 /// Read-only Iceberg scan over a pinned snapshot. Iceberg pipelines never fall
 /// back to Parquet listing.
@@ -97,7 +96,8 @@ impl IcebergScanTableProvider {
     pub fn encode_scan_node(&self) -> Result<IcebergScanNode> {
         if self.catalog_json.is_empty() {
             return Err(DataFusionError::Internal(
-                "IcebergScanTableProvider cannot enter a Ballista plan without catalog_json".into(),
+                "IcebergScanTableProvider cannot enter a distributed plan without catalog_json"
+                    .into(),
             ));
         }
         Ok(IcebergScanNode {
@@ -134,10 +134,6 @@ impl IcebergScanTableProvider {
 
 #[async_trait::async_trait]
 impl TableProvider for IcebergScanTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -297,10 +293,6 @@ impl ExecutionPlan for IcebergScanExec {
         "IcebergScanExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
@@ -314,6 +306,15 @@ impl ExecutionPlan for IcebergScanExec {
         _children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(self)
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+        ) -> Result<datafusion::common::tree_node::TreeNodeRecursion>,
+    ) -> Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn execute(

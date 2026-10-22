@@ -1,9 +1,9 @@
 [package]
-name = "skippr-query-ballista"
+name = "skippr-query-plan"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "FlightSqlExec physical node and SkipprPhysicalCodec for Ballista 53"
+description = "FlightSqlExec physical node and SkipprPhysicalCodec for QueryRuntime"
 
 [dependencies]
 base64.workspace = true
@@ -11,7 +11,7 @@ arrow-flight = { workspace = true }
 async-trait.workspace = true
 bytes.workspace = true
 datafusion.workspace = true
-datafusion-proto = "53.1.0"
+datafusion-proto = "55.2.0"
 futures.workspace = true
 prost = "0.14"
 thiserror.workspace = true

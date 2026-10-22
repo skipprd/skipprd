@@ -1,9 +1,5 @@
-use std::any::Any;
-use std::fs;
-use std::io::{Read, Seek};
 use std::sync::Arc;
 
-use arrow::ipc::reader::StreamReader;
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::Session;
@@ -16,11 +12,11 @@ use datafusion::physical_plan::projection::{ProjectionExec, ProjectionExpr};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use skippr_lease::{PipelineKey, SegmentId};
-use skippr_wal_catalog::{CatalogKey, CatalogRow, PayloadLocation};
+use skippr_wal_catalog::{CatalogKey, CatalogRow};
 
-use crate::buffer::segment_file::SegmentFile;
 use crate::buffer::wal_handle;
 use crate::query_flight::live_wal::select_live_ordinals_for;
+use crate::sqlrt::wal_slice;
 
 /// Unpinned live WAL provider. DoGet/`execute` re-selects ordinals now.
 #[derive(Debug)]
@@ -148,116 +144,31 @@ fn read_ordinal_batches(
     let Ok(id) = SegmentId::new(segment_id) else {
         return Ok(Vec::new());
     };
+    let Ok(Some(CatalogRow::Slice(slice))) = handle.catalog().get(&CatalogKey::Slice {
+        segment_id: id.clone(),
+        ordinal,
+    }) else {
+        return Ok(Vec::new());
+    };
+    if slice.namespace != namespace {
+        return Ok(Vec::new());
+    }
     let Ok(Some(CatalogRow::Segment(seg))) = handle.catalog().get(&CatalogKey::Segment(id)) else {
         return Ok(Vec::new());
     };
-    if crate::buffer::wal_handle::admit_payload(&seg.location, &seg.payload_sha256).is_err() {
-        return Ok(Vec::new());
+    let batches = wal_slice::read_slice_batches(&seg.location, &slice)
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    if schema.fields().is_empty() {
+        return Ok(batches);
     }
-    match &seg.location {
-        PayloadLocation::Disk { path } => {
-            read_disk_ordinal_batches(std::path::PathBuf::from(path), ordinal, namespace, schema)
-        }
-        PayloadLocation::S3 { .. } => {
-            let Ok(bytes) =
-                crate::buffer::wal_handle::payload_bytes(&seg.location, &seg.payload_sha256)
-            else {
-                return Ok(Vec::new());
-            };
-            batches_from_bytes(&bytes, ordinal, namespace, schema)
-        }
-    }
-}
-
-fn read_disk_ordinal_batches(
-    path: std::path::PathBuf,
-    ordinal: u32,
-    namespace: &str,
-    schema: &SchemaRef,
-) -> Result<Vec<RecordBatch>> {
-    let Ok(meta) = SegmentFile::read_index_path(&path) else {
-        return Ok(Vec::new());
-    };
-    let mut file = match fs::File::open(&path) {
-        Ok(file) => file,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let Some(idx) = meta.index.get(ordinal as usize) else {
-        return Ok(Vec::new());
-    };
-    if idx.key.namespace != namespace {
-        return Ok(Vec::new());
-    }
-    if idx.codec != crate::buffer::segment_file::PART_CODEC_ARROW {
-        return Err(DataFusionError::Execution(
-            "sqlrt does not read copy WAL parts".to_string(),
-        ));
-    }
-    if file.seek(std::io::SeekFrom::Start(idx.start)).is_err() {
-        return Ok(Vec::new());
-    }
-    let reader = std::io::BufReader::new(file);
-    let mut take = reader.take(idx.len);
-    decode_arrow_stream(&mut take, schema)
-}
-
-fn batches_from_bytes(
-    bytes: &[u8],
-    ordinal: u32,
-    namespace: &str,
-    schema: &SchemaRef,
-) -> Result<Vec<RecordBatch>> {
-    let Ok(meta) = SegmentFile::read_metadata_from_bytes(bytes) else {
-        return Ok(Vec::new());
-    };
-    let Some(idx) = meta.index.get(ordinal as usize) else {
-        return Ok(Vec::new());
-    };
-    if idx.key.namespace != namespace {
-        return Ok(Vec::new());
-    }
-    if idx.codec != crate::buffer::segment_file::PART_CODEC_ARROW {
-        return Err(DataFusionError::Execution(
-            "sqlrt does not read copy WAL parts".to_string(),
-        ));
-    }
-    let start = idx.start as usize;
-    let end = start.saturating_add(idx.len as usize);
-    if end > bytes.len() {
-        return Ok(Vec::new());
-    }
-    let mut cursor = std::io::Cursor::new(&bytes[start..end]);
-    decode_arrow_stream(&mut cursor, schema)
-}
-
-fn decode_arrow_stream<R: Read>(reader: &mut R, schema: &SchemaRef) -> Result<Vec<RecordBatch>> {
-    let sr = match StreamReader::try_new(reader, None) {
-        Ok(sr) => sr,
-        Err(err) => {
-            if schema.fields().is_empty() {
-                return Ok(Vec::new());
-            }
-            return Err(DataFusionError::ArrowError(Box::new(err), None));
-        }
-    };
-    let mut out = Vec::new();
-    for batch in sr {
-        let batch = batch.map_err(|err| DataFusionError::ArrowError(Box::new(err), None))?;
-        if schema.fields().is_empty() {
-            out.push(batch);
-        } else {
-            out.push(project_batch(batch, schema)?);
-        }
-    }
-    Ok(out)
+    batches
+        .into_iter()
+        .map(|batch| project_batch(batch, schema))
+        .collect()
 }
 
 #[async_trait::async_trait]
 impl TableProvider for WalTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -323,36 +234,20 @@ impl WalScanExec {
         self.schema.clone()
     }
 
-    fn read_batches(&self) -> Result<Vec<RecordBatch>> {
-        let ordinals = select_live_ordinals_for(&self.pipeline, &self.exclude_segment_ids);
-        let mut batches = Vec::new();
-        for (segment_id, ordinal) in &ordinals {
-            batches.extend(read_ordinal_batches(
-                &self.pipeline,
-                segment_id,
-                *ordinal,
-                &self.namespace,
-                &self.schema,
-            )?);
-        }
-        if let Some(limit) = self.limit {
-            let mut remaining = limit;
-            let mut limited = Vec::new();
-            for batch in batches {
-                if remaining == 0 {
-                    break;
-                }
-                if batch.num_rows() <= remaining {
-                    remaining -= batch.num_rows();
-                    limited.push(batch);
-                } else {
-                    limited.push(batch.slice(0, remaining));
-                    break;
-                }
+    fn next_limited(remaining: &mut Option<usize>, batch: RecordBatch) -> Option<RecordBatch> {
+        match remaining {
+            None => Some(batch),
+            Some(0) => None,
+            Some(left) if batch.num_rows() <= *left => {
+                *left -= batch.num_rows();
+                Some(batch)
             }
-            batches = limited;
+            Some(left) => {
+                let sliced = batch.slice(0, *left);
+                *left = 0;
+                Some(sliced)
+            }
         }
-        Ok(batches)
     }
 }
 
@@ -372,10 +267,6 @@ impl ExecutionPlan for WalScanExec {
         "WalScanExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
@@ -391,16 +282,41 @@ impl ExecutionPlan for WalScanExec {
         Ok(self)
     }
 
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+        ) -> Result<datafusion::common::tree_node::TreeNodeRecursion>,
+    ) -> Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     fn execute(
         &self,
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let batches = self.read_batches()?;
-        let stream = futures::stream::iter(batches.into_iter().map(Ok));
+        let ordinals = select_live_ordinals_for(&self.pipeline, &self.exclude_segment_ids);
+        let pipeline = self.pipeline.clone();
+        let namespace = self.namespace.clone();
+        let schema = self.schema.clone();
+        let mut remaining = self.limit;
+        let mut out = Vec::new();
+        for (segment_id, ordinal) in ordinals {
+            if remaining == Some(0) {
+                break;
+            }
+            for batch in read_ordinal_batches(&pipeline, &segment_id, ordinal, &namespace, &schema)?
+            {
+                match Self::next_limited(&mut remaining, batch) {
+                    Some(batch) => out.push(Ok(batch)),
+                    None => break,
+                }
+            }
+        }
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema.clone(),
-            stream,
+            futures::stream::iter(out),
         )))
     }
 }
@@ -589,31 +505,32 @@ mod tests {
             )),
             "S3 catalog rows must be scanned, not treated as empty"
         );
-        use crate::buffer::segment_file::{encode_snapshot, PartitionKey, WalPayload};
-        use arrow::array::StringArray;
-        use std::collections::HashMap;
-
-        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
-        let part = PartitionKey {
-            sink_ref: "data_sinks.iceberg".into(),
-            namespace: "ns".into(),
-            partition: "p0".into(),
-            time: None,
-            schema_fingerprint: "fp".into(),
-        };
-        let mut batches = HashMap::new();
-        batches.insert(
-            part,
-            WalPayload::Arrow(vec![RecordBatch::try_new(
-                schema.clone(),
-                vec![Arc::new(StringArray::from(vec!["evt-s3"]))],
-            )
-            .unwrap()]),
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains("wal_slice::read_slice_batches"),
+            "WalScanExec S3/disk decode is sqlrt::wal_slice, not payload_bytes SHA"
         );
-        let encoded =
-            encode_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new()).unwrap();
-        let out = batches_from_bytes(&encoded.bytes, 0, "ns", &schema).unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].num_rows(), 1);
+        assert!(!prod.contains("payload_bytes"));
+    }
+
+    #[test]
+    fn query_wal_scan_does_not_admit_or_read_foot() {
+        let src = include_str!("wal_table.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !prod.contains("admit_payload"),
+            "WalScanExec must not hash/FOOT-admit payload"
+        );
+        assert!(
+            !prod.contains("read_index_path"),
+            "WalScanExec must use catalog SliceIndexEntry, not FOOT"
+        );
+        assert!(prod.contains("CatalogKey::Slice"));
+        assert!(
+            prod.contains("wal_slice::read_slice_batches"),
+            "query and STREAM share sqlrt::wal_slice"
+        );
+        assert!(!prod.contains("fn read_batches"));
+        assert!(!prod.contains("payload_bytes"));
     }
 }

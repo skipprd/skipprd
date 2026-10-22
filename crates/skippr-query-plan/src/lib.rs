@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::io::Cursor;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -19,8 +18,6 @@ use prost::Message;
 pub const PHYSICAL_MAGIC: &[u8; 4] = b"SKPR";
 pub const PHYSICAL_KIND_FLIGHT_SQL: u8 = 1;
 pub const PHYSICAL_KIND_ICEBERG: u8 = 2;
-/// Live WAL used to occupy kind 3; that leaf is forbidden in Ballista plans.
-pub const PHYSICAL_KIND_UNION: u8 = 4;
 
 pub fn encode_tagged_node(kind: u8, payload: &[u8], buf: &mut Vec<u8>) {
     buf.extend_from_slice(PHYSICAL_MAGIC);
@@ -82,16 +79,6 @@ impl FlightSqlExecNode {
             DataFusionError::Internal(format!("truncated or invalid FlightSql node: {err}"))
         })
     }
-}
-
-#[derive(Clone, PartialEq, Message)]
-pub struct UnionTableNode {
-    #[prost(bytes = "vec", tag = "1")]
-    pub iceberg_provider: Vec<u8>,
-    #[prost(bytes = "vec", tag = "2")]
-    pub wal_provider: Vec<u8>,
-    #[prost(bytes = "vec", tag = "3")]
-    pub arrow_schema_ipc: Vec<u8>,
 }
 
 /// Physical node that executes a Flight SQL statement on `endpoint` (`host:port`).
@@ -163,21 +150,6 @@ impl IcebergScanNode {
     }
 }
 
-impl UnionTableNode {
-    pub fn encode_bytes(&self) -> Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        self.encode(&mut buf)
-            .map_err(|err| DataFusionError::Internal(err.to_string()))?;
-        Ok(buf)
-    }
-
-    pub fn decode_bytes(buf: &[u8]) -> Result<Self> {
-        Self::decode(buf).map_err(|err| {
-            DataFusionError::Internal(format!("truncated or invalid UnionTable node: {err}"))
-        })
-    }
-}
-
 impl DisplayAs for FlightSqlExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "FlightSqlExec(endpoint={})", self.endpoint)
@@ -187,10 +159,6 @@ impl DisplayAs for FlightSqlExec {
 impl ExecutionPlan for FlightSqlExec {
     fn name(&self) -> &str {
         "FlightSqlExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -206,6 +174,15 @@ impl ExecutionPlan for FlightSqlExec {
         _children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(self)
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+        ) -> Result<datafusion::common::tree_node::TreeNodeRecursion>,
+    ) -> Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn execute(
@@ -576,9 +553,9 @@ impl Default for SkipprPhysicalCodec {
 
 impl SkipprPhysicalCodec {
     pub fn try_encode_flight(&self, node: Arc<dyn ExecutionPlan>, buf: &mut Vec<u8>) -> Result<()> {
-        let Some(flight) = node.as_any().downcast_ref::<FlightSqlExec>() else {
+        let Some(flight) = node.downcast_ref::<FlightSqlExec>() else {
             return Err(DataFusionError::Internal(
-                "SkipprPhysicalCodec only encodes FlightSqlExec; other nodes use Ballista's codec"
+                "SkipprPhysicalCodec only encodes FlightSqlExec; other nodes use the default codec"
                     .into(),
             ));
         };
@@ -641,18 +618,24 @@ impl PhysicalExtensionCodec for SkipprPhysicalCodec {
         buf: &[u8],
         inputs: &[Arc<dyn ExecutionPlan>],
         ctx: &TaskContext,
+        proto_converter: &dyn datafusion_proto::physical_plan::PhysicalProtoConverterExtension,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         if decode_tagged_node(buf).map(|(kind, _)| kind) == Some(PHYSICAL_KIND_FLIGHT_SQL) {
             return self.try_decode_flight(buf);
         }
-        self.inner.try_decode(buf, inputs, ctx)
+        self.inner.try_decode(buf, inputs, ctx, proto_converter)
     }
 
-    fn try_encode(&self, node: Arc<dyn ExecutionPlan>, buf: &mut Vec<u8>) -> Result<()> {
-        if node.as_any().downcast_ref::<FlightSqlExec>().is_some() {
+    fn try_encode(
+        &self,
+        node: Arc<dyn ExecutionPlan>,
+        buf: &mut Vec<u8>,
+        proto_converter: &dyn datafusion_proto::physical_plan::PhysicalProtoConverterExtension,
+    ) -> Result<()> {
+        if node.downcast_ref::<FlightSqlExec>().is_some() {
             return self.try_encode_flight(node, buf);
         }
-        self.inner.try_encode(node, buf)
+        self.inner.try_encode(node, buf, proto_converter)
     }
 }
 
@@ -679,7 +662,7 @@ mod tests {
         codec.try_encode_flight(node.clone(), &mut buf).unwrap();
         assert_eq!(&buf[..4], PHYSICAL_MAGIC);
         let decoded = codec.try_decode_flight(&buf).unwrap();
-        let flight = decoded.as_any().downcast_ref::<FlightSqlExec>().unwrap();
+        let flight = decoded.downcast_ref::<FlightSqlExec>().unwrap();
         assert_eq!(flight.endpoint, "127.0.0.1:50051");
         assert_eq!(flight.prepared_handle, b"SELECT 1");
         assert_eq!(flight.schema(), schema);
@@ -725,19 +708,6 @@ mod tests {
         let mut buf = Vec::new();
         encode_tagged_node(PHYSICAL_KIND_FLIGHT_SQL, &[], &mut buf);
         assert!(codec.try_decode_flight(&buf).is_err());
-    }
-
-    #[test]
-    fn union_table_node_round_trips() {
-        let node = UnionTableNode {
-            iceberg_provider: b"ice".to_vec(),
-            wal_provider: b"wal".to_vec(),
-            arrow_schema_ipc: schema_to_ipc(&Schema::empty()).unwrap(),
-        };
-        let bytes = node.encode_bytes().unwrap();
-        let decoded = UnionTableNode::decode_bytes(&bytes).unwrap();
-        assert_eq!(decoded.iceberg_provider, b"ice");
-        assert_eq!(decoded.wal_provider, b"wal");
     }
 
     #[test]

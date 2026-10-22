@@ -20,6 +20,7 @@ use bytes::Bytes;
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::datasource::TableProvider;
+use datafusion::prelude::SessionContext;
 use futures::{Stream, StreamExt, TryStreamExt};
 use skippr_lease::{DurableError, CONTROL_FRAME_MAX_BYTES};
 use tokio::net::TcpListener;
@@ -234,7 +235,7 @@ impl SkipprFlightSql {
         let ticket = TicketStatementQuery {
             statement_handle: Bytes::from(sql.as_bytes().to_vec()),
         };
-        Ticket::new(skippr_query_ballista::encode_flight_sql_command(&ticket))
+        Ticket::new(skippr_query_plan::encode_flight_sql_command(&ticket))
     }
 
     fn flight_info_for_sql(sql: &str, schema: &Schema) -> Result<Response<FlightInfo>, Status> {
@@ -367,8 +368,7 @@ impl SkipprFlightSql {
             }
             ClassifiedSql::User => {}
         }
-        crate::query_flight::ballista::ensure_elected_live()
-            .await
+        crate::query_flight::runtime::query_context()
             .map_err(|err| Status::internal(err.to_string()))?;
         let plan = crate::sqlrt::tables::plan_clustered_select(
             &self.app_config,
@@ -536,7 +536,7 @@ impl FlightSqlService for SkipprFlightSql {
         let data = builder
             .build()
             .map_err(|err| Status::internal(err.to_string()))?;
-        let ticket = Ticket::new(skippr_query_ballista::encode_flight_sql_command(&query));
+        let ticket = Ticket::new(skippr_query_plan::encode_flight_sql_command(&query));
         let schema = query.into_builder(&data).schema();
         let endpoint = FlightEndpoint::new().with_ticket(ticket);
         let info = FlightInfo::new()
@@ -553,7 +553,7 @@ impl FlightSqlService for SkipprFlightSql {
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
         let _scope = self.session_scope(&request)?;
-        let ticket = Ticket::new(skippr_query_ballista::encode_flight_sql_command(&query));
+        let ticket = Ticket::new(skippr_query_plan::encode_flight_sql_command(&query));
         let schema = query.into_builder().schema();
         let endpoint = FlightEndpoint::new().with_ticket(ticket);
         let info = FlightInfo::new()
@@ -587,7 +587,7 @@ impl FlightSqlService for SkipprFlightSql {
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
         let _scope = self.session_scope(&request)?;
-        let ticket = Ticket::new(skippr_query_ballista::encode_flight_sql_command(&query));
+        let ticket = Ticket::new(skippr_query_plan::encode_flight_sql_command(&query));
         let schema = query.into_builder().schema();
         let endpoint = FlightEndpoint::new().with_ticket(ticket);
         let info = FlightInfo::new()
@@ -629,7 +629,7 @@ impl FlightSqlService for SkipprFlightSql {
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
         let _scope = self.session_scope(&request)?;
-        let ticket = Ticket::new(skippr_query_ballista::encode_flight_sql_command(&query));
+        let ticket = Ticket::new(skippr_query_plan::encode_flight_sql_command(&query));
         let schema = query.into_builder().schema();
         let endpoint = FlightEndpoint::new().with_ticket(ticket);
         let info = FlightInfo::new()
@@ -680,7 +680,7 @@ impl FlightSqlService for SkipprFlightSql {
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
         let _scope = self.session_scope(&request)?;
-        let ticket = Ticket::new(skippr_query_ballista::encode_flight_sql_command(&query));
+        let ticket = Ticket::new(skippr_query_plan::encode_flight_sql_command(&query));
         let schema = query.into_builder().schema();
         let endpoint = FlightEndpoint::new().with_ticket(ticket);
         let info = FlightInfo::new()
@@ -741,7 +741,7 @@ async fn execute_live_wal(
         request.namespace.clone(),
         request.exclude_segment_ids.clone(),
     );
-    let ctx = datafusion::prelude::SessionContext::new();
+    let ctx = SessionContext::new();
     let plan = provider
         .scan(&ctx.state(), None, &[], None)
         .await
@@ -782,7 +782,7 @@ mod tests {
         let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity())
             .await
             .unwrap();
-        let err = skippr_query_ballista::fetch_statement_batches(
+        let err = skippr_query_plan::fetch_statement_batches(
             &server.bind_addr().to_string(),
             "INSERT INTO t VALUES (1)",
         )
@@ -804,10 +804,9 @@ mod tests {
             "SELECT '{}'",
             "x".repeat(skippr_lease::CONTROL_FRAME_MAX_BYTES)
         );
-        let err =
-            skippr_query_ballista::fetch_statement_batches(&server.bind_addr().to_string(), &sql)
-                .await
-                .unwrap_err();
+        let err = skippr_query_plan::fetch_statement_batches(&server.bind_addr().to_string(), &sql)
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().to_ascii_lowercase().contains("too large")
                 || err.to_string().contains("invalid")
@@ -816,7 +815,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn live_wal_scan_replica_session_without_handle_fails_closed() {
+        crate::buffer::wal_handle::clear_wal_handles();
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "p").unwrap();
         let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
@@ -839,7 +840,7 @@ mod tests {
         .await
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let err = skippr_query_ballista::fetch_statement_batches(
+        let err = skippr_query_plan::fetch_statement_batches(
             &server.bind_addr().to_string(),
             "SELECT * FROM live_wal_scan('t', 'w', 'p', 'ns')",
         )
@@ -859,7 +860,7 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let err = skippr_query_ballista::fetch_statement_batches(
+        let err = skippr_query_plan::fetch_statement_batches(
             &server.bind_addr().to_string(),
             "SELECT * FROM live_wal_scan('other', 'prod', 'events', 'ns')",
         )
@@ -879,7 +880,7 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let err = skippr_query_ballista::fetch_statement_batches(
+        let err = skippr_query_plan::fetch_statement_batches(
             &server.bind_addr().to_string(),
             "SELECT * FROM live_wal_scan('t', 'w', 'missing', 'ns')",
         )
@@ -916,7 +917,7 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let err = skippr_query_ballista::fetch_statement_batches_unauthenticated(
+        let err = skippr_query_plan::fetch_statement_batches_unauthenticated(
             &server.bind_addr().to_string(),
             "SELECT 1",
         )
@@ -959,7 +960,7 @@ mod tests {
     async fn flight_sql_exec_streams_from_live_server() {
         use datafusion::arrow::datatypes::{DataType, Field, Schema};
         use datafusion::physical_plan::ExecutionPlan;
-        use skippr_query_ballista::FlightSqlExec;
+        use skippr_query_plan::FlightSqlExec;
 
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "p").unwrap();
@@ -990,7 +991,7 @@ mod tests {
             server.bind_addr().to_string(),
             b"SELECT * FROM live_wal_scan('t', 'w', 'p', 'ns')".to_vec(),
             schema,
-            skippr_query_ballista::basic_authorization("t", "w"),
+            skippr_query_plan::basic_authorization("t", "w"),
         );
         let stream = node
             .execute(0, Arc::new(datafusion::execution::TaskContext::default()))
@@ -1104,7 +1105,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let addr = server.bind_addr().to_string();
         let missing =
-            skippr_query_ballista::fetch_statement_batches_plain_unauthenticated(&addr, "SELECT 1")
+            skippr_query_plan::fetch_statement_batches_plain_unauthenticated(&addr, "SELECT 1")
                 .await
                 .unwrap_err();
         assert!(
@@ -1121,7 +1122,7 @@ mod tests {
             "{missing}"
         );
         let wrong =
-            skippr_query_ballista::fetch_statement_batches_plain(&addr, "SELECT 1", "Bearer wrong")
+            skippr_query_plan::fetch_statement_batches_plain(&addr, "SELECT 1", "Bearer wrong")
                 .await
                 .unwrap_err();
         assert!(
@@ -1144,7 +1145,7 @@ mod tests {
     async fn flight_local_serves_select_1() {
         let server = start_local_with(bearer(), wal_only_config()).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let batches = skippr_query_ballista::fetch_statement_batches_plain(
+        let batches = skippr_query_plan::fetch_statement_batches_plain(
             &server.bind_addr().to_string(),
             "SELECT 1",
             "Bearer secret",
@@ -1160,7 +1161,7 @@ mod tests {
     async fn flight_local_rejects_ddl() {
         let server = start_local_with(bearer(), wal_only_config()).await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let err = skippr_query_ballista::fetch_statement_batches_plain(
+        let err = skippr_query_plan::fetch_statement_batches_plain(
             &server.bind_addr().to_string(),
             "INSERT INTO t VALUES (1)",
             "Bearer secret",

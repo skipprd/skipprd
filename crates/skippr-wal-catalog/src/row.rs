@@ -6,7 +6,7 @@ use crate::error::CatalogError;
 use crate::key::CompactionId;
 
 pub const ROW_MAX_BYTES: usize = 350 * 1024;
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct CatalogSeq(u64);
@@ -108,6 +108,18 @@ impl SliceBitmap {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SliceIndexEntry {
+    pub segment_id: SegmentId,
+    pub ordinal: u32,
+    pub namespace: String,
+    pub partition: String,
+    pub start: u64,
+    pub len: u64,
+    pub codec: u8,
+    pub version: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SegmentRow {
     pub segment_id: SegmentId,
     pub seq: CatalogSeq,
@@ -178,6 +190,7 @@ pub struct FormatRow {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CatalogRow {
     Segment(SegmentRow),
+    Slice(SliceIndexEntry),
     Compaction(CompactionRow),
     Control(ControlRow),
     Seq(SeqRow),
@@ -282,6 +295,23 @@ mod tests {
         });
         let bytes = row.encode().unwrap();
         assert!(bytes.len() < ROW_MAX_BYTES);
+        assert_eq!(CatalogRow::decode(&bytes).unwrap(), row);
+    }
+
+    #[test]
+    fn slice_index_entry_is_the_query_authority() {
+        assert_eq!(FORMAT_VERSION, 2);
+        let row = CatalogRow::Slice(SliceIndexEntry {
+            segment_id: SegmentId::new("s").unwrap(),
+            ordinal: 0,
+            namespace: "pipe".into(),
+            partition: "p".into(),
+            start: 16,
+            len: 32,
+            codec: 0,
+            version: 0,
+        });
+        let bytes = row.encode().unwrap();
         assert_eq!(CatalogRow::decode(&bytes).unwrap(), row);
     }
 

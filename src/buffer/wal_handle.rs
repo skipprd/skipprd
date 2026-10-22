@@ -13,7 +13,7 @@ use skippr_wal_catalog::{
     query_all, CatalogFence, CatalogKey, CatalogPrefix, CatalogRow, CatalogSeq, CatalogTxn,
     CheckpointKey, CommittedCheckpoint, CommittedOffset, ControlBody, ControlRow, FormatPhase,
     FormatRow, MemoryWalCatalog, OffsetHintKey, PayloadLocation, PutCond, SegmentRow, SeqRow,
-    SliceBitmap, WalCatalogStore, FORMAT_VERSION,
+    SliceBitmap, SliceIndexEntry, WalCatalogStore, FORMAT_VERSION, TXN_MAX_OPS,
 };
 use tokio::sync::Mutex;
 
@@ -227,27 +227,38 @@ impl PipelineWalHandle {
     }
 
     pub fn select_live_ordinals(&self, exclude_segment_ids: &[String]) -> Vec<(String, u32)> {
+        self.live_slices(exclude_segment_ids)
+            .into_iter()
+            .map(|slice| (slice.segment_id.as_str().to_string(), slice.ordinal))
+            .collect()
+    }
+
+    pub fn live_slices(&self, exclude_segment_ids: &[String]) -> Vec<SliceIndexEntry> {
         let exclude: std::collections::HashSet<&str> =
             exclude_segment_ids.iter().map(String::as_str).collect();
-        let Ok(rows) = query_all(self.catalog.as_ref(), CatalogPrefix::Segment) else {
+        let Ok(rows) = query_all(self.catalog.as_ref(), CatalogPrefix::Slice) else {
             return Vec::new();
         };
         let mut out = Vec::new();
         for (_, row) in rows {
-            let CatalogRow::Segment(seg) = row else {
+            let CatalogRow::Slice(slice) = row else {
                 continue;
             };
-            let id = seg.segment_id.as_str();
+            let id = slice.segment_id.as_str();
             if exclude.contains(id) {
                 continue;
             }
-            let Ok(meta) = admit_payload(&seg.location, &seg.payload_sha256) else {
-                tracing::warn!(segment = id, "live WAL scan skipped unreadable payload");
+            let Ok(Some(CatalogRow::Segment(seg))) = self
+                .catalog
+                .get(&CatalogKey::Segment(slice.segment_id.clone()))
+            else {
                 continue;
             };
-            for ordinal in 0..meta.index.len() as u32 {
-                out.push((id.to_string(), ordinal));
+            if !payload_present(&seg.location) {
+                tracing::warn!(segment = id, "live WAL scan skipped missing payload");
+                continue;
             }
+            out.push(slice);
         }
         out
     }
@@ -373,15 +384,11 @@ impl PipelineWalHandle {
                 .map_err(|err| DurableError::Io(err.to_string()))?
             {
                 Some(CatalogRow::Segment(seg)) => {
-                    let meta = admit_payload(&seg.location, &seg.payload_sha256)?;
-                    let Some((ordinal, _)) = meta.index.iter().enumerate().find(|(_, idx)| {
-                        idx.start == wal_ref.start
-                            && idx.len == wal_ref.len
-                            && idx.key == wal_ref.key
-                    }) else {
+                    let Some(ordinal) = catalog_slice_ordinal(self.catalog.as_ref(), wal_ref)?
+                    else {
                         return Ok(false);
                     };
-                    if !seg.done.is_done(ordinal as u32) {
+                    if !seg.done.is_done(ordinal) {
                         return Ok(false);
                     }
                 }
@@ -404,25 +411,22 @@ impl PipelineWalHandle {
         for wal_ref in &txn.refs {
             let id = SegmentId::new(&wal_ref.segment_id)
                 .map_err(|err| DurableError::Io(err.to_string()))?;
-            let Some(CatalogRow::Segment(seg)) = self
+            let Some(CatalogRow::Segment(_)) = self
                 .catalog
                 .get(&CatalogKey::Segment(id))
                 .map_err(|err| DurableError::Io(err.to_string()))?
             else {
                 continue;
             };
-            let meta = admit_payload(&seg.location, &seg.payload_sha256)?;
-            let Some((ordinal, _)) = meta.index.iter().enumerate().find(|(_, idx)| {
-                idx.start == wal_ref.start && idx.len == wal_ref.len && idx.key == wal_ref.key
-            }) else {
+            let Some(ordinal) = catalog_slice_ordinal(self.catalog.as_ref(), wal_ref)? else {
                 return Err(DurableError::ProtocolMismatch(
-                    "acked compaction slice missing from payload".into(),
+                    "acked compaction slice missing from catalog".into(),
                 ));
             };
             grouped
                 .entry(wal_ref.segment_id.clone())
                 .or_default()
-                .push(ordinal as u32);
+                .push(ordinal);
         }
         for (segment_id, ordinals) in grouped {
             let reclaimed = self
@@ -581,6 +585,7 @@ impl PipelineWalHandle {
             PutCond::NotExists,
         )
         .map_err(|err| DurableError::Io(err.to_string()))?;
+        put_slice_index(&mut txn, id, &encoded.meta)?;
         txn.put(
             CatalogKey::Seq,
             CatalogRow::Seq(SeqRow { max_seq: seq }),
@@ -952,6 +957,24 @@ impl PipelineWalHandle {
                 skippr_wal_catalog::DeleteCond::Version(version),
             )
             .map_err(|err| DurableError::Io(err.to_string()))?;
+            let slices = query_all(self.catalog.as_ref(), CatalogPrefix::Slice)
+                .map_err(|err| DurableError::Io(err.to_string()))?;
+            for (_, slice_row) in slices {
+                let CatalogRow::Slice(slice) = slice_row else {
+                    continue;
+                };
+                if slice.segment_id != id {
+                    continue;
+                }
+                txn.delete(
+                    CatalogKey::Slice {
+                        segment_id: id.clone(),
+                        ordinal: slice.ordinal,
+                    },
+                    skippr_wal_catalog::DeleteCond::Exists,
+                )
+                .map_err(|err| DurableError::Io(err.to_string()))?;
+            }
         } else {
             txn.put(
                 CatalogKey::Segment(id.clone()),
@@ -1164,6 +1187,65 @@ fn delete_payload(location: &PayloadLocation) -> Result<(), DurableError> {
     }
 }
 
+fn catalog_slice_ordinal(
+    catalog: &dyn WalCatalogStore,
+    wal_ref: &crate::buffer::compaction_transaction::WalPartRef,
+) -> Result<Option<u32>, DurableError> {
+    let id =
+        SegmentId::new(&wal_ref.segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
+    let rows = query_all(catalog, CatalogPrefix::Slice)
+        .map_err(|err| DurableError::Io(err.to_string()))?;
+    for (_, row) in rows {
+        let CatalogRow::Slice(slice) = row else {
+            continue;
+        };
+        if slice.segment_id != id {
+            continue;
+        }
+        if slice.start == wal_ref.start
+            && slice.len == wal_ref.len
+            && slice.namespace == wal_ref.key.namespace
+            && slice.partition == wal_ref.key.partition
+        {
+            return Ok(Some(slice.ordinal));
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn put_slice_index(
+    txn: &mut CatalogTxn,
+    id: &SegmentId,
+    meta: &crate::buffer::segment_file::SegmentFileMetadata,
+) -> Result<(), DurableError> {
+    if 2 + meta.index.len() > TXN_MAX_OPS {
+        return Err(DurableError::Io(
+            "WAL slice index exceeds catalog txn ceiling".into(),
+        ));
+    }
+    for idx in &meta.index {
+        txn.put(
+            CatalogKey::Slice {
+                segment_id: id.clone(),
+                ordinal: idx.slice_ordinal,
+            },
+            CatalogRow::Slice(SliceIndexEntry {
+                segment_id: id.clone(),
+                ordinal: idx.slice_ordinal,
+                namespace: idx.key.namespace.clone(),
+                partition: idx.key.partition.clone(),
+                start: idx.start,
+                len: idx.len,
+                codec: idx.codec,
+                version: 0,
+            }),
+            PutCond::NotExists,
+        )
+        .map_err(|err| DurableError::Io(err.to_string()))?;
+    }
+    Ok(())
+}
+
 fn payload_present(location: &PayloadLocation) -> bool {
     match location {
         PayloadLocation::Disk { path } => PathBuf::from(path).exists(),
@@ -1343,7 +1425,88 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(row, CatalogRow::Segment(_)));
+        let slice = handle
+            .catalog
+            .get(&CatalogKey::Slice {
+                segment_id: SegmentId::new("seg-1").unwrap(),
+                ordinal: 0,
+            })
+            .unwrap();
+        assert!(
+            slice.is_none(),
+            "empty persist has no PART index, so no SliceIndexEntry"
+        );
         assert_eq!(handle.catalog_seq_seen().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn persist_writes_slice_index_for_parts() {
+        use crate::buffer::segment_file::{PartitionKey, WalPayload};
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let dir = tempfile::tempdir().unwrap();
+        let handle = leased_handle(dir.path());
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let mut batches = HashMap::new();
+        batches.insert(
+            PartitionKey {
+                sink_ref: "data_sinks.iceberg".into(),
+                namespace: "ns".into(),
+                partition: "p0".into(),
+                time: None,
+                schema_fingerprint: "fp".into(),
+            },
+            WalPayload::Arrow(vec![arrow::array::RecordBatch::try_new(
+                schema,
+                vec![Arc::new(StringArray::from(vec!["evt-a"]))],
+            )
+            .unwrap()]),
+        );
+        handle
+            .persist_segment(
+                "seg-part",
+                &HashMap::new(),
+                &batches,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let slice = handle
+            .catalog
+            .get(&CatalogKey::Slice {
+                segment_id: SegmentId::new("seg-part").unwrap(),
+                ordinal: 0,
+            })
+            .unwrap();
+        let Some(CatalogRow::Slice(entry)) = slice else {
+            panic!("persist must write SliceIndexEntry");
+        };
+        assert_eq!(entry.namespace, "ns");
+        assert_eq!(entry.partition, "p0");
+        assert!(entry.len > 0);
+    }
+
+    #[test]
+    fn select_live_ordinals_uses_catalog_slices_not_admit() {
+        let src = include_str!("wal_handle.rs");
+        let start = src
+            .find("pub fn select_live_ordinals")
+            .expect("select_live_ordinals");
+        let body = src[start..]
+            .split("pub fn slice_is_done")
+            .next()
+            .expect("body");
+        assert!(
+            !body.contains("admit_payload"),
+            "query live ordinals must not hash/FOOT-admit payload"
+        );
+        assert!(
+            body.contains("live_slices"),
+            "live ordinals must come from catalog SliceIndexEntry"
+        );
     }
 
     #[tokio::test]
@@ -1402,6 +1565,29 @@ mod tests {
             .get(&CatalogKey::Segment(SegmentId::new("seg-fp").unwrap()))
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn compaction_maps_slices_from_catalog_not_foot() {
+        let src = include_str!("wal_handle.rs");
+        let already = src
+            .find("fn all_refs_already_done")
+            .expect("all_refs_already_done");
+        let already_body = src[already..]
+            .split("async fn redo_acked_txn")
+            .next()
+            .expect("already body");
+        assert!(
+            !already_body.contains("admit_payload"),
+            "compaction identity is catalog SliceIndexEntry"
+        );
+        let redo = src.find("async fn redo_acked_txn").expect("redo_acked_txn");
+        let redo_body = src[redo..]
+            .split("pub async fn persist_checkpoint")
+            .next()
+            .unwrap_or(&src[redo..]);
+        assert!(!redo_body.contains("admit_payload"));
+        assert!(src.contains("fn catalog_slice_ordinal"));
     }
 
     #[test]

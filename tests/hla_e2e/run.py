@@ -10,7 +10,7 @@ fsync, before the catalog txn). No extra cluster knobs.
 Scenarios (in order):
   bootstrap_three_nodes — n1+n2 form primary+replica
   ingest_and_query_union — JSONL into Iceberg parquet + WAL; SELECT UNION
-  ballista_cluster_query — every ready flight_addr same unique ids+count; shared elected_scheduler
+  distributed_cluster_query — every ready flight_addr same unique ids+count; each node started QueryRuntime worker
   dynamo_closed_epoch_asserts — Dynamo Closed=1 and wal_epoch after quorum
   query_from_every_ready_replica — clustered query succeeds (WAL may be behind)
   late_node_wal_catchup — start n3, SIGKILL sync replica, n3 catch-up, restore spare
@@ -105,7 +105,7 @@ COUNT_SQL = "SELECT count(*) FROM hla_events"
 SCENARIOS = [
     "bootstrap_three_nodes",
     "ingest_and_query_union",
-    "ballista_cluster_query",
+    "distributed_cluster_query",
     "dynamo_closed_epoch_asserts",
     "query_from_every_ready_replica",
     "late_node_wal_catchup",
@@ -814,12 +814,12 @@ def query_flight_count(addr: str, sql: str, timeout: float = 10.0) -> int:
     return flight_sql.query_flight_count(addr, sql, timeout)
 
 
-ELECTED_SCHEDULER_RE = re.compile(r"elected_scheduler=([0-9.:]+)")
+QUERY_WORKER_RE = re.compile(r"QueryRuntime started.*?worker=([0-9.:]+)")
 FLIGHT_STARTED_RE = re.compile(r"clustered scheduler started .* flight=([0-9.]+):(\d+)")
 
 
-def last_elected_scheduler(node: Node) -> str | None:
-    matches = ELECTED_SCHEDULER_RE.findall(node_log(node))
+def last_query_worker(node: Node) -> str | None:
+    matches = QUERY_WORKER_RE.findall(node_log(node))
     return matches[-1] if matches else None
 
 
@@ -832,17 +832,16 @@ def last_flight_addr(node: Node) -> str | None:
     return found
 
 
-def wait_same_elected_scheduler(nodes: list[Node], timeout: float) -> str:
+def wait_query_runtime(nodes: list[Node], timeout: float) -> list[str]:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        values = [last_elected_scheduler(node) for node in nodes]
-        present = [item for item in values if item]
-        if len(present) == len(nodes) and len(set(present)) == 1:
-            return present[0]
+        values = [last_query_worker(node) for node in nodes]
+        if all(values):
+            return [item for item in values if item]
         time.sleep(0.5)
     raise HarnessError(
-        "nodes did not share elected_scheduler: "
-        + str([last_elected_scheduler(node) for node in nodes])
+        "nodes did not start QueryRuntime worker: "
+        + str([last_query_worker(node) for node in nodes])
     )
 
 
@@ -1238,13 +1237,13 @@ def scenario_ingest_and_query(harness: Harness) -> list[str]:
     return ids
 
 
-def scenario_ballista_cluster_query(harness: Harness, expected: list[str]) -> None:
-    log("scenario ballista_cluster_query")
+def scenario_distributed_cluster_query(harness: Harness, expected: list[str]) -> None:
+    log("scenario distributed_cluster_query")
     live = [node for node in harness.nodes[:2] if node.process is not None]
     if len(live) < 2:
         raise HarnessError("need two live ingesting nodes")
-    elected = wait_same_elected_scheduler(live, timeout=60)
-    log(f"shared elected_scheduler={elected}")
+    workers = wait_query_runtime(live, timeout=60)
+    log(f"query_runtime workers={workers}")
     ready = [
         item
         for item in wait_membership(harness, ready=2, timeout=30)
@@ -1274,7 +1273,7 @@ def scenario_ballista_cluster_query(harness: Harness, expected: list[str]) -> No
             raise HarnessError(
                 f"Flight SQL on {flight_addr} count={count} expected={len(expected)}"
             )
-        log(f"Ballista cluster query on {flight_addr} ids={ids} count={count}")
+        log(f"distributed cluster query on {flight_addr} ids={ids} count={count}")
 
 
 def scenario_query_every_replica(harness: Harness, expected: list[str]) -> None:
@@ -2419,7 +2418,7 @@ def run(keep: bool, only: str | None = None) -> None:
             return
         scenario_bootstrap(harness)
         ids = scenario_ingest_and_query(harness)
-        scenario_ballista_cluster_query(harness, ids)
+        scenario_distributed_cluster_query(harness, ids)
         assert_dynamo_closed(harness)
         scenario_query_every_replica(harness, ids)
         scenario_late_catchup(harness, ids)

@@ -9,8 +9,8 @@ pub struct LiveWalScanRequest {
     pub exclude_segment_ids: Vec<String>,
 }
 
-/// Live incomplete ordinals from catalog SegmentRows, minus Iceberg-named
-/// excludes. Unreadable payloads are skipped. Slice-complete ordinals stay
+/// Live ordinals from catalog `SliceIndexEntry` rows, minus Iceberg-named
+/// excludes. Missing payloads are skipped. Slice-complete ordinals stay
 /// visible until Iceberg lists the segment (the row is deleted only when every
 /// slice is done).
 pub fn select_live_ordinals(

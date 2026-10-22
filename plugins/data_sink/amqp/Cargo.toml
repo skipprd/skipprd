@@ -15,7 +15,7 @@ bytes.workspace = true
 hex.workspace = true
 parquet.workspace = true
 
-arrow = { version = "58.3.0", features = ["ipc_compression"] }
+arrow.workspace = true
 async-trait = "0.1.77"
 datafusion.workspace = true
 futures = "0.3.25"

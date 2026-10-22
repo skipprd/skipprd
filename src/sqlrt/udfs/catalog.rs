@@ -10,13 +10,10 @@ use datafusion::error::DataFusionError;
 use datafusion::execution::session_state::SessionState;
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::{col, lit, Expr};
-use datafusion::physical_expr::create_physical_expr;
-use datafusion::physical_expr::execution_props::ExecutionProps;
 use datafusion::physical_plan::collect;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::scalar::ScalarValue;
-use std::any::Any;
 use std::sync::Arc;
 
 use super::budget::ScanBudget;
@@ -86,10 +83,6 @@ pub struct FilteredTable {
 
 #[async_trait::async_trait]
 impl TableProvider for FilteredTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -122,16 +115,16 @@ pub async fn collect_filtered_batches(
     target: &SchemaRef,
 ) -> datafusion::error::Result<Vec<RecordBatch>> {
     let inner = lookup_table(state, table_name).await?;
-    let mut plan = inner.scan(state, None, &[], None).await?;
-    if let Some(pred) = conjunction(filters.to_vec()) {
-        let df_schema = DFSchema::try_from(plan.schema())?;
-        let phys = create_physical_expr(&pred, &df_schema, &ExecutionProps::new())?;
-        plan = Arc::new(FilterExec::try_new(phys, plan)?);
-    }
     let session_state = state
         .as_any()
         .downcast_ref::<SessionState>()
         .ok_or_else(|| DataFusionError::Internal("expected SessionState".into()))?;
+    let mut plan = inner.scan(state, None, &[], None).await?;
+    if let Some(pred) = conjunction(filters.to_vec()) {
+        let df_schema = DFSchema::try_from(plan.schema())?;
+        let phys = session_state.create_physical_expr(pred, &df_schema)?;
+        plan = Arc::new(FilterExec::try_new(phys, plan)?);
+    }
     let batches = collect(plan, session_state.task_ctx()).await?;
     project_to_schema(&batches, target)
 }

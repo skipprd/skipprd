@@ -3,7 +3,7 @@
 **Style:** [AGENTS.md](../../../AGENTS.md) (compile-time invariants, simplest design, DRY) and the WBS completion rules in [hla-implementation-wbs.md](hla-implementation-wbs.md).  
 **Closed:** 2026-08-13. Proof: `python3 tests/hla_e2e/run.py` (exit 0) plus the unit tests named below.
 
-This is not a Ballista/Flight-protocol backlog. Query transport is Arrow Flight SQL 58.3 (`src/query_flight`); remaining live proof is `python3 tests/hla_e2e/run.py`. Contract: [hla-flight-sql-ballista.md](hla-flight-sql-ballista.md) (WU-7.3 / WU-7.5).
+This is not a query-protocol backlog. Query transport is Arrow Flight SQL 59.2 (`src/query_flight`); remaining live proof is `python3 tests/hla_e2e/run.py`. Contract: [hla-flight-sql-query-runtime.md](hla-flight-sql-query-runtime.md) (WU-7.3 / WU-7.5).
 
 ## What the harness now proves
 
@@ -11,7 +11,7 @@ This is not a Ballista/Flight-protocol backlog. Query transport is Arrow Flight 
 |---|---|
 | `bootstrap_three_nodes` | Two processes, then a primary log line. Spare is not in the initial quorum. |
 | `ingest_and_query_union` | File JSONL → Iceberg parquet + WAL; `SELECT id` / `count(*)` unique via `clustered query` (Flight SQL). |
-| `ballista_cluster_query` | Every ready `flight_addr` returns the same unique ids and `count(*)`; live nodes share `elected_scheduler=`. |
+| `distributed_cluster_query` | Every ready `flight_addr` returns the same unique ids and `count(*)`; live nodes share `QueryRuntime worker=`. |
 | `query_from_every_ready_replica` | One `clustered query` client; WAL may be behind. |
 | `late_node_wal_catchup` | n3 start, SIGKILL replica, catch-up log, restore spare. |
 | `primary_kill_failover` | SIGKILL primary, batch2, promote, unique ids. |
@@ -47,4 +47,4 @@ The writer hits `failpoint::hit(FailpointName::BeforeCatalogCommit, &self.paths.
 
 ---
 
-WU-7.3 (Arrow Flight SQL 58.3 GetFlightInfo/DoGet) and WU-7.5 (elected Ballista 53 cluster) are in tree. Live distributed proof is `python3 tests/hla_e2e/run.py` (`ballista_cluster_query`). Contract: [hla-flight-sql-ballista.md](hla-flight-sql-ballista.md).
+WU-7.3 (Arrow Flight SQL 59.2 GetFlightInfo/DoGet) and WU-7.5 (QueryRuntime Worker per node) are in tree. Live distributed proof is `python3 tests/hla_e2e/run.py` (`distributed_cluster_query`). Contract: [hla-flight-sql-query-runtime.md](hla-flight-sql-query-runtime.md).
