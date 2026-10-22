@@ -67,6 +67,8 @@ pipelines:
 | `batch_order_fields` | `TRANSFORM_BATCH_ORDER_FIELDS` | none (unsorted) | Columns to sort rows by inside each Parquet file. Comma-separated. |
 | `enable_single_quote_parsing` | none | `false` | Accept JSON that wraps strings in single quotes. |
 | `enable_unicode_parsing` | none | `false` | Accept JSON with unescaped Unicode. |
+| `ops` | none | none | Ordered in-memory Arrow ops (`filter`, `project`, `derive`, `rename`, `cast`) applied after schema mapping and before WAL commit. DataFusion SQL expressions. See [Filter, project, and derive](#filter-project-and-derive). |
+| `aggregates` | none | none | Keyed running aggregates maintained from committed WAL data in local Sled. Not available with `WAL_STORAGE=clustered`. See [Running aggregates](#running-aggregates). |
 
 A key in `skippr.yml` beats its environment fallback. Flags accept `true`/`false`, `yes`/`no`, or `1`/`0`.
 
@@ -128,6 +130,41 @@ transform:
 - At the end of a run, Skipprd warns `batch_order_fields never matched any namespace during this run: [...]` for fields that matched no table, which usually means a typo.
 
 While sorting is on, Skipprd sizes row groups automatically, between about 16 MiB and 64 MiB uncompressed (25,000 to 500,000 rows), based on row width and how many distinct values the leading sort column has. You do not need to tune it.
+
+## Filter, project, and derive
+
+`ops` is an ordered list of in-memory Arrow operations. They run after schema mapping and before the write-ahead log (WAL) commit, so the lake sees the transformed rows. Each list entry sets exactly one of `filter`, `project`, `derive`, `rename`, or `cast`. Expressions are DataFusion SQL over the current batch columns. Changing `ops` affects new ingest only; committed WAL segments are not rewritten.
+
+```yaml
+transform:
+  ops:
+    - filter: "amount > 0"
+    - project: [id, customer_id, amount]
+    - derive:
+        amount_gbp: "amount * 0.8"
+    - rename:
+        amount: amount_usd
+    - cast:
+        amount: float64
+```
+
+`type: copy` cannot set `ops`. A transform error fails the batch and does not advance source offsets.
+
+## Running aggregates
+
+`aggregates` maintains keyed running totals from committed WAL records in the local Sled `stream_state` tree. CDC inserts add, updates apply the delta from the previous row for that key, and deletes subtract. This is independent of source offsets: compaction does not drop a WAL segment until the processor has passed it.
+
+```yaml
+transform:
+  aggregates:
+    - id: customer_invoice_totals
+      key_fields: [customer_id]
+      measures:
+        invoice_total: { sum: amount }
+        invoice_count: { count: "*" }
+```
+
+Changing an aggregate's id, keys, or measures rebuilds that aggregate by replaying the WAL. `WAL_STORAGE=clustered` cannot set `aggregates`. `type: copy` cannot set `aggregates`. Derived state is not published to sinks in this release.
 
 ## Next steps
 

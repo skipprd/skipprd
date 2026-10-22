@@ -1164,6 +1164,122 @@ class Pipeline:
     YAML key `cdc`."""
 
 @final
+class TransformOp:
+    """One in-memory Arrow op. Exactly one of the keys may be set."""
+    def __new__(
+        cls,
+        *,
+        filter: str | None = None,
+        project: list[str] | None = None,
+        derive: dict[str, str] | None = None,
+        rename: dict[str, str] | None = None,
+        cast: dict[str, str] | None = None,
+    ) -> TransformOp:
+        """One in-memory Arrow op. Exactly one of the keys may be set.
+
+        Args:
+            filter: DataFusion SQL boolean expression. Rows that do not match are dropped.
+            project: Keep only these output column names, in this order.
+            derive: Add derived columns. Map of new name to DataFusion SQL expression.
+            rename: Rename columns. Map of current name to new name.
+            cast: Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`)."""
+        ...
+    @property
+    def filter(self) -> str | None:
+        """DataFusion SQL boolean expression. Rows that do not match are dropped.
+
+        YAML key `filter`."""
+        ...
+    @property
+    def project(self) -> Sequence[str] | None:
+        """Keep only these output column names, in this order.
+
+        YAML key `project`."""
+        ...
+    @property
+    def derive(self) -> Mapping[str, str] | None:
+        """Add derived columns. Map of new name to DataFusion SQL expression.
+
+        YAML key `derive`."""
+        ...
+    @property
+    def rename(self) -> Mapping[str, str] | None:
+        """Rename columns. Map of current name to new name.
+
+        YAML key `rename`."""
+        ...
+    @property
+    def cast(self) -> Mapping[str, str] | None:
+        """Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`).
+
+        YAML key `cast`."""
+        ...
+
+@final
+class AggregateMeasure:
+    """One aggregate measure. Exactly one of `sum` or `count` may be set."""
+    def __new__(
+        cls,
+        *,
+        sum: str | None = None,
+        count: str | None = None,
+    ) -> AggregateMeasure:
+        """One aggregate measure. Exactly one of `sum` or `count` may be set.
+
+        Args:
+            sum: Column to sum. CDC updates apply the delta from the previous row.
+            count: Count rows. Use `"*"` for every row."""
+        ...
+    @property
+    def sum(self) -> str | None:
+        """Column to sum. CDC updates apply the delta from the previous row.
+
+        YAML key `sum`."""
+        ...
+    @property
+    def count(self) -> str | None:
+        """Count rows. Use `"*"` for every row.
+
+        YAML key `count`."""
+        ...
+
+@final
+class TransformAggregate:
+    """One keyed running aggregate maintained from committed WAL records."""
+    def __new__(
+        cls,
+        *,
+        id: str,
+        key_fields: list[str],
+        measures: dict[str, AggregateMeasure],
+    ) -> TransformAggregate:
+        """One keyed running aggregate maintained from committed WAL records.
+
+        Args:
+            id: Stable processor id used in Sled key namespaces.
+            key_fields: Columns that form the aggregate key, in order.
+            measures: Named measures. Each value is `{ sum: column }` or `{ count: "*" }`."""
+        ...
+    @property
+    def id(self) -> str:
+        """Stable processor id used in Sled key namespaces.
+
+        YAML key `id`."""
+        ...
+    @property
+    def key_fields(self) -> Sequence[str]:
+        """Columns that form the aggregate key, in order.
+
+        YAML key `key_fields`."""
+        ...
+    @property
+    def measures(self) -> Mapping[str, AggregateMeasure]:
+        """Named measures. Each value is `{ sum: column }` or `{ count: "*" }`.
+
+        YAML key `measures`."""
+        ...
+
+@final
 class Transform:
     """How source records are namespaced, partitioned, flattened, and ordered before the sink."""
     def __new__(
@@ -1181,6 +1297,8 @@ class Transform:
         enable_unicode_parsing: bool | None = None,
         batch_order_fields: str | None = None,
         inject_fields: dict[str, Any] | None = None,
+        ops: list[TransformOp] | None = None,
+        aggregates: list[TransformAggregate] | None = None,
     ) -> Transform:
         """How source records are namespaced, partitioned, flattened, and ordered before the sink.
 
@@ -1196,7 +1314,9 @@ class Transform:
             enable_single_quote_parsing: Accept JSON that uses single quotes around strings.
             enable_unicode_parsing: Accept JSON with unescaped Unicode.
             batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.
-            inject_fields: Static field names and JSON values merged onto each source record before ingest."""
+            inject_fields: Static field names and JSON values merged onto each source record before ingest.
+            ops: Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.
+            aggregates: Keyed running aggregates maintained from committed WAL data in Sled."""
         ...
     @property
     def batch_time_fields(self) -> str | None:
@@ -1269,6 +1389,18 @@ class Transform:
         """Static field names and JSON values merged onto each source record before ingest.
 
         YAML key `inject_fields`."""
+        ...
+    @property
+    def ops(self) -> Sequence[TransformOp] | None:
+        """Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.
+
+        YAML key `ops`."""
+        ...
+    @property
+    def aggregates(self) -> Sequence[TransformAggregate] | None:
+        """Keyed running aggregates maintained from committed WAL data in Sled.
+
+        YAML key `aggregates`."""
         ...
 
 @final

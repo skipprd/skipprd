@@ -836,10 +836,19 @@ async fn ingest_runtime_batches_into_core(
             total_rows = total_rows.saturating_add(record_batch.num_rows() as u64);
             record_batches.push(record_batch);
         }
+        let ops = config.get_transform_ops();
+        let (record_batches, cdc_rows) =
+            crate::stream_transform::apply_configured_ops(&ops, record_batches, batch.cdc_rows)
+                .map_err(|err| {
+                    crate::metrics::counters::add_stream_transform_failure(1);
+                    io::Error::other(format!("transform.ops failed: {err}"))
+                })?;
         let schema = record_batches
             .first()
             .map(|batch| batch.schema())
             .unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty()));
+        let schema_fingerprint =
+            crate::converters::skippr_arrow::stable_schema_fingerprint(&schema);
         let namespace = storage_namespace(config, &batch.namespace);
         derived_namespaces.insert(namespace.clone(), output_metadata_for_arrow_schema(&schema));
         let offsets_map = batch
@@ -853,10 +862,10 @@ async fn ingest_runtime_batches_into_core(
             _namespace: namespace,
             _partition: storage_partition(config, &batch.partition),
             _time: batch.time,
-            _schema_fingerprint: batch.schema_fingerprint,
+            _schema_fingerprint: schema_fingerprint,
             schema,
             payload: crate::buffer::segment_file::WalPayload::Arrow(record_batches),
-            cdc_rows: batch.cdc_rows,
+            cdc_rows,
             checkpoint_update: batch
                 .checkpoint_update
                 .map(|update| (update.key, update.envelope)),

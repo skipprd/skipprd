@@ -1209,12 +1209,13 @@ impl PipelineWalHandle {
             row.done.or_bits(ordinals);
             crate::metrics::counters::add_compaction_catalog_bit_write(ordinals.len() as u64);
             let all_done = row.done.all_done();
+            let can_reclaim = all_done && crate::processor::allows_reclaim(row.seq.get());
             let version = row.version;
             row.version = next_catalog_version(version)?;
             let location = row.location.clone();
             let slice_count = row.slice_count;
             let mut txn = CatalogTxn::new();
-            if all_done {
+            if can_reclaim {
                 txn.delete(
                     CatalogKey::Segment(id.clone()),
                     skippr_wal_catalog::DeleteCond::Version(version),
@@ -1243,7 +1244,7 @@ impl PipelineWalHandle {
             match self.commit_durable(&txn, fence) {
                 Ok(()) => {
                     self.mark_acked_ordinals_in_memory(segment_id, ordinals, slice_count);
-                    if all_done {
+                    if can_reclaim {
                         self.after_reclaim(&location, segment_id, epoch).await?;
                         let elapsed_ms = started.elapsed().as_millis() as u64;
                         tracing::info!(segment = segment_id, elapsed_ms, "WAL catalog reclaim");
@@ -1255,7 +1256,7 @@ impl PipelineWalHandle {
                             }),
                         );
                     }
-                    return Ok(all_done);
+                    return Ok(can_reclaim);
                 }
                 Err(DurableError::CatalogConflict) => {
                     last_conflict = DurableError::CatalogConflict;
@@ -1296,6 +1297,27 @@ impl PipelineWalHandle {
         self.forget_in_memory_segment(segment_id);
         crate::buffer::ingest_buffer::Buffers::forget_reclaimed_segment(segment_id);
         Ok(())
+    }
+
+    /// Drop catalog rows and payloads for fully compacted segments the processor has passed.
+    pub async fn reclaim_fully_done_before(
+        &self,
+        min_unconsumed_seq: u64,
+    ) -> Result<u64, DurableError> {
+        let rows = self.live_segment_rows()?;
+        let mut reclaimed = 0u64;
+        for row in rows {
+            if !row.done.all_done() || row.seq.get() >= min_unconsumed_seq {
+                continue;
+            }
+            if self
+                .complete_slices_and_reclaim(row.segment_id.as_str(), &[])
+                .await?
+            {
+                reclaimed += 1;
+            }
+        }
+        Ok(reclaimed)
     }
 
     pub async fn delete_compaction(&self, id: &str) -> Result<(), DurableError> {
