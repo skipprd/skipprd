@@ -1478,7 +1478,13 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
                 "acquires": crate::metrics::counters::RUNTIME_SINK_POOL_ACQUIRES_TOTAL
                     .load(std::sync::atomic::Ordering::Relaxed),
                 "bytes": crate::metrics::counters::RUNTIME_SINK_IPC_BYTES_TOTAL
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "spawn_ms": crate::metrics::counters::RUNTIME_PLUGIN_SPAWN_NS_TOTAL
                     .load(std::sync::atomic::Ordering::Relaxed)
+                    / 1_000_000,
+                "apply_ms": crate::metrics::counters::SINK_APPLY_DURATION_NS_TOTAL
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    / 1_000_000
             }),
         );
     }

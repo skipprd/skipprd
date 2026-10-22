@@ -74,6 +74,10 @@ def timings_from_reports(reports: dict[str, dict[str, Any]]) -> list[str]:
         exact = payload.get("exact_arrow_rows")
         if name in {"ingest-a-duckdb", "ingest-json-parquet"} and exact is not None:
             line += f" Exact Arrow kept {exact:,} of those rows."
+        spawn = payload.get("plugin_spawn_ms")
+        apply = payload.get("plugin_apply_ms")
+        if spawn is not None or apply is not None:
+            line += f" Plugin spawn {spawn or 0}ms, sink apply {apply or 0}ms."
         lines.append(line)
     return lines
 

@@ -1057,6 +1057,8 @@ def report_payload(
     bytes_total = 0
     if sync_events:
         bytes_total = int(sync_events[-1].get("bytes") or 0)
+    ipc_events = grouped.get("plugin_ipc") or []
+    ipc = ipc_events[-1] if ipc_events else {}
     payload = {
         "scenario": scenario_id,
         "rows": rows,
@@ -1067,6 +1069,8 @@ def report_payload(
         "exact_arrow_rows": profile["exact_arrow_rows"],
         "exact_fallback_rows": profile["exact_fallback_rows"],
         "legacy_rows": profile["legacy_rows"],
+        "plugin_spawn_ms": ipc.get("spawn_ms"),
+        "plugin_apply_ms": ipc.get("apply_ms"),
         "wal_persist_events": len(persist),
         "wal_compact_events": len(compact),
         "wal_reclaim_events": len(reclaim),
