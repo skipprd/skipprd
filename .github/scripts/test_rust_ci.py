@@ -397,6 +397,11 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("build_linux_profile", text)
         self.assertIn("perf.folded", text)
         self.assertIn("analyze.py", text)
+        self.assertIn("python3 -m pip install --quiet boto3", text)
+        self.assertRegex(
+            text,
+            r"cargo build --release -p skipprd --bin skipprd[^\n]*\n\s+cargo build --release",
+        )
         self.assertIn("perf", text)
         self.assertNotIn("--delete", text)
         self.assertIn("actions/e2e/perf", text)

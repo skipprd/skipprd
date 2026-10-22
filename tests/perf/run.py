@@ -238,7 +238,7 @@ def write_skippr_yml(
     elif source_kind == "Stdin":
         source_block = """    Stdin:
       format: json
-      mode: batch
+      mode: line
       batch_size_bytes: 1048576
 """
     elif source_kind == "Socket":
@@ -552,7 +552,8 @@ def run_skipprd(
     profile: str,
     stdin_data: bytes | None = None,
 ) -> str:
-    cmd = time_prefix() + wrap_profile(
+    prefix = [] if stdin_data is not None else time_prefix()
+    cmd = prefix + wrap_profile(
         [str(skipprd), *log_args(env), *args],
         profile,
         work,
