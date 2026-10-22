@@ -1,0 +1,16 @@
+name: skippr-perf
+
+on:
+  workflow_dispatch:
+
+jobs:
+  register:
+    name: registered on default branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch this workflow with --ref of a branch that has the suite
+        run: |
+          echo "perf.yml is registered so GitHub can workflow_dispatch it."
+          echo "Run the suite with: gh workflow run perf.yml --ref <branch>"
+          echo "This default-branch stub is not the matrix; the run uses the workflow file from --ref."
