@@ -97,4 +97,4 @@ Same keys as the [Athena Iceberg destination](/connectors/outputs/athenaiceberg#
 ## Next steps
 
 - [Athena Iceberg](/connectors/outputs/athenaiceberg)
-- [Datalake](/concepts/datalake)
+- [Stream lake](/concepts/datalake)

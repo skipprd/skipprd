@@ -112,5 +112,5 @@ Supports `append`, `merge_by_key`, `replace_partition`, and `replace_table`. `sk
 ## Next steps
 
 - [Athena Iceberg schema sink](/connectors/schema_sinks/athenaiceberg)
-- [Datalake](/concepts/datalake)
+- [Stream lake](/concepts/datalake)
 - [How sources land](/concepts/source-landing-semantics)
