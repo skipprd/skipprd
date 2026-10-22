@@ -146,8 +146,13 @@ class PerfSkillTests(unittest.TestCase):
         self.assertIn("--log perf", text)
         self.assertIn("tests/perf/download.py", text)
         self.assertIn("tests/perf/analyze.py", text)
+        self.assertIn("tests/perf/memo.py", text)
         self.assertIn("new code", text)
         self.assertIn("perf-stat", text)
+        self.assertIn("paul@paulhudson.me", text)
+        self.assertIn("send-afk-mail.py", text)
+        self.assertIn("iterate", text)
+        self.assertIn("exhausted", text)
 
 
 class SkipprdCliTests(unittest.TestCase):
@@ -171,6 +176,9 @@ class PerfRunnerContractTests(unittest.TestCase):
         self.assertIn("perf-stat", text)
         self.assertIn("require_profile_outputs", text)
         self.assertIn("mode: line", text)
+        self.assertIn("wrap_skippr_yml", text)
+        self.assertIn("COMMAND_TIMEOUT_SECONDS", text)
+        self.assertIn("buffer_threshold_seconds: 2", text)
         self.assertNotIn('list(scenario.get("required_perf") or [])', text)
         self.assertNotIn("collect_log_text", text)
         self.assertNotIn('"--log", "perf"', text)
@@ -185,6 +193,102 @@ class PerfRunnerContractTests(unittest.TestCase):
             self.assertIn("from skipprd_cli import log_args", text, name)
             self.assertIn("*log_args(env)", text, name)
             self.assertNotRegex(text, r'"--log",\s*"--pipeline"', name)
+
+
+class WrapSkipprYmlTests(unittest.TestCase):
+    def test_file_to_s3_uses_sink_yaml(self) -> None:
+        from run import wrap_skippr_yml
+
+        sink = wrap_skippr_yml(
+            REPO_ROOT / ".github" / "actions" / "e2e" / "s3_file_copy" / "run_s3_sink.py"
+        )
+        self.assertEqual(sink.name, "skippr_s3_sink.yml")
+        self.assertTrue(sink.is_file(), sink)
+        self.assertIn("file_s3_copy:", sink.read_text(encoding="utf-8"))
+
+    def test_s3_to_file_keeps_skippr_yml(self) -> None:
+        from run import wrap_skippr_yml
+
+        yml = wrap_skippr_yml(
+            REPO_ROOT / ".github" / "actions" / "e2e" / "s3_file_copy" / "run_matrix.py"
+        )
+        self.assertEqual(yml.name, "skippr.yml")
+        self.assertIn("s3_file_copy:", yml.read_text(encoding="utf-8"))
+
+
+class CommandTimeoutTests(unittest.TestCase):
+    def test_run_logged_kills_hung_commands(self) -> None:
+        import os
+
+        from run import COMMAND_TIMEOUT_SECONDS, PerfError, run_logged
+
+        self.assertEqual(COMMAND_TIMEOUT_SECONDS, 600)
+        with self.assertRaises(PerfError) as ctx:
+            run_logged(["sleep", "30"], env=os.environ.copy(), timeout=1)
+        self.assertIn("timed out", str(ctx.exception).lower())
+
+
+class MemoTests(unittest.TestCase):
+    def test_memo_is_plain_english_and_names_next_ideas(self) -> None:
+        from memo import MEMO_TO, ideas_from_report, write_memo
+
+        self.assertEqual(MEMO_TO, "paul@paulhudson.me")
+        report = {
+            "profiles": [
+                {
+                    "path": "ingest-a/perf.folded",
+                    "hot_leaves": [
+                        {"symbol": "sha2::sha256::x86::digest_blocks", "pct": 59.23},
+                        {"symbol": "read", "pct": 38.44},
+                    ],
+                }
+            ],
+            "summary": {"hottest_new_code": [{"symbol": "import_if_needed", "pct": 0.0}]},
+        }
+        reports = {
+            "ingest-a-duckdb": {
+                "scenario": "ingest-a-duckdb",
+                "elapsed_ms": 403,
+                "rows": 10000,
+                "exact_arrow_rows": 10000,
+            },
+            "copy-b-json-json": {
+                "scenario": "copy-b-json-json",
+                "elapsed_ms": 152,
+                "rows": 10000,
+            },
+            "copy-file-s3": {
+                "scenario": "copy-file-s3",
+                "error": "pipeline 'file_s3_copy' was not found",
+            },
+            "cdc-postgres-skipprlake": {
+                "scenario": "cdc-postgres-skipprlake",
+                "error": "command timed out",
+            },
+        }
+        ideas = ideas_from_report(report, reports)
+        self.assertTrue(any("SHA-256" in idea or "sha2" in idea.lower() for idea in ideas))
+        self.assertTrue(any("copy-file-s3" in idea for idea in ideas))
+        body = write_memo(
+            iteration=1,
+            run_url="https://github.com/skipprd/skipprd/actions/runs/1",
+            timings=["Ingest-A synced 10,000 rows in 403ms.", "Copy-B synced 10,000 rows in 152ms."],
+            broke=["File-to-S3 used the wrong config, so the pipeline name did not match."],
+            done=["Cap skipprd at ten minutes and kill the process group."],
+            nxt=["See whether we hash each ingest batch more than once."],
+        )
+        self.assertIn("Iteration 1", body)
+        self.assertIn("paul@paulhudson.me", body)
+        self.assertNotIn("|", body)
+        self.assertNotIn("```", body)
+        self.assertIn("403ms", body)
+        self.assertIn("ten minutes", body)
+        self.assertIn("https://github.com/skipprd/skipprd/actions/runs/1", body)
+        from memo import broke_from_reports
+
+        broke_lines = broke_from_reports(reports)
+        self.assertTrue(any("pipeline name" in line for line in broke_lines))
+        self.assertFalse(any("hostedtoolcache" in line for line in broke_lines))
 
 
 class WrapProfileTests(unittest.TestCase):
