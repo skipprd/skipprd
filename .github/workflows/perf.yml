@@ -151,18 +151,18 @@ jobs:
           RUSTFLAGS: "-C force-frame-pointers=yes -C debuginfo=1"
         run: |
           set -euo pipefail
-          cargo build --release -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables
-          cargo build --release \
+          cargo build --profile profiling -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables
+          cargo build --profile profiling \
             -p skippr-plugin-data-source-file \
             -p skippr-plugin-data-sink-file \
             -p skippr-plugin-data-sink-duckdb \
             -p skippr-plugin-schema-sink-duckdb
           mkdir -p skipprd-linux_x86-profile runtime-plugin-binaries-linux_x86-profile
-          cp target/release/skipprd skipprd-linux_x86-profile/skipprd
-          cp target/release/skippr-plugin-data-source-file \
-             target/release/skippr-plugin-data-sink-file \
-             target/release/skippr-plugin-data-sink-duckdb \
-             target/release/skippr-plugin-schema-sink-duckdb \
+          cp target/profiling/skipprd skipprd-linux_x86-profile/skipprd
+          cp target/profiling/skippr-plugin-data-source-file \
+             target/profiling/skippr-plugin-data-sink-file \
+             target/profiling/skippr-plugin-data-sink-duckdb \
+             target/profiling/skippr-plugin-schema-sink-duckdb \
              runtime-plugin-binaries-linux_x86-profile/
       - name: Install inferno
         run: |
@@ -288,7 +288,6 @@ jobs:
     name: bottlenecks vs new code
     needs:
       - linux_profile
-      - linux_matrix
     if: always() && needs.linux_profile.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 20

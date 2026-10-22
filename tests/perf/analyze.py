@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 FRAME_RE = re.compile(r"^\s*(?:0x)?[0-9a-fA-F]+\s+(\S+)")
+MODULE_RE = re.compile(r"\(([^)]+)\)\s*$")
+SHORT_FN = 12
 ADDED_FN_RE = re.compile(
     r"^\+\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
@@ -34,17 +36,28 @@ def fold_perf_script(text: str) -> dict[str, int]:
             flush()
             continue
         if line[:1] in {"\t", " "}:
-            match = FRAME_RE.match(line)
-            if not match:
-                continue
-            symbol = match.group(1).split("+", 1)[0]
-            if symbol.startswith("["):
+            symbol = _frame_symbol(line)
+            if not symbol:
                 continue
             current.append(symbol)
             continue
         flush()
     flush()
     return stacks
+
+
+def _frame_symbol(line: str) -> str | None:
+    match = FRAME_RE.match(line)
+    if not match:
+        return None
+    symbol = match.group(1).split("+", 1)[0]
+    module = MODULE_RE.search(line)
+    dso = Path(module.group(1)).name if module else ""
+    if symbol.startswith("["):
+        if dso and not dso.startswith("["):
+            return dso
+        return None
+    return symbol
 
 
 def parse_folded(text: str) -> dict[str, int]:
@@ -72,6 +85,18 @@ def rust_module_needles(path: str) -> list[str]:
         if not parts:
             return ["skipprd"]
         return ["skipprd::" + "::".join(parts)]
+    if posix.startswith("crates/"):
+        rest = posix[len("crates/") : -len(".rs")]
+        crate, _, inner = rest.partition("/src/")
+        crate = crate.replace("-", "_")
+        if not inner or inner in {"lib", "mod", "main"}:
+            return [crate]
+        parts = inner.split("/")
+        if parts[-1] in {"mod", "lib", "main"}:
+            parts = parts[:-1]
+        if not parts:
+            return [crate]
+        return [crate + "::" + "::".join(parts)]
     return []
 
 
@@ -106,7 +131,9 @@ def leaf_in_new_code(symbol: str, files: list[str], functions: list[str]) -> boo
             if needle and needle in symbol:
                 return True
     for name in functions:
-        if symbol == name or symbol.endswith(f"::{name}") or f"::{name}::" in symbol:
+        if len(name) < SHORT_FN:
+            continue
+        if symbol.endswith(f"::{name}") or f"::{name}::" in symbol:
             return True
     return False
 
