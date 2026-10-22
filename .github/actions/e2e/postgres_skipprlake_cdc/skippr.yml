@@ -11,7 +11,7 @@ pipelines:
     env: test
     type: cdc
     buffer_threshold_bytes: 20000000
-    buffer_threshold_seconds: 60
+    buffer_threshold_seconds: 2
     data_source: data_sources.postgres_cdc
     data_sink: data_sinks.lake
     cdc:

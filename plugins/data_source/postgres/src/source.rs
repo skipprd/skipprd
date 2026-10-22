@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use pgwire_replication::{Lsn, ReplicationClient, ReplicationConfig, ReplicationEvent};
 use serde_derive::{Deserialize, Serialize};
 use tokio_postgres::{NoTls, Row};
 use tracing::{info, warn};
@@ -435,8 +436,6 @@ impl DataSourcePostgresPlugin {
 
         info!("Runtime Postgres CDC bootstrap complete, starting logical replication");
 
-        use pgwire_replication::{ReplicationClient, ReplicationConfig, ReplicationEvent};
-
         let repl_config = ReplicationConfig {
             host: self
                 .config
@@ -471,10 +470,21 @@ impl DataSourcePostgresPlugin {
             .cdc_idle_timeout_seconds
             .filter(|seconds| *seconds > 0)
             .map(Duration::from_secs);
+        let mut last_data = std::time::Instant::now();
 
         loop {
             let next_event = if let Some(idle_timeout) = idle_timeout {
-                match tokio::time::timeout(idle_timeout, client.recv()).await {
+                let Some(remaining) = idle_remaining(idle_timeout, last_data.elapsed()) else {
+                    info!(
+                        "Runtime Postgres CDC idle timeout reached after {}s; stopping stream",
+                        idle_timeout.as_secs()
+                    );
+                    if !pending_batches.is_empty() {
+                        self.ingest_batches(std::mem::take(&mut pending_batches), ctx.as_ref())?;
+                    }
+                    break;
+                };
+                match tokio::time::timeout(remaining, client.recv()).await {
                     Ok(result) => result.map_err(|err| io::Error::other(err.to_string()))?,
                     Err(_) => {
                         info!(
@@ -499,6 +509,14 @@ impl DataSourcePostgresPlugin {
             let Some(event) = next_event else {
                 break;
             };
+            match cdc_idle_kind(&event) {
+                CdcIdleKind::Heartbeat => continue,
+                CdcIdleKind::Stop => {
+                    info!("Runtime Postgres replication stream stopped");
+                    break;
+                }
+                CdcIdleKind::Data => last_data = std::time::Instant::now(),
+            }
             match event {
                 ReplicationEvent::XLogData { data, wal_end, .. } => {
                     let Some(msg) = pgoutput::parse(&data) else {
@@ -563,10 +581,8 @@ impl DataSourcePostgresPlugin {
                     self.ingest_batches(std::mem::take(&mut pending_batches), ctx.as_ref())?;
                     self.store_resume_checkpoint(ctx.as_ref(), &slot_name, lsn_u64)?;
                 }
-                ReplicationEvent::KeepAlive { .. } => {}
-                ReplicationEvent::StoppedAt { .. } => {
-                    info!("Runtime Postgres replication stream stopped");
-                    break;
+                ReplicationEvent::KeepAlive { .. } | ReplicationEvent::StoppedAt { .. } => {
+                    unreachable!("classified before this match")
                 }
                 _ => {}
             }
@@ -609,6 +625,25 @@ impl DataSource for DataSourcePostgresPlugin {
             )
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CdcIdleKind {
+    Data,
+    Heartbeat,
+    Stop,
+}
+
+fn cdc_idle_kind(event: &ReplicationEvent) -> CdcIdleKind {
+    match event {
+        ReplicationEvent::KeepAlive { .. } => CdcIdleKind::Heartbeat,
+        ReplicationEvent::StoppedAt { .. } => CdcIdleKind::Stop,
+        _ => CdcIdleKind::Data,
+    }
+}
+
+fn idle_remaining(idle: Duration, since_data: Duration) -> Option<Duration> {
+    idle.checked_sub(since_data).filter(|left| !left.is_zero())
 }
 
 fn parse_pg_lsn(lsn_str: &str) -> u64 {
@@ -666,5 +701,48 @@ mod tests {
         let plugin = plugin(SourceCdcMode::CdcOnly);
         assert_eq!(plugin.cdc_mode(), SourceCdcMode::CdcOnly);
         assert!(plugin.capability().is_some());
+    }
+
+    fn keepalive() -> ReplicationEvent {
+        ReplicationEvent::KeepAlive {
+            wal_end: Lsn::from_u64(1),
+            reply_requested: true,
+            server_time_micros: 0,
+        }
+    }
+
+    #[test]
+    fn keepalive_does_not_reset_cdc_idle() {
+        assert_eq!(cdc_idle_kind(&keepalive()), CdcIdleKind::Heartbeat);
+        assert_eq!(
+            cdc_idle_kind(&ReplicationEvent::StoppedAt {
+                reached: Lsn::from_u64(1)
+            }),
+            CdcIdleKind::Stop
+        );
+        assert_eq!(
+            cdc_idle_kind(&ReplicationEvent::Commit {
+                lsn: Lsn::from_u64(2),
+                end_lsn: Lsn::from_u64(2),
+                commit_time_micros: 0,
+            }),
+            CdcIdleKind::Data
+        );
+    }
+
+    #[test]
+    fn idle_remaining_expires_while_heartbeats_arrive() {
+        assert_eq!(
+            idle_remaining(Duration::from_secs(5), Duration::from_secs(1)),
+            Some(Duration::from_secs(4))
+        );
+        assert_eq!(
+            idle_remaining(Duration::from_secs(5), Duration::from_secs(5)),
+            None
+        );
+        assert_eq!(
+            idle_remaining(Duration::from_secs(5), Duration::from_secs(6)),
+            None
+        );
     }
 }

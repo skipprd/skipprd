@@ -187,6 +187,13 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("bronze/postgres_orders", postgres_cdc)
         self.assertIn("count(DISTINCT id)", postgres_cdc)
         self.assertIn("_skippr_order_token", postgres_cdc)
+        self.assertIn("timeout --signal=KILL 120", postgres_cdc)
+        postgres_cdc_yml = (
+            ROOT / ".github" / "actions" / "e2e" / "postgres_skipprlake_cdc" / "skippr.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("buffer_threshold_seconds: 2", postgres_cdc_yml)
+        self.assertNotIn("buffer_threshold_seconds: 60", postgres_cdc_yml)
+        self.assertIn("cdc_idle_timeout_seconds: 5", postgres_cdc_yml)
         evolve = (
             ROOT / ".github" / "actions" / "e2e" / "s3_skipprlake_evolve" / "action.yaml"
         ).read_text(encoding="utf-8")

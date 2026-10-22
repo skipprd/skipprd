@@ -382,7 +382,7 @@ jobs:
       - linux_x86
       - publish_runtime_plugins
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
