@@ -33,6 +33,11 @@ _run_spec.loader.exec_module(perf_run)
 
 PIPELINE = perf_run.PIPELINE
 COMMAND_TIMEOUT_SECONDS = perf_run.COMMAND_TIMEOUT_SECONDS
+CATALOG_PATH = HARNESS_DIR / "catalog.yaml"
+
+
+def load_perf_db_catalog() -> dict[str, Any]:
+    return load_catalog(CATALOG_PATH)
 
 
 def log(message: str) -> None:
@@ -97,15 +102,12 @@ def run_query_after_ingest(
     warehouse = work / "warehouse"
     data_dir = work / "data"
     manifests = work / "manifests"
-    copied = work / "copied"
     source.mkdir(parents=True, exist_ok=True)
     warehouse.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
-    copied.mkdir(parents=True, exist_ok=True)
     fixture_kind = str(scenario.get("fixture", "exact_arrow"))
     sink = str(scenario["sink"])
     config = work / "skippr.yml"
-    extra = {"output_dir": str(copied)} if sink == "file" else None
     perf_run.write_skippr_yml(
         config,
         kind="ingest",
@@ -114,7 +116,6 @@ def run_query_after_ingest(
         sink=sink,
         warehouse=warehouse,
         flatten=False,
-        extra_source=extra,
     )
     if sink == "skipprlake":
         perf_run.start_ddb()
@@ -154,6 +155,12 @@ def run_query_after_ingest(
             profile="none",
         )
         logs += measured_sync
+        if (scenario.get("asserts") or {}).get("iceberg_parquet"):
+            parquet_files = list(warehouse.rglob("*.parquet"))
+            if not parquet_files:
+                raise perf_run.PerfError(
+                    f"{scenario_id}: no Iceberg parquet under {warehouse}"
+                )
         sql = str(scenario["sql"])
         log(f"skipprd query --sql {sql!r} --plain")
         query_cmd = perf_run.time_prefix() + perf_run.wrap_profile(
@@ -175,7 +182,7 @@ def run_query_after_ingest(
         perf_run.require_profile_outputs(work, profile)
         logs += measured_query
         events = parse_perf_events(measured_sync + measured_query)
-        required = required_perf_for(load_catalog(), scenario)
+        required = required_perf_for(load_perf_db_catalog(), scenario)
         missing = [phase for phase in required if not any(ev.get("phase") == phase for ev in events)]
         if missing:
             raise perf_run.PerfError(f"missing PERF phases {missing}; events={events}")
@@ -184,6 +191,7 @@ def run_query_after_ingest(
         payload = perf_run.report_payload(scenario_id, rows, 0, events, logs, work)
         payload["kind"] = "query_after_ingest"
         payload["sql"] = sql
+        payload["sink"] = sink
         query_events = [ev for ev in events if ev.get("phase") == "query_collect"]
         if query_events:
             payload["query_collect_ms"] = int(query_events[-1].get("elapsed_ms") or 0)
@@ -201,7 +209,7 @@ def run_query_after_ingest(
 
 
 def run_scenario(scenario_id: str, scale: str, work: Path, profile: str) -> dict[str, Any]:
-    catalog = load_catalog()
+    catalog = load_perf_db_catalog()
     scenario = catalog["scenarios"][scenario_id]
     kind = scenario_kind(scenario)
     if kind != "query_after_ingest":
@@ -220,9 +228,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--work", default="")
     args = parser.parse_args(argv)
-    catalog = load_catalog()
+    scenarios = load_perf_db_catalog()["scenarios"]
     ids = [part.strip() for part in args.scenario.split(",") if part.strip()]
-    unknown = [item for item in ids if item not in catalog["scenarios"]]
+    unknown = [item for item in ids if item not in scenarios]
     if unknown:
         raise SystemExit(f"unknown scenario(s): {unknown}")
     failures: list[str] = []

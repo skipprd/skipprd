@@ -49,19 +49,36 @@ def preferred_reports(artifacts: Path) -> dict[str, dict[str, Any]]:
     return {name: item[1] for name, item in chosen.items()}
 
 
+INGEST_LABELS = {
+    "ingest-a-duckdb": "Ingest-A",
+    "ingest-csv-duckdb": "Skipprd CSV to DuckDB",
+    "copy-b-json-json": "Copy-B",
+    "ingest-json-parquet": "JSON File to Parquet File",
+    "duckdb-ndjson": "DuckDB NDJSON (fast)",
+    "duckdb-csv": "DuckDB CSV COPY (fast)",
+    "duckdb-json-array": "DuckDB nested JSON array (slow)",
+    "duckdb-insert-values": "DuckDB row INSERT (slow)",
+    "ingest-slow-flatten-duckdb": "Slow flatten",
+}
+
+QUERY_LABELS = {
+    "q-wal-count-iceberg": "WAL+file Iceberg count",
+    "q-wal-point-iceberg": "WAL+file Iceberg point",
+    "q-union-count-duckdb": "DuckDB UNION count",
+    "q-iceberg-only-iceberg": "File Iceberg-only count",
+    "q-iceberg-only-duckdb": "DuckDB Iceberg-only count",
+}
+
+
+def memo_suite(reports: dict[str, dict[str, Any]]) -> str:
+    if any(payload.get("kind") == "query_after_ingest" for payload in reports.values()):
+        return "skippr-perf-db"
+    return "skippr-perf"
+
+
 def timings_from_reports(reports: dict[str, dict[str, Any]]) -> list[str]:
     lines: list[str] = []
-    for name in (
-        "ingest-a-duckdb",
-        "ingest-csv-duckdb",
-        "copy-b-json-json",
-        "ingest-json-parquet",
-        "duckdb-ndjson",
-        "duckdb-csv",
-        "duckdb-json-array",
-        "duckdb-insert-values",
-        "ingest-slow-flatten-duckdb",
-    ):
+    for name, label in INGEST_LABELS.items():
         payload = reports.get(name)
         if not payload or payload.get("error"):
             continue
@@ -69,17 +86,6 @@ def timings_from_reports(reports: dict[str, dict[str, Any]]) -> list[str]:
         elapsed = payload.get("elapsed_ms")
         if rows is None or elapsed is None:
             continue
-        label = {
-            "ingest-a-duckdb": "Ingest-A",
-            "ingest-csv-duckdb": "Skipprd CSV to DuckDB",
-            "copy-b-json-json": "Copy-B",
-            "ingest-json-parquet": "JSON File to Parquet File",
-            "duckdb-ndjson": "DuckDB NDJSON (fast)",
-            "duckdb-csv": "DuckDB CSV COPY (fast)",
-            "duckdb-json-array": "DuckDB nested JSON array (slow)",
-            "duckdb-insert-values": "DuckDB row INSERT (slow)",
-            "ingest-slow-flatten-duckdb": "Slow flatten",
-        }[name]
         line = f"{label} synced {rows:,} rows in {elapsed}ms."
         exact = payload.get("exact_arrow_rows")
         if name in {"ingest-a-duckdb", "ingest-json-parquet"} and exact is not None:
@@ -89,6 +95,17 @@ def timings_from_reports(reports: dict[str, dict[str, Any]]) -> list[str]:
         if spawn is not None or apply is not None:
             line += f" Plugin spawn {spawn or 0}ms, sink apply {apply or 0}ms."
         lines.append(line)
+    for name, label in QUERY_LABELS.items():
+        payload = reports.get(name)
+        if not payload or payload.get("error"):
+            continue
+        rows = payload.get("rows")
+        elapsed = payload.get("query_collect_ms")
+        if elapsed is None:
+            elapsed = payload.get("elapsed_ms")
+        if rows is None or elapsed is None:
+            continue
+        lines.append(f"{label} queried {rows:,} ingest rows in {elapsed}ms.")
     return lines
 
 
@@ -170,10 +187,11 @@ def write_memo(
     broke: list[str],
     done: list[str],
     nxt: list[str],
+    suite: str = "skippr-perf",
 ) -> str:
     paragraphs = [
         f"Paul,",
-        f"Iteration {iteration} of skippr-perf on GitHub Linux x86. This note is for {MEMO_TO}.",
+        f"Iteration {iteration} of {suite} on GitHub Linux x86. This note is for {MEMO_TO}.",
     ]
     if timings:
         paragraphs.append("What the numbers said\n" + "\n".join(f"- {line}" for line in timings))
@@ -187,7 +205,7 @@ def write_memo(
         paragraphs.append("What is next\n" + "\n".join(f"- {line}" for line in nxt))
     else:
         paragraphs.append(
-            "What is next\n- Ideas look exhausted: ingest-A and copy-B moved little, and no cell is still broken."
+            "What is next\n- Ideas look exhausted: the smoke cells moved little, and no cell is still broken."
         )
     if run_url:
         paragraphs.append(f"GitHub run: {run_url}")
@@ -217,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
     broke = broke_from_reports(reports)
     ideas = ideas_from_report(bottlenecks, reports)
     nxt = list(args.next) or ideas
+    suite = memo_suite(reports)
     body = write_memo(
         iteration=args.iteration,
         run_url=args.run_url,
@@ -224,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         broke=broke,
         done=list(args.done),
         nxt=nxt,
+        suite=suite,
     )
     out = Path(args.out)
     out.write_text(body, encoding="utf-8")
@@ -239,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--to",
                 MEMO_TO,
                 "--subject",
-                f"skippr-perf iteration {args.iteration}",
+                f"{suite} iteration {args.iteration}",
                 "--body-file",
                 str(out),
             ],

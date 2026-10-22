@@ -451,6 +451,35 @@ class MemoTests(unittest.TestCase):
         self.assertTrue(any("pipeline name" in line for line in broke_lines))
         self.assertFalse(any("hostedtoolcache" in line for line in broke_lines))
 
+    def test_query_cell_timings_name_file_iceberg_and_duckdb(self) -> None:
+        from memo import timings_from_reports
+
+        lines = timings_from_reports(
+            {
+                "q-wal-count-iceberg": {
+                    "scenario": "q-wal-count-iceberg",
+                    "kind": "query_after_ingest",
+                    "sink": "skipprlake",
+                    "rows": 200,
+                    "query_collect_ms": 17,
+                    "elapsed_ms": 17,
+                },
+                "q-union-count-duckdb": {
+                    "scenario": "q-union-count-duckdb",
+                    "kind": "query_after_ingest",
+                    "sink": "duckdb",
+                    "rows": 200,
+                    "query_collect_ms": 9,
+                    "elapsed_ms": 9,
+                },
+            }
+        )
+        joined = " ".join(lines)
+        self.assertIn("WAL+file Iceberg count", joined)
+        self.assertIn("DuckDB UNION count", joined)
+        self.assertIn("17ms", joined)
+        self.assertIn("9ms", joined)
+
 
 class WrapProfileTests(unittest.TestCase):
     def test_perf_stat_writes_perf_stat_txt(self) -> None:
