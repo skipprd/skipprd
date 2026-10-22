@@ -1447,6 +1447,40 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
             profile.exact_arrow_fallback_rows,
             profile.legacy_normalized_rows
         );
+        let ingest_rows = profile.exact_arrow_rows
+            + profile.exact_arrow_fallback_rows
+            + profile.legacy_normalized_rows;
+        crate::helpers::perf::emit(
+            "ingest_profile",
+            json!({
+                "elapsed_ms": (profile.decode_ns
+                    + profile.fast_path_ns
+                    + profile.slow_path_ns
+                    + profile.wal_enqueue_ns)
+                    / 1_000_000,
+                "rows": ingest_rows,
+                "bytes": source_bytes_total,
+                "exact_arrow_rows": profile.exact_arrow_rows,
+                "exact_fallback_rows": profile.exact_arrow_fallback_rows,
+                "legacy_rows": profile.legacy_normalized_rows,
+                "decode_ms": profile.decode_ns as f64 / 1_000_000.0,
+                "fast_ms": profile.fast_path_ns as f64 / 1_000_000.0,
+                "slow_ms": profile.slow_path_ns as f64 / 1_000_000.0,
+                "wal_enqueue_ms": profile.wal_enqueue_ns as f64 / 1_000_000.0
+            }),
+        );
+        crate::helpers::perf::emit(
+            "plugin_ipc",
+            json!({
+                "acquire_wait_ms": crate::metrics::counters::RUNTIME_SINK_POOL_ACQUIRE_WAIT_NS_TOTAL
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    / 1_000_000,
+                "acquires": crate::metrics::counters::RUNTIME_SINK_POOL_ACQUIRES_TOTAL
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "bytes": crate::metrics::counters::RUNTIME_SINK_IPC_BYTES_TOTAL
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            }),
+        );
     }
 
     if let Err(err) = source_sync_result {
@@ -1495,6 +1529,19 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
                 )),
                 ..run_telemetry(config, &pipeline_name, "complete")
             },
+        );
+        crate::helpers::perf::emit(
+            "sync",
+            json!({
+                "elapsed_ms": elapsed_ms,
+                "rows": total_rows,
+                "bytes": crate::metrics::counters::SOURCE_BYTES_TOTAL
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "wal_write_rows": crate::metrics::counters::WAL_WRITE_ROWS_TOTAL
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "wal_compacted_rows": crate::metrics::counters::WAL_COMPACTED_ROWS_TOTAL
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            }),
         );
     }
 

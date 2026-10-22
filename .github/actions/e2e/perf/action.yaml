@@ -1,0 +1,37 @@
+name: skippr-perf cell
+description: "Run one tests/perf scenario with local plugins and --log perf."
+inputs:
+  scenario:
+    required: true
+  skipprd_path:
+    required: true
+  plugin_binaries_dir:
+    required: false
+    default: ""
+  scale:
+    required: false
+    default: ci
+  profile:
+    required: false
+    default: none
+  work:
+    required: false
+    default: ""
+  workspace-root:
+    required: false
+    default: "."
+runs:
+  using: composite
+  steps:
+    - name: Run skippr-perf scenario
+      shell: bash
+      working-directory: ${{ inputs.workspace-root }}
+      env:
+        SKIPPRD_BIN: ${{ inputs.skipprd_path }}
+        PLUGIN_BINARIES_DIR: ${{ inputs.plugin_binaries_dir }}
+        PERF_WORK: ${{ inputs.work }}
+        PERF_SCENARIO: ${{ inputs.scenario }}
+        PERF_SCALE: ${{ inputs.scale }}
+        PERF_PROFILE: ${{ inputs.profile }}
+        SKIPPR_LOG_LEVEL: perf
+      run: bash .github/scripts/run_perf_cell.sh

@@ -316,11 +316,15 @@ fn apply_persist_result(
 
     match &result {
         Ok((rows, bytes)) => {
-            info!(
-                rows,
-                bytes,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "WAL writer flush finished"
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            info!(rows, bytes, elapsed_ms, "WAL writer flush finished");
+            crate::helpers::perf::emit(
+                "wal_persist",
+                serde_json::json!({
+                    "elapsed_ms": elapsed_ms,
+                    "rows": rows,
+                    "bytes": bytes
+                }),
             );
             if Config::log_wal_enabled() {
                 info!(

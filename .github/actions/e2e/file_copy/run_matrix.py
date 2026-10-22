@@ -14,6 +14,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ACTION = Path(__file__).resolve().parent
+sys.path.insert(0, str(ACTION.parents[2] / "scripts"))
+from skipprd_cli import log_args  # noqa: E402
+
 TESTDATA = ACTION.parent / "s3_file_copy" / "testdata"
 CELLS = [
     ("json", "jsonl", TESTDATA / "flat.json", True),
@@ -122,7 +125,7 @@ def run_cell(
             "--config",
             str(cfg),
             "sync",
-            "--log",
+            *log_args(env),
             "--pipeline",
             "file_copy",
             "--once",

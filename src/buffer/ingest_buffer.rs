@@ -3287,6 +3287,7 @@ impl Buffers {
         crate::metrics::counters::inc_wal_compactions_in_flight();
         crate::metrics::counters::add_wal_compaction_started(work.entries.len() as u64);
         crate::metrics::counters::add_wal_compaction_transaction_started(1);
+        let compact_started = Instant::now();
         let _guard = WorkGuard(&work);
         let mut records = Vec::new();
         for entry in work.entries.iter() {
@@ -3313,6 +3314,7 @@ impl Buffers {
             .ok_or_else(|| io::Error::other("type: copy requires an output format"))?;
         let body = crate::serdes::copy::encode_copy(format, &records)
             .map_err(|err| io::Error::other(err.to_string()))?;
+        let body_len = body.len();
         let rows = records.len() as u64;
         let source_contract =
             crate::plugins::source_contract::namespace_source_contract(&work.txn.namespace);
@@ -3357,6 +3359,15 @@ impl Buffers {
         COMPACT_FAILURES.remove(&format!("{}:{}", work.txn.sink_ref, work.txn.id));
         crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
         crate::metrics::counters::add_wal_compaction_transaction_completed(1);
+        crate::helpers::perf::emit(
+            "wal_compact",
+            serde_json::json!({
+                "elapsed_ms": compact_started.elapsed().as_millis() as u64,
+                "rows": records.len(),
+                "wal_parts": work.entries.len(),
+                "bytes": body_len
+            }),
+        );
         Ok(true)
     }
 
@@ -3653,6 +3664,18 @@ impl Buffers {
             job_started.elapsed().as_secs(),
             work.txn.id,
             work.txn.target_filename
+        );
+        crate::helpers::perf::emit(
+            "wal_compact",
+            serde_json::json!({
+                "elapsed_ms": job_started.elapsed().as_millis() as u64,
+                "rows": final_rows,
+                "wal_parts": work.entries.len(),
+                "bytes": work
+                    .entries
+                    .iter()
+                    .fold(0u64, |sum, entry| sum.saturating_add(entry.idx.bytes))
+            }),
         );
         crate::metrics::counters::add_wal_compaction_refs_tombstoned(work.entries.len() as u64);
         Self::remove_compaction_row(config, &work.txn.id)?;

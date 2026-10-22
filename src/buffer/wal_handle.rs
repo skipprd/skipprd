@@ -975,10 +975,14 @@ impl PipelineWalHandle {
                 )
                 .await;
             }
-            tracing::info!(
-                segment = segment_id,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "WAL catalog reclaim"
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            tracing::info!(segment = segment_id, elapsed_ms, "WAL catalog reclaim");
+            crate::helpers::perf::emit(
+                "wal_reclaim",
+                serde_json::json!({
+                    "elapsed_ms": elapsed_ms,
+                    "segment": segment_id
+                }),
             );
         }
         Ok(all_done)

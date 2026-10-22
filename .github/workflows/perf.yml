@@ -3,14 +3,207 @@ name: skippr-perf
 on:
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
 jobs:
-  register:
-    name: registered on default branch
+  linux_contracts:
+    name: perf workflow contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
-      - name: Dispatch this workflow with --ref of a branch that has the suite
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 tests/perf/test_run.py
+      - run: python3 .github/scripts/test_rust_ci.py
+
+  build_darwin:
+    name: release host + perf plugins (darwin)
+    runs-on: [self-hosted, skippr-darwin-arm64]
+    timeout-minutes: 240
+    env:
+      CARGO_BUILD_JOBS: "8"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/cloud
+          path: cloud
+          token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
+          submodules: true
+      - name: Build macos arm64 release (perf plugin subset)
+        uses: ./skipprd/.github/actions/rust-build-release
+        with:
+          rust-version: "1.92.0"
+          architecture_name: macos_arm64
+          workspace-root: skipprd
+          runtime_plugin_packages_json: >-
+            ["skippr-plugin-data-source-file","skippr-plugin-data-sink-file","skippr-plugin-data-sink-duckdb","skippr-plugin-schema-sink-duckdb","skippr-plugin-data-sink-skipprlake","skippr-plugin-schema-sink-skipprlake","skippr-plugin-data-source-postgres","skippr-plugin-data-sink-postgres","skippr-plugin-schema-sink-postgres","skippr-plugin-data-source-stdin","skippr-plugin-data-source-socket","skippr-plugin-data-source-s3","skippr-plugin-data-sink-s3"]
+
+  darwin_matrix:
+    name: perf ${{ matrix.scenario }}
+    needs: build_darwin
+    runs-on: [self-hosted, skippr-darwin-arm64]
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - ingest-a-duckdb
+          - ingest-a-skipprlake
+          - copy-b-json-json
+          - ingest-slow-flatten-duckdb
+          - copy-format-matrix
+          - ingest-file-postgres
+          - cdc-postgres-skipprlake
+          - copy-stdin-file
+          - copy-socket-file
+          - ingest-s3-skipprlake
+          - copy-s3-file
+          - copy-file-s3
+          - copy-s3-s3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
+          submodules: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: skipprd-macos_arm64
+          path: skipprd/skipprd-macos_arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-plugin-binaries-macos_arm64
+          path: skipprd/runtime-plugin-binaries-macos_arm64
+      - name: Install DuckDB CLI
+        working-directory: skipprd
+        shell: bash
         run: |
-          echo "perf.yml is registered so GitHub can workflow_dispatch it."
-          echo "Run the suite with: gh workflow run perf.yml --ref <branch>"
-          echo "This default-branch stub is not the matrix; the run uses the workflow file from --ref."
+          set -euo pipefail
+          if command -v duckdb >/dev/null 2>&1; then
+            duckdb --version
+            exit 0
+          fi
+          if command -v brew >/dev/null 2>&1; then
+            brew install duckdb
+            exit 0
+          fi
+          curl -fsSL https://install.duckdb.org | sh
+          echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
+      - name: Run scenario
+        uses: ./skipprd/.github/actions/e2e/perf
+        with:
+          scenario: ${{ matrix.scenario }}
+          skipprd_path: ${{ github.workspace }}/skipprd/skipprd-macos_arm64/skipprd
+          plugin_binaries_dir: ${{ github.workspace }}/skipprd/runtime-plugin-binaries-macos_arm64
+          scale: ci
+          workspace-root: skipprd
+          work: ${{ runner.temp }}/skippr-perf
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-${{ matrix.scenario }}-darwin
+          path: |
+            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf-report.json
+            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf.log
+            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/*.svg
+            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/profile.json.gz
+          if-no-files-found: error
+
+  linux_profile:
+    name: linux ${{ matrix.scenario }} ${{ matrix.profile }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: ingest-a-duckdb
+            profile: flamegraph
+          - scenario: copy-b-json-json
+            profile: flamegraph
+          - scenario: ingest-a-duckdb
+            profile: heaptrack
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/cloud
+          path: cloud
+          token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
+          submodules: true
+      - name: Install system deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev libssl-dev pkg-config linux-tools-common linux-tools-generic
+          if ! command -v duckdb >/dev/null 2>&1; then
+            curl -fsSL https://install.duckdb.org | sh
+            echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
+          fi
+      - name: Release build with frame pointers
+        working-directory: skipprd
+        env:
+          CARGO_BUILD_JOBS: "2"
+          RUSTFLAGS: "-C force-frame-pointers=yes -C debuginfo=1"
+        run: |
+          set -euo pipefail
+          cargo build --release -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables \
+            -p skippr-plugin-data-source-file \
+            -p skippr-plugin-data-sink-file \
+            -p skippr-plugin-data-sink-duckdb \
+            -p skippr-plugin-schema-sink-duckdb
+          mkdir -p runtime-plugin-binaries-linux_x86
+          cp target/release/skipprd skipprd-linux
+          cp target/release/skippr-plugin-data-source-file \
+             target/release/skippr-plugin-data-sink-file \
+             target/release/skippr-plugin-data-sink-duckdb \
+             target/release/skippr-plugin-schema-sink-duckdb \
+             runtime-plugin-binaries-linux_x86/
+      - name: Run flamegraph cell
+        if: matrix.profile != 'heaptrack'
+        uses: ./skipprd/.github/actions/e2e/perf
+        with:
+          scenario: ${{ matrix.scenario }}
+          skipprd_path: ${{ github.workspace }}/skipprd/target/release/skipprd
+          plugin_binaries_dir: ${{ github.workspace }}/skipprd/runtime-plugin-binaries-linux_x86
+          scale: linux
+          profile: ${{ matrix.profile }}
+          workspace-root: skipprd
+          work: ${{ runner.temp }}/skippr-perf
+      - name: Run heaptrack cell
+        if: matrix.profile == 'heaptrack'
+        uses: ./skipprd/.github/actions/e2e/heaptrack
+        with:
+          skipprd_path: ${{ github.workspace }}/skipprd/target/release/skipprd
+          plugin_binaries_dir: ${{ github.workspace }}/skipprd/runtime-plugin-binaries-linux_x86
+          scale: linux
+          workspace-root: skipprd
+          scenario: ${{ matrix.scenario }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-${{ matrix.scenario }}-linux-${{ matrix.profile }}
+          path: |
+            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf-report.json
+            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf.log
+            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/*.svg
+            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf.data
+            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/heaptrack*
+            ${{ runner.temp }}/skippr-perf-heaptrack/${{ matrix.scenario }}/perf-report.json
+            ${{ runner.temp }}/skippr-perf-heaptrack/${{ matrix.scenario }}/perf.log
+            ${{ runner.temp }}/skippr-perf-heaptrack/${{ matrix.scenario }}/heaptrack*
+          if-no-files-found: error
