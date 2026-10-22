@@ -40,7 +40,7 @@ def test_session_doctor_reads_the_built_config():
     result = skippr.Session(p1).doctor()
     assert result["ok"] is True
     assert set(result) == {"ok", "checks"}
-    assert any("WAL is the dataset" in c["message"] for c in result["checks"])
+    assert any("source, WAL-only" in c["message"] for c in result["checks"])
 
 
 def test_session_from_loaded_file(tmp_path):
