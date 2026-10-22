@@ -49,6 +49,6 @@ runs:
     - name: Upload heaptrack output
       uses: actions/upload-artifact@v4
       with:
-        name: heaptrack-output
+        name: heaptrack-${{ inputs.scenario }}
         path: heaptrack_output*
         if-no-files-found: error

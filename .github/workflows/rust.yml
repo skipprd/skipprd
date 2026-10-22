@@ -33,6 +33,7 @@ jobs:
       - run: python3 .github/scripts/test_previous_protocol_compatible_release.py
       - run: python3 .github/scripts/test_engine_tag.py
       - run: python3 tests/perf/test_run.py
+      - run: python3 tests/perf/test_analyze.py
 
   linux_x86:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'

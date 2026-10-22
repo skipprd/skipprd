@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 HARNESS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = HARNESS_DIR.parents[1]
@@ -138,10 +139,15 @@ class PerfSkillTests(unittest.TestCase):
         self.assertIn("name: skippr-perf", text)
         self.assertIn("disable-model-invocation: true", text)
         self.assertIn("Local smoke", text)
-        self.assertIn("skippr-darwin-arm64", text)
+        self.assertIn("ubuntu-latest", text)
+        self.assertNotIn("skippr-darwin-arm64", text)
         self.assertIn("Do **not** run skipprd-docs", text)
         self.assertIn("aws s3 sync --delete", text)
         self.assertIn("--log perf", text)
+        self.assertIn("tests/perf/download.py", text)
+        self.assertIn("tests/perf/analyze.py", text)
+        self.assertIn("new code", text)
+        self.assertIn("perf-stat", text)
 
 
 class SkipprdCliTests(unittest.TestCase):
@@ -162,6 +168,8 @@ class PerfRunnerContractTests(unittest.TestCase):
         self.assertIn("assert_scenario_perf", text)
         self.assertIn("assert_copy_identity", text)
         self.assertIn("log_args(env)", text)
+        self.assertIn("perf-stat", text)
+        self.assertIn("require_profile_outputs", text)
         self.assertNotIn('list(scenario.get("required_perf") or [])', text)
         self.assertNotIn("collect_log_text", text)
         self.assertNotIn('"--log", "perf"', text)
@@ -178,6 +186,22 @@ class PerfRunnerContractTests(unittest.TestCase):
             self.assertNotRegex(text, r'"--log",\s*"--pipeline"', name)
 
 
+class WrapProfileTests(unittest.TestCase):
+    def test_perf_stat_writes_perf_stat_txt(self) -> None:
+        from run import wrap_profile
+
+        work = Path("/tmp/skippr-perf-cell")
+        with (
+            patch("run.shutil.which", return_value="/usr/bin/perf"),
+            patch("run.subprocess.run"),
+        ):
+            cmd = wrap_profile(["skipprd", "sync"], "perf-stat", work)
+        self.assertEqual(
+            cmd,
+            ["/usr/bin/perf", "stat", "-o", str(work / "perf-stat.txt"), "--", "skipprd", "sync"],
+        )
+
+
 class PerfWorkflowContractTests(unittest.TestCase):
     def test_perf_yml_lists_every_catalog_scenario_and_one_runner(self) -> None:
         text = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
@@ -186,6 +210,16 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("actions/e2e/perf", text)
         self.assertIn("actions/e2e/heaptrack", text)
         self.assertNotIn("python3 tests/perf/run.py", text)
+        self.assertIn("ubuntu-latest", text)
+        self.assertNotIn("skippr-darwin-arm64", text)
+        self.assertNotIn("[self-hosted", text)
+        self.assertIn("linux_x86", text)
+        self.assertIn("perf-stat", text)
+        self.assertIn("linux_analyze", text)
+        self.assertIn("build_linux_profile", text)
+        self.assertIn("perf.folded", text)
+        self.assertIn("ingest-slow-flatten-duckdb", text)
+        self.assertIn("analyze.py", text)
         self.assertNotIn("if-no-files-found: warn", text)
         self.assertIn("if-no-files-found: error", text)
         cell = (REPO_ROOT / ".github" / "scripts" / "run_perf_cell.sh").read_text(encoding="utf-8")
