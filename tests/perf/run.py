@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -37,6 +38,7 @@ DDB_PORT = 18021
 DDB_CONTAINER = "skippr-perf-ddb"
 PG_APPEND_PORT = 15433
 PG_CDC_PORT = 15434
+COMMAND_TIMEOUT_SECONDS = 600
 
 
 class PerfError(RuntimeError):
@@ -193,21 +195,42 @@ def run_logged(
     env: dict[str, str],
     cwd: Path | None = None,
     stdin_data: bytes | None = None,
+    timeout: int | None = COMMAND_TIMEOUT_SECONDS,
 ) -> str:
     log("+ " + " ".join(cmd))
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
         cwd=cwd or REPO_ROOT,
         env=env,
-        input=stdin_data,
-        capture_output=True,
+        stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
     )
-    combined = (proc.stdout or b"") + b"\n" + (proc.stderr or b"")
+    try:
+        stdout, stderr = proc.communicate(
+            input=stdin_data if stdin_data is not None else None,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
+        proc.wait()
+        raise PerfError(f"command timed out after {timeout}s: {' '.join(cmd)}") from None
+    combined = (stdout or b"") + b"\n" + (stderr or b"")
     text = combined.decode("utf-8", errors="replace")
     sys.stdout.write(text)
     if proc.returncode != 0:
         raise PerfError(f"command failed ({proc.returncode}): {' '.join(cmd)}")
     return text
+
+
+def wrap_skippr_yml(script: Path) -> Path:
+    if script.name == "run_s3_sink.py":
+        return script.parent / "skippr_s3_sink.yml"
+    return script.parent / "skippr.yml"
 
 
 def write_skippr_yml(
@@ -894,8 +917,10 @@ def run_cdc(scenario_id: str, scenario: dict[str, Any], work: Path, profile: str
     template = (REPO_ROOT / ".github" / "actions" / "e2e" / "postgres_skipprlake_cdc" / "skippr.yml").read_text(
         encoding="utf-8"
     )
-    yaml = template.replace("LAKE_WAREHOUSE_PLACEHOLDER", warehouse_uri).replace(
-        "port: 5434", f"port: {PG_CDC_PORT}"
+    yaml = (
+        template.replace("LAKE_WAREHOUSE_PLACEHOLDER", warehouse_uri)
+        .replace("port: 5434", f"port: {PG_CDC_PORT}")
+        .replace("buffer_threshold_seconds: 60", "buffer_threshold_seconds: 2")
     )
     config = work / "skippr.yml"
     config.write_text(yaml, encoding="utf-8")
@@ -1016,7 +1041,7 @@ def run_wrap_existing(scenario_id: str, scenario: dict[str, Any], work: Path) ->
         env["AWS_DEFAULT_REGION"] = "auto"
         env["AWS_EC2_METADATA_DISABLED"] = "true"
         manifests = work / "manifests"
-        yml = script.parent / "skippr.yml"
+        yml = wrap_skippr_yml(script)
         if yml.is_file():
             pipeline = {
                 "run_matrix.py": "s3_file_copy",

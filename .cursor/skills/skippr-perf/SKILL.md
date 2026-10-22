@@ -3,8 +3,11 @@ name: skippr-perf
 description: >-
   Run the skipprd e2e correctness + performance matrix on a production host
   build with local runtime plugins. Smoke A+B on this Mac first, then dispatch
-  perf.yml on GitHub-hosted Linux x86 (ubuntu-latest), download flamegraphs, and rank bottlenecks in new code. Use when the user says /skippr-perf,
-  skippr-perf, or asks for ingest/copy flamegraphs or PERF logs.
+  perf.yml on GitHub-hosted Linux x86 (ubuntu-latest), download flamegraphs,
+  generate ideas from the results, iterate until ideas are exhausted, and email
+  a plain-English memo to paul@paulhudson.me after each round. Use when the
+  user says /skippr-perf, skippr-perf, or asks for ingest/copy flamegraphs or
+  PERF logs.
 disable-model-invocation: true
 ---
 
@@ -16,6 +19,8 @@ WAL leftover **import is out of suite**. Snowflake, BigQuery, Databricks, Redshi
 
 Repo: `skipprd/skipprd`. In-process `skipprd benchmark` / `scripts/benchmark-ingest-local.sh` stay decode-unit tools; this skill is the product path: **release binary + local plugins + discover/sync/query**.
 
+Mail: `python3 tests/perf/memo.py --mail` → sibling `cloud/scripts/send-afk-mail.py` (Gmail AFK, `paul@paulhudson.me`). MUST NOT Amazon SES.
+
 ## Loop (do not skip)
 
 ```
@@ -24,11 +29,19 @@ skippr-perf:
 - [ ] PERF logs parsed; exact_arrow_rows == total on A; identity on B
 - [ ] Commit harness/skill with hooks (never --no-verify)
 - [ ] gh workflow run perf.yml --ref this branch
-- [ ] Watch until Linux x86 cells succeeded (matrix + flamegraph/heaptrack/perf-stat)
+- [ ] Watch until Linux x86 cells finished (matrix + flamegraph/heaptrack/perf-stat). Do not wait 180m on a hung cell — cancel if skipprd has no timeout evidence.
 - [ ] python3 tests/perf/download.py (flamegraphs, folded stacks, perf-stat, reports)
 - [ ] python3 tests/perf/analyze.py --artifacts artifacts/skippr-perf --base origin/main
-- [ ] Fix hottest frames in new code first; do not publish PyPI/docs/latest
+- [ ] python3 tests/perf/memo.py --iteration N --artifacts … --bottlenecks … --run-url … --done … --mail
+- [ ] Generate ideas from timings, failed cells, and hot leaves (overall first; new code if it is actually hot)
+- [ ] Implement the top remaining idea. Local smoke again if product code changed.
+- [ ] Commit (hooks), dispatch, watch, download, analyze, email, iterate
+- [ ] Stop when ideas are exhausted
 ```
+
+Exhausted means: no remaining idea with a clear test, **or** ingest-A and copy-B `elapsed_ms` moved under 10% on two consecutive GitHub runs after the last product change **and** no cell is still broken. Cap **5** GitHub dispatches unless a skipprd frame is still over 10% of ingest-A or copy-B samples.
+
+Each memo is a short plain-English note to `paul@paulhudson.me`: what the numbers said, what broke, what changed, what is next. No tables. No markdown fences.
 
 ## Local smoke (this Mac, before GitHub)
 
@@ -48,16 +61,18 @@ Duckdb Iceberg is enough for A on a laptop. SkipprLake needs DynamoDB Local (Doc
 
 ## GitHub
 
-`.github/workflows/perf.yml` is **`workflow_dispatch` only** (not every engine tag). GitHub jobs run on GitHub-hosted Linux x86 (`ubuntu-latest`) — not the Mac self-hosted runner. Local smoke stays on this Mac. Profiling cells on that same Linux runner: flamegraph (ingest-A, copy-B, flatten), heaptrack (ingest-A, copy-B), perf-stat (ingest-A, copy-B). `linux_analyze` ranks `perf.folded` leaves against `origin/main...HEAD` new code. One runner label, not a second harness.
+`.github/workflows/perf.yml` is **`workflow_dispatch` only** (not every engine tag). GitHub jobs run on GitHub-hosted Linux x86 (`ubuntu-latest`) — not the Mac self-hosted runner. Local smoke stays on this Mac. Profiling cells on that same Linux runner: flamegraph (ingest-A, copy-B, flatten), heaptrack (ingest-A, copy-B), perf-stat (ingest-A, copy-B). `linux_analyze` ranks `perf.folded` leaves against `origin/main...HEAD` new code. One runner label, not a second harness. skipprd and wrap scripts fail closed after 10 minutes (`COMMAND_TIMEOUT_SECONDS`); kill the process group.
 
 ```bash
 gh workflow run perf.yml --ref "$(git branch --show-current)"
 gh run watch --exit-status
 python3 tests/perf/download.py
 python3 tests/perf/analyze.py --artifacts artifacts/skippr-perf --base origin/main
+python3 tests/perf/memo.py --iteration N --artifacts artifacts/skippr-perf \
+  --bottlenecks bottlenecks.json --run-url "$RUN_URL" --done "…" --mail
 ```
 
-Read `bottlenecks.json` / stdout: hottest frames in new code first, then overall hot leaves. Download `flamegraph.svg`, `perf.folded`, `perf-stat.txt`, `perf-report.json`. Heaptrack on ingest-A/copy-B Linux is this harness (`.github/actions/e2e/heaptrack`), not bike_hire.
+Read `bottlenecks.json` / stdout: hottest frames in new code first **only if they are actually hot**; otherwise overall hot leaves and failed cells. Download `flamegraph.svg`, `perf.folded`, `perf-stat.txt`, `perf-report.json`. Heaptrack on ingest-A/copy-B Linux is this harness (`.github/actions/e2e/heaptrack`), not bike_hire.
 
 ## Must not
 
@@ -68,3 +83,4 @@ Read `bottlenecks.json` / stdout: hottest frames in new code first, then overall
 - `aws s3 sync --delete`
 - Write `cloudcycle-datalake-iceberg-*` or other EU production/staging buckets
 - Treat WAL leftover import as a perf cell
+- Amazon SES for the iteration memo (Gmail AFK only)
