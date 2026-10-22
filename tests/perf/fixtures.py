@@ -38,8 +38,7 @@ def expected_amount_sum(rows: int) -> int:
     return 10 * rows * (rows + 1) // 2
 
 
-def write_ndjson(path: Path, kind: str, rows: int) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _factory(kind: str):
     factories = {
         "exact_arrow": exact_arrow_record,
         "exact_arrow_ts": exact_arrow_ts_record,
@@ -48,7 +47,57 @@ def write_ndjson(path: Path, kind: str, rows: int) -> Path:
     factory = factories.get(kind)
     if factory is None:
         raise ValueError(f"unknown fixture kind {kind!r}")
+    return factory
+
+
+def write_ndjson(path: Path, kind: str, rows: int) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    factory = _factory(kind)
     with path.open("w", encoding="utf-8") as handle:
         for index in range(1, rows + 1):
             handle.write(json.dumps(factory(index), separators=(",", ":")) + "\n")
     return path
+
+
+def write_csv(path: Path, kind: str, rows: int) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    factory = _factory(kind)
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("id,name,amount\n")
+        for index in range(1, rows + 1):
+            record = factory(index)
+            handle.write(f"{record['id']},{record['name']},{record['amount']}\n")
+    return path
+
+
+def write_json_array(path: Path, kind: str, rows: int) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    factory = _factory(kind)
+    payload = [factory(index) for index in range(1, rows + 1)]
+    path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    return path
+
+
+def write_insert_sql(path: Path, rows: int) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "CREATE TABLE events (id BIGINT, name VARCHAR, amount BIGINT);",
+    ]
+    for index in range(1, rows + 1):
+        record = exact_arrow_record(index)
+        name = str(record["name"]).replace("'", "''")
+        lines.append(
+            f"INSERT INTO events VALUES ({record['id']}, '{name}', {record['amount']});"
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def write_records(path: Path, kind: str, rows: int, *, fmt: str) -> Path:
+    if fmt in {"json", "ndjson"}:
+        return write_ndjson(path, kind, rows)
+    if fmt == "csv":
+        return write_csv(path, kind, rows)
+    if fmt == "json_array":
+        return write_json_array(path, kind, rows)
+    raise ValueError(f"unknown fixture format {fmt!r}")

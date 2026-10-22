@@ -25,7 +25,7 @@ Mail: `python3 tests/perf/memo.py --mail` → sibling `cloud/scripts/send-afk-ma
 
 ```
 skippr-perf:
-- [ ] Local smoke A (File ingest exact-Arrow → Duckdb or SkipprLake), B (File copy json→json), and JSON File → Parquet File ingest
+- [ ] Local smoke A (File ingest exact-Arrow → Duckdb or SkipprLake), B (File copy json→json), JSON File → Parquet File ingest, Skipprd CSV → DuckDB, and DuckDB NDJSON/CSV baselines
 - [ ] PERF logs parsed; exact_arrow_rows == total on A; identity on B
 - [ ] Commit harness/skill with hooks (never --no-verify)
 - [ ] gh workflow run perf.yml --ref this branch
@@ -54,10 +54,10 @@ cargo build --release -p skipprd --bin skipprd \
   -p skippr-plugin-data-sink-duckdb \
   -p skippr-plugin-schema-sink-duckdb
 export SKIPPRD_BIN="$PWD/target/release/skipprd"
-python3 tests/perf/run.py --scenario ingest-a-duckdb,copy-b-json-json,ingest-json-parquet --scale smoke
+python3 tests/perf/run.py --scenario ingest-a-duckdb,copy-b-json-json,ingest-json-parquet,ingest-csv-duckdb,duckdb-ndjson,duckdb-csv,duckdb-json-array,duckdb-insert-values --scale smoke
 ```
 
-Duckdb Iceberg is enough for A on a laptop. SkipprLake needs DynamoDB Local (Docker or Java 17+). Fail the cell if required `PERF_EVENT` lines are missing.
+Duckdb Iceberg is enough for A on a laptop. SkipprLake needs DynamoDB Local (Docker or Java 17+). Fail the cell if required `PERF_EVENT` lines are missing. DuckDB baseline cells generate NDJSON/CSV/JSON-array/INSERT SQL on the fly (no checked-in fixtures). NDJSON and CSV COPY are DuckDB's fast ingest paths; a nested JSON array and per-row INSERT VALUES are the slow ones. Compare those to skipprd File JSON → DuckDB (`ingest-a-duckdb`) and File CSV → DuckDB (`ingest-csv-duckdb`).
 
 ## GitHub
 
