@@ -55,12 +55,53 @@ pub static CLUSTER_QUORUM_TIMEOUT_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU6
 pub static CLUSTER_DIVERGENCE_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CLUSTER_PURGE_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
+pub static STREAM_TRANSFORM_RECORDS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static STREAM_TRANSFORM_FAILURES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static STREAM_PROCESSOR_RECORDS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static STREAM_PROCESSOR_CDC_INSERT_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static STREAM_PROCESSOR_CDC_UPDATE_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static STREAM_PROCESSOR_CDC_DELETE_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static STREAM_PROCESSOR_TXN_FAILURES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static STREAM_PROCESSOR_WAL_LAG: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+
 pub fn set_cluster_ready(ready: u64) {
     CLUSTER_READY.store(ready, Ordering::Relaxed);
 }
 
 pub fn set_cluster_primary(primary: u64) {
     CLUSTER_PRIMARY.store(primary, Ordering::Relaxed);
+}
+
+pub fn add_stream_transform_records(n: u64) {
+    STREAM_TRANSFORM_RECORDS_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_stream_transform_failure(n: u64) {
+    STREAM_TRANSFORM_FAILURES_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_stream_processor_records(n: u64) {
+    STREAM_PROCESSOR_RECORDS_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_stream_processor_cdc_insert(n: u64) {
+    STREAM_PROCESSOR_CDC_INSERT_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_stream_processor_cdc_update(n: u64) {
+    STREAM_PROCESSOR_CDC_UPDATE_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_stream_processor_cdc_delete(n: u64) {
+    STREAM_PROCESSOR_CDC_DELETE_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_stream_processor_txn_failure(n: u64) {
+    STREAM_PROCESSOR_TXN_FAILURES_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn set_stream_processor_wal_lag(lag: u64) {
+    STREAM_PROCESSOR_WAL_LAG.store(lag, Ordering::Relaxed);
 }
 
 pub fn add_cluster_quorum_lost(n: u64) {

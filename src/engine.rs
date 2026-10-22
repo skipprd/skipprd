@@ -1147,6 +1147,7 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
 
         validate_pipeline_source_contracts_at_startup(config, &output_plugin_name).await;
         Buffers::start_compactor_service(config, shared_output.clone(), offsets_db.clone());
+        crate::processor::start_processor_service(config, offsets_db.clone());
     }
 
     let shared_output_clone = shared_output.clone();
@@ -1306,6 +1307,10 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
             reporter.start("Finalising");
         }
         let finalising_started = std::time::Instant::now();
+        info!("Finalising: draining stream processor");
+        if !crate::processor::drain_and_stop_processor().await {
+            warn!("Finalising: stream processor drain did not complete cleanly");
+        }
         info!("Finalising: draining and stopping compactor");
         let compactor_ok = Buffers::drain_and_stop_compactor(config, offsets_db.clone()).await;
         if compactor_ok {

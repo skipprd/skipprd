@@ -947,11 +947,12 @@ impl PipelineWalHandle {
         row.done.or_bits(ordinals);
         crate::metrics::counters::add_compaction_catalog_bit_write(ordinals.len() as u64);
         let all_done = row.done.all_done();
+        let can_reclaim = all_done && crate::processor::allows_reclaim(row.seq.get());
         let version = row.version;
         row.version = version.saturating_add(1);
         let location = row.location.clone();
         let mut txn = CatalogTxn::new();
-        if all_done {
+        if can_reclaim {
             txn.delete(
                 CatalogKey::Segment(id.clone()),
                 skippr_wal_catalog::DeleteCond::Version(version),
@@ -984,7 +985,7 @@ impl PipelineWalHandle {
             .map_err(|err| DurableError::Io(err.to_string()))?;
         }
         self.commit_durable(&txn, fence)?;
-        if all_done {
+        if can_reclaim {
             delete_payload(&location)?;
             if let ReplicationMode::Synchronous(replicator) = &self.replicator {
                 let _ = crate::cluster::peer::drop_payload_at(
@@ -1008,7 +1009,28 @@ impl PipelineWalHandle {
                 }),
             );
         }
-        Ok(all_done)
+        Ok(can_reclaim)
+    }
+
+    /// Drop catalog rows and payloads for fully compacted segments the processor has passed.
+    pub async fn reclaim_fully_done_before(
+        &self,
+        min_unconsumed_seq: u64,
+    ) -> Result<u64, DurableError> {
+        let rows = self.live_segment_rows()?;
+        let mut reclaimed = 0u64;
+        for row in rows {
+            if !row.done.all_done() || row.seq.get() >= min_unconsumed_seq {
+                continue;
+            }
+            if self
+                .complete_slices_and_reclaim(row.segment_id.as_str(), &[])
+                .await?
+            {
+                reclaimed += 1;
+            }
+        }
+        Ok(reclaimed)
     }
 
     pub async fn delete_compaction(&self, id: &str) -> Result<(), DurableError> {
