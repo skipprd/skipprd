@@ -1,7 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
@@ -17,6 +17,17 @@ use crate::runtime_plugins::manifest::{RuntimePluginArtifact, RuntimePluginManif
 const ARTIFACT_DOWNLOAD_MAX_ATTEMPTS: usize = 4;
 const ARTIFACT_DOWNLOAD_INITIAL_BACKOFF_MS: u64 = 200;
 static ARTIFACT_INSTALL_LOCKS: Lazy<DashMap<PathBuf, Arc<Mutex<()>>>> = Lazy::new(DashMap::new);
+static VERIFIED_SHA256: Lazy<DashMap<PathBuf, VerifiedSha256>> = Lazy::new(DashMap::new);
+
+#[cfg(test)]
+static VERIFY_SHA256_HASH_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+struct VerifiedSha256 {
+    expected: String,
+    len: u64,
+    modified: SystemTime,
+}
 
 pub async fn resolve_plugin_executable(
     manifest_path: &Path,
@@ -252,6 +263,18 @@ async fn verify_sha256(path: &Path, expected: Option<&str>) -> io::Result<()> {
         return Ok(());
     };
 
+    let metadata = fs::metadata(path).await?;
+    let len = metadata.len();
+    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    if let Some(cached) = VERIFIED_SHA256.get(path) {
+        if cached.expected == expected && cached.len == len && cached.modified == modified {
+            return Ok(());
+        }
+    }
+
+    #[cfg(test)]
+    VERIFY_SHA256_HASH_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
     let bytes = fs::read(path).await?;
     let actual = format!("{:x}", Sha256::digest(&bytes));
     if actual != expected {
@@ -262,7 +285,26 @@ async fn verify_sha256(path: &Path, expected: Option<&str>) -> io::Result<()> {
             actual
         )));
     }
+    VERIFIED_SHA256.insert(
+        path.to_path_buf(),
+        VerifiedSha256 {
+            expected: expected.to_string(),
+            len,
+            modified,
+        },
+    );
     Ok(())
+}
+
+#[cfg(test)]
+fn reset_verify_sha256_hash_count() {
+    VERIFY_SHA256_HASH_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    VERIFIED_SHA256.clear();
+}
+
+#[cfg(test)]
+fn verify_sha256_hash_count() -> usize {
+    VERIFY_SHA256_HASH_COUNT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 async fn set_executable_permissions(path: &Path) -> io::Result<()> {
@@ -314,5 +356,20 @@ mod tests {
             artifact_download_backoff(3),
             std::time::Duration::from_millis(800)
         );
+    }
+
+    #[tokio::test]
+    async fn verify_sha256_hashes_an_unchanged_file_once() {
+        use super::{reset_verify_sha256_hash_count, verify_sha256, verify_sha256_hash_count};
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin.bin");
+        std::fs::write(&path, b"plugin-bytes").unwrap();
+        let expected = format!("{:x}", Sha256::digest(b"plugin-bytes"));
+        reset_verify_sha256_hash_count();
+        verify_sha256(&path, Some(&expected)).await.unwrap();
+        verify_sha256(&path, Some(&expected)).await.unwrap();
+        assert_eq!(verify_sha256_hash_count(), 1);
     }
 }

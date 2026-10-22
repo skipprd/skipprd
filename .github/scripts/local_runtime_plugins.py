@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -66,14 +65,6 @@ def ensure_tool(name: str) -> str:
 def run_command(command: list[str], *, env: dict[str, str] | None = None) -> None:
     print_step("+ " + " ".join(command))
     subprocess.run(command, cwd=REPO_ROOT, env=env, check=True)
-
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def current_rust_target_triple() -> str:
@@ -306,7 +297,6 @@ def build_local_runtime_plugins(
             artifacts={
                 target_triple: {
                     "executable": executable,
-                    "sha256": sha256(binary),
                 }
             },
             executable=executable,
