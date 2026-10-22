@@ -225,6 +225,12 @@ def analyze_artifacts(root: Path, diff: str, *, base: str) -> dict[str, Any]:
     }
 
 
+def missing_folded_message(root: Path) -> str:
+    files = sorted(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
+    listing = "\n".join(files[:40]) if files else "(empty)"
+    return f"no perf.folded under {root}\n{listing}"
+
+
 def git_diff(base: str, cwd: Path) -> str:
     proc = subprocess.run(
         ["git", "diff", f"{base}...HEAD"],
@@ -272,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
     print_summary(report)
     print(f"wrote {args.out}")
     if not report["profiles"]:
-        raise SystemExit("no perf.folded under --artifacts")
+        raise SystemExit(missing_folded_message(Path(args.artifacts)))
     return 0
 
 

@@ -403,6 +403,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("linux_analyze", text)
         self.assertIn("build_linux_profile", text)
         self.assertIn("perf.folded", text)
+        self.assertIn("needs.linux_profile.result == 'success'", text)
+        self.assertIn("perf-*-linux-flamegraph", text)
         self.assertIn("analyze.py", text)
         self.assertIn("python3 -m pip install --quiet boto3", text)
         self.assertRegex(

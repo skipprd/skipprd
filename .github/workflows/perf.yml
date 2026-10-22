@@ -288,7 +288,7 @@ jobs:
     name: bottlenecks vs new code
     needs:
       - linux_profile
-    if: always() && needs.linux_profile.result != 'skipped'
+    if: needs.linux_profile.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -303,7 +303,7 @@ jobs:
         run: git fetch origin main
       - uses: actions/download-artifact@v4
         with:
-          pattern: perf-*
+          pattern: perf-*-linux-flamegraph
           path: artifacts
       - name: Rank flamegraph leaves in new code
         run: python3 tests/perf/analyze.py --artifacts artifacts --base origin/main --out bottlenecks.json --repo-root .
