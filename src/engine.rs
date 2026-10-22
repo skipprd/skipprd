@@ -548,7 +548,9 @@ pub async fn run_schema(config: &Config, pipeline: &str) {
     // let mut options = ConfigOptions::default();
     // options.catalog.information_schema = true;
 
-    let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
+    let ctx = crate::sqlrt::session::coordinating_query_context()
+        .await
+        .expect("QueryRuntime");
 
     let config = config.bind_pipeline(pipeline);
     config.init().await;

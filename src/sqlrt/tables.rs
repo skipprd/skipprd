@@ -10,8 +10,6 @@ use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
 };
-use datafusion::datasource::view::ViewTable;
-use datafusion::datasource::MemTable;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::Expr;
@@ -21,7 +19,6 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
-use std::any::Any;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -79,12 +76,11 @@ pub async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) {
     }
 }
 
-async fn empty_wal_df_from_metadata(
+pub(crate) async fn wal_table_for_namespace(
     config: &Config,
-    ctx: &SessionContext,
     pipeline: &str,
     namespace: &str,
-) -> Result<Option<datafusion::prelude::DataFrame>, DataFusionError> {
+) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
     let bound = config.bind_pipeline(pipeline);
     let Ok(pipeline_metadata) = bound.get_metadata().await else {
         return Ok(None);
@@ -99,41 +95,17 @@ async fn empty_wal_df_from_metadata(
     if schema.fields().is_empty() {
         return Ok(None);
     }
-    let mem = MemTable::try_new(schema, vec![vec![]])
-        .map_err(|e| DataFusionError::Internal(e.to_string()))?;
-    let tname = format!("{}_wal", namespace);
-    ctx.register_table(&tname, Arc::new(mem))?;
-    Ok(Some(ctx.table(&tname).await?))
-}
-
-async fn build_wal_df(
-    config: &Config,
-    ctx: &SessionContext,
-    pipeline: &str,
-    namespace: &str,
-) -> Result<Option<datafusion::prelude::DataFrame>, DataFusionError> {
-    let reader =
-        crate::sqlrt::wal_reader::WalReaderFactory::for_pipeline_async(config, pipeline).await;
-    let wal_batches: Vec<RecordBatch> = reader
-        .load_committed_batches(namespace, usize::MAX)
-        .unwrap_or_default();
-    if wal_batches.is_empty() {
-        return empty_wal_df_from_metadata(config, ctx, pipeline, namespace).await;
-    }
-    let schema = wal_batches[0].schema();
-    let filtered: Vec<RecordBatch> = wal_batches
-        .into_iter()
-        .filter(|b| b.schema().as_ref() == schema.as_ref())
-        .collect();
-    if filtered.is_empty() {
-        return Ok(None);
-    }
-    let mem = MemTable::try_new(schema.clone(), vec![filtered])
-        .map_err(|e| DataFusionError::Internal(e.to_string()))?;
-    let tname = format!("{}_wal", namespace);
-    ctx.register_table(&tname, Arc::new(mem))?;
-    let df = ctx.table(&tname).await?;
-    Ok(Some(df))
+    let key =
+        skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
+            .map_err(|err| DataFusionError::Plan(err.to_string()))?;
+    Ok(Some(Arc::new(
+        crate::sqlrt::wal_table::WalTableProvider::new(
+            schema,
+            key,
+            namespace.to_string(),
+            Vec::new(),
+        ),
+    )))
 }
 
 pub async fn register_namespace_view(
@@ -205,7 +177,7 @@ fn register_table_under_pipeline_schema(
         schema
             .register_table(namespace.to_string(), table)
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-    } else if let Some(memcat) = catalog.as_any().downcast_ref::<MemoryCatalogProvider>() {
+    } else if let Some(memcat) = catalog.downcast_ref::<MemoryCatalogProvider>() {
         let new_schema = Arc::new(MemorySchemaProvider::new());
         let _ = memcat.register_schema(pipeline, new_schema.clone());
         let _ = new_schema.deregister_table(namespace);
@@ -297,13 +269,8 @@ async fn register_wal_namespace_view(
     pipeline: &str,
     namespace: &str,
 ) -> Result<(), DataFusionError> {
-    let bound = config.bind_pipeline(pipeline);
-    match build_wal_df(&bound, ctx, pipeline, namespace).await? {
-        Some(df) => {
-            let plan = df.into_optimized_plan()?;
-            let view = ViewTable::new(plan, Some(namespace.to_string()));
-            register_table_under_pipeline_schema(ctx, pipeline, namespace, Arc::new(view))
-        }
+    match wal_table_for_namespace(config, pipeline, namespace).await? {
+        Some(table) => register_table_under_pipeline_schema(ctx, pipeline, namespace, table),
         None => Err(DataFusionError::Plan(format!(
             "table '{pipeline}.{namespace}' not found"
         ))),
@@ -349,7 +316,7 @@ pub fn ensure_dbt_schema(ctx: &SessionContext) -> Result<(), DataFusionError> {
         if catalog.schema("dbt").is_some() {
             return Ok(());
         }
-        if let Some(memcat) = catalog.as_any().downcast_ref::<MemoryCatalogProvider>() {
+        if let Some(memcat) = catalog.downcast_ref::<MemoryCatalogProvider>() {
             let new_schema = Arc::new(MemorySchemaProvider::new());
             let _ = memcat.register_schema("dbt", new_schema);
             info!("Created DataFusion schema 'dbt'");
@@ -520,11 +487,10 @@ pub async fn plan_clustered_select(
 ) -> Result<ClusteredSelectPlan, DataFusionError> {
     config.init().await;
     let cfg = config.clone();
-    let ctx = if opts.lake_only {
-        SessionContext::new()
-    } else {
-        crate::query_flight::ballista::query_context()?
-    };
+    crate::query_flight::runtime::ensure_started()
+        .await
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    let ctx = crate::query_flight::runtime::query_context()?;
     let mut wal_only = Vec::new();
     for name in cfg.pipelines.keys() {
         let view = PipelineConfigView::for_name(&cfg, name)
@@ -591,7 +557,10 @@ pub async fn plan_iceberg_scan(
 ) -> Result<datafusion::dataframe::DataFrame, DataFusionError> {
     config.init().await;
     let cfg = config.clone();
-    let ctx = datafusion::prelude::SessionContext::new();
+    crate::query_flight::runtime::ensure_started()
+        .await
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    let ctx = crate::query_flight::runtime::query_context()?;
     let mut found = false;
     for name in cfg.pipelines.keys() {
         let view = PipelineConfigView::for_name(&cfg, name)
@@ -840,6 +809,8 @@ async fn wal_child_provider(
         Some(gossip) => gossip.known_ads().await,
         None => Vec::new(),
     };
+    // Local skipprd query has no Flight bind: WalTableProvider on QueryRuntime.
+    // Clustered UNION WAL is FlightSqlExec to the picker winner (loopback DoGet).
     if crate::cluster::identity::process_query_bind().is_none() {
         if crate::buffer::wal_handle::wal_handle_for(&view.key).is_none() {
             return Ok(None);
@@ -904,7 +875,7 @@ async fn load_iceberg_from_peer(
     let sql = crate::query_flight::sql::iceberg_scan_sql(namespace);
     let mut last_err = None;
     for flight in flights {
-        match skippr_query_ballista::fetch_statement_schema_with_auth(
+        match skippr_query_plan::fetch_statement_schema_with_auth(
             &flight.to_string(),
             &sql,
             &opts.scope.basic_authorization(),
@@ -954,10 +925,6 @@ impl std::fmt::Debug for IcebergWalUnionProvider {
 
 #[async_trait::async_trait]
 impl TableProvider for IcebergWalUnionProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -1033,6 +1000,7 @@ async fn load_iceberg_scan_provider(
 mod tests {
     use super::*;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::datasource::MemTable;
     use datafusion::physical_plan::empty::EmptyExec;
 
     #[derive(Debug)]
@@ -1042,10 +1010,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TableProvider for ScanProvider {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
         fn schema(&self) -> SchemaRef {
             self.schema.clone()
         }
@@ -1086,6 +1050,15 @@ mod tests {
             !prod.contains("falling back to {}"),
             "must not invent s3://bucket/datalake/ns/ when the lake manifest is missing"
         );
+        assert!(
+            prod.contains("WalTableProvider::new"),
+            "WAL-only query registers WalTableProvider, not a MemTable dump"
+        );
+        assert!(
+            !prod.contains("WalReaderFactory"),
+            "CatalogWalReader MemTable path is deleted"
+        );
+        assert!(!prod.contains("build_wal_df"));
     }
 
     #[test]

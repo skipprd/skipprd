@@ -67,14 +67,16 @@ impl OffsetHintKey {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CatalogPrefix {
     Segment,
+    Slice,
     Compaction,
     Checkpoint,
     OffsetHint,
 }
 
 impl CatalogPrefix {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Segment,
+        Self::Slice,
         Self::Compaction,
         Self::Checkpoint,
         Self::OffsetHint,
@@ -83,6 +85,7 @@ impl CatalogPrefix {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Segment => "wal#seg#",
+            Self::Slice => "wal#slice#",
             Self::Compaction => "wal#cmp#",
             Self::Checkpoint => "wal#cp#",
             Self::OffsetHint => "wal#hint#",
@@ -93,6 +96,7 @@ impl CatalogPrefix {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CatalogKey {
     Segment(SegmentId),
+    Slice { segment_id: SegmentId, ordinal: u32 },
     Compaction(CompactionId),
     Checkpoint(CheckpointKey),
     OffsetHint(OffsetHintKey),
@@ -104,6 +108,10 @@ impl CatalogKey {
     pub fn encode(&self) -> String {
         match self {
             Self::Segment(id) => format!("wal#seg#{}", id.as_str()),
+            Self::Slice {
+                segment_id,
+                ordinal,
+            } => format!("wal#slice#{}#{ordinal}", segment_id.as_str()),
             Self::Compaction(id) => format!("wal#cmp#{}", id.as_str()),
             Self::Checkpoint(key) => format!("wal#cp#{}", key.as_str()),
             Self::OffsetHint(key) => {
@@ -123,6 +131,18 @@ impl CatalogKey {
         }
         if let Some(rest) = sk.strip_prefix("wal#seg#") {
             return Ok(Self::Segment(SegmentId::new(rest)?));
+        }
+        if let Some(rest) = sk.strip_prefix("wal#slice#") {
+            let (segment, ordinal) = rest.rsplit_once('#').ok_or_else(|| {
+                PathError::InvalidComponent(format!("slice SK must be wal#slice#seg#ordinal: {sk}"))
+            })?;
+            let ordinal: u32 = ordinal.parse().map_err(|_| {
+                PathError::InvalidComponent(format!("slice ordinal is not u32: {sk}"))
+            })?;
+            return Ok(Self::Slice {
+                segment_id: SegmentId::new(segment)?,
+                ordinal,
+            });
         }
         if let Some(rest) = sk.strip_prefix("wal#cmp#") {
             return Ok(Self::Compaction(CompactionId::new(rest)?));
@@ -153,6 +173,10 @@ mod tests {
     fn codec_roundtrips_every_variant() {
         let keys = [
             CatalogKey::Segment(SegmentId::new("seg-1").unwrap()),
+            CatalogKey::Slice {
+                segment_id: SegmentId::new("seg-1").unwrap(),
+                ordinal: 3,
+            },
             CatalogKey::Compaction(CompactionId::new("cmp-1").unwrap()),
             CatalogKey::Checkpoint(CheckpointKey::new("cp-1").unwrap()),
             CatalogKey::OffsetHint(OffsetHintKey::new("ns", "part").unwrap()),
@@ -179,8 +203,19 @@ mod tests {
     #[test]
     fn prefixes_are_stable() {
         assert_eq!(CatalogPrefix::Segment.as_str(), "wal#seg#");
+        assert_eq!(CatalogPrefix::Slice.as_str(), "wal#slice#");
         assert_eq!(CatalogPrefix::Compaction.as_str(), "wal#cmp#");
         assert_eq!(CatalogPrefix::Checkpoint.as_str(), "wal#cp#");
         assert_eq!(CatalogPrefix::OffsetHint.as_str(), "wal#hint#");
+    }
+
+    #[test]
+    fn slice_key_is_segment_plus_ordinal() {
+        let key = CatalogKey::Slice {
+            segment_id: SegmentId::new("live-seg").unwrap(),
+            ordinal: 0,
+        };
+        assert_eq!(key.encode(), "wal#slice#live-seg#0");
+        assert_eq!(CatalogKey::decode("wal#slice#live-seg#0").unwrap(), key);
     }
 }

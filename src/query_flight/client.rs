@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use datafusion::arrow::array::RecordBatch;
 use skippr_lease::DurableError;
-use skippr_query_ballista::fetch_statement_batches;
+use skippr_query_plan::fetch_statement_batches;
 
 pub async fn fetch_flight_sql(
     endpoint: SocketAddr,

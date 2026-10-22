@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -56,10 +55,6 @@ impl ExecutionPlan for StreamingBatchesExec {
         "StreamingBatchesExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
@@ -73,6 +68,15 @@ impl ExecutionPlan for StreamingBatchesExec {
         _children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(self)
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+        ) -> Result<datafusion::common::tree_node::TreeNodeRecursion>,
+    ) -> Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
     fn execute(

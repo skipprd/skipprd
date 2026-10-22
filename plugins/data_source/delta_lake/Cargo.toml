@@ -14,7 +14,7 @@ clap.workspace = true
 tokio.workspace = true
 skippr-runtime-sdk.workspace = true
 
-arrow = { version = "58.3.0", features = ["ipc_compression"] }
+arrow.workspace = true
 deltalake = { version = "0.32.3", features = ["datafusion"] }
 futures = "0.3.25"
 serde.workspace = true

@@ -2,7 +2,7 @@
 
 **Status:** design / implementation in progress  
 **Implementation:** [`hla-observability-implementation-wbs.md`](./hla-observability-implementation-wbs.md)  
-**Depends on (shipped in skipprd):** multi-node HA ingest, per-pipeline leases, sync WAL replication, Iceberg catalog, Iceberg∪WAL UNION (`IcebergWalUnionProvider`), Arrow Flight SQL, in-process Ballista — [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md).  
+**Depends on (shipped in skipprd):** multi-node HA ingest, per-pipeline leases, sync WAL replication, Iceberg catalog, Iceberg∪WAL UNION (`IcebergWalUnionProvider`), Arrow Flight SQL, in-process QueryRuntime — [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md).  
 **Product front:** CloudQuery Execute of the same SQL/UDFs (Cloud later). skipprd has **no** `skippr observe`, no o11y HTTP API, no console, and no alarm evaluator.  
 **Non-goals:** building another consensus/WAL stack; replacing customer paging products; platform-wide legal-hold/compliance product; shipping a full Datadog clone on day one
 
@@ -39,7 +39,7 @@ Skippr ingest (HA, leased pipelines) ──► WAL (hot) ──► Iceberg (cold
         │                                    │              │
         │                                    └──────┬───────┘
         │                                           ▼
-        │                              Query engine (DF / Ballista)
+        │                              Query engine (DF / QueryRuntime)
         │                              + observability UDFs
         │                                           │
         │                                           ▼
@@ -57,7 +57,7 @@ Cloud UI is the sellable console; it is not where durability or multi-node corre
 
 - Per-pipeline exclusive leases; failover with fence + TTL + WAL/compaction catch-up.  
 - Payload-replicated disk WAL and/or S3 WAL as configured; store catalog is WAL/compaction hard-state.  
-- Query: lakehouse (Iceberg) ∪ live WAL via `IcebergWalUnionProvider`; clustered query is Arrow Flight SQL + in-process Ballista ([`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md)).  
+- Query: lakehouse (Iceberg) ∪ live WAL via `IcebergWalUnionProvider`; clustered query is Arrow Flight SQL + in-process QueryRuntime ([`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md)).  
 - Schema and Iceberg metadata on shared object store + catalog.  
 - Platform already provides multi-tenant AuthZ (ABAC policy engine).
 

@@ -15,18 +15,16 @@ use arrow_schema::DataType;
 use datafusion::prelude::SessionContext;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::sqlrt::doc_parser::SqlDocParser;
 use crate::sqlrt::docs::SqlStatementDoc;
 use chrono::DateTime;
 use datafusion::error::DataFusionError;
-use datafusion::prelude::SessionConfig;
 // removed unused SqlIdent
 // no Volatility import needed (UDFs disabled)
 // removed unused ScalarValue
 use datafusion::arrow::array::RecordBatch;
-use datafusion::datasource::MemTable;
 // removed unused ViewTable
 use crate::ingest_work::Ingest;
 use crate::sqlrt::tui::{QueryEditorConfig, QueryEditorView};
@@ -123,7 +121,7 @@ impl Default for QueryExecutionOptions {
 pub async fn new_context_all_namespaces(
     config: &Config,
 ) -> Result<SessionContext, DataFusionError> {
-    let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
+    let ctx = crate::sqlrt::session::coordinating_query_context().await?;
     let pipelines = crate::sqlrt::registry::list_pipelines(&config).await;
     for pipeline in pipelines {
         let mut namespaces = crate::sqlrt::registry::list_namespaces(&config, &pipeline).await;
@@ -143,7 +141,7 @@ pub async fn new_context_all_namespaces(
 pub async fn new_context_iceberg_namespaces(
     config: &Config,
 ) -> Result<SessionContext, DataFusionError> {
-    let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
+    let ctx = crate::sqlrt::session::coordinating_query_context().await?;
     crate::sqlrt::tables::register_user_namespaces(&ctx, config).await?;
     Ok(ctx)
 }
@@ -152,8 +150,6 @@ pub async fn register_catalog(config: &Config, ctx: &SessionContext) {
     // Delegate to S3-only registry-backed builder
     crate::sqlrt::metadata::register_catalog(&config, ctx).await;
 }
-
-// WalReader abstraction handles WAL batch loading; helpers removed.
 
 #[allow(dead_code)]
 fn datediff(args: &[ArrayRef]) -> Result<ArrayRef, DataFusionError> {
@@ -311,10 +307,22 @@ fn extension_message_batch(message: &str) -> Vec<arrow::array::RecordBatch> {
     vec![batch]
 }
 
+fn emit_query_collect(started: Instant, batches: &[RecordBatch]) {
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    crate::helpers::perf::emit(
+        "query_collect",
+        serde_json::json!({
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "rows": rows,
+        }),
+    );
+}
+
 pub async fn query_collect(
     config: &Config,
     sql_str: &str,
 ) -> std::io::Result<Vec<arrow::array::RecordBatch>> {
+    let started = Instant::now();
     config.init().await;
     if !sql_uses_record_batch_collect(sql_str) {
         let mut parser = SParser::new(sql_str).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -328,13 +336,17 @@ pub async fn query_collect(
                 let message = crate::migration::apply_query_alter(&bound, &stmt, sql_str)
                     .await
                     .map_err(std::io::Error::other)?;
-                return Ok(extension_message_batch(&message));
+                let batches = extension_message_batch(&message);
+                emit_query_collect(started, &batches);
+                return Ok(batches);
             }
             Statement::PipelineToggle(stmt) => {
                 let message = apply_pipeline_toggle(config, &stmt)
                     .await
                     .map_err(std::io::Error::other)?;
-                return Ok(extension_message_batch(&message));
+                let batches = extension_message_batch(&message);
+                emit_query_collect(started, &batches);
+                return Ok(batches);
             }
             other => {
                 return Err(std::io::Error::other(format!(
@@ -350,9 +362,53 @@ pub async fn query_collect(
         .sql(sql_str)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    collect_user_sql(df)
+    let batches = collect_user_sql(df)
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    emit_query_collect(started, &batches);
+    Ok(batches)
+}
+
+async fn stream_wal_session(
+    config: &mut Config,
+    pipeline_name: &str,
+) -> Result<Option<SessionContext>, DataFusionError> {
+    let ctx = crate::sqlrt::session::coordinating_query_context().await?;
+    *config = config.bind_pipeline(pipeline_name);
+    config.init().await;
+    register_catalog(config, &ctx).await;
+    let Some(provider) =
+        crate::sqlrt::tables::wal_table_for_namespace(config, pipeline_name, pipeline_name).await?
+    else {
+        return Ok(None);
+    };
+    ctx.register_table(pipeline_name, provider)?;
+    Ok(Some(ctx))
+}
+
+async fn execute_stream_sql(
+    config: &mut Config,
+    pipeline_name: &str,
+    run_sql: &str,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let Some(ctx) = stream_wal_session(config, pipeline_name).await? else {
+        return Ok(Vec::new());
+    };
+    let df = ctx.sql(run_sql).await?;
+    collect_user_sql(df).await
+}
+
+async fn stream_plain_snapshot(
+    config: &mut Config,
+    pipeline_name: &str,
+    run_sql: &str,
+) -> std::io::Result<Vec<RecordBatch>> {
+    let started = Instant::now();
+    let batches = execute_stream_sql(config, pipeline_name, run_sql)
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    emit_query_collect(started, &batches);
+    Ok(batches)
 }
 
 pub async fn query_with_options(
@@ -526,6 +582,17 @@ pub async fn query_with_options(
             // window applied; results may be empty if no recent data
         }
 
+        if query_options.plain {
+            match stream_plain_snapshot(&mut config, &pipeline, &select_sql).await {
+                Ok(batches) => print_query_plain_json(&batches),
+                Err(err) => {
+                    eprintln!("{err}");
+                    process::exit(1);
+                }
+            }
+            return;
+        }
+
         // STREAM editor: editable SQL (STREAM ... or SELECT ...), background refresher pulls WAL-only
         let (tx_req, rx_req) = mpsc::channel::<String>();
         let (tx_res, rx_res) = mpsc::channel::<Vec<RecordBatch>>();
@@ -604,41 +671,13 @@ pub async fn query_with_options(
             let mut current_sql = initial_stream_sql.clone();
             loop {
                 if let Some((pipeline_name, run_sql)) = build_plan(&current_sql) {
-                    let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
-                    // Set pipeline context BEFORE any config that might create dirs
-                    config = config.bind_pipeline(&pipeline_name);
-                    config.init().await;
-                    register_catalog(&config, &ctx).await;
-                    // Catalog-backed WAL reader keyed by PipelineKey.
-                    let reader = crate::sqlrt::wal_reader::WalReaderFactory::for_pipeline_async(
-                        &config,
-                        &pipeline_name,
-                    )
-                    .await;
-                    let wal_batches: Vec<RecordBatch> = reader
-                        .load_committed_batches(&pipeline_name, usize::MAX)
-                        .unwrap_or_default();
-
-                    if !wal_batches.is_empty() {
-                        let schema = wal_batches[0].schema();
-                        let filtered: Vec<RecordBatch> = wal_batches
-                            .into_iter()
-                            .filter(|b| b.schema().as_ref() == schema.as_ref())
-                            .collect();
-                        if let Ok(mem) = MemTable::try_new(schema.clone(), vec![filtered])
-                            .map_err(|e| DataFusionError::Internal(e.to_string()))
-                        {
-                            let _ = ctx.register_table(&pipeline_name, Arc::new(mem));
-                            if let Ok(df) = ctx.sql(&run_sql).await {
-                                if let Ok(b) = df.collect().await {
-                                    let _ = tx_res.send(b);
-                                }
-                            }
-                        } else {
+                    match execute_stream_sql(&mut config, &pipeline_name, &run_sql).await {
+                        Ok(b) => {
+                            let _ = tx_res.send(b);
+                        }
+                        Err(_) => {
                             let _ = tx_res.send(Vec::new());
                         }
-                    } else {
-                        let _ = tx_res.send(Vec::new());
                     }
                 } else {
                     let _ = tx_res.send(Vec::new());
@@ -892,7 +931,13 @@ pub async fn query_with_options(
 
             let pipeline = format!("{}", stmt.pipeline);
             let namespace = format!("{}", schema_name);
-            let ctx = SessionContext::new();
+            let ctx = match crate::sqlrt::session::coordinating_query_context().await {
+                Ok(ctx) => ctx,
+                Err(err) => {
+                    println!("{err}");
+                    process::exit(1);
+                }
+            };
             if let Err(err) =
                 crate::sqlrt::tables::register_namespace_view(&ctx, &config, &pipeline, &namespace)
                     .await
@@ -964,7 +1009,13 @@ pub async fn query_with_options(
         _ => {
             // Fall back to DataFusion for standard SQL (e.g., SELECT ...)
             // Build a context and register available pipeline table from current data dir
-            let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
+            let ctx = match crate::sqlrt::session::coordinating_query_context().await {
+                Ok(ctx) => ctx,
+                Err(err) => {
+                    println!("{err}");
+                    process::exit(1);
+                }
+            };
 
             // Register catalog tables after pipeline context is established below
 
@@ -1401,40 +1452,14 @@ pub async fn query_with_options(
                             }
                         }
                         if let Some(pipeline_name) = table_opt {
-                            let ctx =
-                                crate::sqlrt::session::build_query_context(SessionConfig::new());
-                            register_catalog(&config, &ctx).await;
-                            config = config.bind_pipeline(&pipeline_name);
-                            config.init().await;
-                            let reader =
-                                crate::sqlrt::wal_reader::WalReaderFactory::for_pipeline_async(
-                                    &config,
-                                    &pipeline_name,
-                                )
-                                .await;
-                            let wal_batches: Vec<RecordBatch> = reader
-                                .load_committed_batches(&pipeline_name, usize::MAX)
-                                .unwrap_or_default();
-                            if !wal_batches.is_empty() {
-                                let schema = wal_batches[0].schema();
-                                let filtered: Vec<RecordBatch> = wal_batches
-                                    .into_iter()
-                                    .filter(|b| b.schema().as_ref() == schema.as_ref())
-                                    .collect();
-                                if let Ok(mem) = MemTable::try_new(schema.clone(), vec![filtered])
-                                    .map_err(|e| DataFusionError::Internal(e.to_string()))
-                                {
-                                    let _ = ctx.register_table(&pipeline_name, Arc::new(mem));
-                                    if let Ok(df) = ctx.sql(&select_sql).await {
-                                        if let Ok(b) = df.collect().await {
-                                            let _ = tx_res.send(b);
-                                        }
-                                    }
-                                } else {
+                            match execute_stream_sql(&mut config, &pipeline_name, &select_sql).await
+                            {
+                                Ok(b) => {
+                                    let _ = tx_res.send(b);
+                                }
+                                Err(_) => {
                                     let _ = tx_res.send(Vec::new());
                                 }
-                            } else {
-                                let _ = tx_res.send(Vec::new());
                             }
                         } else {
                             let _ = tx_res.send(Vec::new());
@@ -1866,6 +1891,32 @@ mod plain_query_document_tests {
     }
 
     #[test]
+    fn query_collect_emits_query_collect_perf() {
+        let src = include_str!("query.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains("fn emit_query_collect"),
+            "query PERF must go through emit_query_collect"
+        );
+        assert!(
+            prod.contains("\"query_collect\""),
+            "query_collect phase name must be query_collect"
+        );
+        let start = prod
+            .find("pub async fn query_collect")
+            .expect("query_collect");
+        let body = &prod[start..];
+        let body = body
+            .split("pub async fn query_with_options")
+            .next()
+            .expect("body before query_with_options");
+        assert!(
+            body.contains("emit_query_collect"),
+            "query_collect must emit PERF_EVENT query_collect"
+        );
+    }
+
+    #[test]
     fn query_with_options_does_not_apply_alter_directly() {
         let src = include_str!("query.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
@@ -1881,6 +1932,19 @@ mod plain_query_document_tests {
             body.contains("sql_uses_shared_extension_collect"),
             "CLI ALTER/ENABLE/DISABLE must enter query_collect"
         );
+        assert!(
+            body.contains("stream_plain_snapshot"),
+            "STREAM --plain must collect one WAL snapshot, not the TUI"
+        );
+        assert!(
+            body.contains("execute_stream_sql"),
+            "STREAM must scan WalTableProvider, not dump CatalogWalReader into MemTable"
+        );
+        assert!(
+            !body.contains("WalReaderFactory"),
+            "CatalogWalReader dual stack is deleted"
+        );
+        assert!(!body.contains("MemTable::try_new"));
         assert!(
             !body.contains("apply_alter_table("),
             "query_with_options must not call apply_alter_table"

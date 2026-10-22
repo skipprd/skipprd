@@ -1,11 +1,11 @@
 # Implementation WBS: Multi-Node Skippr HLA
 
 **Architecture:** [`hla-distributed-query-iceberg-catalog.md`](./hla-distributed-query-iceberg-catalog.md)  
-**Flight SQL / Ballista:** [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md)  
+**Flight SQL / QueryRuntime:** [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md)  
 **Style:** [`AGENTS.md`](../../../AGENTS.md)  
 **Boundary:** [`repository-map.md`](./repository-map.md)
 
-This WBS is the implementation contract for clustered disk WAL, failover, the Iceberg DynamoDB catalog, Flight SQL, and Ballista. It supersedes the earlier draft choices for sled leases, custom Flight tickets, configurable quorum, extra cluster knobs, and an Iceberg listing fallback. Shipped vs deferred is recorded in the architecture spec **Implementation status** section: Arrow Flight SQL 58.3, Ballista 53, and authenticated Chitchat (WU-5.1) are in tree. Flight SQL / Ballista requirements and design: [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md).
+This WBS is the implementation contract for clustered disk WAL, failover, the Iceberg DynamoDB catalog, Flight SQL, and QueryRuntime. It supersedes the earlier draft choices for sled leases, custom Flight tickets, configurable quorum, extra cluster knobs, and an Iceberg listing fallback. Shipped vs deferred is recorded in the architecture spec **Implementation status** section: Arrow Flight SQL 59.2, datafusion-distributed, and authenticated Chitchat (WU-5.1) are in tree. Flight SQL / QueryRuntime requirements and design: [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md).
 
 ## Completion rules for every work unit
 
@@ -34,7 +34,7 @@ pub enum WalStorage {
 - Quorum and replication factor are both two total copies.
 - `clustered` forces DynamoDB offsets/checkpoints.
 - `clustered sync --once` and clustered discover fail validation.
-- `clustered query` never takes an ingest lease. After WU-7.5 it opens Flight SQL on any ready node; that node plans Iceberg∪WAL. WAL is best-effort latest advertised head ([`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md)).
+- `clustered query` never takes an ingest lease. After WU-7.5 it opens Flight SQL on any ready node; that node plans Iceberg∪WAL. WAL is best-effort latest advertised head ([`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md)).
 - `disk` and `s3` start no cluster services.
 
 ## Dependency graph
@@ -65,7 +65,7 @@ crates/skippr-lease-store-dynamodb/
 crates/skippr-wal-catalog/
 crates/skippr-iceberg-catalog/
 crates/skippr-iceberg-catalog-dynamodb/
-crates/skippr-query-ballista/
+crates/skippr-query-plan/
 proto/cluster.proto
 src/cluster/
   identity.rs
@@ -82,7 +82,7 @@ src/buffer/
   wal_handle.rs
   wal_startup.rs
   wal_catalog_import.rs
-src/query_flight/          # Arrow Flight SQL 58.3 on flight_addr; in-process Ballista
+src/query_flight/          # Arrow Flight SQL 59.2 on flight_addr; in-process QueryRuntime
   service.rs
   live_wal.rs
 src/sqlrt/
@@ -524,7 +524,7 @@ Initialized payload loss is fatal (`PayloadMissing`).
 
 ## WU-5.3 Trust boundary
 
-- Replica/Flight/Ballista TCP is always mTLS. Gossip UDP is HMAC with a required cluster key.
+- Replica/Flight/QueryRuntime TCP is always mTLS. Gossip UDP is HMAC with a required cluster key.
 - Handshake verifies **cluster id** (`cluster_hash`) and protocol, not tenant/workspace.
 - Tenant is `PipelineKey` on every replica frame and Flight `Authorization: Basic {tenant}/{workspace}` on every SQL RPC. Cloud JWT stays on the gateway (D31).
 - Flight tables are filtered to the session `TenantScope`.
@@ -605,22 +605,22 @@ Iceberg config/catalog errors fail registration. Non-Iceberg/deadletter listing 
 
 `select_live_ordinals(handle, exclude_segment_ids)` is the only selector.
 
-- Live ids = catalog `SegmentRow`s.
-- Skip slice-done ordinals; skip unreadable or missing payloads.
+- Live ids = catalog `SliceIndexEntry` (`CatalogPrefix::Slice`).
+- Skip missing `SegmentRow` or unreadable/missing payloads. Slice-complete ordinals stay visible until Iceberg lists the segment.
 - Iceberg `skippr.wal-segment-ids` exclude the whole segment.
 - No pins, no client head cut, no compaction-id maps.
 - Stream batches; no MemTable.
 - Project/cast/null-fill to Iceberg schema.
 
-**Tests:** missing file skips, complete ordinal not in UNION, Iceberg-named segment not in WAL.
+**Tests:** missing file skips, complete ordinal stays visible until Iceberg exclude, Iceberg-named segment not in WAL.
 
 ## WU-7.3 Flight SQL
 
-**Implemented** in `src/query_flight`. Contract: [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md) (WU-7.3). Framed `src/query_socket` is deleted.
+**Implemented** in `src/query_flight`. Contract: [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md) (WU-7.3). Framed `src/query_socket` is deleted.
 
 Hard-replace `src/query_socket` with `src/query_flight` in the same change. No framed compatibility mode.
 
-Dependencies: Arrow Flight **58.3** `flight-sql`, tonic/prost as required by that crate. Workspace Arrow is already 58.3.
+Dependencies: Arrow Flight **59.2** `flight-sql`, tonic/prost as required by that crate. Workspace Arrow is 59.2.
 
 Implement read-only Flight SQL metadata, statements, prepared statements, bounded execution (`CONTROL_FRAME_MAX_BYTES`), and:
 
@@ -632,7 +632,7 @@ live_wal_scan(tenant, workspace, pipeline, namespace, exclude_segment_ids)
 - GetFlightInfo returns a ticket/prepared handle that does **not** freeze ordinals. DoGet calls `select_live_ordinals` now.
 - Foreign tenant/workspace and unknown pipeline fail closed. DDL/update rejected.
 - Membership `flight_addr` becomes the gRPC bind. Same ephemeral wildcard, no new knobs.
-- `IcebergWalUnionProvider` WAL child is `FlightSqlExec`, not eager `StreamingBatchesExec`. Until WU-7.5, `execute` MAY DoGet in-process on the query client.
+- `IcebergWalUnionProvider` WAL child is `FlightSqlExec`, not eager `StreamingBatchesExec`. `FlightSqlExec::execute` streams DoGet (including loopback to this process's advertised `flight_addr`).
 - Catalog listing is the Iceberg table name (`catalog_table_to_namespace` is identity). Isolation is `table_namespace`.
 
 **Tests:** metadata lists tables in `table_namespace`, SELECT unique ids, unknown pipeline, read-only rejection, reclaim between GetFlightInfo and DoGet skips the file, oversized SQL, Iceberg-only with no ready member, harness `query_each_replica_socket` over Flight SQL. `cargo test -p skipprd --lib query_flight::` replaces `query_socket::`.
@@ -647,22 +647,22 @@ live_wal_scan(tenant, workspace, pipeline, namespace, exclude_segment_ids)
 4. if no WAL replica is reachable, return Iceberg only;
 5. UNION is a dumb concat — no DISTINCT, pin, or wait.
 
-Distributed Flight/Ballista UNION remains WU-7.3 / WU-7.5 ([`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md)).
+Distributed Flight/QueryRuntime UNION remains WU-7.3 / WU-7.5 ([`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md)).
 
-**Tests:** missing file skips, complete ordinal not in WAL, Iceberg-named segment not in WAL, Iceberg-only with no replica.
+**Tests:** missing file skips, complete ordinal stays visible until Iceberg exclude, Iceberg-named segment not in WAL, Iceberg-only with no replica.
 
-## WU-7.5 Ballista 53 extension
+## WU-7.5 datafusion-distributed extension
 
-**Implemented** in `run_clustered` (gossip-elected in-process Ballista cluster). Contract: [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md) (WU-7.5).
+**Implemented** in `run_clustered` (in-process QueryRuntime Worker per node). Contract: [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md) (WU-7.5).
 
-- Compile Ballista 53 + Iceberg Rust + Flight SQL into `skipprd`. Delete wrapper bins.
-- Every clustered node starts a Ballista scheduler + executor + query frontend in `run_clustered`. Executors poll the gossip-elected scheduler (min `NodeId`).
+- Compile datafusion-distributed + Iceberg Rust + Flight SQL into `skipprd`. Delete wrapper bins.
+- Every clustered node starts one QueryRuntime Worker + coordinating SessionContext in `run_clustered`. `WorkerResolver` lists self plus gossip `worker` addrs. There is no scheduler election.
 - WAL picker: max advertised `catalog_seq_seen` with `payload_ready` (gossip hint, Status fallback); local on tie returns this node's advertised `flight_addr` as `FlightSqlExec`; Iceberg-only if none reachable.
 - Iceberg: in-process Catalog first; parquet on any cluster executor; peer Flight SQL scan if load fails; never listing.
-- `FlightSqlExec::execute` DoGets; prost schema-in-payload codec; delete `FLSQ`. `WalScanExec` must not enter a Ballista plan.
+- `FlightSqlExec::execute` DoGets; prost schema-in-payload codec; delete `FLSQ`. `WalScanExec` must not enter a distributed plan.
 - `clustered query` uses any ready `flight_addr`. `query-scheduler#` is not used.
 
-**Tests:** codec; UNION shape; local vs remote WAL head as `FlightSqlExec`; election; Iceberg peer fallback; `ballista_cluster_query` HLA scenario.
+**Tests:** codec; UNION shape; local vs remote WAL head as `FlightSqlExec`; WorkerResolver gossip `worker` ads; Iceberg peer fallback; `distributed_cluster_query` HLA scenario.
 
 # Phase 8 — Lifecycle and operations
 
@@ -703,7 +703,7 @@ Metrics (no partition or compaction-ID labels):
 - lag/catch-up;
 - purge;
 - promotion;
-- query request/fail (`cluster_flight_*`; Arrow Flight SQL 58.3);
+- query request/fail (`cluster_flight_*`; Arrow Flight SQL 59.2);
 - Iceberg CAS.
 
 Dynamo CAS errors use SDK `ProvideErrorMetadata::code() == Some("ConditionalCheckFailedException")`.
@@ -722,7 +722,7 @@ Dynamo CAS errors use SDK `ProvideErrorMetadata::code() == Some("ConditionalChec
 - Keep DDB absent from default host.
 - Existing feature includes lease store.
 - Add feature compile/test to CI.
-- Package Ballista wrappers after WU-7.5 integration tests.
+- Package QueryRuntime after WU-7.5 integration tests.
 
 ## WU-8.6 Soak
 
@@ -816,7 +816,7 @@ Model state includes role, epoch, catalog seq, published seq, payload_ready, liv
 - no double-count;
 - schema evolution;
 - Flight SQL GetFlightInfo/DoGet (WU-7.3);
-- Ballista UNION-before-aggregate, executor retry, scheduler discovery (WU-7.5).
+- QueryRuntime UNION-before-aggregate and WorkerResolver (WU-7.5).
 
 ### Lifecycle/version
 
@@ -834,7 +834,7 @@ cargo test -p skipprd --lib buffer::wal_handle::
 cargo test -p skippr-wal-catalog
 cargo test -p skipprd query_flight::
 # after WU-7.3: cargo test -p skipprd query_flight::
-cargo test -p skippr-query-ballista
+cargo test -p skippr-query-plan
 cargo test -p skipprd sqlrt::wal_table::
 cargo test -p skipprd --test hla_cluster
 cargo check -p skipprd --features offset-store-dynamodb
@@ -866,7 +866,7 @@ Add a deterministic DynamoDB Local job for lease, membership, offset CAS, and ca
 - Iceberg query has no listing fallback and no cold/live duplicate (in-process UNION).
 - Fence and shutdown stop side effects; failed drain leaves the lease held.
 - Deterministic failure suites and feature builds pass CI.
-- Arrow Flight SQL 58.3 and in-process Ballista UNION are implemented. Contract: [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md). HLA e2e over Flight SQL is the remaining live gate.
+- Arrow Flight SQL 59.2 and in-process QueryRuntime UNION are implemented. Contract: [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md). HLA e2e over Flight SQL is the remaining live gate.
 
 # Non-goals
 

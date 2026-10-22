@@ -15,7 +15,7 @@ hex.workspace = true
 parquet.workspace = true
 
 aes = { version = "0.8", default-features = false }
-arrow = { version = "58.3.0", features = ["ipc_compression"] }
+arrow.workspace = true
 async-trait = "0.1.77"
 aws-config = "1.5.1"
 aws-credential-types = "1.2.0"

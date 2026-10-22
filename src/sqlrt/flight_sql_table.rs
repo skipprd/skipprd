@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::SchemaRef;
@@ -8,7 +7,7 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::ExecutionPlan;
 use skippr_lease::PipelineKey;
-use skippr_query_ballista::FlightSqlExec;
+use skippr_query_plan::FlightSqlExec;
 
 /// Remote Flight SQL leaf. Does not collect batches in `scan`.
 #[derive(Debug)]
@@ -75,10 +74,6 @@ impl FlightSqlTableProvider {
 
 #[async_trait::async_trait]
 impl TableProvider for FlightSqlTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

@@ -42,7 +42,7 @@ jobs:
       - name: Build linux x86 release (perf plugin subset)
         uses: ./skipprd/.github/actions/rust-build-release
         with:
-          rust-version: "1.92.0"
+          rust-version: "1.94.1"
           architecture_name: linux_x86
           workspace-root: skipprd
           runtime_plugin_packages_json: >-

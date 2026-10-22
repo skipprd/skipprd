@@ -17,7 +17,7 @@ pub async fn shutdown_cluster(
     release: Option<LeaseRelease<'_>>,
 ) -> Result<(), ShutdownError> {
     flight.drain().await;
-    crate::query_flight::ballista::drain().await;
+    crate::query_flight::runtime::drain().await;
     replica.drain().await;
     gossip.drain().await;
     crate::cluster::identity::clear_process_query_bind();

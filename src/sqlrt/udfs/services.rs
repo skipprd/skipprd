@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -47,10 +46,6 @@ struct ServicesTable {
 
 #[async_trait::async_trait]
 impl TableProvider for ServicesTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         services_schema()
     }
@@ -138,10 +133,6 @@ struct ServiceMapTable {
 
 #[async_trait::async_trait]
 impl TableProvider for ServiceMapTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         service_map_schema()
     }

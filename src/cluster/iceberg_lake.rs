@@ -3,7 +3,7 @@ use serde_derive::{Deserialize, Serialize};
 use skippr_iceberg_catalog::WarehouseObjectStore;
 use skippr_iceberg_catalog::{S3CompatibleObjectStore, SkipprCatalogBackend, SkipprLakeConfig};
 
-/// Serializable Iceberg catalog identity for query, DDL, Ballista reload, and serve.
+/// Serializable Iceberg catalog identity for query, DDL, QueryRuntime reload, and serve.
 /// Opened asynchronously via [`crate::cluster::backend::open_iceberg_catalog`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -13,7 +13,7 @@ pub enum IcebergCatalogSpec {
     Filesystem(FsCatalogConfig),
 }
 
-/// Skippr catalog pointer store is part of lake identity (Ballista reload must not guess DynamoDB).
+/// Skippr catalog pointer store is part of lake identity (QueryRuntime reload must not guess DynamoDB).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SkipprLakeOpen {
     pub lake: SkipprLakeConfig,

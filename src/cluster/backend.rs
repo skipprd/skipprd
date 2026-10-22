@@ -252,7 +252,7 @@ mod tests {
         );
         assert!(
             !backend.contains(concat!("open_iceberg_catalog(&", "Config::new()")),
-            "Ballista reload must reopen from IcebergCatalogSpec, not Config::new()"
+            "QueryRuntime reload must reopen from IcebergCatalogSpec, not Config::new()"
         );
         let host = include_str!("../runtime_plugins/host.rs");
         assert!(

@@ -192,40 +192,48 @@ class BumpChangedPluginCratesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
             self.write_plugin_workspace(workspace)
+            init_env = bump_changed_plugin_crates.git_env()
             subprocess.run(
                 ["git", "init", "-b", "main"],
                 cwd=workspace,
                 check=True,
                 capture_output=True,
+                env=init_env,
             )
+            git_env = bump_changed_plugin_crates.git_env(workspace)
             subprocess.run(
                 ["git", "config", "user.email", "test@example.com"],
                 cwd=workspace,
                 check=True,
                 capture_output=True,
+                env=git_env,
             )
             subprocess.run(
                 ["git", "config", "user.name", "test"],
                 cwd=workspace,
                 check=True,
                 capture_output=True,
+                env=git_env,
             )
             subprocess.run(
                 ["git", "add", "."],
                 cwd=workspace,
                 check=True,
                 capture_output=True,
+                env=git_env,
             )
             subprocess.run(
-                ["git", "commit", "-m", "base"],
+                ["git", "-c", "core.hooksPath=/dev/null", "commit", "-m", "base"],
                 cwd=workspace,
                 check=True,
                 capture_output=True,
+                env=git_env,
             )
             base = subprocess.check_output(
                 ["git", "rev-parse", "HEAD"],
                 cwd=workspace,
                 text=True,
+                env=git_env,
             ).strip()
             self.write_workspace_file(
                 workspace,

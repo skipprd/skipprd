@@ -27,7 +27,7 @@ use crate::query_flight::QueryFlightServer;
 
 pub async fn run_clustered(app_cfg: Config, config: ClusterConfig) -> Result<(), DurableError> {
     let identity = config.identity();
-    crate::query_flight::ballista::start(config.advertised_ip).await?;
+    crate::query_flight::runtime::start_clustered(config.advertised_ip).await?;
     let registry = ReplicaRegistry::new(identity.clone());
     let replica =
         ReplicaServer::start_with_registry("0.0.0.0:0".parse().unwrap(), registry.clone()).await?;
@@ -78,16 +78,15 @@ pub async fn run_clustered(app_cfg: Config, config: ClusterConfig) -> Result<(),
         flight: advertised_flight,
         gossip: advertised_gossip,
     };
-    let advertised_scheduler = crate::query_flight::ballista::advertised_scheduler();
+    let advertised_worker = crate::query_flight::runtime::advertised_worker();
     let mut ad = GossipAd::for_node(config.node_id, config.host_id.clone(), endpoints, false);
-    ad.scheduler = advertised_scheduler;
+    ad.worker = advertised_worker;
     gossip.publish_ad(ad.clone()).await;
-    crate::query_flight::ballista::spawn_election_watch(config.node_id);
     tracing::info!(
         replica = %advertised_replica,
         flight = %advertised_flight,
         gossip = %advertised_gossip,
-        scheduler = ?advertised_scheduler,
+        worker = ?advertised_worker,
         cluster = %config.cluster_id,
         "clustered scheduler started"
     );
@@ -166,7 +165,7 @@ pub async fn run_clustered(app_cfg: Config, config: ClusterConfig) -> Result<(),
     let advertise_clock = clock.clone();
     let mut advertise_base =
         GossipAd::for_node(config.node_id, config.host_id.clone(), endpoints, false);
-    advertise_base.scheduler = advertised_scheduler;
+    advertise_base.worker = advertised_worker;
     tokio::spawn(async move {
         let mut gossip_heartbeat = 0u64;
         loop {

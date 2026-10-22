@@ -42,7 +42,7 @@ Confirmed 2026-09-30: **D3** (`AthenaIceberg` is a separate plugin key; `Athena`
 | D4 | `skipprd query` resolves a typed `QueryBackend { Iceberg(IcebergLake), WalOnly }` once, at the edge. `IcebergLake` holds serializable `IcebergCatalogSpec` (Skippr / Glue / filesystem) plus ingest namespace. | Compile-time exhaustiveness. No string compares in sqlrt. Catalogs open asynchronously. |
 | D6 | `Duckdb` writes Hadoop-style filesystem Iceberg. `skipprd query` serves Iceberg ∪ WAL; `skipprd serve` Flight serves Iceberg `namespace.table`. SDE does not model DuckDB. | Same Iceberg catalog opener as SkipprLake and AthenaIceberg. |
 | D7 | The filesystem catalog crate is the Duckdb catalog backend. Host query opens it through `IcebergCatalogSpec::Filesystem`. | One opener. Not a second Skippr catalog. |
-| D12 | Clustered query serves **Iceberg** pipelines. A `WalOnly` pipeline is **not registered** and yields an explicit typed notice (`ClusteredSelectPlan.wal_only`), never a silent skip. Local `skipprd query` serves WAL for WalOnly and Iceberg ∪ WAL for Iceberg. | Ballista scans persisted Iceberg; Hive/Snowflake have none that skipprd may know about. |
+| D12 | Clustered query serves **Iceberg** pipelines. A `WalOnly` pipeline is **not registered** and yields an explicit typed notice (`ClusteredSelectPlan.wal_only`), never a silent skip. Local `skipprd query` serves WAL for WalOnly and Iceberg ∪ WAL for Iceberg. | QueryRuntime scans persisted Iceberg; Hive/Snowflake have none that skipprd may know about. |
 | D5 | Manifest-prefix S3 Parquet listing in `skipprd query` is deleted. | It encodes the Athena Hive lake layout inside the query engine. |
 | D8 | One shared writer crate `skippr-iceberg-writer`. Plugins are config plus catalog constructor plus `main`. | DRY. `iceberg_sink.rs` is 4.8k LOC with 36 tests. Three copies would diverge. |
 | D9 | SDE models SkipprLake through `dbt-skipprlake` (`type: skipprlake`). Local `file://` uses LocalSidecar `skipprd serve`. | Spec 2 landed; `SKIPPR_NOT_DBT_ADAPTER` is deleted. |
@@ -435,7 +435,7 @@ fn iceberg_lake(view: &PipelineConfigView) -> Result<&IcebergLake, DataFusionErr
 }
 ```
 
-`load_iceberg_scan_provider` and `list_iceberg_source_namespaces` drop the `match &sink.catalog_cfg { Skippr => ..., other => Err(adapter_name) }` arms. `open_iceberg_catalog` (in `src/cluster/backend.rs`) takes `&IcebergCatalogSpec`. Skippr identity includes `SkipprCatalogBackend` and `object_store` (`SkipprLakeOpen`); Ballista reload must not guess DynamoDB via `Config::new()`.
+`load_iceberg_scan_provider` and `list_iceberg_source_namespaces` drop the `match &sink.catalog_cfg { Skippr => ..., other => Err(adapter_name) }` arms. `open_iceberg_catalog` (in `src/cluster/backend.rs`) takes `&IcebergCatalogSpec`. Skippr identity includes `SkipprCatalogBackend` and `object_store` (`SkipprLakeOpen`); QueryRuntime reload must not guess DynamoDB via `Config::new()`.
 
 Delete `#[allow(dead_code)] struct IcebergSinkCatalog`.
 
@@ -1073,7 +1073,7 @@ Those production greps are clean.
 
 After this spec, Spec 2 relies on:
 
-- `IcebergCatalogSpec` (`SkipprLakeOpen` includes backend and object store) as the typed lake identity for REST, Flight, Ballista reload, and query.
+- `IcebergCatalogSpec` (`SkipprLakeOpen` includes backend and object store) as the typed lake identity for REST, Flight, QueryRuntime reload, and query.
 - The catalog crates exposing `Arc<dyn iceberg::Catalog>` (REST wraps that trait).
 - `QueryBackend::Iceberg` as the only place query builds Iceberg ∪ WAL providers (views register there).
 - SDE `WarehouseKind::Skippr` using `dbt-skipprlake` (`DbtNamespaceShape::SchemaOnly`) plus LocalSidecar for `file://`.

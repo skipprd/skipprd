@@ -6,13 +6,12 @@ use std::io;
 
 use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
-use datafusion::prelude::SessionConfig;
 
 use crate::cluster::validation::CliModeKind;
 use crate::doctor::{self, DoctorResult};
 use crate::helpers::configuration::Config;
 use crate::helpers::wal_storage::WalStorage;
-use crate::sqlrt::session::{build_query_context, collect_user_sql};
+use crate::sqlrt::session::{collect_user_sql, coordinating_query_context};
 use crate::sqlrt::tables::register_namespace_view;
 
 /// `config` is the runnable (resolved) config. It is the session's only config authority.
@@ -194,7 +193,9 @@ async fn collect_namespace(
     pipeline: &str,
     namespace: &str,
 ) -> io::Result<Vec<RecordBatch>> {
-    let ctx = build_query_context(SessionConfig::new());
+    let ctx = coordinating_query_context()
+        .await
+        .map_err(|e| io::Error::other(e.to_string()))?;
     register_namespace_view(&ctx, config, pipeline, namespace)
         .await
         .map_err(|e| io::Error::other(e.to_string()))?;

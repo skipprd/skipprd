@@ -7,14 +7,20 @@ use crate::sqlrt::udfs;
 /// Collect timeout for user-SQL sessions (B.19). Not an env knob.
 pub const OTEL_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Construct a user-SQL `SessionContext` with observability UDFs registered.
-///
-/// Callers pass pipeline names into `register_namespace_view`. This factory
-/// MUST NOT read `PIPELINE_NAME`.
+/// Isolated UDF-registration helper for tests that do not start QueryRuntime.
+/// User SQL uses [`coordinating_query_context`].
 pub fn build_query_context(config: SessionConfig) -> SessionContext {
     let ctx = SessionContext::new_with_config(config);
     udfs::register_observability_udfs(&ctx);
     ctx
+}
+
+/// User SQL SessionContext: QueryRuntime Worker + distributed planner.
+pub async fn coordinating_query_context() -> datafusion::error::Result<SessionContext> {
+    crate::query_flight::runtime::ensure_started()
+        .await
+        .map_err(|err| datafusion::error::DataFusionError::Execution(err.to_string()))?;
+    crate::query_flight::runtime::query_context()
 }
 
 /// Collect a user-SQL dataframe under the session timeout (B.19).
@@ -55,22 +61,92 @@ mod tests {
         let query = include_str!("query.rs");
         let engine = include_str!("../engine.rs");
         assert!(
+            query.contains("coordinating_query_context"),
+            "query.rs must call coordinating_query_context"
+        );
+        assert!(
             !query.contains("SessionContext::new_with_config"),
-            "query.rs must call build_query_context"
+            "query.rs must not construct a second SessionContext factory"
+        );
+        assert!(
+            engine.contains("coordinating_query_context"),
+            "engine.rs must call coordinating_query_context"
         );
         assert!(
             !engine.contains("SessionContext::new_with_config"),
-            "engine.rs must call build_query_context"
+            "engine.rs must not construct a second SessionContext factory"
+        );
+        let tables = include_str!("tables.rs");
+        let clustered = tables
+            .split("pub async fn plan_clustered_select")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn execute_clustered_select")
+            .next()
+            .unwrap();
+        assert!(
+            clustered.contains("ensure_started"),
+            "plan_clustered_select must start QueryRuntime"
+        );
+        assert!(
+            clustered.contains("query_context()"),
+            "plan_clustered_select must use QueryRuntime"
+        );
+        let iceberg = tables
+            .split("pub async fn plan_iceberg_scan")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn execute_iceberg_scan")
+            .next()
+            .unwrap();
+        assert!(
+            iceberg.contains("query_context()"),
+            "plan_iceberg_scan must use QueryRuntime"
+        );
+        assert!(
+            !iceberg.contains("SessionContext::new()"),
+            "plan_iceberg_scan must not construct a second SessionContext"
+        );
+        let api = include_str!("../api.rs");
+        let collect = api
+            .split("async fn collect_namespace")
+            .nth(1)
+            .unwrap()
+            .split("/// `PIPELINE_NAME`")
+            .next()
+            .unwrap();
+        assert!(
+            collect.contains("coordinating_query_context"),
+            "collect_namespace must call coordinating_query_context"
+        );
+        assert!(
+            !collect.contains("build_query_context"),
+            "collect_namespace must not use the test-only SessionContext factory"
+        );
+        let live = include_str!("../query_flight/service.rs")
+            .split("async fn execute_live_wal")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(
+            !live.contains("query_context"),
+            "live_wal_scan DoGet must not use QueryRuntime"
+        );
+        assert!(
+            !live.contains("ensure_started"),
+            "live_wal_scan DoGet must not start QueryRuntime"
         );
     }
 
     #[test]
     fn query_timeout_is_thirty_seconds() {
         assert_eq!(OTEL_QUERY_TIMEOUT, Duration::from_secs(30));
-        let ballista = include_str!("../query_flight/ballista.rs");
+        let runtime = include_str!("../query_flight/runtime.rs");
         assert!(
-            ballista.contains("register_observability_udfs"),
-            "Ballista must register observability UDFs before BallistaFunctionRegistry"
+            runtime.contains("register_observability_udfs"),
+            "QueryRuntime must register observability UDFs on the coordinating context"
         );
         let query = include_str!("query.rs");
         assert!(

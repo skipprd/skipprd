@@ -31,7 +31,7 @@ Confirmed 2026-09-30: **S4** (ingest namespace is read-only over REST; dbt write
 | # | Decision | Why |
 |---|---|---|
 | S1 | `dbt-skipprlake` is a separate Apache-2.0 Python package in its own repo. It depends on `dbt-core`, `dbt-adapters`, `pyiceberg`, `adbc-driver-flightsql`, `pyarrow`. It has no dependency on, or reference to, skipprd. | Encapsulation requirement. |
-| S2 | skipprd gains `skipprd serve`, which exposes Iceberg REST and read-only Flight SQL for the **one physical Iceberg catalog** in the config (`IcebergCatalogSpec` equality). Iceberg sinks are SkipprLake, AthenaIceberg, and Duckdb. | Kernel service (with query and Ballista), not a SkipprLake plugin. |
+| S2 | skipprd gains `skipprd serve`, which exposes Iceberg REST and read-only Flight SQL for the **one physical Iceberg catalog** in the config (`IcebergCatalogSpec` equality). Iceberg sinks are SkipprLake, AthenaIceberg, and Duckdb. | Kernel service (with query and QueryRuntime), not a SkipprLake plugin. |
 | S3 | **Reads** (dbt tests, previews, table materialization source SQL) go through Flight SQL as Iceberg `namespace.table` (committed snapshot). **Metadata and writes** from Iceberg clients go through REST. `pipeline.namespace` is the local Iceberg ∪ WAL ingest view only. `skipprd query` SQL DDL mutates the same `iceberg::Catalog`. | Lake contract is Iceberg identity. WAL freshness is the local ingest alias, not Flight/dbt. |
 | S4 | Sink-managed ingest namespaces (SkipprLake `table_namespace`, AthenaIceberg Glue database, Duckdb namespace) are **read-only over REST**. Create, commit, drop and rename against those namespaces return **403 `ForbiddenException`**. Load and list stay allowed. | The ingest writer owns idempotency manifests and CDC state in those tables. |
 | S5 | Views use the Iceberg view spec v1 (SQL representation, dialect **`skipprd`**). View metadata JSON lives in object storage next to tables. The pointer lives in the catalog store. `skipprd query` registers them as DataFusion views. | Makes `materialized='view'` work and stays standard for future engines. |
@@ -415,7 +415,7 @@ Port `0` is valid and the actual bound addresses are written to the ready file. 
 
 ### 6.7 Flight SQL: local mode and bearer auth
 
-Today `QueryFlightServer::start_with_registry` requires cluster mTLS (`cluster::tls::tonic_server_tls()`), Basic `tenant/workspace` auth, and the elected Ballista scheduler (`ensure_elected_live`). Refactor with two enums, not booleans:
+Today `QueryFlightServer::start_with_registry` requires cluster mTLS (`cluster::tls::tonic_server_tls()`), Basic `tenant/workspace` auth, and QueryRuntime (`ensure_started`). Refactor with two enums, not booleans:
 
 ```rust
 pub enum FlightAuth {
@@ -426,9 +426,9 @@ pub enum FlightAuth {
 }
 
 pub enum FlightEngine {
-    /// Existing: Ballista over the elected scheduler.
+    /// Existing: QueryRuntime Worker plus distributed planner.
     Clustered { registry: Option<Arc<ReplicaRegistry>> },
-    /// `skipprd serve`: in-process DataFusion; no gossip, no Ballista election.
+    /// `skipprd serve`: in-process DataFusion; no gossip, no QueryRuntime election.
     Local,
 }
 
@@ -441,7 +441,7 @@ impl QueryFlightServer {
 
 ```rust
 match &self.engine {
-    FlightEngine::Clustered { .. } => { /* existing: ensure_elected_live + plan_clustered_select */ }
+    FlightEngine::Clustered { .. } => { /* existing: ensure_started + plan_clustered_select */ }
     FlightEngine::Local => {
         let ctx = crate::sqlrt::query::new_context_iceberg_namespaces(&self.app_config).await?;
         let df = ctx.sql(sql).await?;
@@ -515,7 +515,7 @@ skipprd serve Flight:
   register_user_namespaces only  # Iceberg namespace.table
 ```
 
-Clustered Ballista (`plan_clustered_select`) gets the same two calls. `IcebergScanTableProvider` already serializes the catalog JSON for executors; it now serializes `IcebergCatalogSpec` (`SkipprLakeOpen` includes backend and object store).
+Clustered QueryRuntime (`plan_clustered_select`) gets the same two calls. `IcebergScanTableProvider` already serializes the catalog JSON for executors; it now serializes `IcebergCatalogSpec` (`SkipprLakeOpen` includes backend and object store).
 
 Tests first: user namespace tables queryable as `shop_gold.fct_x`; ingest namespace not exposed twice; collision errors; view over table; view over view; cycle detected; non-`skipprlake` dialect view skipped.
 

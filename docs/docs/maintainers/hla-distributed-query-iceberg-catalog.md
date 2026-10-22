@@ -3,7 +3,7 @@
 **Status:** architecture decisions locked  
 **Implementation:** [`hla-implementation-wbs.md`](./hla-implementation-wbs.md)  
 **Gaps:** [`hla-remaining-gaps.md`](./hla-remaining-gaps.md)  
-**Flight SQL / Ballista:** [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md)  
+**Flight SQL / QueryRuntime:** [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md)  
 **Style:** [`AGENTS.md`](../../../AGENTS.md) and [`repository-map.md`](./repository-map.md)
 
 ## Scope
@@ -16,7 +16,7 @@ This architecture adds:
 - peer bootstrap, catch-up, promotion, and replica replacement;
 - DDB cold discovery plus gossip membership/fence rumors;
 - an embedded Iceberg DynamoDB catalog backed by R2/S3 metadata;
-- Iceberg cold scans UNION live WAL on in-process Ballista, served over Arrow Flight SQL 58.3 (contract: [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md)).
+- Iceberg cold scans UNION live WAL on in-process QueryRuntime, served over Arrow Flight SQL 59.2 (contract: [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md)).
 
 The architecture preserves the current single-process ingest engine and runtime-plugin boundary. It does not allow concurrent writers for one pipeline.
 
@@ -42,7 +42,7 @@ Cluster constants:
 - lease/membership heartbeat: 10 seconds;
 - durable copies: two;
 - write quorum: local payload fsync plus one caught-up remote payload Ack;
-- replica TCP, Flight SQL, and Ballista gRPC: ephemeral ports, **always mTLS** (SAN `skippr-cluster`);
+- replica TCP, Flight SQL, and QueryRuntime worker gRPC: ephemeral ports, **always mTLS** (SAN `skippr-cluster`);
 - gossip UDP: ephemeral port on the advertised IP (not `0.0.0.0` in `ChitchatId`).
 
 Unknown `WAL_STORAGE` values fail startup. `clustered` requires SkipprStore (`skippr.store.type` / `SKIPPR_STORE_TYPE`) to be DynamoDB (self-hosted / HLA default) or `cloud-tables` (Skippr Cloud). Any other explicit store fails startup.
@@ -54,7 +54,7 @@ Unknown `WAL_STORAGE` values fail startup. `clustered` requires SkipprStore (`sk
 | Offsets, leases, membership | DynamoDB table `SKIPPR_STORE_NAME` (DynamoDB Local in HLA) | Cloud Tables (`SKIPPR_STORE_TYPE=cloud-tables`, same table name) |
 | Iceberg catalog pointers | `SkipprLake.catalog_table` (MAY be SkipprStore) | Same table is allowed (PK/SK prefixes do not collide) |
 | Iceberg warehouse / parquet | `file://` or S3 | **objects** / R2 |
-| Replica RPC, Flight SQL, Ballista gRPC | **Always mTLS** (HLA mints a throwaway CA; SAN `skippr-cluster`) | Same PEMs; mesh only |
+| Replica RPC, Flight SQL, QueryRuntime worker gRPC | **Always mTLS** (HLA mints a throwaway CA; SAN `skippr-cluster`) | Same PEMs; mesh only |
 | Gossip | Authenticated Chitchat (WU-5.1); `SKIPPR_CLUSTER_GOSSIP_KEY` required | Same; no tenant-string fallback |
 | Query tenant | Flight `Authorization: Basic {tenant}/{workspace}` on every RPC | Cloud **gateway** maps JWT `tenant_id` (D31) to that header; skipprd does not verify JWTs |
 | Cloud Tables credentials | n/a (DynamoDB Local) | Skippr Cloud default credentials |
@@ -91,7 +91,7 @@ DynamoDB Local remains the OSS HLA harness.
 
 Clustered ingest, replica protocol, Dynamo leases/offsets/catalog, in-process Iceberg∪WAL UNION, and the three-process DynamoDB Local harness are in tree. Process checklist ticks stay in [`hla-e2e-checklist.md`](hla-e2e-checklist.md) until `python3 tests/hla_e2e/run.py` is actually run. Dynamo CAS ticks wait on `python3 tests/hla_e2e/ddb_cas.py`.
 
-**Still deferred:** first GitHub Actions HLA run. Flight SQL 58.3, in-process Ballista 53, and authenticated Chitchat (WU-5.1) are in tree; live process proof is `python3 tests/hla_e2e/run.py`. Contract: [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md).
+**Still deferred:** first GitHub Actions HLA run. Flight SQL 59.2, in-process QueryRuntime (datafusion-distributed), and authenticated Chitchat (WU-5.1) are in tree; live process proof is `python3 tests/hla_e2e/run.py`. Contract: [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md).
 
 Live membership is Chitchat. The e2e red-team items from 2026-08-13 are closed in [`hla-e2e-implementation-gaps.md`](hla-e2e-implementation-gaps.md).
 
@@ -143,7 +143,7 @@ SK = node#{node_uuid}
   capabilities
 ```
 
-Shipped: `flight_addr` on each membership `node#` row is Arrow Flight SQL 58.3. There is no `query-scheduler#` SK. `clustered query` opens Flight SQL on a ready `flight_addr`; the serving node plans Iceberg∪WAL UNION on the gossip-elected Ballista cluster. Stale membership rows are verified by mTLS + `cluster_hash(SKIPPR_CLUSTER_ID)`, never a DDB clock.
+Shipped: `flight_addr` on each membership `node#` row is Arrow Flight SQL 59.2. There is no `query-scheduler#` SK. `clustered query` opens Flight SQL on a ready `flight_addr`; the serving node plans Iceberg∪WAL UNION on QueryRuntime (WorkerResolver over gossip `worker` addrs). Stale membership rows are verified by mTLS + `cluster_hash(SKIPPR_CLUSTER_ID)`, never a DDB clock.
 
 Cold discovery queries the exact `cluster#{cluster_id}` PK. It never scans the table. Stale rows are verified by handshake and ignored.
 
@@ -403,7 +403,7 @@ Iceberg snapshot summaries preserve Skippr compaction ID, idempotency key, schem
 
 Every grouped commit also records `skippr.pipeline` and `skippr.wal-segment-ids`. Those snapshot properties are two things at once: the replay gate for a crash between the lake commit and slice-done bits (`already_committed`), and the exclude set the live-WAL selector subtracts. Expiry therefore MUST NOT remove a snapshot whose segments the host still holds.
 
-The host sends the live set on every grouped sink request as `live_wal_segments`: catalog `SegmentRow` ids, the same derivation as `select_live_ordinals`. An unreadable catalog sends `None`, and `None` expires nothing.
+The host sends the live set on every grouped sink request as `live_wal_segments`: catalog `SegmentRow` ids (`catalog_segment_ids`). Query `select_live_ordinals` is a different derivation: catalog `SliceIndexEntry` minus Iceberg named ids. An unreadable catalog sends `None`, and `None` expires nothing.
 
 Under the table lane, after the commit and its idempotency manifest, the writer expires a snapshot only when all of these hold:
 
@@ -447,15 +447,15 @@ Iceberg catalog schema is authoritative. WAL batches project/cast into it; missi
 
 Iceberg is the only snapshot. WAL is a best-effort tail of that snapshot: it MAY omit not-yet-compacted rows. A later query MAY see more WAL. Writes never observe query state.
 
-`select_live_ordinals` is the only selector. Live segments are catalog `SegmentRow`s minus Iceberg `skippr.wal-segment-ids`. For each remaining segment, skip slice-done ordinals. If the payload is unreadable or gone, skip that ordinal (do not scan it, do not fail the query).
+`select_live_ordinals` is the only query selector. Live ordinals are catalog `SliceIndexEntry` rows (`CatalogPrefix::Slice`) minus Iceberg `skippr.wal-segment-ids`. If the matching `SegmentRow` is missing or the payload is unreadable or gone, skip that ordinal (do not scan it, do not fail the query). Slice-complete ordinals stay visible until Iceberg lists the segment.
 
-Slice-done bits live on the `SegmentRow`; the selector does not re-parse a mutation log. Iceberg-named segment ids close the window after the lake pointer commit and before bits are set.
+Slice-done bits live on the `SegmentRow` as compaction progress; they are not the query cut. Iceberg-named segment ids close the window after the lake pointer commit.
 
 There are no query pins. Reclaim deletes the catalog row, then the payload; a scan that misses the file skips it. Readers MUST NOT nack reclaim.
 
 ### Query transport
 
-**Shipped:** Arrow Flight SQL 58.3 on membership `flight_addr` (`src/query_flight`). Framed `QuerySocketServer` is deleted. Ballista 53 runs in-process on every clustered node. Contract: [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md).
+**Shipped:** Arrow Flight SQL 59.2 on membership `flight_addr` (`src/query_flight`). Framed `QuerySocketServer` is deleted. datafusion-distributed runs in-process on every clustered node. Contract: [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md).
 
 Locked here so other HLA docs do not drift:
 
@@ -464,7 +464,7 @@ Locked here so other HLA docs do not drift:
 - Flight SQL is read-only. Foreign tenant/workspace and unknown pipeline fail closed.
 - `CURRENT_PROTOCOL` is **3** (cluster hello). There is no query-planner protocol on DynamoDB.
 - No new address/port/scheduler knobs. Dual framed+Flight protocols are forbidden.
-- Each clustered `skipprd` node runs Flight SQL plus a Ballista scheduler and executor. Gossip elects one scheduler (minimum `NodeId` among published `scheduler` addrs). `clustered query` talks Flight SQL to any ready `flight_addr`. WAL is a one-partition `FlightSqlExec` to the serving node's best-effort max advertised `catalog_seq_seen` with `payload_ready` (local on tie if this process holds paths → this process's advertised `flight_addr`). Iceberg parquet may run on any executor.
+- Each clustered `skipprd` node runs Flight SQL plus one QueryRuntime Worker. `WorkerResolver` lists self plus gossip `worker` addrs; there is no elected coordinator. `clustered query` talks Flight SQL to any ready `flight_addr`. WAL is a one-partition `FlightSqlExec` to the serving node's best-effort max advertised `catalog_seq_seen` with `payload_ready` (local on tie if this process holds paths → this process's advertised `flight_addr`). Iceberg parquet may run on any QueryRuntime Worker.
 - UNION stays a dumb concat before aggregate/join. Iceberg-only is a valid behind read.
 
 ### UNION
@@ -480,7 +480,7 @@ For each table:
 
 Gossip ads are not a query cut. Replica WAL row counts are not voted. Iceberg-only is a valid behind read.
 
-**Shipped (WU-7.5):** Ballista 53 **inside** each clustered node joins one elected scheduler and executes UNION before aggregate/join. WAL child is always `FlightSqlExec` to the picker winner. Prost codec carries endpoint, statement SQL, and Arrow schema. Details: [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md).
+**Shipped (WU-7.5):** datafusion-distributed **inside** each clustered node starts one QueryRuntime Worker and executes UNION before aggregate/join. WAL child is always `FlightSqlExec` to the picker winner. Prost codec carries endpoint, statement SQL, and Arrow schema. Details: [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md).
 
 ## Lifecycle
 
@@ -534,15 +534,15 @@ Shipped:
 - WAL, compaction transactions, completion state, and reclaim survive failover.
 - Promotion requires catalog-seq + `payload_ready` state, schemas, reconciled offsets, and a synchronous replica.
 - No absolute disk path appears in clustered durable identity.
-- Iceberg snapshot reads are consistent. Live WAL is eventually consistent and unpinned; UNION must not double-count Iceberg-named segments or slices whose `SegmentRow` bits are all done (in-process `UnionExec` over Iceberg Rust + local WAL or `FlightSqlExec`).
+- Iceberg snapshot reads are consistent. Live WAL is eventually consistent and unpinned; UNION must not double-count Iceberg-named segments (`SliceIndexEntry` minus `skippr.wal-segment-ids`; in-process `UnionExec` over Iceberg Rust + local WAL or `FlightSqlExec`).
 - Iceberg pipelines never fall back to Parquet listing.
 - Disk and clustered share one catalog-backed writer (`PipelineWalHandle`).
 - Deterministic failure, DDB contract (`tests/hla_e2e/ddb_cas.py`), subprocess crash, protocol-version, and query-consistency tests exist in the harness (process ticks wait on `run.py`).
 
-Shipped for query (contract: [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md)):
+Shipped for query (contract: [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md)):
 
-- Live WAL uses Arrow Flight SQL 58.3 `GetFlightInfo`/`DoGet`; framed query socket is gone.
-- Ballista 53 is compiled into `skipprd` and starts in `run_clustered`. UNION is planned before downstream aggregate/join.
+- Live WAL uses Arrow Flight SQL 59.2 `GetFlightInfo`/`DoGet`; framed query socket is gone.
+- datafusion-distributed is compiled into `skipprd` and starts in `run_clustered`. UNION is planned before downstream aggregate/join.
 
 ## Non-goals
 

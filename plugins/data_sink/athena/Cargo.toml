@@ -13,7 +13,7 @@ tokio.workspace = true
 skippr-runtime-sdk.workspace = true
 skippr-object-writer = { path = "../../../crates/skippr-object-writer" }
 
-arrow = { version = "58.3.0", features = ["ipc_compression"] }
+arrow.workspace = true
 async-trait = "0.1.77"
 aws-config = "1.5.1"
 aws-sdk-athena = { version = "1.30.0" }

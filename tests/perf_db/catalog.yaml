@@ -1,0 +1,99 @@
+# skippr-perf-db: ingest then query. WAL leftover import is out of suite.
+defaults:
+  rows: 10000
+  smoke_rows: 200
+  linux_rows: 2000
+  required_perf: [sync, query_collect]
+  table: events
+
+scenarios:
+  q-wal-count-file:
+    group: smoke
+    kind: query_after_ingest
+    sink: file
+    fixture: exact_arrow
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
+    required_perf: [sync, query_collect]
+    asserts:
+      query_count: true
+
+  q-wal-point-file:
+    group: smoke
+    kind: query_after_ingest
+    sink: file
+    fixture: exact_arrow
+    sql: "SELECT id FROM perf_cell.perf_cell WHERE id = 1"
+    required_perf: [sync, query_collect]
+    asserts:
+      query_point: true
+
+  q-union-count-duckdb:
+    group: smoke
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
+    required_perf: [sync, query_collect]
+    asserts:
+      query_count: true
+
+  q-wal-group-file:
+    group: always
+    kind: query_after_ingest
+    sink: file
+    fixture: exact_arrow
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell GROUP BY name"
+    required_perf: [sync, query_collect]
+    asserts:
+      query_group: true
+
+  q-stream-tail-file:
+    group: always
+    kind: query_after_ingest
+    sink: file
+    fixture: exact_arrow
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    required_perf: [sync, query_collect]
+    asserts:
+      stream_limit: true
+
+  q-union-point-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    sql: "SELECT id FROM perf_cell.perf_cell WHERE id = 1"
+    required_perf: [sync, query_collect]
+    asserts:
+      query_point: true
+
+  q-union-group-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell GROUP BY name"
+    required_perf: [sync, query_collect]
+    asserts:
+      query_group: true
+
+  q-iceberg-only-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    iceberg_only: true
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
+    required_perf: [sync, query_collect]
+    asserts:
+      query_count: true
+
+  q-union-count-skipprlake:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
+    required_perf: [sync, query_collect]
+    asserts:
+      query_count: true

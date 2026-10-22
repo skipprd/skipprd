@@ -69,9 +69,9 @@ pub struct GossipAd {
     pub disk_pressure: bool,
     #[serde(default)]
     pub wal_heads: Vec<WalHeadHint>,
-    /// This node's in-process Ballista scheduler bind (advertised IP).
+    /// This node's in-process QueryRuntime worker bind (advertised IP).
     #[serde(default)]
-    pub scheduler: Option<SocketAddr>,
+    pub worker: Option<SocketAddr>,
 }
 
 impl GossipAd {
@@ -94,52 +94,9 @@ impl GossipAd {
             heartbeat: 0,
             disk_pressure: false,
             wal_heads: Vec::new(),
-            scheduler: None,
+            worker: None,
         }
     }
-}
-
-/// Lowest `NodeId` among ads that published a scheduler, including self.
-/// Replica `ready` is not a gate.
-pub fn elect_scheduler(
-    local_node: NodeId,
-    local_scheduler: SocketAddr,
-    ads: &[GossipAd],
-) -> SocketAddr {
-    elect_scheduler_live(local_node, local_scheduler, ads, |_| true)
-}
-
-/// Same as [`elect_scheduler`], but skip ads whose scheduler fails `live`.
-/// The local scheduler is always eligible so a dead min-UUID peer cannot pin
-/// the cluster to an unreachable address.
-pub fn elect_scheduler_live(
-    local_node: NodeId,
-    local_scheduler: SocketAddr,
-    ads: &[GossipAd],
-    live: impl Fn(SocketAddr) -> bool,
-) -> SocketAddr {
-    let filtered: Vec<GossipAd> = ads
-        .iter()
-        .filter(|ad| {
-            ad.scheduler
-                .map(|addr| addr == local_scheduler || live(addr))
-                .unwrap_or(false)
-        })
-        .cloned()
-        .collect();
-    let mut winner_id = local_node.to_string();
-    let mut winner_addr = local_scheduler;
-    for ad in &filtered {
-        let Some(scheduler) = ad.scheduler else {
-            continue;
-        };
-        let id = ad.node_id.to_string();
-        if id < winner_id {
-            winner_id = id;
-            winner_addr = scheduler;
-        }
-    }
-    winner_addr
 }
 
 mod serde_node {
@@ -522,6 +479,13 @@ impl GossipService {
         live_ads(&*self.ads.read().await)
     }
 
+    pub fn known_ads_sync(&self) -> Vec<GossipAd> {
+        match self.ads.try_read() {
+            Ok(guard) => live_ads(&*guard),
+            Err(_) => Vec::new(),
+        }
+    }
+
     pub async fn drain(&self) {
         let _ = self.poll_stop.send(true);
         self.handle.abort();
@@ -581,11 +545,11 @@ mod tests {
         assert_eq!(back.flight, ad.flight);
         assert_eq!(back.ready, ad.ready);
         assert!(back.wal_heads.is_empty());
-        assert!(back.scheduler.is_none());
+        assert!(back.worker.is_none());
     }
 
     #[test]
-    fn gossip_ads_round_trip_wal_heads_and_scheduler() {
+    fn gossip_ads_round_trip_wal_heads_and_worker() {
         let mut ad = GossipAd::for_node(
             NodeId::generate(),
             HostId::new("host-a").unwrap(),
@@ -601,100 +565,11 @@ mod tests {
             catalog_seq_seen: 7,
             payload_ready: true,
         }];
-        ad.scheduler = Some("127.0.0.1:4".parse().unwrap());
+        ad.worker = Some("127.0.0.1:4".parse().unwrap());
         let json = serde_json::to_string(&ad).unwrap();
         let back: GossipAd = serde_json::from_str(&json).unwrap();
         assert_eq!(back.wal_heads, ad.wal_heads);
-        assert_eq!(back.scheduler, ad.scheduler);
-    }
-
-    fn node(n: u8) -> NodeId {
-        NodeId::from_uuid(uuid::Uuid::from_u128(n as u128))
-    }
-
-    fn ad_with_scheduler(id: NodeId, scheduler: &str, ready: bool) -> GossipAd {
-        let mut ad = GossipAd::for_node(
-            id,
-            HostId::new("host").unwrap(),
-            crate::cluster::membership::MembershipEndpoints {
-                replica: "127.0.0.1:1".parse().unwrap(),
-                flight: "127.0.0.1:2".parse().unwrap(),
-                gossip: "127.0.0.1:3".parse().unwrap(),
-            },
-            ready,
-        );
-        ad.scheduler = Some(scheduler.parse().unwrap());
-        ad
-    }
-
-    #[test]
-    fn elect_scheduler_picks_min_node_id() {
-        let local = node(5);
-        let local_sched: SocketAddr = "127.0.0.1:5".parse().unwrap();
-        let winner = elect_scheduler(
-            local,
-            local_sched,
-            &[
-                ad_with_scheduler(node(9), "10.0.0.9:9", true),
-                ad_with_scheduler(node(2), "10.0.0.2:2", true),
-            ],
-        );
-        assert_eq!(winner, "10.0.0.2:2".parse().unwrap());
-    }
-
-    #[test]
-    fn elect_scheduler_skips_missing_scheduler() {
-        let local = node(5);
-        let local_sched: SocketAddr = "127.0.0.1:5".parse().unwrap();
-        let mut peer = ad_with_scheduler(node(1), "10.0.0.1:1", true);
-        peer.scheduler = None;
-        let winner = elect_scheduler(local, local_sched, &[peer]);
-        assert_eq!(winner, local_sched);
-    }
-
-    #[test]
-    fn elect_scheduler_lower_uuid_steals() {
-        let local = node(5);
-        let local_sched: SocketAddr = "127.0.0.1:5".parse().unwrap();
-        let first = elect_scheduler(local, local_sched, &[]);
-        assert_eq!(first, local_sched);
-        let stolen = elect_scheduler(
-            local,
-            local_sched,
-            &[ad_with_scheduler(node(1), "10.0.0.1:1", true)],
-        );
-        assert_eq!(stolen, "10.0.0.1:1".parse().unwrap());
-    }
-
-    #[test]
-    fn elect_scheduler_ignores_ready() {
-        let local = node(5);
-        let local_sched: SocketAddr = "127.0.0.1:5".parse().unwrap();
-        let winner = elect_scheduler(
-            local,
-            local_sched,
-            &[ad_with_scheduler(node(1), "10.0.0.1:1", false)],
-        );
-        assert_eq!(winner, "10.0.0.1:1".parse().unwrap());
-    }
-
-    #[test]
-    fn elect_scheduler_live_skips_unreachable_min_uuid() {
-        let local = node(5);
-        let local_sched: SocketAddr = "127.0.0.1:5".parse().unwrap();
-        let dead = ad_with_scheduler(node(1), "10.0.0.1:1", true);
-        let peer = ad_with_scheduler(node(3), "10.0.0.3:3", true);
-        let winner = elect_scheduler_live(local, local_sched, &[dead, peer], |addr| {
-            addr == "10.0.0.3:3".parse().unwrap()
-        });
-        assert_eq!(winner, "10.0.0.3:3".parse().unwrap());
-        let local_only = elect_scheduler_live(
-            local,
-            local_sched,
-            &[ad_with_scheduler(node(3), "10.0.0.3:3", true)],
-            |_| false,
-        );
-        assert_eq!(local_only, local_sched);
+        assert_eq!(back.worker, ad.worker);
     }
 
     #[tokio::test]

@@ -20,7 +20,7 @@ class HlaE2eHarnessTests(unittest.TestCase):
             [
                 "bootstrap_three_nodes",
                 "ingest_and_query_union",
-                "ballista_cluster_query",
+                "distributed_cluster_query",
                 "dynamo_closed_epoch_asserts",
                 "query_from_every_ready_replica",
                 "late_node_wal_catchup",
@@ -145,7 +145,8 @@ class HlaE2eHarnessTests(unittest.TestCase):
         self.assertIn("added", wait_promoted)
         self.assertIn("query_flight_ids", src)
         self.assertIn("query_flight_count", src)
-        self.assertIn("elected_scheduler=", src)
+        self.assertIn("QueryRuntime started", src)
+        self.assertIn("wait_query_runtime", src)
         self.assertIn("last_flight_addr", src)
         self.assertIn("reap_stale_hla_processes", src)
         self.assertIn("harness.nodes[:2]", src)
