@@ -1,30 +1,42 @@
 ---
 name: skippr-perf-db
 description: >-
-  Run the skipprd ingest-then-query performance matrix on a production host
-  build with local runtime plugins. Smoke WAL count/point and DuckDB UNION
-  count on this Mac first, then dispatch perf-db.yml on GitHub-hosted Linux
-  x86 (ubuntu-latest), download flamegraphs, generate ideas from the results,
+  Run the skipprd ingest-then-query performance matrix: File parquet Iceberg
+  versus DuckDB, plus WAL ∪ file Iceberg UNION. Smoke correctness and timings
+  on this Mac first, then dispatch perf-db.yml on GitHub-hosted Linux x86
+  (ubuntu-latest), download flamegraphs/heaptrack/perf-stat, generate ideas,
   iterate until ideas are exhausted, and email a plain-English memo to
   paul@paulhudson.me after each round. Use when the user says /skippr-perf-db,
-  skippr-perf-db, or asks for query/WAL/Iceberg UNION flamegraphs.
+  skippr-perf-db, or asks for WAL + Iceberg query flamegraphs versus DuckDB.
 disable-model-invocation: true
 ---
 
 # skippr-perf-db
 
-Opt-in ingest→query matrix. Prove **correctness first**, then record timings,
-`--log perf` / `skipprd::perf` events, and flamegraphs for `q-wal-count-file`,
-`q-wal-point-file`, and `q-union-count-duckdb`. Wrap scripts read
-`SKIPPR_LOG_LEVEL` through `skipprd_cli.log_args()` into `--log`. Do **not** run skipprd-docs.
-Do **not** publish PyPI. Do **not** consume CHANGELOG
-Unreleased. Do **not** bump plugin crates. Do **not** write CloudCycle EU
-buckets. `aws s3 sync --delete` is illegal.
+Opt-in ingest→query matrix. **Correctness first**, then timings, `--log perf` /
+`skipprd::perf` events, flamegraphs, heaptrack, and perf-stat.
+
+Comparison is **file parquet Iceberg** (SkipprLake `object_store: type: file`)
+against **DuckDB Iceberg**. The WAL profile target is skipprd `query` over
+**WAL ∪ file Iceberg UNION** after `sync --once` (compact + reclaim). Lake-only
+cells (`SKIPPR_QUERY_LAKE_ONLY=1`) measure the Iceberg parquet leaf without WAL.
+
+Fail the cell when:
+
+- required `PERF_EVENT` phases are missing (`sync`, `query_collect`)
+- `count(*)` does not equal ingest rows
+- point query does not return id `1`
+- the warehouse has no `*.parquet` after compact
+
+Wrap scripts read `SKIPPR_LOG_LEVEL` through `skipprd_cli.log_args()` into
+`--log`. Do **not** run skipprd-docs. Do **not** publish PyPI. Do **not**
+consume CHANGELOG Unreleased. Do **not** bump plugin crates. Do **not** write
+CloudCycle EU buckets. `aws s3 sync --delete` is illegal.
 
 This is **not** skippr-perf (ingest/copy). Cells always `sync --once` then
-`skipprd query --sql --plain`. WAL leftover import, Postgres CDC, Snowflake,
-BigQuery, Databricks, Redshift, Athena Glue, and production JSON are out of
-suite.
+`skipprd query --sql --plain`. Jsonl File sink query cells are out of suite.
+WAL leftover import, Postgres CDC, Snowflake, BigQuery, Databricks, Redshift,
+Athena Glue, and production JSON are out of suite.
 
 Repo: `skipprd/skipprd`. Reuse `tests/perf/download.py --workflow perf-db.yml`,
 `tests/perf/analyze.py`, and `tests/perf/memo.py`. Do not copy those files.
@@ -36,11 +48,11 @@ Mail: `python3 tests/perf/memo.py --mail` → sibling `cloud/scripts/send-afk-ma
 
 ```
 skippr-perf-db:
-- [ ] Local smoke A (q-wal-count-file, q-wal-point-file) and B (q-union-count-duckdb)
-- [ ] PERF logs parsed; query_collect present; counts match ingest rows; point returns id 1
+- [ ] Local smoke A (q-wal-count-iceberg, q-wal-point-iceberg) and B (q-union-count-duckdb)
+- [ ] PERF logs parsed; query_collect present; counts match ingest rows; point returns id 1; warehouse has parquet
 - [ ] Commit harness/skill with hooks (never --no-verify)
 - [ ] gh workflow run perf-db.yml --ref this branch
-- [ ] Watch until Linux x86 cells finished. Cancel if skipprd has no timeout evidence.
+- [ ] Watch until Linux x86 cells finished (matrix + flamegraph/heaptrack/perf-stat). Cancel if skipprd has no timeout evidence.
 - [ ] python3 tests/perf/download.py --workflow perf-db.yml --out artifacts/skippr-perf-db
 - [ ] python3 tests/perf/analyze.py --artifacts artifacts/skippr-perf-db --base origin/main
 - [ ] python3 tests/perf/memo.py --iteration N --artifacts … --bottlenecks … --run-url … --done … --mail
@@ -50,7 +62,7 @@ skippr-perf-db:
 - [ ] Stop when ideas are exhausted
 ```
 
-Exhausted means: no remaining idea with a clear test, **or** `q-wal-point-file`
+Exhausted means: no remaining idea with a clear test, **or** `q-wal-count-iceberg`
 and `q-union-count-duckdb` query `elapsed_ms` moved under 10% on two consecutive
 GitHub runs after the last product change **and** no cell is still broken. Cap
 **5** GitHub dispatches unless a skipprd frame is still over 10% of those two
@@ -62,15 +74,20 @@ fences.
 
 ## Local smoke (this Mac, before GitHub)
 
+SkipprLake cells need DynamoDB Local (Docker). DuckDB cells need the DuckDB CLI.
+Release host + only the plugins the cell needs (`USE_LOCAL_PLUGIN_CODE=1`):
+
 ```bash
-cargo build --release -p skipprd --bin skipprd \
+cargo build --release -p skipprd --bin skipprd --features offset-store-dynamodb
+cargo build --release \
   -p skippr-plugin-data-source-file \
-  -p skippr-plugin-data-sink-file \
   -p skippr-plugin-data-sink-duckdb \
-  -p skippr-plugin-schema-sink-duckdb
+  -p skippr-plugin-schema-sink-duckdb \
+  -p skippr-plugin-data-sink-skipprlake \
+  -p skippr-plugin-schema-sink-skipprlake
 export SKIPPRD_BIN="$PWD/target/release/skipprd"
 python3 tests/perf_db/run.py \
-  --scenario q-wal-count-file,q-wal-point-file,q-union-count-duckdb --scale smoke
+  --scenario q-wal-count-iceberg,q-wal-point-iceberg,q-union-count-duckdb --scale smoke
 ```
 
 Fail the cell if required `PERF_EVENT` lines are missing (`sync`, `query_collect`).
@@ -79,9 +96,10 @@ Fail the cell if required `PERF_EVENT` lines are missing (`sync`, `query_collect
 
 `.github/workflows/perf-db.yml` is **`workflow_dispatch` only**. Jobs run on
 GitHub-hosted Linux x86 (`ubuntu-latest`). Profiling cells: flamegraph and
-perf-stat on `q-wal-count-file`, `q-wal-point-file`, `q-union-count-duckdb`.
-Hottest frames must not be `admit_payload` / whole-seg `read_to_end` after the
-catalog slice index lands. skipprd and wrap scripts fail closed after 10 minutes.
+perf-stat on `q-wal-count-iceberg`, `q-wal-point-iceberg`, `q-union-count-duckdb`;
+heaptrack on the two count cells. Hottest frames must not be `admit_payload` /
+whole-seg `read_to_end` after the catalog slice index lands. skipprd and wrap
+scripts fail closed after 10 minutes.
 
 ```bash
 gh workflow run perf-db.yml --ref "$(git branch --show-current)"
@@ -91,6 +109,10 @@ python3 tests/perf/analyze.py --artifacts artifacts/skippr-perf-db --base origin
 python3 tests/perf/memo.py --iteration N --artifacts artifacts/skippr-perf-db \
   --bottlenecks bottlenecks.json --run-url "$RUN_URL" --done "…" --mail
 ```
+
+Read `bottlenecks.json` / stdout: hottest frames in new code first **only if they
+are actually hot**; otherwise overall hot leaves and failed cells. Download
+`flamegraph.svg`, `perf.folded`, `perf-stat.txt`, `heaptrack*`, `perf-report.json`.
 
 ## Must not
 
@@ -102,5 +124,6 @@ python3 tests/perf/memo.py --iteration N --artifacts artifacts/skippr-perf-db \
 - Write `cloudcycle-datalake-iceberg-*` or other EU production/staging buckets
 - Treat WAL leftover import as a query cell
 - Put Postgres CDC in this matrix until `sync --once` exits
+- Query jsonl File sink (no Iceberg parquet)
 - Amazon SES for the iteration memo (Gmail AFK only)
 - Dual-catalog skippr-perf ingest/copy cells here

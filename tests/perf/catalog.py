@@ -32,6 +32,7 @@ KNOWN_ASSERT_KEYS = frozenset(
         "query_point",
         "query_group",
         "stream_limit",
+        "iceberg_parquet",
     }
 )
 
