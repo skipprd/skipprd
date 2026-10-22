@@ -22,6 +22,7 @@ sys.path.insert(0, str(HARNESS_DIR))
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
 
+from analyze import fold_perf_script  # noqa: E402
 from catalog import load_catalog, required_perf_for, scenario_kind  # noqa: E402
 from skipprd_cli import log_args  # noqa: E402
 from fixtures import (  # noqa: E402
@@ -143,22 +144,32 @@ def base_env(config: Path, data_dir: Path, manifests: Path) -> dict[str, str]:
     return env
 
 
+def _linux_perf() -> str:
+    perf = shutil.which("perf")
+    if not perf:
+        raise PerfError("perf is required for linux profile cells")
+    subprocess.run(
+        ["sudo", "sysctl", "-w", "kernel.perf_event_paranoid=-1"],
+        check=False,
+    )
+    return perf
+
+
 def wrap_profile(cmd: list[str], profile: str, work: Path) -> list[str]:
+    if profile in {"", "none"}:
+        return cmd
     if profile == "heaptrack":
         heaptrack = shutil.which("heaptrack")
         if not heaptrack:
             raise PerfError("heaptrack is required for profile=heaptrack")
         return [heaptrack, "-o", str(work / "heaptrack"), "--", *cmd]
+    if profile == "perf-stat":
+        perf = _linux_perf()
+        return [perf, "stat", "-o", str(work / "perf-stat.txt"), "--", *cmd]
     if profile != "flamegraph":
-        return cmd
+        raise PerfError(f"unknown profile {profile!r}")
     if sys.platform.startswith("linux"):
-        perf = shutil.which("perf")
-        if not perf:
-            raise PerfError("perf is required for linux flamegraph cells")
-        subprocess.run(
-            ["sudo", "sysctl", "-w", "kernel.perf_event_paranoid=-1"],
-            check=False,
-        )
+        perf = _linux_perf()
         return [perf, "record", "-g", "-o", str(work / "perf.data"), "--", *cmd]
     samply = shutil.which("samply")
     if samply:
@@ -413,38 +424,50 @@ def convert_flamegraph(work: Path) -> None:
     if script.returncode != 0:
         log("perf script failed; leaving perf.data")
         return
+    text = script.stdout.decode("utf-8", errors="replace")
+    stacks = fold_perf_script(text)
     collapsed = work / "perf.folded"
+    if stacks:
+        collapsed.write_text(
+            "\n".join(f"{stack} {count}" for stack, count in stacks.items()) + "\n",
+            encoding="utf-8",
+        )
     svg = work / "flamegraph.svg"
-    inferno_collapse = shutil.which("inferno-collapse-perf")
     inferno_flame = shutil.which("inferno-flamegraph")
-    if inferno_collapse and inferno_flame:
-        folded = subprocess.run(
-            [inferno_collapse],
-            input=script.stdout,
+    if inferno_flame and collapsed.is_file():
+        flame = subprocess.run(
+            [inferno_flame],
+            input=collapsed.read_bytes(),
             capture_output=True,
             check=False,
         )
-        if folded.returncode == 0:
-            collapsed.write_bytes(folded.stdout)
-            flame = subprocess.run(
-                [inferno_flame],
-                input=folded.stdout,
-                capture_output=True,
-                check=False,
-            )
-            if flame.returncode == 0:
-                svg.write_bytes(flame.stdout)
-                return
+        if flame.returncode == 0 and flame.stdout:
+            svg.write_bytes(flame.stdout)
+            return
     flamegraph = shutil.which("flamegraph.pl") or shutil.which("flamegraph")
-    collapse = shutil.which("stackcollapse-perf.pl")
-    if flamegraph and collapse:
-        folded = subprocess.run([collapse], input=script.stdout, capture_output=True, check=False)
-        if folded.returncode == 0:
-            flame = subprocess.run(
-                [flamegraph], input=folded.stdout, capture_output=True, check=False
-            )
-            if flame.returncode == 0:
-                svg.write_bytes(flame.stdout)
+    if flamegraph and collapsed.is_file():
+        flame = subprocess.run(
+            [flamegraph],
+            input=collapsed.read_bytes(),
+            capture_output=True,
+            check=False,
+        )
+        if flame.returncode == 0 and flame.stdout:
+            svg.write_bytes(flame.stdout)
+
+
+def require_profile_outputs(work: Path, profile: str) -> None:
+    if profile == "flamegraph" and sys.platform.startswith("linux"):
+        if not (work / "perf.folded").is_file():
+            raise PerfError("flamegraph produced no perf.folded")
+        if not (work / "flamegraph.svg").is_file():
+            raise PerfError("flamegraph produced no flamegraph.svg")
+    if profile == "heaptrack" and not any(work.glob("heaptrack*")):
+        raise PerfError("heaptrack produced no profile")
+    if profile == "perf-stat":
+        stat = work / "perf-stat.txt"
+        if not stat.is_file() or stat.stat().st_size == 0:
+            raise PerfError("perf-stat produced no output")
 
 
 def write_report(path: Path, payload: dict[str, Any]) -> None:
@@ -536,6 +559,7 @@ def run_skipprd(
     )
     text = run_logged(cmd, env=env, stdin_data=stdin_data)
     convert_flamegraph(work)
+    require_profile_outputs(work, profile)
     return text
 
 
@@ -1171,7 +1195,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="skippr-perf e2e correctness + timings")
     parser.add_argument("--scenario", required=True, help="Scenario id or comma-separated ids")
     parser.add_argument("--scale", choices=("smoke", "ci", "linux"), default="smoke")
-    parser.add_argument("--profile", choices=("none", "flamegraph", "heaptrack"), default="none")
+    parser.add_argument(
+        "--profile",
+        choices=("none", "flamegraph", "heaptrack", "perf-stat"),
+        default="none",
+    )
     parser.add_argument("--work", default="")
     args = parser.parse_args(argv)
     catalog = load_catalog()
