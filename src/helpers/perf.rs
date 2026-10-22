@@ -43,4 +43,22 @@ mod tests {
         assert_eq!(parsed["exact_arrow_rows"], 100);
         assert_eq!(parsed["exact_fallback_rows"], 0);
     }
+
+    #[test]
+    fn plugin_ipc_event_line_includes_spawn_and_apply() {
+        let line = event_line(
+            "plugin_ipc",
+            json!({
+                "acquire_wait_ms": 0,
+                "acquires": 1,
+                "bytes": 12,
+                "spawn_ms": 40,
+                "apply_ms": 9
+            }),
+        );
+        let parsed: Value = serde_json::from_str(line.trim_start_matches(PREFIX)).unwrap();
+        assert_eq!(parsed["phase"], "plugin_ipc");
+        assert_eq!(parsed["spawn_ms"], 40);
+        assert_eq!(parsed["apply_ms"], 9);
+    }
 }

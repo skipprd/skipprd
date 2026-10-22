@@ -346,6 +346,7 @@ impl RuntimeChildConnection {
         session_token: Option<String>,
         sink_session_capacity: usize,
     ) -> io::Result<Self> {
+        let spawn_started = Instant::now();
         let executable =
             resolve_plugin_executable(&resolved.manifest_path, &resolved.manifest).await?;
         let control_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -424,6 +425,7 @@ impl RuntimeChildConnection {
             unregister_runtime_plugin_child(connection.child.id());
             return Err(err);
         }
+        crate::metrics::counters::record_plugin_spawn(spawn_started.elapsed());
         Ok(connection)
     }
 
@@ -3325,6 +3327,7 @@ impl RuntimeDataSinkPlugin {
             envelope: sink_apply_envelope(&request),
             request: request.clone(),
         };
+        let apply_started = Instant::now();
         loop {
             let lease = self.pool.acquire().await?;
             let worker = Arc::clone(&lease.worker);
@@ -3447,6 +3450,7 @@ impl RuntimeDataSinkPlugin {
                     }
                     self.persist_catalog_intents(&ack.catalog_intents).await?;
                     record_sink_ack_stats(&ack.stats);
+                    crate::metrics::counters::record_sink_apply(apply_started.elapsed());
                     return Ok(ack.outcome);
                 }
                 PluginFrame::SinkError(RuntimeSinkError {

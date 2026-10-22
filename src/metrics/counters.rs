@@ -251,6 +251,8 @@ pub static RUNTIME_SCHEMA_STATE_PUBLICATIONS_SKIPPED_TOTAL: Lazy<AtomicU64> =
     Lazy::new(|| AtomicU64::new(0));
 pub static SINK_APPLY_CALLS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static SINK_APPLY_DURATION_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static RUNTIME_PLUGIN_SPAWN_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static RUNTIME_PLUGIN_SPAWN_CALLS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static COMPACTION_TOMBSTONE_WRITES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static COMPACTION_CATALOG_BIT_WRITES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static WAL_SEGMENT_CLOSURES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
@@ -504,6 +506,12 @@ pub fn record_sink_apply(duration: Duration) {
 }
 
 #[inline]
+pub fn record_plugin_spawn(duration: Duration) {
+    RUNTIME_PLUGIN_SPAWN_CALLS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    RUNTIME_PLUGIN_SPAWN_NS_TOTAL.fetch_add(duration_ns(duration), Ordering::Relaxed);
+}
+
+#[inline]
 pub fn add_compaction_tombstone_write(n: u64) {
     COMPACTION_TOMBSTONE_WRITES_TOTAL.fetch_add(n, Ordering::Relaxed);
 }
@@ -750,6 +758,8 @@ pub fn reset_flush_metrics() {
     RUNTIME_SCHEMA_STATE_PUBLICATIONS_SKIPPED_TOTAL.store(0, Ordering::Relaxed);
     SINK_APPLY_CALLS_TOTAL.store(0, Ordering::Relaxed);
     SINK_APPLY_DURATION_NS_TOTAL.store(0, Ordering::Relaxed);
+    RUNTIME_PLUGIN_SPAWN_NS_TOTAL.store(0, Ordering::Relaxed);
+    RUNTIME_PLUGIN_SPAWN_CALLS_TOTAL.store(0, Ordering::Relaxed);
     COMPACTION_TOMBSTONE_WRITES_TOTAL.store(0, Ordering::Relaxed);
     COMPACTION_CATALOG_BIT_WRITES_TOTAL.store(0, Ordering::Relaxed);
     WAL_SEGMENT_CLOSURES_TOTAL.store(0, Ordering::Relaxed);
@@ -781,5 +791,26 @@ mod tests {
 
         reset_flush_metrics();
         assert_eq!(flush_metrics_snapshot(), FlushMetricsSnapshot::default());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn sink_apply_and_plugin_spawn_durations_are_recorded() {
+        reset_flush_metrics();
+        record_sink_apply(Duration::from_millis(12));
+        record_plugin_spawn(Duration::from_millis(34));
+        assert_eq!(SINK_APPLY_CALLS_TOTAL.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            SINK_APPLY_DURATION_NS_TOTAL.load(Ordering::Relaxed),
+            12_000_000
+        );
+        assert_eq!(RUNTIME_PLUGIN_SPAWN_CALLS_TOTAL.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            RUNTIME_PLUGIN_SPAWN_NS_TOTAL.load(Ordering::Relaxed),
+            34_000_000
+        );
+        reset_flush_metrics();
+        assert_eq!(SINK_APPLY_DURATION_NS_TOTAL.load(Ordering::Relaxed), 0);
+        assert_eq!(RUNTIME_PLUGIN_SPAWN_NS_TOTAL.load(Ordering::Relaxed), 0);
     }
 }
