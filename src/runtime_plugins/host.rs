@@ -46,14 +46,15 @@ use crate::runtime_plugins::protocol::{
     CommitReceipt, FinishSink, HandshakeRequest, HostDataFrame, HostFrame, PluginDataFrame,
     PluginFrame, PrepareAck, PrepareSink, PrepareSinkResult, RuntimeBinding,
     RuntimeCheckpointUpdate, RuntimeExecutionContext, RuntimeExecutionMode, RuntimeIngestAck,
-    RuntimeOffsetMaterializationHint, RuntimeOutputLayout, RuntimeRequestAck, RuntimeSchemaConfig,
-    RuntimeSchemaInstallRequest, RuntimeSchemaState, RuntimeSchemaStateInstallRequest,
-    RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkError, RuntimeSinkInstallRequest,
-    RuntimeSinkPayloadMode, RuntimeSourceConfig, RuntimeSourceIngestWindow, SchemaDelta,
-    SchemaNamespaceDelta, SchemaRunRequest, SinkAck, SinkChunk, SinkRunRequest, SinkWriteStats,
-    SourceEvent, SourceStartRequest, COMMIT_RECEIPT_VERSION, MAX_RUNTIME_SINK_CHUNK_BYTES,
-    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
-    SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimeOffsetMaterializationHint, RuntimeOutputLayout, RuntimePluginKind, RuntimeRequestAck,
+    RuntimeSchemaConfig, RuntimeSchemaInstallRequest, RuntimeSchemaState,
+    RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkError,
+    RuntimeSinkInstallRequest, RuntimeSinkPayloadMode, RuntimeSourceConfig,
+    RuntimeSourceIngestWindow, SchemaDelta, SchemaNamespaceDelta, SchemaRunRequest, SinkAck,
+    SinkChunk, SinkRunRequest, SinkWriteStats, SourceEvent, SourceStartRequest,
+    COMMIT_RECEIPT_VERSION, MAX_RUNTIME_SINK_CHUNK_BYTES, RUNTIME_PROTOCOL_VERSION,
+    SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_OFFSET_ADDR_ENV,
+    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::runtime_plugins::schema_state::{
     apply_runtime_source_schema_state, bump_pipeline_schema_version, current_runtime_schema_state,
@@ -117,6 +118,30 @@ impl ResolvedRuntimePlugin {
             manifest_path,
             manifest,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimePluginStdin {
+    Null,
+    Inherit,
+}
+
+fn runtime_plugin_stdin(kind: RuntimePluginKind, plugin_name: &str) -> RuntimePluginStdin {
+    if kind == RuntimePluginKind::DataSource && plugin_name == cdc::source_capabilities::STDIN.name
+    {
+        RuntimePluginStdin::Inherit
+    } else {
+        RuntimePluginStdin::Null
+    }
+}
+
+impl RuntimePluginStdin {
+    fn to_stdio(self) -> Stdio {
+        match self {
+            Self::Null => Stdio::null(),
+            Self::Inherit => Stdio::inherit(),
+        }
     }
 }
 
@@ -362,7 +387,10 @@ impl RuntimeChildConnection {
             command.env(SKIPPR_RUNTIME_OFFSET_ADDR_ENV, offset_addr);
         }
         command
-            .stdin(Stdio::null())
+            .stdin(
+                runtime_plugin_stdin(resolved.manifest.kind, &resolved.manifest.plugin_name)
+                    .to_stdio(),
+            )
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
 
@@ -4409,6 +4437,38 @@ mod tests {
 
     fn env_lock() -> MutexGuard<'static, ()> {
         ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn stdin_source_plugin_inherits_host_stdin() {
+        use crate::plugins::cdc::{sink_capabilities, source_capabilities};
+        use crate::runtime_plugins::protocol::RuntimePluginKind;
+
+        assert_eq!(
+            super::runtime_plugin_stdin(
+                RuntimePluginKind::DataSource,
+                source_capabilities::STDIN.name
+            ),
+            super::RuntimePluginStdin::Inherit
+        );
+        assert_eq!(
+            super::runtime_plugin_stdin(
+                RuntimePluginKind::DataSource,
+                source_capabilities::FILE.name
+            ),
+            super::RuntimePluginStdin::Null
+        );
+        assert_eq!(
+            super::runtime_plugin_stdin(
+                RuntimePluginKind::DataSink,
+                source_capabilities::STDIN.name
+            ),
+            super::RuntimePluginStdin::Null
+        );
+        assert_eq!(
+            super::runtime_plugin_stdin(RuntimePluginKind::DataSink, sink_capabilities::FILE.name),
+            super::RuntimePluginStdin::Null
+        );
     }
 
     #[test]
