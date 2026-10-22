@@ -88,8 +88,7 @@ To widen to a string, `MERGE COLUMN` the typed sibling into a string field. Ther
 
 Skipprd rejects the statement and leaves the table unchanged:
 
-- The pipeline is still enabled.
-- The destination is not Iceberg.
+- The destination is Glue/Hive or ClickHouse (no native ALTER).
 - The column does not exist, or the rename target already exists.
 - The promotion is not in the table above (`cannot promote decimal to double`).
 - Nested `DROP` or `MERGE` of a record that has no top-level Iceberg field.
@@ -110,6 +109,8 @@ Run [`skipprd sql-help`](/cli/sql-help) or `skipprd query --sql "SHOW DOCS"` for
 
 ## Next steps
 
+- [`skipprd migrate`](/cli/migrate)
+- [Python](/python)
 - [Schema discovery and evolution](/concepts/schema)
 - [SkipprLake](/connectors/outputs/skipprlake)
 - [skipprd query](/cli/query)

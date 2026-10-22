@@ -5,7 +5,7 @@ description: Follow a pipeline from discover to query, learn what the write-ahea
 
 # How Skipprd works
 
-You describe a **pipeline** in `skippr.yml`: one source, and optionally one destination. Then you run four commands: discover the shape of the data, review the schema, sync the rows, and query them. Every batch is written to Skipprd's write-ahead log (WAL) first. A crash retries from the WAL. Whether a retry can duplicate a row depends on the destination — see [Exactly-once delivery](/concepts/exactly-once).
+You describe a **pipeline** in `skippr.yml`: one source, and optionally one destination. Then you discover the shape of the data, review the schema, sync the rows, and query them. After data has landed, [`skipprd migrate`](/cli/migrate) applies `ALTER TABLE` without stopping the pipeline. Every batch is written to Skipprd's write-ahead log (WAL) first. A crash retries from the WAL. Whether a retry can duplicate a row depends on the destination — see [Exactly-once delivery](/concepts/exactly-once).
 
 ```text
                 ┌──────────────────────── skipprd ────────────────────────┐
@@ -54,6 +54,14 @@ For each pass, Skipprd:
 ### 4. Query
 
 Query the tables in your warehouse with its own SQL client. For Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB), you can also query from the machine running Skipprd with [`skipprd query`](/cli/query). That view includes rows still in the WAL that have not landed yet. See [Datalake](/concepts/datalake).
+
+### 5. Migrate
+
+```bash
+skipprd migrate --pipeline bikehire
+```
+
+When a table already has data and you need to rename, merge, drop, or widen a column, put SQL in `migrations/` next to `skippr.yml` (or run `skipprd query --sql "ALTER TABLE …"`). Skipprd applies the change to its schema, the live WAL, and the destination. You do not stop the pipeline. `DISABLE PIPELINE` still freezes ingest; it is not required to alter. See [ALTER operations](/operations/alter).
 
 ## What the WAL guarantees
 

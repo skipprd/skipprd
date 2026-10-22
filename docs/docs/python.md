@@ -52,6 +52,19 @@ skipprd df --pipeline bikehire
 - `Session` takes a `PipelineRef` from a `Config`, never a name string. To run another pipeline, open another `Session`.
 - `discover()` samples the source and records the schema. `migrate()` applies `migrations/*.sql` (see [`skipprd migrate`](/cli/migrate)). `sync(once=True)` runs one pass and returns. `sync()` keeps running, one pass every `sync_frequency_seconds` (900 by default).
 
+Author those SQL files with `Migration`. The engine never loads `.py`:
+
+```python
+from skippr import Migration
+
+Migration(
+    "20261020_rename_region",
+    up="ALTER TABLE bikehire.trips RENAME COLUMN region TO region_code;",
+    down="ALTER TABLE bikehire.trips RENAME COLUMN region_code TO region;",
+).write("migrations")
+s.migrate()
+```
+
 When you create a `Session`, it takes a snapshot of its pipeline's config and resolves every `${NAME}` reference from the environment, including a `.env` file next to `skippr.yml`. A missing variable raises `ValueError` there, before any data moves, not halfway through a sync.
 
 ## Build a config
@@ -327,3 +340,4 @@ Leave out `data_sink` and the pipeline still syncs. The WAL is the dataset, and 
 - [Data sources](/connectors/) — the connector classes and their options.
 - [Transforms](/configuration/transforms) — namespaces, partitions, and flattening.
 - [How Skipprd works](/concepts/how-it-works) — what happens between source and destination.
+- [`skipprd migrate`](/cli/migrate) — author `migrations/*.sql` and apply ALTER without stopping the pipeline.
