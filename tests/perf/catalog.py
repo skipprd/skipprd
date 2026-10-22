@@ -36,7 +36,6 @@ SCENARIO_KINDS = frozenset(
         "copy",
         "copy_stdin",
         "copy_socket",
-        "cdc_postgres_skipprlake",
         "wrap_existing",
         "ingest_s3_skipprlake",
     }

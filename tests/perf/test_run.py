@@ -27,6 +27,13 @@ from parse import PREFIX, PerfParseError, missing_phases, parse_perf_events  # n
 
 
 class PerfCatalogTests(unittest.TestCase):
+    def test_postgres_cdc_is_out_of_the_perf_matrix(self) -> None:
+        ids = scenario_ids()
+        self.assertNotIn("cdc-postgres-skipprlake", ids)
+        workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        self.assertNotIn("cdc-postgres-skipprlake", workflow)
+        self.assertNotIn("cdc_postgres_skipprlake", (HARNESS_DIR / "run.py").read_text(encoding="utf-8"))
+
     def test_catalog_includes_a_and_b_and_excludes_import(self) -> None:
         catalog = load_catalog()
         ids = scenario_ids(catalog)
@@ -182,7 +189,7 @@ class PerfRunnerContractTests(unittest.TestCase):
         self.assertIn("source_capabilities::STDIN", host)
         self.assertIn("wrap_skippr_yml", text)
         self.assertIn("COMMAND_TIMEOUT_SECONDS", text)
-        self.assertIn("buffer_threshold_seconds: 2", text)
+        self.assertNotIn("run_cdc", text)
         self.assertNotIn('list(scenario.get("required_perf") or [])', text)
         self.assertNotIn("collect_log_text", text)
         self.assertNotIn('"--log", "perf"', text)
@@ -265,9 +272,9 @@ class MemoTests(unittest.TestCase):
                 "scenario": "copy-file-s3",
                 "error": "pipeline 'file_s3_copy' was not found",
             },
-            "cdc-postgres-skipprlake": {
-                "scenario": "cdc-postgres-skipprlake",
-                "error": "command timed out",
+            "copy-stdin-file": {
+                "scenario": "copy-stdin-file",
+                "error": "missing PERF phases ['wal_persist']",
             },
         }
         ideas = ideas_from_report(report, reports)

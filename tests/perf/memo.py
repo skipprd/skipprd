@@ -92,8 +92,8 @@ def ideas_from_report(
             add("copy-file-s3 used the S3-to-file config; point it at skippr_s3_sink.yml.")
         elif name == "copy-stdin-file" or "wal_persist" in error:
             add("copy-stdin-file finished with zero rows because the Stdin plugin is a separate process.")
-        elif name.startswith("cdc") or "timed out" in error.lower():
-            add("CDC can hang skipprd until the GitHub job times out; cap the process and kill the group.")
+        elif "timed out" in error.lower():
+            add("A cell hung skipprd until the GitHub job timed out; cap the process and kill the group.")
         else:
             add(f"{name} failed: {error.splitlines()[0][:180]}")
 
@@ -133,9 +133,9 @@ def broke_from_reports(reports: dict[str, dict[str, Any]]) -> list[str]:
             lines.append(
                 "Stdin copy finished with zero rows. The Stdin plugin is a separate process, so piping into skipprd does not feed it."
             )
-        elif name.startswith("cdc") or "timed out" in error.lower():
+        elif "timed out" in error.lower():
             lines.append(
-                "CDC never finished. skipprd had no timeout, so GitHub sat on the cell."
+                "A cell never finished. skipprd had no timeout, so GitHub sat on it."
             )
         else:
             lines.append(f"{name} failed: {error.splitlines()[0][:160]}")

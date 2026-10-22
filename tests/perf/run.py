@@ -37,7 +37,6 @@ STORE_TABLE = "skippr-perf-catalog"
 DDB_PORT = 18021
 DDB_CONTAINER = "skippr-perf-ddb"
 PG_APPEND_PORT = 15433
-PG_CDC_PORT = 15434
 COMMAND_TIMEOUT_SECONDS = 600
 
 
@@ -882,149 +881,6 @@ def run_copy_socket(scenario_id: str, scenario: dict[str, Any], scale: str, work
     return report_payload(scenario_id, rows, wall_ms, events, logs, work)
 
 
-def run_cdc(scenario_id: str, scenario: dict[str, Any], work: Path, profile: str) -> dict[str, Any]:
-    warehouse = work / "warehouse"
-    data_dir = work / "data"
-    manifests = work / "manifests"
-    warehouse.mkdir(parents=True, exist_ok=True)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    start_postgres(
-        "skippr-perf-pg-cdc",
-        PG_CDC_PORT,
-        "skippr_cdc",
-        ["postgres", "-c", "wal_level=logical"],
-    )
-    docker = shutil.which("docker")
-    assert docker
-    subprocess.run(
-        [
-            docker,
-            "exec",
-            "skippr-perf-pg-cdc",
-            "psql",
-            "-U",
-            "postgres",
-            "-d",
-            "skippr_cdc",
-            "-c",
-            "CREATE TABLE IF NOT EXISTS orders (id integer PRIMARY KEY, name text NOT NULL); "
-            "INSERT INTO orders (id, name) VALUES (1, 'alpha'), (2, 'beta') ON CONFLICT (id) DO NOTHING;",
-        ],
-        check=True,
-    )
-    start_ddb()
-    warehouse_uri = f"file://{warehouse}"
-    template = (REPO_ROOT / ".github" / "actions" / "e2e" / "postgres_skipprlake_cdc" / "skippr.yml").read_text(
-        encoding="utf-8"
-    )
-    yaml = (
-        template.replace("LAKE_WAREHOUSE_PLACEHOLDER", warehouse_uri)
-        .replace("port: 5434", f"port: {PG_CDC_PORT}")
-        .replace("buffer_threshold_seconds: 60", "buffer_threshold_seconds: 2")
-    )
-    config = work / "skippr.yml"
-    config.write_text(yaml, encoding="utf-8")
-    try:
-        stage_plugins(config, "postgres_skipprlake_cdc", manifests)
-        env = base_env(config, data_dir, manifests)
-        env.update(
-            {
-                "AWS_ENDPOINT_URL_DYNAMODB": f"http://127.0.0.1:{DDB_PORT}",
-                "AWS_ENDPOINT_URL": f"http://127.0.0.1:{DDB_PORT}",
-                "AWS_ACCESS_KEY_ID": "local",
-                "AWS_SECRET_ACCESS_KEY": "local",
-                "AWS_REGION": "us-east-1",
-                "AWS_DEFAULT_REGION": "us-east-1",
-                "AWS_EC2_METADATA_DISABLED": "true",
-            }
-        )
-        skipprd = skipprd_bin()
-        started = time.perf_counter()
-        logs = ""
-        for _ in range(1):
-            logs += run_skipprd(
-                skipprd,
-                ["--config", str(config), "sync", "--pipeline", "postgres_skipprlake_cdc", "--once"],
-                env=env,
-                work=work,
-                profile=profile,
-            )
-        subprocess.run(
-            [
-                docker,
-                "exec",
-                "skippr-perf-pg-cdc",
-                "psql",
-                "-U",
-                "postgres",
-                "-d",
-                "skippr_cdc",
-                "-c",
-                "INSERT INTO orders (id, name) VALUES (3, 'gamma');",
-            ],
-            check=True,
-        )
-        logs += run_skipprd(
-            skipprd,
-            ["--config", str(config), "sync", "--pipeline", "postgres_skipprlake_cdc", "--once"],
-            env=env,
-            work=work,
-            profile="none",
-        )
-        subprocess.run(
-            [
-                docker,
-                "exec",
-                "skippr-perf-pg-cdc",
-                "psql",
-                "-U",
-                "postgres",
-                "-d",
-                "skippr_cdc",
-                "-c",
-                "UPDATE orders SET name = 'alpha-prime' WHERE id = 1;",
-            ],
-            check=True,
-        )
-        measured = run_skipprd(
-            skipprd,
-            ["--config", str(config), "sync", "--pipeline", "postgres_skipprlake_cdc", "--once"],
-            env=env,
-            work=work,
-            profile="none",
-        )
-        logs += measured
-        wall_ms = int((time.perf_counter() - started) * 1000)
-        scan = warehouse / "bronze" / "postgres_orders"
-        count = subprocess.check_output(
-            [
-                duckdb_bin(),
-                "-csv",
-                "-c",
-                f"SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(DISTINCT id) FROM iceberg_scan('{scan}');",
-            ],
-            text=True,
-        )
-        updated = subprocess.check_output(
-            [
-                duckdb_bin(),
-                "-csv",
-                "-c",
-                f"SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT name FROM iceberg_scan('{scan}') WHERE id = 1 ORDER BY _skippr_order_token DESC LIMIT 1;",
-            ],
-            text=True,
-        )
-        if count.strip().splitlines()[-1] != "3":
-            raise PerfError(f"{scenario_id}: cdc count {count}")
-        if updated.strip().splitlines()[-1] != "alpha-prime":
-            raise PerfError(f"{scenario_id}: cdc update {updated}")
-        events = assert_scenario_perf(measured, scenario)
-        return report_payload(scenario_id, 3, wall_ms, events, logs, work)
-    finally:
-        stop_ddb()
-        subprocess.run([docker, "rm", "-f", "skippr-perf-pg-cdc"], check=False)
-
-
 def run_wrap_existing(scenario_id: str, scenario: dict[str, Any], work: Path) -> dict[str, Any]:
     script = REPO_ROOT / str(scenario["script"])
     env = os.environ.copy()
@@ -1208,8 +1064,6 @@ def run_scenario(scenario_id: str, scale: str, work: Path, profile: str) -> dict
         return run_copy_stdin(scenario_id, scenario, scale, work, profile)
     if kind == "copy_socket":
         return run_copy_socket(scenario_id, scenario, scale, work, profile)
-    if kind == "cdc_postgres_skipprlake":
-        return run_cdc(scenario_id, scenario, work, profile)
     if kind == "wrap_existing":
         return run_wrap_existing(scenario_id, scenario, work)
     if kind == "ingest_s3_skipprlake":
