@@ -60,6 +60,7 @@ jobs:
           - ingest-a-duckdb
           - ingest-a-skipprlake
           - copy-b-json-json
+          - ingest-json-parquet
           - ingest-slow-flatten-duckdb
           - copy-format-matrix
           - ingest-file-postgres
@@ -198,15 +199,21 @@ jobs:
             profile: flamegraph
           - scenario: copy-b-json-json
             profile: flamegraph
+          - scenario: ingest-json-parquet
+            profile: flamegraph
           - scenario: ingest-slow-flatten-duckdb
             profile: flamegraph
           - scenario: ingest-a-duckdb
             profile: heaptrack
           - scenario: copy-b-json-json
             profile: heaptrack
+          - scenario: ingest-json-parquet
+            profile: heaptrack
           - scenario: ingest-a-duckdb
             profile: perf-stat
           - scenario: copy-b-json-json
+            profile: perf-stat
+          - scenario: ingest-json-parquet
             profile: perf-stat
     steps:
       - uses: actions/checkout@v4

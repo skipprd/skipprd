@@ -44,6 +44,20 @@ scenarios:
     asserts:
       identity: true
 
+  ingest-json-parquet:
+    group: smoke
+    kind: ingest
+    sink: file
+    sink_format: parquet
+    fixture: exact_arrow_ts
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim]
+    asserts:
+      exact_arrow_eq_total: true
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+
   ingest-slow-flatten-duckdb:
     group: always
     kind: ingest

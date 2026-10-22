@@ -51,7 +51,12 @@ def preferred_reports(artifacts: Path) -> dict[str, dict[str, Any]]:
 
 def timings_from_reports(reports: dict[str, dict[str, Any]]) -> list[str]:
     lines: list[str] = []
-    for name in ("ingest-a-duckdb", "copy-b-json-json", "ingest-slow-flatten-duckdb"):
+    for name in (
+        "ingest-a-duckdb",
+        "copy-b-json-json",
+        "ingest-json-parquet",
+        "ingest-slow-flatten-duckdb",
+    ):
         payload = reports.get(name)
         if not payload or payload.get("error"):
             continue
@@ -62,11 +67,12 @@ def timings_from_reports(reports: dict[str, dict[str, Any]]) -> list[str]:
         label = {
             "ingest-a-duckdb": "Ingest-A",
             "copy-b-json-json": "Copy-B",
+            "ingest-json-parquet": "JSON File to Parquet File",
             "ingest-slow-flatten-duckdb": "Slow flatten",
         }[name]
         line = f"{label} synced {rows:,} rows in {elapsed}ms."
         exact = payload.get("exact_arrow_rows")
-        if name == "ingest-a-duckdb" and exact is not None:
+        if name in {"ingest-a-duckdb", "ingest-json-parquet"} and exact is not None:
             line += f" Exact Arrow kept {exact:,} of those rows."
         lines.append(line)
     return lines

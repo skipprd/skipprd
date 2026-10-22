@@ -95,7 +95,7 @@ def duckdb_bin() -> str:
     home = Path.home() / ".duckdb" / "cli" / "latest" / "duckdb"
     if home.is_file():
         return str(home)
-    raise PerfError("duckdb CLI is required for Iceberg scan cells")
+    raise PerfError("duckdb CLI is required for Iceberg and parquet scan cells")
 
 
 def stage_plugins(config: Path, pipeline: str, manifests: Path) -> None:
@@ -337,9 +337,10 @@ schema_sinks:
 """
     elif sink == "file":
         output_dir = (extra_source or {}).get("output_dir", "")
+        file_format = (extra_source or {}).get("format") or "jsonl"
         sink_block = f"""    File:
       output_dir: {output_dir}
-      format: jsonl
+      format: {file_format}
 """
     else:
         raise PerfError(sink)
@@ -432,6 +433,21 @@ def duckdb_scan(warehouse: Path, table: str, sql: str) -> str:
 
 def leftover_segs(data_dir: Path) -> int:
     return sum(1 for _ in data_dir.rglob("*.seg"))
+
+
+def parquet_scan(output: Path, sql: str) -> str:
+    files = list(output.rglob("*.parquet"))
+    if not files:
+        raise PerfError(f"no parquet files under {output}")
+    glob = str(output / "**" / "*.parquet")
+    cmd = [
+        duckdb_bin(),
+        "-csv",
+        "-c",
+        sql.format(glob=glob),
+    ]
+    out = subprocess.check_output(cmd, text=True)
+    return out.strip().splitlines()[-1]
 
 
 def convert_flamegraph(work: Path) -> None:
@@ -601,6 +617,14 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
     if warmup:
         write_ndjson(source / "warmup.json", fixture_kind, 1)
     sink = str(scenario["sink"])
+    output = work / "output"
+    extra_source = None
+    if sink == "file":
+        output.mkdir(parents=True, exist_ok=True)
+        extra_source = {
+            "output_dir": str(output),
+            "format": str(scenario.get("sink_format") or "parquet"),
+        }
     config = work / "skippr.yml"
     write_skippr_yml(
         config,
@@ -610,6 +634,7 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
         sink=sink,
         warehouse=warehouse,
         flatten=flatten,
+        extra_source=extra_source,
     )
     if sink == "skipprlake":
         start_ddb()
@@ -676,6 +701,7 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
             raise PerfError(f"{scenario_id}: exact_arrow_rows {totals}")
         table = PIPELINE
         if asserts.get("bronze_count"):
+            expect_count = rows + (1 if warmup else 0)
             if sink == "postgres":
                 docker = shutil.which("docker")
                 assert docker
@@ -694,18 +720,29 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
                     ],
                     text=True,
                 ).strip()
-                expect_count = rows + (1 if warmup else 0)
                 if int(count) != expect_count:
                     raise PerfError(f"{scenario_id}: postgres count {count} != {expect_count}")
+            elif sink == "file":
+                count = parquet_scan(
+                    output,
+                    "SELECT count(*) FROM read_parquet('{glob}', union_by_name=true)",
+                )
+                if int(count) != expect_count:
+                    raise PerfError(f"{scenario_id}: parquet count {count} != {expect_count}")
             else:
                 count = duckdb_scan(warehouse, table, "SELECT count(*) FROM iceberg_scan('{scan}')")
-                expect_count = rows + (1 if warmup else 0)
                 if int(count) != expect_count:
                     raise PerfError(f"{scenario_id}: bronze count {count} != {expect_count}")
         if asserts.get("amount_sum") and sink != "postgres":
-            summed = duckdb_scan(
-                warehouse, table, "SELECT coalesce(sum(amount),0) FROM iceberg_scan('{scan}')"
-            )
+            if sink == "file":
+                summed = parquet_scan(
+                    output,
+                    "SELECT coalesce(sum(amount),0) FROM read_parquet('{glob}', union_by_name=true)",
+                )
+            else:
+                summed = duckdb_scan(
+                    warehouse, table, "SELECT coalesce(sum(amount),0) FROM iceberg_scan('{scan}')"
+                )
             expect = expected_amount_sum(rows) + (10 if warmup else 0)
             if int(float(summed)) != expect:
                 raise PerfError(f"{scenario_id}: amount sum {summed} != {expect}")

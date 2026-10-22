@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -40,6 +41,7 @@ class PerfCatalogTests(unittest.TestCase):
         self.assertIn("ingest-a-duckdb", ids)
         self.assertIn("ingest-a-skipprlake", ids)
         self.assertIn("copy-b-json-json", ids)
+        self.assertIn("ingest-json-parquet", ids)
         joined = " ".join(ids).lower()
         for banned in OUT_OF_SUITE:
             self.assertNotIn(banned, joined)
@@ -56,7 +58,41 @@ class PerfCatalogTests(unittest.TestCase):
         ]
         self.assertEqual(
             sorted(smoke),
-            ["copy-b-json-json", "ingest-a-duckdb", "ingest-a-skipprlake"],
+            [
+                "copy-b-json-json",
+                "ingest-a-duckdb",
+                "ingest-a-skipprlake",
+                "ingest-json-parquet",
+            ],
+        )
+
+    def test_ingest_json_parquet_is_stable_schema_file_ingest(self) -> None:
+        catalog = load_catalog()
+        spec = catalog["scenarios"]["ingest-json-parquet"]
+        self.assertEqual(spec["kind"], "ingest")
+        self.assertEqual(spec["sink"], "file")
+        self.assertEqual(spec["sink_format"], "parquet")
+        self.assertEqual(spec["fixture"], "exact_arrow_ts")
+        asserts = spec.get("asserts") or {}
+        self.assertTrue(asserts.get("exact_arrow_eq_total"))
+        self.assertEqual(int(asserts["exact_fallback_rows"]), 0)
+        self.assertTrue(asserts.get("bronze_count"))
+        self.assertTrue(asserts.get("amount_sum"))
+        phases = required_perf_for(catalog, spec)
+        for phase in (
+            "ingest_profile",
+            "plugin_ipc",
+            "sync",
+            "wal_persist",
+            "wal_compact",
+            "wal_reclaim",
+        ):
+            self.assertIn(phase, phases)
+        workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        self.assertIn("ingest-json-parquet", workflow)
+        self.assertRegex(
+            workflow,
+            r"- scenario: ingest-json-parquet\n\s+profile: flamegraph",
         )
 
     def test_every_scenario_has_typed_kind_and_requires_sync(self) -> None:
@@ -112,6 +148,43 @@ class PerfFixtureTests(unittest.TestCase):
         self.assertFalse(is_exact_arrow_eligible_record(record, flatten=False))
         self.assertFalse(is_exact_arrow_eligible_record(record, flatten=True))
         self.assertIsInstance(record["user"], dict)
+
+    def test_timestamp_fixture_stays_flat_and_carries_rfc3339(self) -> None:
+        from fixtures import exact_arrow_ts_record, write_ndjson
+
+        record = exact_arrow_ts_record(3)
+        self.assertTrue(is_exact_arrow_eligible_record(record, flatten=False))
+        self.assertEqual(record["occurred_at"], "2024-01-15T12:34:56Z")
+        self.assertEqual(record["id"], 3)
+        self.assertEqual(record["amount"], 30)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_ndjson(Path(tmp) / "events.json", "exact_arrow_ts", 2)
+            lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("2024-01-15T12:34:56Z", lines[0])
+
+
+class FileParquetYamlTests(unittest.TestCase):
+    def test_ingest_file_sink_writes_parquet_format(self) -> None:
+        from run import write_skippr_yml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "skippr.yml"
+            write_skippr_yml(
+                path,
+                kind="ingest",
+                source_kind="File",
+                source_path="/src",
+                sink="file",
+                warehouse=None,
+                flatten=False,
+                extra_source={"output_dir": "/out", "format": "parquet"},
+            )
+            text = path.read_text(encoding="utf-8")
+        self.assertIn("format: parquet", text)
+        self.assertIn("output_dir: /out", text)
+        self.assertNotIn("type: copy", text)
+        self.assertNotIn("schema_sink:", text)
 
 
 class PerfParseTests(unittest.TestCase):
