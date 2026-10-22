@@ -26,40 +26,53 @@ pub struct DoctorResult {
     pub checks: Vec<DoctorCheck>,
 }
 
-pub fn run(config: &Config) -> DoctorResult {
+/// Check `config`. `pipeline = None` is the whole file; `Some(name)` is that
+/// pipeline only. Live source/sink probes are not part of doctor.
+pub fn run(config: &Config, pipeline: Option<&str>) -> DoctorResult {
     let mut checks = Vec::new();
+    let selected: Vec<(&String, &Pipeline)> = match pipeline {
+        Some(name) => match config.pipelines.get_key_value(name) {
+            Some(pair) => vec![pair],
+            None => {
+                checks.push(fail(&format!("pipeline '{name}' is not defined")));
+                Vec::new()
+            }
+        },
+        None => {
+            if config.pipelines.is_empty() {
+                checks.push(fail("no pipelines configured"));
+            } else {
+                checks.push(pass(&format!(
+                    "{} pipeline(s) configured",
+                    config.pipelines.len()
+                )));
+            }
 
-    if config.pipelines.is_empty() {
-        checks.push(fail("no pipelines configured"));
-    } else {
-        checks.push(pass(&format!(
-            "{} pipeline(s) configured",
-            config.pipelines.len()
-        )));
-    }
+            if config
+                .data_sources
+                .as_ref()
+                .map(|s| s.is_empty())
+                .unwrap_or(true)
+            {
+                checks.push(fail("data_sources is empty"));
+            } else {
+                checks.push(pass("data_sources configured"));
+            }
 
-    if config
-        .data_sources
-        .as_ref()
-        .map(|s| s.is_empty())
-        .unwrap_or(true)
-    {
-        checks.push(fail("data_sources is empty"));
-    } else {
-        checks.push(pass("data_sources configured"));
-    }
+            let sinks = config.data_sinks.as_ref();
+            if sinks.map(|s| !s.is_empty()).unwrap_or(false) {
+                checks.push(pass("data_sinks configured (optional)"));
+            } else {
+                checks.push(info("no data_sink; WAL is the dataset"));
+            }
+            config.pipelines.iter().collect()
+        }
+    };
 
-    let sinks = config.data_sinks.as_ref();
-    if sinks.map(|s| !s.is_empty()).unwrap_or(false) {
-        checks.push(pass("data_sinks configured (optional)"));
-    } else {
-        checks.push(info("no data_sink; WAL is the dataset"));
-    }
-
-    for (name, pipeline) in &config.pipelines {
-        match Config::validate_pipeline_registry_refs_for(config, name, pipeline) {
+    for (name, selected_pipeline) in selected {
+        match Config::validate_pipeline_registry_refs_for(config, name, selected_pipeline) {
             Ok(()) => {
-                let sink = if pipeline.data_sink.is_some() {
+                let sink = if selected_pipeline.data_sink.is_some() {
                     "source+sink"
                 } else {
                     "source, WAL-only"
@@ -68,7 +81,7 @@ pub fn run(config: &Config) -> DoctorResult {
             }
             Err(err) => checks.push(fail(&err)),
         }
-        wal_checks(&mut checks, config, pipeline);
+        wal_checks(&mut checks, config, selected_pipeline);
     }
     for violation in config.whole_config_violations() {
         checks.push(fail(&violation));
@@ -135,6 +148,20 @@ mod tests {
     use crate::helpers::configuration::Config;
     use serde_json::json;
 
+    fn two_pipelines_one_dangling() -> Config {
+        serde_json::from_value(json!({
+            "skippr": { "workspace": "quickstart", "skipprd_el_storage_mode": "local" },
+            "pipelines": {
+                "p1": { "data_source": "data_sources.sample" },
+                "p2": { "data_source": "data_sources.foo" }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            }
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn doctor_accepts_wal_only_pipeline() {
         let config: Config = serde_json::from_value(json!({
@@ -147,7 +174,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let result = run(&config);
+        let result = run(&config, None);
         assert!(result.ok, "{:?}", result.checks);
     }
 
@@ -160,7 +187,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let result = run(&config);
+        let result = run(&config, None);
         assert!(!result.ok);
     }
 
@@ -170,7 +197,7 @@ mod tests {
             "pipelines:\n  p:\n    data_source: data_sources.src\n    data_sink: data_sinks.lake\ndata_sources:\n  src:\n    File:\n      path: /tmp/in\ndata_sinks:\n  lake:\n    schema_sink: schema_sinks.lake\n    Duckdb:\n      warehouse: file:///tmp/w1\n      table_namespace: main\nschema_sinks:\n  lake:\n    Duckdb:\n      warehouse: file:///tmp/w2\n      table_namespace: main\n",
         )
         .unwrap();
-        let result = run(&config);
+        let result = run(&config, None);
         assert!(!result.ok);
         assert!(
             result
@@ -180,5 +207,107 @@ mod tests {
             "{:?}",
             result.checks
         );
+    }
+
+    #[test]
+    fn doctor_fails_when_skippr_yml_is_missing() {
+        let result = run(&Config::new(), None);
+        assert!(!result.ok);
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| !c.ok && c.message.contains("no pipelines configured")),
+            "{:?}",
+            result.checks
+        );
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| !c.ok && c.message.contains("data_sources is empty")),
+            "{:?}",
+            result.checks
+        );
+    }
+
+    #[test]
+    fn doctor_fails_on_a_dangling_source_ref() {
+        let config = two_pipelines_one_dangling();
+        let result = run(&config, None);
+        assert!(!result.ok);
+        assert!(
+            result.checks.iter().any(|c| {
+                !c.ok && c.message.contains("data_sources.foo") && c.message.contains("not defined")
+            }),
+            "{:?}",
+            result.checks
+        );
+    }
+
+    #[test]
+    fn doctor_scopes_to_named_pipeline() {
+        let config = two_pipelines_one_dangling();
+        let whole = run(&config, None);
+        assert!(!whole.ok, "{:?}", whole.checks);
+
+        let p1 = run(&config, Some("p1"));
+        assert!(p1.ok, "{:?}", p1.checks);
+        assert!(
+            p1.checks
+                .iter()
+                .any(|c| c.ok && c.message.contains("pipeline 'p1'")),
+            "{:?}",
+            p1.checks
+        );
+        assert!(
+            !p1.checks
+                .iter()
+                .any(|c| c.message.contains("pipeline 'p2'")),
+            "{:?}",
+            p1.checks
+        );
+
+        let p2 = run(&config, Some("p2"));
+        assert!(!p2.ok, "{:?}", p2.checks);
+        assert!(
+            p2.checks.iter().any(|c| {
+                !c.ok && c.message.contains("data_sources.foo") && c.message.contains("not defined")
+            }),
+            "{:?}",
+            p2.checks
+        );
+    }
+
+    #[test]
+    fn doctor_fails_when_named_pipeline_is_missing() {
+        let config = two_pipelines_one_dangling();
+        let result = run(&config, Some("nope"));
+        assert!(!result.ok);
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| !c.ok && c.message.contains("pipeline 'nope' is not defined")),
+            "{:?}",
+            result.checks
+        );
+    }
+
+    #[test]
+    fn unresolved_env_fails_at_config_load_not_as_a_doctor_check() {
+        let path = std::env::temp_dir().join(format!(
+            "skipprd-doctor-missing-env-{}.yml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "skippr:\n  workspace: quickstart\n  skipprd_el_storage_mode: local\npipelines:\n  p1:\n    data_source: data_sources.sample\ndata_sources:\n  sample:\n    S3:\n      s3_bucket: ${SKIPPR_DOCTOR_MISSING_BUCKET}\n      s3_prefix: p\n",
+        )
+        .unwrap();
+        std::env::remove_var("SKIPPR_DOCTOR_MISSING_BUCKET");
+        let err = Config::load_path(&path).expect_err("missing ${NAME} must fail closed");
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("SKIPPR_DOCTOR_MISSING_BUCKET"), "{err}");
     }
 }

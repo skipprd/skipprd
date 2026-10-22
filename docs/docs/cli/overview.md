@@ -34,7 +34,7 @@ If the command is not found, follow [Install](/getting-started/install).
 | [`skipprd query`](/cli/query) | Run SQL against your pipelines, interactively or as JSON for scripts. |
 | [`skipprd df`](/cli/df) | Print every row of a pipeline or namespace as JSON. |
 | [`skipprd serve`](/cli/serve) | Expose your Iceberg tables over Iceberg REST and Flight SQL to tools such as Spark, Trino, and PyIceberg. |
-| [`skipprd doctor`](/cli/doctor) | Check `skippr.yml` for mistakes before a long sync. |
+| [`skipprd doctor`](/cli/doctor) | Check `skippr.yml` for mistakes before a long sync. Omit `--pipeline` to check the whole file. |
 | [`skipprd sql-help`](/cli/sql-help) | List the SQL statements `skipprd query` supports, or export them to a file. |
 | [`skipprd benchmark`](/cli/benchmark) | Generate a synthetic JSON dataset for performance testing. |
 

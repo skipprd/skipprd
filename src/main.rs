@@ -337,7 +337,7 @@ async fn async_main() {
         }
         Mode::Doctor(options) => {
             let loaded = Config::build_config();
-            let session = Session::from_config(loaded, None);
+            let session = Session::from_config(loaded, options.pipeline.as_deref());
             let result = session.doctor().await;
             if options.output == "json" {
                 println!("{}", serde_json::to_string_pretty(&result).unwrap());

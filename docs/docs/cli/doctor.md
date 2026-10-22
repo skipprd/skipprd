@@ -5,7 +5,7 @@ description: Check skippr.yml for missing sections, broken references, unset sec
 
 # skipprd doctor
 
-`skipprd doctor` checks your configuration before you run anything long. It loads `skippr.yml`, resolves every `${NAME}` reference, and checks that each pipeline has a source, that every reference between pipelines and entries resolves, and that paired sinks match. It does not connect to your source or destination, so it is fast and safe to run anywhere: after editing the config, in CI on every change, or as the first step of a deploy. Doctor checks every pipeline in the file.
+`skipprd doctor` checks your configuration before you run anything long. It loads `skippr.yml`, resolves every `${NAME}` reference, and checks that each pipeline has a source, that every reference between pipelines and entries resolves, and that paired sinks match. It does not connect to your source or destination, so it is fast and safe to run anywhere: after editing the config, in CI on every change, or as the first step of a deploy. Omit `--pipeline` to check every pipeline in the file. Pass `--pipeline <name>` to check that pipeline only. `PIPELINE_NAME` does not change the default.
 
 ## Usage
 
@@ -20,7 +20,7 @@ print(result["ok"])
 ```
 
 ```bash [CLI]
-skipprd doctor [--output text|json] [--config <path>]
+skipprd doctor [--pipeline <name>] [--output text|json] [--config <path>]
 ```
 
 :::
@@ -29,6 +29,7 @@ skipprd doctor [--output text|json] [--config <path>]
 
 | Flag | Default | Description |
 |---|---|---|
+| `--pipeline <NAME>` | every pipeline | Check this pipeline only. Omit to check the whole file. |
 | `--output <MODE>` | `text` | `text` prints one line per check. `json` prints `{"ok": bool, "checks": [...]}` for scripts. |
 | `--config <PATH>` | `./skippr.yml` | Config file to check. |
 | `--log [LEVEL]` | Off | Print logs to stderr. |
@@ -49,6 +50,8 @@ See [CLI overview](/cli/overview) for the other global flags.
 
 Doctor validates configuration only. To test credentials and connectivity, run [`skipprd discover`](/cli/discover), which reads the source but never writes to the destination.
 
+A missing `${NAME}` variable fails while the config loads, before doctor runs: the CLI prints `[skippr] config failed: ...` and exits `1`. Python raises `ValueError` when you construct `Session`, so `doctor()` never runs. A dangling `data_sources.foo` is a failed doctor check on the CLI; in Python it is also `ValueError` at `Session(...)`, because a `Session` is bound to one pipeline that must already resolve.
+
 ## Examples
 
 ### Check the config in the current directory
@@ -68,6 +71,14 @@ All checks passed.
 ```
 
 A failing check is marked `[FAIL]` and the summary reads `Some checks failed.`
+
+### Check one pipeline
+
+```bash
+skipprd doctor --pipeline bikehire
+```
+
+Omit `--pipeline` to check every pipeline in the file.
 
 ### JSON for CI
 

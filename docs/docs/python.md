@@ -311,6 +311,8 @@ A **namespace** is one table's worth of records. By default a pipeline has one n
 
 `doctor()` (or `skipprd doctor`) checks that the config is complete and consistent: at least one pipeline and source, every reference points at an entry that exists, the storage mode, and the whole-config rules above. It returns a dict with `ok` and a list of `checks`. It does not connect to your source or destination; `discover()` is the first call that does.
 
+`Session` is bound to one pipeline. A missing `${NAME}` or a dangling `data_sources.foo` raises `ValueError` when you construct `Session`, before `doctor()` runs. The CLI reports a dangling ref as a failed doctor check, and a missing `${NAME}` as `[skippr] config failed: ...`. `skipprd doctor` without `--pipeline` checks every pipeline in the file; `skipprd doctor --pipeline bikehire` is the CLI equivalent of this `Session`.
+
 ```python
 import skippr
 

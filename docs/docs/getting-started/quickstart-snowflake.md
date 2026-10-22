@@ -145,6 +145,23 @@ What the settings mean:
 - Skipprd stages files in your user stage (`@~`) unless you set `stage` to a named stage.
 - `LocalStorage()` (`skipprd_el_storage_mode: local`) keeps Skipprd's own state, such as the discovered schema and how far it has read, in `./data`. That is fine for a trial; for production, see [State store](/configuration/skippr-store).
 
+After you save the file, check it. Doctor validates `skippr.yml`; it does not connect, so it does not replace `discover`.
+
+::: code-group
+
+```python [Python]
+import skippr
+
+s = skippr.Session(skippr.Config.discover().get_pipeline("bikehire"))
+s.doctor()
+```
+
+```bash [CLI]
+skipprd doctor
+```
+
+:::
+
 ## 3. Discover the schema
 
 ::: code-group
