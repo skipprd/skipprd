@@ -1451,7 +1451,6 @@ def stage_local_runtime_release(
             artifacts={
                 target_triple: {
                     "executable": relative_executable,
-                    "sha256": sha256(staged_binary),
                 }
             },
             executable=relative_executable,

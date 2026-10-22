@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -269,6 +270,11 @@ data_sources:
                     )
             run_command.assert_not_called()
             self.assertTrue(os.access(plugin, os.X_OK))
+            payload = json.loads((output_dir / "mssql-source.json").read_text(encoding="utf-8"))
+            artifact = payload["artifacts"]["x86_64-unknown-linux-gnu"]
+            self.assertIn("executable", artifact)
+            self.assertNotIn("sha256", artifact)
+            self.assertNotIn("url", artifact)
 
     def test_host_triple_without_rustc_uses_uname(self) -> None:
         host = type("Uname", (), {"sysname": "Linux", "machine": "x86_64"})()
