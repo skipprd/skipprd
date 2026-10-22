@@ -15,7 +15,7 @@ disable-model-invocation: true
 
 Opt-in performance matrix. Prove **correctness first**, then record timings, `--log perf` / `skipprd::perf` events, and flamegraphs for ingest-A and copy-B. Wrap scripts read `SKIPPR_LOG_LEVEL` through `skipprd_cli.log_args()` into `--log`. Do **not** run skipprd-docs. Do **not** publish PyPI. Do **not** consume CHANGELOG Unreleased. Do **not** bump plugin crates. Do **not** write CloudCycle EU buckets. `aws s3 sync --delete` is illegal.
 
-WAL leftover **import is out of suite**. Snowflake, BigQuery, Databricks, Redshift, Athena Glue, live ads/CRM, and production JSON are out of suite — do not fake them.
+WAL leftover **import is out of suite**. Postgres CDC is out of this matrix until `sync --once` actually exits (release e2e still has it). Snowflake, BigQuery, Databricks, Redshift, Athena Glue, live ads/CRM, and production JSON are out of suite — do not fake them.
 
 Repo: `skipprd/skipprd`. In-process `skipprd benchmark` / `scripts/benchmark-ingest-local.sh` stay decode-unit tools; this skill is the product path: **release binary + local plugins + discover/sync/query**.
 
@@ -83,4 +83,5 @@ Read `bottlenecks.json` / stdout: hottest frames in new code first **only if the
 - `aws s3 sync --delete`
 - Write `cloudcycle-datalake-iceberg-*` or other EU production/staging buckets
 - Treat WAL leftover import as a perf cell
+- Put Postgres CDC back in the skippr-perf matrix until `sync --once` exits
 - Amazon SES for the iteration memo (Gmail AFK only)

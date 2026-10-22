@@ -63,7 +63,6 @@ jobs:
           - ingest-slow-flatten-duckdb
           - copy-format-matrix
           - ingest-file-postgres
-          - cdc-postgres-skipprlake
           - copy-stdin-file
           - copy-socket-file
           - ingest-s3-skipprlake
