@@ -633,6 +633,17 @@ impl Offsets {
             .map_err(|err| format!("open wal_catalog tree: {err}"))
     }
 
+    pub fn open_sled_stream_state(&self) -> Result<sled::Tree, String> {
+        let local = self
+            .local
+            .as_ref()
+            .ok_or_else(|| "stream processor requires a local offset database".to_string())?;
+        local
+            .db
+            .open_tree(crate::processor::STREAM_STATE_TREE)
+            .map_err(|err| format!("open stream_state tree: {err}"))
+    }
+
     #[cfg(test)]
     pub(crate) fn from_local_db_for_test(db: sled::Db) -> Self {
         let tree = db.open_tree("offsets").expect("Could not open offset tree");

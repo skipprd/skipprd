@@ -1984,6 +1984,9 @@ mod tests {
             "SemanticLayerSettings",
             "CdcPipelineConfig",
             "CdcNamespaceConfig",
+            "TransformOp",
+            "TransformAggregate",
+            "AggregateMeasure",
         ] {
             assert!(
                 stub.contains(&format!("class {class}:")),

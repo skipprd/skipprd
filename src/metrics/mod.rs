@@ -550,6 +550,22 @@ impl Metrics {
             "exit_code": exit_code
         });
         data["metrics"]["flush_budget"] = flush_budget_metrics;
+        data["metrics"]["stream_transform_records_total"] =
+            json!(counters::STREAM_TRANSFORM_RECORDS_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["stream_transform_failures_total"] =
+            json!(counters::STREAM_TRANSFORM_FAILURES_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["stream_processor_records_total"] =
+            json!(counters::STREAM_PROCESSOR_RECORDS_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["stream_processor_cdc_insert_total"] =
+            json!(counters::STREAM_PROCESSOR_CDC_INSERT_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["stream_processor_cdc_update_total"] =
+            json!(counters::STREAM_PROCESSOR_CDC_UPDATE_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["stream_processor_cdc_delete_total"] =
+            json!(counters::STREAM_PROCESSOR_CDC_DELETE_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["stream_processor_txn_failures_total"] =
+            json!(counters::STREAM_PROCESSOR_TXN_FAILURES_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["stream_processor_wal_lag"] =
+            json!(counters::STREAM_PROCESSOR_WAL_LAG.load(Ordering::Relaxed));
         data["metrics"]["runtime_sink_active_session_count"] =
             json!(flush_metrics.runtime_sink_active_session_count);
         data["metrics"]["cluster_ready"] = json!(counters::CLUSTER_READY.load(Ordering::Relaxed));
