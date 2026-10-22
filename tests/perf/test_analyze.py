@@ -49,6 +49,15 @@ index 111..222 100644
 
 
 class FoldPerfScriptTests(unittest.TestCase):
+    def test_unknown_frame_keeps_dso_basename(self) -> None:
+        text = """\
+skipprd  1 [000]  1.0:   1 cycles:ppp:
+\tffffffff [unknown] (/opt/skipprd)
+\tffffffee skipprd::sync::run (/opt/skipprd)
+"""
+        folded = fold_perf_script(text)
+        self.assertEqual(folded, {"skipprd::sync::run;skipprd": 1})
+
     def test_collapses_root_first_stacks_with_counts(self) -> None:
         folded = fold_perf_script(PERF_SCRIPT)
         self.assertEqual(
@@ -79,6 +88,10 @@ class DiffNeedlesTests(unittest.TestCase):
         )
         self.assertEqual(rust_module_needles("src/helpers/mod.rs"), ["skipprd::helpers"])
         self.assertEqual(rust_module_needles("src/main.rs"), ["skipprd"])
+        self.assertEqual(
+            rust_module_needles("crates/skippr-wal-catalog/src/apply.rs"),
+            ["skippr_wal_catalog::apply"],
+        )
 
     def test_diff_collects_changed_file_and_added_fn(self) -> None:
         files, functions = symbols_from_diff(DIFF)
@@ -121,6 +134,16 @@ class BottleneckTests(unittest.TestCase):
             self.assertEqual(len(report["profiles"]), 1)
             self.assertTrue(report["profiles"][0]["hot_leaves"][0]["in_new_code"])
             self.assertEqual(report["reports"][0]["scenario"], "ingest-a-duckdb")
+
+    def test_short_fn_names_do_not_flag_libc_leaves(self) -> None:
+        from analyze import rank_leaves
+
+        leaves = rank_leaves(
+            {"libc;write": 10},
+            ["README.md"],
+            ["write", "new", "get"],
+        )
+        self.assertFalse(leaves[0]["in_new_code"])
 
     def test_overall_hot_without_matching_diff_is_not_new_code(self) -> None:
         empty_diff = "diff --git a/README.md b/README.md\n"

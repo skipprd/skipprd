@@ -400,8 +400,9 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("python3 -m pip install --quiet boto3", text)
         self.assertRegex(
             text,
-            r"cargo build --release -p skipprd --bin skipprd[^\n]*\n\s+cargo build --release",
+            r"cargo build --profile profiling -p skipprd --bin skipprd[^\n]*\n\s+cargo build --profile profiling",
         )
+        self.assertIn("target/profiling/", text)
         self.assertIn("perf", text)
         self.assertNotIn("--delete", text)
         self.assertIn("actions/e2e/perf", text)

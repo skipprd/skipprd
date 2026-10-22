@@ -225,8 +225,9 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("-p skippr-plugin-data-source-file", text)
         self.assertRegex(
             text,
-            r"cargo build --release -p skipprd --bin skipprd[^\n]*\n\s+cargo build --release",
+            r"cargo build --profile profiling -p skipprd --bin skipprd[^\n]*\n\s+cargo build --profile profiling",
         )
+        self.assertIn("target/profiling/", text)
         self.assertNotIn("if-no-files-found: warn", text)
         self.assertIn("if-no-files-found: error", text)
         cell = (REPO_ROOT / ".github" / "scripts" / "run_perf_cell.sh").read_text(encoding="utf-8")
