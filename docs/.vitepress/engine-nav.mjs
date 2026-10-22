@@ -21,7 +21,7 @@ export const engineSections = [
       { text: 'Deadletters', link: '/concepts/deadletters' },
       { text: 'Change data capture', link: '/cdc/' },
       { text: 'CDC guarantees', link: '/cdc/guarantees' },
-      { text: 'Datalake', link: '/concepts/datalake' },
+      { text: 'Stream lake', link: '/concepts/datalake' },
       { text: 'How sources land', link: '/concepts/source-landing-semantics' },
       { text: 'GA4 bronze and modeling', link: '/concepts/ga4-bronze-and-modeling' },
     ],
