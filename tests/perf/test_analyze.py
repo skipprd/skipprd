@@ -159,6 +159,18 @@ class BottleneckTests(unittest.TestCase):
             self.assertEqual(report["summary"]["hottest_new_code"], [])
             self.assertFalse(report["profiles"][0]["hot_leaves"][0]["in_new_code"])
 
+    def test_missing_folded_lists_what_was_downloaded(self) -> None:
+        from analyze import missing_folded_message
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            cell = root / "perf-copy-b-json-json-linux"
+            cell.mkdir()
+            (cell / "perf-report.json").write_text("{}\n", encoding="utf-8")
+            message = missing_folded_message(root)
+        self.assertIn("no perf.folded", message)
+        self.assertIn("perf-copy-b-json-json-linux/perf-report.json", message)
+
 
 class DownloadArgvTests(unittest.TestCase):
     def test_downloads_named_perf_artifacts_only(self) -> None:
