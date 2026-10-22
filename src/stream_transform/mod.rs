@@ -304,6 +304,9 @@ fn identity_kept(n: usize) -> Vec<usize> {
 }
 
 #[cfg(test)]
+mod tests_fuzz;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use arrow::array::{Float64Array, Int64Array, StringArray};

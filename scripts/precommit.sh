@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
 # Local gate that must stay green before a commit: Python CI contracts and
-# `cargo test -p skipprd --lib` (the same lib suite GitHub Actions runs).
+# `cargo test -p skipprd --lib` (the full lib suite, including stream-transform
+# chaos/sim/fuzz on local FS Sled). Smoke-only iteration:
+#   ./scripts/stream-transforms-smoke.sh
+# Unset SKIPPR_STREAM_TEST_PROFILE so git commit always runs the full matrix.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
+unset SKIPPR_STREAM_TEST_PROFILE || true
 
 echo "precommit: python3 .github/scripts/test_python_bindings_ci.py"
 python3 .github/scripts/test_python_bindings_ci.py
 
 echo "precommit: python3 .github/scripts/test_rust_ci.py"
 python3 .github/scripts/test_rust_ci.py
+
+echo "precommit: python3 .github/scripts/test_stream_transforms_ci.py"
+python3 .github/scripts/test_stream_transforms_ci.py
 
 echo "precommit: python3 .github/scripts/test_publish_runtime_plugins.py"
 python3 .github/scripts/test_publish_runtime_plugins.py

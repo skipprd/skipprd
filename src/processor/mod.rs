@@ -19,7 +19,12 @@ use skippr_wal_catalog::SegmentRow;
 pub const STREAM_STATE_TREE: &str = "stream_state";
 
 /// Next unconsumed catalog seq. `u64::MAX` means no processor is holding reclaim.
+#[cfg(not(test))]
 static MIN_UNCONSUMED_SEQ: AtomicU64 = AtomicU64::new(u64::MAX);
+#[cfg(test)]
+thread_local! {
+    static MIN_UNCONSUMED_SEQ: AtomicU64 = const { AtomicU64::new(u64::MAX) };
+}
 static PROCESSOR_STARTED: AtomicBool = AtomicBool::new(false);
 static PROCESSOR_STOP: AtomicBool = AtomicBool::new(false);
 static PROCESSOR_HANDLE: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
@@ -27,6 +32,7 @@ static PROCESSOR_HANDLE: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrashPoint {
     BeforeTxn,
+    BeforeCommit,
     DuringTxn,
     AfterTxn,
 }
@@ -74,12 +80,19 @@ impl WalCursor {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct ProcessorMeta {
-    cursor: WalCursor,
-    config_hash: String,
+    pub(crate) cursor: WalCursor,
+    pub(crate) config_hash: String,
 }
 
 pub fn min_unconsumed_seq() -> u64 {
-    MIN_UNCONSUMED_SEQ.load(Ordering::Relaxed)
+    #[cfg(test)]
+    {
+        return MIN_UNCONSUMED_SEQ.with(|slot| slot.load(Ordering::Relaxed));
+    }
+    #[cfg(not(test))]
+    {
+        MIN_UNCONSUMED_SEQ.load(Ordering::Relaxed)
+    }
 }
 
 pub fn allows_reclaim(segment_seq: u64) -> bool {
@@ -87,11 +100,18 @@ pub fn allows_reclaim(segment_seq: u64) -> bool {
 }
 
 pub fn set_min_unconsumed_seq(seq: u64) {
-    MIN_UNCONSUMED_SEQ.store(seq, Ordering::Relaxed);
+    #[cfg(test)]
+    {
+        MIN_UNCONSUMED_SEQ.with(|slot| slot.store(seq, Ordering::Relaxed));
+    }
+    #[cfg(not(test))]
+    {
+        MIN_UNCONSUMED_SEQ.store(seq, Ordering::Relaxed);
+    }
 }
 
 pub fn reset_reclaim_hold() {
-    MIN_UNCONSUMED_SEQ.store(u64::MAX, Ordering::Relaxed);
+    set_min_unconsumed_seq(u64::MAX);
 }
 
 pub struct StreamState {
@@ -342,6 +362,7 @@ impl StreamState {
             puts.push((dkey.clone(), b"1".to_vec()));
         }
 
+        maybe_crash(CrashPoint::BeforeCommit);
         let result: Result<(), sled::transaction::TransactionError<()>> =
             self.tree.transaction(|tx| {
                 for (key, value) in &puts {
@@ -351,7 +372,9 @@ impl StreamState {
                 Ok(())
             });
         match result {
-            Ok(()) => {}
+            Ok(()) => {
+                self.tree.flush().map_err(|err| err.to_string())?;
+            }
             Err(err) => {
                 crate::metrics::counters::add_stream_processor_txn_failure(1);
                 return Err(format!("stream processor transaction failed: {err:?}"));
@@ -404,6 +427,15 @@ impl StreamState {
             return Ok(Some(row));
         }
         self.load_last_row(&agg.id, new_key)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_kv(&self) -> BTreeMap<Vec<u8>, Vec<u8>> {
+        self.tree
+            .iter()
+            .filter_map(|item| item.ok())
+            .map(|(k, v)| (k.to_vec(), v.to_vec()))
+            .collect()
     }
 
     fn load_last_row(
@@ -860,6 +892,15 @@ async fn process_segment(
     Ok(processed)
 }
 
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod tests_chaos;
+#[cfg(test)]
+mod tests_fuzz;
+#[cfg(test)]
+mod tests_sim;
+
 pub async fn drain_and_stop_processor() -> bool {
     if !PROCESSOR_STARTED.load(Ordering::Relaxed) {
         return true;
@@ -925,10 +966,8 @@ mod tests {
         }
     }
 
-    fn state() -> StreamState {
-        let db = sled::Config::new().temporary(true).open().unwrap();
-        let tree = db.open_tree(STREAM_STATE_TREE).unwrap();
-        StreamState::open(tree, "events", vec![agg()]).unwrap()
+    fn state() -> super::test_support::DiskFixture {
+        super::test_support::DiskFixture::new()
     }
 
     fn insert_meta(id: &str) -> WalRowMeta {
@@ -1200,12 +1239,10 @@ mod tests {
 
     #[test]
     fn config_hash_rebuilds_state() {
-        let db = sled::Config::new().temporary(true).open().unwrap();
-        let tree = db.open_tree(STREAM_STATE_TREE).unwrap();
-        let spec = agg();
-        let state = StreamState::open(tree.clone(), "events", vec![spec.clone()]).unwrap();
+        let fixture = super::test_support::DiskFixture::new();
+        let spec = fixture.spec.clone();
         let batch = invoice_batch(&["A"], &[9], &["inv"]);
-        state
+        fixture
             .apply_events(
                 &spec,
                 WalCursor::default(),
@@ -1215,12 +1252,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            state
+            fixture
                 .measure("customer_invoice_totals", "A", "invoice_total")
                 .unwrap(),
             9.0
         );
-        let mut rebuilt = spec.clone();
+        let (dir, db_path) = fixture.release();
+        let mut rebuilt = spec;
         rebuilt.measures.insert(
             "other".into(),
             AggregateMeasure {
@@ -1228,13 +1266,14 @@ mod tests {
                 ..Default::default()
             },
         );
-        let state2 = StreamState::open(tree, "events", vec![rebuilt]).unwrap();
+        let (_db, state2) = super::test_support::open_db(&db_path, rebuilt);
         assert_eq!(
             state2
                 .measure("customer_invoice_totals", "A", "invoice_total")
                 .unwrap(),
             0.0
         );
+        let _keep = dir;
     }
 
     #[test]
@@ -1242,26 +1281,25 @@ mod tests {
         let spec = agg();
         let batch = invoice_batch(&["A"], &[7], &["inv"]);
         let cdc = vec![insert_meta("e1")];
-        let db = sled::Config::new().temporary(true).open().unwrap();
-        let tree = db.open_tree(STREAM_STATE_TREE).unwrap();
-        let state = StreamState::open(tree.clone(), "events", vec![spec.clone()]).unwrap();
+        let fixture = super::test_support::DiskFixture::new();
         set_test_crash(Some(CrashPoint::BeforeTxn));
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = state.apply_events(&spec, WalCursor::default(), &batch, Some(&cdc), 0);
+            let _ = fixture.apply_events(&spec, WalCursor::default(), &batch, Some(&cdc), 0);
         }));
         set_test_crash(None);
         assert!(panicked.is_err());
+        let fixture = fixture.reopen();
         assert_eq!(
-            state
+            fixture
                 .measure("customer_invoice_totals", "A", "invoice_total")
                 .unwrap(),
             0.0
         );
-        state
+        fixture
             .apply_events(&spec, WalCursor::default(), &batch, Some(&cdc), 0)
             .unwrap();
         assert_eq!(
-            state
+            fixture
                 .measure("customer_invoice_totals", "A", "invoice_total")
                 .unwrap(),
             7.0
@@ -1273,26 +1311,25 @@ mod tests {
         let spec = agg();
         let batch = invoice_batch(&["A"], &[7], &["inv"]);
         let cdc = vec![insert_meta("e1")];
-        let db = sled::Config::new().temporary(true).open().unwrap();
-        let tree = db.open_tree(STREAM_STATE_TREE).unwrap();
-        let state = StreamState::open(tree.clone(), "events", vec![spec.clone()]).unwrap();
+        let fixture = super::test_support::DiskFixture::new();
         set_test_crash(Some(CrashPoint::DuringTxn));
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = state.apply_events(&spec, WalCursor::default(), &batch, Some(&cdc), 0);
+            let _ = fixture.apply_events(&spec, WalCursor::default(), &batch, Some(&cdc), 0);
         }));
         set_test_crash(None);
         assert!(panicked.is_err());
+        let fixture = fixture.reopen();
         assert_eq!(
-            state
+            fixture
                 .measure("customer_invoice_totals", "A", "invoice_total")
                 .unwrap(),
             0.0
         );
-        state
+        fixture
             .apply_events(&spec, WalCursor::default(), &batch, Some(&cdc), 0)
             .unwrap();
         assert_eq!(
-            state
+            fixture
                 .measure("customer_invoice_totals", "A", "invoice_total")
                 .unwrap(),
             7.0
@@ -1304,26 +1341,25 @@ mod tests {
         let spec = agg();
         let batch = invoice_batch(&["A"], &[7], &["inv"]);
         let cdc = vec![insert_meta("e1")];
-        let db = sled::Config::new().temporary(true).open().unwrap();
-        let tree = db.open_tree(STREAM_STATE_TREE).unwrap();
-        let state = StreamState::open(tree.clone(), "events", vec![spec.clone()]).unwrap();
+        let fixture = super::test_support::DiskFixture::new();
         set_test_crash(Some(CrashPoint::AfterTxn));
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = state.apply_events(&spec, WalCursor::default(), &batch, Some(&cdc), 0);
+            let _ = fixture.apply_events(&spec, WalCursor::default(), &batch, Some(&cdc), 0);
         }));
         set_test_crash(None);
         assert!(panicked.is_err());
+        let fixture = fixture.reopen();
         assert_eq!(
-            state
+            fixture
                 .measure("customer_invoice_totals", "A", "invoice_total")
                 .unwrap(),
             7.0
         );
-        state
+        fixture
             .apply_events(&spec, WalCursor::default(), &batch, Some(&cdc), 0)
             .unwrap();
         assert_eq!(
-            state
+            fixture
                 .measure("customer_invoice_totals", "A", "invoice_total")
                 .unwrap(),
             7.0
