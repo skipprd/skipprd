@@ -170,6 +170,7 @@ class PerfRunnerContractTests(unittest.TestCase):
         self.assertIn("log_args(env)", text)
         self.assertIn("perf-stat", text)
         self.assertIn("require_profile_outputs", text)
+        self.assertIn("mode: line", text)
         self.assertNotIn('list(scenario.get("required_perf") or [])', text)
         self.assertNotIn("collect_log_text", text)
         self.assertNotIn('"--log", "perf"', text)
@@ -220,6 +221,12 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("perf.folded", text)
         self.assertIn("ingest-slow-flatten-duckdb", text)
         self.assertIn("analyze.py", text)
+        self.assertIn("python3 -m pip install --quiet boto3", text)
+        self.assertIn("-p skippr-plugin-data-source-file", text)
+        self.assertRegex(
+            text,
+            r"cargo build --release -p skipprd --bin skipprd[^\n]*\n\s+cargo build --release",
+        )
         self.assertNotIn("if-no-files-found: warn", text)
         self.assertIn("if-no-files-found: error", text)
         cell = (REPO_ROOT / ".github" / "scripts" / "run_perf_cell.sh").read_text(encoding="utf-8")

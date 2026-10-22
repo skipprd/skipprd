@@ -78,6 +78,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: python3 -m pip install --quiet boto3
       - uses: actions/download-artifact@v4
         with:
           name: skipprd-linux_x86
@@ -150,7 +151,8 @@ jobs:
           RUSTFLAGS: "-C force-frame-pointers=yes -C debuginfo=1"
         run: |
           set -euo pipefail
-          cargo build --release -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables \
+          cargo build --release -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables
+          cargo build --release \
             -p skippr-plugin-data-source-file \
             -p skippr-plugin-data-sink-file \
             -p skippr-plugin-data-sink-duckdb \
@@ -215,6 +217,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: python3 -m pip install --quiet boto3
       - uses: actions/download-artifact@v4
         with:
           name: skipprd-linux_x86-profile
