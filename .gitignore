@@ -18,6 +18,8 @@ skippr_data_tmp/
 /legacy/test-tmp/
 /legacy/test-data/
 /flamegraph*
+/artifacts/
+/bottlenecks.json
 test-data/ieu_trip
 /test-data/
 skippr-el.yml
