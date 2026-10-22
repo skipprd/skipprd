@@ -27,6 +27,7 @@ KNOWN_ASSERT_KEYS = frozenset(
         "amount_sum",
         "leftover_seg_count",
         "identity",
+        "row_count",
     }
 )
 
@@ -38,6 +39,7 @@ SCENARIO_KINDS = frozenset(
         "copy_socket",
         "wrap_existing",
         "ingest_s3_skipprlake",
+        "duckdb_ingest",
     }
 )
 

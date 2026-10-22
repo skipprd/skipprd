@@ -61,6 +61,11 @@ jobs:
           - ingest-a-skipprlake
           - copy-b-json-json
           - ingest-json-parquet
+          - ingest-csv-duckdb
+          - duckdb-ndjson
+          - duckdb-csv
+          - duckdb-json-array
+          - duckdb-insert-values
           - ingest-slow-flatten-duckdb
           - copy-format-matrix
           - ingest-file-postgres

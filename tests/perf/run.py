@@ -28,7 +28,11 @@ from catalog import load_catalog, required_perf_for, scenario_kind  # noqa: E402
 from skipprd_cli import log_args  # noqa: E402
 from fixtures import (  # noqa: E402
     expected_amount_sum,
+    write_csv,
+    write_insert_sql,
+    write_json_array,
     write_ndjson,
+    write_records,
 )
 from parse import events_by_phase, missing_phases, parse_perf_events  # noqa: E402
 
@@ -252,9 +256,11 @@ def write_skippr_yml(
         transform_yaml = f"    transform:\n{flatten_yaml}"
         pipeline_type = ""
     if source_kind == "File":
+        extra = extra_source or {}
+        file_format = extra.get("source_format") or "json"
         source_block = f"""    File:
       path: {source_path}
-      format: json
+      format: {file_format}
       batch_size_bytes: 1048576
 """
     elif source_kind == "Stdin":
@@ -435,6 +441,12 @@ def leftover_segs(data_dir: Path) -> int:
     return sum(1 for _ in data_dir.rglob("*.seg"))
 
 
+def duckdb_sql(db: Path, sql: str) -> str:
+    cmd = [duckdb_bin(), str(db), "-csv", "-c", sql]
+    out = subprocess.check_output(cmd, text=True)
+    return out.strip().splitlines()[-1] if out.strip() else ""
+
+
 def parquet_scan(output: Path, sql: str) -> str:
     files = list(output.rglob("*.parquet"))
     if not files:
@@ -613,18 +625,18 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
     data_dir.mkdir(parents=True, exist_ok=True)
     fixture_kind = str(scenario.get("fixture", "exact_arrow"))
     flatten = bool(scenario.get("flatten_events"))
+    source_format = str(scenario.get("source_format") or "json")
+    source_ext = "csv" if source_format == "csv" else "json"
     warmup = not flatten and bool((scenario.get("asserts") or {}).get("exact_arrow_eq_total"))
     if warmup:
-        write_ndjson(source / "warmup.json", fixture_kind, 1)
+        write_records(source / f"warmup.{source_ext}", fixture_kind, 1, fmt=source_format)
     sink = str(scenario["sink"])
     output = work / "output"
-    extra_source = None
+    extra_source: dict[str, str] = {"source_format": source_format}
     if sink == "file":
         output.mkdir(parents=True, exist_ok=True)
-        extra_source = {
-            "output_dir": str(output),
-            "format": str(scenario.get("sink_format") or "parquet"),
-        }
+        extra_source["output_dir"] = str(output)
+        extra_source["format"] = str(scenario.get("sink_format") or "parquet")
     config = work / "skippr.yml"
     write_skippr_yml(
         config,
@@ -674,8 +686,8 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
                 work=work,
                 profile="none",
             )
-            (source / "warmup.json").unlink(missing_ok=True)
-        write_ndjson(source / "events.json", fixture_kind, rows)
+            (source / f"warmup.{source_ext}").unlink(missing_ok=True)
+        write_records(source / f"events.{source_ext}", fixture_kind, rows, fmt=source_format)
         measured = run_skipprd(
             skipprd,
             ["--config", str(config), "sync", "--pipeline", PIPELINE, "--once"],
@@ -1039,6 +1051,48 @@ def run_s3_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: 
         client.delete_object(Bucket="skippr-e2e-sample-data", Key=key)
 
 
+def run_duckdb_ingest(
+    scenario_id: str, scenario: dict[str, Any], scale: str, work: Path
+) -> dict[str, Any]:
+    rows = row_count(scenario, scale)
+    pattern = str(scenario.get("duckdb_pattern") or "")
+    fixture_kind = str(scenario.get("fixture", "exact_arrow"))
+    source = work / "source"
+    source.mkdir(parents=True, exist_ok=True)
+    db = work / "duckdb-baseline.db"
+    if pattern == "ndjson":
+        path = write_ndjson(source / "events.json", fixture_kind, rows)
+        sql = f"CREATE TABLE events AS SELECT * FROM read_ndjson('{path}');"
+    elif pattern == "csv":
+        path = write_csv(source / "events.csv", fixture_kind, rows)
+        sql = f"CREATE TABLE events AS SELECT * FROM read_csv('{path}', header=true);"
+    elif pattern == "json_array":
+        path = write_json_array(source / "events.json", fixture_kind, rows)
+        sql = f"CREATE TABLE events AS SELECT * FROM read_json('{path}', format='array');"
+    elif pattern == "insert_values":
+        sql_path = write_insert_sql(source / "insert.sql", rows)
+        sql = f".read '{sql_path}'"
+    else:
+        raise PerfError(f"{scenario_id}: unknown duckdb_pattern {pattern!r}")
+    env = os.environ.copy()
+    started = time.perf_counter()
+    captured = run_logged([duckdb_bin(), str(db), "-c", sql], env=env)
+    wall_ms = int((time.perf_counter() - started) * 1000)
+    logs = captured + f'\nPERF_EVENT {{"phase":"sync","elapsed_ms":{wall_ms},"rows":{rows},"bytes":0}}\n'
+    events = assert_scenario_perf(logs, scenario)
+    asserts = scenario.get("asserts") or {}
+    if asserts.get("row_count"):
+        count = duckdb_sql(db, "SELECT count(*) FROM events;")
+        if int(count) != rows:
+            raise PerfError(f"{scenario_id}: duckdb count {count} != {rows}")
+    if asserts.get("amount_sum"):
+        summed = duckdb_sql(db, "SELECT coalesce(sum(amount),0) FROM events;")
+        expect = expected_amount_sum(rows)
+        if int(float(summed)) != expect:
+            raise PerfError(f"{scenario_id}: duckdb amount sum {summed} != {expect}")
+    return report_payload(scenario_id, rows, wall_ms, events, logs, work)
+
+
 def report_payload(
     scenario_id: str,
     rows: int,
@@ -1109,6 +1163,8 @@ def run_scenario(scenario_id: str, scale: str, work: Path, profile: str) -> dict
         return run_wrap_existing(scenario_id, scenario, work)
     if kind == "ingest_s3_skipprlake":
         return run_s3_ingest(scenario_id, scenario, scale, work, profile)
+    if kind == "duckdb_ingest":
+        return run_duckdb_ingest(scenario_id, scenario, scale, work)
     raise PerfError(f"unknown kind {kind}")
 
 

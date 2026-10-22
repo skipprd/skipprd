@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -60,11 +61,43 @@ class PerfCatalogTests(unittest.TestCase):
             sorted(smoke),
             [
                 "copy-b-json-json",
+                "duckdb-csv",
+                "duckdb-ndjson",
                 "ingest-a-duckdb",
                 "ingest-a-skipprlake",
+                "ingest-csv-duckdb",
                 "ingest-json-parquet",
             ],
         )
+
+    def test_duckdb_ingest_baselines_cover_fast_and_slow_patterns(self) -> None:
+        catalog = load_catalog()
+        fast = catalog["scenarios"]["duckdb-ndjson"]
+        csv_fast = catalog["scenarios"]["duckdb-csv"]
+        nested = catalog["scenarios"]["duckdb-json-array"]
+        inserts = catalog["scenarios"]["duckdb-insert-values"]
+        skipprd_csv = catalog["scenarios"]["ingest-csv-duckdb"]
+        self.assertEqual(fast["kind"], "duckdb_ingest")
+        self.assertEqual(fast["duckdb_pattern"], "ndjson")
+        self.assertEqual(csv_fast["duckdb_pattern"], "csv")
+        self.assertEqual(nested["duckdb_pattern"], "json_array")
+        self.assertEqual(inserts["duckdb_pattern"], "insert_values")
+        self.assertEqual(skipprd_csv["kind"], "ingest")
+        self.assertEqual(skipprd_csv["source_format"], "csv")
+        self.assertEqual(skipprd_csv["sink"], "duckdb")
+        self.assertGreaterEqual(int(fast.get("rows") or 0), 100000)
+        self.assertGreaterEqual(int(csv_fast.get("rows") or 0), 100000)
+        self.assertLess(int(inserts.get("rows") or 0), int(fast.get("rows") or 0))
+        workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        for name in (
+            "duckdb-ndjson",
+            "duckdb-csv",
+            "duckdb-json-array",
+            "duckdb-insert-values",
+            "ingest-csv-duckdb",
+        ):
+            self.assertIn(name, workflow)
+            self.assertTrue((catalog["scenarios"][name].get("asserts") or {}).get("row_count"))
 
     def test_ingest_json_parquet_is_stable_schema_file_ingest(self) -> None:
         catalog = load_catalog()
@@ -163,6 +196,26 @@ class PerfFixtureTests(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertIn("2024-01-15T12:34:56Z", lines[0])
 
+    def test_csv_and_json_array_and_insert_sql_are_generated_not_checked_in(self) -> None:
+        from fixtures import write_csv, write_insert_sql, write_json_array
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = write_csv(root / "events.csv", "exact_arrow", 3)
+            array_path = write_json_array(root / "events.json", "nested_flatten", 2)
+            sql_path = write_insert_sql(root / "insert.sql", 2)
+            csv_text = csv_path.read_text(encoding="utf-8")
+            array = json.loads(array_path.read_text(encoding="utf-8"))
+            sql = sql_path.read_text(encoding="utf-8")
+        self.assertIn("id,name,amount", csv_text)
+        self.assertIn("user_3", csv_text)
+        self.assertEqual(len(array), 2)
+        self.assertIsInstance(array[0]["user"], dict)
+        self.assertIn("INSERT INTO events VALUES", sql)
+        self.assertEqual(sql.count("INSERT INTO events VALUES"), 2)
+        fixtures_dir = HARNESS_DIR / "testdata"
+        self.assertFalse(fixtures_dir.exists())
+
 
 class FileParquetYamlTests(unittest.TestCase):
     def test_ingest_file_sink_writes_parquet_format(self) -> None:
@@ -185,6 +238,25 @@ class FileParquetYamlTests(unittest.TestCase):
         self.assertIn("output_dir: /out", text)
         self.assertNotIn("type: copy", text)
         self.assertNotIn("schema_sink:", text)
+
+    def test_csv_file_source_writes_csv_format(self) -> None:
+        from run import write_skippr_yml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "skippr.yml"
+            write_skippr_yml(
+                path,
+                kind="ingest",
+                source_kind="File",
+                source_path="/src",
+                sink="duckdb",
+                warehouse=Path("/warehouse"),
+                flatten=False,
+                extra_source={"source_format": "csv"},
+            )
+            text = path.read_text(encoding="utf-8")
+        self.assertIn("format: csv", text)
+        self.assertIn("path: /src", text)
 
 
 class PerfParseTests(unittest.TestCase):
@@ -233,6 +305,9 @@ class PerfSkillTests(unittest.TestCase):
         self.assertIn("send-afk-mail.py", text)
         self.assertIn("iterate", text)
         self.assertIn("exhausted", text)
+        self.assertIn("duckdb-ndjson", text)
+        self.assertIn("duckdb-csv", text)
+        self.assertIn("ingest-csv-duckdb", text)
 
 
 class SkipprdCliTests(unittest.TestCase):
@@ -263,6 +338,8 @@ class PerfRunnerContractTests(unittest.TestCase):
         self.assertIn("wrap_skippr_yml", text)
         self.assertIn("COMMAND_TIMEOUT_SECONDS", text)
         self.assertNotIn("run_cdc", text)
+        self.assertIn("run_duckdb_ingest", text)
+        self.assertIn("duckdb_ingest", text)
         self.assertNotIn('list(scenario.get("required_perf") or [])', text)
         self.assertNotIn("collect_log_text", text)
         self.assertNotIn('"--log", "perf"', text)

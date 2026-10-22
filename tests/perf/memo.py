@@ -53,8 +53,13 @@ def timings_from_reports(reports: dict[str, dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for name in (
         "ingest-a-duckdb",
+        "ingest-csv-duckdb",
         "copy-b-json-json",
         "ingest-json-parquet",
+        "duckdb-ndjson",
+        "duckdb-csv",
+        "duckdb-json-array",
+        "duckdb-insert-values",
         "ingest-slow-flatten-duckdb",
     ):
         payload = reports.get(name)
@@ -66,8 +71,13 @@ def timings_from_reports(reports: dict[str, dict[str, Any]]) -> list[str]:
             continue
         label = {
             "ingest-a-duckdb": "Ingest-A",
+            "ingest-csv-duckdb": "Skipprd CSV to DuckDB",
             "copy-b-json-json": "Copy-B",
             "ingest-json-parquet": "JSON File to Parquet File",
+            "duckdb-ndjson": "DuckDB NDJSON (fast)",
+            "duckdb-csv": "DuckDB CSV COPY (fast)",
+            "duckdb-json-array": "DuckDB nested JSON array (slow)",
+            "duckdb-insert-values": "DuckDB row INSERT (slow)",
             "ingest-slow-flatten-duckdb": "Slow flatten",
         }[name]
         line = f"{label} synced {rows:,} rows in {elapsed}ms."

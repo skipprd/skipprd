@@ -58,6 +58,72 @@ scenarios:
       bronze_count: true
       amount_sum: true
 
+  ingest-csv-duckdb:
+    group: smoke
+    kind: ingest
+    sink: duckdb
+    source_format: csv
+    fixture: exact_arrow
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim]
+    asserts:
+      exact_arrow_eq_total: true
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+      row_count: true
+
+  duckdb-ndjson:
+    group: smoke
+    kind: duckdb_ingest
+    duckdb_pattern: ndjson
+    fixture: exact_arrow
+    rows: 100000
+    smoke_rows: 5000
+    linux_rows: 50000
+    required_perf: [sync]
+    asserts:
+      row_count: true
+      amount_sum: true
+
+  duckdb-csv:
+    group: smoke
+    kind: duckdb_ingest
+    duckdb_pattern: csv
+    fixture: exact_arrow
+    rows: 100000
+    smoke_rows: 5000
+    linux_rows: 50000
+    required_perf: [sync]
+    asserts:
+      row_count: true
+      amount_sum: true
+
+  duckdb-json-array:
+    group: always
+    kind: duckdb_ingest
+    duckdb_pattern: json_array
+    fixture: nested_flatten
+    rows: 20000
+    smoke_rows: 2000
+    linux_rows: 10000
+    required_perf: [sync]
+    asserts:
+      row_count: true
+
+  duckdb-insert-values:
+    group: always
+    kind: duckdb_ingest
+    duckdb_pattern: insert_values
+    fixture: exact_arrow
+    rows: 5000
+    smoke_rows: 500
+    linux_rows: 2000
+    required_perf: [sync]
+    asserts:
+      row_count: true
+      amount_sum: true
+
   ingest-slow-flatten-duckdb:
     group: always
     kind: ingest
