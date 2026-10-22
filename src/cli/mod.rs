@@ -168,6 +168,9 @@ pub struct BenchmarkOptions {
 
 #[derive(Parser, Clone, PartialEq)]
 pub struct DoctorOptions {
+    /// Check this pipeline only. Omit to check every pipeline in the file.
+    #[arg(short, long)]
+    pub pipeline: Option<String>,
     /// Output mode: text or json
     #[arg(long, default_value = "text")]
     pub output: String,

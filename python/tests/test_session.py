@@ -76,6 +76,61 @@ def test_session_resolves_env_refs_and_fails_on_missing(monkeypatch):
     assert skippr.Session(ref).pipeline == "p1"
 
 
+def test_missing_skippr_yml_has_no_pipeline_to_doctor(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = Config.discover()
+    with pytest.raises(KeyError, match="pipelines.p1"):
+        cfg.get_pipeline("p1")
+
+
+def test_dangling_source_ref_fails_at_session_not_doctor(tmp_path):
+    path = tmp_path / "skippr.yml"
+    path.write_text(
+        """
+skippr:
+  workspace: quickstart
+  skipprd_el_storage_mode: local
+pipelines:
+  p1:
+    data_source: data_sources.foo
+data_sources:
+  sample:
+    S3:
+      s3_bucket: b
+      s3_prefix: p
+"""
+    )
+    cfg = Config.load(path)
+    with pytest.raises(ValueError, match="data_sources.foo"):
+        skippr.Session(cfg.get_pipeline("p1"))
+
+
+def test_session_doctor_does_not_see_other_pipelines_dangling_ref(tmp_path):
+    path = tmp_path / "skippr.yml"
+    path.write_text(
+        """
+skippr:
+  workspace: quickstart
+  skipprd_el_storage_mode: local
+pipelines:
+  p1:
+    data_source: data_sources.sample
+  p2:
+    data_source: data_sources.foo
+data_sources:
+  sample:
+    S3:
+      s3_bucket: b
+      s3_prefix: p
+"""
+    )
+    cfg = Config.load(path)
+    result = skippr.Session(cfg.get_pipeline("p1")).doctor()
+    assert result["ok"] is True
+    with pytest.raises(ValueError, match="data_sources.foo"):
+        skippr.Session(cfg.get_pipeline("p2"))
+
+
 def test_df_and_query_return_pyarrow_table():
     _, p1, _ = _config()
     s = skippr.Session(p1)

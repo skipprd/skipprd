@@ -42,7 +42,7 @@ impl Session {
     }
 
     pub async fn doctor(&self) -> DoctorResult {
-        doctor::run(&self.config)
+        doctor::run(&self.config, self.pipeline.as_deref())
     }
 
     pub async fn discover(&self, output_mode: &str) -> io::Result<()> {
@@ -425,10 +425,43 @@ mod tests {
     }
 
     #[test]
+    fn cli_doctor_omitted_pipeline_checks_the_whole_file() {
+        let cli = include_str!("cli/mod.rs");
+        let doctor_opts = cli
+            .split("pub struct DoctorOptions")
+            .nth(1)
+            .unwrap()
+            .split("pub struct MigrateOptions")
+            .next()
+            .unwrap();
+        assert!(
+            doctor_opts.contains("pub pipeline: Option<String>"),
+            "doctor takes optional --pipeline"
+        );
+        let main = include_str!("main.rs");
+        let doctor_arm = main
+            .split("Mode::Doctor(options)")
+            .nth(1)
+            .unwrap()
+            .split("Mode::Df(options)")
+            .next()
+            .unwrap();
+        assert!(
+            doctor_arm.contains("options.pipeline.as_deref()"),
+            "CLI doctor must pass --pipeline onto Session"
+        );
+        assert!(
+            !doctor_arm.contains("cli_named_pipeline"),
+            "omitted --pipeline must check the whole file, not PIPELINE_NAME"
+        );
+    }
+
+    #[test]
     fn cli_docs_cover_doctor_and_df() {
         let doctor = include_str!("../docs/docs/cli/doctor.md");
         let df = include_str!("../docs/docs/cli/df.md");
         assert!(doctor.contains("skipprd doctor"));
+        assert!(doctor.contains("--pipeline"));
         assert!(df.contains("skipprd df"));
         let overview = include_str!("../docs/docs/cli/overview.md");
         assert!(overview.contains("](/cli/doctor)"));

@@ -220,7 +220,8 @@ class Session:
         """YAML key of the bound pipeline."""
         ...
     def doctor(self) -> dict[str, Any]:
-        """Run startup checks. Returns `ok` and `checks`."""
+        """Run config checks for this pipeline. Returns `ok` and `checks`.
+        Missing `${NAME}` and dangling refs raise at Session construction."""
         ...
     def discover(self) -> None:
         """Discover schemas for this pipeline's source."""
