@@ -1,0 +1,44 @@
+name: Stream transforms
+on:
+  pull_request:
+  push:
+    branches:
+      - stream-transforms
+      - issue-14-skippr-perf
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "2"
+
+jobs:
+  processor_suite:
+    name: Local Sled chaos / sim / fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: skipprd
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/cloud
+          path: cloud
+          token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
+          submodules: true
+      - name: Install Linux x86 build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: skipprd
+      - name: Full stream-transform suite (local FS Sled)
+        run: cargo test -p skipprd --lib -- processor:: stream_transform::

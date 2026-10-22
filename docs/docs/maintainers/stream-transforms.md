@@ -35,6 +35,13 @@ One Sled transaction writes measures, last-row images, entity index, dedup keys,
 
 P0 metrics: `stream_transform_records_total`, `stream_transform_failures_total`, `stream_processor_records_total`, `stream_processor_cdc_{insert,update,delete}_total`, `stream_processor_txn_failures_total`, `stream_processor_wal_lag`.
 
+## Testing
+
+All processor tests open a real Sled directory on the local filesystem (not `temporary(true)`). A successful apply flushes the tree so a process crash after the txn can reopen the same path.
+
+- Smoke (local iteration): `./scripts/stream-transforms-smoke.sh` (`SKIPPR_STREAM_TEST_PROFILE=smoke`).
+- Full matrix (git commit via `scripts/precommit.sh`, and `.github/workflows/stream-transforms.yml` on pull requests): deterministic CDC scripts vs a golden model, crash injection at `BeforeTxn` / `BeforeCommit` / `DuringTxn` / `AfterTxn` with drop+reopen, multi-row batch atomicity, reclaim-hold restore from the disk cursor, and proptest fuzz of event streams plus Arrow ops/CDC alignment.
+
 Config-hash mismatch deletes that aggregate's prefix and rebuilds from WAL start.
 
 ## Reclaim hold
