@@ -22,6 +22,7 @@ pub mod logger;
 pub mod logging;
 pub mod offset_store;
 pub mod offsets;
+pub mod perf;
 pub mod plugin_config;
 pub mod progress;
 pub mod s3;

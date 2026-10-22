@@ -19,6 +19,9 @@ import boto3
 from botocore.config import Config as BotoConfig
 
 ACTION = Path(__file__).resolve().parent
+sys.path.insert(0, str(ACTION.parents[2] / "scripts"))
+from skipprd_cli import log_args  # noqa: E402
+
 SPEC = importlib.util.spec_from_file_location(
     "s3_file_copy_matrix", ACTION.parent / "s3_file_copy" / "run_matrix.py"
 )
@@ -129,7 +132,7 @@ def run_cell(
             "--config",
             str(cfg),
             "sync",
-            "--log",
+            *log_args(env),
             "--pipeline",
             "s3_s3_copy",
             "--once",
@@ -242,7 +245,7 @@ def run_namespace_burst(
             "--config",
             str(cfg),
             "sync",
-            "--log",
+            *log_args(env),
             "--pipeline",
             "s3_s3_copy",
             "--once",

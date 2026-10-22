@@ -32,6 +32,7 @@ jobs:
       - run: python3 .github/scripts/test_bump_changed_plugin_crates.py
       - run: python3 .github/scripts/test_previous_protocol_compatible_release.py
       - run: python3 .github/scripts/test_engine_tag.py
+      - run: python3 tests/perf/test_run.py
 
   linux_x86:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'

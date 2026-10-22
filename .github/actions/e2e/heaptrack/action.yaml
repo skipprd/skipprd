@@ -1,73 +1,54 @@
 name: Heaptrack
-description: "Run heaptrack on Skippr"
+description: "Heaptrack ingest-A through the skippr-perf harness."
 inputs:
-  architecture_name:
-    description: 'macos_arm64, macos-x86, linux_x86'
+  skipprd_path:
     required: true
-    default: 'stable'
-  aws_access_key_id:
-    required: true
-  aws_secret_access_key:
-    required: true
-  docker_hub_pass:
-    required: true
+  plugin_binaries_dir:
+    required: false
+    default: ""
+  scale:
+    required: false
+    default: linux
+  workspace-root:
+    required: false
+    default: "."
+  scenario:
+    required: false
+    default: ingest-a-duckdb
 runs:
-  using: "composite"
+  using: composite
   steps:
-    - name: Discover Schemas
+    - name: Install heaptrack (linux)
+      if: runner.os == 'Linux'
       shell: bash
-      run: |
-        chmod +x ./skipprd-${{ inputs.architecture_name }}/skipprd
-        
-        cp .github/actions/e2e/heaptrack/skippr.yml ./skippr.yml
-        
-        ls -la ./
-        
-        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire
-        ./skipprd-${{ inputs.architecture_name }}/skipprd query --sql "ENABLE PIPELINE bike_hire"
-        
-
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire_many
-#        ./skipprd-${{ inputs.architecture_name }}/skipprd query --sql "ENABLE PIPELINE bike_hire_many"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire_many2
-#        ./skipprd-${{ inputs.architecture_name }}/skipprd query --sql "ENABLE PIPELINE bike_hire_many2"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire_many3
-#        ./skipprd-${{ inputs.architecture_name }}/skipprd query --sql "ENABLE PIPELINE bike_hire_many3"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire_many4
-#        ./skipprd-${{ inputs.architecture_name }}/skipprd query --sql "ENABLE PIPELINE bike_hire_many4"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire_many5
-#        ./skipprd-${{ inputs.architecture_name }}/skipprd query --sql "ENABLE PIPELINE bike_hire_many5"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire_many6
-#        ./skipprd-${{ inputs.architecture_name }}/skipprd query --sql "ENABLE PIPELINE bike_hire_many6"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire_many7
-#        ./skipprd-${{ inputs.architecture_name }}/skipprd query --sql "ENABLE PIPELINE bike_hire_many7"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire_many8
-#        ./skipprd-${{ inputs.architecture_name }}/skipprd query --sql "ENABLE PIPELINE bike_hire_many8"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire_many9
-#        ./skipprd-${{ inputs.architecture_name }}/skipprd query --sql "ENABLE PIPELINE bike_hire_many9"
-#        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire_many10
-#        ./skipprd-${{ inputs.architecture_name }}/skipprd query --sql "ENABLE PIPELINE bike_hire_many10"
-
-
-    - name: Install Heaptrack
+      run: sudo apt-get update && sudo apt-get install -y heaptrack
+    - name: Heaptrack ingest-A
       shell: bash
+      working-directory: ${{ inputs.workspace-root }}
+      env:
+        SKIPPRD_BIN: ${{ inputs.skipprd_path }}
+        PLUGIN_BINARIES_DIR: ${{ inputs.plugin_binaries_dir }}
+        SKIPPR_LOG_LEVEL: perf
+        PERF_SCENARIO: ${{ inputs.scenario }}
+        PERF_SCALE: ${{ inputs.scale }}
+        PERF_PROFILE: heaptrack
+        PERF_WORK: ${{ runner.temp }}/skippr-perf-heaptrack
       run: |
-        if [[ "${{ inputs.architecture_name }}" == "linux_x86" ]]; then
-        sudo apt-get update && sudo apt-get install -y heaptrack
-        elif [[ "${{ inputs.architecture_name }}" == "macos_arm64" || "${{ inputs.architecture_name }}" == "macos-x86" ]]; then
-        brew install heaptrack
+        set -euo pipefail
+        bash .github/scripts/run_perf_cell.sh
+        shopt -s nullglob
+        copied=0
+        for zst in "${PERF_WORK}/${PERF_SCENARIO}"/heaptrack*; do
+          cp "${zst}" "${GITHUB_WORKSPACE}/heaptrack_output${zst##*heaptrack}"
+          copied=1
+        done
+        if [ "${copied}" -eq 0 ]; then
+          echo "heaptrack produced no profile under ${PERF_WORK}/${PERF_SCENARIO}" >&2
+          exit 1
         fi
-
-    - name: Run Heaptrack
-      shell: bash
-      run: |
-        if [[ "${{ inputs.architecture_name }}" == "linux_x86" || "${{ inputs.architecture_name }}" == "macos_arm64" || "${{ inputs.architecture_name }}" == "macos-x86" ]]; then
-          AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 heaptrack ./skipprd-${{ inputs.architecture_name }}/skipprd sync --log --pipeline bike_hire
-          mv heaptrack.*.zst heaptrack_output.zst
-        fi
-
-    - name: Upload Heaptrack Output
+    - name: Upload heaptrack output
       uses: actions/upload-artifact@v4
       with:
         name: heaptrack-output
-        path: heaptrack_output.zst
+        path: heaptrack_output*
+        if-no-files-found: error

@@ -27,24 +27,16 @@ aws_smithy_client=warn,\
 aws_sig_auth=warn,\
 hyper=warn,reqwest=warn,rustls=warn,h2=warn";
 
-    let lvl = level_opt.as_deref().unwrap_or("info").to_lowercase();
-    let crate_level = match lvl.as_str() {
-        "trace" => "trace",
-        "debug" => "debug",
-        "warn" => "warn",
-        "error" => "error",
-        _ => "info",
-    };
-    let composed = format!("skippr={},{}", crate_level, base_filter);
+    let lvl = parse_log_level(level_opt.as_deref().unwrap_or("info"))
+        .unwrap_or_else(|err| panic!("{err}"));
+    let composed = env_filter_directives(&lvl, base_filter);
 
     let file_appender = build_file_appender();
 
     match (enabled, file_appender) {
         (true, Some(appender)) => {
-            let stderr_filter =
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&composed));
-            let file_filter =
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&composed));
+            let stderr_filter = EnvFilter::new(&composed);
+            let file_filter = EnvFilter::new(&composed);
 
             tracing_subscriber::registry()
                 .with(
@@ -67,8 +59,7 @@ hyper=warn,reqwest=warn,rustls=warn,h2=warn";
                 .init();
         }
         (true, None) => {
-            let filter =
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&composed));
+            let filter = EnvFilter::new(&composed);
 
             tracing_subscriber::registry()
                 .with(
@@ -82,8 +73,7 @@ hyper=warn,reqwest=warn,rustls=warn,h2=warn";
                 .init();
         }
         (false, Some(appender)) => {
-            let file_filter =
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&composed));
+            let file_filter = EnvFilter::new(&composed);
 
             tracing_subscriber::registry()
                 .with(
@@ -167,4 +157,65 @@ fn purge_old_logs(dir: &std::path::Path, keep: usize) {
 
 pub fn cli_logs_enabled() -> bool {
     unsafe { CLI_LOGS_ENABLED }
+}
+
+pub fn parse_log_level(raw: &str) -> Result<String, String> {
+    let level = raw.to_ascii_lowercase();
+    match level.as_str() {
+        "trace" | "debug" | "info" | "warn" | "error" | "perf" => Ok(level),
+        _ => Err(format!(
+            "unknown log level {raw}; expected perf|trace|debug|info|warn|error"
+        )),
+    }
+}
+
+pub fn env_filter_directives(level: &str, base_filter: &str) -> String {
+    let crate_filter = match level {
+        "trace" => "skipprd=trace,skippr=trace",
+        "debug" => "skipprd=debug,skippr=debug",
+        "warn" => "skipprd=warn,skippr=warn",
+        "error" => "skipprd=error,skippr=error",
+        "perf" => "skipprd::perf=info,skipprd=warn,skippr=warn",
+        "info" => "skipprd=info,skippr=info",
+        other => panic!("unparsed log level {other}; call parse_log_level first"),
+    };
+    format!("{crate_filter},{base_filter}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: &str = "aws=warn,hyper=warn";
+
+    #[test]
+    fn perf_level_enables_skipprd_perf_and_warns_the_rest() {
+        let filter = env_filter_directives("perf", BASE);
+        assert!(filter.contains("skipprd::perf=info"), "{filter}");
+        assert!(filter.contains("skipprd=warn"), "{filter}");
+        assert!(filter.contains("skippr=warn"), "{filter}");
+        assert!(
+            !filter.contains("skipprd=debug") && !filter.contains("skipprd=info,"),
+            "{filter}"
+        );
+        EnvFilter::try_new(&filter).expect("perf filter should parse");
+    }
+
+    #[test]
+    fn unknown_level_is_rejected() {
+        assert!(parse_log_level("verbose").is_err());
+        assert_eq!(parse_log_level("perf").unwrap(), "perf");
+        assert_eq!(parse_log_level("INFO").unwrap(), "info");
+    }
+
+    #[test]
+    fn explicit_log_level_is_filter_authority() {
+        let src = include_str!("logging.rs");
+        let impl_src = src.split("mod tests").next().expect("logging tests module");
+        assert!(
+            !impl_src.contains("try_from_default_env"),
+            "--log composed filter is SoT; RUST_LOG must not override"
+        );
+        assert!(impl_src.contains("EnvFilter::new(&composed)"));
+    }
 }

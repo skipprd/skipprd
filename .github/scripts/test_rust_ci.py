@@ -98,6 +98,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("test_bump_changed_plugin_crates.py", text)
         self.assertIn("test_previous_protocol_compatible_release.py", text)
         self.assertIn("test_engine_tag.py", text)
+        self.assertIn("tests/perf/test_run.py", text)
         self.assertIn("chaos_mode_published:", text)
         self.assertIn("e2e_prev_plugins:", text)
         self.assertIn("e2e_prev_host:", text)
@@ -374,6 +375,46 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("full `cargo test -p skipprd`", text)
         self.assertNotIn("commented out for now", text)
         self.assertNotIn("stay commented", text)
+
+    def test_perf_workflow_skill_and_no_s3_delete(self) -> None:
+        workflow = ROOT / ".github" / "workflows" / "perf.yml"
+        text = workflow.read_text(encoding="utf-8")
+        header = text.split("\njobs:", 1)[0]
+        self.assertIn("workflow_dispatch:", header)
+        self.assertNotIn("tags:", header)
+        self.assertNotIn("pull_request:", header)
+        self.assertIn("ingest-a-duckdb", text)
+        self.assertIn("copy-b-json-json", text)
+        self.assertIn("skippr-darwin-arm64", text)
+        self.assertIn("ubuntu-latest", text)
+        self.assertIn("flamegraph", text)
+        self.assertIn("heaptrack", text)
+        self.assertIn("perf", text)
+        self.assertNotIn("--delete", text)
+        self.assertIn("actions/e2e/perf", text)
+        self.assertIn("actions/e2e/heaptrack", text)
+        self.assertNotIn("python3 tests/perf/run.py", text)
+        runner = (ROOT / "tests" / "perf" / "run.py").read_text(encoding="utf-8")
+        self.assertIn("log_args", runner)
+        self.assertIn('"perf"', runner)
+        cli = (ROOT / ".github" / "scripts" / "skipprd_cli.py").read_text(encoding="utf-8")
+        self.assertIn("--log", cli)
+        self.assertIn("PERF_EVENT", (ROOT / "src" / "helpers" / "perf.rs").read_text(encoding="utf-8"))
+        self.assertIn("skipprd::perf=info", (ROOT / "src" / "helpers" / "logging.rs").read_text(encoding="utf-8"))
+        skill = ROOT / ".cursor" / "skills" / "skippr-perf" / "SKILL.md"
+        skill_text = skill.read_text(encoding="utf-8")
+        self.assertIn("name: skippr-perf", skill_text)
+        self.assertIn("Local smoke", skill_text)
+        self.assertIn("skippr-darwin-arm64", skill_text)
+        self.assertIn("Do **not** run skipprd-docs", skill_text)
+        self.assertIn("--log perf", skill_text)
+        self.assertTrue((ROOT / ".github" / "scripts" / "skipprd_cli.py").is_file())
+        heaptrack = (
+            ROOT / ".github" / "actions" / "e2e" / "heaptrack" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("ingest-a-duckdb", heaptrack)
+        self.assertIn("heaptrack", heaptrack)
+        self.assertNotIn("bike_hire", heaptrack)
 
 
 if __name__ == "__main__":

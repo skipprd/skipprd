@@ -1,0 +1,147 @@
+# skippr-perf scenario catalog. WAL leftover import is out of suite.
+defaults:
+  rows: 10000
+  smoke_rows: 200
+  linux_rows: 2000
+  required_perf: [sync]
+
+scenarios:
+  ingest-a-duckdb:
+    group: smoke
+    kind: ingest
+    sink: duckdb
+    fixture: exact_arrow
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim]
+    asserts:
+      exact_arrow_eq_total: true
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+
+  ingest-a-skipprlake:
+    group: smoke
+    kind: ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim]
+    asserts:
+      exact_arrow_eq_total: true
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+      leftover_seg_count: 0
+
+  copy-b-json-json:
+    group: smoke
+    kind: copy
+    sink: file
+    fixture: exact_arrow
+    profile: none
+    required_perf: [sync, wal_persist]
+    asserts:
+      identity: true
+
+  ingest-slow-flatten-duckdb:
+    group: always
+    kind: ingest
+    sink: duckdb
+    fixture: nested_flatten
+    flatten_events: true
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist]
+    asserts:
+      exact_arrow_rows: 0
+      bronze_count: true
+
+  copy-format-matrix:
+    group: always
+    kind: wrap_existing
+    script: .github/actions/e2e/file_copy/run_matrix.py
+    required_perf: [sync, wal_persist]
+    asserts:
+      min_sync_events: 12
+      min_wal_persist_events: 12
+
+  ingest-file-postgres:
+    group: always
+    kind: ingest
+    sink: postgres
+    fixture: exact_arrow
+    requires: docker
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist]
+    asserts:
+      bronze_count: true
+
+  cdc-postgres-skipprlake:
+    group: always
+    kind: cdc_postgres_skipprlake
+    requires: docker
+    profile: none
+    required_perf: [sync]
+
+  copy-stdin-file:
+    group: always
+    kind: copy_stdin
+    sink: file
+    fixture: exact_arrow
+    profile: none
+    required_perf: [sync, wal_persist]
+    asserts:
+      identity: true
+
+  copy-socket-file:
+    group: always
+    kind: copy_socket
+    sink: file
+    fixture: exact_arrow
+    profile: none
+    required_perf: [sync, wal_persist]
+    asserts:
+      identity: true
+
+  ingest-s3-skipprlake:
+    group: optional_r2
+    kind: ingest_s3_skipprlake
+    fixture: exact_arrow
+    secrets: r2
+    skip_if_missing_secrets: true
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist]
+    asserts:
+      bronze_count: true
+
+  copy-s3-file:
+    group: optional_r2
+    kind: wrap_existing
+    script: .github/actions/e2e/s3_file_copy/run_matrix.py
+    secrets: r2
+    skip_if_missing_secrets: true
+    required_perf: [sync, wal_persist]
+    asserts:
+      min_sync_events: 12
+      min_wal_persist_events: 12
+
+  copy-file-s3:
+    group: optional_r2
+    kind: wrap_existing
+    script: .github/actions/e2e/s3_file_copy/run_s3_sink.py
+    secrets: r2
+    skip_if_missing_secrets: true
+    required_perf: [sync, wal_persist]
+    asserts:
+      min_sync_events: 12
+      min_wal_persist_events: 12
+
+  copy-s3-s3:
+    group: optional_r2
+    kind: wrap_existing
+    script: .github/actions/e2e/s3_s3_copy/run.py
+    secrets: r2
+    skip_if_missing_secrets: true
+    required_perf: [sync, wal_persist]
+    asserts:
+      min_sync_events: 12
+      min_wal_persist_events: 12
