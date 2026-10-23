@@ -1,29 +1,34 @@
 ---
-title: Stream lake
-description: Land Skipprd pipelines as Iceberg tables in object storage so Athena, Snowflake, DuckDB, and skipprd query can read the same files as they land.
+title: Streamhouse
+description: An open Streamhouse architecture. Land Skipprd pipelines as open Iceberg tables in object storage with zero vendor lock-in. Realtime state in Skippr, historical queries anywhere.
 ---
 
-# Stream lake
+# Streamhouse
 
-A stream lake stores tables as files in object storage so many tools can read them as they land. You do not copy the data into one vendor's warehouse first.
+A [Streamhouse](https://www.streamhouse.com/) continuously captures, transforms, governs, and serves the live operational state of your business on open files you own, rather than locking rows into periodic batch extracts or proprietary vendor warehouses.
 
-Skipprd is not a warehouse. It lands pipelines as [Apache Iceberg](https://iceberg.apache.org/) tables on Parquet. Athena, Snowflake, DuckDB, and `skipprd query` can all read those tables. `skipprd query` is the Iceberg table plus rows that just arrived.
+Skipprd is an open Streamhouse engine. It lands pipelines as [Apache Iceberg](https://iceberg.apache.org/) tables on Parquet in your object storage.
 
-Use a lake destination when you want one copy of the data and several query engines. Use a warehouse destination (Snowflake, BigQuery, PostgreSQL) when that warehouse is the system of record.
+## Open architecture. Zero vendor lock-in.
 
-## How a pipeline lands in the lake
+Because storage is open Apache Iceberg and Parquet in a bucket you control, **your data is never trapped**. Compute is decoupled from storage:
 
-1. Skipprd reads a batch from the source and commits it to the write-ahead log.
-2. It writes the batch into Iceberg files in your bucket or warehouse path.
-3. The catalog (Glue, SkipprLake, or a local DuckDB catalog) points at the new snapshot.
+1. **Realtime operational queries in Skippr:** [`skipprd query`](/cli/query) runs SQL against the committed Iceberg table combined with in-flight rows that just arrived. Readers never see half-written tables because Iceberg snapshot commits are atomic.
+2. **Historical queries anywhere:** Athena, Snowflake, DuckDB, Databricks, PyIceberg, and local notebooks can query the exact same Iceberg tables in your bucket. There is no second ETL copy and no proprietary format to migrate out of.
 
-You query the Iceberg name (`namespace.table`). You do not open Parquet files by hand.
+## How a pipeline lands in the Streamhouse
+
+1. Skipprd ingests events from sources (databases, streams, APIs, files) and commits each batch durably.
+2. It writes the batch into standard Parquet data files and Iceberg positional delete files in your bucket or storage path.
+3. The catalog (AWS Glue, SkipprLake, or a local DuckDB catalog) points atomically to the new Iceberg snapshot.
+
+You query tables by name (`namespace.table`). You do not have to manage raw Parquet files by hand.
 
 ## Destinations that write Iceberg
 
 | Destination | Catalog | Typical use |
 |---|---|---|
-| [SkipprLake](/connectors/outputs/skipprlake) | A table you name (`catalog_table`) | Skippr-managed stream lake, query with `skipprd query` |
+| [SkipprLake](/connectors/outputs/skipprlake) | A table you name (`catalog_table`) | Skippr-managed Streamhouse, query with `skipprd query` |
 | [Athena Iceberg](/connectors/outputs/athenaiceberg) | AWS Glue | SQL in Athena on Iceberg tables |
 | [DuckDB](/connectors/outputs/duckdb) | Files on disk (`file://`) | Local analytics and CI |
 
@@ -35,11 +40,13 @@ Iceberg destinations keep their own tables. They expire old snapshots (they keep
 
 ## Query
 
+Query live state in the Streamhouse:
+
 ```bash
 skipprd query --pipeline bikehire "SELECT * FROM rides LIMIT 20"
 ```
 
-For Iceberg destinations this is the lake table plus any rows still in the WAL. For the query command itself, see [skipprd query](/cli/query).
+For Iceberg destinations, this returns the committed lake table plus any live rows still in-flight. To follow new events as they land in real time, add `--watch`. For the query command itself, see [skipprd query](/cli/query).
 
 ## Next steps
 

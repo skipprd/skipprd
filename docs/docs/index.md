@@ -1,18 +1,18 @@
 ---
 title: Skipprd
-description: Skipprd is a self-hosted ELT engine. Install it, describe a source and destination in skippr.yml, and land your first data in minutes.
+description: Skipprd is an open Streamhouse engine. Install it, describe a source and destination in skippr.yml, and land your first data in minutes with zero vendor lock-in.
 ---
 
 # Skipprd
 
-Skipprd moves data from your sources — databases, files, streams, and SaaS APIs — into your warehouse or lake. It runs on your own machines, as the `skipprd` command or as the `skippr` Python package. Both run the same engine.
+Skipprd is an open Streamhouse engine that captures data continuously from your sources — databases, files, streams, and SaaS APIs — and lands open Apache Iceberg tables in your object store. It runs on your own machines, as the `skipprd` command or as the `skippr` Python package. Both run the same engine.
 
 You describe a pipeline once in `skippr.yml`: where data comes from, and where it should land. Skipprd does the rest:
 
-- **Discovers the schema.** It samples the source and infers field names and types, including nested objects and arrays, the same way every time.
-- **Keeps up when data changes.** A new field, a field that changes type, or a nested object that grows a new array lands without breaking the tables you already query.
-- **Does not lose committed data.** Skipprd writes each batch to its write-ahead log (WAL) before the destination. A crash retries from the WAL. Whether a retry can duplicate a row depends on the destination — see [Exactly-once delivery](/concepts/exactly-once).
-- **Replicates database changes.** [Change data capture](/cdc/) keeps a destination table at the source's current state, including deletes.
+- **Discovers the schema and evolves in-stream.** It samples the source and infers field names and types, including nested structures. When upstream schemas drift, destination tables follow in-stream without breaking existing queries.
+- **Zero vendor lock-in.** Tables land as open Apache Iceberg on Parquet in your bucket. Query realtime state in Skippr, or query historical tables through Athena, Snowflake, DuckDB, or notebooks.
+- **Does not lose committed data.** Skipprd commits each batch before landing. Whether a retry can duplicate a row depends on the destination — see [Exactly-once delivery](/concepts/exactly-once).
+- **Replicates database changes.** [Change data capture](/cdc/) keeps destination tables at the source's current state, including updates and deletes.
 
 Connectors download on first use from `install.skippr.io`, so the engine stays small and each connector updates on its own.
 

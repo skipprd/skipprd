@@ -95,4 +95,4 @@ Rows land in the Delta table. Retries are exactly once. New columns are added wh
 ## Next steps
 
 - [Exactly-once delivery](/concepts/exactly-once)
-- [Stream lake](/concepts/datalake)
+- [Streamhouse](/concepts/datalake)

@@ -80,5 +80,5 @@ Supports `append` and `replace_table`. It does not `replace_partition` or `merge
 ## Next steps
 
 - [DuckDB schema sink](/connectors/schema_sinks/duckdb)
-- [Stream lake](/concepts/datalake)
+- [Streamhouse](/concepts/datalake)
 - [skipprd query](/cli/query)

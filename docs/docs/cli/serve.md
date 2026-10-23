@@ -105,6 +105,6 @@ The ready file records the ports that were actually bound.
 
 ## Next steps
 
-- [Stream lake](/concepts/datalake)
+- [Streamhouse](/concepts/datalake)
 - [SkipprLake destination](/connectors/outputs/skipprlake)
 - [skipprd query](/cli/query)

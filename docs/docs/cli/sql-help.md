@@ -45,4 +45,4 @@ skipprd sql-help --output sql-reference.md --format md
 
 - [skipprd query](/cli/query)
 - [skipprd serve](/cli/serve)
-- [Stream lake](/concepts/datalake)
+- [Streamhouse](/concepts/datalake)
