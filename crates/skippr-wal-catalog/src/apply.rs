@@ -89,6 +89,7 @@ pub enum Applied {
 fn row_version(bytes: &[u8]) -> Result<u64, CatalogError> {
     match CatalogRow::decode(bytes)? {
         CatalogRow::Segment(row) => Ok(row.version),
+        CatalogRow::Index(row) => Ok(row.version),
         CatalogRow::Slice(row) => Ok(row.version),
         CatalogRow::Compaction(row) => Ok(row.version),
         CatalogRow::Control(row) => Ok(row.version),

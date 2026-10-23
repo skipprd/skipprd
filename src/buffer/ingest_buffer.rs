@@ -1752,6 +1752,7 @@ impl Buffers {
                 len: idx.len,
                 key: idx.key.clone(),
                 cdc_meta_hash: idx.part_meta_summary.canonical_hash(),
+                ordinal: Some(idx.slice_ordinal),
             };
             indexed_slices.push(IndexedCompactionSlice {
                 id: crate::buffer::compaction_index::CompactionSliceId {
@@ -1830,7 +1831,7 @@ impl Buffers {
                 );
                 continue;
             }
-            match crate::buffer::wal_handle::admit_payload(&row.location, &row.payload_sha256) {
+            match handle.load_or_build_index_meta(&row) {
                 Ok(meta) => {
                     let source = match &row.location {
                         skippr_wal_catalog::PayloadLocation::Disk { path } => {
@@ -4057,6 +4058,7 @@ mod tests_wal_commit {
                     len: idx.len,
                     key: idx.key.clone(),
                     cdc_meta_hash: None,
+                    ordinal: Some(idx.slice_ordinal),
                 };
                 CompactionEntry {
                     source: source.clone(),
@@ -4536,6 +4538,23 @@ mod tests_wal_commit {
     }
 
     #[test]
+    fn hydrate_from_catalog_does_not_admit_payload() {
+        let src = include_str!("ingest_buffer.rs");
+        let start = src
+            .find("pub(crate) fn hydrate_from_catalog")
+            .expect("hydrate_from_catalog");
+        let body = src[start..]
+            .split("fn segment_cache_register_from_write")
+            .next()
+            .expect("hydrate body");
+        assert!(
+            !body.contains("admit_payload"),
+            "hydrate must use wal#idx# / read_index_path, not SHA admit"
+        );
+        assert!(body.contains("load_or_build_index_meta"));
+    }
+
+    #[test]
     fn cache_miss_keeps_catalog_compaction_row() {
         let src = include_str!("ingest_buffer.rs");
         assert!(!src.contains(concat!("gone from ", "disk")));
@@ -4633,6 +4652,7 @@ mod compaction_semantics_tests {
             len: 100,
             key,
             cdc_meta_hash: None,
+            ordinal: Some(0),
         };
         CompactionEntry {
             source: SegmentSource::Disk(PathBuf::from("/tmp/test.seg")),
@@ -4732,6 +4752,7 @@ mod compaction_semantics_tests {
                 schema_fingerprint: "fp".to_string(),
             },
             cdc_meta_hash: None,
+            ordinal: None,
         }];
         let txn = CompactionTransaction::new(
             "deadletter_sinks.ds_deadletters".to_string(),

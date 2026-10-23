@@ -67,6 +67,7 @@ impl OffsetHintKey {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CatalogPrefix {
     Segment,
+    Index,
     Slice,
     Compaction,
     Checkpoint,
@@ -74,8 +75,9 @@ pub enum CatalogPrefix {
 }
 
 impl CatalogPrefix {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Segment,
+        Self::Index,
         Self::Slice,
         Self::Compaction,
         Self::Checkpoint,
@@ -85,6 +87,7 @@ impl CatalogPrefix {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Segment => "wal#seg#",
+            Self::Index => "wal#idx#",
             Self::Slice => "wal#slice#",
             Self::Compaction => "wal#cmp#",
             Self::Checkpoint => "wal#cp#",
@@ -96,6 +99,7 @@ impl CatalogPrefix {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CatalogKey {
     Segment(SegmentId),
+    Index(SegmentId),
     Slice { segment_id: SegmentId, ordinal: u32 },
     Compaction(CompactionId),
     Checkpoint(CheckpointKey),
@@ -108,6 +112,7 @@ impl CatalogKey {
     pub fn encode(&self) -> String {
         match self {
             Self::Segment(id) => format!("wal#seg#{}", id.as_str()),
+            Self::Index(id) => format!("wal#idx#{}", id.as_str()),
             Self::Slice {
                 segment_id,
                 ordinal,
@@ -131,6 +136,9 @@ impl CatalogKey {
         }
         if let Some(rest) = sk.strip_prefix("wal#seg#") {
             return Ok(Self::Segment(SegmentId::new(rest)?));
+        }
+        if let Some(rest) = sk.strip_prefix("wal#idx#") {
+            return Ok(Self::Index(SegmentId::new(rest)?));
         }
         if let Some(rest) = sk.strip_prefix("wal#slice#") {
             let (segment, ordinal) = rest.rsplit_once('#').ok_or_else(|| {
@@ -173,6 +181,7 @@ mod tests {
     fn codec_roundtrips_every_variant() {
         let keys = [
             CatalogKey::Segment(SegmentId::new("seg-1").unwrap()),
+            CatalogKey::Index(SegmentId::new("seg-1").unwrap()),
             CatalogKey::Slice {
                 segment_id: SegmentId::new("seg-1").unwrap(),
                 ordinal: 3,
@@ -203,6 +212,7 @@ mod tests {
     #[test]
     fn prefixes_are_stable() {
         assert_eq!(CatalogPrefix::Segment.as_str(), "wal#seg#");
+        assert_eq!(CatalogPrefix::Index.as_str(), "wal#idx#");
         assert_eq!(CatalogPrefix::Slice.as_str(), "wal#slice#");
         assert_eq!(CatalogPrefix::Compaction.as_str(), "wal#cmp#");
         assert_eq!(CatalogPrefix::Checkpoint.as_str(), "wal#cp#");
@@ -217,5 +227,12 @@ mod tests {
         };
         assert_eq!(key.encode(), "wal#slice#live-seg#0");
         assert_eq!(CatalogKey::decode("wal#slice#live-seg#0").unwrap(), key);
+    }
+
+    #[test]
+    fn index_key_is_segment_id() {
+        let key = CatalogKey::Index(SegmentId::new("live-seg").unwrap());
+        assert_eq!(key.encode(), "wal#idx#live-seg");
+        assert_eq!(CatalogKey::decode("wal#idx#live-seg").unwrap(), key);
     }
 }

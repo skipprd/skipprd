@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use skippr_lease::DurableError;
 use skippr_wal_catalog::{CatalogRow, FormatPhase, FormatRow};
 
@@ -6,7 +8,7 @@ use crate::buffer::wal_handle::PipelineWalHandle;
 use crate::helpers::configuration::Config;
 
 pub async fn wal_startup(
-    handle: &PipelineWalHandle,
+    handle: &Arc<PipelineWalHandle>,
     config: &Config,
     gc_orphans: bool,
 ) -> Result<(), DurableError> {
@@ -14,7 +16,8 @@ pub async fn wal_startup(
     let _ = handle.guard().require_recovery_epoch()?;
     import_if_needed(handle, config)?;
     crate::buffer::ingest_buffer::Buffers::hydrate_from_catalog(handle, config);
-    handle.redo_acked_compactions().await?;
+    let acked = handle.apply_acked_in_memory()?;
+    tracing::info!(compactions = acked.len(), "WAL catalog redo_acked begin");
     handle.republish_all().await?;
     if gc_orphans {
         let clean = matches!(
@@ -31,6 +34,7 @@ pub async fn wal_startup(
             gc_orphan_payloads(handle, config)?;
         }
     }
+    handle.spawn_durable_redo(acked);
     tracing::info!(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "WAL startup complete"
@@ -131,6 +135,7 @@ mod tests {
                 len: idx.len,
                 key: idx.key.clone(),
                 cdc_meta_hash: None,
+                ordinal: Some(idx.slice_ordinal),
             }],
             "out.parquet".into(),
         )
@@ -144,6 +149,13 @@ mod tests {
             .await
             .unwrap();
         wal_startup(&handle, &Config::new(), true).await.unwrap();
+        assert!(handle
+            .slice_is_done("acked-seg", idx.slice_ordinal)
+            .unwrap());
+        handle
+            .redo_acked_durable_batches(&[txn.id.clone()])
+            .await
+            .unwrap();
         assert!(handle
             .catalog()
             .get(&CatalogKey::Compaction(CompactionId::new(txn.id).unwrap()))
@@ -300,6 +312,10 @@ mod tests {
         assert!(!redo.contains("acked compaction redo deferred; catalog row kept"));
         assert!(import.contains("WAL_CATALOG_PROGRESS_EVERY"));
         assert!(startup.contains("WAL startup complete"));
+        assert!(startup.contains("apply_acked_in_memory"));
+        assert!(startup.contains("spawn_durable_redo"));
+        assert!(!startup.contains("redo_acked_compactions().await"));
+        assert!(!startup.contains("redo_acked_durable_batches("));
     }
 
     #[tokio::test]

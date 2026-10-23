@@ -18,8 +18,8 @@ pub use memory::MemoryWalCatalog;
 pub use row::{
     CatalogFence, CatalogOp, CatalogRow, CatalogSeq, CommittedCheckpoint, CommittedOffset,
     CompactionRow, CompactionState, ControlBody, ControlRow, DeleteCond, FormatPhase, FormatRow,
-    PayloadLocation, PutCond, SegmentRow, SeqRow, SliceBitmap, SliceIndexEntry, FORMAT_VERSION,
-    ROW_MAX_BYTES,
+    PayloadLocation, PutCond, SegmentIndexRow, SegmentRow, SeqRow, SliceBitmap, SliceDirEntry,
+    SliceIndexEntry, FORMAT_VERSION, ROW_MAX_BYTES,
 };
 pub use sled_store::SledWalCatalog;
 pub use store::{query_all, reset_catalog, WalCatalogStore};

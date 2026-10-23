@@ -144,15 +144,26 @@ fn read_ordinal_batches(
     let Ok(id) = SegmentId::new(segment_id) else {
         return Ok(Vec::new());
     };
-    let Ok(Some(CatalogRow::Slice(slice))) = handle.catalog().get(&CatalogKey::Slice {
-        segment_id: id.clone(),
-        ordinal,
-    }) else {
+    let Ok(Some(CatalogRow::Index(index))) = handle.catalog().get(&CatalogKey::Index(id.clone()))
+    else {
         return Ok(Vec::new());
     };
-    if slice.namespace != namespace {
+    let Some(entry) = index.entries.iter().find(|entry| entry.ordinal == ordinal) else {
+        return Ok(Vec::new());
+    };
+    if entry.namespace != namespace {
         return Ok(Vec::new());
     }
+    let slice = skippr_wal_catalog::SliceIndexEntry {
+        segment_id: id.clone(),
+        ordinal: entry.ordinal,
+        namespace: entry.namespace.clone(),
+        partition: entry.partition.clone(),
+        start: entry.start,
+        len: entry.len,
+        codec: entry.codec,
+        version: 0,
+    };
     let Ok(Some(CatalogRow::Segment(seg))) = handle.catalog().get(&CatalogKey::Segment(id)) else {
         return Ok(Vec::new());
     };
@@ -525,7 +536,7 @@ mod tests {
             !prod.contains("read_index_path"),
             "WalScanExec must use catalog SliceIndexEntry, not FOOT"
         );
-        assert!(prod.contains("CatalogKey::Slice"));
+        assert!(prod.contains("CatalogKey::Index"));
         assert!(
             prod.contains("wal_slice::read_slice_batches"),
             "query and STREAM share sqlrt::wal_slice"
