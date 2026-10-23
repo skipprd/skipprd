@@ -223,7 +223,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("github.ref != 'refs/tags/0.0.0'", publish)
         self.assertIn("!startsWith(github.ref, 'refs/tags/test')", publish)
         self.assertIn("!startsWith(github.ref, 'refs/tags/python-')", publish)
-        self.assertIn("!endsWith(github.ref_name, '-beta')", publish)
+        self.assertNotIn("!endsWith(github.ref_name, '-beta')", publish)
         self.assertNotIn("startsWith(github.ref, 'refs/tags/python-v')", publish)
         self.assertIn("python_wheel_version.py", publish)
         self.assertIn("SKIPPR_WHEEL_DIST", publish)

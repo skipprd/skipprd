@@ -6,7 +6,7 @@ use crate::error::CatalogError;
 use crate::key::CompactionId;
 
 pub const ROW_MAX_BYTES: usize = 350 * 1024;
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct CatalogSeq(u64);
@@ -120,6 +120,28 @@ pub struct SliceIndexEntry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SliceDirEntry {
+    pub ordinal: u32,
+    pub namespace: String,
+    pub partition: String,
+    pub event_time: Option<i64>,
+    pub start: u64,
+    pub len: u64,
+    pub codec: u8,
+    pub row_count: Option<u64>,
+    pub sink_ref: String,
+    pub schema_fingerprint: String,
+    pub cdc_meta_hash: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SegmentIndexRow {
+    pub segment_id: SegmentId,
+    pub version: u64,
+    pub entries: Vec<SliceDirEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SegmentRow {
     pub segment_id: SegmentId,
     pub seq: CatalogSeq,
@@ -190,6 +212,7 @@ pub struct FormatRow {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CatalogRow {
     Segment(SegmentRow),
+    Index(SegmentIndexRow),
     Slice(SliceIndexEntry),
     Compaction(CompactionRow),
     Control(ControlRow),
@@ -300,7 +323,6 @@ mod tests {
 
     #[test]
     fn slice_index_entry_is_the_query_authority() {
-        assert_eq!(FORMAT_VERSION, 2);
         let row = CatalogRow::Slice(SliceIndexEntry {
             segment_id: SegmentId::new("s").unwrap(),
             ordinal: 0,
@@ -312,6 +334,31 @@ mod tests {
             version: 0,
         });
         let bytes = row.encode().unwrap();
+        assert_eq!(CatalogRow::decode(&bytes).unwrap(), row);
+    }
+
+    #[test]
+    fn segment_index_row_is_the_query_authority() {
+        assert_eq!(FORMAT_VERSION, 3);
+        let row = CatalogRow::Index(SegmentIndexRow {
+            segment_id: SegmentId::new("s").unwrap(),
+            version: 0,
+            entries: vec![SliceDirEntry {
+                ordinal: 0,
+                namespace: "pipe".into(),
+                partition: "p".into(),
+                event_time: Some(1),
+                start: 16,
+                len: 32,
+                codec: 0,
+                row_count: None,
+                sink_ref: "out".into(),
+                schema_fingerprint: "fp".into(),
+                cdc_meta_hash: None,
+            }],
+        });
+        let bytes = row.encode().unwrap();
+        assert!(bytes.len() < ROW_MAX_BYTES);
         assert_eq!(CatalogRow::decode(&bytes).unwrap(), row);
     }
 

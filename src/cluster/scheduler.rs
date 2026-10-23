@@ -433,7 +433,7 @@ async fn try_promote_and_ingest(
             replicator,
         );
         install_wal_handle(handle.clone());
-        crate::buffer::wal_startup::wal_startup(handle.as_ref(), app_cfg, true).await?;
+        crate::buffer::wal_startup::wal_startup(&handle, app_cfg, true).await?;
         let live = handle.catalog_segment_ids()?;
         let prune_epoch = outcome
             .guard

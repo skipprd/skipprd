@@ -1267,6 +1267,7 @@ mod tests {
             len: bytes,
             key,
             cdc_meta_hash: index_entry.part_meta_summary.canonical_hash(),
+            ordinal: Some(index_entry.slice_ordinal),
         };
         IndexedCompactionSlice {
             id: CompactionSliceId::from_wal_ref(&wal_ref),

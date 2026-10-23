@@ -992,7 +992,7 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
                 offsets_db.clone(),
                 guard,
             )?;
-            crate::buffer::wal_startup::wal_startup(handle.as_ref(), config, true)
+            crate::buffer::wal_startup::wal_startup(&handle, config, true)
                 .await
                 .map_err(|err| io::Error::other(format!("Failed to start WAL catalog: {err}")))?;
         }

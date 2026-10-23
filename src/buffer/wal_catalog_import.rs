@@ -14,8 +14,9 @@ use sha2::{Digest, Sha256};
 use skippr_lease::{DurableError, SegmentId};
 use skippr_wal_catalog::{
     query_all, CatalogFence, CatalogKey, CatalogPrefix, CatalogRow, CatalogTxn, CompactionId,
-    CompactionRow, CompactionState, FormatPhase, FormatRow, PayloadLocation, PutCond, SegmentRow,
-    SeqRow, SliceBitmap, WalCatalogStore, FORMAT_VERSION, ROW_MAX_BYTES,
+    CompactionRow, CompactionState, FormatPhase, FormatRow, PayloadLocation, PutCond,
+    SegmentIndexRow, SegmentRow, SeqRow, SliceBitmap, SliceDirEntry, SliceIndexEntry,
+    WalCatalogStore, FORMAT_VERSION, ROW_MAX_BYTES,
 };
 
 use crate::buffer::compaction_transaction::{CompactionTransaction, CompactionTransactionState};
@@ -114,9 +115,19 @@ pub fn import_if_needed(handle: &PipelineWalHandle, config: &Config) -> Result<(
         .get(&CatalogKey::Format)
         .map_err(|err| DurableError::Io(err.to_string()))?
     {
-        Some(CatalogRow::Format(row)) if row.phase == FormatPhase::Clean => return Ok(()),
+        Some(CatalogRow::Format(row)) if row.phase == FormatPhase::Clean => {
+            migrate_slice_index_if_needed(handle, fence, &row)?;
+            return Ok(());
+        }
         Some(CatalogRow::Format(row)) if row.phase == FormatPhase::Imported => {
             finish_imported(handle, fence, config, row.row_version, leftover)?;
+            if let Some(CatalogRow::Format(clean)) = handle
+                .catalog()
+                .get(&CatalogKey::Format)
+                .map_err(|err| DurableError::Io(err.to_string()))?
+            {
+                migrate_slice_index_if_needed(handle, fence, &clean)?;
+            }
             return Ok(());
         }
         Some(CatalogRow::Format(_)) => {}
@@ -792,6 +803,137 @@ fn import_compaction_json(
     Ok(count)
 }
 
+fn migrate_slice_index_if_needed(
+    handle: &PipelineWalHandle,
+    fence: CatalogFence,
+    row: &FormatRow,
+) -> Result<(), DurableError> {
+    let leftover_slices = query_all(handle.catalog(), CatalogPrefix::Slice)
+        .map_err(|err| DurableError::Io(err.to_string()))?;
+    if row.version >= FORMAT_VERSION && leftover_slices.is_empty() {
+        return Ok(());
+    }
+    rebuild_indexes(handle, fence, &leftover_slices)?;
+    handle
+        .catalog()
+        .delete_prefix(CatalogPrefix::Slice, fence)
+        .map_err(|err| DurableError::Io(err.to_string()))?;
+    if row.version < FORMAT_VERSION {
+        write_format(
+            handle.catalog(),
+            fence,
+            FormatPhase::Clean,
+            Some(row.row_version),
+        )?;
+    }
+    Ok(())
+}
+
+fn rebuild_indexes(
+    handle: &PipelineWalHandle,
+    fence: CatalogFence,
+    leftover_slices: &[(CatalogKey, CatalogRow)],
+) -> Result<(), DurableError> {
+    let mut by_segment: std::collections::HashMap<SegmentId, Vec<SliceIndexEntry>> =
+        std::collections::HashMap::new();
+    for (_, row) in leftover_slices {
+        let CatalogRow::Slice(slice) = row else {
+            continue;
+        };
+        by_segment
+            .entry(slice.segment_id.clone())
+            .or_default()
+            .push(slice.clone());
+    }
+    let segments = query_all(handle.catalog(), CatalogPrefix::Segment)
+        .map_err(|err| DurableError::Io(err.to_string()))?;
+    for (_, row) in segments {
+        let CatalogRow::Segment(seg) = row else {
+            continue;
+        };
+        if handle
+            .catalog()
+            .get(&CatalogKey::Index(seg.segment_id.clone()))
+            .map_err(|err| DurableError::Io(err.to_string()))?
+            .is_some()
+        {
+            continue;
+        }
+        if payload_readable(&seg.location) {
+            if let Ok(meta) = crate::buffer::segment_file::SegmentFile::read_index_path(
+                std::path::Path::new(match &seg.location {
+                    PayloadLocation::Disk { path } => path.as_str(),
+                    PayloadLocation::S3 { .. } => continue,
+                }),
+            ) {
+                let mut txn = CatalogTxn::new();
+                crate::buffer::wal_handle::put_slice_index(&mut txn, &seg.segment_id, &meta)?;
+                if !txn.ops().is_empty() {
+                    handle
+                        .catalog()
+                        .commit_durable(&txn, fence)
+                        .map_err(|err| DurableError::Io(err.to_string()))?;
+                }
+                continue;
+            }
+        }
+        let Some(slices) = by_segment.remove(&seg.segment_id) else {
+            continue;
+        };
+        persist_index_from_slices(handle, fence, &seg.segment_id, &slices)?;
+    }
+    Ok(())
+}
+
+fn persist_index_from_slices(
+    handle: &PipelineWalHandle,
+    fence: CatalogFence,
+    id: &SegmentId,
+    slices: &[SliceIndexEntry],
+) -> Result<(), DurableError> {
+    if slices.is_empty() {
+        return Ok(());
+    }
+    let entries: Vec<SliceDirEntry> = slices
+        .iter()
+        .map(|slice| SliceDirEntry {
+            ordinal: slice.ordinal,
+            namespace: slice.namespace.clone(),
+            partition: slice.partition.clone(),
+            event_time: None,
+            start: slice.start,
+            len: slice.len,
+            codec: slice.codec,
+            row_count: None,
+            sink_ref: String::new(),
+            schema_fingerprint: String::new(),
+            cdc_meta_hash: None,
+        })
+        .collect();
+    let mut txn = CatalogTxn::new();
+    txn.put(
+        CatalogKey::Index(id.clone()),
+        CatalogRow::Index(SegmentIndexRow {
+            segment_id: id.clone(),
+            version: 0,
+            entries,
+        }),
+        PutCond::NotExists,
+    )
+    .map_err(|err| DurableError::Io(err.to_string()))?;
+    handle
+        .catalog()
+        .commit_durable(&txn, fence)
+        .map_err(|err| DurableError::Io(err.to_string()))
+}
+
+fn payload_readable(location: &PayloadLocation) -> bool {
+    match location {
+        PayloadLocation::Disk { path } => std::path::Path::new(path).exists(),
+        PayloadLocation::S3 { .. } => false,
+    }
+}
+
 fn write_format(
     catalog: &dyn WalCatalogStore,
     fence: CatalogFence,
@@ -1274,6 +1416,94 @@ mod tests {
             seg_path.exists(),
             "must not Clean+GC an unimported owned pair"
         );
+    }
+
+    #[test]
+    fn import_format_2_slice_keys_become_index_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = test_handle(dir.path());
+        let meta = write_seg(&handle.paths().segs, "v2-seg");
+        let id = SegmentId::new("v2-seg").unwrap();
+        let idx = &meta.index[0];
+        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(handle.guard()).unwrap();
+        let mut txn = CatalogTxn::new();
+        txn.put(
+            CatalogKey::Segment(id.clone()),
+            CatalogRow::Segment(SegmentRow {
+                segment_id: id.clone(),
+                seq: skippr_wal_catalog::CatalogSeq::new(1),
+                location: PayloadLocation::Disk {
+                    path: handle.paths().segs.join("v2-seg.seg").display().to_string(),
+                },
+                payload_len: meta.total_bytes,
+                payload_sha256: meta.body_sha256,
+                slice_count: meta.index.len() as u32,
+                done: SliceBitmap::new(meta.index.len() as u32),
+                offsets: Vec::new(),
+                checkpoints: Vec::new(),
+                epoch: fence.epoch,
+                version: 0,
+            }),
+            PutCond::NotExists,
+        )
+        .unwrap();
+        txn.put(
+            CatalogKey::Slice {
+                segment_id: id.clone(),
+                ordinal: idx.slice_ordinal,
+            },
+            CatalogRow::Slice(SliceIndexEntry {
+                segment_id: id.clone(),
+                ordinal: idx.slice_ordinal,
+                namespace: idx.key.namespace.clone(),
+                partition: idx.key.partition.clone(),
+                start: idx.start,
+                len: idx.len,
+                codec: idx.codec,
+                version: 0,
+            }),
+            PutCond::NotExists,
+        )
+        .unwrap();
+        txn.put(
+            CatalogKey::Format,
+            CatalogRow::Format(FormatRow {
+                version: 2,
+                phase: FormatPhase::Clean,
+                row_version: 0,
+            }),
+            PutCond::NotExists,
+        )
+        .unwrap();
+        handle.catalog().commit_durable(&txn, fence).unwrap();
+        import_if_needed(&handle, &crate::helpers::configuration::Config::new()).unwrap();
+        match handle.catalog().get(&CatalogKey::Format).unwrap() {
+            Some(CatalogRow::Format(row)) => {
+                assert_eq!(row.version, FORMAT_VERSION);
+                assert_eq!(row.phase, FormatPhase::Clean);
+            }
+            other => panic!("expected format 3 Clean, got {other:?}"),
+        }
+        match handle
+            .catalog()
+            .get(&CatalogKey::Index(id.clone()))
+            .unwrap()
+        {
+            Some(CatalogRow::Index(index)) => {
+                assert_eq!(index.entries.len(), 1);
+                assert_eq!(index.entries[0].namespace, "ns");
+                assert!(index.entries[0].len > 0);
+            }
+            other => panic!("expected wal#idx#, got {other:?}"),
+        }
+        assert!(handle
+            .catalog()
+            .get(&CatalogKey::Slice {
+                segment_id: id,
+                ordinal: 0,
+            })
+            .unwrap()
+            .is_none());
     }
 
     #[test]
