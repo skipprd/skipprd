@@ -82,7 +82,7 @@ fn runtime_once_idle_timeout_for_contract(
 }
 
 #[derive(Clone, Debug)]
-struct RuntimeSourceActivity {
+pub(crate) struct RuntimeSourceActivity {
     last_source_data_ms: Arc<AtomicU64>,
 }
 
@@ -100,8 +100,7 @@ impl RuntimeSourceActivity {
             .as_millis() as u64
     }
 
-    #[cfg(test)]
-    fn mark_source_data(&self) {
+    pub(crate) fn mark_source_data(&self) {
         self.last_source_data_ms
             .store(Self::now_millis(), Ordering::Release);
     }
@@ -462,18 +461,19 @@ pub async fn run_append_data_source_main(
             )))
             .await?;
     }
+    let activity = RuntimeSourceActivity::new();
     let (sync_ctx, offset_reader) = RuntimeSourceSyncContext::new(
         control_writer.clone(),
         data_writer.clone(),
         ingest_ack_client,
         suppress_data_relay,
+        activity.clone(),
     )
     .await?;
     let offset_client = sync_ctx.offset_client();
     tokio::spawn(async move {
         let _ = run_offset_service_reader_loop(offset_reader, offset_client).await;
     });
-    let activity = RuntimeSourceActivity::new();
 
     let sync_ctx: Arc<dyn SourceSyncContext> = Arc::new(sync_ctx);
     let sync_result = {
@@ -596,5 +596,19 @@ mod tests {
         activity.mark_source_data();
 
         assert!(activity.source_data_idle_for() < Duration::from_millis(1_000));
+    }
+
+    #[test]
+    fn mark_source_data_is_not_test_only() {
+        let src = include_str!("append_source_runtime.rs");
+        assert!(
+            !src.contains("#[cfg(test)]\n    fn mark_source_data"),
+            "HostIdleBounded must reset on real ingest, not only in unit tests",
+        );
+        let sync = include_str!("source_sync.rs");
+        assert!(
+            sync.contains("self.note_source_data(total_bytes)"),
+            "payload submit must reset the --once idle clock",
+        );
     }
 }

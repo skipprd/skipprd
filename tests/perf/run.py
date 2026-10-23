@@ -295,6 +295,7 @@ def write_skippr_yml(
       address: {source_path}
       framing: line
       format: json
+      batch_size_bytes: 1048576
 """
     elif source_kind == "S3":
         extra = extra_source or {}
