@@ -258,6 +258,26 @@ class FileParquetYamlTests(unittest.TestCase):
         self.assertIn("format: csv", text)
         self.assertIn("path: /src", text)
 
+    def test_socket_copy_batches_ndjson_instead_of_one_line_per_ingest(self) -> None:
+        from run import write_skippr_yml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "skippr.yml"
+            write_skippr_yml(
+                path,
+                kind="copy",
+                source_kind="Socket",
+                source_path="127.0.0.1:9",
+                sink="file",
+                warehouse=None,
+                flatten=False,
+                extra_source={"output_dir": "/out"},
+            )
+            text = path.read_text(encoding="utf-8")
+        self.assertIn("mode: tcp", text)
+        self.assertIn("batch_size_bytes: 1048576", text)
+        self.assertIn("type: copy", text)
+
 
 class StreamTransformPerfTests(unittest.TestCase):
     def test_catalog_covers_ops_and_aggregates_ingest(self) -> None:

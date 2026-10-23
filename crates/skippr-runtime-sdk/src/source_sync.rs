@@ -21,7 +21,9 @@ use tokio::net::TcpStream;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
-use crate::append_source_runtime::{block_on_handle, ControlWriter, DataWriter};
+use crate::append_source_runtime::{
+    block_on_handle, ControlWriter, DataWriter, RuntimeSourceActivity,
+};
 
 /// Keep host-ingest frames under the runtime wire limit (see `wire::MAX_RUNTIME_FRAME_BYTES`).
 const MAX_SOURCE_PAYLOAD_FRAME_BYTES: usize = 256 * 1024 * 1024;
@@ -353,6 +355,7 @@ pub struct RuntimeSourceSyncContext {
     ingest_ack_client: Arc<RuntimeIngestAckClient>,
     suppress_payloads: bool,
     metrics: Arc<StdMutex<ThroughputMetrics>>,
+    activity: RuntimeSourceActivity,
 }
 
 impl RuntimeSourceSyncContext {
@@ -361,6 +364,7 @@ impl RuntimeSourceSyncContext {
         data_writer: DataWriter,
         ingest_ack_client: Arc<RuntimeIngestAckClient>,
         suppress_payloads: bool,
+        activity: RuntimeSourceActivity,
     ) -> io::Result<(Self, tokio::net::tcp::OwnedReadHalf)> {
         let (offset_client, offset_reader) = RuntimeOffsetClient::connect().await?;
         let offset_client = Arc::new(offset_client);
@@ -377,9 +381,16 @@ impl RuntimeSourceSyncContext {
                     queue_length: 0,
                     optimal_chunk_size: 0,
                 })),
+                activity,
             },
             offset_reader,
         ))
+    }
+
+    fn note_source_data(&self, bytes: usize) {
+        if bytes > 0 {
+            self.activity.mark_source_data();
+        }
     }
 
     pub(crate) fn offset_client(&self) -> Arc<RuntimeOffsetClient> {
@@ -460,6 +471,7 @@ impl SourceSyncContext for RuntimeSourceSyncContext {
             request_ids.push(request_id);
         }
 
+        self.note_source_data(total_bytes);
         Ok(PayloadSubmissionBatch {
             request_ids,
             bytes: total_bytes,
@@ -506,6 +518,7 @@ impl SourceSyncContext for RuntimeSourceSyncContext {
             request_ids.push(request_id);
         }
 
+        self.note_source_data(total_bytes);
         Ok(PayloadSubmissionBatch {
             request_ids,
             bytes: total_bytes,
