@@ -31,24 +31,14 @@ pub enum ConnectRoleCmd {
 pub enum DataSourceKindCmd {
     #[command(name = "ad-roll-ads")]
     AdRollAds(DataSourceAdRollAdsArgs),
-    #[command(name = "ai-citations")]
-    AiCitations(DataSourceAiCitationsArgs),
     #[command(name = "amqp")]
     Amqp(DataSourceAmqpArgs),
-    #[command(name = "apple-app-store-serp")]
-    AppleAppStoreSerp(DataSourceAppleAppStoreSerpArgs),
     #[command(name = "apple-search-ads")]
     AppleSearchAds(DataSourceAppleSearchAdsArgs),
     #[command(name = "bing-webmaster-tools")]
     BingWebmasterTools(DataSourceBingWebmasterToolsArgs),
     #[command(name = "clickhouse")]
     Clickhouse(DataSourceClickhouseArgs),
-    #[command(name = "content-quality")]
-    ContentQuality(DataSourceContentQualityArgs),
-    #[command(name = "data-for-seo-backlinks")]
-    DataForSeoBacklinks(DataSourceDataForSeoBacklinksArgs),
-    #[command(name = "data-for-seo-seo-opportunities")]
-    DataForSeoSeoOpportunities(DataSourceDataForSeoSeoOpportunitiesArgs),
     #[command(name = "delta-lake")]
     DeltaLake(DataSourceDeltaLakeArgs),
     #[command(name = "dynamodb")]
@@ -65,8 +55,6 @@ pub enum DataSourceKindCmd {
     GooglePageSpeed(DataSourceGooglePageSpeedArgs),
     #[command(name = "google-search-console")]
     GoogleSearchConsole(DataSourceGoogleSearchConsoleArgs),
-    #[command(name = "google-serp-ranks")]
-    GoogleSerpRanks(DataSourceGoogleSerpRanksArgs),
     #[command(name = "http-client")]
     HttpClient(DataSourceHttpClientArgs),
     #[command(name = "http-server")]
@@ -105,16 +93,10 @@ pub enum DataSourceKindCmd {
     RevolutBusiness(DataSourceRevolutBusinessArgs),
     #[command(name = "s3")]
     S3(DataSourceS3Args),
-    #[command(name = "seo-crawl")]
-    SeoCrawl(DataSourceSeoCrawlArgs),
     #[command(name = "sftp")]
     Sftp(DataSourceSftpArgs),
     #[command(name = "shopify-admin")]
     ShopifyAdmin(DataSourceShopifyAdminArgs),
-    #[command(name = "site-quality")]
-    SiteQuality(DataSourceSiteQualityArgs),
-    #[command(name = "site-security")]
-    SiteSecurity(DataSourceSiteSecurityArgs),
     #[command(name = "sns")]
     Sns(DataSourceSnsArgs),
     #[command(name = "socket")]
@@ -129,14 +111,6 @@ pub enum DataSourceKindCmd {
     Stripe(DataSourceStripeArgs),
     #[command(name = "sum-up")]
     SumUp(DataSourceSumUpArgs),
-    #[command(name = "upfoundry-backlinks")]
-    UpfoundryBacklinks(DataSourceUpfoundryBacklinksArgs),
-    #[command(name = "upfoundry-link-graph-compact")]
-    UpfoundryLinkGraphCompact(DataSourceUpfoundryLinkGraphCompactArgs),
-    #[command(name = "upfoundry-link-graph-ingest")]
-    UpfoundryLinkGraphIngest(DataSourceUpfoundryLinkGraphIngestArgs),
-    #[command(name = "upfoundry-link-graph-wat-index")]
-    UpfoundryLinkGraphWatIndex(DataSourceUpfoundryLinkGraphWatIndexArgs),
     #[command(name = "websocket")]
     Websocket(DataSourceWebsocketArgs),
     #[command(name = "x-ads")]
@@ -273,46 +247,6 @@ impl DataSourceAdRollAdsArgs {
 }
 
 #[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceAiCitationsArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub site: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub brand_names: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_list: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub requests_per_minute: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_prompts_per_run: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skip_unchanged_responses: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub openai_base_url: Option<String>,
-}
-
-impl DataSourceAiCitationsArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
 pub struct DataSourceAmqpArgs {
     #[arg(long)]
     #[serde(skip)]
@@ -356,55 +290,6 @@ pub struct DataSourceAmqpArgs {
 }
 
 impl DataSourceAmqpArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceAppleAppStoreSerpArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub targets: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub keywords: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub storefronts: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entity: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_depth: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_query_interval_ms: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_queries_per_run: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_after_first_target_match: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub capture_results: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub force_refresh_today: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_agent: Option<String>,
-}
-
-impl DataSourceAppleAppStoreSerpArgs {
     pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
         crate::connect::yaml_map_from_serialize(self)
     }
@@ -579,237 +464,6 @@ pub struct DataSourceClickhouseArgs {
 }
 
 impl DataSourceClickhouseArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceContentQualityArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub site: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_urls: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_depth: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub render_js: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub crawl_rate_per_second: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub respect_robots: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub openai_model: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub openai_enabled: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub openai_max_blocks_per_page: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skip_unchanged_content: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_agent: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worker_node_path: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub render_wait_until: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub render_timeout_ms: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub playwright_executable_path: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub seed_urls: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub url_list: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_response_bytes: Option<String>,
-}
-
-impl DataSourceContentQualityArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceDataForSeoBacklinksArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub login: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub password: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub site: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_mode: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backlink_jobs: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub intersection_jobs: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub competitors: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub streams: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub history_date_from: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub history_date_to: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rank_scale: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_interval_ms: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_api_retries: Option<String>,
-}
-
-impl DataSourceDataForSeoBacklinksArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceDataForSeoSeoOpportunitiesArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub login: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub password: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub site: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub location_code: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub language_code: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub search_engine: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_mode: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub seed_keywords: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seed_queries_from_gsc: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gsc_source: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seed_urls_from_crawl: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seo_crawl_source: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub competitors: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub rank_track_keywords: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub streams: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limits_max_seed_keywords: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limits_max_generated_keywords: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limits_serp_depth: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limits_rank_track_depth: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limits_max_competitors: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scoring_min_search_volume: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scoring_max_keyword_difficulty: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scoring_weak_domain_rank_threshold: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scoring_prefer_question_keywords: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scoring_prefer_low_backlink_serps: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub openai_model: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub openai_enabled: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_interval_ms: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_api_retries: Option<String>,
-}
-
-impl DataSourceDataForSeoSeoOpportunitiesArgs {
     pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
         crate::connect::yaml_map_from_serialize(self)
     }
@@ -1217,85 +871,6 @@ pub struct DataSourceGoogleSearchConsoleArgs {
 }
 
 impl DataSourceGoogleSearchConsoleArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceGoogleSerpRanksArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub targets: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub keywords: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub country: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub language: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_depth: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_query_interval_ms: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_queries_per_run: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_after_first_target_match: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub capture_results: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub force_refresh_today: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub navigation_timeout_ms: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worker_node_path: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub playwright_executable_path: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_agent: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub brightdata_zone: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub brightdata_api_base: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_allintitle: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub allintitle_keywords: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allintitle_only: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_allintitle_queries_per_run: Option<String>,
-}
-
-impl DataSourceGoogleSerpRanksArgs {
     pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
         crate::connect::yaml_map_from_serialize(self)
     }
@@ -2212,64 +1787,6 @@ impl DataSourceS3Args {
 }
 
 #[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceSeoCrawlArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub site: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_urls: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_depth: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub render_js: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub crawl_rate_per_second: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub respect_robots: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub sitemap_probe_paths: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub openai_model: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub openai_structure_enabled: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skip_unchanged_content: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_agent: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub seed_urls: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub url_list: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_response_bytes: Option<String>,
-}
-
-impl DataSourceSeoCrawlArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
 pub struct DataSourceSftpArgs {
     #[arg(long)]
     #[serde(skip)]
@@ -2359,146 +1876,6 @@ pub struct DataSourceShopifyAdminArgs {
 }
 
 impl DataSourceShopifyAdminArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceSiteQualityArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub site: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url_mode: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub url_list: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_pages_per_run: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_crawl_depth: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub crawl_seed_urls: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub devices: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wait_until: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub navigation_timeout_ms: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lighthouse_enabled: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub lighthouse_categories: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub axe_enabled: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub axe_tags: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub throttle_rtt_ms: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub throttle_throughput_kbps: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub throttle_cpu_slowdown: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pages_per_minute: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worker_node_path: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub playwright_executable_path: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub respect_robots: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skip_heavy_when_unchanged: Option<String>,
-}
-
-impl DataSourceSiteQualityArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceSiteSecurityArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub site: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url_mode: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub url_list: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_pages_per_run: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_crawl_depth: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub crawl_seed_urls: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub devices: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wait_until: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub navigation_timeout_ms: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pages_per_minute: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worker_node_path: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub playwright_executable_path: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub respect_robots: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_third_party_scripts: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub import_lighthouse_from_site_quality: Option<String>,
-}
-
-impl DataSourceSiteSecurityArgs {
     pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
         crate::connect::yaml_map_from_serialize(self)
     }
@@ -2800,238 +2177,6 @@ pub struct DataSourceSumUpArgs {
 }
 
 impl DataSourceSumUpArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceUpfoundryBacklinksArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub site: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entity_kind: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entity_domain: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub domain_variants: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub primary_domain: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub competitor_name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ops_bucket: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ops_prefix: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_snapshot_id: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_subdomains: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_detail_rows: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub materialization_manifest_key: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_outbound_rows: Option<String>,
-}
-
-impl DataSourceUpfoundryBacklinksArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceUpfoundryLinkGraphCompactArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ops_bucket: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ops_prefix: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_staging_partitions: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pagerank_damping: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pagerank_max_iterations: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keep_complete_snapshots: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keep_failed_manifest_days: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keep_staging_days: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub spam_model_version: Option<String>,
-}
-
-impl DataSourceUpfoundryLinkGraphCompactArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceUpfoundryLinkGraphIngestArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ops_bucket: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ops_prefix: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub frontier_domains: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cc_crawl_id: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub cc_crawl_ids: Vec<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cc_index_base_uri: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cc_urls_index_prefix: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cc_index_source: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cc_direct_index_enabled: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_urls_per_run: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_links_per_page: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub monthly_window: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cc_web_graph_uri: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cc_web_graph_max_rows: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub live_crawl_enabled: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub brightdata_proxy_escalation_enabled: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_subdomains: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_referrer_page_refs_uri: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub corpus_run_id: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_referrer_pages_per_run: Option<String>,
-}
-
-impl DataSourceUpfoundryLinkGraphIngestArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSourceUpfoundryLinkGraphWatIndexArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub crawl_id: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wat_paths_manifest_uri: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wat_path_start: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wat_path_end: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_domain_bucket_count: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub batch_size_bytes: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_records_per_batch: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_links_per_page: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_wat_objects_per_sync: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_wat_object_bytes: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_wat_records_per_object: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_subdomains: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sqs_queue_url: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sqs_visibility_timeout_seconds: Option<String>,
-}
-
-impl DataSourceUpfoundryLinkGraphWatIndexArgs {
     pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
         crate::connect::yaml_map_from_serialize(self)
     }
@@ -4298,14 +3443,8 @@ impl ConnectRoleCmd {
                 kind: DataSourceKindCmd::AdRollAds(_),
             } => ConnectPlugin::DataSourceAdRollAds,
             Self::DataSource {
-                kind: DataSourceKindCmd::AiCitations(_),
-            } => ConnectPlugin::DataSourceAiCitations,
-            Self::DataSource {
                 kind: DataSourceKindCmd::Amqp(_),
             } => ConnectPlugin::DataSourceAmqp,
-            Self::DataSource {
-                kind: DataSourceKindCmd::AppleAppStoreSerp(_),
-            } => ConnectPlugin::DataSourceAppleAppStoreSerp,
             Self::DataSource {
                 kind: DataSourceKindCmd::AppleSearchAds(_),
             } => ConnectPlugin::DataSourceAppleSearchAds,
@@ -4315,15 +3454,6 @@ impl ConnectRoleCmd {
             Self::DataSource {
                 kind: DataSourceKindCmd::Clickhouse(_),
             } => ConnectPlugin::DataSourceClickhouse,
-            Self::DataSource {
-                kind: DataSourceKindCmd::ContentQuality(_),
-            } => ConnectPlugin::DataSourceContentQuality,
-            Self::DataSource {
-                kind: DataSourceKindCmd::DataForSeoBacklinks(_),
-            } => ConnectPlugin::DataSourceDataForSeoBacklinks,
-            Self::DataSource {
-                kind: DataSourceKindCmd::DataForSeoSeoOpportunities(_),
-            } => ConnectPlugin::DataSourceDataForSeoSeoOpportunities,
             Self::DataSource {
                 kind: DataSourceKindCmd::DeltaLake(_),
             } => ConnectPlugin::DataSourceDeltaLake,
@@ -4348,9 +3478,6 @@ impl ConnectRoleCmd {
             Self::DataSource {
                 kind: DataSourceKindCmd::GoogleSearchConsole(_),
             } => ConnectPlugin::DataSourceGoogleSearchConsole,
-            Self::DataSource {
-                kind: DataSourceKindCmd::GoogleSerpRanks(_),
-            } => ConnectPlugin::DataSourceGoogleSerpRanks,
             Self::DataSource {
                 kind: DataSourceKindCmd::HttpClient(_),
             } => ConnectPlugin::DataSourceHttpClient,
@@ -4409,20 +3536,11 @@ impl ConnectRoleCmd {
                 kind: DataSourceKindCmd::S3(_),
             } => ConnectPlugin::DataSourceS3,
             Self::DataSource {
-                kind: DataSourceKindCmd::SeoCrawl(_),
-            } => ConnectPlugin::DataSourceSeoCrawl,
-            Self::DataSource {
                 kind: DataSourceKindCmd::Sftp(_),
             } => ConnectPlugin::DataSourceSftp,
             Self::DataSource {
                 kind: DataSourceKindCmd::ShopifyAdmin(_),
             } => ConnectPlugin::DataSourceShopifyAdmin,
-            Self::DataSource {
-                kind: DataSourceKindCmd::SiteQuality(_),
-            } => ConnectPlugin::DataSourceSiteQuality,
-            Self::DataSource {
-                kind: DataSourceKindCmd::SiteSecurity(_),
-            } => ConnectPlugin::DataSourceSiteSecurity,
             Self::DataSource {
                 kind: DataSourceKindCmd::Sns(_),
             } => ConnectPlugin::DataSourceSns,
@@ -4444,18 +3562,6 @@ impl ConnectRoleCmd {
             Self::DataSource {
                 kind: DataSourceKindCmd::SumUp(_),
             } => ConnectPlugin::DataSourceSumUp,
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryBacklinks(_),
-            } => ConnectPlugin::DataSourceUpfoundryBacklinks,
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryLinkGraphCompact(_),
-            } => ConnectPlugin::DataSourceUpfoundryLinkGraphCompact,
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryLinkGraphIngest(_),
-            } => ConnectPlugin::DataSourceUpfoundryLinkGraphIngest,
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryLinkGraphWatIndex(_),
-            } => ConnectPlugin::DataSourceUpfoundryLinkGraphWatIndex,
             Self::DataSource {
                 kind: DataSourceKindCmd::Websocket(_),
             } => ConnectPlugin::DataSourceWebsocket,
@@ -4560,13 +3666,7 @@ impl ConnectRoleCmd {
                 kind: DataSourceKindCmd::AdRollAds(args),
             } => args.pipeline.as_deref(),
             Self::DataSource {
-                kind: DataSourceKindCmd::AiCitations(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
                 kind: DataSourceKindCmd::Amqp(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::AppleAppStoreSerp(args),
             } => args.pipeline.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::AppleSearchAds(args),
@@ -4576,15 +3676,6 @@ impl ConnectRoleCmd {
             } => args.pipeline.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::Clickhouse(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::ContentQuality(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::DataForSeoBacklinks(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::DataForSeoSeoOpportunities(args),
             } => args.pipeline.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::DeltaLake(args),
@@ -4609,9 +3700,6 @@ impl ConnectRoleCmd {
             } => args.pipeline.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::GoogleSearchConsole(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::GoogleSerpRanks(args),
             } => args.pipeline.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::HttpClient(args),
@@ -4671,19 +3759,10 @@ impl ConnectRoleCmd {
                 kind: DataSourceKindCmd::S3(args),
             } => args.pipeline.as_deref(),
             Self::DataSource {
-                kind: DataSourceKindCmd::SeoCrawl(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
                 kind: DataSourceKindCmd::Sftp(args),
             } => args.pipeline.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::ShopifyAdmin(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::SiteQuality(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::SiteSecurity(args),
             } => args.pipeline.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::Sns(args),
@@ -4705,18 +3784,6 @@ impl ConnectRoleCmd {
             } => args.pipeline.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::SumUp(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryBacklinks(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryLinkGraphCompact(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryLinkGraphIngest(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryLinkGraphWatIndex(args),
             } => args.pipeline.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::Websocket(args),
@@ -4822,13 +3889,7 @@ impl ConnectRoleCmd {
                 kind: DataSourceKindCmd::AdRollAds(args),
             } => args.name.as_deref(),
             Self::DataSource {
-                kind: DataSourceKindCmd::AiCitations(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
                 kind: DataSourceKindCmd::Amqp(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::AppleAppStoreSerp(args),
             } => args.name.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::AppleSearchAds(args),
@@ -4838,15 +3899,6 @@ impl ConnectRoleCmd {
             } => args.name.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::Clickhouse(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::ContentQuality(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::DataForSeoBacklinks(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::DataForSeoSeoOpportunities(args),
             } => args.name.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::DeltaLake(args),
@@ -4871,9 +3923,6 @@ impl ConnectRoleCmd {
             } => args.name.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::GoogleSearchConsole(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::GoogleSerpRanks(args),
             } => args.name.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::HttpClient(args),
@@ -4933,19 +3982,10 @@ impl ConnectRoleCmd {
                 kind: DataSourceKindCmd::S3(args),
             } => args.name.as_deref(),
             Self::DataSource {
-                kind: DataSourceKindCmd::SeoCrawl(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
                 kind: DataSourceKindCmd::Sftp(args),
             } => args.name.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::ShopifyAdmin(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::SiteQuality(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::SiteSecurity(args),
             } => args.name.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::Sns(args),
@@ -4967,18 +4007,6 @@ impl ConnectRoleCmd {
             } => args.name.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::SumUp(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryBacklinks(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryLinkGraphCompact(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryLinkGraphIngest(args),
-            } => args.name.as_deref(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryLinkGraphWatIndex(args),
             } => args.name.as_deref(),
             Self::DataSource {
                 kind: DataSourceKindCmd::Websocket(args),
@@ -5084,13 +4112,7 @@ impl ConnectRoleCmd {
                 kind: DataSourceKindCmd::AdRollAds(args),
             } => args.to_yaml_map(),
             Self::DataSource {
-                kind: DataSourceKindCmd::AiCitations(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
                 kind: DataSourceKindCmd::Amqp(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::AppleAppStoreSerp(args),
             } => args.to_yaml_map(),
             Self::DataSource {
                 kind: DataSourceKindCmd::AppleSearchAds(args),
@@ -5100,15 +4122,6 @@ impl ConnectRoleCmd {
             } => args.to_yaml_map(),
             Self::DataSource {
                 kind: DataSourceKindCmd::Clickhouse(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::ContentQuality(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::DataForSeoBacklinks(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::DataForSeoSeoOpportunities(args),
             } => args.to_yaml_map(),
             Self::DataSource {
                 kind: DataSourceKindCmd::DeltaLake(args),
@@ -5133,9 +4146,6 @@ impl ConnectRoleCmd {
             } => args.to_yaml_map(),
             Self::DataSource {
                 kind: DataSourceKindCmd::GoogleSearchConsole(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::GoogleSerpRanks(args),
             } => args.to_yaml_map(),
             Self::DataSource {
                 kind: DataSourceKindCmd::HttpClient(args),
@@ -5195,19 +4205,10 @@ impl ConnectRoleCmd {
                 kind: DataSourceKindCmd::S3(args),
             } => args.to_yaml_map(),
             Self::DataSource {
-                kind: DataSourceKindCmd::SeoCrawl(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
                 kind: DataSourceKindCmd::Sftp(args),
             } => args.to_yaml_map(),
             Self::DataSource {
                 kind: DataSourceKindCmd::ShopifyAdmin(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::SiteQuality(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::SiteSecurity(args),
             } => args.to_yaml_map(),
             Self::DataSource {
                 kind: DataSourceKindCmd::Sns(args),
@@ -5229,18 +4230,6 @@ impl ConnectRoleCmd {
             } => args.to_yaml_map(),
             Self::DataSource {
                 kind: DataSourceKindCmd::SumUp(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryBacklinks(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryLinkGraphCompact(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryLinkGraphIngest(args),
-            } => args.to_yaml_map(),
-            Self::DataSource {
-                kind: DataSourceKindCmd::UpfoundryLinkGraphWatIndex(args),
             } => args.to_yaml_map(),
             Self::DataSource {
                 kind: DataSourceKindCmd::Websocket(args),

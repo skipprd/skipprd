@@ -3,15 +3,10 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectPlugin {
     DataSourceAdRollAds,
-    DataSourceAiCitations,
     DataSourceAmqp,
-    DataSourceAppleAppStoreSerp,
     DataSourceAppleSearchAds,
     DataSourceBingWebmasterTools,
     DataSourceClickhouse,
-    DataSourceContentQuality,
-    DataSourceDataForSeoBacklinks,
-    DataSourceDataForSeoSeoOpportunities,
     DataSourceDeltaLake,
     DataSourceDynamodb,
     DataSourceEventbridge,
@@ -20,7 +15,6 @@ pub enum ConnectPlugin {
     DataSourceGoogleAnalytics,
     DataSourceGooglePageSpeed,
     DataSourceGoogleSearchConsole,
-    DataSourceGoogleSerpRanks,
     DataSourceHttpClient,
     DataSourceHttpServer,
     DataSourceHubspotCrm,
@@ -40,11 +34,8 @@ pub enum ConnectPlugin {
     DataSourceRedshift,
     DataSourceRevolutBusiness,
     DataSourceS3,
-    DataSourceSeoCrawl,
     DataSourceSftp,
     DataSourceShopifyAdmin,
-    DataSourceSiteQuality,
-    DataSourceSiteSecurity,
     DataSourceSns,
     DataSourceSocket,
     DataSourceSqs,
@@ -52,10 +43,6 @@ pub enum ConnectPlugin {
     DataSourceStdin,
     DataSourceStripe,
     DataSourceSumUp,
-    DataSourceUpfoundryBacklinks,
-    DataSourceUpfoundryLinkGraphCompact,
-    DataSourceUpfoundryLinkGraphIngest,
-    DataSourceUpfoundryLinkGraphWatIndex,
     DataSourceWebsocket,
     DataSourceXAds,
     DataSourceXeroAccounting,
@@ -94,15 +81,10 @@ impl ConnectPlugin {
     pub fn role(self) -> ConnectRole {
         match self {
             Self::DataSourceAdRollAds => ConnectRole::DataSource,
-            Self::DataSourceAiCitations => ConnectRole::DataSource,
             Self::DataSourceAmqp => ConnectRole::DataSource,
-            Self::DataSourceAppleAppStoreSerp => ConnectRole::DataSource,
             Self::DataSourceAppleSearchAds => ConnectRole::DataSource,
             Self::DataSourceBingWebmasterTools => ConnectRole::DataSource,
             Self::DataSourceClickhouse => ConnectRole::DataSource,
-            Self::DataSourceContentQuality => ConnectRole::DataSource,
-            Self::DataSourceDataForSeoBacklinks => ConnectRole::DataSource,
-            Self::DataSourceDataForSeoSeoOpportunities => ConnectRole::DataSource,
             Self::DataSourceDeltaLake => ConnectRole::DataSource,
             Self::DataSourceDynamodb => ConnectRole::DataSource,
             Self::DataSourceEventbridge => ConnectRole::DataSource,
@@ -111,7 +93,6 @@ impl ConnectPlugin {
             Self::DataSourceGoogleAnalytics => ConnectRole::DataSource,
             Self::DataSourceGooglePageSpeed => ConnectRole::DataSource,
             Self::DataSourceGoogleSearchConsole => ConnectRole::DataSource,
-            Self::DataSourceGoogleSerpRanks => ConnectRole::DataSource,
             Self::DataSourceHttpClient => ConnectRole::DataSource,
             Self::DataSourceHttpServer => ConnectRole::DataSource,
             Self::DataSourceHubspotCrm => ConnectRole::DataSource,
@@ -131,11 +112,8 @@ impl ConnectPlugin {
             Self::DataSourceRedshift => ConnectRole::DataSource,
             Self::DataSourceRevolutBusiness => ConnectRole::DataSource,
             Self::DataSourceS3 => ConnectRole::DataSource,
-            Self::DataSourceSeoCrawl => ConnectRole::DataSource,
             Self::DataSourceSftp => ConnectRole::DataSource,
             Self::DataSourceShopifyAdmin => ConnectRole::DataSource,
-            Self::DataSourceSiteQuality => ConnectRole::DataSource,
-            Self::DataSourceSiteSecurity => ConnectRole::DataSource,
             Self::DataSourceSns => ConnectRole::DataSource,
             Self::DataSourceSocket => ConnectRole::DataSource,
             Self::DataSourceSqs => ConnectRole::DataSource,
@@ -143,10 +121,6 @@ impl ConnectPlugin {
             Self::DataSourceStdin => ConnectRole::DataSource,
             Self::DataSourceStripe => ConnectRole::DataSource,
             Self::DataSourceSumUp => ConnectRole::DataSource,
-            Self::DataSourceUpfoundryBacklinks => ConnectRole::DataSource,
-            Self::DataSourceUpfoundryLinkGraphCompact => ConnectRole::DataSource,
-            Self::DataSourceUpfoundryLinkGraphIngest => ConnectRole::DataSource,
-            Self::DataSourceUpfoundryLinkGraphWatIndex => ConnectRole::DataSource,
             Self::DataSourceWebsocket => ConnectRole::DataSource,
             Self::DataSourceXAds => ConnectRole::DataSource,
             Self::DataSourceXeroAccounting => ConnectRole::DataSource,
@@ -184,15 +158,10 @@ impl ConnectPlugin {
     pub fn plugin_name(self) -> &'static str {
         match self {
             Self::DataSourceAdRollAds => "AdRollAds",
-            Self::DataSourceAiCitations => "AiCitations",
             Self::DataSourceAmqp => "Amqp",
-            Self::DataSourceAppleAppStoreSerp => "AppleAppStoreSerp",
             Self::DataSourceAppleSearchAds => "AppleSearchAds",
             Self::DataSourceBingWebmasterTools => "BingWebmasterTools",
             Self::DataSourceClickhouse => "Clickhouse",
-            Self::DataSourceContentQuality => "ContentQuality",
-            Self::DataSourceDataForSeoBacklinks => "DataForSeoBacklinks",
-            Self::DataSourceDataForSeoSeoOpportunities => "DataForSeoSeoOpportunities",
             Self::DataSourceDeltaLake => "DeltaLake",
             Self::DataSourceDynamodb => "Dynamodb",
             Self::DataSourceEventbridge => "Eventbridge",
@@ -201,7 +170,6 @@ impl ConnectPlugin {
             Self::DataSourceGoogleAnalytics => "GoogleAnalytics",
             Self::DataSourceGooglePageSpeed => "GooglePageSpeed",
             Self::DataSourceGoogleSearchConsole => "GoogleSearchConsole",
-            Self::DataSourceGoogleSerpRanks => "GoogleSerpRanks",
             Self::DataSourceHttpClient => "HttpClient",
             Self::DataSourceHttpServer => "HttpServer",
             Self::DataSourceHubspotCrm => "HubspotCrm",
@@ -221,11 +189,8 @@ impl ConnectPlugin {
             Self::DataSourceRedshift => "Redshift",
             Self::DataSourceRevolutBusiness => "RevolutBusiness",
             Self::DataSourceS3 => "S3",
-            Self::DataSourceSeoCrawl => "SeoCrawl",
             Self::DataSourceSftp => "Sftp",
             Self::DataSourceShopifyAdmin => "ShopifyAdmin",
-            Self::DataSourceSiteQuality => "SiteQuality",
-            Self::DataSourceSiteSecurity => "SiteSecurity",
             Self::DataSourceSns => "Sns",
             Self::DataSourceSocket => "Socket",
             Self::DataSourceSqs => "Sqs",
@@ -233,10 +198,6 @@ impl ConnectPlugin {
             Self::DataSourceStdin => "Stdin",
             Self::DataSourceStripe => "Stripe",
             Self::DataSourceSumUp => "SumUp",
-            Self::DataSourceUpfoundryBacklinks => "UpfoundryBacklinks",
-            Self::DataSourceUpfoundryLinkGraphCompact => "UpfoundryLinkGraphCompact",
-            Self::DataSourceUpfoundryLinkGraphIngest => "UpfoundryLinkGraphIngest",
-            Self::DataSourceUpfoundryLinkGraphWatIndex => "UpfoundryLinkGraphWatIndex",
             Self::DataSourceWebsocket => "Websocket",
             Self::DataSourceXAds => "XAds",
             Self::DataSourceXeroAccounting => "XeroAccounting",
@@ -279,9 +240,7 @@ impl ConnectPlugin {
                 "oauth_client_secret",
                 "oauth_refresh_token",
             ],
-            Self::DataSourceAiCitations => &[],
             Self::DataSourceAmqp => &["connection_string"],
-            Self::DataSourceAppleAppStoreSerp => &[],
             Self::DataSourceAppleSearchAds => &["private_key_pem", "access_token"],
             Self::DataSourceBingWebmasterTools => &[
                 "api_key",
@@ -290,9 +249,6 @@ impl ConnectPlugin {
                 "oauth_refresh_token",
             ],
             Self::DataSourceClickhouse => &["password"],
-            Self::DataSourceContentQuality => &[],
-            Self::DataSourceDataForSeoBacklinks => &["password"],
-            Self::DataSourceDataForSeoSeoOpportunities => &["password"],
             Self::DataSourceDeltaLake => &[],
             Self::DataSourceDynamodb => &[],
             Self::DataSourceEventbridge => &[],
@@ -310,7 +266,6 @@ impl ConnectPlugin {
             Self::DataSourceGoogleSearchConsole => {
                 &["access_token", "oauth_client_secret", "oauth_refresh_token"]
             }
-            Self::DataSourceGoogleSerpRanks => &[],
             Self::DataSourceHttpClient => &["auth.password", "auth.token"],
             Self::DataSourceHttpServer => &["auth_token"],
             Self::DataSourceHubspotCrm => {
@@ -340,11 +295,8 @@ impl ConnectPlugin {
                 &["private_key_pem", "refresh_token", "access_token"]
             }
             Self::DataSourceS3 => &[],
-            Self::DataSourceSeoCrawl => &[],
             Self::DataSourceSftp => &["password"],
             Self::DataSourceShopifyAdmin => &["oauth_client_secret", "oauth_access_token"],
-            Self::DataSourceSiteQuality => &[],
-            Self::DataSourceSiteSecurity => &[],
             Self::DataSourceSns => &[],
             Self::DataSourceSocket => &[],
             Self::DataSourceSqs => &[],
@@ -356,10 +308,6 @@ impl ConnectPlugin {
             Self::DataSourceSumUp => {
                 &["oauth_client_secret", "oauth_refresh_token", "access_token"]
             }
-            Self::DataSourceUpfoundryBacklinks => &[],
-            Self::DataSourceUpfoundryLinkGraphCompact => &[],
-            Self::DataSourceUpfoundryLinkGraphIngest => &[],
-            Self::DataSourceUpfoundryLinkGraphWatIndex => &[],
             Self::DataSourceWebsocket => &[],
             Self::DataSourceXAds => &[
                 "bearer_token",
@@ -428,16 +376,6 @@ impl ConnectPlugin {
             (Self::DataSourceAdRollAds, "stream_profile") => Some("stream_profile"),
             (Self::DataSourceAdRollAds, "processing_lag_days") => Some("processing_lag_days"),
             (Self::DataSourceAdRollAds, "streams") => Some("streams"),
-            (Self::DataSourceAiCitations, "site") => Some("site"),
-            (Self::DataSourceAiCitations, "brand_names") => Some("brand_names"),
-            (Self::DataSourceAiCitations, "prompt_list") => Some("prompt_list"),
-            (Self::DataSourceAiCitations, "models") => Some("models"),
-            (Self::DataSourceAiCitations, "requests_per_minute") => Some("requests_per_minute"),
-            (Self::DataSourceAiCitations, "max_prompts_per_run") => Some("max_prompts_per_run"),
-            (Self::DataSourceAiCitations, "skip_unchanged_responses") => {
-                Some("skip_unchanged_responses")
-            }
-            (Self::DataSourceAiCitations, "openai_base_url") => Some("openai_base_url"),
             (Self::DataSourceAmqp, "connection_string") => Some("connection_string"),
             (Self::DataSourceAmqp, "queue") => Some("queue"),
             (Self::DataSourceAmqp, "exchange") => Some("exchange"),
@@ -449,25 +387,6 @@ impl ConnectPlugin {
             (Self::DataSourceAmqp, "format") => Some("format"),
             (Self::DataSourceAmqp, "batch_size_bytes") => Some("batch_size_bytes"),
             (Self::DataSourceAmqp, "batch_size_seconds") => Some("batch_size_seconds"),
-            (Self::DataSourceAppleAppStoreSerp, "targets") => Some("targets"),
-            (Self::DataSourceAppleAppStoreSerp, "keywords") => Some("keywords"),
-            (Self::DataSourceAppleAppStoreSerp, "storefronts") => Some("storefronts"),
-            (Self::DataSourceAppleAppStoreSerp, "entity") => Some("entity"),
-            (Self::DataSourceAppleAppStoreSerp, "max_depth") => Some("max_depth"),
-            (Self::DataSourceAppleAppStoreSerp, "min_query_interval_ms") => {
-                Some("min_query_interval_ms")
-            }
-            (Self::DataSourceAppleAppStoreSerp, "max_queries_per_run") => {
-                Some("max_queries_per_run")
-            }
-            (Self::DataSourceAppleAppStoreSerp, "stop_after_first_target_match") => {
-                Some("stop_after_first_target_match")
-            }
-            (Self::DataSourceAppleAppStoreSerp, "capture_results") => Some("capture_results"),
-            (Self::DataSourceAppleAppStoreSerp, "force_refresh_today") => {
-                Some("force_refresh_today")
-            }
-            (Self::DataSourceAppleAppStoreSerp, "user_agent") => Some("user_agent"),
             (Self::DataSourceAppleSearchAds, "org_id") => Some("org_id"),
             (Self::DataSourceAppleSearchAds, "client_id") => Some("client_id"),
             (Self::DataSourceAppleSearchAds, "team_id") => Some("team_id"),
@@ -522,111 +441,6 @@ impl ConnectPlugin {
             (Self::DataSourceClickhouse, "format") => Some("format"),
             (Self::DataSourceClickhouse, "batch_size_bytes") => Some("batch_size_bytes"),
             (Self::DataSourceClickhouse, "batch_size_seconds") => Some("batch_size_seconds"),
-            (Self::DataSourceContentQuality, "site") => Some("site"),
-            (Self::DataSourceContentQuality, "max_urls") => Some("max_urls"),
-            (Self::DataSourceContentQuality, "max_depth") => Some("max_depth"),
-            (Self::DataSourceContentQuality, "render_js") => Some("render_js"),
-            (Self::DataSourceContentQuality, "crawl_rate_per_second") => {
-                Some("crawl_rate_per_second")
-            }
-            (Self::DataSourceContentQuality, "respect_robots") => Some("respect_robots"),
-            (Self::DataSourceContentQuality, "openai_model") => Some("openai_model"),
-            (Self::DataSourceContentQuality, "openai_enabled") => Some("openai_enabled"),
-            (Self::DataSourceContentQuality, "openai_max_blocks_per_page") => {
-                Some("openai_max_blocks_per_page")
-            }
-            (Self::DataSourceContentQuality, "skip_unchanged_content") => {
-                Some("skip_unchanged_content")
-            }
-            (Self::DataSourceContentQuality, "user_agent") => Some("user_agent"),
-            (Self::DataSourceContentQuality, "worker_node_path") => Some("worker_node_path"),
-            (Self::DataSourceContentQuality, "render_wait_until") => Some("render_wait_until"),
-            (Self::DataSourceContentQuality, "render_timeout_ms") => Some("render_timeout_ms"),
-            (Self::DataSourceContentQuality, "playwright_executable_path") => {
-                Some("playwright_executable_path")
-            }
-            (Self::DataSourceContentQuality, "seed_urls") => Some("seed_urls"),
-            (Self::DataSourceContentQuality, "url_list") => Some("url_list"),
-            (Self::DataSourceContentQuality, "max_response_bytes") => Some("max_response_bytes"),
-            (Self::DataSourceDataForSeoBacklinks, "login") => Some("login"),
-            (Self::DataSourceDataForSeoBacklinks, "password") => Some("password"),
-            (Self::DataSourceDataForSeoBacklinks, "site") => Some("site"),
-            (Self::DataSourceDataForSeoBacklinks, "run_mode") => Some("run_mode"),
-            (Self::DataSourceDataForSeoBacklinks, "backlink_jobs") => Some("backlink_jobs"),
-            (Self::DataSourceDataForSeoBacklinks, "intersection_jobs") => Some("intersection_jobs"),
-            (Self::DataSourceDataForSeoBacklinks, "competitors") => Some("competitors"),
-            (Self::DataSourceDataForSeoBacklinks, "streams") => Some("streams"),
-            (Self::DataSourceDataForSeoBacklinks, "history_date_from") => Some("history.date_from"),
-            (Self::DataSourceDataForSeoBacklinks, "history_date_to") => Some("history.date_to"),
-            (Self::DataSourceDataForSeoBacklinks, "rank_scale") => Some("rank_scale"),
-            (Self::DataSourceDataForSeoBacklinks, "request_interval_ms") => {
-                Some("request_interval_ms")
-            }
-            (Self::DataSourceDataForSeoBacklinks, "max_api_retries") => Some("max_api_retries"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "login") => Some("login"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "password") => Some("password"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "site") => Some("site"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "location_code") => Some("location_code"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "language_code") => Some("language_code"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "device") => Some("device"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "search_engine") => Some("search_engine"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "run_mode") => Some("run_mode"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "seed_keywords") => Some("seed_keywords"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "seed_queries_from_gsc") => {
-                Some("seed_queries_from_gsc")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "gsc_source") => Some("gsc_source"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "seed_urls_from_crawl") => {
-                Some("seed_urls_from_crawl")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "seo_crawl_source") => {
-                Some("seo_crawl_source")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "competitors") => Some("competitors"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "rank_track_keywords") => {
-                Some("rank_track_keywords")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "streams") => Some("streams"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "limits_max_seed_keywords") => {
-                Some("limits.max_seed_keywords")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "limits_max_generated_keywords") => {
-                Some("limits.max_generated_keywords")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "limits_serp_depth") => {
-                Some("limits.serp_depth")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "limits_rank_track_depth") => {
-                Some("limits.rank_track_depth")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "limits_max_competitors") => {
-                Some("limits.max_competitors")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_min_search_volume") => {
-                Some("scoring.min_search_volume")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_max_keyword_difficulty") => {
-                Some("scoring.max_keyword_difficulty")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_weak_domain_rank_threshold") => {
-                Some("scoring.weak_domain_rank_threshold")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_prefer_question_keywords") => {
-                Some("scoring.prefer_question_keywords")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_prefer_low_backlink_serps") => {
-                Some("scoring.prefer_low_backlink_serps")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "openai_model") => Some("openai_model"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "openai_enabled") => {
-                Some("openai_enabled")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "request_interval_ms") => {
-                Some("request_interval_ms")
-            }
-            (Self::DataSourceDataForSeoSeoOpportunities, "max_api_retries") => {
-                Some("max_api_retries")
-            }
             (Self::DataSourceDeltaLake, "table_uri") => Some("table_uri"),
             (Self::DataSourceDeltaLake, "storage_options") => Some("storage_options"),
             (Self::DataSourceDeltaLake, "version") => Some("version"),
@@ -738,37 +552,6 @@ impl ConnectPlugin {
                 Some("url_inspection_enabled")
             }
             (Self::DataSourceGoogleSearchConsole, "url_list") => Some("url_list"),
-            (Self::DataSourceGoogleSerpRanks, "targets") => Some("targets"),
-            (Self::DataSourceGoogleSerpRanks, "keywords") => Some("keywords"),
-            (Self::DataSourceGoogleSerpRanks, "country") => Some("country"),
-            (Self::DataSourceGoogleSerpRanks, "language") => Some("language"),
-            (Self::DataSourceGoogleSerpRanks, "device") => Some("device"),
-            (Self::DataSourceGoogleSerpRanks, "max_depth") => Some("max_depth"),
-            (Self::DataSourceGoogleSerpRanks, "min_query_interval_ms") => {
-                Some("min_query_interval_ms")
-            }
-            (Self::DataSourceGoogleSerpRanks, "max_queries_per_run") => Some("max_queries_per_run"),
-            (Self::DataSourceGoogleSerpRanks, "stop_after_first_target_match") => {
-                Some("stop_after_first_target_match")
-            }
-            (Self::DataSourceGoogleSerpRanks, "capture_results") => Some("capture_results"),
-            (Self::DataSourceGoogleSerpRanks, "force_refresh_today") => Some("force_refresh_today"),
-            (Self::DataSourceGoogleSerpRanks, "navigation_timeout_ms") => {
-                Some("navigation_timeout_ms")
-            }
-            (Self::DataSourceGoogleSerpRanks, "worker_node_path") => Some("worker_node_path"),
-            (Self::DataSourceGoogleSerpRanks, "playwright_executable_path") => {
-                Some("playwright_executable_path")
-            }
-            (Self::DataSourceGoogleSerpRanks, "user_agent") => Some("user_agent"),
-            (Self::DataSourceGoogleSerpRanks, "brightdata_zone") => Some("brightdata_zone"),
-            (Self::DataSourceGoogleSerpRanks, "brightdata_api_base") => Some("brightdata_api_base"),
-            (Self::DataSourceGoogleSerpRanks, "include_allintitle") => Some("include_allintitle"),
-            (Self::DataSourceGoogleSerpRanks, "allintitle_keywords") => Some("allintitle_keywords"),
-            (Self::DataSourceGoogleSerpRanks, "allintitle_only") => Some("allintitle_only"),
-            (Self::DataSourceGoogleSerpRanks, "max_allintitle_queries_per_run") => {
-                Some("max_allintitle_queries_per_run")
-            }
             (Self::DataSourceHttpClient, "url") => Some("url"),
             (Self::DataSourceHttpClient, "method") => Some("method"),
             (Self::DataSourceHttpClient, "headers") => Some("headers"),
@@ -999,22 +782,6 @@ impl ConnectPlugin {
             (Self::DataSourceS3, "region") => Some("region"),
             (Self::DataSourceS3, "s3_prefix_ordered_depth") => Some("s3_prefix_ordered_depth"),
             (Self::DataSourceS3, "s3_delimiter") => Some("s3_delimiter"),
-            (Self::DataSourceSeoCrawl, "site") => Some("site"),
-            (Self::DataSourceSeoCrawl, "max_urls") => Some("max_urls"),
-            (Self::DataSourceSeoCrawl, "max_depth") => Some("max_depth"),
-            (Self::DataSourceSeoCrawl, "render_js") => Some("render_js"),
-            (Self::DataSourceSeoCrawl, "crawl_rate_per_second") => Some("crawl_rate_per_second"),
-            (Self::DataSourceSeoCrawl, "respect_robots") => Some("respect_robots"),
-            (Self::DataSourceSeoCrawl, "sitemap_probe_paths") => Some("sitemap_probe_paths"),
-            (Self::DataSourceSeoCrawl, "openai_model") => Some("openai_model"),
-            (Self::DataSourceSeoCrawl, "openai_structure_enabled") => {
-                Some("openai_structure_enabled")
-            }
-            (Self::DataSourceSeoCrawl, "skip_unchanged_content") => Some("skip_unchanged_content"),
-            (Self::DataSourceSeoCrawl, "user_agent") => Some("user_agent"),
-            (Self::DataSourceSeoCrawl, "seed_urls") => Some("seed_urls"),
-            (Self::DataSourceSeoCrawl, "url_list") => Some("url_list"),
-            (Self::DataSourceSeoCrawl, "max_response_bytes") => Some("max_response_bytes"),
             (Self::DataSourceSftp, "host") => Some("host"),
             (Self::DataSourceSftp, "port") => Some("port"),
             (Self::DataSourceSftp, "username") => Some("username"),
@@ -1038,56 +805,6 @@ impl ConnectPlugin {
             (Self::DataSourceShopifyAdmin, "oauth_client_id") => Some("oauth_client_id"),
             (Self::DataSourceShopifyAdmin, "oauth_client_secret") => Some("oauth_client_secret"),
             (Self::DataSourceShopifyAdmin, "oauth_access_token") => Some("oauth_access_token"),
-            (Self::DataSourceSiteQuality, "site") => Some("site"),
-            (Self::DataSourceSiteQuality, "url_mode") => Some("url_mode"),
-            (Self::DataSourceSiteQuality, "url_list") => Some("url_list"),
-            (Self::DataSourceSiteQuality, "max_pages_per_run") => Some("max_pages_per_run"),
-            (Self::DataSourceSiteQuality, "max_crawl_depth") => Some("max_crawl_depth"),
-            (Self::DataSourceSiteQuality, "crawl_seed_urls") => Some("crawl_seed_urls"),
-            (Self::DataSourceSiteQuality, "devices") => Some("devices"),
-            (Self::DataSourceSiteQuality, "wait_until") => Some("wait_until"),
-            (Self::DataSourceSiteQuality, "navigation_timeout_ms") => Some("navigation_timeout_ms"),
-            (Self::DataSourceSiteQuality, "lighthouse_enabled") => Some("lighthouse_enabled"),
-            (Self::DataSourceSiteQuality, "lighthouse_categories") => Some("lighthouse_categories"),
-            (Self::DataSourceSiteQuality, "axe_enabled") => Some("axe_enabled"),
-            (Self::DataSourceSiteQuality, "axe_tags") => Some("axe_tags"),
-            (Self::DataSourceSiteQuality, "throttle_rtt_ms") => Some("throttle.rtt_ms"),
-            (Self::DataSourceSiteQuality, "throttle_throughput_kbps") => {
-                Some("throttle.throughput_kbps")
-            }
-            (Self::DataSourceSiteQuality, "throttle_cpu_slowdown") => Some("throttle.cpu_slowdown"),
-            (Self::DataSourceSiteQuality, "pages_per_minute") => Some("pages_per_minute"),
-            (Self::DataSourceSiteQuality, "worker_node_path") => Some("worker_node_path"),
-            (Self::DataSourceSiteQuality, "playwright_executable_path") => {
-                Some("playwright_executable_path")
-            }
-            (Self::DataSourceSiteQuality, "respect_robots") => Some("respect_robots"),
-            (Self::DataSourceSiteQuality, "skip_heavy_when_unchanged") => {
-                Some("skip_heavy_when_unchanged")
-            }
-            (Self::DataSourceSiteSecurity, "site") => Some("site"),
-            (Self::DataSourceSiteSecurity, "url_mode") => Some("url_mode"),
-            (Self::DataSourceSiteSecurity, "url_list") => Some("url_list"),
-            (Self::DataSourceSiteSecurity, "max_pages_per_run") => Some("max_pages_per_run"),
-            (Self::DataSourceSiteSecurity, "max_crawl_depth") => Some("max_crawl_depth"),
-            (Self::DataSourceSiteSecurity, "crawl_seed_urls") => Some("crawl_seed_urls"),
-            (Self::DataSourceSiteSecurity, "devices") => Some("devices"),
-            (Self::DataSourceSiteSecurity, "wait_until") => Some("wait_until"),
-            (Self::DataSourceSiteSecurity, "navigation_timeout_ms") => {
-                Some("navigation_timeout_ms")
-            }
-            (Self::DataSourceSiteSecurity, "pages_per_minute") => Some("pages_per_minute"),
-            (Self::DataSourceSiteSecurity, "worker_node_path") => Some("worker_node_path"),
-            (Self::DataSourceSiteSecurity, "playwright_executable_path") => {
-                Some("playwright_executable_path")
-            }
-            (Self::DataSourceSiteSecurity, "respect_robots") => Some("respect_robots"),
-            (Self::DataSourceSiteSecurity, "max_third_party_scripts") => {
-                Some("max_third_party_scripts")
-            }
-            (Self::DataSourceSiteSecurity, "import_lighthouse_from_site_quality") => {
-                Some("import_lighthouse_from_site_quality")
-            }
             (Self::DataSourceSns, "topic_arn") => Some("topic_arn"),
             (Self::DataSourceSns, "sqs_queue_url") => Some("sqs_queue_url"),
             (Self::DataSourceSns, "region") => Some("region"),
@@ -1151,132 +868,6 @@ impl ConnectPlugin {
             (Self::DataSourceSumUp, "privacy_keep_properties") => Some("privacy.keep_properties"),
             (Self::DataSourceSumUp, "privacy_hash_properties") => Some("privacy.hash_properties"),
             (Self::DataSourceSumUp, "privacy_on_violation") => Some("privacy.on_violation"),
-            (Self::DataSourceUpfoundryBacklinks, "site") => Some("site"),
-            (Self::DataSourceUpfoundryBacklinks, "entity_kind") => Some("entity_kind"),
-            (Self::DataSourceUpfoundryBacklinks, "entity_domain") => Some("entity_domain"),
-            (Self::DataSourceUpfoundryBacklinks, "domain_variants") => Some("domain_variants"),
-            (Self::DataSourceUpfoundryBacklinks, "primary_domain") => Some("primary_domain"),
-            (Self::DataSourceUpfoundryBacklinks, "competitor_name") => Some("competitor_name"),
-            (Self::DataSourceUpfoundryBacklinks, "ops_bucket") => Some("ops_bucket"),
-            (Self::DataSourceUpfoundryBacklinks, "ops_prefix") => Some("ops_prefix"),
-            (Self::DataSourceUpfoundryBacklinks, "selected_snapshot_id") => {
-                Some("selected_snapshot_id")
-            }
-            (Self::DataSourceUpfoundryBacklinks, "include_subdomains") => {
-                Some("include_subdomains")
-            }
-            (Self::DataSourceUpfoundryBacklinks, "max_detail_rows") => Some("max_detail_rows"),
-            (Self::DataSourceUpfoundryBacklinks, "materialization_manifest_key") => {
-                Some("materialization_manifest_key")
-            }
-            (Self::DataSourceUpfoundryBacklinks, "max_outbound_rows") => Some("max_outbound_rows"),
-            (Self::DataSourceUpfoundryLinkGraphCompact, "ops_bucket") => Some("ops_bucket"),
-            (Self::DataSourceUpfoundryLinkGraphCompact, "ops_prefix") => Some("ops_prefix"),
-            (Self::DataSourceUpfoundryLinkGraphCompact, "max_staging_partitions") => {
-                Some("max_staging_partitions")
-            }
-            (Self::DataSourceUpfoundryLinkGraphCompact, "pagerank_damping") => {
-                Some("pagerank_damping")
-            }
-            (Self::DataSourceUpfoundryLinkGraphCompact, "pagerank_max_iterations") => {
-                Some("pagerank_max_iterations")
-            }
-            (Self::DataSourceUpfoundryLinkGraphCompact, "keep_complete_snapshots") => {
-                Some("keep_complete_snapshots")
-            }
-            (Self::DataSourceUpfoundryLinkGraphCompact, "keep_failed_manifest_days") => {
-                Some("keep_failed_manifest_days")
-            }
-            (Self::DataSourceUpfoundryLinkGraphCompact, "keep_staging_days") => {
-                Some("keep_staging_days")
-            }
-            (Self::DataSourceUpfoundryLinkGraphCompact, "spam_model_version") => {
-                Some("spam_model_version")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "ops_bucket") => Some("ops_bucket"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "ops_prefix") => Some("ops_prefix"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "frontier_domains") => {
-                Some("frontier_domains")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_crawl_id") => Some("cc_crawl_id"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_crawl_ids") => Some("cc_crawl_ids"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_index_base_uri") => {
-                Some("cc_index_base_uri")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_urls_index_prefix") => {
-                Some("cc_urls_index_prefix")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_index_source") => {
-                Some("cc_index_source")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_direct_index_enabled") => {
-                Some("cc_direct_index_enabled")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "max_urls_per_run") => {
-                Some("max_urls_per_run")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "max_links_per_page") => {
-                Some("max_links_per_page")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "monthly_window") => Some("monthly_window"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_web_graph_uri") => {
-                Some("cc_web_graph_uri")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_web_graph_max_rows") => {
-                Some("cc_web_graph_max_rows")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "live_crawl_enabled") => {
-                Some("live_crawl_enabled")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "brightdata_proxy_escalation_enabled") => {
-                Some("brightdata_proxy_escalation_enabled")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "include_subdomains") => {
-                Some("include_subdomains")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "selected_referrer_page_refs_uri") => {
-                Some("selected_referrer_page_refs_uri")
-            }
-            (Self::DataSourceUpfoundryLinkGraphIngest, "corpus_run_id") => Some("corpus_run_id"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "max_referrer_pages_per_run") => {
-                Some("max_referrer_pages_per_run")
-            }
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "crawl_id") => Some("crawl_id"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "wat_paths_manifest_uri") => {
-                Some("wat_paths_manifest_uri")
-            }
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "wat_path_start") => {
-                Some("wat_path_start")
-            }
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "wat_path_end") => Some("wat_path_end"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "target_domain_bucket_count") => {
-                Some("target_domain_bucket_count")
-            }
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "batch_size_bytes") => {
-                Some("batch_size_bytes")
-            }
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_records_per_batch") => {
-                Some("max_records_per_batch")
-            }
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_links_per_page") => {
-                Some("max_links_per_page")
-            }
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_wat_objects_per_sync") => {
-                Some("max_wat_objects_per_sync")
-            }
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_wat_object_bytes") => {
-                Some("max_wat_object_bytes")
-            }
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_wat_records_per_object") => {
-                Some("max_wat_records_per_object")
-            }
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "include_subdomains") => {
-                Some("include_subdomains")
-            }
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "sqs_queue_url") => Some("sqs_queue_url"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "sqs_visibility_timeout_seconds") => {
-                Some("sqs_visibility_timeout_seconds")
-            }
             (Self::DataSourceWebsocket, "url") => Some("url"),
             (Self::DataSourceWebsocket, "headers") => Some("headers"),
             (Self::DataSourceWebsocket, "ping_interval_seconds") => Some("ping_interval_seconds"),
@@ -1594,15 +1185,10 @@ impl ConnectPlugin {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DataSource {
     AdRollAds,
-    AiCitations,
     Amqp,
-    AppleAppStoreSerp,
     AppleSearchAds,
     BingWebmasterTools,
     Clickhouse,
-    ContentQuality,
-    DataForSeoBacklinks,
-    DataForSeoSeoOpportunities,
     DeltaLake,
     Dynamodb,
     Eventbridge,
@@ -1611,7 +1197,6 @@ pub enum DataSource {
     GoogleAnalytics,
     GooglePageSpeed,
     GoogleSearchConsole,
-    GoogleSerpRanks,
     HttpClient,
     HttpServer,
     HubspotCrm,
@@ -1631,11 +1216,8 @@ pub enum DataSource {
     Redshift,
     RevolutBusiness,
     S3,
-    SeoCrawl,
     Sftp,
     ShopifyAdmin,
-    SiteQuality,
-    SiteSecurity,
     Sns,
     Socket,
     Sqs,
@@ -1643,10 +1225,6 @@ pub enum DataSource {
     Stdin,
     Stripe,
     SumUp,
-    UpfoundryBacklinks,
-    UpfoundryLinkGraphCompact,
-    UpfoundryLinkGraphIngest,
-    UpfoundryLinkGraphWatIndex,
     Websocket,
     XAds,
     XeroAccounting,
@@ -1656,15 +1234,10 @@ impl DataSource {
     pub fn plugin(self) -> ConnectPlugin {
         match self {
             Self::AdRollAds => ConnectPlugin::DataSourceAdRollAds,
-            Self::AiCitations => ConnectPlugin::DataSourceAiCitations,
             Self::Amqp => ConnectPlugin::DataSourceAmqp,
-            Self::AppleAppStoreSerp => ConnectPlugin::DataSourceAppleAppStoreSerp,
             Self::AppleSearchAds => ConnectPlugin::DataSourceAppleSearchAds,
             Self::BingWebmasterTools => ConnectPlugin::DataSourceBingWebmasterTools,
             Self::Clickhouse => ConnectPlugin::DataSourceClickhouse,
-            Self::ContentQuality => ConnectPlugin::DataSourceContentQuality,
-            Self::DataForSeoBacklinks => ConnectPlugin::DataSourceDataForSeoBacklinks,
-            Self::DataForSeoSeoOpportunities => ConnectPlugin::DataSourceDataForSeoSeoOpportunities,
             Self::DeltaLake => ConnectPlugin::DataSourceDeltaLake,
             Self::Dynamodb => ConnectPlugin::DataSourceDynamodb,
             Self::Eventbridge => ConnectPlugin::DataSourceEventbridge,
@@ -1673,7 +1246,6 @@ impl DataSource {
             Self::GoogleAnalytics => ConnectPlugin::DataSourceGoogleAnalytics,
             Self::GooglePageSpeed => ConnectPlugin::DataSourceGooglePageSpeed,
             Self::GoogleSearchConsole => ConnectPlugin::DataSourceGoogleSearchConsole,
-            Self::GoogleSerpRanks => ConnectPlugin::DataSourceGoogleSerpRanks,
             Self::HttpClient => ConnectPlugin::DataSourceHttpClient,
             Self::HttpServer => ConnectPlugin::DataSourceHttpServer,
             Self::HubspotCrm => ConnectPlugin::DataSourceHubspotCrm,
@@ -1693,11 +1265,8 @@ impl DataSource {
             Self::Redshift => ConnectPlugin::DataSourceRedshift,
             Self::RevolutBusiness => ConnectPlugin::DataSourceRevolutBusiness,
             Self::S3 => ConnectPlugin::DataSourceS3,
-            Self::SeoCrawl => ConnectPlugin::DataSourceSeoCrawl,
             Self::Sftp => ConnectPlugin::DataSourceSftp,
             Self::ShopifyAdmin => ConnectPlugin::DataSourceShopifyAdmin,
-            Self::SiteQuality => ConnectPlugin::DataSourceSiteQuality,
-            Self::SiteSecurity => ConnectPlugin::DataSourceSiteSecurity,
             Self::Sns => ConnectPlugin::DataSourceSns,
             Self::Socket => ConnectPlugin::DataSourceSocket,
             Self::Sqs => ConnectPlugin::DataSourceSqs,
@@ -1705,10 +1274,6 @@ impl DataSource {
             Self::Stdin => ConnectPlugin::DataSourceStdin,
             Self::Stripe => ConnectPlugin::DataSourceStripe,
             Self::SumUp => ConnectPlugin::DataSourceSumUp,
-            Self::UpfoundryBacklinks => ConnectPlugin::DataSourceUpfoundryBacklinks,
-            Self::UpfoundryLinkGraphCompact => ConnectPlugin::DataSourceUpfoundryLinkGraphCompact,
-            Self::UpfoundryLinkGraphIngest => ConnectPlugin::DataSourceUpfoundryLinkGraphIngest,
-            Self::UpfoundryLinkGraphWatIndex => ConnectPlugin::DataSourceUpfoundryLinkGraphWatIndex,
             Self::Websocket => ConnectPlugin::DataSourceWebsocket,
             Self::XAds => ConnectPlugin::DataSourceXAds,
             Self::XeroAccounting => ConnectPlugin::DataSourceXeroAccounting,
@@ -1717,15 +1282,10 @@ impl DataSource {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "adrollads" => Some(Self::AdRollAds),
-            "aicitations" => Some(Self::AiCitations),
             "amqp" => Some(Self::Amqp),
-            "appleappstoreserp" => Some(Self::AppleAppStoreSerp),
             "applesearchads" => Some(Self::AppleSearchAds),
             "bingwebmastertools" => Some(Self::BingWebmasterTools),
             "clickhouse" => Some(Self::Clickhouse),
-            "contentquality" => Some(Self::ContentQuality),
-            "dataforseobacklinks" => Some(Self::DataForSeoBacklinks),
-            "dataforseoseoopportunities" => Some(Self::DataForSeoSeoOpportunities),
             "deltalake" => Some(Self::DeltaLake),
             "dynamodb" => Some(Self::Dynamodb),
             "eventbridge" => Some(Self::Eventbridge),
@@ -1734,7 +1294,6 @@ impl DataSource {
             "googleanalytics" => Some(Self::GoogleAnalytics),
             "googlepagespeed" => Some(Self::GooglePageSpeed),
             "googlesearchconsole" => Some(Self::GoogleSearchConsole),
-            "googleserpranks" => Some(Self::GoogleSerpRanks),
             "httpclient" => Some(Self::HttpClient),
             "httpserver" => Some(Self::HttpServer),
             "hubspotcrm" => Some(Self::HubspotCrm),
@@ -1754,11 +1313,8 @@ impl DataSource {
             "redshift" => Some(Self::Redshift),
             "revolutbusiness" => Some(Self::RevolutBusiness),
             "s3" => Some(Self::S3),
-            "seocrawl" => Some(Self::SeoCrawl),
             "sftp" => Some(Self::Sftp),
             "shopifyadmin" => Some(Self::ShopifyAdmin),
-            "sitequality" => Some(Self::SiteQuality),
-            "sitesecurity" => Some(Self::SiteSecurity),
             "sns" => Some(Self::Sns),
             "socket" => Some(Self::Socket),
             "sqs" => Some(Self::Sqs),
@@ -1766,10 +1322,6 @@ impl DataSource {
             "stdin" => Some(Self::Stdin),
             "stripe" => Some(Self::Stripe),
             "sumup" => Some(Self::SumUp),
-            "upfoundrybacklinks" => Some(Self::UpfoundryBacklinks),
-            "upfoundrylinkgraphcompact" => Some(Self::UpfoundryLinkGraphCompact),
-            "upfoundrylinkgraphingest" => Some(Self::UpfoundryLinkGraphIngest),
-            "upfoundrylinkgraphwatindex" => Some(Self::UpfoundryLinkGraphWatIndex),
             "websocket" => Some(Self::Websocket),
             "xads" => Some(Self::XAds),
             "xeroaccounting" => Some(Self::XeroAccounting),

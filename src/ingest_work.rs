@@ -4046,8 +4046,8 @@ mod warm_output_schemas_tests {
     async fn warm_from_tokio_runtime_does_not_panic_with_multiple_namespaces() {
         let mut pipeline = PipelineMetadata::new(&Config::new());
         for ns in [
-            "dataforseo_seo_opportunities_keyword_suggestion_daily",
-            "dataforseo_seo_opportunities_keyword_metric_daily",
+            "stripe_charges",
+            "stripe_customers",
         ] {
             pipeline
                 .metadata

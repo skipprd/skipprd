@@ -1522,15 +1522,14 @@ mod tests {
                 .any(|f| f.ident == "stream_profile_type" || f.yaml_path == "stream_profile.type"),
             "string enums must not invent .type maps"
         );
-        let apple = plugins
+        let gsc = plugins
             .iter()
-            .find(|p| p.kind == PluginKind::DataSource && p.plugin_name == "AppleAppStoreSerp")
-            .expect("AppleAppStoreSerp");
-        assert!(apple
+            .find(|p| p.kind == PluginKind::DataSource && p.plugin_name == "GoogleSearchConsole")
+            .expect("GoogleSearchConsole");
+        assert!(gsc
             .fields
             .iter()
-            .any(|f| f.ident == "entity" && f.yaml_path == "entity"));
-        assert!(!apple.fields.iter().any(|f| f.ident == "entity_type"));
+            .any(|f| f.ident == "site_url" && f.yaml_path == "site_url"));
         let lake = plugins
             .iter()
             .find(|p| p.kind == PluginKind::DataSink && p.plugin_name == "SkipprLake")
@@ -1945,23 +1944,21 @@ mod tests {
             "stubtest requires positional-only __eq__ to match PyO3"
         );
         assert!(stub.contains("class DataSourceStripeStreamProfile:"));
-        assert!(
-            stub.contains("search_engine: DataSourceDataForSeoSeoOpportunitiesSearchEngine | None")
-        );
+        assert!(stub.contains("stream_profile: DataSourceStripeStreamProfile | None"));
         assert!(!stub.contains("TypeAlias = Literal["));
     }
 
     #[test]
     fn python_emits_fields_the_cli_skips() {
         let (rs, _) = python_outputs();
-        let entry = rs
-            .split("pub struct PyDataSourceDataForSeoBacklinksCompetitorEntry {")
+        let stripe = rs
+            .split("pub struct PyDataSourceStripe {")
             .nth(1)
-            .and_then(|rest| rest.split('}').next())
-            .expect("CompetitorEntry");
+            .and_then(|rest| rest.split("\n\n").next())
+            .expect("Stripe");
         assert!(
-            entry.contains("pub name: "),
-            "clap_skip_field is CLI-only: {entry}"
+            stripe.contains("pub streams: "),
+            "list fields omitted from CLI still emit in Python: {stripe}"
         );
     }
 
@@ -1980,7 +1977,7 @@ mod tests {
         assert!(stub.contains("    def inject_fields(self) -> Mapping[str, Any] | None:\n"));
         assert!(stub.contains("        inject_fields: dict[str, Any] | None = None,\n"));
         assert!(stub.contains(
-            "    def keywords(self) -> Sequence[str]:\n        \"\"\"YAML key `keywords`.\"\"\"\n        ...\n    @keywords.setter\n    def keywords(self, value: list[str]) -> None: ...\n"
+            "    def tables(self) -> Sequence[str] | None:\n        \"\"\"YAML key `tables`.\"\"\"\n        ...\n    @tables.setter\n    def tables(self, value: list[str] | None) -> None: ...\n"
         ));
         for class in [
             "Stats",

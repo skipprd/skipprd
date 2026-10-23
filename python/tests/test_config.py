@@ -10,10 +10,9 @@ from skippr import (
     DataSinkSkipprLakeWarehouseObjectStoreR2,
     DataSourceFile,
     BatchTimeUnit,
-    DataSourceGoogleSerpRanks,
-    DataSourceGoogleSerpRanksSerpDevice,
-    DataSourceGoogleSerpRanksTargetEntry,
     DataSourceHttpClient,
+    DataSourceStripe,
+    DataSourceStripeStreamProfile,
     DataSourceHttpClientDataSourceHttpAuthConfig,
     DataSourceOtlp,
     DataSourcePostgres,
@@ -233,9 +232,9 @@ def test_any_fields_keep_exact_integers_and_reject_what_json_cannot_hold():
 
 
 def test_list_and_map_setters_accept_what_the_stub_declares():
-    serp = DataSourceGoogleSerpRanks(keywords=["k"], targets=[])
-    serp.keywords = ["a", "b"]
-    assert list(serp.keywords) == ["a", "b"]
+    pg = DataSourcePostgres(host="localhost", password=EnvRef("POSTGRES_PASSWORD"))
+    pg.tables = ["a", "b"]
+    assert list(pg.tables or []) == ["a", "b"]
     http = DataSourceHttpClient(url="https://example.com")
     http.headers = {"a": "b"}
     assert dict(http.headers or {}) == {"a": "b"}
@@ -275,29 +274,30 @@ def test_lists_numbers_and_nested_classes_persist_typed():
         DataSourceFile(path="/tmp/in", batch_size_bytes=1048576, batch_size_seconds=5),
     )
     cfg.data_source(
-        "serp",
-        DataSourceGoogleSerpRanks(
-            keywords=["skippr"],
-            targets=[DataSourceGoogleSerpRanksTargetEntry(site="example.com", aliases=["ex"])],
-        ),
+        "stripe",
+        DataSourceStripe(stripe_account_id="acct_123", start_date="2024-01-01"),
     )
     raw = cfg.to_yaml()
     assert "- orders" in raw and "- items" in raw
     assert "batch_size_bytes: 1048576" in raw
     assert "batch_size_seconds: 5" in raw
-    assert "site: example.com" in raw
-    assert "- ex" in raw
+    assert "stripe_account_id: acct_123" in raw
+    assert "start_date: 2024-01-01" in raw
 
 
 def test_enum_fields_take_class_members_not_strings():
-    DataSourceGoogleSerpRanks(
-        keywords=[],
-        targets=[],
-        device=DataSourceGoogleSerpRanksSerpDevice.MOBILE,
+    DataSourceStripe(
+        stripe_account_id="acct",
+        start_date="2024-01-01",
+        stream_profile=DataSourceStripeStreamProfile.FULL,
     )
     Transform(batch_time_unit=BatchTimeUnit.DAY)
-    with pytest.raises(TypeError, match="DataSourceGoogleSerpRanksSerpDevice"):
-        DataSourceGoogleSerpRanks(keywords=[], targets=[], device="mobile")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="DataSourceStripeStreamProfile"):
+        DataSourceStripe(
+            stripe_account_id="acct",
+            start_date="2024-01-01",
+            stream_profile="full",  # type: ignore[arg-type]
+        )
     with pytest.raises(TypeError, match="BatchTimeUnit"):
         Transform(batch_time_unit="day")  # type: ignore[arg-type]
 
@@ -322,9 +322,9 @@ def test_tagged_enum_variant_serializes_tag():
 
 
 def test_nested_classes_are_frozen_and_top_level_is_mutable():
-    target = DataSourceGoogleSerpRanksTargetEntry(site="a")
+    auth = DataSourceHttpClientDataSourceHttpAuthConfig(username="u")
     with pytest.raises(AttributeError):
-        target.site = "b"  # type: ignore[misc]
+        auth.username = "b"  # type: ignore[misc]
     src = _s3()
     src.s3_prefix = "q"
     assert src.s3_prefix == "q"

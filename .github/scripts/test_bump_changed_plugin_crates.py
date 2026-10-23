@@ -50,7 +50,7 @@ class BumpChangedPluginCratesTests(unittest.TestCase):
         )
         self.write_workspace_file(
             workspace,
-            "plugins/shared/link_graph/src/lib.rs",
+            "plugins/shared/api_source/src/lib.rs",
             "pub fn shared() {}\n",
         )
         self.write_workspace_file(
@@ -143,7 +143,7 @@ class BumpChangedPluginCratesTests(unittest.TestCase):
             bumped = bump_changed_plugin_crates.bump_changed_plugin_crates(
                 workspace,
                 changed_paths=[
-                    "plugins/shared/link_graph/src/lib.rs",
+                    "plugins/shared/api_source/src/lib.rs",
                     "crates/skippr-runtime-sdk/src/lib.rs",
                 ],
             )
