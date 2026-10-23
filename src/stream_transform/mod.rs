@@ -130,11 +130,7 @@ fn apply_filter_with_mask(
     }
     let table = unique_table();
     let sql = format!("SELECT ({expr}) AS __skippr_keep FROM {table}");
-    let flags = run_sql(batch.clone(), &table, &sql)?;
-    let flag_batch = flags
-        .into_iter()
-        .next()
-        .ok_or_else(|| "transform.ops filter produced no boolean batch".to_string())?;
+    let flag_batch = run_sql(batch.clone(), &table, &sql)?;
     let col = flag_batch
         .column(0)
         .as_any()
@@ -231,11 +227,7 @@ fn apply_derive(
         }
         let table = unique_table();
         let sql = format!("SELECT *, ({expr}) AS {} FROM {table}", quote_ident(name));
-        let out = run_sql(current, &table, &sql)?;
-        current = out
-            .into_iter()
-            .next()
-            .ok_or_else(|| format!("transform.ops derive '{name}' produced no batch"))?;
+        current = run_sql(current, &table, &sql)?;
     }
     Ok(current)
 }
@@ -268,14 +260,26 @@ fn unique_table() -> String {
     format!("b{}", TABLE_SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
-fn run_sql(batch: RecordBatch, table: &str, sql: &str) -> Result<Vec<RecordBatch>, String> {
-    block_on_df(async move {
+fn run_sql(batch: RecordBatch, table: &str, sql: &str) -> Result<RecordBatch, String> {
+    let batches = block_on_df(async move {
         let ctx = SessionContext::new();
         ctx.register_batch(table, batch)
             .map_err(|err| err.to_string())?;
         let df = ctx.sql(sql).await.map_err(|err| err.to_string())?;
         df.collect().await.map_err(|err| err.to_string())
-    })
+    })?;
+    concat_sql_batches(batches)
+}
+
+fn concat_sql_batches(mut batches: Vec<RecordBatch>) -> Result<RecordBatch, String> {
+    if batches.is_empty() {
+        return Err("transform.ops SQL produced no batch".into());
+    }
+    if batches.len() == 1 {
+        return Ok(batches.remove(0));
+    }
+    let schema = batches[0].schema();
+    arrow::compute::concat_batches(&schema, &batches).map_err(|err| err.to_string())
 }
 
 fn block_on_df<F, T>(fut: F) -> Result<T, String>
@@ -520,6 +524,49 @@ mod tests {
             .downcast_ref::<Float64Array>()
             .unwrap();
         assert_eq!(gbp.value(0), 8.0);
+    }
+
+    #[test]
+    fn filter_concatenates_datafusion_batches_past_default_split() {
+        let n = 10_000usize;
+        let ids: Vec<String> = (0..n).map(|i| i.to_string()).collect();
+        let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let amounts: Vec<i64> = (1..=n as i64).map(|i| i * 10).collect();
+        let batch = batch_amounts(&id_refs, &amounts);
+        let ops = vec![TransformOp {
+            filter: Some("amount > 0".into()),
+            ..Default::default()
+        }];
+        let applied = apply_ops(&ops, vec![batch]).unwrap();
+        assert_eq!(applied.batches[0].num_rows(), n);
+        assert_eq!(applied.kept.as_ref().map(Vec::len), Some(n));
+    }
+
+    #[test]
+    fn derive_concatenates_datafusion_batches_past_default_split() {
+        let n = 10_000usize;
+        let ids: Vec<String> = (0..n).map(|i| i.to_string()).collect();
+        let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let amounts: Vec<i64> = vec![10; n];
+        let batch = batch_amounts(&id_refs, &amounts);
+        let ops = vec![TransformOp {
+            derive: Some(
+                [("amount_gbp".into(), "amount * 0.8".into())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        }];
+        let applied = apply_ops(&ops, vec![batch]).unwrap();
+        assert_eq!(applied.batches[0].num_rows(), n);
+        let gbp = applied.batches[0]
+            .column(2)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(gbp.len(), n);
+        assert_eq!(gbp.value(0), 8.0);
+        assert_eq!(gbp.value(n - 1), 8.0);
     }
 
     #[test]
