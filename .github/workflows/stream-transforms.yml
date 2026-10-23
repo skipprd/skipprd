@@ -41,4 +41,4 @@ jobs:
         with:
           workspaces: skipprd
       - name: Full stream-transform suite (local FS Sled)
-        run: cargo test -p skipprd --lib -- processor:: stream_transform::
+        run: "cargo test -p skipprd --lib -- processor:: stream_transform::"
