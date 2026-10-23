@@ -278,6 +278,7 @@ impl StreamState {
         maybe_crash(CrashPoint::BeforeTxn);
         let mut measures: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
         let mut last_rows: BTreeMap<String, BTreeMap<String, Value>> = BTreeMap::new();
+        let mut entity_index: BTreeMap<String, String> = BTreeMap::new();
         let mut dedup: Vec<Vec<u8>> = Vec::new();
         let mut next_cursor = cursor.clone();
 
@@ -302,7 +303,12 @@ impl StreamState {
             let new_row = row_values(batch, row)?;
             let key = encode_key(&agg.key_fields, &new_row)?;
             let mutation = meta.map(|m| m.mutation).unwrap_or(MutationKind::Insert);
-            let old_row = self.load_previous_row(agg, &key, &new_row, &last_rows)?;
+            let old_row = match mutation {
+                MutationKind::Insert | MutationKind::Snapshot => None,
+                MutationKind::Update | MutationKind::Delete => {
+                    self.load_previous_row(agg, &key, &new_row, &last_rows, &entity_index)?
+                }
+            };
             apply_mutation(
                 agg,
                 mutation,
@@ -312,6 +318,16 @@ impl StreamState {
                 &mut measures,
                 &mut last_rows,
             )?;
+            if let Some(entity) = entity_identity(agg, &new_row) {
+                match mutation {
+                    MutationKind::Delete => {
+                        entity_index.remove(&entity);
+                    }
+                    MutationKind::Insert | MutationKind::Snapshot | MutationKind::Update => {
+                        entity_index.insert(entity, key.clone());
+                    }
+                }
+            }
             match mutation {
                 MutationKind::Delete => {
                     crate::metrics::counters::add_stream_processor_cdc_delete(1);
@@ -411,12 +427,13 @@ impl StreamState {
         new_key: &str,
         new_row: &BTreeMap<String, Value>,
         pending: &BTreeMap<String, BTreeMap<String, Value>>,
+        entity_index: &BTreeMap<String, String>,
     ) -> Result<Option<BTreeMap<String, Value>>, String> {
         if let Some(entity) = entity_identity(agg, new_row) {
-            if let Some((_, row)) = pending.iter().find(|(_, row)| {
-                !row.is_empty() && entity_identity(agg, row).as_deref() == Some(entity.as_str())
-            }) {
-                return Ok(Some(row.clone()));
+            if let Some(old_key) = entity_index.get(&entity) {
+                if let Some(row) = pending.get(old_key).cloned().filter(|row| !row.is_empty()) {
+                    return Ok(Some(row));
+                }
             }
             if let Some(bytes) = self
                 .tree
@@ -591,9 +608,25 @@ fn json_key_part(value: &Value) -> String {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static ENTITY_IDENTITY_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_entity_identity_calls() -> u64 {
+    ENTITY_IDENTITY_CALLS.with(|cell| {
+        let n = cell.get();
+        cell.set(0);
+        n
+    })
+}
+
 /// Identity of one business entity using leftover columns (not key or measure sources).
 /// Lets a CDC update find the previous row after a key-field change.
 fn entity_identity(agg: &TransformAggregate, row: &BTreeMap<String, Value>) -> Option<String> {
+    #[cfg(test)]
+    ENTITY_IDENTITY_CALLS.with(|cell| cell.set(cell.get() + 1));
     if row.is_empty() {
         return None;
     }
@@ -1267,6 +1300,39 @@ mod tests {
     }
 
     #[test]
+    fn pk_change_inside_one_batch_uses_pending_entity_index() {
+        let state = state();
+        let spec = agg();
+        let batch = invoice_batch(&["A", "B"], &[25, 25], &["inv", "inv"]);
+        let update = WalRowMeta {
+            mutation: MutationKind::Update,
+            event_id: b"e2".to_vec(),
+            order_token: b"e2".to_vec(),
+        };
+        state
+            .apply_events(
+                &spec,
+                WalCursor::default(),
+                &batch,
+                Some(&[insert_meta("e1"), update]),
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .measure("customer_invoice_totals", "A", "invoice_total")
+                .unwrap(),
+            0.0
+        );
+        assert_eq!(
+            state
+                .measure("customer_invoice_totals", "B", "invoice_total")
+                .unwrap(),
+            25.0
+        );
+    }
+
+    #[test]
     fn config_hash_rebuilds_state() {
         let fixture = super::test_support::DiskFixture::new();
         let spec = fixture.spec.clone();
@@ -1392,6 +1458,35 @@ mod tests {
                 .measure("customer_invoice_totals", "A", "invoice_total")
                 .unwrap(),
             7.0
+        );
+    }
+
+    #[test]
+    fn insert_batch_does_not_rescan_pending_entities() {
+        let state = state();
+        let spec = agg();
+        let n = 80usize;
+        let customers: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
+        let ids: Vec<String> = (0..n).map(|i| format!("inv{i}")).collect();
+        let amounts = vec![1i64; n];
+        let customer_refs: Vec<&str> = customers.iter().map(String::as_str).collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let batch = invoice_batch(&customer_refs, &amounts, &id_refs);
+        let cdc: Vec<_> = ids.iter().map(|id| insert_meta(id)).collect();
+        let _ = take_entity_identity_calls();
+        state
+            .apply_events(&spec, WalCursor::default(), &batch, Some(&cdc), 0)
+            .unwrap();
+        let calls = take_entity_identity_calls();
+        assert!(
+            calls <= (n as u64) * 3,
+            "entity_identity must be linear in batch size, got {calls} for {n} inserts"
+        );
+        assert_eq!(
+            state
+                .measure("customer_invoice_totals", "c0", "invoice_count")
+                .unwrap(),
+            1.0
         );
     }
 
