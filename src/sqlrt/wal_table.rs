@@ -427,7 +427,7 @@ mod tests {
     #[tokio::test]
     async fn unpinned_wal_scan_reselects_ordinals_at_execute() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
-        let key = PipelineKey::new("t", "w", "events").unwrap();
+        let key = PipelineKey::new("t", "w", "unpinned-events").unwrap();
         let provider = WalTableProvider::new(schema, key, "ns".into(), vec!["gone".into()]);
         let ctx = datafusion::prelude::SessionContext::new();
         let plan = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
@@ -452,7 +452,7 @@ mod tests {
         use std::sync::Arc as StdArc;
 
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
-        let key = PipelineKey::new("t", "w", "events").unwrap();
+        let key = PipelineKey::new("t", "w", "reclaim-events").unwrap();
         let dir = tempfile::tempdir().unwrap();
         let paths = PipelinePaths::legacy_disk(dir.path());
         let clock = StdArc::new(SystemClock::new());

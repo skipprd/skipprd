@@ -957,13 +957,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn flight_sql_exec_streams_from_live_server() {
         use datafusion::arrow::datatypes::{DataType, Field, Schema};
         use datafusion::physical_plan::ExecutionPlan;
         use skippr_query_plan::FlightSqlExec;
 
         let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let key = PipelineKey::new("t", "w", "flightsqllive").unwrap();
         let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
         let identity = identity();
         let clock = Arc::new(skippr_lease::SystemClock::new());
@@ -989,7 +990,7 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
         let node = FlightSqlExec::with_authorization(
             server.bind_addr().to_string(),
-            b"SELECT * FROM live_wal_scan('t', 'w', 'p', 'ns')".to_vec(),
+            b"SELECT * FROM live_wal_scan('t', 'w', 'flightsqllive', 'ns')".to_vec(),
             schema,
             skippr_query_plan::basic_authorization("t", "w"),
         );
