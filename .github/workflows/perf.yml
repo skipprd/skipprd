@@ -67,6 +67,8 @@ jobs:
           - duckdb-json-array
           - duckdb-insert-values
           - ingest-slow-flatten-duckdb
+          - ingest-ops-duckdb
+          - ingest-aggregates-duckdb
           - copy-format-matrix
           - ingest-file-postgres
           - copy-stdin-file
@@ -207,6 +209,10 @@ jobs:
           - scenario: ingest-json-parquet
             profile: flamegraph
           - scenario: ingest-slow-flatten-duckdb
+            profile: flamegraph
+          - scenario: ingest-ops-duckdb
+            profile: flamegraph
+          - scenario: ingest-aggregates-duckdb
             profile: flamegraph
           - scenario: ingest-a-duckdb
             profile: heaptrack

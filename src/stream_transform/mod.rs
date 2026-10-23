@@ -54,13 +54,15 @@ pub fn apply_ops(ops: &[TransformOp], batches: Vec<RecordBatch>) -> Result<Appli
             kept: None,
         });
     };
+    let started = std::time::Instant::now();
     let schema = first.schema();
     let merged = if batches.len() == 1 {
         first.clone()
     } else {
         arrow::compute::concat_batches(&schema, &batches).map_err(|err| err.to_string())?
     };
-    crate::metrics::counters::add_stream_transform_records(merged.num_rows() as u64);
+    let input_rows = merged.num_rows();
+    crate::metrics::counters::add_stream_transform_records(input_rows as u64);
     let mut kept: Option<Vec<usize>> = None;
     let mut current = merged;
     for op in ops {
@@ -76,6 +78,14 @@ pub fn apply_ops(ops: &[TransformOp], batches: Vec<RecordBatch>) -> Result<Appli
             ));
         }
     }
+    crate::helpers::perf::emit(
+        "stream_transform",
+        serde_json::json!({
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "rows": current.num_rows(),
+            "input_rows": input_rows
+        }),
+    );
     let batches = if current.num_rows() == 0 {
         Vec::new()
     } else {
@@ -433,6 +443,60 @@ mod tests {
         }];
         let err = apply_ops(&ops, vec![batch]).unwrap_err();
         assert!(err.contains("unknown column"), "{err}");
+    }
+
+    #[test]
+    fn perf_catalog_ops_keep_positive_amounts_and_derive_gbp() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("amount", DataType::Int64, false),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["user_1", "user_2"])),
+                Arc::new(Int64Array::from(vec![10, 20])),
+            ],
+        )
+        .unwrap();
+        let ops = vec![
+            TransformOp {
+                filter: Some("amount > 0".into()),
+                ..Default::default()
+            },
+            TransformOp {
+                project: Some(vec!["id".into(), "name".into(), "amount".into()]),
+                ..Default::default()
+            },
+            TransformOp {
+                derive: Some(
+                    [("amount_gbp".into(), "amount * 0.8".into())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+        ];
+        let applied = apply_ops(&ops, vec![batch]).unwrap();
+        let out = &applied.batches[0];
+        assert_eq!(out.num_rows(), 2);
+        assert_eq!(
+            out.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "name", "amount", "amount_gbp"]
+        );
+        let gbp = out
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(gbp.value(0), 8.0);
+        assert_eq!(gbp.value(1), 16.0);
     }
 
     #[test]

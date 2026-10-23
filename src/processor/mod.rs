@@ -274,6 +274,7 @@ impl StreamState {
         if start_row >= batch.num_rows() {
             return Ok(cursor);
         }
+        let started = std::time::Instant::now();
         maybe_crash(CrashPoint::BeforeTxn);
         let mut measures: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
         let mut last_rows: BTreeMap<String, BTreeMap<String, Value>> = BTreeMap::new();
@@ -326,6 +327,14 @@ impl StreamState {
         }
         crate::metrics::counters::add_stream_processor_records(
             (batch.num_rows() - start_row) as u64,
+        );
+        crate::helpers::perf::emit(
+            "stream_processor",
+            serde_json::json!({
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "rows": batch.num_rows() - start_row,
+                "aggregate": agg.id
+            }),
         );
 
         let meta = ProcessorMeta {
@@ -731,6 +740,17 @@ fn format_data_type(dt: &DataType) -> String {
     format!("{dt:?}")
 }
 
+fn already_applied_slice(
+    cursor: &WalCursor,
+    segment_id: &str,
+    slice_ordinal: u32,
+    batch_rows: usize,
+) -> bool {
+    cursor.segment_id == segment_id
+        && cursor.slice_ordinal == slice_ordinal
+        && cursor.row_index as usize >= batch_rows
+}
+
 pub fn start_processor_service(config: &Config, offsets: Arc<crate::helpers::offsets::Offsets>) {
     if !config.transform_aggregates_configured() {
         reset_reclaim_hold();
@@ -868,6 +888,15 @@ async fn process_segment(
         } else {
             0
         };
+        if already_applied_slice(
+            &current,
+            seg.segment_id.as_str(),
+            entry.slice_ordinal,
+            batch.num_rows(),
+        ) || start_row >= batch.num_rows()
+        {
+            continue;
+        }
         current.slice_ordinal = entry.slice_ordinal;
         current.seq = seg.seq.get();
         current.segment_id = seg.segment_id.as_str().to_string();
@@ -1364,6 +1393,20 @@ mod tests {
                 .unwrap(),
             7.0
         );
+    }
+
+    #[test]
+    fn already_applied_slice_is_skip_not_new_work() {
+        let cursor = WalCursor {
+            seq: 3,
+            segment_id: "seg-a".into(),
+            slice_ordinal: 1,
+            row_index: 10,
+        };
+        assert!(already_applied_slice(&cursor, "seg-a", 1, 10));
+        assert!(!already_applied_slice(&cursor, "seg-a", 1, 11));
+        assert!(!already_applied_slice(&cursor, "seg-b", 1, 10));
+        assert!(!already_applied_slice(&cursor, "seg-a", 2, 10));
     }
 
     #[test]
