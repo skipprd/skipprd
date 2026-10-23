@@ -126,6 +126,9 @@ pub struct QueryOptions {
     /// Print one JSON document `{header, rows}` to stdout instead of the TUI
     #[arg(long, default_value_t = false)]
     pub plain: bool,
+    /// Open catalogs and run the statement once, then time the second collect.
+    #[arg(long, default_value_t = false)]
+    pub warmup: bool,
 }
 
 #[derive(Parser, Clone, PartialEq)]

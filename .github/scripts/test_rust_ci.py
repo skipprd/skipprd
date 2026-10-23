@@ -477,12 +477,18 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("analyze.py", text)
         self.assertNotIn("--delete", text)
         self.assertIn("actions/e2e/perf-db", text)
+        self.assertGreaterEqual(
+            text.count("python3 -m pip install --quiet boto3"),
+            2,
+            "linux_matrix and linux_profile both need boto3 for DynamoDB Local",
+        )
         self.assertIn("tests/perf_db/run.py", (ROOT / ".github" / "scripts" / "run_perf_db_cell.sh").read_text(encoding="utf-8"))
         self.assertNotIn("python3 tests/perf_db/run.py", text)
         runner = (ROOT / "tests" / "perf_db" / "run.py").read_text(encoding="utf-8")
         self.assertIn("log_args", runner)
         self.assertIn("query_after_ingest", runner)
         self.assertIn("skipprd query", runner)
+        self.assertIn("--warmup", runner)
         skill = ROOT / ".cursor" / "skills" / "skippr-perf-db" / "SKILL.md"
         skill_text = skill.read_text(encoding="utf-8")
         self.assertIn("name: skippr-perf-db", skill_text)
@@ -498,6 +504,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("q-wal-count-iceberg", skill_text)
         self.assertIn("file parquet Iceberg", skill_text)
         self.assertIn("heaptrack", skill_text)
+        self.assertIn("--warmup", skill_text)
+        self.assertIn("query time", skill_text.lower())
         self.assertNotIn("ingest-a-duckdb", skill_text)
         self.assertNotIn("q-wal-count-file", skill_text)
 

@@ -34,7 +34,10 @@ consume CHANGELOG Unreleased. Do **not** bump plugin crates. Do **not** write
 CloudCycle EU buckets. `aws s3 sync --delete` is illegal.
 
 This is **not** skippr-perf (ingest/copy). Cells always `sync --once` then
-`skipprd query --sql --plain`. Jsonl File sink query cells are out of suite.
+`skipprd query --sql --plain --warmup`. `--warmup` starts QueryRuntime, opens
+catalog connections, and runs the statement once; `query_collect` elapsed is
+the **query time** of the second collect, not skipprd process startup. Jsonl
+File sink query cells are out of suite.
 WAL leftover import, Postgres CDC, Snowflake, BigQuery, Databricks, Redshift,
 Athena Glue, and production JSON are out of suite.
 
