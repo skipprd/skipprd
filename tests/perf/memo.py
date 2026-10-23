@@ -59,6 +59,8 @@ INGEST_LABELS = {
     "duckdb-json-array": "DuckDB nested JSON array (slow)",
     "duckdb-insert-values": "DuckDB row INSERT (slow)",
     "ingest-slow-flatten-duckdb": "Slow flatten",
+    "ingest-ops-duckdb": "Ingest ops",
+    "ingest-aggregates-duckdb": "Ingest aggregates",
 }
 
 QUERY_LABELS = {
