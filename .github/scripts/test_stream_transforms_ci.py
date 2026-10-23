@@ -21,7 +21,10 @@ class StreamTransformsCiTests(unittest.TestCase):
         header = text.split("jobs:", 1)[0]
         self.assertIn("pull_request:", header)
         self.assertIn("workflow_dispatch:", header)
-        self.assertIn("cargo test -p skipprd --lib -- processor:: stream_transform::", text)
+        self.assertIn(
+            'run: "cargo test -p skipprd --lib -- processor:: stream_transform::"',
+            text,
+        )
         self.assertIn("protobuf-compiler", text)
         self.assertIn("skipprd/cloud", text)
         self.assertNotIn("secrets.AWS_ACCESS_KEY_ID", text)
