@@ -9,6 +9,11 @@ path = "src/main.rs"
 
 [dependencies]
 arrow.workspace = true
+# Lance 7 scans emit arrow-array 58; workspace arrow is 59. Same crate versions
+# as lance so scan batches unify, then IPC rehydrates into workspace RecordBatch.
+arrow-array-lance = { package = "arrow-array", version = "58.3.0" }
+arrow-ipc-lance = { package = "arrow-ipc", version = "58.3.0" }
+arrow-schema-lance = { package = "arrow-schema", version = "58.3.0" }
 async-trait.workspace = true
 aws-config = "1.5.1"
 aws-sdk-s3 = "1.32.0"
