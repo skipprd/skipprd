@@ -1,8 +1,13 @@
+use std::io::Cursor;
+
 use arrow::array::{
     Array, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray, UInt32Array,
     UInt64Array, UInt8Array,
 };
+use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
+use arrow_array_lance::RecordBatch as LanceRecordBatch;
+use arrow_ipc_lance::writer::StreamWriter as LanceIpcWriter;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client;
 use futures::StreamExt;
@@ -507,6 +512,27 @@ fn lance_uri(bucket: &str, corpus_root: &str, artifact: &str, snapshot_id: &str)
     format!("s3://{bucket}/{corpus_root}lance/{artifact}.lance/snapshot_id={snapshot_id}")
 }
 
+fn lance_batch_to_workspace(batch: LanceRecordBatch) -> Result<RecordBatch, std::io::Error> {
+    let mut buf = Vec::new();
+    {
+        let mut writer = LanceIpcWriter::try_new(&mut buf, batch.schema().as_ref())
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        writer
+            .write(&batch)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        writer
+            .finish()
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+    }
+    let mut reader = StreamReader::try_new(Cursor::new(buf), None)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    reader
+        .next()
+        .transpose()
+        .map_err(|err| std::io::Error::other(err.to_string()))?
+        .ok_or_else(|| std::io::Error::other("lance IPC stream had no record batch"))
+}
+
 async fn load_lance_batches(uri: String) -> Result<Vec<RecordBatch>, std::io::Error> {
     let dataset = Dataset::open(uri.as_str())
         .await
@@ -518,7 +544,8 @@ async fn load_lance_batches(uri: String) -> Result<Vec<RecordBatch>, std::io::Er
         .map_err(|err| std::io::Error::other(err.to_string()))?;
     let mut batches = Vec::new();
     while let Some(batch) = stream.next().await {
-        batches.push(batch.map_err(|err| std::io::Error::other(err.to_string()))?);
+        let lance_batch = batch.map_err(|err| std::io::Error::other(err.to_string()))?;
+        batches.push(lance_batch_to_workspace(lance_batch)?);
     }
     Ok(batches)
 }
@@ -776,5 +803,36 @@ pub async fn load_spam_scores_for_snapshot(
             )
             .await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use arrow_array_lance::{ArrayRef, StringArray as LanceStringArray, UInt64Array as LanceU64};
+    use arrow_schema_lance::{DataType, Field, Schema};
+
+    #[test]
+    fn lance_batch_to_workspace_preserves_string_and_u64() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("domain_id", DataType::UInt64, false),
+            Field::new("status", DataType::Utf8, false),
+        ]));
+        let domain_id: ArrayRef = Arc::new(LanceU64::from(vec![7_u64, 9]));
+        let status: ArrayRef = Arc::new(LanceStringArray::from(vec!["ok", "missing"]));
+        let lance_batch =
+            LanceRecordBatch::try_new(schema, vec![domain_id, status]).expect("lance batch");
+
+        let batch = lance_batch_to_workspace(lance_batch).expect("workspace batch");
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(u64_value(&batch, "domain_id", 0), Some(7));
+        assert_eq!(u64_value(&batch, "domain_id", 1), Some(9));
+        assert_eq!(string_value(&batch, "status", 0).as_deref(), Some("ok"));
+        assert_eq!(
+            string_value(&batch, "status", 1).as_deref(),
+            Some("missing")
+        );
     }
 }
