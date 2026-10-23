@@ -259,6 +259,97 @@ class FileParquetYamlTests(unittest.TestCase):
         self.assertIn("path: /src", text)
 
 
+class StreamTransformPerfTests(unittest.TestCase):
+    def test_catalog_covers_ops_and_aggregates_ingest(self) -> None:
+        catalog = load_catalog()
+        ops = catalog["scenarios"]["ingest-ops-duckdb"]
+        aggs = catalog["scenarios"]["ingest-aggregates-duckdb"]
+        self.assertEqual(ops["kind"], "ingest")
+        self.assertEqual(ops["sink"], "duckdb")
+        self.assertEqual(ops["group"], "always")
+        self.assertTrue(ops.get("transform_ops"))
+        self.assertFalse(bool(ops.get("transform_aggregates")))
+        self.assertTrue((ops.get("asserts") or {}).get("exact_arrow_eq_total"))
+        self.assertTrue((ops.get("asserts") or {}).get("amount_sum"))
+        self.assertIn("stream_transform", required_perf_for(catalog, ops))
+        self.assertEqual(aggs["kind"], "ingest")
+        self.assertEqual(aggs["sink"], "duckdb")
+        self.assertEqual(aggs["group"], "always")
+        self.assertTrue(aggs.get("transform_aggregates"))
+        self.assertFalse(bool(aggs.get("transform_ops")))
+        self.assertTrue((aggs.get("asserts") or {}).get("bronze_count"))
+        self.assertIn("stream_processor", required_perf_for(catalog, aggs))
+        workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        self.assertIn("ingest-ops-duckdb", workflow)
+        self.assertIn("ingest-aggregates-duckdb", workflow)
+        self.assertRegex(
+            workflow,
+            r"- scenario: ingest-ops-duckdb\n\s+profile: flamegraph",
+        )
+        self.assertRegex(
+            workflow,
+            r"- scenario: ingest-aggregates-duckdb\n\s+profile: flamegraph",
+        )
+
+    def test_ingest_yaml_writes_ops_and_aggregates(self) -> None:
+        from run import write_skippr_yml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ops_path = Path(tmp) / "ops.yml"
+            write_skippr_yml(
+                ops_path,
+                kind="ingest",
+                source_kind="File",
+                source_path="/src",
+                sink="duckdb",
+                warehouse=Path("/warehouse"),
+                flatten=False,
+                ops=True,
+            )
+            aggs_path = Path(tmp) / "aggs.yml"
+            write_skippr_yml(
+                aggs_path,
+                kind="ingest",
+                source_kind="File",
+                source_path="/src",
+                sink="duckdb",
+                warehouse=Path("/warehouse"),
+                flatten=False,
+                aggregates=True,
+            )
+            copy_path = Path(tmp) / "copy.yml"
+            write_skippr_yml(
+                copy_path,
+                kind="copy",
+                source_kind="File",
+                source_path="/src",
+                sink="file",
+                warehouse=None,
+                flatten=False,
+                extra_source={"output_dir": "/out"},
+            )
+            ops_text = ops_path.read_text(encoding="utf-8")
+            aggs_text = aggs_path.read_text(encoding="utf-8")
+            copy_text = copy_path.read_text(encoding="utf-8")
+        self.assertIn('filter: "amount > 0"', ops_text)
+        self.assertIn("project: [id, name, amount]", ops_text)
+        self.assertNotIn("derive:", ops_text)
+        self.assertNotIn("aggregates:", ops_text)
+        self.assertIn("name_totals", aggs_text)
+        self.assertIn("key_fields: [name]", aggs_text)
+        self.assertIn("{ sum: amount }", aggs_text)
+        self.assertNotIn("ops:", aggs_text)
+        self.assertNotIn("ops:", copy_text)
+        self.assertNotIn("aggregates:", copy_text)
+
+    def test_skill_smoke_includes_stream_transform_cells(self) -> None:
+        skill = (REPO_ROOT / ".cursor" / "skills" / "skippr-perf" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("ingest-ops-duckdb", skill)
+        self.assertIn("ingest-aggregates-duckdb", skill)
+
+
 class PerfParseTests(unittest.TestCase):
     def test_parses_perf_event_lines_and_detects_missing_phases(self) -> None:
         log = """

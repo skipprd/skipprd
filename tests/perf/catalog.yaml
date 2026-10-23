@@ -136,6 +136,34 @@ scenarios:
       exact_arrow_rows: 0
       bronze_count: true
 
+  ingest-ops-duckdb:
+    group: always
+    kind: ingest
+    sink: duckdb
+    fixture: exact_arrow
+    transform_ops: true
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
+    asserts:
+      exact_arrow_eq_total: true
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+
+  ingest-aggregates-duckdb:
+    group: always
+    kind: ingest
+    sink: duckdb
+    fixture: exact_arrow
+    transform_aggregates: true
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_processor]
+    asserts:
+      exact_arrow_eq_total: true
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+
   copy-format-matrix:
     group: always
     kind: wrap_existing
