@@ -246,6 +246,8 @@ def write_skippr_yml(
     warehouse: Path | None,
     flatten: bool,
     extra_source: dict[str, str] | None = None,
+    ops: bool = False,
+    aggregates: bool = False,
 ) -> None:
     if kind.startswith("copy"):
         flatten_yaml = ""
@@ -253,7 +255,23 @@ def write_skippr_yml(
         pipeline_type = "    type: copy\n"
     else:
         flatten_yaml = "      flatten_events: yes\n" if flatten else "      flatten_events: no\n"
-        transform_yaml = f"    transform:\n{flatten_yaml}"
+        extra_transform = ""
+        if ops:
+            extra_transform += (
+                "      ops:\n"
+                '        - filter: "amount > 0"\n'
+                "        - project: [id, name, amount]\n"
+            )
+        if aggregates:
+            extra_transform += (
+                "      aggregates:\n"
+                "        - id: name_totals\n"
+                "          key_fields: [name]\n"
+                "          measures:\n"
+                "            amount_total: { sum: amount }\n"
+                '            row_count: { count: "*" }\n'
+            )
+        transform_yaml = f"    transform:\n{flatten_yaml}{extra_transform}"
         pipeline_type = ""
     if source_kind == "File":
         extra = extra_source or {}
@@ -625,6 +643,8 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
     data_dir.mkdir(parents=True, exist_ok=True)
     fixture_kind = str(scenario.get("fixture", "exact_arrow"))
     flatten = bool(scenario.get("flatten_events"))
+    ops = bool(scenario.get("transform_ops"))
+    aggregates = bool(scenario.get("transform_aggregates"))
     source_format = str(scenario.get("source_format") or "json")
     source_ext = "csv" if source_format == "csv" else "json"
     warmup = not flatten and bool((scenario.get("asserts") or {}).get("exact_arrow_eq_total"))
@@ -647,6 +667,8 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
         warehouse=warehouse,
         flatten=flatten,
         extra_source=extra_source,
+        ops=ops,
+        aggregates=aggregates,
     )
     if sink == "skipprlake":
         start_ddb()

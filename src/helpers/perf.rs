@@ -45,6 +45,35 @@ mod tests {
     }
 
     #[test]
+    fn stream_transform_and_processor_event_lines_include_rows() {
+        let transform = event_line(
+            "stream_transform",
+            json!({
+                "elapsed_ms": 3,
+                "rows": 8,
+                "input_rows": 10
+            }),
+        );
+        let processor = event_line(
+            "stream_processor",
+            json!({
+                "elapsed_ms": 5,
+                "rows": 8,
+                "aggregate": "name_totals"
+            }),
+        );
+        let transform_json: Value =
+            serde_json::from_str(transform.trim_start_matches(PREFIX)).unwrap();
+        let processor_json: Value =
+            serde_json::from_str(processor.trim_start_matches(PREFIX)).unwrap();
+        assert_eq!(transform_json["phase"], "stream_transform");
+        assert_eq!(transform_json["rows"], 8);
+        assert_eq!(transform_json["input_rows"], 10);
+        assert_eq!(processor_json["phase"], "stream_processor");
+        assert_eq!(processor_json["aggregate"], "name_totals");
+    }
+
+    #[test]
     fn plugin_ipc_event_line_includes_spawn_and_apply() {
         let line = event_line(
             "plugin_ipc",
