@@ -138,5 +138,5 @@ In scripts, use `--plain`: a failing `SELECT` then prints `query failed: <reason
 
 - [skipprd sql-help](/cli/sql-help)
 - [skipprd df](/cli/df)
-- [Stream lake](/concepts/datalake)
+- [Streamhouse](/concepts/datalake)
 - [Deadletters](/concepts/deadletters)

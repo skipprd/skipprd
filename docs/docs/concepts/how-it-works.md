@@ -53,7 +53,7 @@ For each pass, Skipprd:
 
 ### 4. Query
 
-Query the tables in your warehouse with its own SQL client. For Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB), you can also query from the machine running Skipprd with [`skipprd query`](/cli/query). That view includes rows still in the WAL that have not landed yet. See [Stream lake](/concepts/datalake).
+Query the tables in your warehouse with its own SQL client. For Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB), you can also query from the machine running Skipprd with [`skipprd query`](/cli/query). That view includes rows still in the WAL that have not landed yet. See [Streamhouse](/concepts/datalake).
 
 ### 5. Migrate
 

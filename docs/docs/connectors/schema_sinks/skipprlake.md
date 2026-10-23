@@ -90,4 +90,4 @@ data_sinks:
 ## Next steps
 
 - [SkipprLake](/connectors/outputs/skipprlake)
-- [Stream lake](/concepts/datalake)
+- [Streamhouse](/concepts/datalake)
