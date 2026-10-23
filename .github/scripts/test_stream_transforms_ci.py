@@ -27,6 +27,12 @@ class StreamTransformsCiTests(unittest.TestCase):
         )
         self.assertIn("protobuf-compiler", text)
         self.assertIn("skipprd/cloud", text)
+        channel = next(
+            line.split("=", 1)[1].strip().strip('"')
+            for line in (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8").splitlines()
+            if line.startswith("channel")
+        )
+        self.assertIn(f"dtolnay/rust-toolchain@{channel}", text)
         self.assertNotIn("secrets.AWS_ACCESS_KEY_ID", text)
         self.assertNotIn("WAL_STORAGE=clustered", text)
         self.assertNotIn("temporary(true)", text)
