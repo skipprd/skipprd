@@ -10,6 +10,10 @@ path = "src/main.rs"
 [dependencies]
 arrow.workspace = true
 arrow-array.workspace = true
+# Lance 7 writes consume arrow-array 58; workspace arrow is 59.
+arrow-array-lance = { package = "arrow-array", version = "58.3.0" }
+arrow-ipc-lance = { package = "arrow-ipc", version = "58.3.0" }
+arrow-schema-lance = { package = "arrow-schema", version = "58.3.0" }
 async-trait.workspace = true
 aws-config = "1.5.1"
 aws-sdk-s3 = "1.32.0"
