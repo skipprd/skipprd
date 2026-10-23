@@ -972,33 +972,20 @@ pub mod source_capabilities {
             Src::Statsd => Some(&STATSD),
             Src::Pcap => Some(&PCAP),
             Src::AdRollAds
-            | Src::AiCitations
-            | Src::AppleAppStoreSerp
             | Src::AppleSearchAds
             | Src::BingWebmasterTools
-            | Src::ContentQuality
-            | Src::DataForSeoBacklinks
-            | Src::DataForSeoSeoOpportunities
             | Src::GoogleAds
             | Src::GoogleAnalytics
             | Src::GooglePageSpeed
             | Src::GoogleSearchConsole
-            | Src::GoogleSerpRanks
             | Src::HubspotCrm
             | Src::LinkedInAds
             | Src::MetaAds
             | Src::MetaInstagramAds
             | Src::RevolutBusiness
-            | Src::SeoCrawl
             | Src::ShopifyAdmin
-            | Src::SiteQuality
-            | Src::SiteSecurity
             | Src::Stripe
             | Src::SumUp
-            | Src::UpfoundryBacklinks
-            | Src::UpfoundryLinkGraphCompact
-            | Src::UpfoundryLinkGraphIngest
-            | Src::UpfoundryLinkGraphWatIndex
             | Src::XAds
             | Src::XeroAccounting => None,
         }

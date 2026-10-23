@@ -10,7 +10,7 @@ from skippr import (
     DataSinkAthena,
     DataSinkDuckdb,
     DataSinkPostgres,
-    DataSourceGoogleSerpRanks,
+    DataSourcePostgres,
     DataSourceS3,
     DynamoDbStore,
     EnvRef,
@@ -72,7 +72,7 @@ def run(ref: PipelineRef) -> pyarrow.Table:
     return session.query("SELECT 1")
 
 
-def keywords() -> Sequence[str]:
-    serp = DataSourceGoogleSerpRanks(keywords=["k"], targets=[])
-    serp.keywords = ["a", "b"]
-    return serp.keywords
+def tables() -> Sequence[str] | None:
+    pg = DataSourcePostgres(host="localhost", password=EnvRef("PG_PASSWORD"))
+    pg.tables = ["orders", "items"]
+    return pg.tables

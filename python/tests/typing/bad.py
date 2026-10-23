@@ -9,9 +9,11 @@ from skippr import (
     DataSinkAthena,
     DataSinkDuckdb,
     DataSinkPostgres,
-    DataSourceGoogleSerpRanks,
     DataSourceHttpClient,
+    DataSourcePostgres,
+    DataSourceStripe,
     DataSourceS3,
+    EnvRef,
     Pipeline,
     SchemaSinkGlue,
 )
@@ -40,7 +42,11 @@ DataSourceS3(s3_bucket="b")  # type: ignore[call-arg]
 DataSourceS3(s3_bucket="b", s3_prefix="p", batch_size_bytes="1MB")  # type: ignore[arg-type]
 
 # Enum fields take class members, not strings.
-DataSourceGoogleSerpRanks(keywords=[], targets=[], device="tablet")  # type: ignore[arg-type]
+DataSourceStripe(
+    stripe_account_id="acct",
+    start_date="2024-01-01",
+    stream_profile="minimal",  # type: ignore[arg-type]
+)
 
 # Unpaired sinks link a SchemaSinkRef, not a name.
 cfg.data_sink(  # type: ignore[call-overload]
@@ -65,10 +71,10 @@ glue = cfg.schema_sink(
 cfg.data_sink("lake2", DataSinkDuckdb(warehouse="w", table_namespace="n"), schema_sink=glue)  # type: ignore[call-overload]
 
 # List getters return a copy, so in-place mutation is not offered.
-DataSourceGoogleSerpRanks(keywords=["k"], targets=[]).keywords.append("x")  # type: ignore[attr-defined]
+DataSourcePostgres(host="h", password=EnvRef("PG")).tables.append("x")  # type: ignore[attr-defined]
 
 # List and map setters take a list and a dict, which is what the runtime accepts.
-serp = DataSourceGoogleSerpRanks(keywords=["k"], targets=[])
-serp.keywords = "abc"  # type: ignore[assignment]
+pg = DataSourcePostgres(host="h", password=EnvRef("PG"))
+pg.tables = "abc"  # type: ignore[assignment]
 http = DataSourceHttpClient(url="https://example.com")
 http.headers = MappingProxyType({"a": "b"})  # type: ignore[assignment]
