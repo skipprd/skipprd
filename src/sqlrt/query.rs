@@ -58,6 +58,7 @@ pub struct QueryExecutionOptions {
     pub mode: QueryExecutionMode,
     pub plain: bool,
     pub watch: Option<u64>,
+    pub warmup: bool,
 }
 
 fn sql_ident_name(name: &impl std::fmt::Display) -> String {
@@ -113,6 +114,7 @@ impl Default for QueryExecutionOptions {
             mode: QueryExecutionMode::Query,
             plain: false,
             watch: None,
+            warmup: false,
         }
     }
 }
@@ -318,11 +320,40 @@ fn emit_query_collect(started: Instant, batches: &[RecordBatch]) {
     );
 }
 
+async fn sql_collect(
+    ctx: &SessionContext,
+    sql_str: &str,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let df = ctx.sql(sql_str).await?;
+    collect_user_sql(df).await
+}
+
+async fn sql_collect_timed(
+    ctx: &SessionContext,
+    sql_str: &str,
+    warmup: bool,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    if warmup {
+        let _ = sql_collect(ctx, sql_str).await?;
+    }
+    let started = Instant::now();
+    let batches = sql_collect(ctx, sql_str).await?;
+    emit_query_collect(started, &batches);
+    Ok(batches)
+}
+
 pub async fn query_collect(
     config: &Config,
     sql_str: &str,
 ) -> std::io::Result<Vec<arrow::array::RecordBatch>> {
-    let started = Instant::now();
+    query_collect_warm(config, sql_str, false).await
+}
+
+pub async fn query_collect_warm(
+    config: &Config,
+    sql_str: &str,
+    warmup: bool,
+) -> std::io::Result<Vec<arrow::array::RecordBatch>> {
     config.init().await;
     if !sql_uses_record_batch_collect(sql_str) {
         let mut parser = SParser::new(sql_str).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -333,6 +364,7 @@ pub async fn query_collect(
             Statement::AlterTable(stmt) => {
                 let bound = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
                 bound.init().await;
+                let started = Instant::now();
                 let message = crate::migration::apply_query_alter(&bound, &stmt, sql_str)
                     .await
                     .map_err(std::io::Error::other)?;
@@ -341,6 +373,7 @@ pub async fn query_collect(
                 return Ok(batches);
             }
             Statement::PipelineToggle(stmt) => {
+                let started = Instant::now();
                 let message = apply_pipeline_toggle(config, &stmt)
                     .await
                     .map_err(std::io::Error::other)?;
@@ -358,15 +391,9 @@ pub async fn query_collect(
     let ctx = new_context_all_namespaces(&config)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let df = ctx
-        .sql(sql_str)
+    sql_collect_timed(&ctx, sql_str, warmup)
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let batches = collect_user_sql(df)
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    emit_query_collect(started, &batches);
-    Ok(batches)
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 async fn stream_wal_session(
@@ -402,13 +429,17 @@ async fn stream_plain_snapshot(
     config: &mut Config,
     pipeline_name: &str,
     run_sql: &str,
+    warmup: bool,
 ) -> std::io::Result<Vec<RecordBatch>> {
-    let started = Instant::now();
-    let batches = execute_stream_sql(config, pipeline_name, run_sql)
+    let Some(ctx) = stream_wal_session(config, pipeline_name)
         .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    emit_query_collect(started, &batches);
-    Ok(batches)
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+    else {
+        return Ok(Vec::new());
+    };
+    sql_collect_timed(&ctx, run_sql, warmup)
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 pub async fn query_with_options(
@@ -583,7 +614,9 @@ pub async fn query_with_options(
         }
 
         if query_options.plain {
-            match stream_plain_snapshot(&mut config, &pipeline, &select_sql).await {
+            match stream_plain_snapshot(&mut config, &pipeline, &select_sql, query_options.warmup)
+                .await
+            {
                 Ok(batches) => print_query_plain_json(&batches),
                 Err(err) => {
                     eprintln!("{err}");
@@ -1903,16 +1936,38 @@ mod plain_query_document_tests {
             "query_collect phase name must be query_collect"
         );
         let start = prod
-            .find("pub async fn query_collect")
-            .expect("query_collect");
+            .find("pub async fn query_collect_warm")
+            .expect("query_collect_warm");
         let body = &prod[start..];
         let body = body
             .split("pub async fn query_with_options")
             .next()
             .expect("body before query_with_options");
         assert!(
-            body.contains("emit_query_collect"),
+            body.contains("sql_collect_timed"),
+            "query_collect_warm must time SQL on a ready context"
+        );
+        assert!(
+            body.contains("new_context_all_namespaces"),
+            "query_collect_warm must build a ready context before the timed collect"
+        );
+        let timed = prod
+            .split("async fn sql_collect_timed")
+            .nth(1)
+            .expect("sql_collect_timed");
+        let timed = timed
+            .split("pub async fn query_collect")
+            .next()
+            .expect("timed helper before query_collect");
+        assert!(
+            timed.contains("emit_query_collect"),
             "query_collect must emit PERF_EVENT query_collect"
+        );
+        let warmup = timed.find("if warmup").expect("warmup collect");
+        let timer = timed.find("Instant::now()").expect("query_collect timer");
+        assert!(
+            warmup < timer,
+            "query_collect must open catalogs/connections before elapsed_ms starts"
         );
     }
 

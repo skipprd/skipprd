@@ -162,7 +162,7 @@ def run_query_after_ingest(
                     f"{scenario_id}: no Iceberg parquet under {warehouse}"
                 )
         sql = str(scenario["sql"])
-        log(f"skipprd query --sql {sql!r} --plain")
+        log(f"skipprd query --sql {sql!r} --plain --warmup")
         query_cmd = perf_run.time_prefix() + perf_run.wrap_profile(
             [
                 str(skipprd),
@@ -173,6 +173,7 @@ def run_query_after_ingest(
                 "--sql",
                 sql,
                 "--plain",
+                "--warmup",
             ],
             profile,
             work,
