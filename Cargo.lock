@@ -14011,7 +14011,10 @@ name = "skippr-plugin-data-source-upfoundry-link-graph-compact"
 version = "0.1.5"
 dependencies = [
  "arrow 59.3.1",
+ "arrow-array 58.3.0",
  "arrow-array 59.3.1",
+ "arrow-ipc 58.3.0",
+ "arrow-schema 58.3.0",
  "async-trait",
  "aws-config",
  "aws-sdk-s3",

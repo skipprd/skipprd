@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Cursor;
 use std::sync::Arc;
 
 use arrow::array::{
@@ -6,7 +7,10 @@ use arrow::array::{
     UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow_array::RecordBatchIterator;
+use arrow::ipc::writer::StreamWriter;
+use arrow_array_lance::RecordBatch as LanceRecordBatch;
+use arrow_array_lance::RecordBatchIterator as LanceRecordBatchIterator;
+use arrow_ipc_lance::reader::StreamReader as LanceIpcReader;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::primitives::ByteStream;
@@ -240,6 +244,27 @@ pub struct PageFeatureRow {
     pub domain_id: u64,
     pub outbound_edge_count: u32,
     pub feature_schema_version: String,
+}
+
+fn workspace_batch_to_lance(batch: RecordBatch) -> Result<LanceRecordBatch, std::io::Error> {
+    let mut buf = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref())
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        writer
+            .write(&batch)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        writer
+            .finish()
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+    }
+    let mut reader = LanceIpcReader::try_new(Cursor::new(buf), None)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    reader
+        .next()
+        .transpose()
+        .map_err(|err| std::io::Error::other(err.to_string()))?
+        .ok_or_else(|| std::io::Error::other("workspace IPC stream had no record batch"))
 }
 
 pub struct UpfoundryLinkGraphCompactPlugin {
@@ -2238,8 +2263,9 @@ impl UpfoundryLinkGraphCompactPlugin {
     }
 
     async fn write_lance_batch(uri: String, batch: RecordBatch) -> Result<(), std::io::Error> {
-        let schema = batch.schema();
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
+        let lance_batch = workspace_batch_to_lance(batch)?;
+        let schema = lance_batch.schema();
+        let reader = LanceRecordBatchIterator::new(vec![Ok(lance_batch)], schema);
         let mut params = WriteParams::default();
         params.mode = WriteMode::Overwrite;
         Dataset::write(reader, uri.as_str(), Some(params))
@@ -2679,6 +2705,20 @@ impl UpfoundryLinkGraphCompactPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_batch_to_lance_preserves_string_column() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "status",
+            DataType::Utf8,
+            false,
+        )]));
+        let status = Arc::new(StringArray::from(vec!["ok", "missing"]));
+        let batch = RecordBatch::try_new(schema, vec![status]).expect("workspace batch");
+        let lance_batch = workspace_batch_to_lance(batch).expect("lance batch");
+        assert_eq!(lance_batch.num_rows(), 2);
+        assert_eq!(lance_batch.schema().field(0).name(), "status");
+    }
 
     fn edge(last_seen: &str) -> EdgeByTargetRow {
         EdgeByTargetRow {
