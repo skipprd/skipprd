@@ -15,7 +15,7 @@ tokio.workspace = true
 skippr-runtime-sdk.workspace = true
 
 arrow.workspace = true
-deltalake = { version = "0.32.3", features = ["datafusion"] }
+deltalake = { version = "=0.32.3", features = ["datafusion"] }
 futures = "0.3.25"
 serde.workspace = true
 serde_derive = "1.0.105"
