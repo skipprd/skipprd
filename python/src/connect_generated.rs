@@ -868,6 +868,123 @@ impl PyPipeline {
     }
 }
 
+#[doc = "One in-memory Arrow op. Exactly one of the keys may be set."]
+#[pyclass(frozen, from_py_object, name = "TransformOp", module = "skippr")]
+#[derive(Clone, Serialize)]
+pub struct PyTransformOp {
+    #[doc = "DataFusion SQL boolean expression. Rows that do not match are dropped.\n\nYAML key `filter`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    #[doc = "Keep only these output column names, in this order.\n\nYAML key `project`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<Vec<String>>,
+    #[doc = "Add derived columns. Map of new name to DataFusion SQL expression.\n\nYAML key `derive`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derive: Option<BTreeMap<String, String>>,
+    #[doc = "Rename columns. Map of current name to new name.\n\nYAML key `rename`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rename: Option<BTreeMap<String, String>>,
+    #[doc = "Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`).\n\nYAML key `cast`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cast: Option<BTreeMap<String, String>>,
+}
+
+#[pymethods]
+impl PyTransformOp {
+    #[new]
+    #[doc = "One in-memory Arrow op. Exactly one of the keys may be set.\n\nArgs:\n    filter: DataFusion SQL boolean expression. Rows that do not match are dropped.\n    project: Keep only these output column names, in this order.\n    derive: Add derived columns. Map of new name to DataFusion SQL expression.\n    rename: Rename columns. Map of current name to new name.\n    cast: Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`)."]
+    #[pyo3(signature = (*, filter = None, project = None, derive = None, rename = None, cast = None))]
+    fn new(
+        filter: Option<String>,
+        project: Option<Vec<String>>,
+        derive: Option<BTreeMap<String, String>>,
+        rename: Option<BTreeMap<String, String>>,
+        cast: Option<BTreeMap<String, String>>,
+    ) -> Self {
+        Self {
+            filter,
+            project,
+            derive,
+            rename,
+            cast,
+        }
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        config_repr("TransformOp", self)
+    }
+}
+
+#[doc = "One aggregate measure. Exactly one of `sum` or `count` may be set."]
+#[pyclass(frozen, from_py_object, name = "AggregateMeasure", module = "skippr")]
+#[derive(Clone, Serialize)]
+pub struct PyAggregateMeasure {
+    #[doc = "Column to sum. CDC updates apply the delta from the previous row.\n\nYAML key `sum`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sum: Option<String>,
+    #[doc = "Count rows. Use `\"*\"` for every row.\n\nYAML key `count`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<String>,
+}
+
+#[pymethods]
+impl PyAggregateMeasure {
+    #[new]
+    #[doc = "One aggregate measure. Exactly one of `sum` or `count` may be set.\n\nArgs:\n    sum: Column to sum. CDC updates apply the delta from the previous row.\n    count: Count rows. Use `\"*\"` for every row."]
+    #[pyo3(signature = (*, sum = None, count = None))]
+    fn new(sum: Option<String>, count: Option<String>) -> Self {
+        Self { sum, count }
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        config_repr("AggregateMeasure", self)
+    }
+}
+
+#[doc = "One keyed running aggregate maintained from committed WAL records."]
+#[pyclass(frozen, from_py_object, name = "TransformAggregate", module = "skippr")]
+#[derive(Clone, Serialize)]
+pub struct PyTransformAggregate {
+    #[doc = "Stable processor id used in Sled key namespaces.\n\nYAML key `id`."]
+    #[pyo3(get)]
+    pub id: String,
+    #[doc = "Columns that form the aggregate key, in order.\n\nYAML key `key_fields`."]
+    #[pyo3(get)]
+    pub key_fields: Vec<String>,
+    #[doc = "Named measures. Each value is `{ sum: column }` or `{ count: \"*\" }`.\n\nYAML key `measures`."]
+    #[pyo3(get)]
+    pub measures: BTreeMap<String, PyAggregateMeasure>,
+}
+
+#[pymethods]
+impl PyTransformAggregate {
+    #[new]
+    #[doc = "One keyed running aggregate maintained from committed WAL records.\n\nArgs:\n    id: Stable processor id used in Sled key namespaces.\n    key_fields: Columns that form the aggregate key, in order.\n    measures: Named measures. Each value is `{ sum: column }` or `{ count: \"*\" }`."]
+    #[pyo3(signature = (*, id, key_fields, measures))]
+    fn new(
+        id: String,
+        key_fields: Vec<String>,
+        measures: BTreeMap<String, PyAggregateMeasure>,
+    ) -> Self {
+        Self {
+            id,
+            key_fields,
+            measures,
+        }
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        config_repr("TransformAggregate", self)
+    }
+}
+
 #[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink."]
 #[pyclass(frozen, from_py_object, name = "Transform", module = "skippr")]
 #[derive(Clone, Serialize)]
@@ -920,13 +1037,21 @@ pub struct PyTransform {
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inject_fields: Option<BTreeMap<String, PyAnyValue>>,
+    #[doc = "Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.\n\nYAML key `ops`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ops: Option<Vec<PyTransformOp>>,
+    #[doc = "Keyed running aggregates maintained from committed WAL data in Sled.\n\nYAML key `aggregates`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aggregates: Option<Vec<PyTransformAggregate>>,
 }
 
 #[pymethods]
 impl PyTransform {
     #[new]
-    #[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink.\n\nArgs:\n    batch_time_fields: Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.\n    batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n    flatten_events: Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n    record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.\n    batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).\n    partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.\n    namespace_fields: Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.\n    time_partition_prefix: Prefix for time-partition folder names (`p_` → `p_2026-10-08`).\n    enable_single_quote_parsing: Accept JSON that uses single quotes around strings.\n    enable_unicode_parsing: Accept JSON with unescaped Unicode.\n    batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.\n    inject_fields: Static field names and JSON values merged onto each source record before ingest."]
-    #[pyo3(signature = (*, batch_time_fields = None, batch_time_unit = None, flatten_events = None, record_field_path = None, batch_partition_fields = None, partition_allowed_values = None, namespace_fields = None, time_partition_prefix = None, enable_single_quote_parsing = None, enable_unicode_parsing = None, batch_order_fields = None, inject_fields = None))]
+    #[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink.\n\nArgs:\n    batch_time_fields: Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.\n    batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n    flatten_events: Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n    record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.\n    batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).\n    partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.\n    namespace_fields: Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.\n    time_partition_prefix: Prefix for time-partition folder names (`p_` → `p_2026-10-08`).\n    enable_single_quote_parsing: Accept JSON that uses single quotes around strings.\n    enable_unicode_parsing: Accept JSON with unescaped Unicode.\n    batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.\n    inject_fields: Static field names and JSON values merged onto each source record before ingest.\n    ops: Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.\n    aggregates: Keyed running aggregates maintained from committed WAL data in Sled."]
+    #[pyo3(signature = (*, batch_time_fields = None, batch_time_unit = None, flatten_events = None, record_field_path = None, batch_partition_fields = None, partition_allowed_values = None, namespace_fields = None, time_partition_prefix = None, enable_single_quote_parsing = None, enable_unicode_parsing = None, batch_order_fields = None, inject_fields = None, ops = None, aggregates = None))]
     fn new(
         batch_time_fields: Option<String>,
         batch_time_unit: Option<PyBatchTimeUnit>,
@@ -940,6 +1065,8 @@ impl PyTransform {
         enable_unicode_parsing: Option<bool>,
         batch_order_fields: Option<String>,
         inject_fields: Option<BTreeMap<String, PyAnyValue>>,
+        ops: Option<Vec<PyTransformOp>>,
+        aggregates: Option<Vec<PyTransformAggregate>>,
     ) -> Self {
         Self {
             batch_time_fields,
@@ -954,6 +1081,8 @@ impl PyTransform {
             enable_unicode_parsing,
             batch_order_fields,
             inject_fields,
+            ops,
+            aggregates,
         }
     }
 
@@ -6456,6 +6585,9 @@ pub fn register_generated_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataSinkSkipprLakeWarehouseObjectStoreS3>()?;
     m.add_class::<PyDataSinkSkipprLakeWarehouseObjectStoreR2>()?;
     m.add_class::<PyPipeline>()?;
+    m.add_class::<PyTransformOp>()?;
+    m.add_class::<PyAggregateMeasure>()?;
+    m.add_class::<PyTransformAggregate>()?;
     m.add_class::<PyTransform>()?;
     m.add_class::<PyStats>()?;
     m.add_class::<PySemanticLayerSettings>()?;

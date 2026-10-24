@@ -407,6 +407,126 @@ pub struct Transform {
     /// Static field names and JSON values merged onto each source record before ingest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inject_fields: Option<BTreeMap<String, Value>>,
+    /// Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops: Option<Vec<TransformOp>>,
+    /// Keyed running aggregates maintained from committed WAL data in Sled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregates: Option<Vec<TransformAggregate>>,
+}
+
+/// One in-memory Arrow op. Exactly one of the keys may be set.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TransformOp {
+    /// DataFusion SQL boolean expression. Rows that do not match are dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    /// Keep only these output column names, in this order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<Vec<String>>,
+    /// Add derived columns. Map of new name to DataFusion SQL expression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derive: Option<BTreeMap<String, String>>,
+    /// Rename columns. Map of current name to new name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename: Option<BTreeMap<String, String>>,
+    /// Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast: Option<BTreeMap<String, String>>,
+}
+
+impl TransformOp {
+    fn set_count(&self) -> usize {
+        [
+            self.filter.is_some(),
+            self.project.as_ref().is_some_and(|v| !v.is_empty()),
+            self.derive.as_ref().is_some_and(|v| !v.is_empty()),
+            self.rename.as_ref().is_some_and(|v| !v.is_empty()),
+            self.cast.as_ref().is_some_and(|v| !v.is_empty()),
+        ]
+        .into_iter()
+        .filter(|set| *set)
+        .count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.set_count() == 0
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        match self.set_count() {
+            1 => Ok(()),
+            0 => Err(
+                "transform.ops entry must set exactly one of filter, project, derive, rename, cast"
+                    .into(),
+            ),
+            _ => Err(
+                "transform.ops entry must set exactly one of filter, project, derive, rename, cast"
+                    .into(),
+            ),
+        }
+    }
+}
+
+/// One keyed running aggregate maintained from committed WAL records.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TransformAggregate {
+    /// Stable processor id used in Sled key namespaces.
+    pub id: String,
+    /// Columns that form the aggregate key, in order.
+    pub key_fields: Vec<String>,
+    /// Named measures. Each value is `{ sum: column }` or `{ count: "*" }`.
+    pub measures: BTreeMap<String, AggregateMeasure>,
+}
+
+impl TransformAggregate {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err("transform.aggregates[].id must be non-empty".into());
+        }
+        if self.key_fields.is_empty() || self.key_fields.iter().any(|f| f.trim().is_empty()) {
+            return Err(format!(
+                "transform.aggregates id '{}' requires at least one key_fields entry",
+                self.id
+            ));
+        }
+        if self.measures.is_empty() {
+            return Err(format!(
+                "transform.aggregates id '{}' requires at least one measure",
+                self.id
+            ));
+        }
+        for (name, measure) in &self.measures {
+            measure.validate(name)?;
+        }
+        Ok(())
+    }
+}
+
+/// One aggregate measure. Exactly one of `sum` or `count` may be set.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AggregateMeasure {
+    /// Column to sum. CDC updates apply the delta from the previous row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sum: Option<String>,
+    /// Count rows. Use `"*"` for every row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<String>,
+}
+
+impl AggregateMeasure {
+    pub fn validate(&self, name: &str) -> Result<(), String> {
+        match (self.sum.as_deref(), self.count.as_deref()) {
+            (Some(sum), None) if !sum.trim().is_empty() => Ok(()),
+            (None, Some(count)) if !count.trim().is_empty() => Ok(()),
+            _ => Err(format!(
+                "transform.aggregates measure '{name}' must set exactly one of sum or count"
+            )),
+        }
+    }
 }
 
 /// Namespace cardinality and histogram collection during ingest.
@@ -1631,7 +1751,77 @@ impl Config {
         {
             return Some("type: copy cannot set transform.batch_order_fields".into());
         }
+        if transform.ops.as_ref().is_some_and(|ops| !ops.is_empty()) {
+            return Some("type: copy cannot set transform.ops".into());
+        }
+        if transform
+            .aggregates
+            .as_ref()
+            .is_some_and(|aggregates| !aggregates.is_empty())
+        {
+            return Some("type: copy cannot set transform.aggregates".into());
+        }
         None
+    }
+
+    /// Non-empty `transform.ops` after dropping empty entries.
+    pub fn get_transform_ops(&self) -> Vec<TransformOp> {
+        self.get_transform_config()
+            .ops
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|op| !op.is_empty())
+            .collect()
+    }
+
+    /// Non-empty `transform.aggregates`.
+    pub fn get_transform_aggregates(&self) -> Vec<TransformAggregate> {
+        self.get_transform_config()
+            .aggregates
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|agg| !agg.id.trim().is_empty())
+            .collect()
+    }
+
+    pub fn transform_aggregates_configured(&self) -> bool {
+        !self.get_transform_aggregates().is_empty()
+    }
+
+    /// Stable hash of the aggregate config used to detect rebuilds.
+    pub fn transform_aggregates_config_hash(&self) -> String {
+        Self::aggregates_config_hash(&self.get_transform_aggregates())
+    }
+
+    pub fn aggregates_config_hash(aggregates: &[TransformAggregate]) -> String {
+        let bytes = serde_json::to_vec(aggregates).unwrap_or_default();
+        format!("{:x}", md5::compute(bytes))
+    }
+
+    fn transform_shape_violations(pipeline_name: &str, transform: &Transform) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(ops) = transform.ops.as_ref() {
+            for (i, op) in ops.iter().enumerate() {
+                if let Err(err) = op.validate() {
+                    out.push(format!("pipeline '{pipeline_name}' {err} (index {i})"));
+                }
+            }
+        }
+        if let Some(aggregates) = transform.aggregates.as_ref() {
+            let mut seen = std::collections::BTreeSet::new();
+            for agg in aggregates {
+                if let Err(err) = agg.validate() {
+                    out.push(format!("pipeline '{pipeline_name}' {err}"));
+                }
+                if !agg.id.trim().is_empty() && !seen.insert(agg.id.clone()) {
+                    out.push(format!(
+                        "pipeline '{pipeline_name}' duplicate transform.aggregates id '{}'",
+                        agg.id
+                    ));
+                }
+            }
+        }
+        out
     }
 
     pub fn get_stats_config(&self) -> Stats {
@@ -1988,6 +2178,35 @@ impl Config {
         }
 
         violations.extend(self.whole_config_violations());
+        let clustered = matches!(
+            Self::parse_wal_storage(),
+            Ok(crate::helpers::wal_storage::WalStorage::Clustered)
+        );
+        for (name, named_pipeline) in &self.pipelines {
+            if let Some(transform) = named_pipeline.transform.as_ref() {
+                violations.extend(Self::transform_shape_violations(name, transform));
+                if clustered
+                    && transform
+                        .aggregates
+                        .as_ref()
+                        .is_some_and(|aggregates| !aggregates.is_empty())
+                {
+                    violations.push(format!(
+                        "pipeline '{name}' transform.aggregates requires local Sled and cannot be used with WAL_STORAGE=clustered"
+                    ));
+                }
+            }
+            if let Ok(crate::pipeline_type::PipelineType::Copy) =
+                crate::pipeline_type::resolve_pipeline_type(
+                    named_pipeline.r#type,
+                    named_pipeline.cdc.is_some(),
+                )
+            {
+                if let Some(err) = Self::copy_pipeline_violations(named_pipeline) {
+                    violations.push(format!("pipeline '{name}' {err}"));
+                }
+            }
+        }
         match self.pipeline_type() {
             Ok(pipeline_type) => {
                 if pipeline_type == crate::pipeline_type::PipelineType::Copy {
@@ -3489,6 +3708,134 @@ pipelines:
       enable_single_quote_parsing: "true"
     chaos_mode: 0
 "#;
+
+    #[test]
+    fn transform_ops_and_aggregates_parse_from_yaml() {
+        let transform: Transform = serde_yaml::from_str(
+            r#"
+ops:
+  - filter: "amount > 0"
+  - project: [id, customer_id, amount]
+  - derive:
+      amount_gbp: "amount * 0.8"
+  - rename:
+      amount: amount_usd
+  - cast:
+      amount: float64
+aggregates:
+  - id: customer_invoice_totals
+    key_fields: [customer_id]
+    measures:
+      invoice_total: { sum: amount }
+      invoice_count: { count: "*" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(transform.ops.as_ref().unwrap().len(), 5);
+        assert_eq!(
+            transform.ops.as_ref().unwrap()[0].filter.as_deref(),
+            Some("amount > 0")
+        );
+        let agg = &transform.aggregates.as_ref().unwrap()[0];
+        assert_eq!(agg.id, "customer_invoice_totals");
+        assert_eq!(agg.measures["invoice_total"].sum.as_deref(), Some("amount"));
+        agg.validate().unwrap();
+        transform.ops.as_ref().unwrap()[0].validate().unwrap();
+    }
+
+    #[test]
+    fn copy_pipeline_rejects_ops_and_aggregates() {
+        let mut ops_config = Config::new();
+        let mut ops_pipeline = Pipeline::default();
+        ops_pipeline.r#type = Some(crate::pipeline_type::PipelineType::Copy);
+        ops_pipeline.transform = Some(Transform {
+            ops: Some(vec![TransformOp {
+                filter: Some("amount > 0".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        ops_config.pipelines.insert("p".to_string(), ops_pipeline);
+        let ops_violations = ops_config
+            .bind_pipeline("p")
+            .get_config_dependency_violations();
+        assert!(
+            ops_violations
+                .iter()
+                .any(|v| v.contains("type: copy cannot set transform.ops")),
+            "{ops_violations:?}"
+        );
+
+        let mut agg_config = Config::new();
+        let mut agg_pipeline = Pipeline::default();
+        agg_pipeline.r#type = Some(crate::pipeline_type::PipelineType::Copy);
+        agg_pipeline.transform = Some(Transform {
+            aggregates: Some(vec![TransformAggregate {
+                id: "customer_invoice_totals".into(),
+                key_fields: vec!["customer_id".into()],
+                measures: [(
+                    "invoice_count".into(),
+                    AggregateMeasure {
+                        count: Some("*".into()),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }]),
+            ..Default::default()
+        });
+        agg_config.pipelines.insert("p".to_string(), agg_pipeline);
+        let agg_violations = agg_config
+            .bind_pipeline("p")
+            .get_config_dependency_violations();
+        assert!(
+            agg_violations
+                .iter()
+                .any(|v| v.contains("type: copy cannot set transform.aggregates")),
+            "{agg_violations:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn clustered_wal_rejects_aggregates() {
+        ENV_CACHE.write().clear();
+        let original = std::env::var("WAL_STORAGE").ok();
+        std::env::set_var("WAL_STORAGE", "clustered");
+        Config::set_evncache("WAL_STORAGE", "clustered");
+        let mut config = Config::new();
+        let mut pipeline = Pipeline::default();
+        pipeline.transform = Some(Transform {
+            aggregates: Some(vec![TransformAggregate {
+                id: "customer_invoice_totals".into(),
+                key_fields: vec!["customer_id".into()],
+                measures: [(
+                    "invoice_count".into(),
+                    AggregateMeasure {
+                        count: Some("*".into()),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }]),
+            ..Default::default()
+        });
+        config.pipelines.insert("p".to_string(), pipeline);
+        let violations = config.bind_pipeline("p").get_config_dependency_violations();
+        match original {
+            Some(value) => std::env::set_var("WAL_STORAGE", value),
+            None => std::env::remove_var("WAL_STORAGE"),
+        }
+        ENV_CACHE.write().clear();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("cannot be used with WAL_STORAGE=clustered")),
+            "{violations:?}"
+        );
+    }
 
     #[test]
     fn pipeline_type_parses_lowercase_and_legacy_ingest() {

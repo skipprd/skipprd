@@ -458,6 +458,36 @@ def test_pipeline_transform_is_typed():
     assert "flatten_events: true" in cfg.to_yaml()
 
 
+def test_pipeline_transform_ops_and_aggregates():
+    from skippr import AggregateMeasure, TransformAggregate, TransformOp
+
+    cfg = Config()
+    src = cfg.data_source("src", _s3())
+    cfg.pipeline(
+        "p",
+        Pipeline(
+            data_source=src,
+            transform=Transform(
+                ops=[TransformOp(filter="amount > 0")],
+                aggregates=[
+                    TransformAggregate(
+                        id="customer_invoice_totals",
+                        key_fields=["customer_id"],
+                        measures={
+                            "invoice_total": AggregateMeasure(sum="amount"),
+                            "invoice_count": AggregateMeasure(count="*"),
+                        },
+                    )
+                ],
+            ),
+        ),
+    )
+    yaml = cfg.to_yaml()
+    assert "filter: amount > 0" in yaml
+    assert "customer_invoice_totals" in yaml
+    assert "invoice_total:" in yaml
+
+
 def test_getters_return_refs_or_raise_key_error():
     cfg = Config()
     src = cfg.data_source("src", _s3())

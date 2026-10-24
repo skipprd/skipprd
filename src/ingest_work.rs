@@ -3658,7 +3658,38 @@ impl Ingest {
 
             match merge_record_batches(entry.schema.clone(), batches) {
                 Ok(merged) => {
-                    entry.payload = crate::buffer::segment_file::WalPayload::Arrow(merged);
+                    let ops = config.get_transform_ops();
+                    match crate::stream_transform::apply_configured_ops(
+                        &ops,
+                        merged,
+                        cdc_row_buf.remove(k),
+                    ) {
+                        Ok((batches, cdc_rows)) => {
+                            if let Some(batch) = batches.first() {
+                                entry.schema = batch.schema();
+                                entry._schema_fingerprint =
+                                    crate::converters::skippr_arrow::stable_schema_fingerprint(
+                                        &entry.schema,
+                                    );
+                            }
+                            entry.payload = crate::buffer::segment_file::WalPayload::Arrow(batches);
+                            entry.cdc_rows = cdc_rows;
+                        }
+                        Err(err) => {
+                            crate::metrics::counters::add_stream_transform_failure(1);
+                            warn!("transform.ops failed for ns={}: {}", entry._namespace, err);
+                            if submit_id != 0 {
+                                crate::buffer::wal_writer::fail_request(
+                                    submit_id,
+                                    format!(
+                                        "transform.ops failed for namespace {}: {}",
+                                        entry._namespace, err
+                                    ),
+                                );
+                            }
+                            return;
+                        }
+                    }
                 }
                 Err(err) => {
                     warn!(
