@@ -99,18 +99,23 @@ def assert_query_doc(
         if got != expect:
             raise perf_run.PerfError(f"{scenario_id}: sum {got} != {expect}")
     if asserts.get("stream_limit"):
-        sql = str(scenario.get("sql") or "")
-        expect = 10
-        upper = sql.upper()
-        if "LIMIT" in upper:
-            try:
-                expect = int(upper.rsplit("LIMIT", 1)[1].strip().split()[0])
-            except ValueError:
-                expect = 10
+        expect = stream_limit_rows(scenario)
         if len(result_rows) != expect:
             raise perf_run.PerfError(
                 f"{scenario_id}: STREAM returned {len(result_rows)} rows, expected {expect}"
             )
+
+
+def stream_limit_rows(scenario: dict[str, Any]) -> int:
+    sql = str(scenario.get("sql") or "")
+    expect = 10
+    upper = sql.upper()
+    if "LIMIT" in upper:
+        try:
+            expect = int(upper.rsplit("LIMIT", 1)[1].strip().split()[0])
+        except ValueError:
+            expect = 10
+    return expect
 
 
 def run_query_after_ingest(
@@ -142,6 +147,8 @@ def run_query_after_ingest(
     )
     if sink == "skipprlake":
         perf_run.start_ddb()
+    tail_proc = None
+    tail_failpoint = data_dir / "failpoint"
     try:
         perf_run.stage_plugins(config, PIPELINE, manifests)
         env = perf_run.base_env(config, data_dir, manifests)
@@ -242,6 +249,60 @@ def run_query_after_ingest(
                     measured_sync += out or ""
                 except Exception:
                     overlap_proc.kill()
+        if scenario.get("wal_tail"):
+            tail_failpoint.write_text("hold_before_compaction_sink\n", encoding="utf-8")
+            expect = stream_limit_rows(scenario)
+            records = [
+                {"id": index, "name": f"user_{index}", "amount": index * 10}
+                for index in range(rows + 1, rows + expect + 1)
+            ]
+            (source / "events_tail.json").write_text(
+                "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in records),
+                encoding="utf-8",
+            )
+            tail_cmd = [
+                str(skipprd),
+                *log_args(env),
+                "--config",
+                str(config),
+                "sync",
+                "--pipeline",
+                PIPELINE,
+                "--once",
+            ]
+            tail_proc = subprocess.Popen(
+                tail_cmd,
+                env=env,
+                cwd=REPO_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            deadline = time.time() + 90
+            while time.time() < deadline:
+                try:
+                    peek = perf_run.run_skipprd(
+                        skipprd,
+                        [
+                            "--config",
+                            str(config),
+                            "query",
+                            "--plain",
+                            "--sql",
+                            str(scenario["sql"]),
+                        ],
+                        env=env,
+                        work=work,
+                        profile="none",
+                    )
+                    doc = parse_plain_query(peek)
+                    if len(doc.get("rows") or []) == expect:
+                        break
+                except Exception:
+                    pass
+                if tail_proc.poll() is not None:
+                    break
+                time.sleep(1)
         if (scenario.get("asserts") or {}).get("iceberg_parquet"):
             parquet_files = list(warehouse.rglob("*.parquet"))
             if not parquet_files:
@@ -292,6 +353,12 @@ def run_query_after_ingest(
         )
         return payload
     finally:
+        if tail_proc is not None:
+            tail_failpoint.unlink(missing_ok=True)
+            try:
+                tail_proc.communicate(timeout=120)
+            except Exception:
+                tail_proc.kill()
         if sink == "skipprlake":
             perf_run.stop_ddb()
 

@@ -45,6 +45,30 @@ pub fn get_namespace_cdc_contract(namespace: &str) -> Option<NamespaceContract> 
     })
 }
 
+/// Load CDC business keys for `skipprd query` (a separate process from ingest).
+pub fn install_query_cdc_contracts(namespaces: BTreeMap<String, Vec<String>>) {
+    let mut contracts = BTreeMap::new();
+    for (namespace, business_key_columns) in namespaces {
+        if business_key_columns.is_empty() {
+            continue;
+        }
+        contracts.insert(
+            namespace.clone(),
+            NamespaceContract {
+                namespace,
+                business_key_columns,
+                effective_guarantee: EffectiveGuarantee::CdcEncoded,
+                order_token_semantics: OrderTokenSemantics::SourceDefined,
+                null_key_policy: NullKeyPolicy::Reject,
+                requires_skippr_system_columns: true,
+            },
+        );
+    }
+    if !contracts.is_empty() {
+        set_namespace_cdc_contracts(contracts);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Checkpoint authority model
 // ---------------------------------------------------------------------------
@@ -1334,6 +1358,18 @@ mod tests {
             event_id: vec![order],
             order_token: vec![order],
         }
+    }
+
+    #[test]
+    fn install_query_cdc_contracts_star_covers_named_namespace() {
+        set_namespace_cdc_contracts(BTreeMap::new());
+        assert!(get_namespace_cdc_contract("postgres_orders").is_none());
+        let mut keys = BTreeMap::new();
+        keys.insert("*".to_string(), vec!["id".to_string()]);
+        install_query_cdc_contracts(keys);
+        let contract = get_namespace_cdc_contract("postgres_orders").expect("star contract");
+        assert_eq!(contract.business_key_columns, vec!["id".to_string()]);
+        set_namespace_cdc_contracts(BTreeMap::new());
     }
 
     #[test]

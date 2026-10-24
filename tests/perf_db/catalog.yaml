@@ -57,6 +57,7 @@ scenarios:
     kind: query_after_ingest
     sink: skipprlake
     fixture: exact_arrow
+    wal_tail: true
     sql: "STREAM * FROM perf_cell LIMIT 10"
     required_perf: [sync, query_collect]
     asserts:
