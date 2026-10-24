@@ -160,6 +160,8 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("load_perf_db_catalog", text)
         self.assertIn("timeout=120", text)
         self.assertIn("--signal=KILL", text)
+        self.assertIn('CDC_DDB_TABLE = "skippr-perf-db-cdc"', text)
+        self.assertIn("tables=[CDC_DDB_TABLE]", text)
         self.assertNotIn("from tests.perf.run import", text)
         self.assertNotIn("copy_b-json-json", text)
 
