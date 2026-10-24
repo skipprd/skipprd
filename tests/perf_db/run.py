@@ -6,8 +6,12 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +64,7 @@ def assert_query_doc(
 ) -> None:
     asserts = scenario.get("asserts") or {}
     result_rows = doc.get("rows") or []
-    if asserts.get("query_count"):
+    if asserts.get("query_count") is True:
         if len(result_rows) != 1 or len(result_rows[0]) < 1:
             raise perf_run.PerfError(f"{scenario_id}: query_count expected one cell, got {doc}")
         got = int(float(result_rows[0][0]))
@@ -75,6 +79,25 @@ def assert_query_doc(
     if asserts.get("query_group"):
         if len(result_rows) < 1:
             raise perf_run.PerfError(f"{scenario_id}: query_group returned no groups")
+    if asserts.get("query_unique"):
+        ids = [str(row[0]) for row in result_rows]
+        if len(ids) != len(set(ids)):
+            raise perf_run.PerfError(f"{scenario_id}: duplicate ids in overlap query")
+    expect_name = asserts.get("query_name")
+    if expect_name:
+        got = str(result_rows[0][0]) if result_rows else ""
+        if got != str(expect_name):
+            raise perf_run.PerfError(f"{scenario_id}: name {got!r} != {expect_name!r}")
+    if "query_count" in asserts and asserts["query_count"] not in {True, False}:
+        got = int(float(result_rows[0][0]))
+        expect = int(asserts["query_count"])
+        if got != expect:
+            raise perf_run.PerfError(f"{scenario_id}: count {got} != {expect}")
+    if "query_sum" in asserts:
+        got = int(float(result_rows[0][0]))
+        expect = int(asserts["query_sum"])
+        if got != expect:
+            raise perf_run.PerfError(f"{scenario_id}: sum {got} != {expect}")
     if asserts.get("stream_limit"):
         sql = str(scenario.get("sql") or "")
         expect = 10
@@ -155,6 +178,70 @@ def run_query_after_ingest(
             profile="none",
         )
         logs += measured_sync
+        if scenario.get("overlap"):
+            failpoint = data_dir / "failpoint"
+            failpoint.write_text("hold_before_compaction_sink\n", encoding="utf-8")
+            records = [
+                {"id": index, "name": f"user_{index}", "amount": index * 10}
+                for index in range(rows + 1, (2 * rows) + 1)
+            ]
+            (source / "events_b.json").write_text(
+                "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in records),
+                encoding="utf-8",
+            )
+            rows = 2 * rows
+            overlap_cmd = [
+                str(skipprd),
+                *log_args(env),
+                "--config",
+                str(config),
+                "sync",
+                "--pipeline",
+                PIPELINE,
+                "--once",
+            ]
+            overlap_proc = subprocess.Popen(
+                overlap_cmd,
+                env=env,
+                cwd=REPO_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            try:
+                deadline = time.time() + 90
+                while time.time() < deadline:
+                    try:
+                        peek = perf_run.run_skipprd(
+                            skipprd,
+                            [
+                                "--config",
+                                str(config),
+                                "query",
+                                "--plain",
+                                "--sql",
+                                str(scenario["sql"]),
+                            ],
+                            env=env,
+                            work=work,
+                            profile="none",
+                        )
+                        doc = parse_plain_query(peek)
+                        got = int(float((doc.get("rows") or [[0]])[0][0]))
+                        if got == rows:
+                            break
+                    except Exception:
+                        pass
+                    if overlap_proc.poll() is not None:
+                        break
+                    time.sleep(1)
+            finally:
+                failpoint.unlink(missing_ok=True)
+                try:
+                    out, _ = overlap_proc.communicate(timeout=120)
+                    measured_sync += out or ""
+                except Exception:
+                    overlap_proc.kill()
         if (scenario.get("asserts") or {}).get("iceberg_parquet"):
             parquet_files = list(warehouse.rglob("*.parquet"))
             if not parquet_files:
@@ -209,13 +296,340 @@ def run_query_after_ingest(
             perf_run.stop_ddb()
 
 
+PG_CDC_PORT = 5435
+PG_CDC_DDB_PORT = 18022
+PG_CDC_CONTAINER = "skippr-perf-db-pg"
+PG_CDC_DDB_CONTAINER = "skippr-perf-db-pg-ddb"
+PG_CDC_PIPELINE = "postgres_skipprlake_cdc"
+
+
+def docker_available() -> bool:
+    try:
+        subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def write_cdc_skippr_yml(path: Path, warehouse: Path) -> None:
+    uri = f"file://{warehouse}"
+    path.write_text(
+        f"""skippr:
+  workspace: test
+  skipprd_el_storage_mode: local
+  store:
+    type: dynamodb
+    name: skippr-perf-db-cdc
+
+pipelines:
+  {PG_CDC_PIPELINE}:
+    auto_approve: yes
+    env: test
+    type: cdc
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 2
+    data_source: data_sources.postgres_cdc
+    data_sink: data_sinks.lake
+    cdc:
+      default:
+        business_key_columns: ["id"]
+
+data_sources:
+  postgres_cdc:
+    Postgres:
+      host: 127.0.0.1
+      port: {PG_CDC_PORT}
+      user: postgres
+      password: postgres
+      database: skippr_cdc
+      tables: ["orders"]
+      cdc_mode: snapshot_then_cdc
+      cdc_idle_timeout_seconds: 5
+
+data_sinks:
+  lake:
+    SkipprLake:
+      warehouse: {uri}
+      catalog_table: skippr-perf-db-cdc
+      region: us-east-1
+      table_namespace: bronze
+      object_store:
+        type: file
+    schema_sink: schema_sinks.lake_schema
+
+schema_sinks:
+  lake_schema:
+    SkipprLake:
+      warehouse: {uri}
+      catalog_table: skippr-perf-db-cdc
+      region: us-east-1
+      table_namespace: bronze
+      object_store:
+        type: file
+""",
+        encoding="utf-8",
+    )
+
+
+def start_cdc_postgres() -> None:
+    subprocess.run(["docker", "rm", "-f", PG_CDC_CONTAINER], capture_output=True, check=False)
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            PG_CDC_CONTAINER,
+            "-e",
+            "POSTGRES_PASSWORD=postgres",
+            "-e",
+            "POSTGRES_DB=skippr_cdc",
+            "-p",
+            f"{PG_CDC_PORT}:5432",
+            "postgres:16-alpine",
+            "postgres",
+            "-c",
+            "wal_level=logical",
+        ],
+        check=True,
+    )
+    for _ in range(60):
+        ready = subprocess.run(
+            [
+                "docker",
+                "exec",
+                PG_CDC_CONTAINER,
+                "psql",
+                "-U",
+                "postgres",
+                "-d",
+                "skippr_cdc",
+                "-c",
+                "SELECT 1",
+            ],
+            capture_output=True,
+        )
+        if ready.returncode == 0:
+            break
+        time.sleep(1)
+    else:
+        raise perf_run.PerfError("postgres CDC container did not accept SQL")
+    subprocess.run(
+        [
+            "docker",
+            "exec",
+            PG_CDC_CONTAINER,
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "skippr_cdc",
+            "-c",
+            "CREATE TABLE IF NOT EXISTS orders (id integer PRIMARY KEY, name text NOT NULL, amount integer NOT NULL DEFAULT 0); INSERT INTO orders (id, name, amount) VALUES (1, 'alpha', 100), (2, 'beta', 50) ON CONFLICT (id) DO NOTHING;",
+        ],
+        check=True,
+    )
+
+
+def stop_cdc_postgres() -> None:
+    subprocess.run(["docker", "rm", "-f", PG_CDC_CONTAINER], capture_output=True, check=False)
+    subprocess.run(["docker", "rm", "-f", PG_CDC_DDB_CONTAINER], capture_output=True, check=False)
+
+
+def pg_sql(sql: str) -> None:
+    subprocess.run(
+        [
+            "docker",
+            "exec",
+            PG_CDC_CONTAINER,
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "skippr_cdc",
+            "-c",
+            sql,
+        ],
+        check=True,
+    )
+
+
+def run_cdc_once(skipprd: Path, config: Path, env: dict[str, str]) -> str:
+    cmd = [
+        str(skipprd),
+        *log_args(env),
+        "--config",
+        str(config),
+        "sync",
+        "--log",
+        "--pipeline",
+        PG_CDC_PIPELINE,
+        "--once",
+    ]
+    gnu = shutil.which("gtimeout") or shutil.which("timeout")
+    if gnu is not None:
+        cmd = [gnu, "--signal=KILL", "120", *cmd]
+        return perf_run.run_logged(cmd, env=env, timeout=130)
+    return perf_run.run_logged(cmd, env=env, timeout=120)
+
+
+def run_query_after_cdc(
+    scenario_id: str,
+    scenario: dict[str, Any],
+    work: Path,
+    profile: str,
+) -> dict[str, Any]:
+    if not docker_available():
+        if os.environ.get("GITHUB_ACTIONS"):
+            raise perf_run.PerfError(f"{scenario_id}: Docker required on GitHub")
+        log(f"{scenario_id} SKIP (Docker not running)")
+        payload = {"scenario": scenario_id, "skipped": True, "reason": "docker-down"}
+        (work / "perf-db-report.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        (work / "perf-report.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        return payload
+    warehouse = work / "warehouse"
+    data_dir = work / "data"
+    manifests = work / "manifests"
+    warehouse.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    config = work / "skippr.yml"
+    write_cdc_skippr_yml(config, warehouse)
+    start_cdc_postgres()
+    old_ddb = perf_run.DDB_PORT
+    old_container = perf_run.DDB_CONTAINER
+    perf_run.DDB_PORT = PG_CDC_DDB_PORT
+    perf_run.DDB_CONTAINER = PG_CDC_DDB_CONTAINER
+    try:
+        perf_run.start_ddb()
+        perf_run.stage_plugins(config, PG_CDC_PIPELINE, manifests)
+        env = perf_run.base_env(config, data_dir, manifests)
+        env.update(
+            {
+                "AWS_ENDPOINT_URL_DYNAMODB": f"http://127.0.0.1:{PG_CDC_DDB_PORT}",
+                "AWS_ENDPOINT_URL": f"http://127.0.0.1:{PG_CDC_DDB_PORT}",
+                "AWS_ACCESS_KEY_ID": "local",
+                "AWS_SECRET_ACCESS_KEY": "local",
+                "AWS_REGION": "us-east-1",
+                "AWS_DEFAULT_REGION": "us-east-1",
+                "AWS_EC2_METADATA_DISABLED": "true",
+                "SKIPPRLAKE_TOKEN": "skippr-perf-db-cdc",
+            }
+        )
+        if scenario.get("iceberg_only"):
+            env["SKIPPR_QUERY_LAKE_ONLY"] = "1"
+        skipprd = perf_run.skipprd_bin()
+        logs = run_cdc_once(skipprd, config, env)
+        mutation = str(scenario.get("mutation") or "")
+        if mutation:
+            pg_sql(mutation)
+        if scenario.get("overlap"):
+            failpoint = data_dir / "failpoint"
+            failpoint.write_text("hold_before_compaction_sink\n", encoding="utf-8")
+            overlap_cmd = [
+                str(skipprd),
+                *log_args(env),
+                "--config",
+                str(config),
+                "sync",
+                "--log",
+                "--pipeline",
+                PG_CDC_PIPELINE,
+                "--once",
+            ]
+            overlap_proc = subprocess.Popen(
+                overlap_cmd, env=env, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            )
+            time.sleep(8)
+        else:
+            logs += run_cdc_once(skipprd, config, env)
+            overlap_proc = None
+            failpoint = None
+        sql = str(scenario["sql"])
+        query_cmd = perf_run.time_prefix() + perf_run.wrap_profile(
+            [
+                str(skipprd),
+                *log_args(env),
+                "--config",
+                str(config),
+                "query",
+                "--sql",
+                sql,
+                "--plain",
+                "--warmup",
+            ],
+            profile,
+            work,
+        )
+        measured_query = perf_run.run_logged(query_cmd, env=env)
+        logs += measured_query
+        if failpoint is not None:
+            failpoint.unlink(missing_ok=True)
+        if overlap_proc is not None:
+            try:
+                out, _ = overlap_proc.communicate(timeout=120)
+                logs += out or ""
+            except Exception:
+                overlap_proc.kill()
+        perf_run.convert_flamegraph(work)
+        perf_run.require_profile_outputs(work, profile)
+        events = parse_perf_events(logs + measured_query)
+        required = required_perf_for(load_perf_db_catalog(), scenario)
+        missing = [phase for phase in required if not any(ev.get("phase") == phase for ev in events)]
+        if missing:
+            raise perf_run.PerfError(f"missing PERF phases {missing}; events={events}")
+        doc = parse_plain_query(measured_query)
+        assert_query_doc(scenario_id, scenario, 0, doc)
+        absent = (scenario.get("asserts") or {}).get("query_absent_id")
+        if absent is not None:
+            ids_doc = parse_plain_query(
+                perf_run.run_skipprd(
+                    skipprd,
+                    [
+                        "--config",
+                        str(config),
+                        "query",
+                        "--plain",
+                        "--sql",
+                        "SELECT id FROM postgres_skipprlake_cdc.postgres_orders",
+                    ],
+                    env=env,
+                    work=work,
+                    profile="none",
+                )
+            )
+            ids = {str(row[0]) for row in ids_doc.get("rows") or []}
+            if str(absent) in ids:
+                raise perf_run.PerfError(f"{scenario_id}: id {absent} still present")
+        payload = perf_run.report_payload(scenario_id, 0, 0, events, logs, work)
+        payload["kind"] = "query_after_cdc"
+        payload["sql"] = sql
+        perf_run.write_report(work / "perf-db-report.json", payload)
+        (work / "perf-report.json").write_text(
+            json.dumps(payload, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return payload
+    finally:
+        perf_run.stop_ddb()
+        perf_run.DDB_PORT = old_ddb
+        perf_run.DDB_CONTAINER = old_container
+        stop_cdc_postgres()
+
+
 def run_scenario(scenario_id: str, scale: str, work: Path, profile: str) -> dict[str, Any]:
     catalog = load_perf_db_catalog()
     scenario = catalog["scenarios"][scenario_id]
     kind = scenario_kind(scenario)
-    if kind != "query_after_ingest":
-        raise perf_run.PerfError(f"unknown kind {kind}")
-    return run_query_after_ingest(scenario_id, scenario, scale, work, profile)
+    if kind == "query_after_ingest":
+        return run_query_after_ingest(scenario_id, scenario, scale, work, profile)
+    if kind == "query_after_cdc":
+        return run_query_after_cdc(scenario_id, scenario, work, profile)
+    raise perf_run.PerfError(f"unknown kind {kind}")
 
 
 def main(argv: list[str] | None = None) -> int:

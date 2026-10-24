@@ -629,23 +629,23 @@ live_wal_scan(tenant, workspace, pipeline, namespace, exclude_segment_ids)
 ```
 
 - TVF, not a public custom ticket. Replica `CURRENT_PROTOCOL` is 3 (cluster hello). Flight SQL is not a second protocol family.
-- GetFlightInfo returns a ticket/prepared handle that does **not** freeze ordinals. DoGet calls `select_live_ordinals` now.
+- GetFlightInfo returns a ticket/prepared handle that does **not** nack reclaim. DoGet uses the plan-time pinned ordinal list.
 - Foreign tenant/workspace and unknown pipeline fail closed. DDL/update rejected.
 - Membership `flight_addr` becomes the gRPC bind. Same ephemeral wildcard, no new knobs.
-- `IcebergWalUnionProvider` WAL child is `FlightSqlExec`, not eager `StreamingBatchesExec`. `FlightSqlExec::execute` streams DoGet (including loopback to this process's advertised `flight_addr`).
+- `IcebergWalTableProvider` WAL child is `FlightSqlExec`, not eager `StreamingBatchesExec`. `FlightSqlExec::execute` streams DoGet (including loopback to this process's advertised `flight_addr`).
 - Catalog listing is the Iceberg table name (`catalog_table_to_namespace` is identity). Isolation is `table_namespace`.
 
 **Tests:** metadata lists tables in `table_namespace`, SELECT unique ids, unknown pipeline, read-only rejection, reclaim between GetFlightInfo and DoGet skips the file, oversized SQL, Iceberg-only with no ready member, harness `query_each_replica_socket` over Flight SQL. `cargo test -p skipprd --lib query_flight::` replaces `query_socket::`.
 
-## WU-7.4 Unpinned UNION
+## WU-7.4 Pinned Iceberg∪WAL merge
 
-**Shipped in-process:** `IcebergWalUnionProvider` `UnionExec` + `GlobalLimitExec` on the union.
+**Shipped in-process:** `IcebergWalTableProvider` pins `(S, E, W)` then `UnionExec` (append) or `CdcReconcileExec` (CDC) + `GlobalLimitExec`.
 
 1. load Iceberg current snapshot (fail closed if none);
-2. exclude Iceberg `skippr.wal-segment-ids` from WAL;
-3. scan live WAL from one ready membership `flight_addr`, or a local durable store;
+2. exclude Iceberg `skippr.wal-segment-ids` from WAL (ancestry-wide);
+3. pin live WAL ordinals at plan; execute must not re-select;
 4. if no WAL replica is reachable, return Iceberg only;
-5. UNION is a dumb concat — no DISTINCT, pin, or wait.
+5. append concat; CDC collapse by business key + `order_token`. Pin is not a reclaim lease.
 
 Distributed Flight/QueryRuntime UNION remains WU-7.3 / WU-7.5 ([`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md)).
 

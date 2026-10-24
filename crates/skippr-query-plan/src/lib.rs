@@ -18,6 +18,7 @@ use prost::Message;
 pub const PHYSICAL_MAGIC: &[u8; 4] = b"SKPR";
 pub const PHYSICAL_KIND_FLIGHT_SQL: u8 = 1;
 pub const PHYSICAL_KIND_ICEBERG: u8 = 2;
+pub const PHYSICAL_KIND_CDC_RECONCILE: u8 = 3;
 
 pub fn encode_tagged_node(kind: u8, payload: &[u8], buf: &mut Vec<u8>) {
     buf.extend_from_slice(PHYSICAL_MAGIC);

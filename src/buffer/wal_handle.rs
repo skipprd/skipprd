@@ -1472,8 +1472,8 @@ fn meta_from_index_row(
                 bytes: entry.len,
                 updated_at_secs: 0,
                 slice_ordinal: entry.ordinal,
-                part_meta_start: 0,
-                part_meta_len: 0,
+                part_meta_start: entry.part_meta_start,
+                part_meta_len: entry.part_meta_len,
                 part_meta_summary: match (entry.cdc_meta_hash, entry.row_count) {
                     (Some(canonical_hash), Some(row_count)) => SegmentPartMetaSummary::Cdc {
                         row_count,
@@ -1530,6 +1530,8 @@ fn slice_dir_entries(
             sink_ref: idx.key.sink_ref.clone(),
             schema_fingerprint: idx.key.schema_fingerprint.clone(),
             cdc_meta_hash: idx.part_meta_summary.canonical_hash(),
+            part_meta_start: idx.part_meta_start,
+            part_meta_len: idx.part_meta_len,
         })
         .collect()
 }
@@ -1543,6 +1545,8 @@ fn slice_index_from_dir(segment_id: &SegmentId, entry: &SliceDirEntry) -> SliceI
         start: entry.start,
         len: entry.len,
         codec: entry.codec,
+        part_meta_start: entry.part_meta_start,
+        part_meta_len: entry.part_meta_len,
         version: 0,
     }
 }
@@ -1807,6 +1811,7 @@ mod tests {
         assert_eq!(row.entries[0].namespace, "ns");
         assert_eq!(row.entries[0].partition, "p0");
         assert!(row.entries[0].len > 0);
+        assert_eq!(row.entries[0].part_meta_len, 0);
         assert!(handle
             .catalog
             .get(&CatalogKey::Slice {

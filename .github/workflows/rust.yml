@@ -176,6 +176,39 @@ jobs:
           count="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${work}/warehouse/bronze/file_duckdb_append');")"
           echo "${count}"
           echo "${count}" | tail -n 1 | grep -qx '2'
+          query_count() {
+            DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+              ./skipprd-linux_x86/skipprd --config "${work}/skippr.yml" \
+              query --plain --sql "SELECT count(*) FROM file_duckdb_append.file_duckdb_append" \
+            | python3 -c 'import json,sys; d=next(json.loads(l) for l in reversed(sys.stdin.read().splitlines()) if l.strip().startswith("{") and "\"rows\"" in l); print(d["rows"][0][0])'
+          }
+          echo "skipprd query count=$(query_count)"
+          test "$(query_count)" = "2"
+          printf '%s\n' '3,Alan Turing,gamma' >> "${work}/source/people.csv"
+          echo hold_before_compaction_sink > "${work}/data/failpoint"
+          USE_LOCAL_PLUGIN_CODE=1 \
+          SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests" \
+          DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+            ./skipprd-linux_x86/skipprd --config "${work}/skippr.yml" \
+            sync --log --pipeline file_duckdb_append --once &
+          sync_pid=$!
+          overlap=""
+          for _ in $(seq 1 60); do
+            overlap="$(query_count || true)"
+            if [ "${overlap}" = "3" ]; then
+              break
+            fi
+            sleep 1
+          done
+          test "${overlap}" = "3"
+          ids="$(DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+            ./skipprd-linux_x86/skipprd --config "${work}/skippr.yml" \
+            query --plain --sql "SELECT id FROM file_duckdb_append.file_duckdb_append" \
+            | python3 -c 'import json,sys; d=next(json.loads(l) for l in reversed(sys.stdin.read().splitlines()) if l.strip().startswith("{") and "\"rows\"" in l); print(len({r[0] for r in d["rows"]}))'"
+          test "${ids}" = "3"
+          rm -f "${work}/data/failpoint"
+          wait "${sync_pid}" || true
+          test "$(query_count)" = "3"
 
   e2e_file_copy:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'

@@ -495,6 +495,36 @@ def main() -> int:
         manifests = None if use_published_plugins() else stage_plugins(config)
         env = lake_env(config, data_dir, manifests)
         run_sync(skipprd, config, env)
+        log("stage skipprd query bronze count")
+        query = subprocess.run(
+            [
+                str(skipprd),
+                "--config",
+                str(config),
+                "query",
+                "--plain",
+                "--sql",
+                "SELECT count(*) FROM shop.shop",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if query.returncode != 0:
+            raise HarnessError(
+                f"skipprd query failed rc={query.returncode}:\nstdout={query.stdout!r}\nstderr={query.stderr!r}"
+            )
+        query_count = None
+        for line in reversed(query.stdout.splitlines()):
+            stripped = line.strip()
+            if stripped.startswith("{") and '"rows"' in stripped:
+                query_count = int(float(json.loads(stripped)["rows"][0][0]))
+                break
+        if query_count != EXPECTED["bronze_count"]:
+            raise HarnessError(
+                f"skipprd query shop.shop count {query_count} != {EXPECTED['bronze_count']}"
+            )
         if use_published_plugins():
             assert_published_file_lake_plugins(env["SKIPPR_RUNTIME_PLUGIN_DIR"])
         serve, endpoints = start_serve(skipprd, config, env, workdir)

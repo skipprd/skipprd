@@ -30,7 +30,7 @@ skipprd stays JWT-ignorant. Fully functional on `skipprd sync` + `sde query` (an
 4. Iceberg partition = **identity** on bronze `hour` + `service_name` + `tenant_id`. No Iceberg `hour()` transform.
 5. `trace_id` lookup is time-bounded (ScanBudget, default 24h).
 6. Clustered discover stays rejected. Schema from **host-seeded `OutputMetadata`**.
-7. Dual-plane is shipped (`IcebergWalUnionProvider`). UDFs run on that provider. No listing fallback.
+7. Dual-plane is shipped (`IcebergWalTableProvider`). UDFs run on that provider. No listing fallback.
 8. skipprd JWT-ignorant. Tenant prune is SQL `WHERE tenant_id = …`.
 9. **Arrow IPC ingest:** plugin decodes OTLP binary (or OTLP JSON → proto) to bronze structs, then Arrow builders. Submit `RuntimeIngestPartitionBatch` via `submit_arrow_ipc_batches`. MUST NOT emit `IngestBatch` NDJSON. MUST NOT add a serde path in `ingest_work.rs`.
 10. Dead letters: invalid wire → HTTP 400 / gRPC invalid argument. Builder/schema failure → Arrow batch on `_dl_{pipeline}` with existing deadletter columns.
@@ -108,7 +108,7 @@ docs/docs/query/observability-udfs.md
 | B.4 | `otel_waterfall` TVF | parent/child/depth |
 | B.5 | `otel_logs_tail` / `otel_logs_for_trace` | filter + trace join |
 | B.6–B.8 | `otel_rate` / `otel_increase` / `otel_histogram_quantile` | monotonic; empty; quantile |
-| B.9 | UDFs on IcebergWalUnionProvider; no listing fallback | existing union tests |
+| B.9 | UDFs on IcebergWalTableProvider; no listing fallback | existing union tests |
 | B.15 | Cookbook SQL | `examples/otel/cookbook.sql` |
 | B.16–B.17 | `otel_services` / `otel_service_map` | caps |
 | B.18 | Row caps + `truncated` column | overflow sets truncated |

@@ -46,7 +46,7 @@ jobs:
           architecture_name: linux_x86
           workspace-root: skipprd
           runtime_plugin_packages_json: >-
-            ["skippr-plugin-data-source-file","skippr-plugin-data-sink-duckdb","skippr-plugin-schema-sink-duckdb","skippr-plugin-data-sink-skipprlake","skippr-plugin-schema-sink-skipprlake"]
+            ["skippr-plugin-data-source-file","skippr-plugin-data-source-postgres","skippr-plugin-data-sink-duckdb","skippr-plugin-schema-sink-duckdb","skippr-plugin-data-sink-skipprlake","skippr-plugin-schema-sink-skipprlake"]
 
   linux_matrix:
     name: perf-db ${{ matrix.scenario }}
@@ -66,6 +66,14 @@ jobs:
           - q-union-point-duckdb
           - q-union-group-duckdb
           - q-iceberg-only-duckdb
+          - q-union-overlap-duckdb
+          - q-cdc-union-count-pg
+          - q-cdc-union-update-pg
+          - q-cdc-union-delete-pg
+          - q-cdc-union-reinsert-pg
+          - q-cdc-union-sum-pg
+          - q-cdc-overlap-pg
+          - q-cdc-iceberg-only-pg
     steps:
       - uses: actions/checkout@v4
         with:
@@ -147,6 +155,7 @@ jobs:
           cargo build --profile profiling -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables
           cargo build --profile profiling \
             -p skippr-plugin-data-source-file \
+            -p skippr-plugin-data-source-postgres \
             -p skippr-plugin-data-sink-duckdb \
             -p skippr-plugin-schema-sink-duckdb \
             -p skippr-plugin-data-sink-skipprlake \
@@ -154,6 +163,7 @@ jobs:
           mkdir -p skipprd-linux_x86-profile runtime-plugin-binaries-linux_x86-profile
           cp target/profiling/skipprd skipprd-linux_x86-profile/skipprd
           cp target/profiling/skippr-plugin-data-source-file \
+             target/profiling/skippr-plugin-data-source-postgres \
              target/profiling/skippr-plugin-data-sink-duckdb \
              target/profiling/skippr-plugin-schema-sink-duckdb \
              target/profiling/skippr-plugin-data-sink-skipprlake \
@@ -195,6 +205,8 @@ jobs:
           - scenario: q-wal-point-iceberg
             profile: flamegraph
           - scenario: q-union-count-duckdb
+            profile: flamegraph
+          - scenario: q-cdc-union-update-pg
             profile: flamegraph
           - scenario: q-wal-count-iceberg
             profile: heaptrack

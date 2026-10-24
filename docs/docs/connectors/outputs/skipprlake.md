@@ -114,7 +114,7 @@ Table files live at `{warehouse}/{table_namespace}/{table_name}`.
 
 Supports `append`, `merge_by_key`, `replace_partition`, and `replace_table`. Skipprd expires old snapshots (recent commits are kept), rewrites small files, and folds delete files. Query results stay the same; do not use old snapshots as time travel.
 
-`skipprd query` unions the Iceberg table with in-flight WAL rows.
+`skipprd query` returns the current table (Iceberg plus uncompacted WAL, CDC applied).
 
 ## Troubleshooting
 

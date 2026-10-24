@@ -735,12 +735,16 @@ async fn execute_live_wal(
     let schema = iceberg_schema_for_namespace(config, &request.namespace)
         .await
         .unwrap_or_else(|_| Arc::new(Schema::empty()));
+    let cdc = crate::plugins::cdc::get_namespace_cdc_contract(&request.namespace)
+        .map(|c| !c.business_key_columns.is_empty())
+        .unwrap_or(false);
     let provider = crate::sqlrt::wal_table::WalTableProvider::new(
         schema.clone(),
         request.pipeline.clone(),
         request.namespace.clone(),
         request.exclude_segment_ids.clone(),
-    );
+    )
+    .with_cdc_sidecar(cdc);
     let ctx = SessionContext::new();
     let plan = provider
         .scan(&ctx.state(), None, &[], None)

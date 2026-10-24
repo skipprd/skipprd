@@ -16,7 +16,7 @@ Shipped: every clustered `skipprd` process serves Arrow Flight SQL 59.2 on membe
 ### Functional
 
 1. Every clustered node MUST serve Arrow Flight SQL 59.2 on the advertised `flight_addr` (wildcard bind, ephemeral port, no new address knobs).
-2. Live WAL remains unpinned and eventually consistent. `select_live_ordinals` is the only selector. DoGet MUST re-select ordinals at execution time. Tickets and prepared handles MUST NOT freeze a segment/ordinal set.
+2. Query pins a read boundary `(S, E, W)` at plan time: Iceberg current snapshot `S`, ancestry-wide exclude set `E` (`skippr.wal-segment-ids` across snapshots), and WAL ordinals `W` from `select_live_ordinals`. `WalScanExec` MUST NOT re-select live ordinals at execute. The pin is a query-local ordinal list, not a reclaim lease. Tickets MUST NOT nack `ReclaimSegment`. Missing payloads skip that ordinal.
 3. The only Skippr SQL extension for live WAL is:
 
    ```sql
@@ -27,9 +27,9 @@ Shipped: every clustered `skipprd` process serves Arrow Flight SQL 59.2 on membe
 4. Flight SQL is read-only. INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, MERGE, and CommandStatementUpdate MUST fail closed.
 5. `live_wal_scan` tenant/workspace MUST equal the Flight session `TenantScope` (`Authorization: Basic {tenant}/{workspace}` on **every** RPC). Foreign identity is a typed rejection, not an empty scan. Unknown pipeline is a typed rejection. Cluster membership is **not** a tenant.
 6. SkipprLake catalog listing for UNION registration lists tables in that pipeline's `table_namespace` (see `catalog_table_to_namespace`). Isolation is the Iceberg namespace, not a table name prefix. A pipeline with no catalog tables yet MUST NOT fail registration of another pipeline in the same session.
-7. UNION is a dumb concat of Iceberg snapshot + live WAL. It MUST NOT DISTINCT, wait, or pin. Missing WAL files skip that ordinal. Unreachable WAL is Iceberg-only (complete Iceberg result, not a partial UNION).
-8. datafusion-distributed MUST execute that UNION **before** aggregate, join, sort, or limit that is not pushed into a scan. Iceberg parquet MAY run on any QueryRuntime Worker (shared warehouse; `IcebergScanExec` reloads from `catalog_json`). Live WAL is always a one-partition `FlightSqlExec` DoGet to the advertised `flight_addr` of the picker winner (best-effort max `catalog_seq_seen` with `payload_ready`, including when the winner is this process). `WalTableProvider` / `WalScanExec` MUST NOT enter a distributed plan (catalog rows and payload bytes stay on the owner). `WalScanExec` runs only inside the owner's `live_wal_scan` DoGet.
-9. Every clustered `skipprd` node is a query node: in-process QueryRuntime Worker bind first, then Flight SQL on `flight_addr`, then gossip. `query_context()` uses the distributed planner and `WorkerResolver` over gossip `worker` addrs (including self; replica `ready` is not a gate). Clustered SELECT fails closed if QueryRuntime is not started. `clustered query` opens Flight SQL on any ready `flight_addr`. The serving node plans UNION. `SK=query-scheduler#{generation}` is **not** used.
+7. One table provider (`IcebergWalTableProvider`) serves Iceberg plus uncompacted WAL. Append WAL is concat. CDC WAL collapses by business key and `order_token` (max token wins; equal tokens break ties by segment/ordinal/row), anti-joins those keys out of Iceberg, then unions surviving insert/update/snapshot rows. Deletes suppress the key. v1 has no before-image: a mutated business key is correct only if the source emitted delete(old)+insert(new). Slice-done bits MUST NOT hide an ordinal until its segment id is in `E` or the `SegmentRow` is reclaimed. Missing WAL files skip that ordinal. Unreachable WAL is Iceberg-only.
+8. datafusion-distributed MUST execute that merge **before** aggregate, join, sort, or limit that is not pushed into a scan. Iceberg parquet MAY run on any QueryRuntime Worker (shared warehouse; `IcebergScanExec` reloads from `catalog_json`). Live WAL is always a one-partition `FlightSqlExec` DoGet to the advertised `flight_addr` of the picker winner (best-effort max `catalog_seq_seen` with `payload_ready`, including when the winner is this process). The merge (`UnionExec` or `CdcReconcileExec`) sits on the serving node above those leaves. `WalTableProvider` / `WalScanExec` MUST NOT enter a distributed plan (catalog rows and payload bytes stay on the owner). `WalScanExec` runs only inside the owner's `live_wal_scan` DoGet. Unsafe predicate/projection pushdown stays off for CDC until merge finishes.
+9. Every clustered `skipprd` node is a query node: in-process QueryRuntime Worker bind first, then Flight SQL on `flight_addr`, then gossip. `query_context()` uses the distributed planner and `WorkerResolver` over gossip `worker` addrs (including self; replica `ready` is not a gate). Clustered SELECT fails closed if QueryRuntime is not started. `clustered query` opens Flight SQL on any ready `flight_addr`. The serving node plans the merge. `SK=query-scheduler#{generation}` is **not** used.
 10. Iceberg metadata is loaded with in-process Iceberg Rust `Catalog` on the serving node. If load/scan setup fails, retry Iceberg scan via another ready node's Flight SQL. Never fall back to parquet listing.
 11. Partial distributed results are forbidden. Executor or replica failure either retries a typed alternative (next WAL head, peer Iceberg Flight, or Iceberg-only) or fails the query. Returning a subset of UNION partitions is not allowed.
 
@@ -40,13 +40,13 @@ Shipped: every clustered `skipprd` process serves Arrow Flight SQL 59.2 on membe
 - Default host `skipprd` builds still MUST NOT pull `aws-sdk-dynamodb`. `arrow-flight`, `datafusion-distributed`, and `iceberg` MAY be default-host dependencies. Dynamo catalog stays `offset-store-dynamodb`.
 - Clustered replica TCP, Flight SQL, and QueryRuntime worker gRPC MUST use mTLS (SAN `skippr-cluster`). Gossip UDP uses HMAC with required `SKIPPR_CLUSTER_GOSSIP_KEY`.
 - Every Flight SQL RPC MUST carry `Authorization: Basic {tenant}/{workspace}`. Cloud JWT is verified only at the Cloud gateway (D31); skipprd enforces the resulting `TenantScope`.
-- Query must not nack `ReclaimSegment` or hold pins. In-flight DoGet that loses a file skips that ordinal.
+- Query must not nack `ReclaimSegment`. The `(S, E, W)` pin is a query-local ordinal list, not a reclaim lease. In-flight DoGet that loses a file skips that ordinal.
 - Metrics already named `cluster_flight_request` / `cluster_flight_fail` apply to Flight SQL (keep the names).
 
 ### Non-goals
 
 - Custom public WAL Flight tickets.
-- Pinning WAL to a query snapshot / delaying reclaim.
+- Holding a reclaim lease or nacking `ReclaimSegment` from query (plan-time ordinal lists are local to the scan).
 - Guaranteeing the globally latest WAL (advertised max is best effort).
 - Historical Iceberg time-travel UNION with reclaimed WAL.
 - Standalone `skippr-ballista-scheduler` / `skippr-ballista-executor` processes.
@@ -60,7 +60,7 @@ Shipped: every clustered `skipprd` process serves Arrow Flight SQL 59.2 on membe
 |---|---|---|
 | Iceberg cold scan | `src/sqlrt/iceberg_table.rs` | Current snapshot, fail closed if none; schema/field IDs authoritative |
 | Live ordinals | `src/query_flight/live_wal.rs` `select_live_ordinals` | Catalog `SliceIndexEntry` rows (`CatalogPrefix::Slice`) minus Iceberg named segment ids. Skip ordinals whose `SegmentRow` is missing or whose payload is gone. Slice-complete ordinals stay visible until Iceberg lists the segment. |
-| In-process UNION | `IcebergWalUnionProvider` | `UnionExec` + `GlobalLimitExec` on the union; WAL is always `FlightSqlExec` to the picker winner's advertised `flight_addr` |
+| In-process merge | `IcebergWalTableProvider` | Append: `UnionExec`. CDC: `CdcReconcileExec` above Iceberg + WAL leaves. WAL is `FlightSqlExec` to the picker winner's advertised `flight_addr`. Pin `(S, E, W)` at plan. |
 | Client | `Session.query` → `clustered_query_collect` | Flight SQL to ready `flight_addr`s in `node_id` contact order; Iceberg-only is inside the serving node; never takes an ingest lease |
 | Catalog listing | `catalog_table_to_namespace` | Iceberg table name is identity; isolation is `table_namespace` |
 
@@ -119,13 +119,13 @@ Foreign session is a typed rejection. The serving node does not register a DataF
 DoGet for `live_wal_scan`:
 
 1. resolve the pipeline WAL catalog handle for that `PipelineKey`;
-2. `select_live_ordinals`: catalog `SliceIndexEntry` minus Iceberg named ids; skip missing payloads;
-3. stream `WalTableProvider` batches projected/cast/null-filled to Iceberg schema;
+2. pin `select_live_ordinals` at `WalTableProvider::scan` (catalog `SliceIndexEntry` minus Iceberg named ids); skip missing payloads;
+3. stream `WalTableProvider` batches projected/cast/null-filled to Iceberg schema (plus CDC sidecar when the namespace has business keys);
 4. skip missing payload bytes; unknown pipeline fails the stream.
 
 ### Host-side scan node
 
-`IcebergWalUnionProvider` remote WAL side MUST become a physical `FlightSqlExec` leaf (crate `skippr-query-plan`), not an eager collect into `StreamingBatchesExec`.
+`IcebergWalTableProvider` remote WAL side MUST become a physical `FlightSqlExec` leaf (crate `skippr-query-plan`), not an eager collect into `StreamingBatchesExec`.
 
 `FlightSqlExec` fields:
 
@@ -136,14 +136,14 @@ DoGet for `live_wal_scan`:
 
 `FlightSqlExec::execute` streams GetFlightInfo+DoGet of that SQL. Collecting in `TableProvider::scan` is forbidden.
 
-The UNION WAL child is always that `FlightSqlExec`, including when the picker winner is this process (loopback to the advertised `flight_addr`, not `0.0.0.0` and not `WalTableProvider` in the UNION). `WalTableProvider` is only the owner's `live_wal_scan` DoGet. That DoGet MUST NOT use QueryRuntime (`classify_sql` sole-FROM), so loopback cannot deadlock.
+The merge WAL child is always that `FlightSqlExec`, including when the picker winner is this process (loopback to the advertised `flight_addr`, not `0.0.0.0` and not `WalTableProvider` in the merge). `WalTableProvider` is only the owner's `live_wal_scan` DoGet. That DoGet MUST NOT use QueryRuntime (`classify_sql` sole-FROM), so loopback cannot deadlock.
 
 ### Tests (WU-7.3)
 
 - Flight SQL metadata lists Iceberg tables in that pipeline's `table_namespace` only.
 - SELECT against Iceberg∪WAL unique ids (existing e2e assertion, new transport).
 - `live_wal_scan` foreign tenant rejected; unknown pipeline rejected; DDL/update rejected.
-- Prepared handle DoGet re-selects ordinals (a reclaim between GetFlightInfo and DoGet skips the file, does not fail closed unless every path fails).
+- Prepared handle DoGet uses the plan-time pinned ordinals (a reclaim between GetFlightInfo and DoGet skips the file, does not fail closed unless every path fails).
 - Empty `flight_addr` / no ready member → Iceberg-only, not a hung client.
 - Oversized SQL rejected.
 - `cargo test -p skipprd --lib query_flight::` replaces `query_socket::`.
@@ -222,6 +222,7 @@ message FlightSqlExecNode {
 
 - encode/decode `FlightSqlExec` via that message (`SkipprPhysicalCodec` in `skippr-query-plan` is the FlightSql helper);
 - encode/decode `IcebergScanExec` via tagged prost;
+- encode/decode `CdcReconcileExec` as a tagged node with Iceberg and WAL children;
 - **fail closed** if asked to encode `WalScanExec` (WAL must not leave the owner as a distributed leaf);
 - delegate every other node to `DefaultPhysicalExtensionCodec`;
 - schema lives in `arrow_schema_ipc` because these leaves have no children.
@@ -231,7 +232,7 @@ datafusion-distributed ships **physical** plans only. `SkipprHostCodec` is the s
 ### Tests (WU-7.5)
 
 - Prost codec round-trip including schema; reject truncated/unknown tags.
-- Distributed plan: UNION children are Iceberg scan + `FlightSqlExec`; aggregate/join are parents of UNION. No `WalScanExec` in the distributed plan.
+- Distributed plan: merge children are Iceberg scan + `FlightSqlExec`; aggregate/join are parents of the merge. No `WalScanExec` in the distributed plan.
 - Higher advertised peer head → `FlightSqlExec` to that `flight_addr`; local tie → `FlightSqlExec` to this process's advertised `flight_addr`.
 - Host codec rejects `WalScanExec` encode. `WorkerResolver` returns self plus gossip `worker` addrs. Replica `ready` is not a gate.
 - Worker bind is `0.0.0.0`; advertised worker is the cluster IP + bound port.
@@ -246,7 +247,7 @@ datafusion-distributed ships **physical** plans only. `SkipprHostCodec` is the s
 Product SQL stays `sde query` / `skipprd query --sql`. Clustered mode:
 
 - User writes `SELECT ... FROM <iceberg namespace>`.
-- The session registers UNION views per pipeline namespace (Iceberg table names; isolation is `table_namespace`).
+- The session registers Iceberg∪WAL views per pipeline namespace (Iceberg table names; isolation is `table_namespace`).
 - `live_wal_scan` is internal to the WAL leaf (sole-FROM statement). It is not a documented customer table.
 
 `STREAM ... FROM ...` is a single-process WAL tail on `WalTableProvider` registered on the QueryRuntime coordinating context.
@@ -263,8 +264,8 @@ Product SQL stays `sde query` / `skipprd query --sql`. Clustered mode:
 
 - No framed query socket remains in `skipprd`.
 - Iceberg Rust, Flight SQL 59.2, and datafusion-distributed are linked into `skipprd`. No standalone query-engine OS processes.
-- Every clustered node accepts user `SELECT` on `flight_addr` and runs UNION of Iceberg parquet + best-effort latest advertised WAL.
-- QueryRuntime executes UNION before downstream relational operators.
+- Every clustered node accepts user `SELECT` on `flight_addr` and returns the current table (Iceberg parquet plus uncompacted WAL, CDC applied).
+- QueryRuntime executes the merge before downstream relational operators.
 - Iceberg-only remains a complete stand-in when no WAL head is reachable.
 - No new cluster configuration knobs.
 - HLA harness query paths use Flight SQL against `skipprd` nodes only.
@@ -275,7 +276,7 @@ Product SQL stays `sde query` / `skipprd query --sql`. Clustered mode:
 |---|---|
 | Framed query socket | Deleted (`src/query_flight` only) |
 | `select_live_ordinals` | Shipped in `src/query_flight/live_wal.rs` |
-| In-process `UnionExec` | Shipped. Clustered UNION WAL child is `FlightSqlExec` to the picker winner. Local `skipprd query` (no Flight bind) registers `WalTableProvider` on QueryRuntime; `WalScanExec` must not cross the worker wire |
+| In-process merge | Shipped (`IcebergWalTableProvider`). Clustered WAL child is `FlightSqlExec` to the picker winner. Local `skipprd query` (no Flight bind) registers `WalTableProvider` on QueryRuntime; `WalScanExec` must not cross the worker wire |
 | `FlightSqlExec` | Prost codec + streaming DoGet execute |
 | `SkipprHostCodec` | Tagged prost (`FlightSqlExec` / Iceberg) plus distributed shuffle; `WalScanExec` encode fails closed |
 | Scheduler/executor bins | Deleted; one QueryRuntime Worker per process inside `run_clustered` |

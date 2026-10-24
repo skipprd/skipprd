@@ -443,15 +443,15 @@ Skippr implements a read-only DataFusion `TableProvider` directly over the vendo
 
 Iceberg catalog schema is authoritative. WAL batches project/cast into it; missing evolved columns are NULL-filled; incompatible evolution fails.
 
-### Live WAL (unpinned, eventually consistent)
+### Live WAL (pinned read boundary)
 
-Iceberg is the only snapshot. WAL is a best-effort tail of that snapshot: it MAY omit not-yet-compacted rows. A later query MAY see more WAL. Writes never observe query state.
+Iceberg snapshot `S` is the lake pointer captured at plan. WAL set `W` is catalog `SliceIndexEntry` rows minus exclude set `E` (`skippr.wal-segment-ids` across snapshot ancestry). `select_live_ordinals` is the only selector; it runs at plan and the ordinal list is reused at execute. A later query MAY see more WAL. Writes never observe query state.
 
-`select_live_ordinals` is the only query selector. Live ordinals are catalog `SliceIndexEntry` rows (`CatalogPrefix::Slice`) minus Iceberg `skippr.wal-segment-ids`. If the matching `SegmentRow` is missing or the payload is unreadable or gone, skip that ordinal (do not scan it, do not fail the query). Slice-complete ordinals stay visible until Iceberg lists the segment.
+If the matching `SegmentRow` is missing or the payload is unreadable or gone, skip that ordinal (do not scan it, do not fail the query). Slice-complete ordinals stay visible until Iceberg lists the segment.
 
 Slice-done bits live on the `SegmentRow` as compaction progress; they are not the query cut. Iceberg-named segment ids close the window after the lake pointer commit.
 
-There are no query pins. Reclaim deletes the catalog row, then the payload; a scan that misses the file skips it. Readers MUST NOT nack reclaim.
+The pin is a query-local ordinal list, not a reclaim lease. Reclaim deletes the catalog row, then the payload; a scan that misses the file skips it. Readers MUST NOT nack reclaim.
 
 ### Query transport
 
@@ -460,16 +460,16 @@ There are no query pins. Reclaim deletes the catalog row, then the payload; a sc
 Locked here so other HLA docs do not drift:
 
 - Skippr SQL extension remains `live_wal_scan(tenant, workspace, pipeline, namespace, exclude_segment_ids)` as an internal sole-FROM statement, not a public custom ticket.
-- DoGet re-selects `select_live_ordinals` at execution time (unpinned). Handles MUST NOT freeze ordinals.
+- DoGet/`WalScanExec` uses the plan-time pinned ordinal list. Handles MUST NOT nack reclaim.
 - Flight SQL is read-only. Foreign tenant/workspace and unknown pipeline fail closed.
 - `CURRENT_PROTOCOL` is **3** (cluster hello). There is no query-planner protocol on DynamoDB.
 - No new address/port/scheduler knobs. Dual framed+Flight protocols are forbidden.
 - Each clustered `skipprd` node runs Flight SQL plus one QueryRuntime Worker. `WorkerResolver` lists self plus gossip `worker` addrs; there is no elected coordinator. `clustered query` talks Flight SQL to any ready `flight_addr`. WAL is a one-partition `FlightSqlExec` to the serving node's best-effort max advertised `catalog_seq_seen` with `payload_ready` (local on tie if this process holds paths → this process's advertised `flight_addr`). Iceberg parquet may run on any QueryRuntime Worker.
-- UNION stays a dumb concat before aggregate/join. Iceberg-only is a valid behind read.
+- Merge (append concat or CDC reconcile) stays above Iceberg and WAL leaves, before aggregate/join. Iceberg-only is a valid behind read.
 
-### UNION
+### Merge (Iceberg + WAL)
 
-**Shipped:** `IcebergWalUnionProvider::scan` builds a DataFusion `UnionExec` of the Iceberg plan and the live WAL plan, with `GlobalLimitExec` on the union (not eager collect with Iceberg-only limit). UNION is a dumb concat: it MUST NOT DISTINCT, wait, or pin. Catalog listing returns tables in that pipeline's Iceberg namespace (`catalog_table_to_namespace` is the table name); an empty second pipeline MUST NOT fail the first.
+**Shipped:** `IcebergWalTableProvider::scan` pins `(S, E, W)` and builds either `UnionExec` (append) or `CdcReconcileExec` (CDC business keys) of the Iceberg plan and the live WAL plan, with `GlobalLimitExec` on the result. Catalog listing returns tables in that pipeline's Iceberg namespace (`catalog_table_to_namespace` is the table name); an empty second pipeline MUST NOT fail the first.
 
 For each table:
 
@@ -534,7 +534,7 @@ Shipped:
 - WAL, compaction transactions, completion state, and reclaim survive failover.
 - Promotion requires catalog-seq + `payload_ready` state, schemas, reconciled offsets, and a synchronous replica.
 - No absolute disk path appears in clustered durable identity.
-- Iceberg snapshot reads are consistent. Live WAL is eventually consistent and unpinned; UNION must not double-count Iceberg-named segments (`SliceIndexEntry` minus `skippr.wal-segment-ids`; in-process `UnionExec` over Iceberg Rust + local WAL or `FlightSqlExec`).
+- Iceberg snapshot reads are consistent. Query pins `(S, E, W)` at plan; live WAL is eventually consistent at that pin. Merge must not double-count Iceberg-named segments (`SliceIndexEntry` minus ancestry-wide `skippr.wal-segment-ids`; append `UnionExec` or CDC `CdcReconcileExec` over Iceberg Rust + local WAL or `FlightSqlExec`).
 - Iceberg pipelines never fall back to Parquet listing.
 - Disk and clustered share one catalog-backed writer (`PipelineWalHandle`).
 - Deterministic failure, DDB contract (`tests/hla_e2e/ddb_cas.py`), subprocess crash, protocol-version, and query-consistency tests exist in the harness (process ticks wait on `run.py`).

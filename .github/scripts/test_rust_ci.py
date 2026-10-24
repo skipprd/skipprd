@@ -170,10 +170,15 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("chmod +x target/release/skippr-plugin-*", file_duckdb)
         self.assertIn("unsafe_enable_version_guessing", file_duckdb)
         self.assertIn("DATA_DIR_HIGH_WATERMARK_PCT=0", file_duckdb)
+        self.assertIn("skipprd query", file_duckdb)
+        self.assertIn("hold_before_compaction_sink", file_duckdb)
         file_duckdb_action = (
             ROOT / ".github" / "actions" / "e2e" / "file_duckdb_append" / "action.yaml"
         ).read_text(encoding="utf-8")
         self.assertIn("skipprd migrate", file_duckdb_action)
+        self.assertIn("skipprd query", file_duckdb_action)
+        self.assertIn("hold_before_compaction_sink", file_duckdb_action)
+        self.assertIn("SELECT id FROM file_duckdb_append.file_duckdb_append", file_duckdb_action)
         skipprlake = text.split("\n  e2e_skipprlake:", 1)[1].split("\n  e2e_postgres_cdc:", 1)[0]
         self.assertIn("USE_PUBLISHED_PLUGINS", skipprlake)
         self.assertNotIn("runtime-plugin-binaries-linux_x86", skipprlake)
@@ -188,6 +193,9 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("count(DISTINCT id)", postgres_cdc)
         self.assertIn("_skippr_order_token", postgres_cdc)
         self.assertIn("timeout --signal=KILL 120", postgres_cdc)
+        self.assertIn("query --plain", postgres_cdc)
+        self.assertIn("hold_before_compaction_sink", postgres_cdc)
+        self.assertIn("alpha-wal", postgres_cdc)
         postgres_cdc_yml = (
             ROOT / ".github" / "actions" / "e2e" / "postgres_skipprlake_cdc" / "skippr.yml"
         ).read_text(encoding="utf-8")
