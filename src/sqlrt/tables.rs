@@ -464,9 +464,18 @@ fn fallback_ingest_scope(config: &Config) -> TenantScope {
     })
 }
 
+fn query_lake_only_from_env() -> bool {
+    Config::truth_value(&Config::getenv("SKIPPR_QUERY_LAKE_ONLY", "false"))
+}
+
 fn namespace_union_opts(config: &Config) -> ClusteredSelectOpts {
-    process_clustered_select_opts(fallback_ingest_scope(config)).unwrap_or_else(|_| {
-        ClusteredSelectOpts {
+    let lake_only = query_lake_only_from_env();
+    process_clustered_select_opts(fallback_ingest_scope(config))
+        .map(|mut opts| {
+            opts.lake_only = opts.lake_only || lake_only;
+            opts
+        })
+        .unwrap_or_else(|_| ClusteredSelectOpts {
             identity: ClusterIdentity::new(
                 skippr_lease::ClusterId::new("local").expect("static cluster id"),
                 skippr_lease::NodeId::from_uuid(uuid::Uuid::nil()),
@@ -474,9 +483,8 @@ fn namespace_union_opts(config: &Config) -> ClusteredSelectOpts {
             scope: fallback_ingest_scope(config),
             local_flight: "127.0.0.1:0".parse().unwrap(),
             registry: crate::cluster::peer::process_registry(),
-            lake_only: false,
-        }
-    })
+            lake_only,
+        })
 }
 
 pub async fn plan_clustered_select(
@@ -1386,6 +1394,7 @@ mod tests {
         let src = include_str!("tables.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(prod.contains("lake_only: bool"));
+        assert!(prod.contains("SKIPPR_QUERY_LAKE_ONLY"));
         assert!(prod.contains("FlightSqlTableProvider::live_wal"));
         assert!(!prod.contains("WalPick"));
         assert!(prod.contains("None => Ok(None)"));

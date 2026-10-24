@@ -221,9 +221,48 @@ pub fn ensure_disk_wal_handle(
     Ok(handle)
 }
 
+/// Open the WAL catalog for `skipprd query` without taking the ingest writer lease.
+pub fn ensure_query_wal_handle(config: &Config) -> io::Result<Option<Arc<PipelineWalHandle>>> {
+    let pipeline = config.get_pipeline_name();
+    if pipeline.is_empty() {
+        return Ok(None);
+    }
+    let key =
+        skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+    if let Some(handle) = wal_handle::wal_handle_for(&key) {
+        return Ok(Some(handle));
+    }
+    let offsets = crate::helpers::offsets::Offsets::init(config)
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    let offsets = Arc::new(offsets);
+    let clock = Arc::new(skippr_lease::SystemClock::new());
+    let guard = skippr_lease::LeaseGuard::single_node(key.clone(), clock);
+    let fence = wal_handle::catalog_fence_from_guard(&guard)
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    let catalog =
+        crate::pipeline_backend::open_wal_catalog_for_config(config, Some(offsets.as_ref()), fence)
+            .map_err(io::Error::other)?;
+    let offset_store = offsets
+        .bytes_store()
+        .cloned()
+        .ok_or_else(|| io::Error::other("WAL catalog requires an offset store"))?;
+    let paths =
+        skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(&config.get_data_dir()));
+    let handle = PipelineWalHandle::new(key, paths, guard, catalog, offset_store);
+    wal_handle::install_wal_handle(handle.clone());
+    Ok(Some(handle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_wal_handle_skips_unbound_pipeline() {
+        let config = Config::new();
+        assert!(ensure_query_wal_handle(&config).unwrap().is_none());
+    }
 
     #[test]
     fn block_on_async_completes_without_runtime() {

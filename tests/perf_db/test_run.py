@@ -103,6 +103,7 @@ class PerfDbCatalogTests(unittest.TestCase):
         self.assertTrue((point.get("asserts") or {}).get("query_point"))
         stream = catalog["scenarios"]["q-stream-tail-iceberg"]
         self.assertTrue(stream["sql"].upper().startswith("STREAM "))
+        self.assertTrue(stream.get("wal_tail"))
         union = catalog["scenarios"]["q-union-count-duckdb"]
         self.assertEqual(union["sink"], "duckdb")
         self.assertTrue((union.get("asserts") or {}).get("query_count"))
@@ -162,6 +163,8 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("--signal=KILL", text)
         self.assertIn('CDC_DDB_TABLE = "skippr-perf-db-cdc"', text)
         self.assertIn("tables=[CDC_DDB_TABLE]", text)
+        self.assertIn('scenario.get("wal_tail")', text)
+        self.assertIn("stream_limit_rows", text)
         self.assertNotIn("from tests.perf.run import", text)
         self.assertNotIn("copy_b-json-json", text)
 

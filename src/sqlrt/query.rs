@@ -355,6 +355,21 @@ pub async fn query_collect_warm(
     warmup: bool,
 ) -> std::io::Result<Vec<arrow::array::RecordBatch>> {
     config.init().await;
+    let cdc_keys = config.query_cdc_business_keys();
+    if !cdc_keys.is_empty() {
+        crate::plugins::cdc::install_query_cdc_contracts(cdc_keys);
+    }
+    if !crate::helpers::configuration::Config::truth_value(
+        &crate::helpers::configuration::Config::getenv("SKIPPR_QUERY_LAKE_ONLY", "false"),
+    ) {
+        for name in config.get_pipelines() {
+            let bound = config.bind_pipeline(&name);
+            bound.init().await;
+            if let Err(err) = crate::buffer::wal_store::ensure_query_wal_handle(&bound) {
+                tracing::warn!(pipeline = %name, error = %err, "query WAL catalog not opened");
+            }
+        }
+    }
     if !sql_uses_record_batch_collect(sql_str) {
         let mut parser = SParser::new(sql_str).map_err(|e| std::io::Error::other(e.to_string()))?;
         match parser
@@ -403,9 +418,17 @@ async fn stream_wal_session(
     let ctx = crate::sqlrt::session::coordinating_query_context().await?;
     *config = config.bind_pipeline(pipeline_name);
     config.init().await;
+    if let Err(err) = crate::buffer::wal_store::ensure_query_wal_handle(config) {
+        tracing::warn!(pipeline = %pipeline_name, error = %err, "STREAM WAL catalog not opened");
+    }
     register_catalog(config, &ctx).await;
+    let namespaces = crate::sqlrt::registry::list_namespaces(config, pipeline_name).await;
+    let namespace = namespaces
+        .into_iter()
+        .find(|name| !name.is_empty())
+        .unwrap_or_else(|| pipeline_name.to_string());
     let Some(provider) =
-        crate::sqlrt::tables::wal_table_for_namespace(config, pipeline_name, pipeline_name).await?
+        crate::sqlrt::tables::wal_table_for_namespace(config, pipeline_name, &namespace).await?
     else {
         return Ok(None);
     };
@@ -1951,6 +1974,14 @@ mod plain_query_document_tests {
             body.contains("new_context_all_namespaces"),
             "query_collect_warm must build a ready context before the timed collect"
         );
+        assert!(
+            body.contains("install_query_cdc_contracts"),
+            "query_collect_warm must load CDC business keys before Iceberg ∪ WAL scan"
+        );
+        assert!(
+            body.contains("ensure_query_wal_handle"),
+            "query_collect_warm must open the WAL catalog in this process"
+        );
         let timed = prod
             .split("async fn sql_collect_timed")
             .nth(1)
@@ -1990,6 +2021,10 @@ mod plain_query_document_tests {
         assert!(
             body.contains("stream_plain_snapshot"),
             "STREAM --plain must collect one WAL snapshot, not the TUI"
+        );
+        assert!(
+            prod.contains("list_namespaces"),
+            "STREAM FROM <pipeline> must scan a real namespace, not assume namespace==pipeline"
         );
         assert!(
             body.contains("execute_stream_sql"),
