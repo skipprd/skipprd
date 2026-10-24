@@ -73,6 +73,36 @@ runs:
         count="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${warehouse}/bronze/file_duckdb_append');")"
         echo "${count}"
         echo "${count}" | tail -n 1 | grep -qx '2'
+        query_count() {
+          DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+            target/debug/skipprd query --plain --sql "SELECT count(*) FROM file_duckdb_append.file_duckdb_append" \
+            --config "${work}/skippr.yml" \
+          | python3 -c 'import json,sys; d=next(json.loads(l) for l in reversed(sys.stdin.read().splitlines()) if l.strip().startswith("{") and "\"rows\"" in l); print(d["rows"][0][0])'
+        }
+        test "$(query_count)" = "2"
+        printf '%s\n' '3,Alan Turing,gamma' >> "${work}/source/people.csv"
+        echo hold_before_compaction_sink > "${work}/data/failpoint"
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+          target/debug/skipprd sync --log --pipeline file_duckdb_append --once \
+          --config "${work}/skippr.yml" &
+        sync_pid=$!
+        overlap=""
+        for _ in $(seq 1 60); do
+          overlap="$(query_count || true)"
+          if [ "${overlap}" = "3" ]; then
+            break
+          fi
+          sleep 1
+        done
+        test "${overlap}" = "3"
+        ids="$(DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+          target/debug/skipprd query --plain --sql "SELECT id FROM file_duckdb_append.file_duckdb_append" \
+          --config "${work}/skippr.yml" \
+          | python3 -c 'import json,sys; d=next(json.loads(l) for l in reversed(sys.stdin.read().splitlines()) if l.strip().startswith("{") and "\"rows\"" in l); print(len({r[0] for r in d["rows"]}))')"
+        test "${ids}" = "3"
+        rm -f "${work}/data/failpoint"
+        wait "${sync_pid}" || true
+        test "$(query_count)" = "3"
         mkdir -p "${work}/migrations"
         printf '%s\n' \
           'ALTER TABLE file_duckdb_append RENAME COLUMN category TO category_code;' \

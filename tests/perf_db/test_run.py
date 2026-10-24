@@ -25,7 +25,12 @@ def db_catalog() -> dict:
     return load_catalog(CATALOG_PATH)
 
 
-SMOKE = ("q-wal-count-iceberg", "q-wal-point-iceberg", "q-union-count-duckdb")
+SMOKE = (
+    "q-wal-count-iceberg",
+    "q-wal-point-iceberg",
+    "q-union-count-duckdb",
+    "q-union-overlap-duckdb",
+)
 REQUIRED = SMOKE + (
     "q-wal-group-iceberg",
     "q-stream-tail-iceberg",
@@ -33,6 +38,13 @@ REQUIRED = SMOKE + (
     "q-union-point-duckdb",
     "q-union-group-duckdb",
     "q-iceberg-only-duckdb",
+    "q-cdc-union-count-pg",
+    "q-cdc-union-update-pg",
+    "q-cdc-union-delete-pg",
+    "q-cdc-union-reinsert-pg",
+    "q-cdc-union-sum-pg",
+    "q-cdc-overlap-pg",
+    "q-cdc-iceberg-only-pg",
 )
 
 
@@ -47,9 +59,10 @@ class PerfDbCatalogTests(unittest.TestCase):
             self.assertNotIn(banned, joined)
         text = (HARNESS_DIR / "catalog.yaml").read_text(encoding="utf-8").lower()
         self.assertIn("file parquet iceberg", text)
-        self.assertNotIn("cdc-postgres", joined)
         self.assertNotIn("q-wal-count-file", ids)
         self.assertNotIn("q-union-count-skipprlake", ids)
+        self.assertIn("q-cdc-union-update-pg", ids)
+        self.assertIn("q-union-overlap-duckdb", ids)
 
     def test_smoke_is_wal_file_iceberg_versus_duckdb(self) -> None:
         catalog = db_catalog()
@@ -64,15 +77,16 @@ class PerfDbCatalogTests(unittest.TestCase):
         duckdb = catalog["scenarios"]["q-union-count-duckdb"]
         self.assertEqual(duckdb["sink"], "duckdb")
 
-    def test_every_cell_is_query_after_ingest_and_requires_sync_and_query_collect(self) -> None:
+    def test_every_cell_requires_sync_and_query_collect(self) -> None:
         catalog = db_catalog()
         for name, spec in catalog["scenarios"].items():
-            self.assertEqual(spec["kind"], "query_after_ingest", name)
-            self.assertIn(spec["sink"], {"skipprlake", "duckdb"}, name)
+            self.assertIn(spec["kind"], {"query_after_ingest", "query_after_cdc"}, name)
+            if spec["kind"] == "query_after_ingest":
+                self.assertIn(spec["sink"], {"skipprlake", "duckdb"}, name)
+                self.assertTrue((spec.get("asserts") or {}).get("iceberg_parquet"), name)
             phases = required_perf_for(catalog, spec)
             self.assertIn("sync", phases, name)
             self.assertIn("query_collect", phases, name)
-            self.assertTrue((spec.get("asserts") or {}).get("iceberg_parquet"), name)
 
     def test_unknown_catalog_assert_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -132,6 +146,7 @@ class PerfDbRunnerContractTests(unittest.TestCase):
     def test_runner_queries_after_sync_and_shares_perf_helpers(self) -> None:
         text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
         self.assertIn("query_after_ingest", text)
+        self.assertIn("query_after_cdc", text)
         self.assertIn("skipprd query", text)
         self.assertIn("--plain", text)
         self.assertIn("--warmup", text)
@@ -143,6 +158,8 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("iceberg_parquet", text)
         self.assertIn("*.parquet", text)
         self.assertIn("load_perf_db_catalog", text)
+        self.assertIn("timeout=120", text)
+        self.assertIn("--signal=KILL", text)
         self.assertNotIn("from tests.perf.run import", text)
         self.assertNotIn("copy_b-json-json", text)
 

@@ -33,6 +33,11 @@ KNOWN_ASSERT_KEYS = frozenset(
         "query_group",
         "stream_limit",
         "iceberg_parquet",
+        "query_name",
+        "query_absent_id",
+        "query_sum",
+        "query_unique",
+        "query_reconcile",
     }
 )
 
@@ -46,6 +51,7 @@ SCENARIO_KINDS = frozenset(
         "ingest_s3_skipprlake",
         "duckdb_ingest",
         "query_after_ingest",
+        "query_after_cdc",
     }
 )
 

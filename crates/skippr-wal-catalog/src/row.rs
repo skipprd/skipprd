@@ -116,6 +116,9 @@ pub struct SliceIndexEntry {
     pub start: u64,
     pub len: u64,
     pub codec: u8,
+    /// Byte range of the CDC sidecar. Zero length means append (no sidecar).
+    pub part_meta_start: u64,
+    pub part_meta_len: u64,
     pub version: u64,
 }
 
@@ -132,6 +135,9 @@ pub struct SliceDirEntry {
     pub sink_ref: String,
     pub schema_fingerprint: String,
     pub cdc_meta_hash: Option<[u8; 32]>,
+    /// Byte range of the CDC sidecar. Zero length means append (no sidecar).
+    pub part_meta_start: u64,
+    pub part_meta_len: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -331,6 +337,8 @@ mod tests {
             start: 16,
             len: 32,
             codec: 0,
+            part_meta_start: 8,
+            part_meta_len: 0,
             version: 0,
         });
         let bytes = row.encode().unwrap();
@@ -355,6 +363,8 @@ mod tests {
                 sink_ref: "out".into(),
                 schema_fingerprint: "fp".into(),
                 cdc_meta_hash: None,
+                part_meta_start: 8,
+                part_meta_len: 0,
             }],
         });
         let bytes = row.encode().unwrap();

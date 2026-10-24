@@ -908,6 +908,8 @@ fn persist_index_from_slices(
             sink_ref: String::new(),
             schema_fingerprint: String::new(),
             cdc_meta_hash: None,
+            part_meta_start: slice.part_meta_start,
+            part_meta_len: slice.part_meta_len,
         })
         .collect();
     let mut txn = CatalogTxn::new();
@@ -1460,6 +1462,8 @@ mod tests {
                 start: idx.start,
                 len: idx.len,
                 codec: idx.codec,
+                part_meta_start: idx.part_meta_start,
+                part_meta_len: idx.part_meta_len,
                 version: 0,
             }),
             PutCond::NotExists,

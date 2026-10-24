@@ -38,8 +38,10 @@ This is **not** skippr-perf (ingest/copy). Cells always `sync --once` then
 catalog connections, and runs the statement once; `query_collect` elapsed is
 the **query time** of the second collect, not skipprd process startup. Jsonl
 File sink query cells are out of suite.
-WAL leftover import, Postgres CDC, Snowflake, BigQuery, Databricks, Redshift,
-Athena Glue, and production JSON are out of suite.
+WAL leftover import, Snowflake, BigQuery, Databricks, Redshift,
+Athena Glue, and production JSON are out of suite. Postgres CDC query cells
+are in this matrix (`query_after_cdc`); skip locally if Docker is down, fail
+closed on GitHub. `sync --once` for those cells is wrapped with a 120s KILL.
 
 Repo: `skipprd/skipprd`. Reuse `tests/perf/download.py --workflow perf-db.yml`,
 `tests/perf/analyze.py`, and `tests/perf/memo.py`. Do not copy those files.
@@ -51,7 +53,7 @@ Mail: `python3 tests/perf/memo.py --mail` → sibling `cloud/scripts/send-afk-ma
 
 ```
 skippr-perf-db:
-- [ ] Local smoke A (q-wal-count-iceberg, q-wal-point-iceberg) and B (q-union-count-duckdb)
+- [ ] Local smoke A (q-wal-count-iceberg, q-wal-point-iceberg) and B (q-union-count-duckdb, q-union-overlap-duckdb); CDC smoke when Docker is up
 - [ ] PERF logs parsed; query_collect present; counts match ingest rows; point returns id 1; warehouse has parquet
 - [ ] Commit harness/skill with hooks (never --no-verify)
 - [ ] gh workflow run perf-db.yml --ref this branch
@@ -93,14 +95,15 @@ python3 tests/perf_db/run.py \
   --scenario q-wal-count-iceberg,q-wal-point-iceberg,q-union-count-duckdb --scale smoke
 ```
 
-Fail the cell if required `PERF_EVENT` lines are missing (`sync`, `query_collect`).
+Fail the cell if required `PERF_EVENT` lines are missing (`sync`, `query_collect`,
+and `query_reconcile` on CDC merge cells).
 
 ## GitHub
 
 `.github/workflows/perf-db.yml` is **`workflow_dispatch` only**. Jobs run on
 GitHub-hosted Linux x86 (`ubuntu-latest`). Profiling cells: flamegraph and
 perf-stat on `q-wal-count-iceberg`, `q-wal-point-iceberg`, `q-union-count-duckdb`;
-heaptrack on the two count cells. Hottest frames must not be `admit_payload` /
+flamegraph on `q-cdc-union-update-pg`; heaptrack on the two count cells. Hottest frames must not be `admit_payload` /
 whole-seg `read_to_end` after the catalog slice index lands. skipprd and wrap
 scripts fail closed after 10 minutes.
 
@@ -126,7 +129,7 @@ are actually hot**; otherwise overall hot leaves and failed cells. Download
 - `aws s3 sync --delete`
 - Write `cloudcycle-datalake-iceberg-*` or other EU production/staging buckets
 - Treat WAL leftover import as a query cell
-- Put Postgres CDC in this matrix until `sync --once` exits
+- Put skippr-perf ingest/copy Postgres CDC cells here (query_after_cdc is allowed)
 - Query jsonl File sink (no Iceberg parquet)
 - Amazon SES for the iteration memo (Gmail AFK only)
 - Dual-catalog skippr-perf ingest/copy cells here

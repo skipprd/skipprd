@@ -13,7 +13,6 @@ use datafusion::datasource::listing::{
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::Expr;
-use datafusion::physical_plan::limit::GlobalLimitExec;
 use datafusion::physical_plan::union::UnionExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
@@ -786,11 +785,16 @@ async fn register_iceberg_union_view(
         )
         .await?
     };
+    let business_key_columns = crate::plugins::cdc::get_namespace_cdc_contract(namespace)
+        .map(|c| c.business_key_columns)
+        .filter(|keys| !keys.is_empty())
+        .unwrap_or_default();
     let table: Arc<dyn TableProvider> = match wal_provider {
-        Some(wal) => Arc::new(IcebergWalUnionProvider {
+        Some(wal) => Arc::new(IcebergWalTableProvider {
             iceberg: loaded.provider,
             wal,
             schema,
+            business_key_columns,
         }),
         None => loaded.provider,
     };
@@ -809,8 +813,16 @@ async fn wal_child_provider(
         Some(gossip) => gossip.known_ads().await,
         None => Vec::new(),
     };
+    let cdc = crate::plugins::cdc::get_namespace_cdc_contract(namespace)
+        .map(|c| !c.business_key_columns.is_empty())
+        .unwrap_or(false);
+    let wal_schema = if cdc {
+        crate::sqlrt::cdc_reconcile::cdc_sidecar_schema(&schema)
+    } else {
+        schema.clone()
+    };
     // Local skipprd query has no Flight bind: WalTableProvider on QueryRuntime.
-    // Clustered UNION WAL is FlightSqlExec to the picker winner (loopback DoGet).
+    // Clustered WAL is FlightSqlExec to the picker winner (loopback DoGet).
     if crate::cluster::identity::process_query_bind().is_none() {
         if crate::buffer::wal_handle::wal_handle_for(&view.key).is_none() {
             return Ok(None);
@@ -821,7 +833,8 @@ async fn wal_child_provider(
                 view.key.clone(),
                 namespace.to_string(),
                 exclude_segment_ids.to_vec(),
-            ),
+            )
+            .with_cdc_sidecar(cdc),
         )));
     }
     let local_committed =
@@ -850,7 +863,7 @@ async fn wal_child_provider(
                 &view.key,
                 namespace,
                 exclude_segment_ids,
-                schema,
+                wal_schema,
                 opts.scope.basic_authorization(),
             ),
         ))),
@@ -911,20 +924,21 @@ async fn load_iceberg_from_peer(
     })))
 }
 
-pub(crate) struct IcebergWalUnionProvider {
+pub(crate) struct IcebergWalTableProvider {
     pub(crate) iceberg: Arc<dyn TableProvider>,
     pub(crate) wal: Arc<dyn TableProvider>,
     pub(crate) schema: SchemaRef,
+    pub(crate) business_key_columns: Vec<String>,
 }
 
-impl std::fmt::Debug for IcebergWalUnionProvider {
+impl std::fmt::Debug for IcebergWalTableProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IcebergWalUnionProvider").finish()
+        f.debug_struct("IcebergWalTableProvider").finish()
     }
 }
 
 #[async_trait::async_trait]
-impl TableProvider for IcebergWalUnionProvider {
+impl TableProvider for IcebergWalTableProvider {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -941,28 +955,36 @@ impl TableProvider for IcebergWalUnionProvider {
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let schema = crate::sqlrt::wal_table::projected_schema(&self.schema, projection)?;
-        // COUNT(*) projects no columns but still needs rows. Scan children
-        // unprojected, then drop columns so the physical schema matches.
-        let child_projection = if schema.fields().is_empty() {
-            None
-        } else {
-            projection
-        };
-        let iceberg_plan = self
-            .iceberg
-            .scan(state, child_projection, filters, None)
-            .await?;
-        let wal_plan = self
-            .wal
-            .scan(state, child_projection, filters, None)
-            .await?;
-        let union = UnionExec::try_new(vec![iceberg_plan, wal_plan])?;
-        let union = crate::sqlrt::wal_table::align_exec_to_schema(union, schema)?;
-        if let Some(limit) = limit {
-            Ok(Arc::new(GlobalLimitExec::new(union, 0, Some(limit))))
-        } else {
-            Ok(union)
+        if self.business_key_columns.is_empty() {
+            // COUNT(*) projects no columns but still needs rows. Scan children
+            // unprojected, then drop columns so the physical schema matches.
+            let child_projection = if schema.fields().is_empty() {
+                None
+            } else {
+                projection
+            };
+            let iceberg_plan = self
+                .iceberg
+                .scan(state, child_projection, filters, None)
+                .await?;
+            let wal_plan = self
+                .wal
+                .scan(state, child_projection, filters, None)
+                .await?;
+            let union = UnionExec::try_new(vec![iceberg_plan, wal_plan])?;
+            return crate::sqlrt::cdc_reconcile::wrap_limit(union, schema, limit);
         }
+        // Keep business key / mutation columns until merge finishes. Do not
+        // push SQL predicates into children (after-image only after collapse).
+        let iceberg_plan = self.iceberg.scan(state, None, &[], None).await?;
+        let wal_plan = self.wal.scan(state, None, &[], None).await?;
+        let merge = Arc::new(crate::sqlrt::cdc_reconcile::CdcReconcileExec::try_new(
+            iceberg_plan,
+            wal_plan,
+            self.business_key_columns.clone(),
+            schema.clone(),
+        )?);
+        crate::sqlrt::cdc_reconcile::wrap_limit(merge, schema, limit)
     }
 }
 
@@ -1195,10 +1217,11 @@ mod tests {
         let child = Arc::new(ScanProvider {
             schema: schema.clone(),
         });
-        let provider = IcebergWalUnionProvider {
+        let provider = IcebergWalTableProvider {
             iceberg: child.clone(),
             wal: child,
             schema,
+            business_key_columns: Vec::new(),
         };
         let ctx = SessionContext::new();
         let union = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
@@ -1236,10 +1259,11 @@ mod tests {
             "SELECT * FROM live_wal_scan('t','w','p','ns')".into(),
             schema.clone(),
         ));
-        let provider = IcebergWalUnionProvider {
+        let provider = IcebergWalTableProvider {
             iceberg,
             wal,
             schema,
+            business_key_columns: Vec::new(),
         };
         let ctx = SessionContext::new();
         let plan = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
@@ -1251,6 +1275,108 @@ mod tests {
             "UNION must include FlightSqlExec WAL leaf, got {:?}",
             children.iter().map(|c| c.name()).collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn cdc_scan_does_not_push_filters_into_children() {
+        use datafusion::logical_expr::{col, lit};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug)]
+        struct FilterRecordingProvider {
+            schema: SchemaRef,
+            filter_len: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl TableProvider for FilterRecordingProvider {
+            fn schema(&self) -> SchemaRef {
+                self.schema.clone()
+            }
+
+            fn table_type(&self) -> TableType {
+                TableType::Base
+            }
+
+            async fn scan(
+                &self,
+                _state: &dyn Session,
+                _projection: Option<&Vec<usize>>,
+                filters: &[Expr],
+                _limit: Option<usize>,
+            ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+                self.filter_len.store(filters.len(), Ordering::SeqCst);
+                Ok(Arc::new(EmptyExec::new(self.schema.clone())))
+            }
+        }
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let iceberg_n = Arc::new(AtomicUsize::new(999));
+        let wal_n = Arc::new(AtomicUsize::new(999));
+        let iceberg = Arc::new(FilterRecordingProvider {
+            schema: schema.clone(),
+            filter_len: iceberg_n.clone(),
+        });
+        let wal = Arc::new(FilterRecordingProvider {
+            schema: crate::sqlrt::cdc_reconcile::cdc_sidecar_schema(&schema),
+            filter_len: wal_n.clone(),
+        });
+        let provider = IcebergWalTableProvider {
+            iceberg,
+            wal,
+            schema,
+            business_key_columns: vec!["id".into()],
+        };
+        let ctx = SessionContext::new();
+        let filters = vec![col("name").eq(lit("alpha"))];
+        let plan = provider
+            .scan(&ctx.state(), None, &filters, None)
+            .await
+            .unwrap();
+        assert_eq!(plan.name(), "CdcReconcileExec");
+        assert_eq!(iceberg_n.load(Ordering::SeqCst), 0);
+        assert_eq!(wal_n.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn cdc_merge_sits_above_flight_and_iceberg_leaves() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let iceberg = Arc::new(ScanProvider {
+            schema: schema.clone(),
+        });
+        let wal = Arc::new(crate::sqlrt::flight_sql_table::FlightSqlTableProvider::new(
+            "127.0.0.1:9".into(),
+            "SELECT * FROM live_wal_scan('t','w','p','ns')".into(),
+            crate::sqlrt::cdc_reconcile::cdc_sidecar_schema(&schema),
+        ));
+        let provider = IcebergWalTableProvider {
+            iceberg,
+            wal,
+            schema,
+            business_key_columns: vec!["id".into()],
+        };
+        let ctx = SessionContext::new();
+        let plan = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
+        assert_eq!(plan.name(), "CdcReconcileExec");
+        let children = plan.children();
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().any(|child| child.name() == "FlightSqlExec"));
+    }
+
+    #[test]
+    fn union_provider_is_hard_cutover_to_iceberg_wal_table() {
+        let src = include_str!("tables.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("IcebergWalUnionProvider"));
+        assert!(prod.contains("IcebergWalTableProvider"));
+        assert!(prod.contains("CdcReconcileExec"));
+        assert!(prod.contains("business_key_columns"));
     }
 
     #[test]

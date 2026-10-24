@@ -9,9 +9,10 @@ use datafusion_proto::physical_plan::PhysicalExtensionCodec;
 use datafusion_proto::physical_plan::PhysicalProtoConverterExtension;
 use skippr_query_plan::{
     decode_tagged_node, encode_tagged_node, FlightSqlExec, IcebergScanNode, SkipprPhysicalCodec,
-    PHYSICAL_KIND_FLIGHT_SQL, PHYSICAL_KIND_ICEBERG,
+    PHYSICAL_KIND_CDC_RECONCILE, PHYSICAL_KIND_FLIGHT_SQL, PHYSICAL_KIND_ICEBERG,
 };
 
+use crate::sqlrt::cdc_reconcile::CdcReconcileExec;
 use crate::sqlrt::iceberg_table::IcebergScanExec;
 use crate::sqlrt::wal_table::WalScanExec;
 
@@ -46,6 +47,9 @@ impl PhysicalExtensionCodec for SkipprHostCodec {
                 IcebergScanExec::from_node(node)
                     .map(|exec| Arc::new(exec) as Arc<dyn ExecutionPlan>)
             }
+            Some((PHYSICAL_KIND_CDC_RECONCILE, payload)) => {
+                CdcReconcileExec::from_bytes(payload, inputs)
+            }
             Some((kind, _)) => Err(DataFusionError::Internal(format!(
                 "unknown Skippr physical node kind {kind}"
             ))),
@@ -68,6 +72,10 @@ impl PhysicalExtensionCodec for SkipprHostCodec {
                 &iceberg.encode_node()?.encode_bytes()?,
                 buf,
             );
+            return Ok(());
+        }
+        if let Some(merge) = node.downcast_ref::<CdcReconcileExec>() {
+            encode_tagged_node(PHYSICAL_KIND_CDC_RECONCILE, &merge.encode_bytes()?, buf);
             return Ok(());
         }
         if node.is::<WalScanExec>() {
@@ -136,12 +144,44 @@ mod tests {
 
         let key = skippr_lease::PipelineKey::new("t", "w", "p").unwrap();
         let wal = Arc::new(
-            WalScanExec::new(schema(), key, "ns".into(), vec!["seg".into()], None).unwrap(),
+            WalScanExec::new(
+                schema(),
+                key,
+                "ns".into(),
+                vec![("seg".into(), 0)],
+                None,
+                false,
+            )
+            .unwrap(),
         ) as Arc<dyn ExecutionPlan>;
         buf.clear();
         let err = codec.try_encode(wal, &mut buf, &conv).unwrap_err();
         assert!(err
             .to_string()
             .contains("WalScanExec must not enter a distributed plan"));
+    }
+
+    #[test]
+    fn host_codec_round_trips_cdc_reconcile() {
+        use datafusion::physical_plan::empty::EmptyExec;
+
+        let user = schema();
+        let iceberg = Arc::new(EmptyExec::new(user.clone())) as Arc<dyn ExecutionPlan>;
+        let wal = Arc::new(EmptyExec::new(
+            crate::sqlrt::cdc_reconcile::cdc_sidecar_schema(&user),
+        )) as Arc<dyn ExecutionPlan>;
+        let merge = Arc::new(
+            CdcReconcileExec::try_new(iceberg.clone(), wal.clone(), vec!["id".into()], user)
+                .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+        let codec = SkipprHostCodec::default();
+        let conv = DefaultPhysicalProtoConverter {};
+        let mut buf = Vec::new();
+        codec.try_encode(merge, &mut buf, &conv).unwrap();
+        assert_eq!(&buf[..4], PHYSICAL_MAGIC);
+        let decoded = codec
+            .try_decode(&buf, &[iceberg, wal], &TaskContext::default(), &conv)
+            .unwrap();
+        assert_eq!(decoded.name(), "CdcReconcileExec");
     }
 }

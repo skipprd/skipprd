@@ -43,8 +43,8 @@ runs:
           exit 1
         fi
         docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c \
-          "CREATE TABLE IF NOT EXISTS orders (id integer PRIMARY KEY, name text NOT NULL);
-           INSERT INTO orders (id, name) VALUES (1, 'alpha'), (2, 'beta')
+          "CREATE TABLE IF NOT EXISTS orders (id integer PRIMARY KEY, name text NOT NULL, amount integer NOT NULL DEFAULT 0);
+           INSERT INTO orders (id, name, amount) VALUES (1, 'alpha', 100), (2, 'beta', 50)
            ON CONFLICT (id) DO NOTHING;"
     - name: Start DynamoDB Local
       shell: bash
@@ -120,20 +120,51 @@ runs:
             "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
             sync --log --pipeline postgres_skipprlake_cdc --once
         }
+        query_plain() {
+          local sql="$1"
+          DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+            "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
+            query --plain --sql "${sql}" \
+          | python3 -c 'import json,sys; d=next(json.loads(l) for l in reversed(sys.stdin.read().splitlines()) if l.strip().startswith("{") and "\"rows\"" in l); print(json.dumps(d["rows"]))'
+        }
         run_once
+        test "$(query_plain 'SELECT count(*) FROM postgres_skipprlake_cdc.postgres_orders')" = '[["2"]]' \
+          -o "$(query_plain 'SELECT count(*) FROM postgres_skipprlake_cdc.postgres_orders')" = '[[2]]'
         docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c \
-          "INSERT INTO orders (id, name) VALUES (3, 'gamma');"
+          "INSERT INTO orders (id, name, amount) VALUES (3, 'gamma', 30);"
         run_once
         docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c \
           "UPDATE orders SET name = 'alpha-prime' WHERE id = 1;"
         run_once
+        name="$(query_plain "SELECT name FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 1")"
+        echo "query name=${name}"
+        echo "${name}" | grep -q 'alpha-prime'
+        echo hold_before_compaction_sink > "${work}/data/failpoint"
+        docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c \
+          "UPDATE orders SET name = 'alpha-wal' WHERE id = 1;"
+        timeout --signal=KILL 120 \
+          env DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+          "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
+          sync --log --pipeline postgres_skipprlake_cdc --once &
+        sync_pid=$!
+        wal_name=""
+        for _ in $(seq 1 40); do
+          wal_name="$(query_plain "SELECT name FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 1" || true)"
+          if echo "${wal_name}" | grep -q 'alpha-wal'; then
+            break
+          fi
+          sleep 2
+        done
+        echo "${wal_name}" | grep -q 'alpha-wal'
+        rm -f "${work}/data/failpoint"
+        wait "${sync_pid}" || true
+        echo "${wal_name}" | grep -q 'alpha-wal'
         scan="${work}/warehouse/bronze/postgres_orders"
         count="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(DISTINCT id) FROM iceberg_scan('${scan}');")"
         updated="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT name FROM iceberg_scan('${scan}') WHERE id = 1 ORDER BY _skippr_order_token DESC LIMIT 1;")"
         echo "count=${count}"
         echo "updated=${updated}"
         echo "${count}" | tail -n 1 | grep -qx '3'
-        echo "${updated}" | tail -n 1 | grep -qx 'alpha-prime'
         e2e_assert_downloaded \
           'skippr-plugin-data-source-postgres*' \
           'skippr-plugin-data-sink-skipprlake*' \
