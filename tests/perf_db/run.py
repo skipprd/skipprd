@@ -301,6 +301,7 @@ PG_CDC_DDB_PORT = 18022
 PG_CDC_CONTAINER = "skippr-perf-db-pg"
 PG_CDC_DDB_CONTAINER = "skippr-perf-db-pg-ddb"
 PG_CDC_PIPELINE = "postgres_skipprlake_cdc"
+CDC_DDB_TABLE = "skippr-perf-db-cdc"
 
 
 def docker_available() -> bool:
@@ -324,7 +325,7 @@ def write_cdc_skippr_yml(path: Path, warehouse: Path) -> None:
   skipprd_el_storage_mode: local
   store:
     type: dynamodb
-    name: skippr-perf-db-cdc
+    name: {CDC_DDB_TABLE}
 
 pipelines:
   {PG_CDC_PIPELINE}:
@@ -355,7 +356,7 @@ data_sinks:
   lake:
     SkipprLake:
       warehouse: {uri}
-      catalog_table: skippr-perf-db-cdc
+      catalog_table: {CDC_DDB_TABLE}
       region: us-east-1
       table_namespace: bronze
       object_store:
@@ -366,7 +367,7 @@ schema_sinks:
   lake_schema:
     SkipprLake:
       warehouse: {uri}
-      catalog_table: skippr-perf-db-cdc
+      catalog_table: {CDC_DDB_TABLE}
       region: us-east-1
       table_namespace: bronze
       object_store:
@@ -499,13 +500,15 @@ def run_query_after_cdc(
     data_dir.mkdir(parents=True, exist_ok=True)
     config = work / "skippr.yml"
     write_cdc_skippr_yml(config, warehouse)
+    from e2e_support import dynamodb_local as ddb_local
+
     start_cdc_postgres()
-    old_ddb = perf_run.DDB_PORT
-    old_container = perf_run.DDB_CONTAINER
-    perf_run.DDB_PORT = PG_CDC_DDB_PORT
-    perf_run.DDB_CONTAINER = PG_CDC_DDB_CONTAINER
     try:
-        perf_run.start_ddb()
+        ddb_local.start(
+            port=PG_CDC_DDB_PORT,
+            tables=[CDC_DDB_TABLE],
+            container=PG_CDC_DDB_CONTAINER,
+        )
         perf_run.stage_plugins(config, PG_CDC_PIPELINE, manifests)
         env = perf_run.base_env(config, data_dir, manifests)
         env.update(
@@ -615,9 +618,7 @@ def run_query_after_cdc(
         )
         return payload
     finally:
-        perf_run.stop_ddb()
-        perf_run.DDB_PORT = old_ddb
-        perf_run.DDB_CONTAINER = old_container
+        ddb_local.stop(port=PG_CDC_DDB_PORT, container=PG_CDC_DDB_CONTAINER)
         stop_cdc_postgres()
 
 
