@@ -322,9 +322,9 @@ def test_tagged_enum_variant_serializes_tag():
 
 
 def test_nested_classes_are_frozen_and_top_level_is_mutable():
-    auth = DataSourceHttpClientDataSourceHttpAuthConfig(username="u")
+    auth = DataSourceHttpClientDataSourceHttpAuthConfig(user="u")
     with pytest.raises(AttributeError):
-        auth.username = "b"  # type: ignore[misc]
+        auth.user = "b"  # type: ignore[misc]
     src = _s3()
     src.s3_prefix = "q"
     assert src.s3_prefix == "q"
