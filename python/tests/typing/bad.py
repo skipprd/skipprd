@@ -71,7 +71,7 @@ glue = cfg.schema_sink(
 cfg.data_sink("lake2", DataSinkDuckdb(warehouse="w", table_namespace="n"), schema_sink=glue)  # type: ignore[call-overload]
 
 # List getters return a copy, so in-place mutation is not offered.
-DataSourcePostgres(host="h", password=EnvRef("PG")).tables.append("x")  # type: ignore[attr-defined]
+DataSourcePostgres(host="h", password=EnvRef("PG")).tables.append("x")  # type: ignore[union-attr]
 
 # List and map setters take a list and a dict, which is what the runtime accepts.
 pg = DataSourcePostgres(host="h", password=EnvRef("PG"))
