@@ -224,7 +224,7 @@ def run_query_after_ingest(
                 text=True,
             )
             expect = stream_limit_rows(scenario)
-            deadline = time.time() + OVERLAP_WAIT_SECONDS
+            deadline = time.time() + 90
             while time.time() < deadline:
                 try:
                     peek = perf_run.run_skipprd(
