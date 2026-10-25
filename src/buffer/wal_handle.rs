@@ -238,6 +238,19 @@ impl PipelineWalHandle {
             .collect()
     }
 
+    pub fn live_namespaces(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for slice in self.live_slices(&[]) {
+            if slice.namespace.is_empty() {
+                continue;
+            }
+            if !names.iter().any(|existing| existing == &slice.namespace) {
+                names.push(slice.namespace);
+            }
+        }
+        names
+    }
+
     pub fn live_slices(&self, exclude_segment_ids: &[String]) -> Vec<SliceIndexEntry> {
         let exclude: std::collections::HashSet<&str> =
             exclude_segment_ids.iter().map(String::as_str).collect();
@@ -1820,6 +1833,7 @@ mod tests {
             })
             .unwrap()
             .is_none());
+        assert_eq!(handle.live_namespaces(), vec!["ns".to_string()]);
     }
 
     #[test]

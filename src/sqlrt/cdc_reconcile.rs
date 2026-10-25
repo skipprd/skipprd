@@ -639,6 +639,37 @@ mod tests {
     }
 
     #[test]
+    fn leftover_snapshot_wal_keeps_lake_keys_not_in_wal() {
+        let lake = vec![
+            row(1, "alpha", 100),
+            row(2, "beta", 50),
+            row(3, "gamma", 30),
+        ];
+        let wal = vec![
+            cdc_row(
+                1,
+                "alpha",
+                100,
+                MutationKind::Snapshot,
+                1,
+                "compacted",
+                0,
+                0,
+            ),
+            cdc_row(2, "beta", 50, MutationKind::Snapshot, 1, "compacted", 1, 0),
+        ];
+        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
+        let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
+        let lake_rows = kept.iter().map(|b| b.num_rows()).sum::<usize>();
+        let wal_rows = collapsed
+            .survivor_batches
+            .iter()
+            .map(|b| b.num_rows())
+            .sum::<usize>();
+        assert_eq!(lake_rows + wal_rows, 3);
+    }
+
+    #[test]
     fn insert_only_wal_unions_with_lake() {
         let lake = vec![row(1, "alpha", 10)];
         let wal = vec![cdc_row(2, "beta", 20, MutationKind::Insert, 1, "s", 0, 0)];

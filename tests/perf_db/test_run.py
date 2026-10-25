@@ -111,6 +111,9 @@ class PerfDbCatalogTests(unittest.TestCase):
         self.assertTrue(only_file.get("iceberg_only"))
         only_duck = catalog["scenarios"]["q-iceberg-only-duckdb"]
         self.assertTrue(only_duck.get("iceberg_only"))
+        deleted = catalog["scenarios"]["q-cdc-union-delete-pg"]
+        self.assertEqual((deleted.get("asserts") or {}).get("query_count"), 1)
+        self.assertEqual((deleted.get("asserts") or {}).get("query_absent_id"), 2)
 
 
 class PerfDbSkillTests(unittest.TestCase):
@@ -165,6 +168,17 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("tables=[CDC_DDB_TABLE]", text)
         self.assertIn('scenario.get("wal_tail")', text)
         self.assertIn("stream_limit_rows", text)
+        ingest = text.split("def run_query_after_ingest")[1].split("def write_cdc")[0]
+        measured = ingest.find("measured_query")
+        self.assertGreater(measured, 0)
+        self.assertGreater(
+            ingest.find("disarm_compaction_hold", measured),
+            measured,
+            "File overlap must hold compact until after the measured query",
+        )
+        self.assertIn("clustered", text)
+        self.assertIn("arm_compaction_hold", text)
+        self.assertNotIn("failpoint.unlink", ingest[:measured])
         self.assertNotIn("from tests.perf.run import", text)
         self.assertNotIn("copy_b-json-json", text)
 

@@ -411,6 +411,17 @@ pub async fn query_collect_warm(
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
+pub(crate) fn stream_wal_namespace(
+    listed: Vec<String>,
+    live: Vec<String>,
+    pipeline: &str,
+) -> String {
+    live.into_iter()
+        .find(|name| !name.is_empty())
+        .or_else(|| listed.into_iter().find(|name| !name.is_empty()))
+        .unwrap_or_else(|| pipeline.to_string())
+}
+
 async fn stream_wal_session(
     config: &mut Config,
     pipeline_name: &str,
@@ -422,11 +433,18 @@ async fn stream_wal_session(
         tracing::warn!(pipeline = %pipeline_name, error = %err, "STREAM WAL catalog not opened");
     }
     register_catalog(config, &ctx).await;
-    let namespaces = crate::sqlrt::registry::list_namespaces(config, pipeline_name).await;
-    let namespace = namespaces
-        .into_iter()
-        .find(|name| !name.is_empty())
-        .unwrap_or_else(|| pipeline_name.to_string());
+    let listed = crate::sqlrt::registry::list_namespaces(config, pipeline_name).await;
+    let live = match skippr_lease::PipelineKey::new(
+        config.get_tenant(),
+        config.get_workspace_name(),
+        pipeline_name,
+    ) {
+        Ok(key) => crate::buffer::wal_handle::wal_handle_for(&key)
+            .map(|handle| handle.live_namespaces())
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let namespace = stream_wal_namespace(listed, live, pipeline_name);
     let Some(provider) =
         crate::sqlrt::tables::wal_table_for_namespace(config, pipeline_name, &namespace).await?
     else {
@@ -2027,6 +2045,14 @@ mod plain_query_document_tests {
             "STREAM FROM <pipeline> must scan a real namespace, not assume namespace==pipeline"
         );
         assert!(
+            prod.contains("live_namespaces"),
+            "STREAM FROM <pipeline> must prefer live WAL slice namespaces over the pipeline name"
+        );
+        assert!(
+            prod.contains("stream_wal_namespace"),
+            "STREAM namespace pick is one function"
+        );
+        assert!(
             body.contains("execute_stream_sql"),
             "STREAM must scan WalTableProvider, not dump CatalogWalReader into MemTable"
         );
@@ -2042,6 +2068,26 @@ mod plain_query_document_tests {
         assert!(
             !body.contains("apply_pipeline_toggle("),
             "query_with_options must not call apply_pipeline_toggle"
+        );
+    }
+
+    #[test]
+    fn stream_wal_namespace_prefers_live_slices_over_pipeline_name() {
+        assert_eq!(
+            super::stream_wal_namespace(
+                vec!["perf_cell".into()],
+                vec!["source".into()],
+                "perf_cell"
+            ),
+            "source"
+        );
+        assert_eq!(
+            super::stream_wal_namespace(Vec::new(), Vec::new(), "perf_cell"),
+            "perf_cell"
+        );
+        assert_eq!(
+            super::stream_wal_namespace(vec!["events".into()], Vec::new(), "perf_cell"),
+            "events"
         );
     }
 

@@ -150,7 +150,7 @@ scenarios:
     mutation: "DELETE FROM orders WHERE id = 2;"
     required_perf: [sync, query_collect, query_reconcile]
     asserts:
-      query_count: 2
+      query_count: 1
       query_absent_id: 2
       query_reconcile: true
 

@@ -4045,10 +4045,7 @@ mod warm_output_schemas_tests {
     #[tokio::test]
     async fn warm_from_tokio_runtime_does_not_panic_with_multiple_namespaces() {
         let mut pipeline = PipelineMetadata::new(&Config::new());
-        for ns in [
-            "stripe_charges",
-            "stripe_customers",
-        ] {
+        for ns in ["stripe_charges", "stripe_customers"] {
             pipeline
                 .metadata
                 .insert(ns.to_string(), hub_namespace_metadata(ns));
