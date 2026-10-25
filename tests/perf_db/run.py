@@ -224,7 +224,7 @@ def run_query_after_ingest(
                 text=True,
             )
             expect = stream_limit_rows(scenario)
-            deadline = time.time() + 90
+            deadline = time.time() + OVERLAP_WAIT_SECONDS
             while time.time() < deadline:
                 try:
                     peek = perf_run.run_skipprd(
@@ -246,7 +246,8 @@ def run_query_after_ingest(
                         break
                 except Exception:
                     pass
-                if tail_proc.poll() is not None:
+                hold_armed = any(path.is_file() for path in hold_paths)
+                if tail_proc.poll() is not None and not hold_armed:
                     break
                 time.sleep(1)
         else:

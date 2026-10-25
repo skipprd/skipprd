@@ -179,6 +179,7 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("clustered", text)
         self.assertIn("arm_compaction_hold", text)
         self.assertIn("OVERLAP_WAIT_SECONDS", text)
+        self.assertIn("hold_armed", text)
         self.assertNotIn("failpoint.unlink", ingest[:measured])
         self.assertNotIn("from tests.perf.run import", text)
         self.assertNotIn("copy_b-json-json", text)

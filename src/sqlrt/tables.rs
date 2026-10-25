@@ -91,12 +91,12 @@ pub(crate) async fn wal_table_for_namespace(
         flatten,
     )
     .map_err(|err| DataFusionError::Plan(err.to_string()))?;
-    if schema.fields().is_empty() {
-        return Ok(None);
-    }
     let key =
         skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
             .map_err(|err| DataFusionError::Plan(err.to_string()))?;
+    if schema.fields().is_empty() && crate::buffer::wal_handle::wal_handle_for(&key).is_none() {
+        return Ok(None);
+    }
     Ok(Some(Arc::new(
         crate::sqlrt::wal_table::WalTableProvider::new(
             schema,
@@ -1065,6 +1065,11 @@ mod tests {
         assert!(
             prod.contains("prepare_arrow_schema_with_metadata_for_query"),
             "empty WAL after reclaim must still register the metadata schema so query/migrate work"
+        );
+        assert!(
+            prod.contains("schema.fields().is_empty()")
+                && prod.contains("wal_handle_for(&key).is_none()"),
+            "STREAM must register a WAL provider from live slices when discover metadata is empty"
         );
         assert!(
             prod.contains("wal_handle_for"),
