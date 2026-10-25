@@ -41,6 +41,7 @@ CATALOG_PATH = HARNESS_DIR / "catalog.yaml"
 INGEST_WORKSPACE = "perf"
 CDC_WORKSPACE = "test"
 CLUSTER_TENANT = "default"
+OVERLAP_WAIT_SECONDS = 480
 
 
 def load_perf_db_catalog() -> dict[str, Any]:
@@ -286,7 +287,7 @@ def run_query_after_ingest(
                 stderr=subprocess.STDOUT,
                 text=True,
             )
-            deadline = time.time() + 90
+            deadline = time.time() + OVERLAP_WAIT_SECONDS
             while time.time() < deadline:
                 try:
                     peek = perf_run.run_skipprd(
@@ -403,16 +404,18 @@ CDC_DDB_TABLE = "skippr-perf-db-cdc"
 
 
 def docker_available() -> bool:
-    try:
-        subprocess.run(
-            ["docker", "info"],
-            capture_output=True,
-            check=True,
-            timeout=10,
-        )
-        return True
-    except Exception:
-        return False
+    for _ in range(5):
+        try:
+            subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                check=True,
+                timeout=10,
+            )
+            return True
+        except Exception:
+            time.sleep(1)
+    return False
 
 
 def write_cdc_skippr_yml(path: Path, warehouse: Path) -> None:
@@ -646,7 +649,33 @@ def run_query_after_cdc(
             overlap_proc = subprocess.Popen(
                 overlap_cmd, env=env, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
             )
-            time.sleep(8)
+            expect_name = str((scenario.get("asserts") or {}).get("query_name") or "")
+            deadline = time.time() + OVERLAP_WAIT_SECONDS
+            while time.time() < deadline:
+                try:
+                    peek = perf_run.run_skipprd(
+                        skipprd,
+                        [
+                            "--config",
+                            str(config),
+                            "query",
+                            "--plain",
+                            "--sql",
+                            str(scenario["sql"]),
+                        ],
+                        env=env,
+                        work=work,
+                        profile="none",
+                    )
+                    doc = parse_plain_query(peek)
+                    got = str(((doc.get("rows") or [[""]])[0] or [""])[0])
+                    if expect_name and got == expect_name:
+                        break
+                except Exception:
+                    pass
+                if overlap_proc.poll() is not None:
+                    break
+                time.sleep(1)
         else:
             logs += run_cdc_once(skipprd, config, env)
         sql = str(scenario["sql"])
