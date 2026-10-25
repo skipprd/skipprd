@@ -180,6 +180,8 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("arm_compaction_hold", text)
         self.assertIn("OVERLAP_WAIT_SECONDS", text)
         self.assertIn("hold_armed", text)
+        wal_tail = text.split('if scenario.get("wal_tail")')[1].split("else:")[0]
+        self.assertIn("time.time() + 90", wal_tail)
         self.assertNotIn("failpoint.unlink", ingest[:measured])
         self.assertNotIn("from tests.perf.run import", text)
         self.assertNotIn("copy_b-json-json", text)
