@@ -85,6 +85,7 @@ struct Winner {
 
 pub struct CollapseResult {
     pub changed_keys: HashSet<Vec<u8>>,
+    pub snapshot_keys: HashSet<Vec<u8>>,
     pub survivor_batches: Vec<RecordBatch>,
 }
 
@@ -130,18 +131,67 @@ pub fn collapse_wal_batches(
             }
         }
     }
-    let changed_keys = winners.keys().cloned().collect();
+    let mut changed_keys = HashSet::new();
+    let mut snapshot_keys = HashSet::new();
     let mut keep: Vec<(usize, usize)> = append_rows;
-    for winner in winners.values() {
-        if winner.mutation != MUT_DELETE {
-            keep.push((winner.batch_idx, winner.row));
+    for (key, winner) in &winners {
+        match winner.mutation {
+            MUT_SNAPSHOT => {
+                snapshot_keys.insert(key.clone());
+                keep.push((winner.batch_idx, winner.row));
+            }
+            MUT_DELETE => {
+                changed_keys.insert(key.clone());
+            }
+            MUT_INSERT | MUT_UPDATE => {
+                changed_keys.insert(key.clone());
+                keep.push((winner.batch_idx, winner.row));
+            }
+            _ => {}
         }
     }
     keep.sort_unstable();
     Ok(CollapseResult {
         changed_keys,
+        snapshot_keys,
         survivor_batches: take_rows(batches, &keep)?,
     })
+}
+
+fn lake_business_keys(
+    lake: &[RecordBatch],
+    business_key_columns: &[String],
+) -> Result<HashSet<Vec<u8>>> {
+    let mut keys = HashSet::new();
+    for batch in lake {
+        for row in 0..batch.num_rows() {
+            if let Some(key) = row_business_key(batch, row, business_key_columns)? {
+                keys.insert(key);
+            }
+        }
+    }
+    Ok(keys)
+}
+
+pub fn drop_compacted_snapshot_leftover(
+    collapsed: &CollapseResult,
+    lake_keys: &HashSet<Vec<u8>>,
+    business_key_columns: &[String],
+) -> Result<Vec<RecordBatch>> {
+    if collapsed.snapshot_keys.is_empty() {
+        return Ok(collapsed.survivor_batches.clone());
+    }
+    let mut keep = Vec::new();
+    for (batch_idx, batch) in collapsed.survivor_batches.iter().enumerate() {
+        for row in 0..batch.num_rows() {
+            match row_business_key(batch, row, business_key_columns)? {
+                Some(key) if collapsed.snapshot_keys.contains(&key) && lake_keys.contains(&key) => {
+                }
+                _ => keep.push((batch_idx, row)),
+            }
+        }
+    }
+    take_rows(&collapsed.survivor_batches, &keep)
 }
 
 pub fn anti_join_lake(
@@ -477,9 +527,11 @@ impl ExecutionPlan for CdcReconcileExec {
             let wal_batches = wal.try_collect::<Vec<_>>().await?;
             let collapsed = collapse_wal_batches(&wal_batches, &keys)?;
             let lake_batches = iceberg.try_collect::<Vec<_>>().await?;
+            let lake_keys = lake_business_keys(&lake_batches, &keys)?;
             let lake_kept = anti_join_lake(&lake_batches, &collapsed.changed_keys, &keys)?;
+            let wal_kept = drop_compacted_snapshot_leftover(&collapsed, &lake_keys, &keys)?;
             let mut out = Vec::new();
-            for batch in lake_kept.into_iter().chain(collapsed.survivor_batches) {
+            for batch in lake_kept.into_iter().chain(wal_kept) {
                 let projected = project_batch(batch, &schema)?;
                 if projected.num_rows() > 0 || schema.fields().is_empty() {
                     out.push(projected);
@@ -659,14 +711,72 @@ mod tests {
             cdc_row(2, "beta", 50, MutationKind::Snapshot, 1, "compacted", 1, 0),
         ];
         let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
+        let lake_keys = lake_business_keys(&lake, &["id".into()]).unwrap();
         let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
+        let wal_kept =
+            drop_compacted_snapshot_leftover(&collapsed, &lake_keys, &["id".into()]).unwrap();
         let lake_rows = kept.iter().map(|b| b.num_rows()).sum::<usize>();
-        let wal_rows = collapsed
-            .survivor_batches
-            .iter()
-            .map(|b| b.num_rows())
-            .sum::<usize>();
+        let wal_rows = wal_kept.iter().map(|b| b.num_rows()).sum::<usize>();
+        assert_eq!(lake_rows, 3);
+        assert_eq!(wal_rows, 0);
         assert_eq!(lake_rows + wal_rows, 3);
+    }
+
+    #[test]
+    fn leftover_snapshots_do_not_replace_updated_lake_amounts() {
+        let lake = vec![
+            row(1, "alpha", 120),
+            row(2, "beta", 50),
+            row(3, "gamma", 30),
+        ];
+        let wal = vec![
+            cdc_row(
+                1,
+                "alpha",
+                100,
+                MutationKind::Snapshot,
+                1,
+                "compacted",
+                0,
+                0,
+            ),
+            cdc_row(2, "beta", 50, MutationKind::Snapshot, 1, "compacted", 1, 0),
+        ];
+        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
+        assert!(collapsed.changed_keys.is_empty());
+        let lake_keys = lake_business_keys(&lake, &["id".into()]).unwrap();
+        let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
+        let wal_kept =
+            drop_compacted_snapshot_leftover(&collapsed, &lake_keys, &["id".into()]).unwrap();
+        let batches: Vec<_> = kept.into_iter().chain(wal_kept).collect();
+        let mut amounts = Vec::new();
+        for batch in &batches {
+            let col = batch
+                .column_by_name("amount")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            amounts.extend(col.iter().map(|v| v.unwrap()));
+        }
+        amounts.sort();
+        assert_eq!(amounts, vec![30, 50, 120]);
+    }
+
+    #[test]
+    fn snapshot_wal_fills_empty_lake() {
+        let lake: Vec<RecordBatch> = Vec::new();
+        let wal = vec![
+            cdc_row(1, "alpha", 100, MutationKind::Snapshot, 1, "s", 0, 0),
+            cdc_row(2, "beta", 50, MutationKind::Snapshot, 1, "s", 1, 0),
+        ];
+        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
+        let lake_keys = lake_business_keys(&lake, &["id".into()]).unwrap();
+        let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
+        let wal_kept =
+            drop_compacted_snapshot_leftover(&collapsed, &lake_keys, &["id".into()]).unwrap();
+        assert_eq!(kept.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+        assert_eq!(wal_kept.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
     }
 
     #[test]
