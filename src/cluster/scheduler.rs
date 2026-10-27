@@ -91,7 +91,7 @@ pub async fn run_clustered(app_cfg: Config, config: ClusterConfig) -> Result<(),
         "clustered scheduler started"
     );
     metrics::set_cluster_ready(0);
-    let keys = crate::cluster::pipeline_registry::scheduled_pipeline_keys(&app_cfg).await?;
+    let keys = crate::cluster::pipeline_registry::scheduled_pipeline_keys(&app_cfg)?;
     for key in &keys {
         let view = PipelineConfigView::for_registry(&app_cfg, key)
             .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
@@ -282,8 +282,7 @@ async fn run_primary_loop(
         ) {
             break;
         }
-        let keys = match crate::cluster::pipeline_registry::scheduled_pipeline_keys(&app_cfg).await
-        {
+        let keys = match crate::cluster::pipeline_registry::scheduled_pipeline_keys(&app_cfg) {
             Ok(keys) => keys,
             Err(err) => {
                 tracing::error!(error = %err, "pipeline registry unavailable; fail closed");

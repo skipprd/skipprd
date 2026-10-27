@@ -45,10 +45,10 @@ impl QueryBackend {
                     .deserialize()
                     .map_err(|err| ConfigError::IcebergConfigInvalid(err))?;
                 cfg.validate().map_err(ConfigError::IcebergConfigInvalid)?;
-                let backend = skippr_iceberg_catalog::SkipprCatalogBackend::from_store_type(
-                    &crate::pipeline_backend::skippr_store_type_value(config),
-                );
-                Ok(Self::Iceberg(IcebergLake::skippr(cfg, backend)))
+                Ok(Self::Iceberg(IcebergLake::skippr(
+                    cfg,
+                    skippr_iceberg_catalog::SkipprCatalogBackend::DynamoDb,
+                )))
             }
             Some(DataSink::AthenaIceberg) => {
                 let cfg: GlueCatalogConfig = entry

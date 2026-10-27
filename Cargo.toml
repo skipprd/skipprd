@@ -13,9 +13,6 @@ members = [
     "crates/skippr-lease",
     "crates/skippr-wal-catalog",
     "crates/skippr-lease-store-dynamodb",
-    "crates/skippr-offset-store-cloud-tables",
-    "crates/skippr-lease-store-cloud-tables",
-    "crates/skippr-iceberg-catalog-cloud-tables",
     "crates/skippr-iceberg-catalog",
     "crates/skippr-iceberg-writer",
     "crates/skippr-iceberg-catalog-fs",
@@ -71,7 +68,6 @@ skippr-object-writer = { path = "crates/skippr-object-writer" }
 skippr-runtime-sdk = { path = "crates/skippr-runtime-sdk" }
 chrono-tz = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-skippr-cloud = { version = "0.1.0", path = "../cloud/crates/cloud-client" }
 
 [[bin]]
 name = "skipprd"
@@ -109,10 +105,6 @@ skippr-iceberg-catalog-fs = { path = "crates/skippr-iceberg-catalog-fs" }
 skippr-iceberg-catalog-glue = { path = "crates/skippr-iceberg-catalog-glue" }
 skippr-iceberg-rest = { path = "crates/skippr-iceberg-rest" }
 skippr-iceberg-catalog-dynamodb = { path = "crates/skippr-iceberg-catalog-dynamodb", optional = true }
-skippr-offset-store-cloud-tables = { path = "crates/skippr-offset-store-cloud-tables", optional = true }
-skippr-lease-store-cloud-tables = { path = "crates/skippr-lease-store-cloud-tables", optional = true }
-skippr-iceberg-catalog-cloud-tables = { path = "crates/skippr-iceberg-catalog-cloud-tables", optional = true }
-skippr-cloud = { workspace = true, optional = true }
 skippr-query-plan = { path = "crates/skippr-query-plan" }
 datafusion-proto = "55.2.0"
 datafusion-distributed.workspace = true
@@ -202,19 +194,13 @@ prost-build = "0.13"
 stats_integration = []
 # Used only by crates/skipprd-dfs-hub-compat-tests (keeps plugin out of host dev-deps).
 dfs-hub-compat-tests = []
-# Release tarballs enable these so published skipprd can use SKIPPR_STORE_TYPE=dynamodb
-# (Lambda) and SKIPPR_STORE_TYPE=cloud-tables (Skippr Cloud elt guest) without pulling
-# those stores into the default host dependency closure (CI boundary check).
+# Release tarballs enable this so published skipprd can use SKIPPR_STORE_TYPE=dynamodb
+# (Lambda / clustered) without pulling DynamoDB into the default host dependency
+# closure (CI boundary check).
 offset-store-dynamodb = [
     "dep:skippr-offset-store-dynamodb",
     "dep:skippr-lease-store-dynamodb",
     "dep:skippr-iceberg-catalog-dynamodb",
-]
-offset-store-cloud-tables = [
-    "dep:skippr-offset-store-cloud-tables",
-    "dep:skippr-lease-store-cloud-tables",
-    "dep:skippr-iceberg-catalog-cloud-tables",
-    "dep:skippr-cloud",
 ]
 
 [dev-dependencies]

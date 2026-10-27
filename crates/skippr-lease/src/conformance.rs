@@ -7,7 +7,7 @@ use crate::identity::{NodeId, PipelineKey};
 use crate::protocol::acquire_pipeline;
 use crate::store::PipelineLeaseStore;
 
-/// Shared lease/epoch contract for memory, sled, DynamoDB, and Cloud Tables.
+/// Shared lease/epoch contract for memory, sled, and DynamoDB.
 pub async fn assert_pipeline_lease_conformance(store: Arc<dyn PipelineLeaseStore>) {
     one_owner_and_renew(store.as_ref()).await;
     unchanged_heartbeat_takeover(store.as_ref()).await;

@@ -6,7 +6,7 @@ The **data sink plugin key** selects the warehouse family. There is no `query_en
 
 | Plugin key | Writes | Read by |
 |---|---|---|
-| `SkipprLake` | Iceberg on object storage; catalog pointers in DynamoDB or Cloud Tables | `skipprd query` (Iceberg ∪ WAL), `skipprd serve`, Spark/Trino via REST |
+| `SkipprLake` | Iceberg on object storage; catalog pointers in DynamoDB | `skipprd query` (Iceberg ∪ WAL), `skipprd serve`, Spark/Trino via REST |
 | `Athena` | Hive Parquet plus Glue | Athena only |
 | `AthenaIceberg` | Iceberg on S3, Glue catalog | `skipprd query` (Iceberg ∪ WAL), `skipprd serve`, and Athena SQL |
 | `Duckdb` | Iceberg on `file://`, metadata colocated with data | `skipprd query` (Iceberg ∪ WAL), `skipprd serve`, and DuckDB `iceberg_scan`. SDE does not model DuckDB. |

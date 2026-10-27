@@ -5529,7 +5529,7 @@ impl PyDataSinkSftp {
     }
 }
 
-#[doc = "Config for the `SkipprLake` data sink and schema sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(DynamoDB, or Cloud Tables when SkipprStore selects it). Catalog rows MAY\nshare the SkipprStore table; PK/SK prefixes do not collide with offsets."]
+#[doc = "Config for the `SkipprLake` data sink and schema sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(DynamoDB). Catalog rows MAY share the SkipprStore table; PK/SK prefixes\ndo not collide with offsets."]
 #[pyclass(from_py_object, name = "DataSinkSkipprLake", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyDataSinkSkipprLake {
@@ -5556,7 +5556,7 @@ pub struct PyDataSinkSkipprLake {
 #[pymethods]
 impl PyDataSinkSkipprLake {
     #[new]
-    #[doc = "Config for the `SkipprLake` data sink and schema sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(DynamoDB, or Cloud Tables when SkipprStore selects it). Catalog rows MAY\nshare the SkipprStore table; PK/SK prefixes do not collide with offsets.\n\nArgs:\n    warehouse: Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.\n    catalog_table: Catalog pointer table. MAY be the SkipprStore table.\n    region: YAML key `region`.\n    object_store: YAML key `object_store`.\n    table_namespace: Iceberg namespace for sink-managed tables. Unique per `(catalog_table, table_namespace)`."]
+    #[doc = "Config for the `SkipprLake` data sink and schema sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(DynamoDB). Catalog rows MAY share the SkipprStore table; PK/SK prefixes\ndo not collide with offsets.\n\nArgs:\n    warehouse: Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.\n    catalog_table: Catalog pointer table. MAY be the SkipprStore table.\n    region: YAML key `region`.\n    object_store: YAML key `object_store`.\n    table_namespace: Iceberg namespace for sink-managed tables. Unique per `(catalog_table, table_namespace)`."]
     #[pyo3(signature = (*, warehouse, catalog_table, region = None, object_store = None, table_namespace = None))]
     fn new(
         warehouse: String,

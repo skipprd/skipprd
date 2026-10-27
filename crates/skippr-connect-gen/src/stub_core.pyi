@@ -49,15 +49,7 @@ class DynamoDbStore:
     @property
     def table(self) -> str: ...
 
-@final
-class CloudTablesStore:
-    """Skippr Cloud Tables SkipprStore (`store.type: cloud-tables`, `store.name`)."""
-
-    def __new__(cls, table: str) -> CloudTablesStore: ...
-    @property
-    def table(self) -> str: ...
-
-Store: TypeAlias = SledStore | DynamoDbStore | CloudTablesStore
+Store: TypeAlias = SledStore | DynamoDbStore
 
 @final
 class DataSourceRef:
@@ -141,7 +133,7 @@ class Config:
         """Where engine state lives: `LocalStorage()` or `S3Storage(bucket)`."""
         ...
     def store(self, value: Store) -> Config:
-        """SkipprStore for offsets and leases: `SledStore()`, `DynamoDbStore(table)`, or `CloudTablesStore(table)`."""
+        """SkipprStore for offsets and leases: `SledStore()` or `DynamoDbStore(table)`."""
         ...
     def wal_s3_bucket(self, value: str) -> Config:
         """Dedicated S3 bucket for WAL segments. Falls back to the storage bucket."""

@@ -256,10 +256,7 @@ async fn cleanup_discover_ingest_artifacts(
             };
             crate::pipeline_backend::reset_pipeline_state(config, offsets, fence)?;
         }
-        Ok(
-            crate::helpers::wal_storage::SkipprStoreKind::DynamoDb
-            | crate::helpers::wal_storage::SkipprStoreKind::CloudTables,
-        ) => {
+        Ok(crate::helpers::wal_storage::SkipprStoreKind::DynamoDb) => {
             let lease = crate::pipeline_backend::acquire_ingest_lease(config, offsets).await?;
             let fence = skippr_wal_catalog::CatalogFence {
                 owner: lease.session.owner,

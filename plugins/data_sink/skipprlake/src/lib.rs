@@ -2,7 +2,6 @@ use std::io;
 use std::sync::Arc;
 
 use iceberg::Catalog;
-use skippr_iceberg_catalog::SkipprCatalogBackend;
 pub use skippr_iceberg_catalog::SkipprLakeConfig;
 use skippr_iceberg_catalog_dynamodb::DynamoDbCatalog;
 pub use skippr_iceberg_writer::{IcebergWriter, IcebergWriterConfig};
@@ -31,24 +30,12 @@ pub fn writer_config(cfg: &SkipprLakeConfig) -> IcebergWriterConfig {
     }
 }
 
-/// The Skippr catalog: Cloud Tables when SkipprStore type selects it, else DynamoDB.
-/// Host spawn injects the Config-resolved kind as `SKIPPR_STORE_TYPE`; this is the same
-/// selector as `skipprd` query (`SkipprCatalogBackend::from_store_type`).
+/// SkipprLake catalog pointers live in DynamoDB.
 pub async fn open_catalog(cfg: &SkipprLakeConfig) -> io::Result<Arc<dyn Catalog>> {
-    match SkipprCatalogBackend::from_store_type(&skippr_iceberg_catalog::store_type_from_env()) {
-        SkipprCatalogBackend::CloudTables => {
-            let catalog = skippr_iceberg_catalog_cloud_tables::CloudTablesCatalog::new(cfg)
-                .await
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            Ok(Arc::new(catalog))
-        }
-        SkipprCatalogBackend::DynamoDb => {
-            let catalog = DynamoDbCatalog::new(cfg)
-                .await
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            Ok(Arc::new(catalog))
-        }
-    }
+    let catalog = DynamoDbCatalog::new(cfg)
+        .await
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    Ok(Arc::new(catalog))
 }
 
 /// Construct the writer for one plugin install.

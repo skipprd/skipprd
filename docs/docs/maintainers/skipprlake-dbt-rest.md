@@ -67,7 +67,7 @@ flowchart LR
   dbt -->|Parquet via PyIceberg| store[(object storage)]
   spark[Spark Trino PyIceberg] -->|Iceberg REST| rest
   flight --> engine[skipprd serve Flight Iceberg namespace.table]
-  rest --> cat[Skippr catalog DynamoDB or Cloud Tables]
+  rest --> cat[Skippr catalog DynamoDB]
   engine --> cat
   engine --> store
   sink[SkipprLake sink writer] --> cat
@@ -344,7 +344,6 @@ pub trait ViewCatalog: Send + Sync + Debug {
 Implementations:
 
 - `DynamoDbCatalog`: same table and partition key as tables (`catalog#<warehouse_hash>`), sort key `view#<ns>#<name>` with attribute `metadata_location`. Create uses `attribute_not_exists(PK)`; swap uses `#loc = :expected`; the pattern already exists in `create_table` and `update_table`.
-- `CloudTablesCatalog`: the same shape on Cloud Tables items.
 
 Tables and views share one identifier space: creating a table with the name of an existing view (and vice versa) is `AlreadyExists`. Enforce in both `create_table` (check `ViewCatalog::load_view`) and `create_view` (check `Catalog::table_exists`).
 
@@ -1223,7 +1222,7 @@ Each P step: failing test first, then code, then docs, then remove any code it m
 
 ```bash
 cargo test -p skippr-iceberg-rest
-cargo test -p skippr-iceberg-catalog -p skippr-iceberg-catalog-dynamodb -p skippr-iceberg-catalog-cloud-tables
+cargo test -p skippr-iceberg-catalog -p skippr-iceberg-catalog-dynamodb
 cargo test -p skipprd --lib
 cargo test -p skipprd --test query_isolation
 cargo check --all-features
