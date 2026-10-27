@@ -76,7 +76,7 @@ W1–W8 replaced this world. Do not treat this section as current code. `skipprd
 
 ### 3.3 Host hardcodes of `"Iceberg"`
 
-`src/engine.rs`, `src/plugins/cdc.rs` (`ICEBERG`, `by_name`), `src/runtime_plugins/protocol.rs`, `src/helpers/configuration.rs` schema pairing, `src/helpers/plugin_config.rs`, `src/cluster/validation.rs`, `src/cluster/pipeline_view.rs`, `src/connect.rs` / `src/connect_generated.rs`. Cut in W3.
+`src/engine.rs`, `src/plugins/cdc.rs` (`ICEBERG`, `by_name`), `crates/skippr-runtime-sdk/src/protocol.rs`, `src/helpers/configuration.rs` schema pairing, `src/helpers/plugin_config.rs`, `src/cluster/validation.rs`, `src/cluster/pipeline_view.rs`, `src/connect.rs` / `src/connect_generated.rs`. Cut in W3.
 
 ### 3.4 SDE (W6 cut)
 
@@ -667,7 +667,7 @@ The schema-sink `main.rs` is the same closure with buffer name `"schema"`, using
 |---|---|
 | `src/plugins/cdc.rs` | `ICEBERG` → `SKIPPRLAKE` with `name: "SkipprLake"`; `by_name` arm `"SkipprLake"`; test name list (~1302); test uses `sink_capabilities::SKIPPRLAKE` |
 | `src/engine.rs` | 1689 `"SkipprLake" => Some(&sink_capabilities::SKIPPRLAKE)`; 1884 |
-| `src/runtime_plugins/protocol.rs:155` | write-policy defaults for `"SkipprLake"` |
+| `crates/skippr-runtime-sdk/src/protocol.rs` | write-policy defaults for `"SkipprLake"` |
 | `src/helpers/configuration.rs:716` | SkipprLake data+schema names pair; decoded `SkipprLakeConfig` values MUST be equal |
 | `src/helpers/plugin_config.rs:157` | remove parquet default; SkipprLake has no `format` |
 | `src/cluster/validation.rs:161,474` | use `SkipprLakeConfig::PLUGIN_NAME`; `skippr_catalog_table` returns `cfg.catalog_table` from the typed config |
@@ -942,7 +942,7 @@ supports_replace_table = true
 supports_primary_key_metadata = false
 ```
 
-`SinkWritePolicySupport { supports_merge_by_key: false, supports_replace_partition: false, supports_replace_table: true }` (append is implicit). Also set `default_write_policy_flags_for_sink` in `src/runtime_plugins/protocol.rs` (AthenaIceberg already has this arm).
+`SinkWritePolicySupport { supports_merge_by_key: false, supports_replace_partition: false, supports_replace_table: true }` (append is implicit). Also set `default_write_policy_flags_for_sink` in `crates/skippr-runtime-sdk/src/protocol.rs` (AthenaIceberg already has this arm).
 
 Existing source/sink compatibility (`derive_and_validate` in `src/plugins/cdc.rs`) already rejects CDC sources that need exact-once merge into a `CdcEncodedOnly` sink where required. Add `Duckdb` to `sink_capabilities::by_name` and the tests at ~1302.
 

@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use clap::Parser;
 use skippr_plugin_data_sink_athena::*;
 use skippr_runtime_sdk::discover::OutputMetadata;
-use skippr_runtime_sdk::plugins::source_contract::namespace_source_contract;
 use skippr_runtime_sdk::plugins::{SchemaSink, SchemaSyncRequest};
 use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
 use skippr_runtime_sdk::sink_runtime_entry::run_runtime_schema_sink_plugin;
@@ -40,10 +39,7 @@ impl SchemaSink for GlueAthenaSchemaSync {
         request: SchemaSyncRequest<'_>,
         metadata: &OutputMetadata,
     ) -> Result<(), io::Error> {
-        let source_contract = request
-            .source_contract
-            .cloned()
-            .or_else(|| namespace_source_contract(request.namespace));
+        let source_contract = request.source_contract.cloned();
         AwsAthena::create_or_update_schema_with_config(
             request.namespace,
             metadata,

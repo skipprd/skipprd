@@ -1,0 +1,68 @@
+pub mod alter_ddl;
+pub mod cdc;
+pub mod source_contract;
+pub mod source_sync;
+pub mod traits;
+
+pub use alter_ddl::{warehouse_alter_sql, WarehouseDialect};
+pub use source_contract::{
+    validate_namespace_contracts, validate_write_policy_for_sink, FieldPath,
+    SinkWritePolicySupport, SourceContractError, SourceNamespaceContract, SourceSemantics,
+    WritePolicy, WritePolicyUnsupportedError,
+};
+pub use source_sync::{OffsetValidationEntry, SourcePayloadTask, SourceSyncContext};
+pub use traits::{
+    AlterSupport, AtLeastOnceMessageDelivery, ConfiguredSink, DataSink, DataSource,
+    DeterministicObjectOverwrite, FinalStateIdempotentApply, GroupedBatchReader,
+    GroupedBatchReaderConfig, GroupedSinkContract, GroupedSinkWriteContext, GroupedWalKind,
+    GroupedWalPartitionKey, GroupedWalRefs, HasSchemaSinkSpec, HasSinkSpec, LiveWalSegments,
+    NonRetryableDebugOutput, RecordBatchChunk, SchemaSink, SchemaSinkSpec, SchemaSource,
+    SchemaSyncRequest, SftpAtLeastOnce, SftpAtomicRename, SinkCallResult, SinkPreflightOutcome,
+    SinkPreflightResult, SinkSpec, SinkWriteContext, SinkWriteOutcome, SinkWriteRejection,
+    SinkWriteSemantics, SinkWriteSupport, SourceCdcContract, SourceCdcMode,
+    SourceExecutionContract, SourceOnceContract, TransactionalTableCommit,
+};
+
+/// No-op output plugin used by `discover` mode to run the input pipeline
+/// without writing to any destination.
+pub struct NoopOutputPlugin;
+
+#[async_trait::async_trait]
+impl DataSink for NoopOutputPlugin {
+    async fn sync(
+        &self,
+        stream: datafusion::execution::SendableRecordBatchStream,
+        _filename: String,
+        _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+    ) -> Result<(), std::io::Error> {
+        use futures::StreamExt;
+        let mut stream = stream;
+        while let Some(batch) = stream.next().await {
+            let _ = batch.map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn sync_with_context(
+        &self,
+        stream: datafusion::execution::SendableRecordBatchStream,
+        ctx: crate::plugins::SinkWriteContext<'_>,
+    ) -> Result<(), std::io::Error> {
+        ctx.validate_grouped::<crate::plugins::AtLeastOnceMessageDelivery>()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Unsupported, e))?;
+        self.sync(stream, ctx.filename, ctx.cdc_ctx).await
+    }
+
+    async fn sync_grouped(
+        &self,
+        mut reader: crate::plugins::GroupedBatchReader,
+        _ctx: crate::plugins::GroupedSinkWriteContext<'_>,
+    ) -> Result<crate::plugins::SinkWriteOutcome, std::io::Error> {
+        while let Some(_chunk) = reader.next_chunk().await? {}
+        Ok(crate::plugins::SinkWriteOutcome::Applied)
+    }
+
+    fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {
+        &crate::plugins::cdc::sink_capabilities::STDOUT
+    }
+}

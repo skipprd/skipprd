@@ -1,1 +1,1722 @@
-pub use skippr_core::runtime_plugins::protocol::*;
+use std::collections::BTreeMap;
+use std::num::NonZeroU64;
+
+use crate::helpers::offsets::{OffsetKey, RuntimeOffsetRpcRequest, RuntimeOffsetRpcResponse};
+pub use crate::pipeline_type::PipelineType;
+use crate::plugins::cdc::{
+    sink_capabilities, CheckpointEnvelope, EventIdSemantics, SinkCapability, SinkGuaranteeTier,
+    SourceBootstrapStyle, SourceCapability, SourceCheckpointStyle, SourceGuaranteeTier,
+    SourceOrderModel, SyncContext,
+};
+use crate::plugins::source_contract::{SinkWritePolicySupport, SourceNamespaceContract};
+use crate::plugins::{AlterSupport, SinkWriteOutcome};
+use crate::schema::OutputMetadata;
+use crate::serdes::output_format::OutputFormat;
+use crate::sink_apply_identity::SinkApplyEnvelopeV2;
+use crate::sink_semantics::{SinkGroupingSupport, SinkRetrySemantics, SinkWriteSemantics};
+use serde::{Deserialize, Serialize};
+
+// This is the in-process runtime plugin IPC contract. It is deliberately
+// separate from the skippr/React adapter's CLI subprocess JSON summaries.
+// Schema freshness is negotiated through required_schema_version plus
+// SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
+// Protocol 23: HostFrame::ApplyAlter for SchemaSink migrations.
+// Protocol 22: PipelineType is a bincode u32 (YAML/JSON stay lowercase names).
+// 18.3.1 keeps protocol 22 and rejects trailing frame bytes so a too-long
+// payload cannot steal the next length prefix (EU Staging COPY desync).
+// Bump every plugin crate patch when this constant changes so catalog paths
+// stay immutable.
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 23;
+pub const COMMIT_RECEIPT_VERSION: u32 = 1;
+pub const CATALOG_INTENT_VERSION: u32 = 2;
+pub const GLUE_PARTITION_CATALOG_INTENT_VERSION: u32 = 1;
+pub const MAX_RUNTIME_SINK_CHUNK_BYTES: usize = 128 * 1024 * 1024;
+pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
+pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
+pub const SKIPPR_RUNTIME_OFFSET_ADDR_ENV: &str = "SKIPPR_RUNTIME_OFFSET_ADDR";
+pub const SKIPPR_RUNTIME_SESSION_TOKEN_ENV: &str = "SKIPPR_RUNTIME_SESSION_TOKEN";
+/// Set on runtime source children by the host (`discover` | `sync`). Not a customer-facing setting.
+pub const SKIPPR_RUNTIME_EXECUTION_MODE_ENV: &str = "SKIPPR_RUNTIME_EXECUTION_MODE";
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeSessionHello {
+    pub protocol_version: u32,
+    pub token: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum RuntimePluginKind {
+    DataSource,
+    DataSink,
+    SchemaSink,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum RuntimeBinding {
+    Primary,
+    Deadletter,
+}
+
+impl RuntimeBinding {
+    pub fn format_pipeline(
+        self,
+        pipeline: crate::pipeline_type::PipelineType,
+    ) -> crate::pipeline_type::PipelineType {
+        match self {
+            Self::Primary => pipeline,
+            Self::Deadletter => crate::pipeline_type::PipelineType::deadletter_format_mode(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeSourceCapabilityDescriptor {
+    pub name: String,
+    pub guarantee_tier: SourceGuaranteeTier,
+    pub checkpoint_style: SourceCheckpointStyle,
+    pub bootstrap_style: SourceBootstrapStyle,
+    pub order_model: SourceOrderModel,
+    pub supports_deletes: bool,
+    pub event_id_semantics: EventIdSemantics,
+    #[serde(default)]
+    pub declares_namespace_contracts: bool,
+}
+
+impl From<&'static SourceCapability> for RuntimeSourceCapabilityDescriptor {
+    fn from(value: &'static SourceCapability) -> Self {
+        Self {
+            name: value.name.to_string(),
+            guarantee_tier: value.guarantee_tier,
+            checkpoint_style: value.checkpoint_style,
+            bootstrap_style: value.bootstrap_style,
+            order_model: value.order_model,
+            supports_deletes: value.supports_deletes,
+            event_id_semantics: value.event_id_semantics,
+            declares_namespace_contracts: false,
+        }
+    }
+}
+
+impl RuntimeSourceCapabilityDescriptor {
+    pub fn to_cdc_capability(&self) -> SourceCapability {
+        SourceCapability {
+            name: Box::leak(self.name.clone().into_boxed_str()),
+            guarantee_tier: self.guarantee_tier,
+            checkpoint_style: self.checkpoint_style,
+            bootstrap_style: self.bootstrap_style,
+            order_model: self.order_model,
+            supports_deletes: self.supports_deletes,
+            event_id_semantics: self.event_id_semantics,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeSinkCapabilityDescriptor {
+    pub name: String,
+    pub max_sessions_per_child: usize,
+    pub guarantee_tier: SinkGuaranteeTier,
+    pub can_manage_skippr_columns: bool,
+    pub can_maintain_tombstone_tables: bool,
+    pub can_compare_order_tokens: bool,
+    pub supports_transactions: bool,
+    #[serde(default)]
+    pub supports_merge_by_key: bool,
+    #[serde(default)]
+    pub supports_replace_table: bool,
+    #[serde(default)]
+    pub supports_replace_partition: bool,
+    #[serde(default)]
+    pub supports_primary_key_metadata: bool,
+    #[serde(default)]
+    pub supports_bounded_grouped_stream: bool,
+    pub retry_semantics: SinkRetrySemantics,
+    pub grouping_support: SinkGroupingSupport,
+}
+
+impl From<&SinkCapability> for RuntimeSinkCapabilityDescriptor {
+    fn from(value: &SinkCapability) -> Self {
+        let flags = Self::default_write_policy_flags_for_sink(value.name);
+        Self {
+            name: value.name.to_string(),
+            max_sessions_per_child: value.max_sessions_per_child.max(1),
+            guarantee_tier: value.guarantee_tier,
+            can_manage_skippr_columns: value.can_manage_skippr_columns,
+            can_maintain_tombstone_tables: value.can_maintain_tombstone_tables,
+            can_compare_order_tokens: value.can_compare_order_tokens,
+            supports_transactions: value.supports_transactions,
+            supports_merge_by_key: flags.supports_merge_by_key,
+            supports_replace_table: flags.supports_replace_table,
+            supports_replace_partition: flags.supports_replace_partition,
+            supports_primary_key_metadata: Self::supports_primary_key_metadata_for_sink(value.name),
+            supports_bounded_grouped_stream: !value.grouping_support.is_none(),
+            retry_semantics: value.retry_semantics,
+            grouping_support: value.grouping_support,
+        }
+    }
+}
+
+fn canon_plugin_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+impl RuntimeSinkCapabilityDescriptor {
+    fn supports_primary_key_metadata_for_sink(name: &str) -> bool {
+        canon_plugin_name(name) == "athena"
+    }
+
+    fn default_write_policy_flags_for_sink(name: &str) -> SinkWritePolicySupport {
+        let mut support = SinkWritePolicySupport::default();
+        match canon_plugin_name(name).as_str() {
+            "athena" => {
+                support.supports_replace_partition = true;
+                support.supports_replace_table = true;
+            }
+            "skipprlake" | "athenaiceberg" => {
+                support.supports_merge_by_key = true;
+                support.supports_replace_partition = true;
+                support.supports_replace_table = true;
+            }
+            "duckdb" => {
+                support.supports_replace_table = true;
+            }
+            _ => {}
+        }
+        support
+    }
+}
+
+impl RuntimeSinkCapabilityDescriptor {
+    pub fn to_cdc_capability(&self) -> SinkCapability {
+        SinkCapability {
+            name: Box::leak(self.name.clone().into_boxed_str()),
+            max_sessions_per_child: self.max_sessions_per_child.max(1),
+            guarantee_tier: self.guarantee_tier,
+            can_manage_skippr_columns: self.can_manage_skippr_columns,
+            can_maintain_tombstone_tables: self.can_maintain_tombstone_tables,
+            can_compare_order_tokens: self.can_compare_order_tokens,
+            supports_transactions: self.supports_transactions,
+            retry_semantics: self.retry_semantics,
+            grouping_support: self.grouping_support,
+            supported_formats: sink_capabilities::by_name(&self.name)
+                .map(|known| known.supported_formats)
+                .unwrap_or_else(OutputFormat::native_formats),
+            default_format: sink_capabilities::by_name(&self.name)
+                .and_then(|known| known.default_format),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimePluginConfigEnvelope {
+    pub plugin_name: String,
+    pub raw_config_json: String,
+}
+
+impl RuntimePluginConfigEnvelope {
+    pub fn new(plugin_name: impl Into<String>, raw_config: serde_json::Value) -> Self {
+        Self {
+            plugin_name: plugin_name.into(),
+            raw_config_json: raw_config.to_string(),
+        }
+    }
+
+    pub fn expect_plugin(&self, expected_plugin_name: &str) -> Result<(), String> {
+        if self.plugin_name == expected_plugin_name {
+            Ok(())
+        } else {
+            Err(format!(
+                "runtime config targets plugin '{}' but '{}' was expected",
+                self.plugin_name, expected_plugin_name
+            ))
+        }
+    }
+
+    pub fn decode<T: serde::de::DeserializeOwned>(&self) -> Result<T, String> {
+        serde_json::from_str(&self.raw_config_json).map_err(|err| {
+            format!(
+                "Failed to decode runtime config for '{}': {}",
+                self.plugin_name, err
+            )
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSourceConfig(pub RuntimePluginConfigEnvelope);
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSinkConfig(pub RuntimePluginConfigEnvelope);
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSchemaConfig(pub RuntimePluginConfigEnvelope);
+
+impl From<crate::helpers::plugin_config::PluginConfigEntry> for RuntimePluginConfigEnvelope {
+    fn from(value: crate::helpers::plugin_config::PluginConfigEntry) -> Self {
+        Self::new(value.plugin_name, value.config)
+    }
+}
+
+impl TryFrom<crate::helpers::plugin_config::PluginConfigEntry> for RuntimeSourceConfig {
+    type Error = String;
+
+    fn try_from(
+        value: crate::helpers::plugin_config::PluginConfigEntry,
+    ) -> Result<Self, Self::Error> {
+        Ok(Self(value.into()))
+    }
+}
+
+impl TryFrom<crate::helpers::plugin_config::PluginConfigEntry> for RuntimeSinkConfig {
+    type Error = String;
+
+    fn try_from(
+        value: crate::helpers::plugin_config::PluginConfigEntry,
+    ) -> Result<Self, Self::Error> {
+        Ok(Self(RuntimePluginConfigEnvelope::new(
+            value.plugin_name,
+            value.config,
+        )))
+    }
+}
+
+impl TryFrom<crate::helpers::plugin_config::PluginConfigEntry> for RuntimeSchemaConfig {
+    type Error = String;
+
+    fn try_from(
+        value: crate::helpers::plugin_config::PluginConfigEntry,
+    ) -> Result<Self, Self::Error> {
+        Ok(Self(RuntimePluginConfigEnvelope::new(
+            value.plugin_name,
+            value.config,
+        )))
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeOutputLayout {
+    pub partition_fields: Vec<String>,
+    #[serde(default)]
+    pub order_fields: Vec<String>,
+    pub time_partition_granularity: Option<String>,
+    #[serde(default)]
+    pub time_partition_prefix: Option<String>,
+    #[serde(default)]
+    pub format: Option<OutputFormat>,
+}
+
+impl RuntimeOutputLayout {
+    pub fn required_format(&self) -> Result<OutputFormat, String> {
+        let format = self
+            .format
+            .ok_or_else(|| "object sink requires RuntimeOutputLayout.format".to_string())?;
+        if format.is_native() {
+            return Err("this sink writes files and needs a file format (parquet, jsonl, csv, or xml). Table sinks such as Postgres insert rows and have no file format.".to_string());
+        }
+        Ok(format)
+    }
+
+    pub fn object_extension(&self) -> Result<&'static str, String> {
+        Ok(self.required_format()?.extension())
+    }
+
+    pub fn hive_object_key(
+        &self,
+        prefix: &str,
+        filename: &str,
+        object_stem: &str,
+    ) -> Result<String, String> {
+        Ok(crate::object_layout::hive_object_relative_path(
+            prefix,
+            filename,
+            object_stem,
+            self.object_extension()?,
+            self.time_partition_granularity.as_deref(),
+            self.time_partition_prefix.as_deref(),
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum RuntimeExecutionMode {
+    Discover,
+    #[default]
+    Sync,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeExecutionContext {
+    pub pipeline_name: String,
+    pub workspace_name: String,
+    pub data_dir: String,
+    #[serde(default)]
+    pub execution_mode: RuntimeExecutionMode,
+    #[serde(default)]
+    pub output_layout: RuntimeOutputLayout,
+    #[serde(default)]
+    pub inject_fields: BTreeMap<String, String>,
+    #[serde(default, with = "crate::pipeline_type::wire")]
+    pub pipeline_type: PipelineType,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct RuntimeSchemaState {
+    pub version: u64,
+    pub namespaces: BTreeMap<String, OutputMetadata>,
+    /// Exact per-namespace publication watermarks. These are independent of
+    /// `version`, which is only the latest pipeline-wide schema event.
+    pub namespace_versions: BTreeMap<String, u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SchemaNamespaceDelta {
+    pub version: u64,
+    pub metadata: OutputMetadata,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SchemaDelta {
+    pub version: u64,
+    pub namespaces: BTreeMap<String, SchemaNamespaceDelta>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSinkInstallRequest {
+    pub context: RuntimeExecutionContext,
+    pub binding: RuntimeBinding,
+    pub config: RuntimeSinkConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSchemaInstallRequest {
+    pub context: RuntimeExecutionContext,
+    pub binding: RuntimeBinding,
+    pub config: RuntimeSchemaConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct RuntimeSchemaStateInstallRequest {
+    pub schema_state: RuntimeSchemaState,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeSchemaRefreshRequest {
+    pub request_id: u64,
+    pub namespace: String,
+    pub required_version: u64,
+    pub installed_version: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HandshakeRequest {
+    pub pipeline_name: String,
+    pub protocol_version: u32,
+    /// Maximum concurrent sink sessions the host will route through this child.
+    /// Non-sink runtimes receive one.
+    pub sink_session_capacity: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HandshakeResponse {
+    pub protocol_version: u32,
+    pub kind: RuntimePluginKind,
+    pub plugin_name: String,
+    pub source_capability: Option<RuntimeSourceCapabilityDescriptor>,
+    pub sink_capability: Option<RuntimeSinkCapabilityDescriptor>,
+    pub supports_schema: bool,
+    pub alter_support: AlterSupport,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSourceIngestWindow {
+    pub max_in_flight_requests: usize,
+    pub max_in_flight_bytes: usize,
+}
+
+impl Default for RuntimeSourceIngestWindow {
+    fn default() -> Self {
+        Self {
+            max_in_flight_requests: 8,
+            max_in_flight_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SourceStartRequest {
+    pub context: RuntimeExecutionContext,
+    pub config: RuntimeSourceConfig,
+    // Keep this trailing so v7 runtimes can decode RunSource and ignore it.
+    #[serde(default)]
+    pub once: bool,
+    #[serde(default)]
+    pub source_ingest_window: RuntimeSourceIngestWindow,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeCheckpointUpdate {
+    pub key: String,
+    pub envelope: CheckpointEnvelope,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeOffsetPosition {
+    pub key: OffsetKey,
+    pub position: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeOffsetMaterializationHint {
+    pub key: OffsetKey,
+    pub position: u64,
+    pub closed: bool,
+}
+
+/// Generic offset validation entry for batched source offset checks.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeOffsetValidationEntry {
+    pub key: OffsetKey,
+    pub offset_type: crate::helpers::offsets::OffsetTypes,
+    pub offset_value: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum PluginOffsetFrame {
+    ValidateOffsetBatch {
+        request_id: u64,
+        entries: Vec<RuntimeOffsetValidationEntry>,
+    },
+    LoadCheckpoint {
+        request_id: u64,
+        key: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum HostOffsetFrame {
+    ValidateOffsetBatchResponse {
+        request_id: u64,
+        should_process: Vec<bool>,
+    },
+    LoadCheckpointResponse {
+        request_id: u64,
+        envelope: Option<CheckpointEnvelope>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeIngestPartitionBatch {
+    pub sink_ref: String,
+    pub namespace: String,
+    pub partition: String,
+    pub time: Option<i64>,
+    pub schema_fingerprint: String,
+    pub offsets: Vec<RuntimeOffsetPosition>,
+    pub arrow_stream_bytes: Vec<u8>,
+    pub cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+    /// When set, persisted atomically with this batch's WAL segment after offsets are durable.
+    #[serde(default)]
+    pub checkpoint_update: Option<RuntimeCheckpointUpdate>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeRawIngestBatch {
+    pub offset_key: OffsetKey,
+    pub data: String,
+    pub bytes: usize,
+    /// Always present on the bincode wire (use `None` when unset). Do not use
+    /// `skip_serializing_if` here — bincode + serde will not apply defaults for omitted fields.
+    #[serde(default)]
+    pub offset_pos: Option<u64>,
+    pub source_uri: String,
+    pub namespace: Option<String>,
+    pub cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+}
+
+impl From<crate::ingest::IngestBatch> for RuntimeRawIngestBatch {
+    fn from(batch: crate::ingest::IngestBatch) -> Self {
+        Self {
+            offset_key: batch.offset_key,
+            data: batch.data,
+            bytes: batch.bytes,
+            offset_pos: batch.offset_pos,
+            source_uri: batch.source_uri,
+            namespace: batch.namespace,
+            cdc_rows: batch.cdc_rows,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSourceSinkWrite {
+    pub filename: String,
+    pub compaction_id: String,
+    pub idempotency_key: String,
+    pub wal_refs: Vec<RuntimeWalPartRef>,
+    pub write_semantics: SinkWriteSemantics,
+    pub schema_fingerprint: String,
+    pub arrow_stream_bytes: Vec<u8>,
+    pub cdc_ctx: Option<SyncContext>,
+    /// Always present on the bincode wire (use `None` when unset). Do not use
+    /// `skip_serializing_if` here — bincode + serde will not apply defaults for omitted fields.
+    #[serde(default)]
+    pub source_contract: Option<SourceNamespaceContract>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeWalPartRef {
+    pub segment_id: String,
+    pub source: String,
+    pub start: u64,
+    pub len: u64,
+    pub sink_ref: String,
+    pub namespace: String,
+    pub partition: String,
+    pub time: Option<i64>,
+    pub schema_fingerprint: String,
+    pub cdc_meta_hash: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeRequestAck {
+    pub request_id: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum CommitReceiptAuthority {
+    SinkWrite,
+    AuthoritativePreflight { authority: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CommitReceipt {
+    pub version: u32,
+    pub compaction_id: String,
+    pub idempotency_key: String,
+    pub wal_refs_fingerprint: String,
+    pub authority: CommitReceiptAuthority,
+}
+
+impl CommitReceipt {
+    pub fn from_envelope(
+        envelope: &SinkApplyEnvelopeV2,
+        authority: CommitReceiptAuthority,
+    ) -> Self {
+        Self {
+            version: COMMIT_RECEIPT_VERSION,
+            compaction_id: envelope.compaction_id.clone(),
+            idempotency_key: envelope.idempotency_key.clone(),
+            wal_refs_fingerprint: envelope.wal_refs_fingerprint.clone(),
+            authority,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SinkWriteStats {
+    pub rows: Option<u64>,
+    pub bytes: Option<u64>,
+    pub objects: Option<u64>,
+    pub encode_duration_ms: Option<u64>,
+    pub upload_duration_ms: Option<u64>,
+    pub commit_duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub enum CatalogIntentKind {
+    UpsertPartition,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct CatalogIntentIdentity {
+    pub sink_ref: String,
+    pub namespace: String,
+    pub kind: CatalogIntentKind,
+    pub key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct CatalogIntent {
+    pub version: u32,
+    pub identity: CatalogIntentIdentity,
+    pub payload: GluePartitionCatalogIntentV1,
+}
+
+impl CatalogIntent {
+    pub fn is_admissible(&self) -> bool {
+        self.version == CATALOG_INTENT_VERSION
+            && !self.identity.namespace.trim().is_empty()
+            && !self.identity.key.trim().is_empty()
+            && self.payload.version == GLUE_PARTITION_CATALOG_INTENT_VERSION
+            && !self.payload.database.trim().is_empty()
+            && !self.payload.table.trim().is_empty()
+            && !self.payload.location.trim().is_empty()
+            && self.payload.schema_namespace == self.identity.namespace
+            && !self.payload.partition_values.is_empty()
+            && self.payload.partition_values.len() == self.payload.partition_columns.len()
+            && self
+                .payload
+                .partition_values
+                .iter()
+                .all(|value| !value.trim().is_empty())
+            && self
+                .payload
+                .partition_columns
+                .iter()
+                .all(|column| !column.name.trim().is_empty())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct GlueColumnIntent {
+    pub name: String,
+    pub r#type: String,
+    pub comment: Option<String>,
+}
+
+impl GlueColumnIntent {
+    pub fn from_glue_fields(name: &str, r#type: Option<&str>, comment: Option<&str>) -> Self {
+        Self {
+            name: name.to_string(),
+            r#type: r#type.unwrap_or("string").to_string(),
+            comment: comment.map(str::to_string),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct GluePartitionCatalogIntentV1 {
+    pub version: u32,
+    pub region: Option<String>,
+    pub catalog_id: Option<String>,
+    pub database: String,
+    pub table: String,
+    pub partition_values: Vec<String>,
+    pub location: String,
+    pub storage_columns: Vec<GlueColumnIntent>,
+    pub partition_columns: Vec<GlueColumnIntent>,
+    pub input_format: String,
+    pub output_format: String,
+    pub serde_library: String,
+    pub schema_namespace: String,
+    pub schema_version: NonZeroU64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SinkAck {
+    pub request_id: u64,
+    pub outcome: SinkWriteOutcome,
+    pub receipt: CommitReceipt,
+    pub stats: SinkWriteStats,
+    pub catalog_intents: Vec<CatalogIntent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeIngestAck {
+    pub request_id: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum SourceEvent {
+    SchemaStateUpdate(RuntimeSchemaState),
+    SchemaDelta(SchemaDelta),
+    ContractsUpdate(Vec<SourceNamespaceContract>),
+    Completed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SinkRunRequest {
+    pub request_id: u64,
+    pub compaction_id: String,
+    pub idempotency_key: String,
+    pub wal_refs: Vec<RuntimeWalPartRef>,
+    pub write_semantics: SinkWriteSemantics,
+    pub schema_fingerprint: String,
+    pub binding: RuntimeBinding,
+    pub required_schema_namespace: String,
+    pub required_schema_version: u64,
+    pub filename: String,
+    pub cdc_ctx: Option<SyncContext>,
+    /// Always present on the bincode wire (use `None` when unset). Do not use
+    /// `skip_serializing_if` here — bincode + serde will not apply defaults for omitted fields.
+    #[serde(default)]
+    pub source_contract: Option<SourceNamespaceContract>,
+    #[serde(default)]
+    pub payload_mode: RuntimeSinkPayloadMode,
+    /// Always present on the bincode wire; `None` when the host sent no fence.
+    #[serde(default)]
+    pub live_wal_segments: Option<crate::plugins::LiveWalSegments>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PrepareSink {
+    pub request_id: u64,
+    pub envelope: SinkApplyEnvelopeV2,
+    pub request: SinkRunRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum PrepareSinkResult {
+    Ready,
+    AlreadyApplied {
+        receipt: CommitReceipt,
+        catalog_intents: Vec<CatalogIntent>,
+    },
+    Rejected {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PrepareAck {
+    pub request_id: u64,
+    pub result: PrepareSinkResult,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeSinkError {
+    pub request_id: u64,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum RuntimeSinkPayloadMode {
+    #[default]
+    FullStream,
+    GroupedChunks,
+    RawBytes,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SinkChunk {
+    pub request_id: u64,
+    pub chunk_index: u32,
+    pub row_offset: u64,
+    pub rows: u64,
+    pub arrow_stream_bytes: Vec<u8>,
+}
+
+impl SinkChunk {
+    pub fn validate_bound(&self) -> Result<(), String> {
+        if self.arrow_stream_bytes.len() > MAX_RUNTIME_SINK_CHUNK_BYTES {
+            return Err(format!(
+                "sink chunk {} for request {} is {} bytes; maximum is {}",
+                self.chunk_index,
+                self.request_id,
+                self.arrow_stream_bytes.len(),
+                MAX_RUNTIME_SINK_CHUNK_BYTES
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FinishSink {
+    pub request_id: u64,
+    pub chunks: u32,
+    pub rows: u64,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SchemaRunRequest {
+    pub request_id: u64,
+    pub compaction_id: String,
+    pub binding: RuntimeBinding,
+    pub required_schema_version: u64,
+    pub namespace: String,
+    #[serde(default)]
+    pub source_contract: Option<SourceNamespaceContract>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum HostFrame {
+    Handshake(HandshakeRequest),
+    InstallSink(RuntimeSinkInstallRequest),
+    InstallSchema(RuntimeSchemaInstallRequest),
+    InstallSchemaState(RuntimeSchemaStateInstallRequest),
+    InstallSchemaDelta(SchemaDelta),
+    RunSource(SourceStartRequest),
+    PrepareSink(PrepareSink),
+    RunSchema(SchemaRunRequest),
+    IngestAck(RuntimeIngestAck),
+    OffsetResponse(RuntimeOffsetRpcResponse),
+    Shutdown,
+    ApplyAlter(SchemaAlterRequest),
+}
+
+impl HostFrame {
+    pub fn wire_label(&self) -> &'static str {
+        match self {
+            Self::Handshake(_) => "Handshake",
+            Self::InstallSink(_) => "InstallSink",
+            Self::InstallSchema(_) => "InstallSchema",
+            Self::InstallSchemaState(_) => "InstallSchemaState",
+            Self::InstallSchemaDelta(_) => "InstallSchemaDelta",
+            Self::RunSource(_) => "RunSource",
+            Self::PrepareSink(_) => "PrepareSink",
+            Self::RunSchema(_) => "RunSchema",
+            Self::IngestAck(_) => "IngestAck",
+            Self::OffsetResponse(_) => "OffsetResponse",
+            Self::Shutdown => "Shutdown",
+            Self::ApplyAlter(_) => "ApplyAlter",
+        }
+    }
+
+    pub fn request_id(&self) -> Option<u64> {
+        match self {
+            Self::PrepareSink(prepare) => Some(prepare.request_id),
+            Self::RunSchema(request) => Some(request.request_id),
+            Self::ApplyAlter(request) => Some(request.request_id),
+            Self::IngestAck(ack) => Some(ack.request_id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SchemaAlterRequest {
+    pub request_id: u64,
+    pub namespace: String,
+    pub op: crate::schema_alter::SchemaAlterOp,
+    pub field_id: i32,
+    pub metadata: OutputMetadata,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum PluginFrame {
+    HandshakeAck(HandshakeResponse),
+    Installed,
+    SourceEvent(SourceEvent),
+    OffsetRequest(RuntimeOffsetRpcRequest),
+    PrepareAck(PrepareAck),
+    SinkAck(SinkAck),
+    SinkError(RuntimeSinkError),
+    SchemaAck(RuntimeRequestAck),
+    SchemaStateRefreshRequired(RuntimeSchemaRefreshRequest),
+    Error(String),
+}
+
+impl PluginFrame {
+    pub fn wire_label(&self) -> &'static str {
+        match self {
+            Self::HandshakeAck(_) => "HandshakeAck",
+            Self::Installed => "Installed",
+            Self::SourceEvent(_) => "SourceEvent",
+            Self::OffsetRequest(_) => "OffsetRequest",
+            Self::PrepareAck(_) => "PrepareAck",
+            Self::SinkAck(_) => "SinkAck",
+            Self::SinkError(_) => "SinkError",
+            Self::SchemaAck(_) => "SchemaAck",
+            Self::SchemaStateRefreshRequired(_) => "SchemaStateRefreshRequired",
+            Self::Error(_) => "Error",
+        }
+    }
+
+    pub fn request_id(&self) -> Option<u64> {
+        match self {
+            Self::PrepareAck(ack) => Some(ack.request_id),
+            Self::SinkAck(ack) => Some(ack.request_id),
+            Self::SinkError(err) => Some(err.request_id),
+            Self::SchemaAck(ack) => Some(ack.request_id),
+            Self::SchemaStateRefreshRequired(refresh) => Some(refresh.request_id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum HostDataFrame {
+    SinkChunk(SinkChunk),
+    FinishSink(FinishSink),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum PluginDataFrame {
+    /// Host-owned ingest payloads emitted by runtime source plugins.
+    SourcePayloadBatches {
+        request_id: u64,
+        tasks: Vec<Vec<RuntimeRawIngestBatch>>,
+    },
+    IngestBatches {
+        request_id: u64,
+        batches: Vec<RuntimeIngestPartitionBatch>,
+    },
+    CheckpointUpdate {
+        update: RuntimeCheckpointUpdate,
+    },
+    OffsetMaterializationHints {
+        hints: Vec<RuntimeOffsetMaterializationHint>,
+    },
+    SinkWrite(RuntimeSourceSinkWrite),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deadletter_format_pipeline_is_ingest_even_for_copy() {
+        assert_eq!(
+            RuntimeBinding::Primary.format_pipeline(crate::pipeline_type::PipelineType::Copy),
+            crate::pipeline_type::PipelineType::Copy
+        );
+        assert_eq!(
+            RuntimeBinding::Deadletter.format_pipeline(crate::pipeline_type::PipelineType::Copy),
+            crate::pipeline_type::PipelineType::Ingest
+        );
+    }
+
+    #[test]
+    fn source_start_roundtrips_at_v17() {
+        let frame = HostFrame::RunSource(SourceStartRequest {
+            context: RuntimeExecutionContext {
+                pipeline_name: "pipeline".to_string(),
+                workspace_name: "workspace".to_string(),
+                data_dir: "/tmp/data".to_string(),
+                execution_mode: RuntimeExecutionMode::Sync,
+                output_layout: RuntimeOutputLayout::default(),
+                inject_fields: Default::default(),
+                pipeline_type: crate::pipeline_type::PipelineType::Ingest,
+            },
+            config: RuntimeSourceConfig(RuntimePluginConfigEnvelope::new(
+                "Test",
+                serde_json::json!({}),
+            )),
+            once: true,
+            source_ingest_window: RuntimeSourceIngestWindow::default(),
+        });
+
+        let bytes = bincode::serialize(&frame).unwrap();
+        let decoded: HostFrame = bincode::deserialize(&bytes).unwrap();
+
+        let HostFrame::RunSource(decoded) = decoded else {
+            panic!("expected RunSource frame");
+        };
+        assert_eq!(decoded.context.pipeline_name, "pipeline");
+        assert_eq!(decoded.context.execution_mode, RuntimeExecutionMode::Sync);
+        assert_eq!(
+            decoded.context.pipeline_type,
+            crate::pipeline_type::PipelineType::Ingest
+        );
+        assert!(decoded.once);
+    }
+
+    #[test]
+    fn sink_install_copy_pipeline_type_roundtrips() {
+        let request = RuntimeSinkInstallRequest {
+            context: RuntimeExecutionContext {
+                pipeline_name: "pipeline".to_string(),
+                workspace_name: "workspace".to_string(),
+                data_dir: "/tmp/data".to_string(),
+                execution_mode: RuntimeExecutionMode::Sync,
+                output_layout: RuntimeOutputLayout::default(),
+                inject_fields: Default::default(),
+                pipeline_type: crate::pipeline_type::PipelineType::Copy,
+            },
+            binding: RuntimeBinding::Primary,
+            config: RuntimeSinkConfig(RuntimePluginConfigEnvelope::new(
+                "File",
+                serde_json::json!({}),
+            )),
+        };
+        let decoded: RuntimeSinkInstallRequest =
+            bincode::deserialize(&bincode::serialize(&request).unwrap()).unwrap();
+        assert_eq!(
+            decoded.context.pipeline_type,
+            crate::pipeline_type::PipelineType::Copy
+        );
+    }
+
+    fn copy_prepare_sink(request_id: u64) -> PrepareSink {
+        let request = SinkRunRequest {
+            request_id,
+            compaction_id: format!("c{request_id}"),
+            idempotency_key: format!("k{request_id}"),
+            wal_refs: Vec::new(),
+            write_semantics: SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
+            binding: RuntimeBinding::Primary,
+            required_schema_namespace: String::new(),
+            required_schema_version: 0,
+            filename: "cube.json".into(),
+            cdc_ctx: None,
+            source_contract: None,
+            payload_mode: RuntimeSinkPayloadMode::RawBytes,
+            live_wal_segments: None,
+        };
+        PrepareSink {
+            request_id,
+            envelope: crate::sink_apply_identity::SinkApplyEnvelopeV2::new(
+                request.compaction_id.clone(),
+                request.idempotency_key.clone(),
+                &request.wal_refs,
+                false,
+                Default::default(),
+                request.write_semantics,
+                None,
+                None,
+                None,
+            ),
+            request,
+        }
+    }
+
+    #[test]
+    fn prepare_sink_is_host_frame_variant_6() {
+        let payload = bincode::serialize(&HostFrame::PrepareSink(copy_prepare_sink(31))).unwrap();
+        assert_eq!(u32::from_le_bytes(payload[0..4].try_into().unwrap()), 6);
+        assert_eq!(&payload[4..10], &[0x1f, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[tokio::test]
+    async fn omitted_length_prefix_on_prepare_sink_matches_eu_staging_desync() {
+        use crate::wire::read_frame;
+        use tokio::io::AsyncWriteExt;
+
+        let payload = bincode::serialize(&HostFrame::PrepareSink(copy_prepare_sink(31))).unwrap();
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        writer.write_all(&payload).await.unwrap();
+        drop(writer);
+
+        let err = read_frame::<_, HostFrame>(&mut reader).await.unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("31")
+                && message.contains("expected variant index")
+                && message.contains("payload_len=6")
+                && message.contains("1f, 00, 00, 00, 00, 00"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn length_prefixed_installed_plugin_frame_roundtrips_without_desync_warn() {
+        use crate::wire::{looks_like_omitted_prepare_sink_length_prefix, read_frame, write_frame};
+
+        let payload = bincode::serialize(&PluginFrame::Installed).unwrap();
+        assert_eq!(payload.as_slice(), &[1, 0, 0, 0]);
+        assert!(!looks_like_omitted_prepare_sink_length_prefix(&payload));
+
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        write_frame(&mut writer, &PluginFrame::Installed)
+            .await
+            .unwrap();
+        drop(writer);
+
+        let decoded = read_frame::<_, PluginFrame>(&mut reader).await.unwrap();
+        assert!(matches!(decoded, PluginFrame::Installed));
+    }
+
+    #[tokio::test]
+    async fn length_prefixed_prepare_sink_roundtrips_copy_raw_bytes() {
+        use crate::wire::{read_frame, write_frame};
+
+        let frame = HostFrame::PrepareSink(copy_prepare_sink(31));
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        write_frame(&mut writer, &frame).await.unwrap();
+        drop(writer);
+
+        let decoded = read_frame::<_, HostFrame>(&mut reader).await.unwrap();
+        let HostFrame::PrepareSink(prepare) = decoded else {
+            panic!("expected PrepareSink, got {}", decoded.wire_label());
+        };
+        assert_eq!(prepare.request_id, 31);
+        assert_eq!(
+            prepare.request.payload_mode,
+            RuntimeSinkPayloadMode::RawBytes
+        );
+    }
+
+    #[test]
+    fn source_event_contracts_update_roundtrips() {
+        use crate::plugins::source_contract::{FieldPath, SourceNamespaceContract, WritePolicy};
+
+        let event = SourceEvent::ContractsUpdate(vec![SourceNamespaceContract {
+            namespace: "google_analytics.events_daily".into(),
+            primary_key: vec![FieldPath::single("property_id"), FieldPath::single("date")],
+            cursor: Some(FieldPath::single("date")),
+            partition_key: vec![FieldPath::single("date")],
+            write_policy: WritePolicy::ReplacePartition,
+            refresh_window: Some(3),
+            description: String::new(),
+            semantics: None,
+        }]);
+        let frame = PluginFrame::SourceEvent(event);
+        let bytes = bincode::serialize(&frame).unwrap();
+        let decoded: PluginFrame = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            PluginFrame::SourceEvent(SourceEvent::ContractsUpdate(contracts)) => {
+                assert_eq!(contracts.len(), 1);
+                assert_eq!(contracts[0].write_policy, WritePolicy::ReplacePartition);
+            }
+            other => panic!("unexpected frame: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sink_run_request_optional_source_contract_defaults_none() {
+        let bytes = bincode::serialize(&SinkRunRequest {
+            request_id: 1,
+            compaction_id: "c1".into(),
+            idempotency_key: "c1".into(),
+            wal_refs: Vec::new(),
+            write_semantics: SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
+            binding: RuntimeBinding::Primary,
+            required_schema_namespace: "ns".into(),
+            required_schema_version: 0,
+            filename: "f".into(),
+            cdc_ctx: None,
+            source_contract: None,
+            payload_mode: RuntimeSinkPayloadMode::FullStream,
+            live_wal_segments: None,
+        })
+        .unwrap();
+        let decoded: SinkRunRequest = bincode::deserialize(&bytes).unwrap();
+        assert!(decoded.source_contract.is_none());
+    }
+
+    #[test]
+    fn source_payload_batch_none_offset_pos_roundtrips() {
+        use crate::helpers::offsets::OffsetKey;
+
+        let frame = PluginDataFrame::SourcePayloadBatches {
+            request_id: 42,
+            tasks: vec![vec![RuntimeRawIngestBatch {
+                offset_key: OffsetKey::new("orders", "partition-1"),
+                data: "{}\n".into(),
+                bytes: 3,
+                offset_pos: None,
+                source_uri: "mysql://localhost/orders".into(),
+                namespace: Some("mysql.orders".into()),
+                cdc_rows: None,
+            }]],
+        };
+
+        let bytes = bincode::serialize(&frame).unwrap();
+        let decoded: PluginDataFrame = bincode::deserialize(&bytes).unwrap();
+
+        let PluginDataFrame::SourcePayloadBatches { request_id, tasks } = decoded else {
+            panic!("expected SourcePayloadBatches frame");
+        };
+        assert_eq!(request_id, 42);
+        assert_eq!(tasks[0][0].offset_pos, None);
+        assert_eq!(tasks[0][0].source_uri, "mysql://localhost/orders");
+    }
+
+    #[test]
+    fn sink_write_none_source_contract_roundtrips() {
+        let frame = PluginDataFrame::SinkWrite(RuntimeSourceSinkWrite {
+            filename: "orders/part-0001.arrow".into(),
+            compaction_id: "c1".into(),
+            idempotency_key: "c1".into(),
+            wal_refs: Vec::new(),
+            write_semantics: SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
+            arrow_stream_bytes: vec![1, 2, 3],
+            cdc_ctx: None,
+            source_contract: None,
+        });
+
+        let bytes = bincode::serialize(&frame).unwrap();
+        let decoded: PluginDataFrame = bincode::deserialize(&bytes).unwrap();
+
+        let PluginDataFrame::SinkWrite(decoded) = decoded else {
+            panic!("expected SinkWrite frame");
+        };
+        assert!(decoded.source_contract.is_none());
+        assert_eq!(decoded.filename, "orders/part-0001.arrow");
+    }
+
+    #[test]
+    fn sink_chunk_and_finish_roundtrip() {
+        let frame = HostDataFrame::SinkChunk(SinkChunk {
+            request_id: 7,
+            chunk_index: 1,
+            row_offset: 10,
+            rows: 5,
+            arrow_stream_bytes: vec![1, 2, 3],
+        });
+        let bytes = bincode::serialize(&frame).unwrap();
+        let decoded: HostDataFrame = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            HostDataFrame::SinkChunk(chunk) => {
+                assert_eq!(chunk.request_id, 7);
+                assert_eq!(chunk.chunk_index, 1);
+                assert_eq!(chunk.row_offset, 10);
+                assert_eq!(chunk.rows, 5);
+                assert_eq!(chunk.arrow_stream_bytes, vec![1, 2, 3]);
+            }
+            HostDataFrame::FinishSink(_) => panic!("expected chunk"),
+        }
+
+        let finish = HostDataFrame::FinishSink(FinishSink {
+            request_id: 7,
+            chunks: 2,
+            rows: 5,
+            bytes: 3,
+        });
+        let decoded: HostDataFrame =
+            bincode::deserialize(&bincode::serialize(&finish).unwrap()).unwrap();
+        assert!(matches!(
+            decoded,
+            HostDataFrame::FinishSink(FinishSink { chunks: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn sink_run_request_source_contract_roundtrips() {
+        use crate::plugins::source_contract::{FieldPath, SourceNamespaceContract, WritePolicy};
+
+        let contract = SourceNamespaceContract {
+            namespace: "google_analytics.events_daily".into(),
+            primary_key: vec![FieldPath::single("date")],
+            cursor: Some(FieldPath::single("date")),
+            partition_key: vec![FieldPath::single("date")],
+            write_policy: WritePolicy::ReplacePartition,
+            refresh_window: Some(3),
+            description: String::new(),
+            semantics: None,
+        };
+        let bytes = bincode::serialize(&SinkRunRequest {
+            request_id: 2,
+            compaction_id: "c2".into(),
+            idempotency_key: "c2".into(),
+            wal_refs: Vec::new(),
+            write_semantics: SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
+            binding: RuntimeBinding::Primary,
+            required_schema_namespace: "google_analytics.events_daily".into(),
+            required_schema_version: 1,
+            filename: "ns/part.parquet".into(),
+            cdc_ctx: None,
+            source_contract: Some(contract.clone()),
+            payload_mode: RuntimeSinkPayloadMode::FullStream,
+            live_wal_segments: None,
+        })
+        .unwrap();
+        let decoded: SinkRunRequest = bincode::deserialize(&bytes).unwrap();
+        let roundtrip = decoded.source_contract.expect("contract");
+        assert_eq!(roundtrip.namespace, contract.namespace);
+        assert_eq!(roundtrip.write_policy, WritePolicy::ReplacePartition);
+    }
+
+    #[test]
+    fn schema_run_request_source_contract_roundtrips() {
+        use crate::plugins::source_contract::{FieldPath, SourceNamespaceContract, WritePolicy};
+
+        let contract = SourceNamespaceContract {
+            namespace: "google_analytics.events_daily".into(),
+            primary_key: vec![FieldPath::single("date")],
+            cursor: None,
+            partition_key: vec![FieldPath::single("date")],
+            write_policy: WritePolicy::ReplacePartition,
+            refresh_window: None,
+            description: String::new(),
+            semantics: None,
+        };
+        let request = SchemaRunRequest {
+            request_id: 3,
+            compaction_id: "schema-c1".into(),
+            binding: RuntimeBinding::Primary,
+            required_schema_version: 2,
+            namespace: "google_analytics.events_daily".into(),
+            source_contract: Some(contract),
+        };
+        let bytes = bincode::serialize(&request).unwrap();
+        let decoded: SchemaRunRequest = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(
+            decoded
+                .source_contract
+                .as_ref()
+                .map(|c| c.partition_key[0].dotted()),
+            Some("date".to_string())
+        );
+    }
+
+    #[test]
+    fn contracts_update_empty_clears_via_roundtrip() {
+        let event = SourceEvent::ContractsUpdate(vec![]);
+        let frame = PluginFrame::SourceEvent(event);
+        let bytes = bincode::serialize(&frame).unwrap();
+        let decoded: PluginFrame = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            PluginFrame::SourceEvent(SourceEvent::ContractsUpdate(contracts)) => {
+                assert!(contracts.is_empty());
+            }
+            other => panic!("unexpected frame: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sink_ack_stats_roundtrip_without_fake_unknowns() {
+        let receipt = CommitReceipt {
+            version: COMMIT_RECEIPT_VERSION,
+            compaction_id: "c1".into(),
+            idempotency_key: "k1".into(),
+            wal_refs_fingerprint: "refs".into(),
+            authority: CommitReceiptAuthority::SinkWrite,
+        };
+        let frame = PluginFrame::SinkAck(SinkAck {
+            request_id: 11,
+            outcome: SinkWriteOutcome::Applied,
+            receipt: receipt.clone(),
+            stats: SinkWriteStats {
+                rows: Some(42),
+                bytes: Some(1024),
+                objects: None,
+                encode_duration_ms: None,
+                upload_duration_ms: Some(9),
+                commit_duration_ms: None,
+            },
+            catalog_intents: Vec::new(),
+        });
+        let decoded: PluginFrame =
+            bincode::deserialize(&bincode::serialize(&frame).unwrap()).unwrap();
+        let PluginFrame::SinkAck(decoded) = decoded else {
+            panic!("expected SinkAck");
+        };
+        assert_eq!(decoded.receipt, receipt);
+        assert_eq!(decoded.stats.rows, Some(42));
+        assert_eq!(decoded.stats.objects, None);
+        assert_eq!(decoded.stats.commit_duration_ms, None);
+    }
+
+    #[test]
+    fn sink_ack_phase_latencies_roundtrip() {
+        let stats = SinkWriteStats {
+            rows: Some(3),
+            bytes: Some(4096),
+            objects: Some(2),
+            encode_duration_ms: None,
+            upload_duration_ms: Some(1_250),
+            commit_duration_ms: Some(80),
+        };
+        let frame = PluginFrame::SinkAck(SinkAck {
+            request_id: 12,
+            outcome: SinkWriteOutcome::Applied,
+            receipt: CommitReceipt {
+                version: COMMIT_RECEIPT_VERSION,
+                compaction_id: "c2".into(),
+                idempotency_key: "k2".into(),
+                wal_refs_fingerprint: "refs".into(),
+                authority: CommitReceiptAuthority::SinkWrite,
+            },
+            stats: stats.clone(),
+            catalog_intents: Vec::new(),
+        });
+        let decoded: PluginFrame =
+            bincode::deserialize(&bincode::serialize(&frame).unwrap()).unwrap();
+        let PluginFrame::SinkAck(decoded) = decoded else {
+            panic!("expected SinkAck");
+        };
+        assert_eq!(decoded.stats, stats);
+    }
+
+    #[test]
+    fn catalog_intent_identity_is_serializable_and_deduplicable() {
+        use std::collections::BTreeSet;
+        use std::num::NonZeroU64;
+
+        let intent = CatalogIntent {
+            version: CATALOG_INTENT_VERSION,
+            identity: CatalogIntentIdentity {
+                sink_ref: "primary".into(),
+                namespace: "events".into(),
+                kind: CatalogIntentKind::UpsertPartition,
+                key: "day=2026-07-30".into(),
+            },
+            payload: GluePartitionCatalogIntentV1 {
+                version: GLUE_PARTITION_CATALOG_INTENT_VERSION,
+                region: None,
+                catalog_id: None,
+                database: "analytics".into(),
+                table: "events".into(),
+                partition_values: vec!["2026-07-30".into()],
+                location: "s3://bucket/events/day=2026-07-30/".into(),
+                storage_columns: vec![GlueColumnIntent::from_glue_fields(
+                    "id",
+                    Some("bigint"),
+                    None,
+                )],
+                partition_columns: vec![GlueColumnIntent::from_glue_fields(
+                    "day",
+                    Some("string"),
+                    None,
+                )],
+                input_format: "input".into(),
+                output_format: "output".into(),
+                serde_library: "serde".into(),
+                schema_namespace: "events".into(),
+                schema_version: NonZeroU64::new(1).unwrap(),
+            },
+        };
+        let decoded: CatalogIntent =
+            bincode::deserialize(&bincode::serialize(&intent).unwrap()).unwrap();
+        assert_eq!(decoded, intent);
+        assert_eq!(
+            BTreeSet::from([intent.clone(), decoded])
+                .into_iter()
+                .count(),
+            1
+        );
+        assert!(intent.is_admissible());
+        let mut empty_values = intent.clone();
+        empty_values.payload.partition_values.clear();
+        empty_values.payload.partition_columns.clear();
+        assert!(!empty_values.is_admissible());
+        let mut empty_location = intent.clone();
+        empty_location.payload.location.clear();
+        assert!(!empty_location.is_admissible());
+        let mut blank_value = intent;
+        blank_value.payload.partition_values = vec![String::new()];
+        assert!(!blank_value.is_admissible());
+    }
+
+    #[test]
+    fn schema_delta_roundtrips_changed_namespace_versions() {
+        let delta = SchemaDelta {
+            version: 9,
+            namespaces: BTreeMap::from([(
+                "events".into(),
+                SchemaNamespaceDelta {
+                    version: 9,
+                    metadata: OutputMetadata::new(),
+                },
+            )]),
+        };
+        let frame = HostFrame::InstallSchemaDelta(delta.clone());
+        let decoded: HostFrame =
+            bincode::deserialize(&bincode::serialize(&frame).unwrap()).unwrap();
+        let HostFrame::InstallSchemaDelta(decoded) = decoded else {
+            panic!("expected SchemaDelta");
+        };
+        assert_eq!(decoded, delta);
+        assert_eq!(decoded.namespaces["events"].version, 9);
+    }
+
+    #[test]
+    fn protocol_version_is_hard_cut_to_v23() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 23);
+    }
+
+    #[test]
+    fn copy_prepare_sink_host_frame_roundtrips() {
+        let request = SinkRunRequest {
+            request_id: 54,
+            compaction_id: "c1".into(),
+            idempotency_key: "c1".into(),
+            wal_refs: Vec::new(),
+            write_semantics: SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
+            binding: RuntimeBinding::Primary,
+            required_schema_namespace: String::new(),
+            required_schema_version: 0,
+            filename: "cube_events/p_rmc=cemex/part.jsonl".into(),
+            cdc_ctx: None,
+            source_contract: None,
+            payload_mode: RuntimeSinkPayloadMode::RawBytes,
+            live_wal_segments: None,
+        };
+        let prepare = PrepareSink {
+            request_id: 54,
+            envelope: crate::sink_apply_identity::SinkApplyEnvelopeV2::new(
+                request.compaction_id.clone(),
+                request.idempotency_key.clone(),
+                &request.wal_refs,
+                false,
+                crate::plugins::source_contract::WritePolicy::Append,
+                request.write_semantics,
+                None,
+                None,
+                None,
+            ),
+            request,
+        };
+        let bytes = bincode::serialize(&HostFrame::PrepareSink(prepare)).unwrap();
+        let tag = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        assert_eq!(
+            tag, 6,
+            "PrepareSink is HostFrame variant 6; request_id must not be the tag"
+        );
+        let decoded: HostFrame = bincode::deserialize(&bytes).unwrap();
+        let HostFrame::PrepareSink(decoded) = decoded else {
+            panic!("expected PrepareSink");
+        };
+        assert_eq!(decoded.request_id, 54);
+        assert_eq!(
+            decoded.request.payload_mode,
+            RuntimeSinkPayloadMode::RawBytes
+        );
+    }
+
+    #[test]
+    fn unwrapped_prepare_sink_is_not_a_host_frame() {
+        let request = SinkRunRequest {
+            request_id: 54,
+            compaction_id: "c1".into(),
+            idempotency_key: "c1".into(),
+            wal_refs: Vec::new(),
+            write_semantics: SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
+            binding: RuntimeBinding::Primary,
+            required_schema_namespace: String::new(),
+            required_schema_version: 0,
+            filename: "f".into(),
+            cdc_ctx: None,
+            source_contract: None,
+            payload_mode: RuntimeSinkPayloadMode::RawBytes,
+            live_wal_segments: None,
+        };
+        let prepare = PrepareSink {
+            request_id: 54,
+            envelope: crate::sink_apply_identity::SinkApplyEnvelopeV2::new(
+                request.compaction_id.clone(),
+                request.idempotency_key.clone(),
+                &request.wal_refs,
+                false,
+                crate::plugins::source_contract::WritePolicy::Append,
+                request.write_semantics,
+                None,
+                None,
+                None,
+            ),
+            request,
+        };
+        let err =
+            bincode::deserialize::<HostFrame>(&bincode::serialize(&prepare).unwrap()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("variant index 0 <= i < 12") && message.contains("54"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn object_layout_requires_format() {
+        let missing = RuntimeOutputLayout::default();
+        assert!(missing.required_format().is_err());
+        assert!(missing.object_extension().is_err());
+        assert!(missing
+            .hive_object_key("warehouse", "namespace=events", "apply-0001")
+            .is_err());
+        let native = RuntimeOutputLayout {
+            format: Some(OutputFormat::Native),
+            ..RuntimeOutputLayout::default()
+        };
+        assert!(native.required_format().is_err());
+        let layout = RuntimeOutputLayout {
+            format: Some(OutputFormat::Jsonl),
+            ..RuntimeOutputLayout::default()
+        };
+        assert_eq!(layout.required_format().unwrap(), OutputFormat::Jsonl);
+        assert_eq!(layout.object_extension().unwrap(), "jsonl");
+        assert_eq!(
+            layout
+                .hive_object_key("warehouse", "namespace=events", "apply-0001")
+                .unwrap(),
+            "warehouse/events/apply-0001.jsonl"
+        );
+        let hive = RuntimeOutputLayout {
+            format: Some(OutputFormat::Parquet),
+            time_partition_granularity: Some("day".into()),
+            time_partition_prefix: Some("p_".into()),
+            ..RuntimeOutputLayout::default()
+        };
+        assert_eq!(
+            hive.hive_object_key(
+                "warehouse",
+                "buffer=test&namespace=events&partition=p_rmc=EU1&time=1645296045",
+                "apply-0001",
+            )
+            .unwrap(),
+            "warehouse/events/p_rmc=EU1/p_year=2022/p_month=2/p_day=19/apply-0001.parquet"
+        );
+    }
+
+    #[test]
+    fn athena_sink_capability_handshake_matches_plugin_manifest_metadata() {
+        use crate::plugins::cdc::{sink_capabilities, SinkGuaranteeTier};
+        use crate::sink_semantics::{SinkGroupingSupport, SinkRetrySemantics};
+
+        let handshake = RuntimeSinkCapabilityDescriptor::from(&sink_capabilities::ATHENA);
+        let manifest = RuntimeSinkCapabilityDescriptor {
+            name: "Athena".into(),
+            max_sessions_per_child: 4,
+            guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
+            can_manage_skippr_columns: false,
+            can_maintain_tombstone_tables: false,
+            can_compare_order_tokens: false,
+            supports_transactions: false,
+            supports_merge_by_key: false,
+            supports_replace_table: true,
+            supports_replace_partition: true,
+            supports_primary_key_metadata: true,
+            supports_bounded_grouped_stream: true,
+            retry_semantics: SinkRetrySemantics::DeterministicOverwrite,
+            grouping_support: SinkGroupingSupport::CdcEncodedBatches,
+        };
+        assert_eq!(handshake, manifest);
+        assert_eq!(
+            RuntimeSinkCapabilityDescriptor::from(&sink_capabilities::POSTGRES)
+                .max_sessions_per_child,
+            1
+        );
+    }
+
+    #[test]
+    fn athena_iceberg_sink_capability_handshake_matches_plugin_manifest_metadata() {
+        use crate::plugins::cdc::{sink_capabilities, SinkGuaranteeTier};
+        use crate::sink_semantics::{SinkGroupingSupport, SinkRetrySemantics};
+
+        let handshake = RuntimeSinkCapabilityDescriptor::from(&sink_capabilities::ATHENA_ICEBERG);
+        let manifest = RuntimeSinkCapabilityDescriptor {
+            name: "AthenaIceberg".into(),
+            max_sessions_per_child: 1,
+            guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
+            can_manage_skippr_columns: true,
+            can_maintain_tombstone_tables: true,
+            can_compare_order_tokens: true,
+            supports_transactions: true,
+            supports_merge_by_key: true,
+            supports_replace_table: true,
+            supports_replace_partition: true,
+            supports_primary_key_metadata: false,
+            supports_bounded_grouped_stream: true,
+            retry_semantics: SinkRetrySemantics::TransactionalIdempotent,
+            grouping_support: SinkGroupingSupport::FinalStateBatches,
+        };
+        assert_eq!(handshake, manifest);
+    }
+
+    #[test]
+    fn duckdb_sink_capability_handshake_matches_plugin_manifest_metadata() {
+        use crate::plugins::cdc::{sink_capabilities, SinkGuaranteeTier};
+        use crate::sink_semantics::{SinkGroupingSupport, SinkRetrySemantics};
+
+        let handshake = RuntimeSinkCapabilityDescriptor::from(&sink_capabilities::DUCKDB);
+        let manifest = RuntimeSinkCapabilityDescriptor {
+            name: "Duckdb".into(),
+            max_sessions_per_child: 1,
+            guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
+            can_manage_skippr_columns: false,
+            can_maintain_tombstone_tables: false,
+            can_compare_order_tokens: false,
+            supports_transactions: true,
+            supports_merge_by_key: false,
+            supports_replace_table: true,
+            supports_replace_partition: false,
+            supports_primary_key_metadata: false,
+            supports_bounded_grouped_stream: true,
+            retry_semantics: SinkRetrySemantics::TransactionalIdempotent,
+            grouping_support: SinkGroupingSupport::FinalStateBatches,
+        };
+        assert_eq!(handshake, manifest);
+    }
+}

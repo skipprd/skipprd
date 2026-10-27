@@ -38,9 +38,7 @@ PLUGIN_ROOT_PREFIXES = (
 PLAIN_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 RUNTIME_PROTOCOL_VERSION_RE = re.compile(r"pub const RUNTIME_PROTOCOL_VERSION: u32 = (\d+);")
 RUNTIME_PROTOCOL_VERSION_CANDIDATES = (
-    Path("src/runtime_plugins/protocol.rs"),
     Path("crates/skippr-runtime-sdk/src/protocol.rs"),
-    Path("crates/skippr-core/src/runtime_plugins/protocol.rs"),
 )
 RUNTIME_SDK_MANIFEST = Path("crates/skippr-runtime-sdk/Cargo.toml")
 RUNTIME_SDK_FINGERPRINT_SCHEME = "skippr-runtime-sdk-build-v1"
@@ -56,8 +54,6 @@ CARGO_BUILD_DEPENDENCY_TABLES = ("dependencies", "build-dependencies")
 SHARED_PLUGIN_DIR = Path("plugins/shared")
 RUNTIME_PLUGIN_BUILD_INPUTS = (
     Path("Cargo.lock"),
-    Path("src/runtime_plugins/protocol.rs"),
-    Path("src/runtime_plugins/wire.rs"),
     Path("crates/skippr-runtime-sdk/Cargo.toml"),
     Path("crates/skippr-runtime-sdk/src"),
 )

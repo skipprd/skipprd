@@ -4,19 +4,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
 
-use skippr_core::helpers::offsets::{OffsetKey, OffsetTypes};
-use skippr_core::ingest_work::{IngestBatch, ThroughputMetrics};
-use skippr_core::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
-use skippr_core::plugins::source_sync::{
+use crate::helpers::offsets::{OffsetKey, OffsetTypes};
+use crate::ingest::{IngestBatch, ThroughputMetrics};
+use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
+use crate::plugins::source_sync::{
     OffsetValidationEntry, PayloadSubmissionBatch, SourcePayloadTask, SourceSyncContext,
 };
-use skippr_core::runtime_plugins::protocol::{
+use crate::protocol::{
     HostOffsetFrame, PluginDataFrame, PluginOffsetFrame, RuntimeCheckpointUpdate, RuntimeIngestAck,
     RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint, RuntimeOffsetValidationEntry,
     RuntimeRawIngestBatch, RuntimeSessionHello, RuntimeSourceIngestWindow,
     RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
-use skippr_core::runtime_plugins::wire::{read_frame, write_frame};
+use crate::wire::{read_frame, write_frame};
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
@@ -424,15 +424,7 @@ impl SourceSyncContext for RuntimeSourceSyncContext {
             .map(|task| {
                 task.batches
                     .into_iter()
-                    .map(|batch| RuntimeRawIngestBatch {
-                        offset_key: batch.offset_key,
-                        data: batch.data,
-                        bytes: batch.bytes,
-                        offset_pos: batch.offset_pos,
-                        source_uri: batch.source_uri,
-                        namespace: batch.namespace,
-                        cdc_rows: batch.cdc_rows,
-                    })
+                    .map(RuntimeRawIngestBatch::from)
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -731,7 +723,7 @@ pub fn offset_validation_entry(
     offset_value: u64,
 ) -> OffsetValidationEntry {
     OffsetValidationEntry {
-        key: skippr_core::helpers::offsets::OffsetKey::new(namespace, partition),
+        key: crate::helpers::offsets::OffsetKey::new(namespace, partition),
         offset_type,
         offset_value,
     }
@@ -744,7 +736,7 @@ pub fn source_payload_task(batches: Vec<IngestBatch>) -> SourcePayloadTask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skippr_core::runtime_plugins::protocol::RuntimeSourceIngestWindow;
+    use crate::protocol::RuntimeSourceIngestWindow;
 
     fn test_ack_client() -> RuntimeIngestAckClient {
         RuntimeIngestAckClient::new(RuntimeSourceIngestWindow {

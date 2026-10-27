@@ -1,4 +1,4 @@
-use crate::buffer::BufferChunker;
+use crate::buffer::event_time_bucket;
 use crate::discover::{
     AnalyseSchema, Metadata, OutputMetadata, PipelineMetadata, NUM_ANALYSED_RECORDS,
 };
@@ -6,7 +6,6 @@ use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, OffsetValue, Offsets};
 use crate::helpers::{Helpers, IngestTransformSnapshot};
 use crate::ingest::ingest::ingest;
-use crate::runtime_plugins::protocol::{RuntimeExecutionMode, RuntimeRawIngestBatch};
 use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
 use crate::serdes::decode::decode_records;
 use crate::serdes::input_format::InputFormat;
@@ -16,6 +15,7 @@ use crate::{
     ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING,
 };
 use dashmap::DashMap;
+use skippr_runtime_sdk::protocol::{RuntimeExecutionMode, RuntimeRawIngestBatch};
 use std::sync::atomic::AtomicBool;
 // Per-namespace schema readiness flag to eliminate first-batch races
 static SCHEMA_READY: once_cell::sync::Lazy<DashMap<String, AtomicBool>> =
@@ -895,20 +895,10 @@ pub fn storage_namespace(config: &Config, namespace: &str) -> String {
     Helpers::clean_field_name(config, namespace.to_string())
 }
 
-static STORAGE_PATH_NON_ALNUM: Lazy<regex::Regex> =
-    Lazy::new(|| regex::Regex::new(r"[^a-z0-9_]+").expect("valid regex"));
-static STORAGE_PATH_COLLAPSE: Lazy<regex::Regex> =
-    Lazy::new(|| regex::Regex::new(r"_+").expect("valid regex"));
-
 /// Sanitize a path token (partition value or simple key) without field-name rules
 /// (no leading-digit strip, no `item_` prefix for numeric-only tokens).
 fn storage_path_token(raw: &str) -> String {
-    let lower = raw.to_lowercase();
-    let out = STORAGE_PATH_NON_ALNUM.replace_all(&lower, "_");
-    STORAGE_PATH_COLLAPSE
-        .replace_all(out.as_ref(), "_")
-        .trim_matches('_')
-        .to_string()
+    skippr_runtime_sdk::helpers::names::storage_path_token(raw)
 }
 
 /// Sanitize a partition key or offset partition string for storage paths.
@@ -1023,7 +1013,7 @@ fn commit_deadletters(
     if let Some(deadletter_sink_ref) = config.get_pipeline_deadletters_ref() {
         let dl_ns = deadletter::table_name(config);
         let dl_schema: SchemaRef = deadletter::arrow_schema();
-        let dl_time_bucket = BufferChunker::event_time_bucket(
+        let dl_time_bucket = event_time_bucket(
             config,
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -1106,126 +1096,89 @@ fn commit_deadletters(
     true
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct IngestBatch {
-    pub offset_key: OffsetKey,
-    pub data: String,
-    pub bytes: usize,
-    pub offset_pos: Option<u64>,
-    #[allow(dead_code)]
-    pub source_uri: String,
-    /// Explicit namespace override from the input plugin (e.g. table name for
-    /// MSSQL). When `None`, the pipeline name + `transform.namespace_fields`
-    /// config is used to derive the namespace from message content.
-    pub namespace: Option<String>,
-    /// Per-row CDC metadata. When `Some`, each element aligns 1:1 with the
-    /// rows parsed from `data`. Sources that don't produce CDC leave this as
-    /// `None` (append semantics).
-    pub cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+pub use skippr_runtime_sdk::ingest::IngestBatch;
+
+/// Config-aware offset key for host ingest. Plugin children use
+/// [`IngestBatch::normalized_offset_key`] (flatten_events = false).
+pub fn ingest_normalized_offset_key(
+    config: &Config,
+    namespace: impl Into<String>,
+    partition: impl Into<String>,
+) -> OffsetKey {
+    OffsetKey {
+        namespace: storage_namespace(config, &namespace.into()),
+        partition: storage_partition(config, &partition.into()),
+    }
 }
 
-impl IngestBatch {
-    fn normalize_cdc_rows(
-        rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
-    ) -> Option<Vec<crate::plugins::cdc::WalRowMeta>> {
-        rows.filter(|rows| !rows.is_empty())
-    }
+/// Offset key as observed by host ingest after the runtime plugin → host round trip.
+///
+/// Runtime sources normalize once in the child, serialize the already-normalized
+/// key across the wire, then the host reconstructs via [`ingest_batch_from_runtime`]
+/// which applies Config sanitization again. `storage_partition` is not always
+/// idempotent (numeric path segments under `flatten_events`), so list-time
+/// validation must use this twice-applied form to match Closed offsets written
+/// by prior host ingest.
+pub fn ingest_runtime_roundtrip_offset_key(
+    config: &Config,
+    namespace: impl Into<String>,
+    partition: impl Into<String>,
+) -> OffsetKey {
+    let once = ingest_normalized_offset_key(config, namespace, partition);
+    ingest_normalized_offset_key(config, once.namespace, once.partition)
+}
 
-    pub fn normalized_offset_key(
-        config: &Config,
-        namespace: impl Into<String>,
-        partition: impl Into<String>,
-    ) -> OffsetKey {
-        OffsetKey {
-            namespace: storage_namespace(config, &namespace.into()),
-            partition: storage_partition(config, &partition.into()),
-        }
+pub fn new_ingest_batch(
+    config: &Config,
+    offset_key: OffsetKey,
+    data: String,
+    bytes: usize,
+    source_uri: String,
+    namespace: Option<String>,
+    cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+) -> IngestBatch {
+    let offset_key =
+        ingest_normalized_offset_key(config, offset_key.namespace, offset_key.partition);
+    IngestBatch {
+        offset_key,
+        data,
+        bytes,
+        offset_pos: None,
+        source_uri,
+        namespace: namespace.map(|ns| storage_namespace(config, &ns)),
+        cdc_rows: cdc_rows.filter(|rows| !rows.is_empty()),
     }
+}
 
-    /// Offset key as observed by host ingest after the runtime plugin → host round trip.
-    ///
-    /// Runtime sources normalize once in [`IngestBatch::new`], serialize the already-normalized
-    /// key across the wire, then the host reconstructs via [`From<RuntimeRawIngestBatch>`] which
-    /// calls [`IngestBatch::new`] again. `storage_partition` is not always idempotent (numeric
-    /// path segments under `flatten_events`), so list-time validation must use this twice-applied
-    /// form to match Closed offsets written by prior host ingest.
-    pub fn runtime_roundtrip_offset_key(
-        config: &Config,
-        namespace: impl Into<String>,
-        partition: impl Into<String>,
-    ) -> OffsetKey {
-        let once = Self::normalized_offset_key(config, namespace, partition);
-        Self::normalized_offset_key(config, once.namespace, once.partition)
-    }
+pub fn new_ingest_batch_with_offset_pos(
+    config: &Config,
+    offset_key: OffsetKey,
+    data: String,
+    bytes: usize,
+    offset_pos: u64,
+    source_uri: String,
+    namespace: Option<String>,
+    cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+) -> IngestBatch {
+    let mut batch = new_ingest_batch(
+        config, offset_key, data, bytes, source_uri, namespace, cdc_rows,
+    );
+    batch.offset_pos = Some(offset_pos);
+    batch
+}
 
-    pub fn new(
-        config: &Config,
-        offset_key: OffsetKey,
-        data: String,
-        bytes: usize,
-        source_uri: String,
-        namespace: Option<String>,
-        cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
-    ) -> Self {
-        let offset_key =
-            Self::normalized_offset_key(config, offset_key.namespace, offset_key.partition);
-        Self {
-            offset_key,
-            data,
-            bytes,
-            offset_pos: None,
-            source_uri,
-            namespace: namespace.map(|ns| storage_namespace(config, &ns)),
-            cdc_rows: Self::normalize_cdc_rows(cdc_rows),
-        }
-    }
-
-    pub fn new_with_offset_pos(
-        config: &Config,
-        offset_key: OffsetKey,
-        data: String,
-        bytes: usize,
-        offset_pos: u64,
-        source_uri: String,
-        namespace: Option<String>,
-        cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
-    ) -> Self {
-        let mut batch = Self::new(
-            config, offset_key, data, bytes, source_uri, namespace, cdc_rows,
-        );
-        batch.offset_pos = Some(offset_pos);
-        batch
-    }
-
-    pub fn offset_key(&self) -> &OffsetKey {
-        &self.offset_key
-    }
-
-    pub fn data(&self) -> &str {
-        &self.data
-    }
-
-    pub fn bytes(&self) -> usize {
-        self.bytes
-    }
-
-    pub fn offset_pos_for_line(&self, line: u64) -> u64 {
-        self.offset_pos
-            .map(|base| base.saturating_add(line.saturating_sub(1)))
-            .unwrap_or(line)
-    }
-
-    pub fn source_uri(&self) -> &str {
-        &self.source_uri
-    }
-
-    pub fn namespace_override(&self) -> Option<&str> {
-        self.namespace.as_deref()
-    }
-
-    pub fn cdc_rows(&self) -> Option<&[crate::plugins::cdc::WalRowMeta]> {
-        self.cdc_rows.as_deref()
-    }
+pub fn ingest_batch_from_runtime(config: &Config, batch: RuntimeRawIngestBatch) -> IngestBatch {
+    let mut ingest_batch = new_ingest_batch(
+        config,
+        batch.offset_key,
+        batch.data,
+        batch.bytes,
+        batch.source_uri,
+        batch.namespace,
+        batch.cdc_rows,
+    );
+    ingest_batch.offset_pos = batch.offset_pos;
+    ingest_batch
 }
 
 #[cfg(test)]
@@ -1234,7 +1187,7 @@ mod ingest_batch_tests {
 
     #[test]
     fn explicit_offset_pos_overrides_line_number() {
-        let batch = IngestBatch::new_with_offset_pos(
+        let batch = new_ingest_batch_with_offset_pos(
             &Config::new(),
             OffsetKey::new("postgres.orders", "orders"),
             "{}".to_string(),
@@ -1251,7 +1204,7 @@ mod ingest_batch_tests {
 
     #[test]
     fn default_offset_pos_uses_line_number() {
-        let batch = IngestBatch::new(
+        let batch = new_ingest_batch(
             &Config::new(),
             OffsetKey::new("file.orders", "orders"),
             "{}".to_string(),
@@ -1267,12 +1220,12 @@ mod ingest_batch_tests {
     #[test]
     fn normalized_offset_key_matches_constructor() {
         let raw_key = OffsetKey::new("source-bucket", "raw/path/date=2026-06-24/file-1.json.gz");
-        let helper_key = IngestBatch::normalized_offset_key(
+        let helper_key = ingest_normalized_offset_key(
             &Config::new(),
             raw_key.namespace.clone(),
             raw_key.partition.clone(),
         );
-        let batch = IngestBatch::new(
+        let batch = new_ingest_batch(
             &Config::new(),
             raw_key,
             "{}".to_string(),
@@ -1308,8 +1261,8 @@ mod ingest_batch_tests {
         // Unique suffix avoids CLEAN_FIELD_CACHE pollution from other tests.
         let object_key = "data/2021/05/19/11/Production-DataStorage-Stack-v3firehose-roundtrip-probe-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
-        let once = IngestBatch::normalized_offset_key(&config, bucket, object_key);
-        let plugin_batch = IngestBatch::new(
+        let once = ingest_normalized_offset_key(&config, bucket, object_key);
+        let plugin_batch = new_ingest_batch(
             &config,
             OffsetKey::new(bucket, object_key),
             "{}".to_string(),
@@ -1321,8 +1274,8 @@ mod ingest_batch_tests {
         assert_eq!(plugin_batch.offset_key, once);
 
         let wire: RuntimeRawIngestBatch = plugin_batch.clone().into();
-        let host_batch = IngestBatch::from_runtime(&config, wire);
-        let roundtrip = IngestBatch::runtime_roundtrip_offset_key(&config, bucket, object_key);
+        let host_batch = ingest_batch_from_runtime(&config, wire);
+        let roundtrip = ingest_runtime_roundtrip_offset_key(&config, bucket, object_key);
 
         assert_eq!(host_batch.offset_key, roundtrip);
         assert_ne!(
@@ -1333,36 +1286,6 @@ mod ingest_batch_tests {
         );
 
         Helpers::reset_clean_field_cache_for_test();
-    }
-}
-
-impl From<IngestBatch> for RuntimeRawIngestBatch {
-    fn from(batch: IngestBatch) -> Self {
-        Self {
-            offset_key: batch.offset_key,
-            data: batch.data,
-            bytes: batch.bytes,
-            offset_pos: batch.offset_pos,
-            source_uri: batch.source_uri,
-            namespace: batch.namespace,
-            cdc_rows: batch.cdc_rows,
-        }
-    }
-}
-
-impl IngestBatch {
-    pub fn from_runtime(config: &Config, batch: RuntimeRawIngestBatch) -> Self {
-        let mut ingest_batch = IngestBatch::new(
-            config,
-            batch.offset_key,
-            batch.data,
-            batch.bytes,
-            batch.source_uri,
-            batch.namespace,
-            batch.cdc_rows,
-        );
-        ingest_batch.offset_pos = batch.offset_pos;
-        ingest_batch
     }
 }
 
@@ -2835,7 +2758,7 @@ impl Ingest {
                         &record.value,
                         &transform_snap.time_fields,
                     )
-                    .map(|ts| BufferChunker::event_time_bucket(config, ts))
+                    .map(|ts| event_time_bucket(config, ts))
                 };
                 let key = (
                     primary_sink_ref.clone(),
@@ -3302,8 +3225,7 @@ impl Ingest {
                             let mut skpr_time_bucket: Option<i64> = None;
 
                             if let Some(event_time) = skpr_time {
-                                skpr_time_bucket =
-                                    Some(BufferChunker::event_time_bucket(config, event_time));
+                                skpr_time_bucket = Some(event_time_bucket(config, event_time));
 
                                 if event_time > latest_timestamp {
                                     latest_timestamp = event_time;
@@ -3869,9 +3791,12 @@ impl Ingest {
 
         if let Some(metadata_for_namespace) = skpr_metadata {
             if flatten {
-                output_metadata = OutputMetadata::from_flatterened_metadata(metadata_for_namespace);
+                output_metadata = crate::discover::output_metadata_from_flatterened_metadata(
+                    metadata_for_namespace,
+                );
             } else {
-                output_metadata = OutputMetadata::from_metadata(metadata_for_namespace);
+                output_metadata =
+                    crate::discover::output_metadata_from_metadata(metadata_for_namespace);
             }
         }
 
@@ -3963,9 +3888,9 @@ impl Ingest {
         flatten: bool,
     ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
         let output = if flatten {
-            OutputMetadata::from_flatterened_metadata(ns_meta)
+            crate::discover::output_metadata_from_flatterened_metadata(ns_meta)
         } else {
-            OutputMetadata::from_metadata(ns_meta)
+            crate::discover::output_metadata_from_metadata(ns_meta)
         };
         let schema = Arc::new(convert_skippr_to_arrow(output.fields)?);
         ARROW_SCHEMA.insert(
@@ -4001,9 +3926,12 @@ impl Ingest {
 
         if let Some(metadata_for_namespace) = skpr_metadata {
             if flatten {
-                output_metadata = OutputMetadata::from_flatterened_metadata(metadata_for_namespace);
+                output_metadata = crate::discover::output_metadata_from_flatterened_metadata(
+                    metadata_for_namespace,
+                );
             } else {
-                output_metadata = OutputMetadata::from_metadata(metadata_for_namespace);
+                output_metadata =
+                    crate::discover::output_metadata_from_metadata(metadata_for_namespace);
             }
         }
 

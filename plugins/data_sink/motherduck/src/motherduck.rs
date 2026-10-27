@@ -13,7 +13,7 @@ use once_cell::sync::Lazy;
 
 use crate::helpers::configuration::DataSinkPluginConfig;
 use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
-use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::chunker::BufferChunker;
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 const MOTHERDUCK_NATIVE_STAGE_BLOCKER: &str =

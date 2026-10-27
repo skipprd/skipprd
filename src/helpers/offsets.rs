@@ -8,9 +8,8 @@ use crate::helpers::configuration::Config;
 use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
 use crate::helpers::offsets::OffsetsError::VacuumError;
 use crate::helpers::Helpers;
-use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
+use crate::plugins::cdc::CheckpointEnvelope;
 use crate::METRICS;
-use serde_derive::{Deserialize, Serialize};
 #[cfg(feature = "offset-store-dynamodb")]
 use skippr_offset_store_dynamodb::DynamoDbOffsetStore;
 use sled::{IVec, Mode};
@@ -19,6 +18,11 @@ use tracing::{error, info};
 use {
     byteorder::{BigEndian, LittleEndian},
     zerocopy::{byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned, U16},
+};
+
+pub use skippr_runtime_sdk::helpers::offsets::{
+    CheckpointTransport, OffsetKey, OffsetTransport, OffsetTypes, RuntimeOffsetOperation,
+    RuntimeOffsetRpcRequest, RuntimeOffsetRpcResponse, RuntimeOffsetValue,
 };
 
 pub const SLED_NAME: &str = "db";
@@ -31,67 +35,6 @@ pub const SLED_NAME: &str = "db";
 // does not have alignment requirements.
 // sled does not guarantee any particular
 // value alignment as of now.
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-#[repr(C)]
-pub struct OffsetKey {
-    pub namespace: String,
-    pub partition: String,
-}
-
-impl OffsetKey {
-    pub fn new(namespace: impl Into<String>, partition: impl Into<String>) -> Self {
-        Self {
-            namespace: namespace.into(),
-            partition: partition.into(),
-        }
-    }
-
-    pub fn namespace(&self) -> &str {
-        &self.namespace
-    }
-
-    pub fn partition(&self) -> &str {
-        &self.partition
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
-pub enum OffsetTypes {
-    Filesize,
-    Position,
-    Closed,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub enum RuntimeOffsetOperation {
-    Validate {
-        key: OffsetKey,
-        offset_type: OffsetTypes,
-        offset_value: u64,
-    },
-    LoadCheckpointEnvelope {
-        key: String,
-    },
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RuntimeOffsetRpcRequest {
-    pub request_id: u64,
-    pub operation: RuntimeOffsetOperation,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub enum RuntimeOffsetValue {
-    Validate(Option<bool>),
-    LoadCheckpointEnvelope(Option<CheckpointEnvelope>),
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RuntimeOffsetRpcResponse {
-    pub request_id: u64,
-    pub result: Result<RuntimeOffsetValue, String>,
-}
-
 // We use `LittleEndian` for values because
 // it's possibly cheaper, but the difference
 // isn't likely to be measurable, so honestly
@@ -108,14 +51,6 @@ pub struct OffsetValue {
 pub struct Offset {
     pub(crate) value: OffsetValue,
     pub(crate) key: OffsetKey,
-}
-
-pub trait OffsetTransport: Send + Sync {
-    fn call(&self, operation: RuntimeOffsetOperation) -> Result<RuntimeOffsetValue, String>;
-}
-
-pub trait CheckpointTransport: Send + Sync {
-    fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String>;
 }
 
 #[derive(Clone)]

@@ -18,9 +18,8 @@ use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
 use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
-use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, submit_payload_batches, IngestBatch,
-};
+use skippr_runtime_sdk::ingest::IngestBatch;
+use skippr_runtime_sdk::source_sync::{load_checkpoint_payload, submit_payload_batches};
 
 use crate::google_ads_api::{
     api_version_or_default, bearer_token, normalize_customer_id, parse_google_ads_rows,

@@ -29,7 +29,7 @@ pub fn table_name(config: &Config) -> String {
 }
 
 pub fn table_name_for_pipeline(pipeline: &str) -> String {
-    format!("_dl_{pipeline}")
+    skippr_runtime_sdk::chunker::deadletter::table_name_for_pipeline(pipeline)
 }
 
 pub(crate) fn arrow_schema() -> Arc<ArrowSchema> {

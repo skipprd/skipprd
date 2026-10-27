@@ -42,7 +42,16 @@ use crate::plugins::{DataSink, SchemaSink, SchemaSyncRequest, SinkWriteOutcome};
 use crate::runtime_plugins::artifact::resolve_plugin_executable;
 use crate::runtime_plugins::manifest::RuntimePluginManifest;
 use crate::runtime_plugins::offset_service::OffsetServiceEndpoint;
-use crate::runtime_plugins::protocol::{
+use crate::runtime_plugins::schema_state::{
+    apply_runtime_source_schema_state, bump_pipeline_schema_version, current_runtime_schema_state,
+    runtime_schema_namespace_version,
+};
+use crate::runtime_plugins::sdk::{
+    decode_record_batch_stream, decode_record_batch_stream_with_stats,
+    encode_record_batch_stream_with_stats, encode_record_batches,
+};
+use crate::sink_apply_identity::SinkApplyEnvelopeV2;
+use skippr_runtime_sdk::protocol::{
     CommitReceipt, FinishSink, HandshakeRequest, HostDataFrame, HostFrame, PluginDataFrame,
     PluginFrame, PrepareAck, PrepareSink, PrepareSinkResult, RuntimeBinding,
     RuntimeCheckpointUpdate, RuntimeExecutionContext, RuntimeExecutionMode, RuntimeIngestAck,
@@ -56,18 +65,7 @@ use crate::runtime_plugins::protocol::{
     SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_OFFSET_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
-use crate::runtime_plugins::schema_state::{
-    apply_runtime_source_schema_state, bump_pipeline_schema_version, current_runtime_schema_state,
-    runtime_schema_namespace_version,
-};
-use crate::runtime_plugins::sdk::{
-    decode_record_batch_stream, decode_record_batch_stream_with_stats,
-    encode_record_batch_stream_with_stats, encode_record_batches,
-};
-use crate::runtime_plugins::wire::{
-    decode_payload, read_frame, write_frame, MAX_RUNTIME_FRAME_BYTES,
-};
-use crate::sink_apply_identity::SinkApplyEnvelopeV2;
+use skippr_runtime_sdk::wire::{decode_payload, read_frame, write_frame, MAX_RUNTIME_FRAME_BYTES};
 
 #[derive(Clone, Debug)]
 pub struct ResolvedRuntimePlugin {
@@ -85,7 +83,7 @@ impl ResolvedRuntimePlugin {
                 manifest.name, manifest.protocol_version, RUNTIME_PROTOCOL_VERSION
             )));
         }
-        if manifest.kind == crate::runtime_plugins::protocol::RuntimePluginKind::DataSink {
+        if manifest.kind == skippr_runtime_sdk::protocol::RuntimePluginKind::DataSink {
             let capability = manifest.sink_capability.as_ref().ok_or_else(|| {
                 io::Error::other(format!(
                     "runtime sink manifest '{}' is missing sink capability",
@@ -293,7 +291,7 @@ fn validate_commit_receipt(
 }
 
 fn validate_catalog_intents(
-    intents: &[crate::runtime_plugins::protocol::CatalogIntent],
+    intents: &[skippr_runtime_sdk::protocol::CatalogIntent],
 ) -> io::Result<()> {
     if intents.iter().any(|intent| !intent.is_admissible()) {
         return Err(io::Error::new(
@@ -815,7 +813,7 @@ fn apply_derived_runtime_schema(config: &Config, namespace: String, schema: &Sch
 async fn ingest_runtime_batches_into_core(
     config: &Config,
     request_id: u64,
-    batches: Vec<crate::runtime_plugins::protocol::RuntimeIngestPartitionBatch>,
+    batches: Vec<skippr_runtime_sdk::protocol::RuntimeIngestPartitionBatch>,
     offsets: Arc<Offsets>,
     _shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
 ) -> io::Result<()> {
@@ -923,7 +921,7 @@ fn decode_plugin_data_frame(payload: Vec<u8>) -> io::Result<PluginDataFrame> {
 fn ingest_source_payload_batches_into_core(
     config: &Config,
     request_id: u64,
-    tasks: Vec<Vec<crate::runtime_plugins::protocol::RuntimeRawIngestBatch>>,
+    tasks: Vec<Vec<skippr_runtime_sdk::protocol::RuntimeRawIngestBatch>>,
     offsets: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ingest: Arc<Ingest>,
@@ -939,7 +937,7 @@ fn ingest_source_payload_batches_into_core(
         }
         let batches = task
             .into_iter()
-            .map(|batch| IngestBatch::from_runtime(config, batch))
+            .map(|batch| crate::ingest_work::ingest_batch_from_runtime(config, batch))
             .collect::<Vec<_>>();
         ingest_tasks.add(
             IngestTask::new(batches, offsets.clone(), shared_output.clone())
@@ -3135,7 +3133,7 @@ impl RuntimeDataSinkPlugin {
 
     async fn persist_catalog_intents(
         &self,
-        intents: &[crate::runtime_plugins::protocol::CatalogIntent],
+        intents: &[skippr_runtime_sdk::protocol::CatalogIntent],
     ) -> io::Result<()> {
         validate_catalog_intents(intents)?;
         self.catalog_coordinator
@@ -4314,7 +4312,7 @@ impl SchemaSink for RuntimeSchemaSinkPlugin {
         op: &crate::discover::schema_alter::SchemaAlterOp,
         field_id: i32,
     ) -> Result<(), io::Error> {
-        let request = crate::runtime_plugins::protocol::SchemaAlterRequest {
+        let request = skippr_runtime_sdk::protocol::SchemaAlterRequest {
             request_id: next_runtime_request_id(),
             namespace: namespace.to_string(),
             op: op.clone(),
@@ -4438,11 +4436,11 @@ mod tests {
     };
     use crate::helpers::plugin_config::{DataSinkEntry, PluginConfigEntry};
     use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
-    use crate::runtime_plugins::protocol::{RuntimeBinding, RuntimeExecutionMode};
-    use crate::runtime_plugins::wire::write_frame;
     use crate::serdes::output_format::OutputFormat;
     use serde::{Deserialize, Serialize};
     use serial_test::serial;
+    use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionMode};
+    use skippr_runtime_sdk::wire::write_frame;
     use tempfile::TempDir;
     use tokio::net::{TcpListener, TcpStream};
 
@@ -4455,7 +4453,7 @@ mod tests {
     #[test]
     fn stdin_source_plugin_inherits_host_stdin() {
         use crate::plugins::cdc::{sink_capabilities, source_capabilities};
-        use crate::runtime_plugins::protocol::RuntimePluginKind;
+        use skippr_runtime_sdk::protocol::RuntimePluginKind;
 
         assert_eq!(
             super::runtime_plugin_stdin(
@@ -4646,7 +4644,7 @@ mod tests {
         let mut child = TcpStream::connect(addr).await.unwrap();
         write_frame(
             &mut child,
-            &crate::runtime_plugins::protocol::RuntimeSessionHello {
+            &skippr_runtime_sdk::protocol::RuntimeSessionHello {
                 protocol_version: 16,
                 token: "v17-token".to_string(),
             },
@@ -4656,7 +4654,7 @@ mod tests {
         let err = accept.await.unwrap().unwrap_err();
         assert!(err.to_string().contains(&format!(
             "host={} child=16",
-            crate::runtime_plugins::protocol::RUNTIME_PROTOCOL_VERSION
+            skippr_runtime_sdk::protocol::RUNTIME_PROTOCOL_VERSION
         )));
     }
 

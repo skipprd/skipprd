@@ -6,7 +6,7 @@ use serde_derive::Deserialize;
 
 use crate::helpers::plugin_config::PluginConfigEntry;
 use skippr_runtime_sdk::plugins::DataSource;
-use skippr_runtime_sdk::source_compat::SourceSyncContext;
+use skippr_runtime_sdk::plugins::source_sync::SourceSyncContext;
 
 #[derive(Debug, Deserialize, SkipprConfig, Clone, Default)]
 pub struct DataSourcePcapPluginConfig {}

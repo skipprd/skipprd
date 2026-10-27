@@ -2,9 +2,6 @@
 ///
 /// Validates structural contracts and generated SQL for the exact-once CDC
 /// pipeline on the Postgres sink apply path without a running database.
-use std::collections::HashMap;
-use std::time::SystemTime;
-
 use skippr_plugin_data_sink_postgres::{
     ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
     postgres_bulk_cdc_sql, tombstone_table_name, upsert_if_newer_sql, CdcApplyBatch,
@@ -12,39 +9,9 @@ use skippr_plugin_data_sink_postgres::{
     PostgresCdcBackend,
 };
 use skippr_runtime_sdk::plugins::cdc::*;
-use skippr_runtime_sdk::progress::OffsetKey;
-use skippr_runtime_sdk::sink_compat::segment_file::{PartitionKey, SegmentFile, WalPayload};
 
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-fn temp_dir() -> std::path::PathBuf {
-    let base = std::env::temp_dir().join(format!("skippr_cdc_ref_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&base);
-    base
-}
-
-fn make_batch() -> arrow::record_batch::RecordBatch {
-    use arrow::array::{Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-
-    let schema = Schema::new(vec![
-        Field::new("id", DataType::Int64, false),
-        Field::new("name", DataType::Utf8, true),
-    ]);
-    arrow::record_batch::RecordBatch::try_new(
-        std::sync::Arc::new(schema),
-        vec![
-            std::sync::Arc::new(Int64Array::from(vec![1, 2, 3])),
-            std::sync::Arc::new(StringArray::from(vec![
-                Some("Alice"),
-                Some("Bob"),
-                Some("Charlie"),
-            ])),
-        ],
-    )
-    .unwrap()
 }
 
 fn bulk_apply_batch(rows: Vec<CdcApplyRow>) -> CdcApplyBatch {
@@ -162,24 +129,7 @@ fn reference_path_delete_sql_writes_tombstone() {
 
 #[test]
 fn reference_path_full_lifecycle_insert_update_delete() {
-    let dir = temp_dir();
-    let seg = SegmentFile::new(&dir, "lifecycle").unwrap();
-
-    let key = PartitionKey {
-        sink_ref: "data_outputs.pg".to_string(),
-        namespace: "users".to_string(),
-        partition: "".to_string(),
-        time: None,
-        schema_fingerprint: "".to_string(),
-    };
-
-    let batch = make_batch();
-    let mut batches = HashMap::new();
-    batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
-    let mut parts_meta = HashMap::new();
-    parts_meta.insert(key.clone(), (0u64, SystemTime::now()));
-    let offsets: HashMap<OffsetKey, u64> = HashMap::new();
-    let meta = WalPartMeta {
+    let decoded = WalPartMeta {
         kind: WalPartKind::Cdc,
         row_count: 3,
         rows: vec![
@@ -200,21 +150,6 @@ fn reference_path_full_lifecycle_insert_update_delete() {
             },
         ],
     };
-
-    let mut blobs = HashMap::new();
-    blobs.insert(key.clone(), bincode::serialize(&meta).unwrap());
-    seg.write_snapshot(
-        &offsets,
-        &batches,
-        &parts_meta,
-        &blobs,
-        std::time::SystemTime::UNIX_EPOCH,
-    )
-    .unwrap();
-
-    let mut f = std::fs::File::open(&seg.path).unwrap();
-    let read_blobs = SegmentFile::read_part_meta_blobs_from_reader(&mut f).unwrap();
-    let decoded: WalPartMeta = bincode::deserialize(read_blobs.get(&key).unwrap()).unwrap();
     let actions: Vec<SinkApplyAction> = decoded
         .rows
         .iter()

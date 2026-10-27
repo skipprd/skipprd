@@ -1,19 +1,37 @@
+use std::sync::atomic::AtomicBool;
+
 pub mod append_source_runtime;
+pub mod cdc_apply_core;
+pub mod cdc_encode;
+pub mod chunker;
+pub mod converters;
+pub mod discover;
+pub mod helpers;
+pub mod ingest;
+pub mod lineage;
+pub mod metrics;
+pub mod object_layout;
+pub mod parquet_util;
+pub mod pipeline_type;
+pub mod plugins;
 pub mod progress;
 pub mod protocol;
 pub mod runtime_main;
+pub mod schema;
+pub mod schema_alter;
 pub mod sdk;
-pub mod sink_compat;
+pub mod serdes;
+pub mod sink_apply_identity;
 pub mod sink_idempotency;
 pub mod sink_runtime_entry;
-pub mod source_compat;
+pub mod sink_semantics;
 pub mod source_sync;
 pub mod wire;
 
-pub use skippr_core::RUNNING;
-pub use skippr_core::{
-    buffer, converters, discover, helpers, ingest, lineage, metrics, plugins, serdes, wal_slice_ref,
-};
+/// Child-process stop flag. Host skipprd keeps its own process RUNNING lock.
+pub static RUNNING: AtomicBool = AtomicBool::new(true);
+
+pub mod wal_slice_ref;
 pub use skippr_plugin_macros::SkipprConfig;
 
 #[macro_export]

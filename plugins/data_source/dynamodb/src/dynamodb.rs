@@ -22,10 +22,9 @@ use skippr_runtime_sdk::plugins::{
     DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
 use skippr_runtime_sdk::progress::OffsetKey;
-use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, partition_already_closed, store_checkpoint_payload,
-    submit_payload_batch_groups, submit_payload_batches, IngestBatch, SourceSyncContext,
-};
+use skippr_runtime_sdk::ingest::IngestBatch;
+use skippr_runtime_sdk::plugins::source_sync::SourceSyncContext;
+use skippr_runtime_sdk::source_sync::{load_checkpoint_payload, partition_already_closed, store_checkpoint_payload, submit_payload_batch_groups, submit_payload_batches};
 
 /// CDC scan configuration passed to `sync_scan` when CDC tagging is needed.
 struct CdcScanConfig {

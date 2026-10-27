@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
 
-use crate::discover::schema_alter::SchemaAlterOp;
-use crate::discover::SkipprDataType;
+use skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp;
+use skippr_runtime_sdk::discover::SkipprDataType;
 
 fn iceberg_name_candidates(name: &str) -> Vec<String> {
     let mut out = vec![name.to_string()];

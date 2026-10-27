@@ -175,7 +175,7 @@ async fn apply_with(
             }
             dest_ops.push((
                 stmt.namespace.clone(),
-                crate::discover::OutputMetadata::from_metadata(ns_meta),
+                crate::discover::output_metadata_from_metadata(ns_meta),
                 op,
                 field_id,
             ));

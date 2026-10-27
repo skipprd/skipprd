@@ -5,13 +5,11 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::helpers::logging::init_logging;
+use crate::plugins::source_sync::SourceSyncContext;
+use crate::plugins::traits::SourceOnceContract;
+use crate::plugins::DataSource;
 use clap::Parser;
-use skippr_core::discover::OutputMetadata as CoreOutputMetadata;
-use skippr_core::helpers::logging::init_logging;
-use skippr_core::plugins::source_sync::SourceSyncContext;
-use skippr_core::plugins::traits::SourceOnceContract;
-use skippr_core::plugins::DataSource;
-use skippr_core::{METADATA, PIPELINE_SCHEMA_VERSION};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
@@ -126,27 +124,10 @@ async fn wait_for_runtime_source_once_idle(
 }
 
 fn current_runtime_schema_state_from_core() -> RuntimeSchemaState {
-    let metadata = METADATA.load();
-    let version = PIPELINE_SCHEMA_VERSION.load(Ordering::Acquire);
-    let namespaces: std::collections::BTreeMap<_, _> = metadata
-        .metadata
-        .iter()
-        .map(|(namespace, schema)| {
-            let output = if metadata.flattened {
-                CoreOutputMetadata::from_flatterened_metadata(schema)
-            } else {
-                CoreOutputMetadata::from_metadata(schema)
-            };
-            (namespace.clone(), output.into())
-        })
-        .collect();
     RuntimeSchemaState {
-        version,
-        namespace_versions: namespaces
-            .keys()
-            .map(|namespace| (namespace.clone(), version))
-            .collect(),
-        namespaces,
+        version: 0,
+        namespace_versions: Default::default(),
+        namespaces: Default::default(),
     }
 }
 
@@ -400,7 +381,7 @@ pub async fn run_append_data_source_main(
             source_capability,
             sink_capability: None,
             supports_schema: false,
-            alter_support: skippr_core::plugins::AlterSupport::Unsupported,
+            alter_support: crate::plugins::AlterSupport::Unsupported,
         }))
         .await?;
 

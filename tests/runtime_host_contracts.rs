@@ -15,6 +15,10 @@ use futures::Stream;
 use serde_json::json;
 use serial_test::serial;
 use sha2::{Digest, Sha256};
+use skippr_runtime_sdk::protocol::{
+    RuntimeBinding, RuntimePluginConfigEnvelope, RuntimeSchemaConfig, RuntimeSinkConfig,
+    RUNTIME_PROTOCOL_VERSION,
+};
 use skipprd::discover::OutputMetadata;
 use skipprd::helpers::configuration::Config;
 use skipprd::plugins::{DataSink, SchemaSink};
@@ -22,10 +26,6 @@ use skipprd::runtime_plugins::host::{
     ResolvedRuntimePlugin, RuntimeDataSinkPlugin, RuntimeSchemaSinkPlugin,
 };
 use skipprd::runtime_plugins::manifest::RuntimePluginManifest;
-use skipprd::runtime_plugins::protocol::{
-    RuntimeBinding, RuntimePluginConfigEnvelope, RuntimeSchemaConfig, RuntimeSinkConfig,
-    RUNTIME_PROTOCOL_VERSION,
-};
 use tempfile::tempdir;
 
 fn helper_binary() -> PathBuf {

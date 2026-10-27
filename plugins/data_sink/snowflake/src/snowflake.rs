@@ -27,7 +27,7 @@ use url::Url;
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
 use skippr_runtime_sdk::protocol::{RuntimeSchemaState, SchemaDelta};
-use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::chunker::BufferChunker;
 
 static ENSURED_SCHEMAS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
     Lazy::new(DashMap::new);

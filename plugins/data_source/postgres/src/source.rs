@@ -11,7 +11,7 @@ use tokio_postgres::{NoTls, Row};
 use tracing::{info, warn};
 
 use crate::pgoutput::{self, PgColumn, PgOutputMessage};
-use skippr_runtime_sdk::helpers::configuration::{runtime_child_config, Config};
+use skippr_runtime_sdk::helpers::configuration::runtime_child_config;
 use skippr_runtime_sdk::plugins::cdc::{
     source_capabilities, MutationKind, PostgresCheckpoint, WalRowMeta,
 };
@@ -19,9 +19,10 @@ use skippr_runtime_sdk::plugins::{
     DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
 use skippr_runtime_sdk::progress::OffsetKey;
-use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches, IngestBatch,
-    SourceSyncContext,
+use skippr_runtime_sdk::ingest::IngestBatch;
+use skippr_runtime_sdk::plugins::source_sync::SourceSyncContext;
+use skippr_runtime_sdk::source_sync::{
+    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches,
 };
 
 #[derive(Debug, Deserialize, SkipprConfig, Serialize, Clone)]
@@ -175,7 +176,6 @@ impl DataSourcePostgresPlugin {
 
     fn cdc_batch(
         &self,
-        ingest_config: &Config,
         table: &str,
         columns: &[PgColumn],
         tuple: &[Option<String>],
@@ -188,7 +188,6 @@ impl DataSourcePostgresPlugin {
         let bytes = json_str.len();
         let lsn_id = lsn.to_be_bytes().to_vec();
         IngestBatch::new_with_offset_pos(
-            ingest_config,
             offset_key,
             json_str,
             bytes,
@@ -246,7 +245,6 @@ impl DataSourcePostgresPlugin {
                 let json_str = Self::row_to_json(row);
                 let bytes = json_str.len();
                 current_batch.push(IngestBatch::new(
-                    &ingest_config,
                     offset_key.clone(),
                     json_str,
                     bytes,
@@ -406,7 +404,6 @@ impl DataSourcePostgresPlugin {
                 let json_str = Self::row_to_json(row);
                 let bytes = json_str.len();
                 current_batch.push(IngestBatch::new_with_offset_pos(
-                    &ingest_config,
                     offset_key.clone(),
                     json_str,
                     bytes,
@@ -540,7 +537,6 @@ impl DataSourcePostgresPlugin {
                         PgOutputMessage::Insert { oid, new_row } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
                                 pending_batches.push(self.cdc_batch(
-                                    &ingest_config,
                                     table,
                                     cols,
                                     &new_row,
@@ -552,7 +548,6 @@ impl DataSourcePostgresPlugin {
                         PgOutputMessage::Update { oid, new_row, .. } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
                                 pending_batches.push(self.cdc_batch(
-                                    &ingest_config,
                                     table,
                                     cols,
                                     &new_row,
@@ -564,7 +559,6 @@ impl DataSourcePostgresPlugin {
                         PgOutputMessage::Delete { oid, old_row } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
                                 pending_batches.push(self.cdc_batch(
-                                    &ingest_config,
                                     table,
                                     cols,
                                     &old_row,

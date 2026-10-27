@@ -91,7 +91,7 @@ pub fn metadata_for_columns(columns: &[String]) -> Metadata {
 }
 
 pub fn output_metadata_for_columns(columns: &[String]) -> OutputMetadata {
-    OutputMetadata::from_metadata(&metadata_for_columns(columns))
+    crate::discover::output_metadata_from_metadata(&metadata_for_columns(columns))
 }
 
 pub fn otel_namespace_metadata() -> HashMap<String, Metadata> {

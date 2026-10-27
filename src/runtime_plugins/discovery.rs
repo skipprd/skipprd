@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::runtime_plugins::host::ResolvedRuntimePlugin;
 use crate::runtime_plugins::manifest::RuntimePluginManifest;
-use crate::runtime_plugins::protocol::RuntimePluginKind;
+use skippr_runtime_sdk::protocol::RuntimePluginKind;
 
 const DEFAULT_DISCOVERY_BASE_URL: &str = "https://install.skippr.io/releases/runtime-plugins";
 const UNSTAMPED_WORKSPACE_HOST_VERSION: &str = "0.1.0";
@@ -605,7 +605,7 @@ mod tests {
     use serial_test::serial;
     use tempfile::tempdir;
 
-    use crate::runtime_plugins::protocol::RuntimePluginKind;
+    use skippr_runtime_sdk::protocol::RuntimePluginKind;
 
     use super::{
         append_metadata_refresh_query, configured_runtime_plugin_version,

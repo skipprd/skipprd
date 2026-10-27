@@ -3161,10 +3161,10 @@ impl Config {
                     let md_snapshot = { METADATA.load().metadata.clone() };
                     let out_meta = if let Some(schema) = md_snapshot.get(&ns) {
                         Some(if flatten {
-                            OutputMetadata::from_flatterened_metadata_for_namespace(&ns, schema)
+                            crate::discover::output_metadata_from_flatterened_metadata_for_namespace(&ns, schema)
                         } else {
-                            let mut out_meta = OutputMetadata::from_metadata(schema);
-                            OutputMetadata::repair_field_identity(&ns, &mut out_meta);
+                            let mut out_meta = crate::discover::output_metadata_from_metadata(schema);
+                            crate::discover::repair_output_field_identity(&ns, &mut out_meta);
                             out_meta
                         })
                     } else {
@@ -3202,7 +3202,7 @@ impl Config {
                                     Ok(Some(schema_plugin_name)) => {
                                         let runtime_config = dl_sink_cfg
                                             .clone()
-                                            .and_then(|cfg| crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
+                                            .and_then(|cfg| skippr_runtime_sdk::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
                                         let runtime_version =
                                             match request.config.get_pipeline_deadletter_schema_plugin_version()
                                             {
@@ -3217,7 +3217,7 @@ impl Config {
                                             };
                                         if let Some(runtime_config) = runtime_config {
                                             match crate::runtime_plugins::discovery::resolve_runtime_plugin(
-                                                crate::runtime_plugins::protocol::RuntimePluginKind::SchemaSink,
+                                                skippr_runtime_sdk::protocol::RuntimePluginKind::SchemaSink,
                                                 &schema_plugin_name,
                                                 runtime_version.as_deref(),
                                             )
@@ -3228,7 +3228,7 @@ impl Config {
                                                         &request.config,
                                                         resolved,
                                                         request.config.get_pipeline_name(),
-                                                        crate::runtime_plugins::protocol::RuntimeBinding::Deadletter,
+                                                        skippr_runtime_sdk::protocol::RuntimeBinding::Deadletter,
                                                         runtime_config,
                                                     )
                                                     .await
@@ -3422,18 +3422,16 @@ impl Config {
                 )
             })
             .and_then(|cfg| {
-                crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).map_err(
-                    |err| {
-                        format!(
-                            "Schema sync: failed to derive runtime schema config: {}",
-                            err
-                        )
-                    },
-                )
+                skippr_runtime_sdk::protocol::RuntimeSchemaConfig::try_from(cfg).map_err(|err| {
+                    format!(
+                        "Schema sync: failed to derive runtime schema config: {}",
+                        err
+                    )
+                })
             })?;
 
         let resolved = crate::runtime_plugins::discovery::resolve_runtime_plugin(
-            crate::runtime_plugins::protocol::RuntimePluginKind::SchemaSink,
+            skippr_runtime_sdk::protocol::RuntimePluginKind::SchemaSink,
             &schema_plugin_name,
             runtime_version.as_deref(),
         )
@@ -3449,7 +3447,7 @@ impl Config {
             self,
             resolved,
             self.get_pipeline_name(),
-            crate::runtime_plugins::protocol::RuntimeBinding::Primary,
+            skippr_runtime_sdk::protocol::RuntimeBinding::Primary,
             runtime_config,
         )
         .await
@@ -3539,10 +3537,10 @@ impl Config {
         let md_snapshot = { METADATA.load().metadata.clone() };
         let out_meta = if let Some(schema) = md_snapshot.get(ns) {
             if flatten {
-                OutputMetadata::from_flatterened_metadata_for_namespace(ns, schema)
+                crate::discover::output_metadata_from_flatterened_metadata_for_namespace(ns, schema)
             } else {
-                let mut out_meta = OutputMetadata::from_metadata(schema);
-                OutputMetadata::repair_field_identity(ns, &mut out_meta);
+                let mut out_meta = crate::discover::output_metadata_from_metadata(schema);
+                crate::discover::repair_output_field_identity(ns, &mut out_meta);
                 out_meta
             }
         } else {

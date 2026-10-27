@@ -470,10 +470,10 @@ impl CdcApplyBatchError {
 pub fn append_record_batch_to_cdc_apply(
     apply_batch: &mut CdcApplyBatch,
     record_batch: &datafusion::arrow::record_batch::RecordBatch,
-    row_metadata: &[skippr_runtime_sdk::plugins::cdc::WalRowMeta],
+    row_metadata: &[crate::plugins::cdc::WalRowMeta],
     source_offset: usize,
 ) -> Result<(), CdcApplyBatchError> {
-    use skippr_runtime_sdk::plugins::cdc::MutationKind;
+    use crate::plugins::cdc::MutationKind;
 
     for row in 0..record_batch.num_rows() {
         let metadata_index = source_offset + row;

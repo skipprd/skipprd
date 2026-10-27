@@ -19,9 +19,7 @@ use crate::catalog_budget::{
     CatalogOperationBudget,
 };
 use crate::catalog_outbox::{CatalogOutbox, ConditionalMutationResult, PendingCatalogIntent};
-use crate::runtime_plugins::protocol::{
-    CatalogIntent, GlueColumnIntent, GluePartitionCatalogIntentV1,
-};
+use skippr_runtime_sdk::protocol::{CatalogIntent, GlueColumnIntent, GluePartitionCatalogIntentV1};
 
 const GLUE_BATCH_CREATE_LIMIT: usize = 100;
 const RECOVERY_SCAN_LIMIT: usize = 10_000;
@@ -879,7 +877,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime_plugins::protocol::{
+    use skippr_runtime_sdk::protocol::{
         CatalogIntentIdentity, CatalogIntentKind, CATALOG_INTENT_VERSION,
     };
     use std::collections::VecDeque;
@@ -988,7 +986,7 @@ mod tests {
 
     fn intent(day: &str, location: &str, schema_version: u64) -> CatalogIntent {
         let payload = GluePartitionCatalogIntentV1 {
-            version: crate::runtime_plugins::protocol::GLUE_PARTITION_CATALOG_INTENT_VERSION,
+            version: skippr_runtime_sdk::protocol::GLUE_PARTITION_CATALOG_INTENT_VERSION,
             region: Some("eu-west-1".into()),
             catalog_id: Some("123456789012".into()),
             database: "analytics".into(),

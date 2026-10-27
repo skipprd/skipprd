@@ -10,7 +10,7 @@ use skippr_runtime_sdk::SkipprConfig;
 use tracing::{error, info, warn};
 
 use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
-use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::chunker::BufferChunker;
 
 static ENSURED_DATASETS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);

@@ -7,14 +7,14 @@ This repository is a Cargo workspace with a single host binary and many separate
 | Path | Responsibility |
 |---|---|
 | `python/` | PyO3 `skippr` module. Maturin crate wrapping `Session`. Own semver in `pyproject.toml` / `python/Cargo.toml`, not the skipprd git tag. CI always builds and tests the wheel via `scripts/test-python.sh` on Skippr Cloud runners. PyPI publish is GitHub OIDC, only when that Python semver is new. |
-| `crates/skippr-core/` | Shared core logic used by the host and plugin crates. |
+| `crates/skippr-runtime-sdk/` | Plugin IPC protocol, plugin traits, and child-process runtime. Host skipprd depends on this crate; plugins must not depend on skipprd. |
 | `crates/skippr-query-plan/` | `FlightSqlExec` physical node and SkipprPhysicalCodec for datafusion-distributed. |
 | `src/cluster/` | Clustered WAL replica, lease scheduler, gossip, promotion, WAL head picker. |
 | `src/query_flight/` | Arrow Flight SQL 59.2 on `flight_addr`, live WAL selector, in-process QueryRuntime. |
 | `plugins/data_source/*/` | Runtime source plugin crates. Each crate owns its connector implementation and Cargo metadata. |
 | `plugins/data_sink/*/` | Runtime sink plugin crates. Each crate owns its connector implementation and Cargo metadata. |
 | `plugins/schema_sink/*/` | Runtime schema sink plugin crates. |
-| `plugins/shared/` | Small connector-agnostic helper modules reused by multiple plugin crates. These helpers do not replace direct crate dependencies in the consuming plugins. |
+| `plugins/shared/` | Shared plugin crates such as `api_source`. CDC/parquet helpers live in `skippr-runtime-sdk`. |
 | `tests/` | Host integration tests plus runtime plugin guard tests. |
 | `.github/scripts/` | CI and release scripts, including runtime plugin catalog generation, release planning, publishing, and the runtime e2e harness. |
 | `.github/actions/e2e/` | Scenario configs and wrappers used by the runtime e2e jobs. |

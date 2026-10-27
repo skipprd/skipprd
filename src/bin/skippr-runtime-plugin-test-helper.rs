@@ -20,10 +20,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 
-use skipprd::buffer::compaction_transaction::SinkWriteSemantics;
-use skipprd::plugins::cdc;
-use skipprd::plugins::SinkWriteOutcome;
-use skipprd::runtime_plugins::protocol::{
+use skippr_runtime_sdk::protocol::{
     CatalogIntent, CatalogIntentIdentity, CatalogIntentKind, CommitReceipt, CommitReceiptAuthority,
     GlueColumnIntent, GluePartitionCatalogIntentV1, HandshakeResponse, HostDataFrame, HostFrame,
     PluginDataFrame, PluginFrame, PrepareAck, PrepareSinkResult, RuntimeCheckpointUpdate,
@@ -34,8 +31,11 @@ use skipprd::runtime_plugins::protocol::{
     SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
+use skippr_runtime_sdk::wire::{read_frame_or_eof, write_frame};
+use skipprd::buffer::compaction_transaction::SinkWriteSemantics;
+use skipprd::plugins::cdc;
+use skipprd::plugins::SinkWriteOutcome;
 use skipprd::runtime_plugins::sdk::{decode_record_batch_stream, encode_record_batch_stream};
-use skipprd::runtime_plugins::wire::{read_frame_or_eof, write_frame};
 
 #[derive(Debug, Parser)]
 struct TestHelperCli {
@@ -1127,7 +1127,7 @@ async fn read_sink_payload(
 
 async fn write_sink_request_to_output(
     arrow_stream_bytes: Vec<u8>,
-    context: &skipprd::runtime_plugins::protocol::RuntimeExecutionContext,
+    context: &skippr_runtime_sdk::protocol::RuntimeExecutionContext,
 ) -> io::Result<()> {
     let mut stream = decode_record_batch_stream(arrow_stream_bytes)?;
     let schema = stream.schema();

@@ -13,7 +13,7 @@ use once_cell::sync::Lazy;
 use reqwest::Client;
 use serde_derive::Deserialize;
 use skippr_runtime_sdk::plugins::DataSink;
-use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::chunker::BufferChunker;
 use tracing::{error, info};
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);

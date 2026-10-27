@@ -5,7 +5,7 @@ use serde_json::Value;
 use skippr_runtime_sdk::plugins::cdc::CheckpointEnvelope;
 use skippr_runtime_sdk::plugins::{OffsetValidationEntry, SourcePayloadTask, SourceSyncContext};
 use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
-use skippr_runtime_sdk::source_compat::ThroughputMetrics;
+use skippr_runtime_sdk::ingest::ThroughputMetrics;
 
 use crate::privacy::{PrivacyConfig, PrivacyMode, PrivacyProfile};
 use crate::revolut_api::FIXTURE_ENV;

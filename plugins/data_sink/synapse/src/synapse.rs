@@ -6,7 +6,7 @@ use futures::StreamExt;
 use once_cell::sync::Lazy;
 use serde_derive::Deserialize;
 use skippr_runtime_sdk::plugins::DataSink;
-use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::chunker::BufferChunker;
 use skippr_runtime_sdk::SkipprConfig;
 use tiberius::{Client, Config as TibConfig};
 use tokio::net::TcpStream;

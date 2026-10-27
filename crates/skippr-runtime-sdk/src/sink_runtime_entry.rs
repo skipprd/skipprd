@@ -5,20 +5,21 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 
-use arrow::ipc::reader::StreamReader;
-use arrow::record_batch::RecordBatch;
-use arrow_schema::SchemaRef;
-use skippr_core::helpers::logging::init_logging;
-use skippr_core::plugins::{
+use crate::helpers::logging::init_logging;
+use crate::plugins::{
     DataSink, HasSchemaSinkSpec, HasSinkSpec, RecordBatchChunk, SchemaSink, SchemaSyncRequest,
     SinkCallResult, SinkPreflightOutcome, SinkWriteOutcome,
 };
+use arrow::ipc::reader::StreamReader;
+use arrow::record_batch::RecordBatch;
+use arrow_schema::SchemaRef;
 #[cfg(test)]
 use tokio::io::AsyncRead;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use crate::plugins::GroupedBatchReader;
 #[cfg(test)]
 use crate::protocol::FinishSink;
 use crate::protocol::{
@@ -32,11 +33,10 @@ use crate::protocol::{
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::sdk::decode_record_batch_stream;
+use crate::sink_apply_identity::SINK_APPLY_ENVELOPE_V2;
 use crate::sink_idempotency::ObjectWriteManifest;
 use crate::wire::{read_frame_or_eof, write_frame};
 use futures::Stream;
-use skippr_core::plugins::GroupedBatchReader;
-use skippr_core::sink_apply_identity::SINK_APPLY_ENVELOPE_V2;
 
 const SINK_DATA_ROUTE_CAPACITY: usize = 1;
 
@@ -693,7 +693,7 @@ where
         return Err(io::Error::other("runtime protocol version mismatch"));
     }
 
-    let spec_capability = <P::Spec as skippr_core::plugins::SinkSpec>::CAPABILITY;
+    let spec_capability = <P::Spec as crate::plugins::SinkSpec>::CAPABILITY;
     let spec_descriptor = RuntimeSinkCapabilityDescriptor::from(&spec_capability);
     let adapter_session_limit = spec_descriptor.max_sessions_per_child.max(1);
     if let Some(ref declared) = sink_capability {
@@ -720,7 +720,7 @@ where
             source_capability: None,
             sink_capability: Some(spec_descriptor),
             supports_schema,
-            alter_support: skippr_core::plugins::AlterSupport::Unsupported,
+            alter_support: crate::plugins::AlterSupport::Unsupported,
         }))
         .await
         .map_err(|err| with_io_context(err, "runtime sink handshake ack write failed"))?;
@@ -1209,8 +1209,8 @@ enum PreparedSink {
     },
 }
 
-fn sink_write_context(request: &SinkRunRequest) -> skippr_core::plugins::SinkWriteContext<'_> {
-    skippr_core::plugins::SinkWriteContext {
+fn sink_write_context(request: &SinkRunRequest) -> crate::plugins::SinkWriteContext<'_> {
+    crate::plugins::SinkWriteContext {
         filename: request.filename.clone(),
         compaction_id: request.compaction_id.clone(),
         idempotency_key: request.idempotency_key.clone(),
@@ -1249,7 +1249,7 @@ where
             ),
         ));
     }
-    let expected_envelope = skippr_core::sink_apply_identity::SinkApplyEnvelopeV2::new(
+    let expected_envelope = crate::sink_apply_identity::SinkApplyEnvelopeV2::new(
         request.compaction_id.clone(),
         request.idempotency_key.clone(),
         &request.wal_refs,
@@ -1277,10 +1277,10 @@ where
     .as_ref()
     .ok_or_else(|| io::Error::other("runtime sink binding was not installed"))?;
     let ctx = sink_write_context(request);
-    ctx.validate_grouped::<<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport>()
+    ctx.validate_grouped::<<P::Spec as crate::plugins::SinkSpec>::WriteSupport>()
         .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
     let replay_safe =
-        <<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport as skippr_core::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
+        <<P::Spec as crate::plugins::SinkSpec>::WriteSupport as crate::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
     let ledger_manifest = if ctx.is_grouped() && replay_safe {
         Some(ObjectWriteManifest::from_context(
             ctx.compaction_id.clone(),
@@ -1353,7 +1353,7 @@ where
         source_contract,
         ..
     } = request;
-    let ctx = skippr_core::plugins::SinkWriteContext {
+    let ctx = crate::plugins::SinkWriteContext {
         filename,
         compaction_id,
         idempotency_key,
@@ -1363,11 +1363,11 @@ where
         cdc_ctx: cdc_ctx.as_ref(),
         source_contract: source_contract.as_ref(),
     };
-    ctx.validate_grouped::<<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport>()
+    ctx.validate_grouped::<<P::Spec as crate::plugins::SinkSpec>::WriteSupport>()
         .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
     let is_grouped = ctx.is_grouped();
     let replay_safe =
-        <<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport as skippr_core::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
+        <<P::Spec as crate::plugins::SinkSpec>::WriteSupport as crate::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
     let result = plugin.sync_with_context_call_result(stream, ctx).await?;
     if is_grouped && result.outcome == SinkWriteOutcome::AlreadyApplied && !replay_safe {
         return Err(io::Error::other(
@@ -1406,7 +1406,7 @@ where
         live_wal_segments,
         ..
     } = request;
-    let ctx = skippr_core::plugins::SinkWriteContext {
+    let ctx = crate::plugins::SinkWriteContext {
         filename,
         compaction_id,
         idempotency_key,
@@ -1416,13 +1416,13 @@ where
         cdc_ctx: cdc_ctx.as_ref(),
         source_contract: source_contract.as_ref(),
     };
-    ctx.validate_grouped::<<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport>()
+    ctx.validate_grouped::<<P::Spec as crate::plugins::SinkSpec>::WriteSupport>()
         .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
-    let grouped_ctx = skippr_core::plugins::GroupedSinkWriteContext::try_from(ctx)
+    let grouped_ctx = crate::plugins::GroupedSinkWriteContext::try_from(ctx)
         .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?
         .with_live_wal_segments(live_wal_segments);
     let replay_safe =
-        <<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport as skippr_core::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
+        <<P::Spec as crate::plugins::SinkSpec>::WriteSupport as crate::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
 
     let (schema, chunk_stream, progress) =
         RuntimeGroupedChunkStream::start(receiver, request_id).await?;
@@ -1554,12 +1554,12 @@ where
             .await?;
         return Err(io::Error::other("runtime protocol version mismatch"));
     }
-    if <P::Spec as skippr_core::plugins::SchemaSinkSpec>::NAME != handshake_display_name {
+    if <P::Spec as crate::plugins::SchemaSinkSpec>::NAME != handshake_display_name {
         return Err(io::Error::other(format!(
             "{}: runtime schema sink display name '{}' does not match SchemaSinkSpec '{}'",
             bin_name,
             handshake_display_name,
-            <P::Spec as skippr_core::plugins::SchemaSinkSpec>::NAME
+            <P::Spec as crate::plugins::SchemaSinkSpec>::NAME
         )));
     }
 
@@ -1571,7 +1571,7 @@ where
             source_capability: None,
             sink_capability: None,
             supports_schema: true,
-            alter_support: <P::Spec as skippr_core::plugins::SchemaSinkSpec>::ALTER_SUPPORT,
+            alter_support: <P::Spec as crate::plugins::SchemaSinkSpec>::ALTER_SUPPORT,
         }))
         .await?;
 
@@ -1825,13 +1825,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::cdc::{sink_capabilities, SinkCapability};
+    use crate::plugins::{DeterministicObjectOverwrite, GroupedBatchReader, HasSinkSpec, SinkSpec};
     use crate::wire::write_frame;
     use arrow::array::Int64Array;
     use arrow::datatypes::{DataType, Field, Schema};
-    use skippr_core::plugins::cdc::{sink_capabilities, SinkCapability};
-    use skippr_core::plugins::{
-        DeterministicObjectOverwrite, GroupedBatchReader, HasSinkSpec, SinkSpec,
-    };
     use std::sync::{Mutex as StdMutex, OnceLock};
 
     struct TestSink;
@@ -1853,7 +1851,7 @@ mod tests {
             &self,
             _stream: datafusion::execution::SendableRecordBatchStream,
             _filename: String,
-            _cdc_ctx: Option<&skippr_core::plugins::cdc::SyncContext>,
+            _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
         ) -> io::Result<()> {
             Ok(())
         }
@@ -1861,7 +1859,7 @@ mod tests {
         async fn sync_grouped(
             &self,
             _reader: GroupedBatchReader,
-            _ctx: skippr_core::plugins::GroupedSinkWriteContext<'_>,
+            _ctx: crate::plugins::GroupedSinkWriteContext<'_>,
         ) -> io::Result<SinkWriteOutcome> {
             Ok(SinkWriteOutcome::Applied)
         }
@@ -1886,7 +1884,7 @@ mod tests {
             &self,
             _stream: datafusion::execution::SendableRecordBatchStream,
             _filename: String,
-            _cdc_ctx: Option<&skippr_core::plugins::cdc::SyncContext>,
+            _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
         ) -> io::Result<()> {
             Ok(())
         }
@@ -1894,7 +1892,7 @@ mod tests {
         async fn sync_grouped(
             &self,
             mut reader: GroupedBatchReader,
-            _ctx: skippr_core::plugins::GroupedSinkWriteContext<'_>,
+            _ctx: crate::plugins::GroupedSinkWriteContext<'_>,
         ) -> io::Result<SinkWriteOutcome> {
             while let Some(chunk) = reader.next_chunk().await? {
                 let mut chunks = self.chunks.lock().unwrap();
@@ -1930,8 +1928,7 @@ mod tests {
                 schema_fingerprint: "schema".into(),
                 cdc_meta_hash: None,
             }],
-            write_semantics:
-                skippr_core::buffer::compaction_transaction::SinkWriteSemantics::IdempotentAtLeastOnce,
+            write_semantics: crate::sink_semantics::SinkWriteSemantics::IdempotentAtLeastOnce,
             schema_fingerprint: "schema".into(),
             binding: RuntimeBinding::Primary,
             required_schema_namespace: "events".into(),
@@ -2085,8 +2082,7 @@ mod tests {
             compaction_id: "c9".into(),
             idempotency_key: "k9".into(),
             wal_refs: wal_refs.clone(),
-            write_semantics:
-                skippr_core::buffer::compaction_transaction::SinkWriteSemantics::IdempotentAtLeastOnce,
+            write_semantics: crate::sink_semantics::SinkWriteSemantics::IdempotentAtLeastOnce,
             schema_fingerprint: "schema".into(),
             binding: RuntimeBinding::Primary,
             required_schema_namespace: "events".into(),
@@ -2102,7 +2098,7 @@ mod tests {
         write_local_idempotency_manifest(&manifest).unwrap();
         let prepare = PrepareSink {
             request_id: 9,
-            envelope: skippr_core::sink_apply_identity::SinkApplyEnvelopeV2::new(
+            envelope: crate::sink_apply_identity::SinkApplyEnvelopeV2::new(
                 "c9",
                 "k9",
                 &wal_refs,

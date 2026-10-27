@@ -17,7 +17,6 @@ use crate::discover::date_formats::DateFormats;
 
 pub mod evolution;
 mod filter_float;
-pub mod iceberg_schema;
 pub mod metadata_apply;
 pub mod schema_alter;
 pub mod stats;
@@ -27,6 +26,8 @@ use crate::discover::filter_bool::parse_bool;
 mod filter_parse_int;
 
 use crate::helpers::configuration::Config;
+
+pub use skippr_runtime_sdk::schema::{serde_opt_data_type, OutputMetadata, SkipprDataType};
 
 use crate::serdes::json::SerdeJson;
 
@@ -119,170 +120,69 @@ pub fn discover_ingest(
     discoverd_data_type.to_string()
 }
 
-/**
- * Reduced metadata for output schema, only includes fields that are required to generate an output schema
- *
- * The main motivation for this, is to be very clear that the output metadata is generated from the input metadata.
- * This is currently only done via flatten_metadata(), concevable this may evolve.
- */
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct OutputMetadata {
-    #[serde(default)]
-    pub(crate) source_field_name: String,
-    pub(crate) out_field_name: String,
-    pub(crate) determined_type: SkipprDataType,
-    #[serde(with = "serde_opt_data_type")]
-    pub(crate) determined_type_values: Option<SkipprDataType>,
-    #[serde(default)]
-    pub(crate) field_id: i32,
-    #[serde(default)]
-    pub(crate) schema_id: u64,
-    #[serde(default)]
-    pub(crate) lineage_id: String,
-    #[serde(default = "crate::lineage::default_nullable")]
-    pub(crate) nullable: bool,
-    #[serde(default)]
-    pub(crate) default_value: Option<serde_json::Value>,
-    pub(crate) fields: Box<HashMap<String, OutputMetadata>>,
+pub fn output_metadata_from_metadata(metadata: &Metadata) -> OutputMetadata {
+    let mut output_metadata = OutputMetadata::new();
+    output_metadata.out_field_name = metadata.out_field_name.clone();
+    output_metadata.source_field_name = metadata.source_field_name.clone();
+    output_metadata.determined_type = metadata.determined_type.clone();
+    output_metadata.determined_type_values = metadata.determined_type_values.clone();
+    output_metadata.field_id = metadata.field_id;
+    output_metadata.schema_id = metadata.schema_id;
+    output_metadata.lineage_id = metadata.lineage_id.clone();
+    output_metadata.nullable = metadata.nullable;
+    output_metadata.default_value = metadata.default_value.clone();
+    let mut fields = HashMap::new();
+    for (field, md) in metadata.fields.iter() {
+        fields.insert(field.clone(), output_metadata_from_metadata(md));
+    }
+    output_metadata.fields = Box::new(fields);
+    output_metadata
 }
 
-impl OutputMetadata {
-    #[inline]
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            out_field_name: "".to_string(),
-            source_field_name: "".to_string(),
-            determined_type: SkipprDataType::Unknown,
-            determined_type_values: None,
-            field_id: 0,
-            schema_id: 0,
-            lineage_id: "".to_string(),
-            nullable: true,
-            default_value: None,
-            fields: Box::new(HashMap::new()),
+pub fn output_metadata_from_flatterened_metadata(metadata: &Metadata) -> OutputMetadata {
+    let mut flatterened_metadata = OutputMetadata::new();
+    Metadata::flatten_metadata(metadata, &mut flatterened_metadata);
+    flatterened_metadata
+}
+
+pub fn output_metadata_from_flatterened_metadata_for_namespace(
+    namespace: &str,
+    metadata: &Metadata,
+) -> OutputMetadata {
+    let mut flatterened_metadata = output_metadata_from_flatterened_metadata(metadata);
+    repair_output_field_identity(namespace, &mut flatterened_metadata);
+    flatterened_metadata
+}
+
+pub fn repair_output_field_identity(namespace: &str, metadata: &mut OutputMetadata) -> bool {
+    let mut changed = false;
+    let mut seen = HashMap::<i32, String>::new();
+    repair_output_field_identity_inner(namespace, metadata, Vec::new(), &mut seen, &mut changed);
+    changed
+}
+
+fn repair_output_field_identity_inner(
+    namespace: &str,
+    metadata: &mut OutputMetadata,
+    path: Vec<String>,
+    seen: &mut HashMap<i32, String>,
+    changed: &mut bool,
+) {
+    for (field_name, child) in metadata.fields.iter_mut() {
+        let output_name = if child.out_field_name.is_empty() {
+            field_name.clone()
+        } else {
+            child.out_field_name.clone()
+        };
+        let mut child_path = path.clone();
+        child_path.push(output_name);
+        let path_string = child_path.join(".");
+        if child.field_id == 0 || seen.contains_key(&child.field_id) {
+            child.field_id = Metadata::unique_deterministic_field_id(namespace, &child_path, seen);
+            *changed = true;
         }
-    }
-
-    pub fn out_field_name(&self) -> &str {
-        &self.out_field_name
-    }
-
-    pub fn source_field_name(&self) -> &str {
-        &self.source_field_name
-    }
-
-    pub fn determined_type(&self) -> &SkipprDataType {
-        &self.determined_type
-    }
-
-    pub fn determined_type_values(&self) -> Option<&SkipprDataType> {
-        self.determined_type_values.as_ref()
-    }
-
-    pub fn nullable(&self) -> bool {
-        self.nullable
-    }
-
-    pub fn field_id(&self) -> i32 {
-        self.field_id
-    }
-
-    pub fn schema_id(&self) -> u64 {
-        self.schema_id
-    }
-
-    pub fn lineage_id(&self) -> &str {
-        &self.lineage_id
-    }
-
-    pub fn default_value(&self) -> Option<&serde_json::Value> {
-        self.default_value.as_ref()
-    }
-
-    pub fn child_fields(&self) -> impl Iterator<Item = (&String, &OutputMetadata)> {
-        self.fields.iter()
-    }
-
-    pub fn fields_clone(&self) -> Box<HashMap<String, OutputMetadata>> {
-        self.fields.clone()
-    }
-
-    pub fn from_metadata(metadata: &Metadata) -> OutputMetadata {
-        let mut output_metadata = OutputMetadata::new();
-
-        output_metadata.out_field_name = metadata.out_field_name.clone();
-        output_metadata.source_field_name = metadata.source_field_name.clone();
-        output_metadata.determined_type = metadata.determined_type.clone();
-        output_metadata.determined_type_values = metadata.determined_type_values.clone();
-        output_metadata.field_id = metadata.field_id;
-        output_metadata.schema_id = metadata.schema_id;
-        output_metadata.lineage_id = metadata.lineage_id.clone();
-        output_metadata.nullable = metadata.nullable;
-        output_metadata.default_value = metadata.default_value.clone();
-
-        let mut fields = HashMap::new();
-        for (field, md) in metadata.fields.iter() {
-            fields.insert(field.clone(), OutputMetadata::from_metadata(md));
-        }
-        output_metadata.fields = Box::new(fields);
-
-        output_metadata
-    }
-
-    /**
-     * Recusively convert OutputMetadata to Metadata while flattening the fields
-     */
-    pub fn from_flatterened_metadata(metadata: &Metadata) -> OutputMetadata {
-        let mut flatterened_metadata: OutputMetadata = OutputMetadata::new();
-
-        Metadata::flatten_metadata(metadata, &mut flatterened_metadata);
-
-        flatterened_metadata
-    }
-
-    pub fn from_flatterened_metadata_for_namespace(
-        namespace: &str,
-        metadata: &Metadata,
-    ) -> OutputMetadata {
-        let mut flatterened_metadata = Self::from_flatterened_metadata(metadata);
-        Self::repair_field_identity(namespace, &mut flatterened_metadata);
-        flatterened_metadata
-    }
-
-    pub fn repair_field_identity(namespace: &str, metadata: &mut OutputMetadata) -> bool {
-        let mut changed = false;
-        let mut seen = HashMap::<i32, String>::new();
-        Self::repair_field_identity_inner(namespace, metadata, Vec::new(), &mut seen, &mut changed);
-        changed
-    }
-
-    fn repair_field_identity_inner(
-        namespace: &str,
-        metadata: &mut OutputMetadata,
-        path: Vec<String>,
-        seen: &mut HashMap<i32, String>,
-        changed: &mut bool,
-    ) {
-        for (field_name, child) in metadata.fields.iter_mut() {
-            let output_name = if child.out_field_name.is_empty() {
-                field_name.clone()
-            } else {
-                child.out_field_name.clone()
-            };
-            let mut child_path = path.clone();
-            child_path.push(output_name);
-            let path_string = child_path.join(".");
-
-            if child.field_id == 0 || seen.contains_key(&child.field_id) {
-                child.field_id =
-                    Metadata::unique_deterministic_field_id(namespace, &child_path, seen);
-                *changed = true;
-            }
-            seen.insert(child.field_id, path_string);
-
-            Self::repair_field_identity_inner(namespace, child, child_path, seen, changed);
-        }
+        seen.insert(child.field_id, path_string);
+        repair_output_field_identity_inner(namespace, child, child_path, seen, changed);
     }
 }
 
@@ -945,171 +845,6 @@ pub struct AnalyseSchema {
     // pub data_type_masks: HashMap<String, String>,
     // pub data_type_drops: HashMap<String, String>,
     // pub data_type_casts: HashMap<String, Vec<String>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum SkipprDataType {
-    Record,
-    Map,
-    Array,
-    Date,
-    String,
-    Long,
-    Integer,
-    Short,
-    Byte,
-    Double,
-    Float,
-    Decimal,
-    Boolean,
-    TimestampMilli,
-    Timestamp,
-    Time,
-    Binary,
-    Uuid,
-    Fixed,
-    Json,
-    Null,
-    Unknown,
-}
-
-impl serde::Serialize for SkipprDataType {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for SkipprDataType {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = <std::string::String as serde::Deserialize>::deserialize(deserializer)?;
-        Ok(SkipprDataType::from_str(&s))
-    }
-}
-
-impl std::fmt::Display for SkipprDataType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl Default for SkipprDataType {
-    fn default() -> Self {
-        SkipprDataType::Unknown
-    }
-}
-
-pub(crate) mod serde_opt_data_type {
-    use super::SkipprDataType;
-    use serde::{self, Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(
-        value: &Option<SkipprDataType>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        match value {
-            Some(dt) => serializer.serialize_str(dt.as_str()),
-            None => serializer.serialize_str(""),
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<SkipprDataType>, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        if s.is_empty() {
-            Ok(None)
-        } else {
-            let dt = SkipprDataType::from_str(&s);
-            if dt == SkipprDataType::Unknown {
-                Ok(None)
-            } else {
-                Ok(Some(dt))
-            }
-        }
-    }
-}
-
-impl SkipprDataType {
-    pub fn from_str(data_type: &str) -> Self {
-        match data_type {
-            "record" | "struct" => SkipprDataType::Record,
-            "map" => SkipprDataType::Map,
-            "array" => SkipprDataType::Array,
-            "date" => SkipprDataType::Date,
-            "string" => SkipprDataType::String,
-            "long" | "bigint" => SkipprDataType::Long,
-            "int" | "integer" => SkipprDataType::Integer,
-            "short" | "smallint" => SkipprDataType::Short,
-            "byte" | "tinyint" => SkipprDataType::Byte,
-            "double" => SkipprDataType::Double,
-            "float" => SkipprDataType::Float,
-            "decimal" | "numeric" => SkipprDataType::Decimal,
-            "boolean" => SkipprDataType::Boolean,
-            "timestamp_milli" => SkipprDataType::TimestampMilli,
-            "timestamp" => SkipprDataType::Timestamp,
-            "time" => SkipprDataType::Time,
-            "binary" => SkipprDataType::Binary,
-            "uuid" => SkipprDataType::Uuid,
-            "fixed" => SkipprDataType::Fixed,
-            "json" => SkipprDataType::Json,
-            "null" | "NULL" => SkipprDataType::Null,
-            _ => SkipprDataType::Unknown,
-        }
-    }
-
-    pub fn from_string(s: &str) -> Option<SkipprDataType> {
-        match s.to_lowercase().as_str() {
-            "string" => Some(SkipprDataType::String),
-            "integer" | "int" => Some(SkipprDataType::Integer),
-            "long" | "bigint" => Some(SkipprDataType::Long),
-            "short" | "smallint" => Some(SkipprDataType::Short),
-            "byte" | "tinyint" => Some(SkipprDataType::Byte),
-            "double" => Some(SkipprDataType::Double),
-            "float" => Some(SkipprDataType::Float),
-            "decimal" | "numeric" => Some(SkipprDataType::Decimal),
-            "boolean" => Some(SkipprDataType::Boolean),
-            "date" => Some(SkipprDataType::Date),
-            "timestamp" => Some(SkipprDataType::Timestamp),
-            "timestamp_milli" => Some(SkipprDataType::TimestampMilli),
-            "time" => Some(SkipprDataType::Time),
-            "binary" => Some(SkipprDataType::Binary),
-            "uuid" => Some(SkipprDataType::Uuid),
-            "fixed" => Some(SkipprDataType::Fixed),
-            "json" => Some(SkipprDataType::Json),
-            "array" => Some(SkipprDataType::Array),
-            "map" => Some(SkipprDataType::Map),
-            "record" | "struct" => Some(SkipprDataType::Record),
-            "null" => Some(SkipprDataType::Null),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            SkipprDataType::Record => "record",
-            SkipprDataType::Map => "map",
-            SkipprDataType::Array => "array",
-            SkipprDataType::Date => "date",
-            SkipprDataType::String => "string",
-            SkipprDataType::Long => "long",
-            SkipprDataType::Integer => "integer",
-            SkipprDataType::Short => "short",
-            SkipprDataType::Byte => "byte",
-            SkipprDataType::Double => "double",
-            SkipprDataType::Float => "float",
-            SkipprDataType::Decimal => "decimal",
-            SkipprDataType::Boolean => "boolean",
-            SkipprDataType::TimestampMilli => "timestamp_milli",
-            SkipprDataType::Timestamp => "timestamp",
-            SkipprDataType::Time => "time",
-            SkipprDataType::Binary => "binary",
-            SkipprDataType::Uuid => "uuid",
-            SkipprDataType::Fixed => "fixed",
-            SkipprDataType::Json => "json",
-            SkipprDataType::Null => "null",
-            SkipprDataType::Unknown => "unknown",
-        }
-    }
 }
 
 const DATE_FIELD_VALIDATION_MIN_SAMPLE: i32 = 100;
@@ -3804,10 +3539,10 @@ mod tests_flatten_metadata {
 mod tests_roundtrip {
     use super::*;
     use crate::converters::skippr_arrow::convert_skippr_to_arrow;
-    use crate::converters::skippr_hive::SkipprHive;
     use crate::discover::evolution::Evolution;
     use crate::ingest::ingest::discover_ingest;
     use serde_json::json;
+    use skippr_runtime_sdk::converters::skippr_hive::SkipprHive;
 
     #[test]
     fn persisted_metadata_migration_sets_ids_and_defaults() {
@@ -3921,8 +3656,10 @@ mod tests_roundtrip {
         array.fields.insert("0".to_string(), element);
         root.fields.insert("items".to_string(), array);
 
-        let flattened =
-            OutputMetadata::from_flatterened_metadata_for_namespace("cube_events", &root);
+        let flattened = crate::discover::output_metadata_from_flatterened_metadata_for_namespace(
+            "cube_events",
+            &root,
+        );
         let first = flattened.fields.get("items_0_value").unwrap().field_id;
         let second = flattened.fields.get("items_1_value").unwrap().field_id;
 
@@ -3952,7 +3689,7 @@ mod tests_roundtrip {
         let mut out = HashMap::new();
         for (k, v) in metadata.iter() {
             if v.enabled {
-                out.insert(k.clone(), OutputMetadata::from_metadata(v));
+                out.insert(k.clone(), crate::discover::output_metadata_from_metadata(v));
             }
         }
         Box::new(out)
@@ -3963,7 +3700,7 @@ mod tests_roundtrip {
         root.determined_type = SkipprDataType::Record;
         let mut fields = HashMap::new();
         for (k, v) in metadata.iter() {
-            fields.insert(k.clone(), OutputMetadata::from_metadata(v));
+            fields.insert(k.clone(), crate::discover::output_metadata_from_metadata(v));
         }
         root.fields = Box::new(fields);
         root

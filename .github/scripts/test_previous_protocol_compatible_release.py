@@ -148,6 +148,28 @@ class PreviousProtocolCompatibleReleaseTests(unittest.TestCase):
         encoded = compat.encode_pins(pins)
         self.assertEqual(compat.decode_pins(encoded), pins)
 
+    def test_parse_protocol_version_ignores_host_reexport(self) -> None:
+        self.assertIsNone(
+            compat.parse_protocol_version("pub use skippr_runtime_sdk::protocol::*;\n")
+        )
+        self.assertEqual(compat.parse_protocol_version(PROTOCOL_22), 22)
+
+    def test_protocol_at_tag_prefers_sdk_protocol_file(self) -> None:
+        def fake_git(_workspace, *_args):
+            spec = _args[-1]
+            if spec.endswith("crates/skippr-runtime-sdk/src/protocol.rs"):
+                return PROTOCOL_22
+            if spec.endswith("src/runtime_plugins/protocol.rs"):
+                return "pub use skippr_runtime_sdk::protocol::*;\n"
+            return None
+
+        original = compat.git_output
+        compat.git_output = fake_git
+        try:
+            self.assertEqual(compat.protocol_at_tag(Path("/tmp"), "1.2.3"), 22)
+        finally:
+            compat.git_output = original
+
 
 if __name__ == "__main__":
     unittest.main()

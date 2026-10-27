@@ -158,11 +158,22 @@ def list_engine_tags(workspace: Path) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
+PROTOCOL_AT_TAG_CANDIDATES = (
+    "crates/skippr-runtime-sdk/src/protocol.rs",
+    # Pre-invert tags stored the const on the host file.
+    "src/runtime_plugins/protocol.rs",
+)
+
+
 def protocol_at_tag(workspace: Path, tag: str) -> int | None:
-    source = git_output(workspace, "show", f"{tag}:src/runtime_plugins/protocol.rs")
-    if source is None:
-        return None
-    return parse_protocol_version(source)
+    for relative in PROTOCOL_AT_TAG_CANDIDATES:
+        source = git_output(workspace, "show", f"{tag}:{relative}")
+        if source is None:
+            continue
+        version = parse_protocol_version(source)
+        if version is not None:
+            return version
+    return None
 
 
 def versions_at_tag(workspace: Path, tag: str) -> dict[str, str]:

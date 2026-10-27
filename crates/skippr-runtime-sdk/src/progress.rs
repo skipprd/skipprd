@@ -1,4 +1,4 @@
-pub use skippr_core::helpers::offsets::{
-    CheckpointTransport, OffsetKey, OffsetTransport, OffsetTypes, Offsets, RuntimeOffsetOperation,
-    RuntimeOffsetRpcRequest, RuntimeOffsetRpcResponse, RuntimeOffsetValue,
+pub use crate::helpers::offsets::{
+    OffsetKey, OffsetTransport, OffsetTypes, RuntimeOffsetOperation, RuntimeOffsetRpcRequest,
+    RuntimeOffsetRpcResponse, RuntimeOffsetValue,
 };

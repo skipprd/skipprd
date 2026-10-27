@@ -7,7 +7,6 @@ publish = false
 [workspace]
 resolver = "2"
 members = [
-    "crates/skippr-core",
     "crates/skippr-object-writer",
     "crates/skippr-offset-store-dynamodb",
     "crates/skippr-lease",
@@ -63,7 +62,6 @@ tokio-tungstenite = "0.21"
 tracing = "0.1"
 tungstenite = "0.21"
 thiserror = "1.0.58"
-skippr-core = { path = "crates/skippr-core" }
 skippr-object-writer = { path = "crates/skippr-object-writer" }
 skippr-runtime-sdk = { path = "crates/skippr-runtime-sdk" }
 chrono-tz = "0.10"
@@ -100,7 +98,9 @@ skippr-lease = { path = "crates/skippr-lease" }
 skippr-wal-catalog = { path = "crates/skippr-wal-catalog" }
 skippr-lease-store-dynamodb = { path = "crates/skippr-lease-store-dynamodb", optional = true }
 skippr-iceberg-catalog = { path = "crates/skippr-iceberg-catalog" }
+skippr-iceberg-writer = { path = "crates/skippr-iceberg-writer" }
 skippr-object-writer.workspace = true
+skippr-runtime-sdk.workspace = true
 skippr-iceberg-catalog-fs = { path = "crates/skippr-iceberg-catalog-fs" }
 skippr-iceberg-catalog-glue = { path = "crates/skippr-iceberg-catalog-glue" }
 skippr-iceberg-rest = { path = "crates/skippr-iceberg-rest" }
@@ -130,7 +130,6 @@ urldecode = "0.1.1"
 url = "2.3.1"
 aws-sdk-glue = "1.38.0"
 md5 = "0.7.0"
-phf = { version = "0.11.1", default-features = false, features = ["macros"] }
 sled = { version = "=0.34.4" }
 zerocopy = "0.6.1"
 byteorder = "1.4.3"
@@ -204,12 +203,12 @@ offset-store-dynamodb = [
 ]
 
 [dev-dependencies]
+skippr-runtime-sdk.workspace = true
 tokio = { version = "1", features = ["full", "test-util"] }
 serial_test = "1.0.0"
 assert_cmd = "2"
 predicates = "3"
 proptest = "1.10.0"
-skippr-runtime-sdk = { path = "crates/skippr-runtime-sdk" }
 
 [target.'cfg(unix)'.dependencies]
 nix = "0.26.2"

@@ -1,47 +1,45 @@
 use std::collections::HashSet;
 
-use aws_sdk_glue::types::Column;
+use crate::schema::{OutputMetadata, SkipprDataType};
 
-use crate::discover::{OutputMetadata, SkipprDataType};
-use phf::phf_map;
+fn hive_mapped_type(skippr: &str) -> Option<&'static str> {
+    Some(match skippr {
+        "map" => "map",
+        "array" => "array",
+        "record" => "struct",
+        "long" => "bigint",
+        "string" => "string",
+        "boolean" => "boolean",
+        "integer" => "int",
+        "short" => "smallint",
+        "byte" => "tinyint",
+        "double" => "double",
+        "float" => "float",
+        "decimal" => "decimal(38,9)",
+        "NULL" => "null",
+        "date" => "timestamp",
+        "timestamp" => "timestamp",
+        "timestamp_milli" => "timestamp",
+        "time" => "string",
+        "binary" => "binary",
+        "uuid" => "string",
+        "fixed" => "binary",
+        "json" => "string",
+        _ => return None,
+    })
+}
 
-// const MAPPINGS: [(&str, &str); 5] = [
-// ("map", "map"),
-// ("array", "array"),
-// ("record", "struct"),
-// ("long", "bigint"),
-// ("string", "string") // parquet is binary but athena fails with binary and works with string?
-// ];
-
-static MAPPINGS: phf::Map<&'static str, &'static str> = phf_map! {
-    "map" => "map",
-    "array" => "array",
-    "record" => "struct",
-    "long" => "bigint",
-    "string" => "string",
-    "boolean" => "boolean",
-    "integer" => "int",
-    "short" => "smallint",
-    "byte" => "tinyint",
-    "double" => "double",
-    "float" => "float",
-    "decimal" => "decimal(38,9)",
-    "NULL" => "null",
-    "date" => "timestamp",
-    "timestamp" => "timestamp",
-    "timestamp_milli" => "timestamp",
-    "time" => "string",
-    "binary" => "binary",
-    "uuid" => "string",
-    "fixed" => "binary",
-    "json" => "string"
-};
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HiveColumn {
+    pub name: String,
+    pub hive_type: String,
+}
 
 pub struct SkipprHive {}
 
 impl SkipprHive {
-    pub fn convert_skippr_to_hive(metadata: &OutputMetadata) -> Result<Vec<Column>, bool> {
-        let field_types: Result<Vec<Column>, bool> =
+    pub fn convert_skippr_to_hive(metadata: &OutputMetadata) -> Result<Vec<HiveColumn>, bool> {
+        let field_types: Result<Vec<HiveColumn>, bool> =
             SkipprHive::convert_skippr_to_hive_field_types(metadata);
         field_types
     }
@@ -51,11 +49,11 @@ impl SkipprHive {
     /// fields; only the table metadata must omit them from `StorageDescriptor.Columns`.
     pub fn storage_columns_excluding_partition_keys(
         metadata: &OutputMetadata,
-        partition_keys: &[Column],
-    ) -> Result<Vec<Column>, bool> {
-        let exclude: HashSet<String> = partition_keys
+        partition_key_names: &[&str],
+    ) -> Result<Vec<HiveColumn>, bool> {
+        let exclude: HashSet<String> = partition_key_names
             .iter()
-            .map(|column| column.name.clone())
+            .map(|name| (*name).to_string())
             .collect();
         let columns = SkipprHive::convert_skippr_to_hive(metadata)?;
         Ok(columns
@@ -64,8 +62,10 @@ impl SkipprHive {
             .collect())
     }
 
-    fn convert_skippr_to_hive_field_types(metadata: &OutputMetadata) -> Result<Vec<Column>, bool> {
-        let mut field_types: Vec<Column> = vec![];
+    fn convert_skippr_to_hive_field_types(
+        metadata: &OutputMetadata,
+    ) -> Result<Vec<HiveColumn>, bool> {
+        let mut field_types: Vec<HiveColumn> = vec![];
 
         for (k, v) in metadata.fields.iter() {
             match v.determined_type {
@@ -77,50 +77,46 @@ impl SkipprHive {
                     let stuct_cols = SkipprHive::convert_skippr_to_hive_field_types(v).unwrap();
 
                     let mut type_str =
-                        format!("{}<", MAPPINGS.get(v.determined_type.as_str()).unwrap());
+                        format!("{}<", hive_mapped_type(v.determined_type.as_str()).unwrap());
 
                     let mut types: Vec<String> = vec![];
                     for col in stuct_cols.into_iter() {
-                        types.push(format!("{}:{}", col.name, col.r#type().unwrap()));
-                        // types.push(format!("{}", col.r#type().unwrap()));
+                        types.push(format!("{}:{}", col.name, col.hive_type));
+                        // types.push(format!("{}", col.hive_type));
                     }
                     type_str = format!("{}{}>", type_str, types.join(","));
 
-                    field_types.push(
-                        Column::builder()
-                            .name(v.out_field_name.to_string())
-                            .r#type(type_str)
-                            .build()
-                            .unwrap(),
-                    )
+                    field_types.push(HiveColumn {
+                        name: v.out_field_name.to_string().to_string(),
+                        hive_type: type_str.to_string(),
+                    })
                 }
                 SkipprDataType::Map => {
                     if v.determined_type_values.is_some() {
-                        let field_type: String = match MAPPINGS.get(v.determined_type.as_str()) {
+                        let field_type: String = match hive_mapped_type(v.determined_type.as_str())
+                        {
                             Some(mapped_type) => mapped_type.to_string(),
                             None => v.determined_type.to_string(),
                         };
 
                         let dtv = v.determined_type_values.as_ref().unwrap();
-                        let value_type: String = match MAPPINGS.get(dtv.as_str()) {
+                        let value_type: String = match hive_mapped_type(dtv.as_str()) {
                             Some(mapped_value) => mapped_value.to_string(),
                             None => dtv.to_string(),
                         };
 
                         let type_str = format!("{}<string,{}>", field_type, value_type);
 
-                        field_types.push(
-                            Column::builder()
-                                .name(v.out_field_name.to_string())
-                                .r#type(type_str)
-                                .build()
-                                .unwrap(),
-                        )
+                        field_types.push(HiveColumn {
+                            name: v.out_field_name.to_string().to_string(),
+                            hive_type: type_str.to_string(),
+                        })
                     }
                 }
                 SkipprDataType::Array => {
                     if v.determined_type_values.is_some() {
-                        let field_type: String = match MAPPINGS.get(v.determined_type.as_str()) {
+                        let field_type: String = match hive_mapped_type(v.determined_type.as_str())
+                        {
                             Some(mapped_type) => mapped_type.to_string(),
                             None => v.determined_type.to_string(),
                         };
@@ -132,23 +128,20 @@ impl SkipprHive {
 
                             let mut types: Vec<String> = vec![];
                             for col in object_fields.into_iter() {
-                                // types.push(format!("{}:{}", col.name().unwrap(), col.r#type().unwrap()));
-                                types.push(format!("{}", col.r#type().unwrap()));
+                                // types.push(format!("{}:{}", col.name.unwrap(), col.hive_type));
+                                types.push(format!("{}", col.hive_type));
                             }
                             type_str = format!("{}{}>", type_str, types.join(","));
 
-                            field_types.push(
-                                Column::builder()
-                                    .name(v.out_field_name.to_string())
-                                    .r#type(type_str)
-                                    .build()
-                                    .unwrap(),
-                            )
+                            field_types.push(HiveColumn {
+                                name: v.out_field_name.to_string().to_string(),
+                                hive_type: type_str.to_string(),
+                            })
                         } else if v.determined_type_values == Some(SkipprDataType::Array) {
                             // Handle array of arrays by recursively processing the inner array
                             if let Some(inner_array) = v.fields.get("0") {
                                 let field_type: String =
-                                    match MAPPINGS.get(v.determined_type.as_str()) {
+                                    match hive_mapped_type(v.determined_type.as_str()) {
                                         Some(mapped_type) => mapped_type.to_string(),
                                         None => v.determined_type.to_string(),
                                     };
@@ -156,7 +149,7 @@ impl SkipprHive {
                                 let inner_dtv =
                                     inner_array.determined_type_values.as_ref().unwrap();
                                 let inner_value_type: String =
-                                    match MAPPINGS.get(inner_dtv.as_str()) {
+                                    match hive_mapped_type(inner_dtv.as_str()) {
                                         Some(mapped_value) => mapped_value.to_string(),
                                         None => inner_dtv.to_string(),
                                     };
@@ -165,42 +158,33 @@ impl SkipprHive {
                                 let type_str =
                                     format!("{}<{}<{}>>", field_type, field_type, inner_value_type);
 
-                                field_types.push(
-                                    Column::builder()
-                                        .name(v.out_field_name.to_string())
-                                        .r#type(type_str)
-                                        .build()
-                                        .unwrap(),
-                                )
+                                field_types.push(HiveColumn {
+                                    name: v.out_field_name.to_string().to_string(),
+                                    hive_type: type_str.to_string(),
+                                })
                             }
                         } else {
                             let dtv = v.determined_type_values.as_ref().unwrap();
-                            let value_type: String = match MAPPINGS.get(dtv.as_str()) {
+                            let value_type: String = match hive_mapped_type(dtv.as_str()) {
                                 Some(mapped_value) => mapped_value.to_string(),
                                 None => dtv.to_string(),
                             };
 
                             let type_str = format!("{}<{}>", field_type, value_type);
 
-                            field_types.push(
-                                Column::builder()
-                                    .name(v.out_field_name.to_string())
-                                    .r#type(type_str)
-                                    .build()
-                                    .unwrap(),
-                            )
+                            field_types.push(HiveColumn {
+                                name: v.out_field_name.to_string().to_string(),
+                                hive_type: type_str.to_string(),
+                            })
                         }
                     }
                 }
                 _ => {
-                    match MAPPINGS.get(v.determined_type.as_str()) {
-                        Some(mapped_type) => field_types.push(
-                            Column::builder()
-                                .name(&v.out_field_name.to_string())
-                                .r#type(mapped_type.to_string())
-                                .build()
-                                .unwrap(),
-                        ),
+                    match hive_mapped_type(v.determined_type.as_str()) {
+                        Some(mapped_type) => field_types.push(HiveColumn {
+                            name: v.out_field_name.to_string().to_string(),
+                            hive_type: mapped_type.to_string().to_string(),
+                        }),
                         None => {
                             println!(
                                 "No Hive mapped type for field '{}' with type of '{}'",
@@ -217,7 +201,7 @@ impl SkipprHive {
         Ok(field_types)
     }
 
-    fn sort_fields(vec: &mut Vec<Column>) {
+    fn sort_fields(vec: &mut Vec<HiveColumn>) {
         // Sort the map by the count of each OutputMetadata in descending order
         vec.sort_by(|col1, col2| col1.name.cmp(&col2.name));
     }
@@ -261,7 +245,7 @@ mod tests {
 
             let columns = SkipprHive::convert_skippr_to_hive(&root).unwrap();
             assert_eq!(columns.len(), 1);
-            assert_eq!(columns[0].r#type().unwrap(), hive_type);
+            assert_eq!(columns[0].hive_type, hive_type);
         }
     }
 
@@ -275,15 +259,10 @@ mod tests {
             field.determined_type = SkipprDataType::String;
             metadata.fields.insert(name.to_string(), field);
         }
-        let partition = Column::builder()
-            .name("date")
-            .r#type("string")
-            .build()
-            .unwrap();
         let columns =
-            SkipprHive::storage_columns_excluding_partition_keys(&metadata, &[partition]).unwrap();
+            SkipprHive::storage_columns_excluding_partition_keys(&metadata, &["date"]).unwrap();
         assert_eq!(columns.len(), 1);
-        assert_eq!(columns[0].name(), "metric");
+        assert_eq!(columns[0].name, "metric");
     }
 
     #[test]
@@ -308,7 +287,7 @@ mod tests {
         // Check the column's type
         let column = &columns[0];
         assert_eq!(column.name, "numbers");
-        assert_eq!(column.r#type().unwrap(), "array<int>");
+        assert_eq!(column.hive_type, "array<int>");
     }
 
     #[test]
@@ -356,7 +335,7 @@ mod tests {
         assert_eq!(column.name, "contacts");
 
         // Check the structure of the array<struct> type
-        let type_str = column.r#type().unwrap();
+        let type_str = column.hive_type.as_str();
         assert!(type_str.starts_with("array<"));
         assert!(type_str.contains("name:string"));
         assert!(type_str.contains("tel:int"));
@@ -400,7 +379,7 @@ mod tests {
         assert_eq!(column.name, "matrix");
 
         // The type should be an array of arrays
-        let type_str = column.r#type().unwrap();
+        let type_str = column.hive_type.as_str();
         assert!(type_str.starts_with("array<array<int>"));
     }
 
@@ -472,7 +451,7 @@ mod tests {
         let contacts_column = columns.iter().find(|col| col.name == "contacts").unwrap();
 
         // Check the structure of the array<struct> type with the nested array
-        let type_str = contacts_column.r#type().unwrap();
+        let type_str = contacts_column.hive_type.as_str();
         assert!(type_str.starts_with("array<"));
         assert!(type_str.contains("name:string"));
         assert!(type_str.contains("tel:int"));
@@ -513,7 +492,7 @@ mod tests {
         assert_eq!(column.name, "imu");
 
         // Extract the struct definition
-        let type_str = column.r#type().unwrap();
+        let type_str = column.hive_type.as_str();
 
         // Check that the struct contains the array field
         assert!(type_str.starts_with("struct<"));

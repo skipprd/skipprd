@@ -24,7 +24,6 @@ use crate::buffer::segment_file::{
     PartitionKey, SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry, WalPayload,
 };
 use crate::buffer::wal_store::{SegmentWriteLocation, SegmentWriteResult};
-use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::helpers::timed_rwlock::TimedRwLock;
@@ -44,6 +43,7 @@ use once_cell::sync::Lazy;
 use once_cell::sync::Lazy as OnceLazy;
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use skippr_runtime_sdk::chunker::BufferChunker;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::future::Future;

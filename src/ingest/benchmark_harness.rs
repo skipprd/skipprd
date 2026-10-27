@@ -19,11 +19,11 @@ use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE};
 use crate::ingest_work::storage_namespace;
-use crate::ingest_work::{Ingest, IngestBatch};
+use crate::ingest_work::Ingest;
 use crate::metrics::ingest_profile::{self, IngestProfileSnapshot};
 use crate::plugins::NoopOutputPlugin;
-use crate::runtime_plugins::protocol::RuntimeExecutionMode;
 use crate::{METADATA, RUNNING};
+use skippr_runtime_sdk::protocol::RuntimeExecutionMode;
 
 #[derive(Debug, Clone, Copy)]
 pub enum BenchmarkFixture {
@@ -392,7 +392,7 @@ pub fn run_local_fixture_benchmark_with_options(
     let input_bytes = payload.len();
     let namespace = storage_namespace(&config, fixture.namespace());
     let offset_key = OffsetKey::new("file", fixture.name());
-    let batch = IngestBatch::new(
+    let batch = crate::ingest_work::new_ingest_batch(
         &config,
         offset_key,
         payload,

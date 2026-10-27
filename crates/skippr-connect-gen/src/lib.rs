@@ -249,8 +249,8 @@ fn dependency_type_files(
         }
     }
     if deps.contains_key("skippr-runtime-sdk") {
-        files.push(root.join("src/plugins/traits.rs"));
-        files.push(root.join("src/plugins/source_contract.rs"));
+        files.push(root.join("crates/skippr-runtime-sdk/src/plugins/traits.rs"));
+        files.push(root.join("crates/skippr-runtime-sdk/src/plugins/source_contract.rs"));
     }
     Ok(files)
 }
@@ -1345,7 +1345,7 @@ pub fn discover_engine(root: &Path) -> Result<EngineSpec, String> {
         })
         .ok_or_else(|| format!("{}: enum PairedSink not found", path.display()))?;
     let mut types = reflect_source_file(&path)?;
-    let pipeline_type = root.join("src/pipeline_type.rs");
+    let pipeline_type = root.join("crates/skippr-runtime-sdk/src/pipeline_type.rs");
     let extra = reflect_source_file(&pipeline_type)?;
     types.structs.extend(extra.structs);
     types.enums.extend(extra.enums);
@@ -1409,6 +1409,51 @@ mod tests {
             .and_then(|p| p.parent())
             .map(PathBuf::from)
             .expect("workspace root")
+    }
+
+    #[test]
+    fn discover_engine_loads_pipeline_type_from_sdk() {
+        let engine = discover_engine(&root()).expect("engine");
+        assert!(
+            engine.types.enums.contains_key("PipelineType"),
+            "PipelineType lives in crates/skippr-runtime-sdk/src/pipeline_type.rs"
+        );
+    }
+
+    #[test]
+    fn runtime_sdk_dependency_reads_sdk_plugin_types_not_host_reexports() {
+        let cargo: toml::Value = toml::from_str(
+            r#"
+            [dependencies]
+            skippr-runtime-sdk = { path = "../../crates/skippr-runtime-sdk" }
+            "#,
+        )
+        .unwrap();
+        let files =
+            dependency_type_files(&root(), &root().join("plugins/data_source/file"), &cargo)
+                .unwrap();
+        let rendered: Vec<String> = files
+            .iter()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|path| { path.ends_with("crates/skippr-runtime-sdk/src/plugins/traits.rs") }),
+            "expected SDK traits.rs, got {rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|path| {
+                path.ends_with("crates/skippr-runtime-sdk/src/plugins/source_contract.rs")
+            }),
+            "expected SDK source_contract.rs, got {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|path| {
+                path.ends_with("/src/plugins/traits.rs") && !path.contains("skippr-runtime-sdk")
+            }),
+            "host traits.rs is a pub-use reexport, got {rendered:?}"
+        );
     }
 
     #[test]

@@ -10,7 +10,8 @@ use tracing::info;
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceNamespaceContract, SourceOnceContract,
 };
-use skippr_runtime_sdk::source_compat::{submit_arrow_ipc_batches, SourceSyncContext};
+use skippr_runtime_sdk::plugins::source_sync::SourceSyncContext;
+use skippr_runtime_sdk::source_sync::submit_arrow_ipc_batches;
 use skippr_runtime_sdk::RUNNING;
 
 use crate::arrow_batch::{batches_from_signal, deadletter_batch, ipc_batch, NS_SPANS};

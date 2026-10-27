@@ -31,10 +31,7 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
-members = ["crates/skippr-core", "crates/skippr-runtime-sdk"]
-
-[workspace.dependencies]
-skippr-core = { path = "crates/skippr-core" }
+members = ["crates/skippr-runtime-sdk"]
 """,
         )
         self.write_workspace_file(workspace, "Cargo.lock", "version = 4\n")
@@ -56,45 +53,16 @@ name = "skippr-runtime-sdk"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
-skippr-core.workspace = true
 """,
         )
         self.write_workspace_file(
             workspace,
             "crates/skippr-runtime-sdk/src/lib.rs",
-            "pub use skippr_core::runtime_plugins;\n",
-        )
-        self.write_workspace_file(
-            workspace,
-            "crates/skippr-core/Cargo.toml",
-            """[package]
-name = "skippr-core"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-skipprd = { path = "../.." }
-""",
-        )
-        self.write_workspace_file(
-            workspace,
-            "crates/skippr-core/src/lib.rs",
-            "pub use skipprd::*;\n",
-        )
-        self.write_workspace_file(
-            workspace,
-            "src/lib.rs",
-            "pub mod runtime_plugins;\n",
-        )
-        self.write_workspace_file(
-            workspace,
-            "src/runtime_plugins/mod.rs",
             "pub mod protocol;\n",
         )
         self.write_workspace_file(
             workspace,
-            "src/runtime_plugins/protocol.rs",
+            "crates/skippr-runtime-sdk/src/protocol.rs",
             "pub const RUNTIME_PROTOCOL_VERSION: u32 = 17;\n",
         )
 
@@ -149,28 +117,7 @@ skipprd = { path = "../.." }
             )
             self.assertEqual(len(fingerprint), 64)
 
-    def test_runtime_sdk_build_fingerprint_changes_with_sdk_source(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            workspace = Path(tmp_dir)
-            self.write_runtime_sdk_workspace(workspace)
-            initial = runtime_plugin_catalog.workspace_runtime_sdk_build_fingerprint(
-                workspace
-            )
-
-            self.write_workspace_file(
-                workspace,
-                "crates/skippr-runtime-sdk/src/lib.rs",
-                "pub fn changed_sdk_runtime() {}\n",
-            )
-
-            self.assertNotEqual(
-                initial,
-                runtime_plugin_catalog.workspace_runtime_sdk_build_fingerprint(
-                    workspace
-                ),
-            )
-
-    def test_runtime_sdk_build_fingerprint_changes_with_transitive_core_source(
+    def test_runtime_sdk_build_fingerprint_changes_with_sdk_source(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -182,8 +129,8 @@ skipprd = { path = "../.." }
 
             self.write_workspace_file(
                 workspace,
-                "crates/skippr-core/src/lib.rs",
-                "pub fn changed_core_contract() {}\n",
+                "crates/skippr-runtime-sdk/src/lib.rs",
+                "pub fn changed_sdk_contract() {}\n",
             )
 
             self.assertNotEqual(
@@ -193,7 +140,7 @@ skipprd = { path = "../.." }
                 ),
             )
 
-    def test_runtime_sdk_build_fingerprint_changes_with_host_protocol_source(
+    def test_runtime_sdk_build_fingerprint_ignores_host_protocol_reexport(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -206,11 +153,10 @@ skipprd = { path = "../.." }
             self.write_workspace_file(
                 workspace,
                 "src/runtime_plugins/protocol.rs",
-                "pub const RUNTIME_PROTOCOL_VERSION: u32 = 17;\n"
-                "pub struct ChangedFrame;\n",
+                "pub use skippr_runtime_sdk::protocol::*;\n",
             )
 
-            self.assertNotEqual(
+            self.assertEqual(
                 initial,
                 runtime_plugin_catalog.workspace_runtime_sdk_build_fingerprint(
                     workspace
@@ -545,12 +491,12 @@ skipprd = { path = "../.." }
             self.write_workspace_file(
                 workspace,
                 "crates/skippr-runtime-sdk/src/protocol.rs",
-                "pub use skippr_core::runtime_plugins::protocol::*;\n",
+                "pub const RUNTIME_PROTOCOL_VERSION: u32 = 6;\n",
             )
             self.write_workspace_file(
                 workspace,
                 "src/runtime_plugins/protocol.rs",
-                "pub const RUNTIME_PROTOCOL_VERSION: u32 = 6;\n",
+                "pub const RUNTIME_PROTOCOL_VERSION: u32 = 99;\n",
             )
 
             self.assertEqual(

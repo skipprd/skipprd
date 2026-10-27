@@ -18,7 +18,7 @@ use once_cell::sync::Lazy;
 use super::parquet_util::serialize_to_parquet;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
-use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::chunker::BufferChunker;
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 const REDSHIFT_CDC_S3_STAGE_BLOCKER: &str = "the current S3 COPY path serializes target-only \

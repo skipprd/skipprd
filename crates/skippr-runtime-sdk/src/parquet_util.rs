@@ -99,20 +99,18 @@ async fn serialize_to_parquet_inner(
         None => first_batch,
     };
     let schema = first_batch.schema();
-    let order_fields =
-        skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
-            &schema,
-            configured_order_fields,
-        );
-    let props = skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
+    let order_fields = crate::converters::parquet_ordering::resolve_effective_order_from_fields(
+        &schema,
+        configured_order_fields,
+    );
+    let props = crate::converters::parquet_ordering::build_writer_properties(
         &schema,
         &order_fields,
-        skippr_runtime_sdk::converters::parquet_ordering::default_streaming_row_group_size(),
+        crate::converters::parquet_ordering::default_streaming_row_group_size(),
     );
     let mut bytes = Vec::new();
     let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(props))?;
-    let first_batch =
-        skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&first_batch, &order_fields)?;
+    let first_batch = crate::converters::parquet_ordering::sort_batch(&first_batch, &order_fields)?;
     writer.write(&first_batch)?;
 
     while let Some(batch) = batches.next().await {
@@ -123,8 +121,7 @@ async fn serialize_to_parquet_inner(
             }
             None => batch,
         };
-        let batch =
-            skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&batch, &order_fields)?;
+        let batch = crate::converters::parquet_ordering::sort_batch(&batch, &order_fields)?;
         writer.write(&batch)?;
     }
 

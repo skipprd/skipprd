@@ -8536,16 +8536,6 @@ dependencies = [
 
 [[package]]
 name = "phf"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
-dependencies = [
- "phf_macros",
- "phf_shared 0.11.3",
-]
-
-[[package]]
-name = "phf"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "913273894cec178f401a31ec4b656318d95473527be05c0752cc41cdc32be8b7"
@@ -8561,38 +8551,6 @@ checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
 dependencies = [
  "phf_shared 0.13.1",
  "serde",
-]
-
-[[package]]
-name = "phf_generator"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
-dependencies = [
- "phf_shared 0.11.3",
- "rand 0.8.8",
-]
-
-[[package]]
-name = "phf_macros"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
-dependencies = [
- "phf_generator",
- "phf_shared 0.11.3",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "phf_shared"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
-dependencies = [
- "siphasher",
 ]
 
 [[package]]
@@ -10728,13 +10686,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "skippr-core"
-version = "0.1.0"
-dependencies = [
- "skipprd",
-]
-
-[[package]]
 name = "skippr-iceberg-catalog"
 version = "0.1.0"
 dependencies = [
@@ -12230,17 +12181,33 @@ dependencies = [
  "arrow-schema 59.3.1",
  "async-trait",
  "bincode",
+ "bytes",
+ "chrono",
  "clap",
+ "dashmap 5.5.3",
  "datafusion 55.2.0",
  "futures",
+ "hex",
  "libc",
+ "md5",
+ "once_cell",
+ "parquet 59.3.1",
+ "proptest",
+ "rand 0.8.8",
  "serde",
  "serde_derive",
  "serde_json",
- "skippr-core",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "skippr-lease",
+ "skippr-object-writer",
  "skippr-plugin-macros",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -12315,7 +12282,6 @@ dependencies = [
  "once_cell",
  "parquet 59.3.1",
  "periodic",
- "phf 0.11.3",
  "predicates",
  "proptest",
  "prost 0.13.5",
@@ -12347,6 +12313,7 @@ dependencies = [
  "skippr-iceberg-catalog-fs",
  "skippr-iceberg-catalog-glue",
  "skippr-iceberg-rest",
+ "skippr-iceberg-writer",
  "skippr-lease",
  "skippr-lease-store-dynamodb",
  "skippr-object-writer",

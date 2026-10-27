@@ -76,25 +76,7 @@ pub struct NamespaceLineage {
     pub fields: Vec<FieldLineage>,
 }
 
-pub fn default_nullable() -> bool {
-    true
-}
-
-/// Derive a deterministic positive 31-bit field id from a namespace and path.
-///
-/// This is suitable for initial field-id assignment. If a source rename is
-/// later detected, the persisted `FieldLineage` record should preserve the old
-/// id and record the new path as an alias instead of recomputing it.
-pub fn deterministic_field_id(namespace: &str, output_path: &[String]) -> i32 {
-    let mut input = String::with_capacity(namespace.len() + output_path.len() * 16);
-    input.push_str(namespace);
-    input.push('\0');
-    input.push_str(&output_path.join("."));
-    let digest = md5::compute(input.as_bytes());
-    let raw = u32::from_be_bytes([digest.0[0], digest.0[1], digest.0[2], digest.0[3]]);
-    // Iceberg field ids are positive signed integers.
-    (raw & 0x7fff_ffff) as i32
-}
+pub use skippr_runtime_sdk::lineage::{default_nullable, deterministic_field_id};
 
 pub fn derive_namespace_lineage(
     source_system: impl Into<String>,

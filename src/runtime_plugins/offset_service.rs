@@ -7,11 +7,11 @@ use tokio::runtime::Runtime;
 use tracing::warn;
 
 use crate::helpers::offsets::{OffsetTypes, Offsets, OffsetsError};
-use crate::runtime_plugins::protocol::{
+use skippr_runtime_sdk::protocol::{
     HostOffsetFrame, PluginOffsetFrame, RuntimeOffsetValidationEntry, RuntimeSessionHello,
     RUNTIME_PROTOCOL_VERSION,
 };
-use crate::runtime_plugins::wire::{read_frame, write_frame};
+use skippr_runtime_sdk::wire::{read_frame, write_frame};
 
 static OFFSET_SERVICE_RT: Lazy<Runtime> =
     Lazy::new(|| Runtime::new().expect("offset service runtime"));

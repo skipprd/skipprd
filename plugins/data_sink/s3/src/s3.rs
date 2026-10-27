@@ -15,7 +15,7 @@ use skippr_object_writer::{
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::serdes::output_format::OutputFormat;
-use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::chunker::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, persisted_object_write_matches, sidecar_manifest_object_key,
     GroupedWriteReceipt, ObjectWriteManifest,

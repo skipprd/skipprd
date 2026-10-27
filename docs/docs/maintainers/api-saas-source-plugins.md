@@ -73,7 +73,7 @@ The host also validates that the **pipeline’s configured data sink** supports 
 
 ## Implementation checklist: source plugin
 
-**Core types:** `DataSource`, `SourceNamespaceContract`, `SourceSyncContext` — `src/plugins/traits.rs`, `src/plugins/source_contract.rs`.
+**Core types:** `DataSource`, `SourceNamespaceContract`, `SourceSyncContext` — `crates/skippr-runtime-sdk` (`plugins/traits.rs`, `plugins/source_contract.rs`). Host `src/plugins/` re-exports and persists contracts into `METADATA`.
 
 **Runtime wiring:** `crates/skippr-runtime-sdk/src/append_source_runtime.rs` (emits `ContractsUpdate` before `sync()`).
 
@@ -162,7 +162,7 @@ Reference: `google-analytics` / `GoogleAnalytics` in `plugins/data_source/google
 
 ## Implementation checklist: data sink plugin
 
-**Core types:** `DataSink`, `SinkWriteContext` — `src/plugins/traits.rs`.
+**Core types:** `DataSink`, `SinkWriteContext` — `crates/skippr-runtime-sdk/src/plugins/traits.rs`.
 
 The host invokes `sync_with_context` for compaction and WAL replay. Contract-aware sinks must not use the default `sync_with_context` that ignores `source_contract`.
 
@@ -177,7 +177,7 @@ The host invokes `sync_with_context` for compaction and WAL replay. Contract-awa
 ### `DataSink` implementation
 
 - [ ] Override `sync_with_context`
-- [ ] Resolve contract: `ctx.source_contract` → else `namespace_source_contract(namespace)` from `METADATA`
+- [ ] Resolve contract: `ctx.source_contract` (host METADATA is not visible to plugin children)
 - [ ] Derive `write_policy` from contract; on CDC-encoded paths, typically force `append` and skip SaaS replace semantics
 - [ ] Before non-append writes: `validate_write_policy_for_sink`, `ensure_source_contract_for_policy`
 - [ ] **Hard-fail** unsupported policies (`io::Error`); never warn and fall back to append
@@ -225,7 +225,7 @@ Additional requirements for any sink:
 
 ## Implementation checklist: schema sink plugin
 
-**Core types:** `SchemaSink`, `SchemaSyncRequest` — `src/plugins/traits.rs`.
+**Core types:** `SchemaSink`, `SchemaSyncRequest` — `crates/skippr-runtime-sdk/src/plugins/traits.rs`.
 
 Schema sinks run as separate runtime subprocesses (`kind = "SchemaSink"`). They update destination DDL/catalog from `OutputMetadata` and must honor `source_contract` when partition semantics depend on it.
 
@@ -237,7 +237,7 @@ Schema sinks run as separate runtime subprocesses (`kind = "SchemaSink"`). They 
 ### `SchemaSink` implementation
 
 - [ ] Override `sync_schema_request` (default implementation **ignores** `source_contract`)
-- [ ] Resolve contract: `request.source_contract` → else `namespace_source_contract(namespace)`
+- [ ] Resolve contract: `request.source_contract`
 - [ ] Thread contract into create/update catalog logic
 
 ### Catalog DDL (generic)
@@ -278,7 +278,7 @@ Each `ContractsUpdate` is the **full** contract set for the current source run, 
 2. Sink manifest capability check for each `write_policy`
 3. On failure: abort source ingest work; fail the source run with `io::Error` (no silent append fallback; apply path does not panic on bad input)
 
-Sinks may still read contracts from `SinkWriteContext` per batch and fall back to `METADATA`.
+The host may look up `METADATA.source_contracts` when filling `SinkWriteContext` / `SchemaSyncRequest`. Plugin children must use the contract on that request; they must not look up host `METADATA`.
 
 ### Control before data
 
@@ -412,7 +412,7 @@ When a bronze namespace uses dimension/metric combinations that some accounts re
 ```bash
 # Host: contracts + protocol
 cargo test -p skipprd --lib plugins::source_contract::tests
-cargo test -p skipprd --lib runtime_plugins::protocol::tests
+cargo test -p skippr-runtime-sdk --lib protocol::tests
 cargo test -p skipprd --test runtime_host_contracts
 
 # Shared API helpers

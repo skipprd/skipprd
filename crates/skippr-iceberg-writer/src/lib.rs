@@ -1,12 +1,11 @@
+pub mod iceberg_schema;
 pub use skippr_runtime_sdk::{
     converters, discover, helpers, ingest, lineage, metrics, plugins, serdes,
 };
 
-#[path = "../../../plugins/shared/cdc_encode.rs"]
-pub mod cdc_encode;
+pub use skippr_runtime_sdk::cdc_encode;
 
-#[path = "../../../plugins/shared/parquet_util.rs"]
-pub mod parquet_util;
+pub use skippr_runtime_sdk::parquet_util;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
@@ -72,8 +71,8 @@ use skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp;
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::plugins::cdc::EffectiveGuarantee;
 use skippr_runtime_sdk::plugins::source_contract::{
-    ensure_source_contract_for_policy, namespace_source_contract, validate_write_policy_for_sink,
-    FieldPath, SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
+    ensure_source_contract_for_policy, validate_write_policy_for_sink, FieldPath,
+    SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
 };
 use skippr_runtime_sdk::plugins::{
     AlterSupport, DataSink, SchemaSink, SinkCallResult, SinkPreflightOutcome, SinkSpec,
@@ -82,7 +81,7 @@ use skippr_runtime_sdk::plugins::{
 use skippr_runtime_sdk::protocol::{
     RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState, SchemaDelta, SinkWriteStats,
 };
-use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::chunker::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
 
 /// Everything the writer needs that is not the catalog itself. Plugins resolve their own
@@ -463,7 +462,7 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
         let resolved_contract = ctx
             .source_contract
             .cloned()
-            .or_else(|| namespace_source_contract(&namespace));
+            ;
         let policy = resolved_contract
             .as_ref()
             .map(|c| c.write_policy)
@@ -726,7 +725,7 @@ impl<S: SinkSpec> SchemaSink for IcebergWriter<S> {
         op: &SchemaAlterOp,
         field_id: i32,
     ) -> Result<(), io::Error> {
-        use skippr_runtime_sdk::discover::iceberg_schema::iceberg_schema_after_alter;
+        use crate::iceberg_schema::iceberg_schema_after_alter;
 
         let ident = self.table_ident(namespace)?;
         let loaded = self
@@ -1530,7 +1529,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
         let resolved_contract = ctx
             .source_contract
             .cloned()
-            .or_else(|| namespace_source_contract(namespace));
+            ;
         let policy = if ctx.cdc_ctx.is_some() {
             WritePolicy::Append
         } else {
@@ -2990,7 +2989,6 @@ fn grouped_preparation_requires_lane(
     }
     ctx.source_contract
         .cloned()
-        .or_else(|| namespace_source_contract(namespace))
         .is_some_and(|contract| contract.write_policy == WritePolicy::ReplaceTable)
 }
 

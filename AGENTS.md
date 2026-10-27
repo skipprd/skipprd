@@ -47,7 +47,7 @@ Release CI on `skipprd-private` is a **full integration test** of user-facing be
 
 Operator path is **`/skippr-release`** (skill `skippr-release`). It bumps plugin crate patches when checksum inputs changed, updates `CHANGELOG.md`, commits with the pre-commit hook (never `--no-verify`), tags, pushes, watches GitHub Actions, and calls **`skipprd-docs`** for surgical public copy.
 
-Plugin crate `version` in `plugins/**/Cargo.toml` is the CDN path identity (`plugins/<stem>/versions/<crate>/`). Those paths are immutable. If the release contains plugin, `plugins/shared/`, protocol, wire, or `skippr-runtime-sdk` changes, bump that crate (or every catalog crate for shared inputs) **before** the tag:
+Plugin crate `version` in `plugins/**/Cargo.toml` is the CDN path identity (`plugins/<stem>/versions/<crate>/`). Those paths are immutable. If the release contains plugin, `plugins/shared/`, or `crates/skippr-runtime-sdk` changes, bump that crate (or every catalog crate for shared inputs) **before** the tag:
 
 ```bash
 python3 .github/scripts/bump_changed_plugin_crates.py --base <last-engine-tag>

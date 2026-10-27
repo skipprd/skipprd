@@ -18,9 +18,8 @@ use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
 use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
-use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, submit_payload_batches, IngestBatch,
-};
+use skippr_runtime_sdk::ingest::IngestBatch;
+use skippr_runtime_sdk::source_sync::{load_checkpoint_payload, submit_payload_batches};
 
 use crate::linkedin_ads_api::{
     normalize_account_id, parse_rows, rest_version_or_default, LinkedInAdsApiClient,

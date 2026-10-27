@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::runtime_plugins::protocol::{
-    HandshakeResponse, RuntimePluginKind, RuntimeSinkCapabilityDescriptor,
-    RuntimeSourceCapabilityDescriptor, RUNTIME_PROTOCOL_VERSION,
-};
 use crate::runtime_plugins::targets::{
     current_target_triple, manifest_key_candidates_for_current_target,
+};
+use skippr_runtime_sdk::protocol::{
+    HandshakeResponse, RuntimePluginKind, RuntimeSinkCapabilityDescriptor,
+    RuntimeSourceCapabilityDescriptor, RUNTIME_PROTOCOL_VERSION,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -185,7 +185,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{RuntimePluginArtifact, RuntimePluginKind, RuntimePluginManifest};
-    use crate::runtime_plugins::protocol::RUNTIME_PROTOCOL_VERSION;
+    use skippr_runtime_sdk::protocol::RUNTIME_PROTOCOL_VERSION;
 
     fn sample_manifest() -> RuntimePluginManifest {
         RuntimePluginManifest {

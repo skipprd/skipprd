@@ -55,11 +55,8 @@ class BumpChangedPluginCratesTests(unittest.TestCase):
         )
         self.write_workspace_file(
             workspace,
-            "src/runtime_plugins/protocol.rs",
+            "crates/skippr-runtime-sdk/src/protocol.rs",
             "pub const RUNTIME_PROTOCOL_VERSION: u32 = 22;\n",
-        )
-        self.write_workspace_file(
-            workspace, "src/runtime_plugins/wire.rs", "pub fn wire() {}\n"
         )
         self.write_workspace_file(
             workspace,
@@ -126,7 +123,7 @@ class BumpChangedPluginCratesTests(unittest.TestCase):
             self.write_plugin_workspace(workspace)
             bumped = bump_changed_plugin_crates.bump_changed_plugin_crates(
                 workspace,
-                changed_paths=["src/runtime_plugins/protocol.rs"],
+                changed_paths=["crates/skippr-runtime-sdk/src/protocol.rs"],
             )
             self.assertEqual(
                 bumped,

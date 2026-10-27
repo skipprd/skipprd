@@ -19,11 +19,11 @@ use skippr_object_writer::{
     CompletionMetadata, MultipartUpload, ObjectPartReceipt, ObjectWriteBackend, ObjectWriteError,
     ObjectWriteRequest, ObjectWriteSession, ObjectWriterConfig, PartMetadata,
 };
-use skippr_runtime_sdk::converters::skippr_hive::SkipprHive;
+use skippr_runtime_sdk::converters::skippr_hive::{HiveColumn, SkipprHive};
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::metrics::counters as metrics_counters;
 use skippr_runtime_sdk::plugins::{SchemaSink, SchemaSyncRequest, SinkWriteOutcome};
-use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::chunker::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, sidecar_manifest_object_key, GroupedWriteReceipt,
     ObjectWriteManifest,
@@ -51,8 +51,8 @@ use once_cell::sync::Lazy;
 use rand::Rng;
 use serde_derive::Deserialize;
 use skippr_runtime_sdk::plugins::source_contract::{
-    ensure_source_contract_for_policy, namespace_source_contract, validate_write_policy_for_sink,
-    SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
+    ensure_source_contract_for_policy, validate_write_policy_for_sink, SinkWritePolicySupport,
+    SourceNamespaceContract, WritePolicy,
 };
 use skippr_runtime_sdk::plugins::{
     DataSink, SinkCallResult, SinkPreflightOutcome, SinkPreflightResult, SinkWriteContext,
@@ -62,11 +62,24 @@ use skippr_runtime_sdk::protocol::{
     GluePartitionCatalogIntentV1, RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState,
     SchemaDelta, SinkWriteStats, CATALOG_INTENT_VERSION, GLUE_PARTITION_CATALOG_INTENT_VERSION,
 };
-use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
+use skippr_runtime_sdk::chunker::partition_time::TimePartitioner;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use tracing::{debug, info, warn};
+
+fn hive_to_glue(columns: Vec<HiveColumn>) -> Vec<Column> {
+    columns
+        .into_iter()
+        .map(|column| {
+            Column::builder()
+                .name(column.name)
+                .r#type(column.hive_type)
+                .build()
+                .unwrap()
+        })
+        .collect()
+}
 
 const TIME_PARTITION_GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
 const ATHENA_MULTIPART_PART_SIZE: usize = 16 * 1024 * 1024;
@@ -549,7 +562,7 @@ impl InstalledAthenaSchemaState {
 fn is_deadletter_athena_target(binding: RuntimeBinding, namespace: &str, pipeline: &str) -> bool {
     binding == RuntimeBinding::Deadletter
         && namespace
-            == skippr_runtime_sdk::sink_compat::deadletter::table_name_for_pipeline(pipeline)
+            == skippr_runtime_sdk::chunker::deadletter::table_name_for_pipeline(pipeline)
 }
 
 fn deadletter_output_metadata() -> OutputMetadata {
@@ -728,9 +741,7 @@ impl DataSink for DataSinkAthenaPlugin {
         let resolved_contract = if ctx.cdc_ctx.is_some() {
             None
         } else {
-            ctx.source_contract
-                .cloned()
-                .or_else(|| namespace_source_contract(&namespace))
+            ctx.source_contract.cloned()
         };
         let write_policy = if ctx.cdc_ctx.is_some() {
             WritePolicy::Append
@@ -796,9 +807,7 @@ impl DataSink for DataSinkAthenaPlugin {
         let resolved_contract = if ctx.cdc_ctx.is_some() {
             None
         } else {
-            ctx.source_contract
-                .cloned()
-                .or_else(|| namespace_source_contract(&namespace))
+            ctx.source_contract.cloned()
         };
         let write_policy = if ctx.cdc_ctx.is_some() {
             WritePolicy::Append
@@ -935,10 +944,7 @@ impl SchemaSink for DataSinkAthenaPlugin {
         request: SchemaSyncRequest<'_>,
         metadata: &OutputMetadata,
     ) -> Result<(), io::Error> {
-        let source_contract = request
-            .source_contract
-            .cloned()
-            .or_else(|| namespace_source_contract(request.namespace));
+        let source_contract = request.source_contract.cloned();
         AwsAthena::create_or_update_schema_with_config(
             request.namespace,
             metadata,
@@ -992,10 +998,7 @@ impl DataSinkAthenaPlugin {
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkCallResult, std::io::Error> {
         let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
-        let resolved_contract = ctx
-            .source_contract
-            .cloned()
-            .or_else(|| namespace_source_contract(&namespace));
+        let resolved_contract = ctx.source_contract.cloned();
         let write_policy = resolved_contract
             .as_ref()
             .map(|c| c.write_policy)
@@ -1300,14 +1303,16 @@ impl DataSinkAthenaPlugin {
                 ),
             ));
         }
-        let storage_columns =
-            SkipprHive::storage_columns_excluding_partition_keys(metadata, &partition_columns)
+        let partition_names: Vec<&str> = partition_columns.iter().map(|c| c.name()).collect();
+        let storage_columns = hive_to_glue(
+            SkipprHive::storage_columns_excluding_partition_keys(metadata, &partition_names)
                 .map_err(|_| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("failed to derive Glue storage columns for '{namespace}'"),
                     )
-                })?;
+                })?,
+        );
         let schema_version = catalog_intent_schema_version(
             &self.schema_state.read().await.namespace_versions,
             namespace,
@@ -2574,10 +2579,8 @@ impl AwsAthena {
                 Some(index) => format!("p_{}", &field_dot[index + 1..]),
                 None => format!("p_{}", field_dot),
             };
-            let clean_field_name = Helpers::clean_field_name(
-                &crate::helpers::configuration::runtime_child_config(),
-                entity_name.to_string(),
-            );
+            let clean_field_name =
+                skippr_runtime_sdk::helpers::names::clean_field_name(&entity_name, false);
 
             partitions.push(
                 Column::builder()
@@ -2737,8 +2740,11 @@ impl AwsAthena {
             }
         }
 
-        let columns =
-            SkipprHive::storage_columns_excluding_partition_keys(metadata, &partitions).unwrap();
+        let partition_names: Vec<&str> = partitions.iter().map(|c| c.name()).collect();
+        let columns = hive_to_glue(
+            SkipprHive::storage_columns_excluding_partition_keys(metadata, &partition_names)
+                .unwrap(),
+        );
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -2819,11 +2825,11 @@ impl AwsAthena {
             .table()
             .and_then(|table| table.partition_keys.clone())
             .unwrap_or_default();
-        let columns = SkipprHive::storage_columns_excluding_partition_keys(
-            metadata,
-            &existing_partition_keys,
-        )
-        .unwrap();
+        let partition_names: Vec<&str> = existing_partition_keys.iter().map(|c| c.name()).collect();
+        let columns = hive_to_glue(
+            SkipprHive::storage_columns_excluding_partition_keys(metadata, &partition_names)
+                .unwrap(),
+        );
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()

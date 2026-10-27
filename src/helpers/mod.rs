@@ -2,7 +2,6 @@
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use memory_stats::memory_stats;
-use regex::Regex;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::{env, fs};
@@ -136,7 +135,8 @@ impl Helpers {
     }
 
     pub fn clean_field_name<'a>(config: &Config, field: String) -> String {
-        let cache_key = clean_field_cache_key(config.get_transform_flatten_events(), &field);
+        let flatten_events = config.get_transform_flatten_events();
+        let cache_key = clean_field_cache_key(flatten_events, &field);
         {
             if let Some(cached) = CLEAN_FIELD_CACHE.get(&cache_key) {
                 if cached.value() != "no" {
@@ -145,38 +145,7 @@ impl Helpers {
             }
         }
 
-        let mut clean = field.clone();
-        if field.parse::<i32>().is_ok() {
-            if config.get_transform_flatten_events() {
-                clean = "".to_string() + &field;
-            } else {
-                clean = "item_".to_string() + &field;
-            }
-        }
-
-        clean = clean.to_lowercase();
-
-        let re = Regex::new(r"[^_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]")
-            .unwrap();
-        clean = re.replace_all(&clean, "_").to_string();
-        clean = regex::Regex::new(r"_+")
-            .unwrap()
-            .replace_all(&clean, "_")
-            .to_string();
-
-        // let pattern = "/[^" + preg_quote(
-        //     "_0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        //     "/"
-        // ) + "]/";
-        // clean = preg_replace(pattern, "_", field);
-
-        let x: &[_] = &['1', '2', '3', '4', '5', '6', '7', '8', '9'];
-        clean = clean.trim_start_matches(x).to_string();
-        // clean = ltrim(clean, "0123456789");
-
-        // '_' at the beginning is common and probably allowable
-        clean = clean.trim_matches('_').to_string();
-        // clean = trim(clean, '_');
+        let clean = skippr_runtime_sdk::helpers::names::clean_field_name(&field, flatten_events);
 
         {
             let mut cache = CLEAN_FIELD_CACHE

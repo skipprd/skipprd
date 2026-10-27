@@ -6,16 +6,12 @@
 /// the full-pipeline end-to-end suite.
 ///
 /// Requires Docker services `postgres` and `postgres-target`.
-use std::collections::HashMap;
-use std::time::SystemTime;
-
 use skippr_plugin_data_sink_postgres::{
     apply_postgres_cdc_batch, ddl_add_order_token_column, ddl_create_tombstone_table,
     delete_if_newer_sql, tombstone_table_name, upsert_if_newer_sql, CdcApplyBatch, CdcApplyColumn,
     CdcApplyMutation, CdcApplyRow, CdcApplyRowMetadata, CdcApplyValue, PostgresCdcBackend,
 };
 use skippr_runtime_sdk::plugins::cdc::{MutationKind, WalPartKind, WalPartMeta, WalRowMeta};
-use skippr_runtime_sdk::sink_compat::segment_file::{PartitionKey, SegmentFile, WalPayload};
 
 const SOURCE_CONN: &str =
     "host=localhost port=15432 user=postgres password=testpass dbname=skippr_test";
@@ -49,77 +45,6 @@ fn bulk_row(
         },
         values,
     }
-}
-
-#[test]
-#[ignore]
-fn cdc_wal_roundtrip_with_postgres_metadata() {
-    let dir = std::env::temp_dir().join(format!("skippr_cdc_pg_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let seg = SegmentFile::new(&dir, "pg_cdc_roundtrip").unwrap();
-
-    let key = PartitionKey {
-        sink_ref: "data_outputs.pg_target".to_string(),
-        namespace: "users".to_string(),
-        partition: "".to_string(),
-        time: None,
-        schema_fingerprint: "".to_string(),
-    };
-
-    let schema = arrow::datatypes::Schema::new(vec![
-        arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int32, false),
-        arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, true),
-    ]);
-    let batch = arrow::record_batch::RecordBatch::try_new(
-        std::sync::Arc::new(schema),
-        vec![
-            std::sync::Arc::new(arrow::array::Int32Array::from(vec![1, 2, 3])),
-            std::sync::Arc::new(arrow::array::StringArray::from(vec!["a", "b", "c"])),
-        ],
-    )
-    .unwrap();
-
-    let mut batches: HashMap<PartitionKey, WalPayload> = HashMap::new();
-    batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
-    let mut parts_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
-    parts_meta.insert(key.clone(), (0, SystemTime::now()));
-    let offsets = HashMap::new();
-
-    let wal_meta = WalPartMeta {
-        kind: WalPartKind::Cdc,
-        row_count: 3,
-        rows: vec![
-            WalRowMeta {
-                mutation: MutationKind::Insert,
-                event_id: b"pg:lsn:0/1000000".to_vec(),
-                order_token: 0x1000000u64.to_be_bytes().to_vec(),
-            },
-            WalRowMeta {
-                mutation: MutationKind::Insert,
-                event_id: b"pg:lsn:0/1000001".to_vec(),
-                order_token: 0x1000001u64.to_be_bytes().to_vec(),
-            },
-            WalRowMeta {
-                mutation: MutationKind::Update,
-                event_id: b"pg:lsn:0/1000002".to_vec(),
-                order_token: 0x1000002u64.to_be_bytes().to_vec(),
-            },
-        ],
-    };
-    let blob = bincode::serialize(&wal_meta).unwrap();
-    let mut blobs: HashMap<PartitionKey, Vec<u8>> = HashMap::new();
-    blobs.insert(key.clone(), blob);
-
-    let (_meta, rows, _sha) = seg
-        .write_snapshot(
-            &offsets,
-            &batches,
-            &parts_meta,
-            &blobs,
-            std::time::SystemTime::UNIX_EPOCH,
-        )
-        .unwrap();
-    assert_eq!(rows, 3);
 }
 
 #[tokio::test]

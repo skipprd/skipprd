@@ -9,8 +9,8 @@ use once_cell::sync::Lazy;
 use crate::discover::OutputMetadata;
 use crate::helpers::configuration::Config;
 use crate::ingest_work::storage_namespace;
-use crate::runtime_plugins::protocol::RuntimeSchemaState;
 use crate::{METADATA, PIPELINE_SCHEMA_VERSION};
+use skippr_runtime_sdk::protocol::RuntimeSchemaState;
 
 static RUNTIME_SOURCE_SCHEMA_STATE: Lazy<ArcSwap<RuntimeSchemaState>> = Lazy::new(|| {
     ArcSwap::new(Arc::new(RuntimeSchemaState {
@@ -53,9 +53,9 @@ fn metadata_schema_state_namespaces() -> BTreeMap<String, OutputMetadata> {
         .iter()
         .map(|(namespace, schema)| {
             let output = if metadata.flattened {
-                OutputMetadata::from_flatterened_metadata(schema)
+                crate::discover::output_metadata_from_flatterened_metadata(schema)
             } else {
-                OutputMetadata::from_metadata(schema)
+                crate::discover::output_metadata_from_metadata(schema)
             };
             (namespace.clone(), output)
         })
@@ -252,7 +252,7 @@ mod tests {
     fn identical_runtime_schema_state_reports_no_changed_namespaces() {
         with_metadata_test_lock(|| {
             let namespace_metadata = root_record_with_field("id", SkipprDataType::String);
-            let output = OutputMetadata::from_metadata(&namespace_metadata);
+            let output = crate::discover::output_metadata_from_metadata(&namespace_metadata);
             install_metadata(HashMap::from([("events".to_string(), namespace_metadata)]));
 
             let changed = apply_runtime_source_schema_state(
@@ -273,7 +273,7 @@ mod tests {
     fn schema_state_change_detection_ignores_non_published_ids() {
         with_metadata_test_lock(|| {
             let namespace_metadata = root_record_with_field("id", SkipprDataType::String);
-            let mut output = OutputMetadata::from_metadata(&namespace_metadata);
+            let mut output = crate::discover::output_metadata_from_metadata(&namespace_metadata);
             output.field_id = 42;
             output.schema_id = 99;
             output.lineage_id = "runtime-lineage".to_string();
@@ -297,9 +297,10 @@ mod tests {
     fn changed_runtime_schema_state_reports_only_changed_namespaces() {
         with_metadata_test_lock(|| {
             let events_metadata = root_record_with_field("id", SkipprDataType::String);
-            let metadata_output = OutputMetadata::from_metadata(&events_metadata);
-            let changed_output =
-                OutputMetadata::from_metadata(&root_record_with_field("id", SkipprDataType::Long));
+            let metadata_output = crate::discover::output_metadata_from_metadata(&events_metadata);
+            let changed_output = crate::discover::output_metadata_from_metadata(
+                &root_record_with_field("id", SkipprDataType::Long),
+            );
             install_metadata(HashMap::from([("events".to_string(), events_metadata)]));
 
             let changed = apply_runtime_source_schema_state(

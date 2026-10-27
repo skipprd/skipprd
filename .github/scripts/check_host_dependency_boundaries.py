@@ -69,6 +69,52 @@ def cargo_cmd() -> list[str]:
     return ["cargo"]
 
 
+SDK_CRATE_DIR = REPO_ROOT / "crates" / "skippr-runtime-sdk"
+SKIPPR_CORE_DIR = REPO_ROOT / "crates" / "skippr-core"
+SKIPPR_CORE_IMPORT_RE = re.compile(r"\bskippr_core::")
+
+
+def packages_named_in_cargo_tree(stdout: str) -> set[str]:
+    names = set()
+    for line in stdout.splitlines():
+        match = re.match(r"^([A-Za-z0-9_.-]+) v", line.strip())
+        if match:
+            names.add(match.group(1))
+    return names
+
+
+def collect_sdk_tree_packages() -> set[str]:
+    command = cargo_cmd() + [
+        "tree",
+        "-p",
+        "skippr-runtime-sdk",
+        "-e",
+        EDGE_KINDS,
+        "--prefix",
+        "none",
+    ]
+    result = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return packages_named_in_cargo_tree(result.stdout)
+
+
+def collect_sdk_skippr_core_imports() -> list[str]:
+    hits = []
+    src = SDK_CRATE_DIR / "src"
+    if not src.is_dir():
+        return ["crates/skippr-runtime-sdk/src missing"]
+    for path in sorted(src.rglob("*.rs")):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if SKIPPR_CORE_IMPORT_RE.search(text):
+            hits.append(str(path.relative_to(REPO_ROOT)))
+    return hits
+
+
 def collect_leaked_host_packages(*, widest_features: bool) -> set[str]:
     command = cargo_cmd() + ["tree", "-p", "skipprd", "-e", EDGE_KINDS, "--prefix", "none"]
     if widest_features and HOST_WIDEST_FEATURES:
@@ -125,6 +171,8 @@ FORBIDDEN_PLUGIN_PATTERNS = {
     "plugin ingest_file": re.compile(r"\.ingest_file\s*\("),
     "runtime ingest relay": re.compile(r"\bRuntimeIngestRelay\b"),
     "relay raw ingest": re.compile(r"\brelay_raw_ingest_tasks\b"),
+    "deleted sink_compat import": re.compile(r"\bsink_compat\b"),
+    "deleted source_compat import": re.compile(r"\bsource_compat\b"),
 }
 
 
@@ -144,8 +192,20 @@ def main() -> int:
     leaked_widest = collect_leaked_host_packages(widest_features=True)
     manifest_violations = collect_plugin_manifest_violations()
     source_violations = collect_plugin_source_violations()
+    sdk_skippr_core_imports = collect_sdk_skippr_core_imports()
+    sdk_tree = collect_sdk_tree_packages()
+    sdk_depends_on_skipprd = "skipprd" in sdk_tree
+    skippr_core_present = SKIPPR_CORE_DIR.exists()
 
-    if leaked_default or leaked_widest or manifest_violations or source_violations:
+    if (
+        leaked_default
+        or leaked_widest
+        or manifest_violations
+        or source_violations
+        or sdk_skippr_core_imports
+        or sdk_depends_on_skipprd
+        or skippr_core_present
+    ):
         print(
             "host/plugin dependency boundary violated:",
             file=sys.stderr,
@@ -178,6 +238,23 @@ def main() -> int:
             )
             for violation in source_violations:
                 print(f"    - {violation}", file=sys.stderr)
+        if skippr_core_present:
+            print(
+                "  skippr-core crate is illegal (pub use skipprd); delete crates/skippr-core",
+                file=sys.stderr,
+            )
+        if sdk_skippr_core_imports:
+            print(
+                "  skippr-runtime-sdk must not import skippr_core:::",
+                file=sys.stderr,
+            )
+            for path in sdk_skippr_core_imports:
+                print(f"    - {path}", file=sys.stderr)
+        if sdk_depends_on_skipprd:
+            print(
+                "  cargo tree -p skippr-runtime-sdk must not contain skipprd",
+                file=sys.stderr,
+            )
         return 1
 
     print(

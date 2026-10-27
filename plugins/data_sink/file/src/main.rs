@@ -1,6 +1,5 @@
 use skippr_runtime_sdk::SkipprConfig;
-#[path = "../../../shared/cdc_encode.rs"]
-mod cdc_encode;
+use skippr_runtime_sdk::cdc_encode;
 
 use std::collections::BTreeMap;
 use std::fs;

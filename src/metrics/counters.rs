@@ -6,6 +6,14 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
+pub use skippr_runtime_sdk::metrics::counters::{
+    add_glue_retry, add_parquet_bytes, add_parquet_objects, add_parquet_rows, add_upload,
+    add_upload_latency_ns, dec_uploads_in_flight, inc_uploads_in_flight, ATHENA_GLUE_CP_TARGET,
+    GLUE_RETRIES_TOTAL, MULTIPART_PART_CONCURRENCY_TARGET, PARQUET_PERSISTED_BYTES_TOTAL,
+    PARQUET_PERSISTED_OBJECTS_TOTAL, PARQUET_PERSISTED_ROWS_TOTAL, S3_DOWNLOAD_CONCURRENCY_TARGET,
+    UPLOADS_IN_FLIGHT, UPLOADS_TOTAL, UPLOAD_CONCURRENCY_TARGET, UPLOAD_LATENCY_NS_TOTAL,
+};
+
 // Lock-free, process-wide counters used across hot paths
 pub static MESSAGES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static DEADLETTERS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
@@ -29,9 +37,6 @@ pub static LAST_WAL_RECLAIM_PROGRESS_EPOCH_SECS: Lazy<AtomicU64> = Lazy::new(|| 
 pub static WAL_COMPACTIONS_IN_FLIGHT: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
 
-pub static PARQUET_PERSISTED_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-pub static PARQUET_PERSISTED_ROWS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-pub static PARQUET_PERSISTED_OBJECTS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static LATEST_TIMESTAMP: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static QUARANTINED_PARTITIONS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
@@ -175,15 +180,8 @@ pub fn add_cluster_lease_lost(n: u64) {
 // (removed unused LLM/semantic counters)
 
 // Dynamic tuning targets (self-tuned by ingest; read by components)
-pub static UPLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
-    Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
-/// Recommended number of multipart parts in flight inside one object write.
-pub static MULTIPART_PART_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
-    Lazy::new(|| std::sync::atomic::AtomicUsize::new(2));
 pub static WAL_COMPACTION_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
-pub static S3_DOWNLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
-    Lazy::new(|| std::sync::atomic::AtomicUsize::new(256));
 /// Max concurrent grouped compactions per sink_ref (auto-tuned; env WAL_COMPACTIONS_PER_SINK overrides).
 pub static WAL_COMPACTIONS_PER_SINK_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(1));
@@ -201,9 +199,6 @@ pub static RUNTIME_SINK_SESSIONS_PER_CHILD_PIN: Lazy<std::sync::atomic::AtomicUs
 /// Test pin for the hard process cap. Zero means "no pin".
 pub static RUNTIME_SINK_PROCESS_CAP_PIN: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
-/// Athena Glue control-plane concurrency (auto-tuned in plugin; env ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY overrides).
-pub static ATHENA_GLUE_CP_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
-    Lazy::new(|| std::sync::atomic::AtomicUsize::new(2));
 /// Compatibility metrics for the authoritative `FlushBudgetSnapshot`.
 pub static FLUSH_BUDGET_GENERATION: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
 pub static FLUSH_BUDGET_REASON_CODE: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
@@ -222,8 +217,6 @@ pub static S3_WAL_ERRORS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0)
 // Exponential moving average of retries per tick, scaled by 100 (for decimals)
 pub static S3_WAL_RETRY_EMA_X100: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
-// Glue/Athena control-plane retry telemetry (plugin-local when using runtime sinks)
-pub static GLUE_RETRIES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static GLUE_RETRY_EMA_X100: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CATALOG_OUTBOX_PENDING: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
 pub static CATALOG_OUTBOX_TERMINAL_COUNT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
@@ -233,12 +226,6 @@ pub static CATALOG_OUTBOX_TERMINAL_FAILURES: Lazy<AtomicU64> = Lazy::new(|| Atom
 pub static CATALOG_OUTBOX_SUCCESSFUL_BATCHES: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CATALOG_OUTBOX_LOCATION_UPDATES: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static DATA_DURABLE_CATALOG_PENDING: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-
-// Upload telemetry
-pub static UPLOADS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-pub static UPLOAD_LATENCY_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-pub static UPLOADS_IN_FLIGHT: Lazy<std::sync::atomic::AtomicUsize> =
-    Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
 
 // Ingest runtime telemetry
 pub static ACTIVE_THREADS: Lazy<std::sync::atomic::AtomicUsize> =
@@ -651,18 +638,6 @@ pub fn dec_wal_compactions_in_flight() {
 }
 
 #[inline]
-pub fn add_parquet_bytes(n: u64) {
-    PARQUET_PERSISTED_BYTES_TOTAL.fetch_add(n, Ordering::Relaxed);
-}
-#[inline]
-pub fn add_parquet_rows(n: u64) {
-    PARQUET_PERSISTED_ROWS_TOTAL.fetch_add(n, Ordering::Relaxed);
-}
-#[inline]
-pub fn add_parquet_objects(n: u64) {
-    PARQUET_PERSISTED_OBJECTS_TOTAL.fetch_add(n, Ordering::Relaxed);
-}
-#[inline]
 pub fn add_quarantined_partitions(n: u64) {
     QUARANTINED_PARTITIONS_TOTAL.fetch_add(n, Ordering::Relaxed);
 }
@@ -678,22 +653,6 @@ pub fn update_latest_timestamp_max(ts: u64) {
     }
 }
 
-#[inline]
-pub fn add_upload(n: u64) {
-    UPLOADS_TOTAL.fetch_add(n, Ordering::Relaxed);
-}
-#[inline]
-pub fn add_upload_latency_ns(n: u64) {
-    UPLOAD_LATENCY_NS_TOTAL.fetch_add(n, Ordering::Relaxed);
-}
-#[inline]
-pub fn inc_uploads_in_flight() {
-    UPLOADS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
-}
-#[inline]
-pub fn dec_uploads_in_flight() {
-    UPLOADS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
-}
 #[inline]
 pub fn set_active_threads(n: usize) {
     ACTIVE_THREADS.store(n, Ordering::Relaxed);
@@ -714,11 +673,6 @@ pub fn add_s3_wal_error(n: u64) {
 #[inline]
 pub fn set_s3_wal_retry_ema_x100(v: u64) {
     S3_WAL_RETRY_EMA_X100.store(v, Ordering::Relaxed);
-}
-
-#[inline]
-pub fn add_glue_retry(n: u64) {
-    GLUE_RETRIES_TOTAL.fetch_add(n, Ordering::Relaxed);
 }
 
 #[inline]

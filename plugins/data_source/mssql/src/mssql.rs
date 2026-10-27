@@ -12,9 +12,9 @@ use crate::helpers::configuration::DataSourcePluginConfig;
 use async_trait::async_trait;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
-use skippr_runtime_sdk::source_compat::{
-    partition_already_closed, submit_payload_batch_groups, IngestBatch, SourceSyncContext,
-};
+use skippr_runtime_sdk::ingest::IngestBatch;
+use skippr_runtime_sdk::plugins::source_sync::SourceSyncContext;
+use skippr_runtime_sdk::source_sync::{partition_already_closed, submit_payload_batch_groups};
 
 #[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceMssqlPluginConfig {

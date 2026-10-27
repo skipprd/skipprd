@@ -16,7 +16,8 @@ use std::time::Duration;
 use serde_derive::Deserialize;
 
 use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
-use skippr_runtime_sdk::source_compat::{IngestBatch, SourcePayloadTask, SourceSyncContext};
+use skippr_runtime_sdk::ingest::IngestBatch;
+use skippr_runtime_sdk::plugins::source_sync::{SourcePayloadTask, SourceSyncContext};
 use skippr_runtime_sdk::source_sync::offset_validation_entry;
 
 use crate::helpers::Helpers;
@@ -249,7 +250,6 @@ impl DataSourceS3Plugin {
                     // Match the key host ingest uses after the runtime wire round-trip
                     // (normalize twice). Existing Closed offsets were written under that form.
                     let offset_key = IngestBatch::runtime_roundtrip_offset_key(
-                        &ingest_config,
                         s3_bucket_filter.clone(),
                         key.clone(),
                     );
@@ -539,7 +539,6 @@ impl DataSourceS3Plugin {
                 current_bytes += bytes;
                 let source_uri = format!("s3://{}/{}", s3_bucket_outer, key);
                 current_batch.push(IngestBatch::new(
-                    &ingest_config,
                     OffsetKey {
                         namespace: s3_bucket_ns.clone(),
                         partition: key,

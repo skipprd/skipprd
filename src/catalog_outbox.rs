@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::runtime_plugins::protocol::{CatalogIntent, CatalogIntentIdentity};
+use skippr_runtime_sdk::protocol::{CatalogIntent, CatalogIntentIdentity};
 
 pub const CATALOG_OUTBOX_FORMAT_VERSION: u32 = 2;
 const MAX_ENTRY_BYTES: u64 = 1024 * 1024;
@@ -518,7 +518,7 @@ fn write_entry_atomic_rename(path: &Path, entry: &PendingCatalogIntent) -> io::R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime_plugins::protocol::{
+    use skippr_runtime_sdk::protocol::{
         CatalogIntentKind, GlueColumnIntent, GluePartitionCatalogIntentV1, CATALOG_INTENT_VERSION,
         GLUE_PARTITION_CATALOG_INTENT_VERSION,
     };

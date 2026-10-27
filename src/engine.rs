@@ -19,7 +19,6 @@ use serde_json::{json, Value};
 use tracing::{error, info, warn};
 
 use crate::buffer::ingest_buffer::Buffers;
-use crate::buffer::BufferChunker;
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::helpers::configuration::Config;
 use crate::helpers::logger::LogLevel;
@@ -36,13 +35,14 @@ use crate::runtime_plugins::host::{
     sync_runtime_input_plugin, ResolvedRuntimePlugin, RuntimeDataSinkPlugin,
     RuntimeSinkProcessBudget,
 };
-use crate::runtime_plugins::protocol::{
-    RuntimeBinding, RuntimeExecutionMode, RuntimePluginKind, RuntimeSinkConfig,
-};
 use crate::runtime_plugins::schema_state::{
     clear_runtime_source_schema_state, current_runtime_schema_state,
 };
 use crate::{LOGGER, METADATA, METRICS, RUNNING};
+use skippr_runtime_sdk::chunker::BufferChunker;
+use skippr_runtime_sdk::protocol::{
+    RuntimeBinding, RuntimeExecutionMode, RuntimePluginKind, RuntimeSinkConfig,
+};
 
 fn current_run_id() -> String {
     METRICS.read().run_id.clone()
@@ -394,7 +394,7 @@ impl DataSink for OutputRouter {
         filename: String,
         cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
-        let namespace = crate::buffer::BufferChunker::decode_file_namespace(&filename);
+        let namespace = BufferChunker::decode_file_namespace(&filename);
         let compaction_id = filename
             .rsplit_once("-c=")
             .map(|(_, suffix)| suffix.to_string())
@@ -502,7 +502,7 @@ impl DataSink for OutputRouter {
 
     async fn install_schema_snapshot(
         &self,
-        schema_state: &crate::runtime_plugins::protocol::RuntimeSchemaState,
+        schema_state: &skippr_runtime_sdk::protocol::RuntimeSchemaState,
     ) -> Result<(), std::io::Error> {
         for plugin in self.sinks.values() {
             plugin.install_schema_snapshot(schema_state).await?;
@@ -512,7 +512,7 @@ impl DataSink for OutputRouter {
 
     async fn install_schema_delta(
         &self,
-        delta: &crate::runtime_plugins::protocol::SchemaDelta,
+        delta: &skippr_runtime_sdk::protocol::SchemaDelta,
     ) -> Result<(), std::io::Error> {
         for plugin in self.sinks.values() {
             plugin.install_schema_delta(delta).await?;

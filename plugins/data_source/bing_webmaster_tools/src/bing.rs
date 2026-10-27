@@ -18,9 +18,8 @@ use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
 use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
-use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, submit_payload_batches, IngestBatch,
-};
+use skippr_runtime_sdk::ingest::IngestBatch;
+use skippr_runtime_sdk::source_sync::{load_checkpoint_payload, submit_payload_batches};
 use tokio::time::{sleep, Duration as TokioDuration};
 use tracing::info;
 
@@ -993,7 +992,7 @@ mod tests {
         OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
     };
     use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
-    use skippr_runtime_sdk::source_compat::ThroughputMetrics;
+    use skippr_runtime_sdk::ingest::ThroughputMetrics;
 
     #[derive(Default)]
     struct RecordingSyncContext {
