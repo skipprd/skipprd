@@ -4,11 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [18.3.10]
+## [18.3.11]
 
 ### Fixed
 
 - Host plugin YAML `version` pins are kept off plugin-facing config, so SkipprLake (`deny_unknown_fields`) can load previous crate versions in current-host e2e.
+
+### Breaking
+
+- Plugin crate patch versions are bumped so catalog paths stay immutable next to the 18.3.10 plugin artifacts. Protocol stays 23. Hosts must run skippr 18.3.11 with the matching plugin bundle.
+
+## [18.3.10]
 
 ### Breaking
 
