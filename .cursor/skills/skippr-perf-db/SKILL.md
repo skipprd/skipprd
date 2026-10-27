@@ -19,7 +19,7 @@ Opt-in ingest→query matrix. **Correctness first**, then timings, `--log perf` 
 Comparison is **file parquet Iceberg** (SkipprLake `object_store: type: file`)
 against **DuckDB Iceberg**. The WAL profile target is skipprd `query` over
 **WAL ∪ file Iceberg UNION** after `sync --once` (compact + reclaim). Lake-only
-cells (`SKIPPR_QUERY_LAKE_ONLY=1`) measure the Iceberg parquet leaf without WAL.
+cells measure post-compact UNION (`W \ E` empty) as the Iceberg parquet leaf. `SKIPPR_QUERY_LAKE_ONLY` is deleted.
 
 Fail the cell when:
 
