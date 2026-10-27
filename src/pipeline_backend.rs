@@ -26,23 +26,6 @@ pub async fn open_pipeline_lease_store(
             let store = offsets.open_sled_lease_store()?;
             Ok(Arc::new(store))
         }
-        SkipprStoreKind::CloudTables => {
-            #[cfg(feature = "offset-store-cloud-tables")]
-            {
-                let store = skippr_lease_store_cloud_tables::CloudTablesLeaseStore::connect(table)
-                    .await
-                    .map_err(|err| err.to_string())?;
-                Ok(Arc::new(store))
-            }
-            #[cfg(not(feature = "offset-store-cloud-tables"))]
-            {
-                let _ = table;
-                Err(
-                    "skippr.store.type=cloud-tables requires --features offset-store-cloud-tables"
-                        .into(),
-                )
-            }
-        }
         SkipprStoreKind::DynamoDb => {
             #[cfg(feature = "offset-store-dynamodb")]
             {
@@ -68,8 +51,7 @@ pub fn configured_kind(config: &Config) -> Result<SkipprStoreKind, String> {
     }
 }
 
-/// Canonical SkipprStore type string. Host query and spawned plugins
-/// both feed this to `SkipprCatalogBackend::from_store_type`.
+/// Canonical SkipprStore type string injected as `SKIPPR_STORE_TYPE` for plugins.
 pub fn skippr_store_type_value(config: &Config) -> String {
     match configured_kind(config) {
         Ok(kind) => kind.as_str().to_string(),
@@ -162,22 +144,6 @@ pub fn open_wal_catalog(
             {
                 let _ = (table, pk);
                 Err("skippr.store.type=dynamodb requires --features offset-store-dynamodb".into())
-            }
-        }
-        SkipprStoreKind::CloudTables => {
-            #[cfg(feature = "offset-store-cloud-tables")]
-            {
-                let catalog =
-                    skippr_offset_store_cloud_tables::CloudTablesWalCatalog::new(table, pk);
-                Ok(Arc::new(catalog))
-            }
-            #[cfg(not(feature = "offset-store-cloud-tables"))]
-            {
-                let _ = (table, pk);
-                Err(
-                    "skippr.store.type=cloud-tables requires --features offset-store-cloud-tables"
-                        .into(),
-                )
             }
         }
     }

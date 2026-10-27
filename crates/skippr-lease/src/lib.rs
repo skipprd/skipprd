@@ -1,9 +1,9 @@
 //! Clock-free pipeline lease domain types.
 //!
-//! Production storage is DynamoDB (`skippr-lease-store-dynamodb`) or Cloud
-//! tables (`skippr-lease-store-cloud-tables`). Tests use [`MemoryLeaseStore`].
-//! Disk and S3 ingest acquire a writer lease through the same [`PipelineLeaseStore`]
-//! (sled locally; Dynamo/Cloud Tables when those are the offset backend).
+//! Production storage is DynamoDB (`skippr-lease-store-dynamodb`). Tests use
+//! [`MemoryLeaseStore`]. Disk and S3 ingest acquire a writer lease through the
+//! same [`PipelineLeaseStore`] (sled locally; DynamoDB when that is the offset
+//! backend).
 
 mod clock;
 mod conformance;
@@ -39,7 +39,7 @@ pub use store::{MembershipAd, MemoryLeaseStore, MemoryMembershipStore, PipelineL
 pub const PROTOCOL_MIN: u32 = 3;
 pub const PROTOCOL_MAX: u32 = 3;
 pub const CURRENT_PROTOCOL: u32 = 3;
-/// SK of the pipeline lease item in DynamoDB / Cloud Tables (same table as catalog).
+/// SK of the pipeline lease item in DynamoDB (same table as catalog).
 pub const LEASE_SK: &str = "lease";
 pub const LEASE_ATTR_OWNER: &str = "owner_node";
 pub const LEASE_ATTR_EPOCH: &str = "epoch";

@@ -50,15 +50,7 @@ class DynamoDbStore:
     @property
     def table(self) -> str: ...
 
-@final
-class CloudTablesStore:
-    """Skippr Cloud Tables SkipprStore (`store.type: cloud-tables`, `store.name`)."""
-
-    def __new__(cls, table: str) -> CloudTablesStore: ...
-    @property
-    def table(self) -> str: ...
-
-Store: TypeAlias = SledStore | DynamoDbStore | CloudTablesStore
+Store: TypeAlias = SledStore | DynamoDbStore
 
 @final
 class DataSourceRef:
@@ -142,7 +134,7 @@ class Config:
         """Where engine state lives: `LocalStorage()` or `S3Storage(bucket)`."""
         ...
     def store(self, value: Store) -> Config:
-        """SkipprStore for offsets and leases: `SledStore()`, `DynamoDbStore(table)`, or `CloudTablesStore(table)`."""
+        """SkipprStore for offsets and leases: `SledStore()` or `DynamoDbStore(table)`."""
         ...
     def wal_s3_bucket(self, value: str) -> Config:
         """Dedicated S3 bucket for WAL segments. Falls back to the storage bucket."""
@@ -4323,8 +4315,8 @@ class DataSinkSkipprLake:
     Query and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)
     inside `IcebergCatalogSpec`, not as a standalone query backend.
     The Skippr catalog is the only catalog: pointers live in `catalog_table`
-    (DynamoDB, or Cloud Tables when SkipprStore selects it). Catalog rows MAY
-    share the SkipprStore table; PK/SK prefixes do not collide with offsets."""
+    (DynamoDB). Catalog rows MAY share the SkipprStore table; PK/SK prefixes
+    do not collide with offsets."""
     def __new__(
         cls,
         *,
@@ -4338,8 +4330,8 @@ class DataSinkSkipprLake:
         Query and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)
         inside `IcebergCatalogSpec`, not as a standalone query backend.
         The Skippr catalog is the only catalog: pointers live in `catalog_table`
-        (DynamoDB, or Cloud Tables when SkipprStore selects it). Catalog rows MAY
-        share the SkipprStore table; PK/SK prefixes do not collide with offsets.
+        (DynamoDB). Catalog rows MAY share the SkipprStore table; PK/SK prefixes
+        do not collide with offsets.
 
         Args:
             warehouse: Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.

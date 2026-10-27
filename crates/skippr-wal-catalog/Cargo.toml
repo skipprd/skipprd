@@ -3,7 +3,7 @@ name = "skippr-wal-catalog"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "WAL catalog rows, keys, and store trait (sled / memory; DynamoDB and Cloud Tables impls live with those offset stores)"
+description = "WAL catalog rows, keys, and store trait (sled / memory; DynamoDB impl lives with that offset store)"
 
 [dependencies]
 bincode = "1.3"

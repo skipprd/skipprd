@@ -7487,16 +7487,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
-name = "mime_guess"
-version = "2.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
-dependencies = [
- "mime",
- "unicase",
-]
-
-[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9691,7 +9681,6 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
- "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -10726,20 +10715,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "skippr-cloud"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "http 1.5.0",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "skippr-sigv4",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
 name = "skippr-connect-gen"
 version = "0.1.0"
 dependencies = [
@@ -10772,20 +10747,6 @@ dependencies = [
  "skippr-plugin-macros",
  "tempfile",
  "tokio",
-]
-
-[[package]]
-name = "skippr-iceberg-catalog-cloud-tables"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "iceberg",
- "iceberg-storage-opendal",
- "serde_json",
- "skippr-cloud",
- "skippr-iceberg-catalog",
- "tokio",
- "uuid 1.29.0",
 ]
 
 [[package]]
@@ -10885,20 +10846,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "skippr-lease-store-cloud-tables"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "serde_json",
- "skippr-cloud",
- "skippr-lease",
- "tokio",
- "tracing",
- "uuid 1.29.0",
-]
-
-[[package]]
 name = "skippr-lease-store-dynamodb"
 version = "0.1.0"
 dependencies = [
@@ -10930,22 +10877,6 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
-]
-
-[[package]]
-name = "skippr-offset-store-cloud-tables"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "once_cell",
- "serde_json",
- "sha2 0.10.9",
- "skippr-cloud",
- "skippr-lease",
- "skippr-wal-catalog",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -11311,7 +11242,6 @@ dependencies = [
  "iceberg",
  "serde_json",
  "skippr-iceberg-catalog",
- "skippr-iceberg-catalog-cloud-tables",
  "skippr-iceberg-catalog-dynamodb",
  "skippr-iceberg-writer",
  "skippr-runtime-sdk",
@@ -12314,20 +12244,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "skippr-sigv4"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hex",
- "hmac 0.12.1",
- "http 1.5.0",
- "percent-encoding",
- "serde",
- "sha2 0.10.9",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "skippr-wal-catalog"
 version = "0.1.0"
 dependencies = [
@@ -12426,18 +12342,14 @@ dependencies = [
  "shellexpand",
  "signal-hook",
  "simd-json",
- "skippr-cloud",
  "skippr-iceberg-catalog",
- "skippr-iceberg-catalog-cloud-tables",
  "skippr-iceberg-catalog-dynamodb",
  "skippr-iceberg-catalog-fs",
  "skippr-iceberg-catalog-glue",
  "skippr-iceberg-rest",
  "skippr-lease",
- "skippr-lease-store-cloud-tables",
  "skippr-lease-store-dynamodb",
  "skippr-object-writer",
- "skippr-offset-store-cloud-tables",
  "skippr-offset-store-dynamodb",
  "skippr-query-plan",
  "skippr-runtime-sdk",
@@ -13592,12 +13504,6 @@ name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
-
-[[package]]
-name = "unicase"
-version = "2.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-bidi"

@@ -45,19 +45,19 @@ Cluster constants:
 - replica TCP, Flight SQL, and QueryRuntime worker gRPC: ephemeral ports, **always mTLS** (SAN `skippr-cluster`);
 - gossip UDP: ephemeral port on the advertised IP (not `0.0.0.0` in `ChitchatId`).
 
-Unknown `WAL_STORAGE` values fail startup. `clustered` requires SkipprStore (`skippr.store.type` / `SKIPPR_STORE_TYPE`) to be DynamoDB (self-hosted / HLA default) or `cloud-tables` (Skippr Cloud). Any other explicit store fails startup.
+Unknown `WAL_STORAGE` values fail startup. `clustered` requires SkipprStore (`skippr.store.type` / `SKIPPR_STORE_TYPE`) to be DynamoDB. Any other explicit store fails startup.
 
 ### Cloud vs OSS catalog and control state
 
 | Concern | OSS / HLA harness | Skippr Cloud |
 |---------|-------------------|--------------|
-| Offsets, leases, membership | DynamoDB table `SKIPPR_STORE_NAME` (DynamoDB Local in HLA) | Cloud Tables (`SKIPPR_STORE_TYPE=cloud-tables`, same table name) |
+| Offsets, leases, membership | DynamoDB table `SKIPPR_STORE_NAME` (DynamoDB Local in HLA) | DynamoDB (`SKIPPR_STORE_TYPE=dynamodb`, same table name) |
 | Iceberg catalog pointers | `SkipprLake.catalog_table` (MAY be SkipprStore) | Same table is allowed (PK/SK prefixes do not collide) |
 | Iceberg warehouse / parquet | `file://` or S3 | **objects** / R2 |
 | Replica RPC, Flight SQL, QueryRuntime worker gRPC | **Always mTLS** (HLA mints a throwaway CA; SAN `skippr-cluster`) | Same PEMs; mesh only |
 | Gossip | Authenticated Chitchat (WU-5.1); `SKIPPR_CLUSTER_GOSSIP_KEY` required | Same; no tenant-string fallback |
 | Query tenant | Flight `Authorization: Basic {tenant}/{workspace}` on every RPC | Cloud **gateway** maps JWT `tenant_id` (D31) to that header; skipprd does not verify JWTs |
-| Cloud Tables credentials | n/a (DynamoDB Local) | Skippr Cloud default credentials |
+| DynamoDB credentials | DynamoDB Local | AWS / Skippr Cloud DynamoDB credentials |
 
 DynamoDB Local remains the OSS HLA harness.
 
@@ -336,7 +336,7 @@ An initialized pipeline whose live payloads cannot be assembled fails `PayloadMi
 
 ## Membership and gossip
 
-DDB / Cloud tables membership provides cold seeds. Live membership is authenticated Chitchat (`src/cluster/gossip.rs`, WU-5.1): liveness/suspicion, bounded ads, endpoints, protocol, replica head hint, capacity/readiness, and fence rumors.
+DynamoDB membership provides cold seeds. Live membership is authenticated Chitchat (`src/cluster/gossip.rs`, WU-5.1): liveness/suspicion, bounded ads, endpoints, protocol, replica head hint, capacity/readiness, and fence rumors.
 
 Gossip never:
 
@@ -414,7 +414,7 @@ Under the table lane, after the commit and its idempotency manifest, the writer 
 
 Expiry commits at least 16 and at most 256 snapshots, asserts the current `main`, and never fails the write: a conflict or error keeps history. Retention is a code ceiling, not configuration. It is not a time-travel promise.
 
-After the expiry commit, the writer deletes what only expired snapshots referenced. History on `main` is linear, so a manifest lives on a contiguous run of snapshots; it is deleted once neither retained neighbour of an expired snapshot lists it. Expired manifest lists go too, and so do files a file-removing expired snapshot marked DELETED. Tables are created with `write.metadata.delete-after-commit.enabled`. The Skippr catalogs (DynamoDB, Cloud Tables, filesystem) honour it: after a successful pointer swap they drop `metadata.json` files that fell out of `metadata-log`. The filesystem catalog also drops the matching `v{N}.metadata.json` aliases and refuses an alias at or below the latest listed version. The upstream Glue catalog (AthenaIceberg) keeps superseded `metadata.json` objects. They cost storage only; a commit never reads them, and expiry bounds the size of each one. A crash between a commit and its deletes leaks orphans, never live data.
+After the expiry commit, the writer deletes what only expired snapshots referenced. History on `main` is linear, so a manifest lives on a contiguous run of snapshots; it is deleted once neither retained neighbour of an expired snapshot lists it. Expired manifest lists go too, and so do files a file-removing expired snapshot marked DELETED. Tables are created with `write.metadata.delete-after-commit.enabled`. The Skippr catalogs (DynamoDB, filesystem) honour it: after a successful pointer swap they drop `metadata.json` files that fell out of `metadata-log`. The filesystem catalog also drops the matching `v{N}.metadata.json` aliases and refuses an alias at or below the latest listed version. The upstream Glue catalog (AthenaIceberg) keeps superseded `metadata.json` objects. They cost storage only; a commit never reads them, and expiry bounds the size of each one. A crash between a commit and its deletes leaks orphans, never live data.
 
 ### Automatic maintenance
 

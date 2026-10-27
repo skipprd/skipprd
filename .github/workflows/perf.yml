@@ -156,7 +156,7 @@ jobs:
           RUSTFLAGS: "-C force-frame-pointers=yes -C debuginfo=1"
         run: |
           set -euo pipefail
-          cargo build --profile profiling -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables
+          cargo build --profile profiling -p skipprd --bin skipprd --features offset-store-dynamodb
           cargo build --profile profiling \
             -p skippr-plugin-data-source-file \
             -p skippr-plugin-data-sink-file \

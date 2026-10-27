@@ -504,9 +504,9 @@ Initialized payload loss is fatal (`PayloadMissing`).
 
 ## WU-5.1 Live membership (authenticated Chitchat)
 
-**Create:** `src/cluster/gossip.rs` (Chitchat 0.9), `membership.rs` (DDB / Cloud tables cold seeds).
+**Create:** `src/cluster/gossip.rs` (Chitchat 0.9), `membership.rs` (DynamoDB cold seeds).
 
-- DDB / Cloud tables Query supplies cold seeds (`add_seeds` / `ChitchatHandle::gossip`).
+- DynamoDB Query supplies cold seeds (`add_seeds` / `ChitchatHandle::gossip`).
 - Live transport is authenticated Chitchat: HMAC-SHA256 on `ad` / `fence` / `suspect` payloads. `SKIPPR_CLUSTER_GOSSIP_KEY` is required (no tenant-string fallback). Chitchat `cluster_id` is `SKIPPR_CLUSTER_ID`.
 - Advertise endpoints, protocol, replica head hint, capacity/readiness. No `ClientHello.role`.
 - No partition-level ads.

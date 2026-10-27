@@ -2,7 +2,7 @@
 
 Working notes for finishing the multi-node implementation. The architecture spec remains [hla-distributed-query-iceberg-catalog.md](hla-distributed-query-iceberg-catalog.md), Flight SQL / QueryRuntime [hla-flight-sql-query-runtime.md](hla-flight-sql-query-runtime.md), and the WBS [hla-implementation-wbs.md](hla-implementation-wbs.md). Do not treat Cursor plan todos as done.
 
-**As of 2026-08-17 (production cluster close-out):** Cluster identity is `SKIPPR_CLUSTER_ID` (membership `PK=cluster#{id}`). Clustered replica / Flight SQL / QueryRuntime worker gRPC are always mTLS. Gossip HMAC (`SKIPPR_CLUSTER_GOSSIP_KEY`) is required. Wire protocol is **3** (payload-only). Flight SQL requires `Authorization: Basic tenant/workspace` on every RPC. Skippr Cloud clustered path sets `SKIPPR_STORE_TYPE=cloud-tables` and uses Skippr Cloud default credentials.
+**As of 2026-08-17 (production cluster close-out):** Cluster identity is `SKIPPR_CLUSTER_ID` (membership `PK=cluster#{id}`). Clustered replica / Flight SQL / QueryRuntime worker gRPC are always mTLS. Gossip HMAC (`SKIPPR_CLUSTER_GOSSIP_KEY`) is required. Wire protocol is **3** (payload-only). Flight SQL requires `Authorization: Basic tenant/workspace` on every RPC. Clustered Skippr Store is DynamoDB (`SKIPPR_STORE_TYPE=dynamodb`).
 
 HLA process e2e (`python3 tests/hla_e2e/run.py`) must be re-run after protocol v3 (payload-only replica RPC). Do not treat the pre-cutover 2026-08-17 pass as current.
 
