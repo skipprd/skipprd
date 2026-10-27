@@ -1,7 +1,7 @@
 //! Sled implementation of [`skippr_lease::PipelineLeaseStore`].
 //!
 //! Process exclusivity is sled's exclusive DB open. Epoch semantics match
-//! DynamoDB and Cloud Tables so WAL and engine code stay backend-agnostic.
+//! DynamoDB so WAL and engine code stay backend-agnostic.
 
 use async_trait::async_trait;
 use skippr_lease::{

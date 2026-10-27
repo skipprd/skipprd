@@ -14,7 +14,6 @@ skippr-runtime-sdk.workspace = true
 skippr-iceberg-writer = { path = "../../../crates/skippr-iceberg-writer" }
 skippr-iceberg-catalog = { path = "../../../crates/skippr-iceberg-catalog" }
 skippr-iceberg-catalog-dynamodb = { path = "../../../crates/skippr-iceberg-catalog-dynamodb" }
-skippr-iceberg-catalog-cloud-tables = { path = "../../../crates/skippr-iceberg-catalog-cloud-tables" }
 iceberg = "0.9.1"
 
 [dev-dependencies]

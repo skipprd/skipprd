@@ -418,22 +418,6 @@ impl PyDynamoDbStore {
     }
 }
 
-#[pyclass(frozen, name = "CloudTablesStore", module = "skippr")]
-pub struct PyCloudTablesStore {
-    #[pyo3(get)]
-    table: String,
-}
-
-#[pymethods]
-impl PyCloudTablesStore {
-    #[new]
-    fn new(table: String) -> PyResult<Self> {
-        Ok(Self {
-            table: non_empty("CloudTablesStore table", table)?,
-        })
-    }
-}
-
 /// An unresolved engine config plus the file it came from.
 #[pyclass(name = "Config", module = "skippr")]
 pub struct PyConfig {
@@ -684,14 +668,9 @@ impl PyConfig {
                 kind: SkipprStoreKind::DynamoDb,
                 name: Some(dynamo.get().table.clone()),
             }
-        } else if let Ok(tables) = value.cast::<PyCloudTablesStore>() {
-            SkipprStore {
-                kind: SkipprStoreKind::CloudTables,
-                name: Some(tables.get().table.clone()),
-            }
         } else {
             return Err(PyTypeError::new_err(format!(
-                "expected skippr.SledStore, skippr.DynamoDbStore, or skippr.CloudTablesStore, got {}",
+                "expected skippr.SledStore or skippr.DynamoDbStore, got {}",
                 type_name(value)
             )));
         };
@@ -835,7 +814,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyS3Storage>()?;
     m.add_class::<PySledStore>()?;
     m.add_class::<PyDynamoDbStore>()?;
-    m.add_class::<PyCloudTablesStore>()?;
     m.add_class::<PyDataSourceRef>()?;
     m.add_class::<PyDataSinkRef>()?;
     m.add_class::<PyDeadletterSinkRef>()?;
@@ -854,7 +832,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         union_alias([
             py.get_type::<PySledStore>().into_any(),
             py.get_type::<PyDynamoDbStore>().into_any(),
-            py.get_type::<PyCloudTablesStore>().into_any(),
         ])?,
     )?;
     register_generated_classes(m)

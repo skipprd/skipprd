@@ -62,32 +62,6 @@ pub fn dynamodb_feature_enabled() -> bool {
     cfg!(feature = "offset-store-dynamodb")
 }
 
-pub fn cloud_tables_feature_enabled() -> bool {
-    cfg!(feature = "offset-store-cloud-tables")
-}
-
-fn cloud_tables_endpoint_configured() -> bool {
-    #[cfg(feature = "offset-store-cloud-tables")]
-    {
-        let endpoint = std::env::var("CLOUD_TABLES_ENDPOINT").unwrap_or_default();
-        return skippr_cloud::parse_tables_endpoint(&endpoint).is_ok();
-    }
-    #[cfg(not(feature = "offset-store-cloud-tables"))]
-    false
-}
-
-fn cloud_tables_auth_configured() -> bool {
-    #[cfg(feature = "offset-store-cloud-tables")]
-    {
-        return matches!(
-            skippr_cloud::Credential::from_env(),
-            Ok(skippr_cloud::Credential::Workload(_))
-        );
-    }
-    #[cfg(not(feature = "offset-store-cloud-tables"))]
-    false
-}
-
 pub fn validate_wal_storage_for_mode(
     storage: WalStorage,
     mode: CliModeKind,
@@ -116,46 +90,15 @@ pub fn validate_clustered_backend(
     table: &str,
 ) -> Result<SkipprStoreKind, ConfigError> {
     match storage {
-        WalStorage::Disk | WalStorage::S3 => {
-            if kind == SkipprStoreKind::CloudTables {
-                if !cloud_tables_feature_enabled() {
-                    return Err(ConfigError::ClusteredFeatureMissing);
-                }
-                if !cloud_tables_endpoint_configured() {
-                    return Err(ConfigError::CloudTablesEndpointMissing);
-                }
-                if !cloud_tables_auth_configured() {
-                    return Err(ConfigError::CloudTablesAuthMissing);
-                }
-            }
-            Ok(kind)
-        }
+        WalStorage::Disk | WalStorage::S3 => Ok(kind),
         WalStorage::Clustered => {
-            if !dynamodb_feature_enabled() && !cloud_tables_feature_enabled() {
+            if !dynamodb_feature_enabled() {
                 return Err(ConfigError::ClusteredFeatureMissing);
             }
             if table.trim().is_empty() {
                 return Err(ConfigError::ClusteredTableMissing);
             }
-            if kind == SkipprStoreKind::Sled {
-                return Err(ConfigError::ClusteredStoreConflict("sled".into()));
-            }
             match kind {
-                SkipprStoreKind::DynamoDb if !dynamodb_feature_enabled() => {
-                    Err(ConfigError::ClusteredFeatureMissing)
-                }
-                SkipprStoreKind::CloudTables if !cloud_tables_feature_enabled() => {
-                    Err(ConfigError::ClusteredFeatureMissing)
-                }
-                SkipprStoreKind::CloudTables => {
-                    if !cloud_tables_endpoint_configured() {
-                        return Err(ConfigError::CloudTablesEndpointMissing);
-                    }
-                    if !cloud_tables_auth_configured() {
-                        return Err(ConfigError::CloudTablesAuthMissing);
-                    }
-                    Ok(kind)
-                }
                 SkipprStoreKind::DynamoDb => Ok(kind),
                 SkipprStoreKind::Sled => Err(ConfigError::ClusteredStoreConflict("sled".into())),
             }
@@ -354,15 +297,9 @@ mod tests {
             "",
         )
         .unwrap_err();
-        #[cfg(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        ))]
+        #[cfg(feature = "offset-store-dynamodb")]
         assert_eq!(err, ConfigError::ClusteredTableMissing);
-        #[cfg(not(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        )))]
+        #[cfg(not(feature = "offset-store-dynamodb"))]
         assert_eq!(err, ConfigError::ClusteredFeatureMissing);
     }
 
@@ -371,24 +308,14 @@ mod tests {
         let err =
             validate_clustered_backend(WalStorage::Clustered, SkipprStoreKind::Sled, "offsets")
                 .unwrap_err();
-        #[cfg(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        ))]
+        #[cfg(feature = "offset-store-dynamodb")]
         assert_eq!(err, ConfigError::ClusteredStoreConflict("sled".into()));
-        #[cfg(not(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        )))]
+        #[cfg(not(feature = "offset-store-dynamodb"))]
         assert_eq!(err, ConfigError::ClusteredFeatureMissing);
     }
 
     #[test]
     fn clustered_selects_dynamodb_when_offset_store_absent() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLOUD_TABLES_ENDPOINT");
-        std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
-        std::env::remove_var("CLOUD_SYSTEM_BROKER_ENDPOINT");
         #[cfg(feature = "offset-store-dynamodb")]
         {
             assert_eq!(
@@ -401,25 +328,7 @@ mod tests {
                 SkipprStoreKind::DynamoDb
             );
         }
-        #[cfg(all(
-            feature = "offset-store-cloud-tables",
-            not(feature = "offset-store-dynamodb")
-        ))]
-        {
-            assert_eq!(
-                validate_clustered_backend(
-                    WalStorage::Clustered,
-                    SkipprStoreKind::default_for_wal(WalStorage::Clustered),
-                    "offsets"
-                )
-                .unwrap_err(),
-                ConfigError::CloudTablesEndpointMissing
-            );
-        }
-        #[cfg(not(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        )))]
+        #[cfg(not(feature = "offset-store-dynamodb"))]
         {
             assert_eq!(
                 validate_clustered_backend(
@@ -448,41 +357,6 @@ mod tests {
             validate_clustered_backend(WalStorage::S3, SkipprStoreKind::DynamoDb, "t").unwrap(),
             SkipprStoreKind::DynamoDb
         );
-    }
-
-    #[cfg(feature = "offset-store-cloud-tables")]
-    #[test]
-    fn disk_cloud_tables_rejects_guest_held_bearer() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
-        std::env::remove_var("CLOUD_BEARER_TOKEN");
-        std::env::remove_var("CLOUD_ACCESS_KEY_ID");
-        std::env::set_var("CLOUD_TABLES_ENDPOINT", "http://127.0.0.1:8003");
-        std::env::set_var("CLOUD_BEARER_TOKEN", "guest-held-jwt");
-        let err =
-            validate_clustered_backend(WalStorage::Disk, SkipprStoreKind::CloudTables, "offsets")
-                .unwrap_err();
-        std::env::remove_var("CLOUD_TABLES_ENDPOINT");
-        std::env::remove_var("CLOUD_BEARER_TOKEN");
-        assert_eq!(err, ConfigError::CloudTablesAuthMissing);
-    }
-
-    #[cfg(feature = "offset-store-cloud-tables")]
-    #[test]
-    fn disk_cli_rejects_cloud_tables_without_workload() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
-        std::env::remove_var("CLOUD_ACCESS_KEY_ID");
-        Config::set_skippr_store_type("cloud-tables");
-        std::env::set_var("CLOUD_TABLES_ENDPOINT", "http://127.0.0.1:8003");
-        std::env::set_var("CLOUD_BEARER_TOKEN", "guest-held-jwt");
-        let err = validate_clustered_cli(&Config::new(), WalStorage::Disk, CliModeKind::Query)
-            .unwrap_err();
-        Config::set_skippr_store_type("");
-        std::env::remove_var("SKIPPR_STORE_TYPE");
-        std::env::remove_var("CLOUD_TABLES_ENDPOINT");
-        std::env::remove_var("CLOUD_BEARER_TOKEN");
-        assert_eq!(err, ConfigError::CloudTablesAuthMissing);
     }
 
     fn iceberg_skippr_sink(table: &str) -> crate::helpers::plugin_config::DataSinkEntry {
@@ -533,101 +407,6 @@ mod tests {
             matches!(err, ConfigError::IcebergConfigInvalid(_)),
             "{err:?}"
         );
-    }
-
-    #[cfg(feature = "offset-store-cloud-tables")]
-    #[test]
-    fn cloud_tables_rejects_guest_held_env_jwt() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
-        std::env::remove_var("CLOUD_SYSTEM_BROKER_ENDPOINT");
-        std::env::remove_var("CLOUD_ACCESS_KEY_ID");
-        std::env::remove_var("CLOUD_OPERATOR_ACCESS_KEY_ID");
-        std::env::set_var("CLOUD_TABLES_ENDPOINT", "http://127.0.0.1:8003");
-        std::env::set_var("CLOUD_BEARER_TOKEN", "guest-held-jwt");
-        std::env::set_var("CLOUD_TABLES_ACCESS_TOKEN", "guest-held-jwt");
-        std::env::set_var("CLOUD_ACCESS_TOKEN", "guest-held-jwt");
-        let err = validate_clustered_backend(
-            WalStorage::Clustered,
-            SkipprStoreKind::CloudTables,
-            "offsets",
-        )
-        .unwrap_err();
-        std::env::remove_var("CLOUD_TABLES_ENDPOINT");
-        std::env::remove_var("CLOUD_BEARER_TOKEN");
-        std::env::remove_var("CLOUD_TABLES_ACCESS_TOKEN");
-        std::env::remove_var("CLOUD_ACCESS_TOKEN");
-        assert_eq!(err, ConfigError::CloudTablesAuthMissing);
-        let msg = err.to_string();
-        assert!(
-            !msg.contains("CLOUD_TABLES_ACCESS_TOKEN") && !msg.contains("CLOUD_ACCESS_TOKEN"),
-            "auth error must not name guest-held JWTs, got {msg}"
-        );
-        assert!(
-            msg.contains("SDK default credentials"),
-            "auth error must name SDK default credentials, got {msg}"
-        );
-        assert!(
-            !msg.contains("GuestCredentialBroker"),
-            "auth error must not name GuestCredentialBroker, got {msg}"
-        );
-        assert!(
-            !msg.contains("CLOUD_TABLES_ENDPOINT"),
-            "auth error must not claim the endpoint is missing when it is present, got {msg}"
-        );
-    }
-
-    #[cfg(feature = "offset-store-cloud-tables")]
-    #[test]
-    fn cloud_tables_rejects_non_mesh_endpoint() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        std::env::set_var("CLOUD_TABLES_ENDPOINT", "http://example.com");
-        std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
-        let err = validate_clustered_backend(
-            WalStorage::Clustered,
-            SkipprStoreKind::CloudTables,
-            "offsets",
-        )
-        .unwrap_err();
-        std::env::remove_var("CLOUD_TABLES_ENDPOINT");
-        assert_eq!(err, ConfigError::CloudTablesEndpointMissing);
-    }
-
-    #[cfg(feature = "offset-store-cloud-tables")]
-    #[test]
-    fn cloud_tables_accepts_broker_config_drive() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join(format!("skipprd-broker-ok-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("broker.json"),
-            r#"{
-  "profile": "skippr",
-  "guest_id": "skippr-0",
-  "cluster_generation": 1,
-  "guest_incarnation": "inc-1",
-  "broker_endpoint": "http://127.0.0.1:8097",
-  "capability": "opaque"
-}
-"#,
-        )
-        .unwrap();
-        std::env::set_var("CLOUD_TABLES_ENDPOINT", "http://127.0.0.1:8003");
-        std::env::set_var("CLOUD_SYSTEM_BROKER_CONFIG", &dir);
-        std::env::remove_var("CLOUD_TABLES_ACCESS_TOKEN");
-        std::env::remove_var("CLOUD_ACCESS_TOKEN");
-        std::env::remove_var("CLOUD_BEARER_TOKEN");
-        std::env::remove_var("CLOUD_ACCESS_KEY_ID");
-        std::env::remove_var("CLOUD_OPERATOR_ACCESS_KEY_ID");
-        let kind = validate_clustered_backend(
-            WalStorage::Clustered,
-            SkipprStoreKind::CloudTables,
-            "offsets",
-        );
-        std::env::remove_var("CLOUD_TABLES_ENDPOINT");
-        std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(kind.unwrap(), SkipprStoreKind::CloudTables);
     }
 
     #[test]

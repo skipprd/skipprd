@@ -1,5 +1,5 @@
-//! Object-safe offset/checkpoint store. Sled, DynamoDB, and Cloud Tables
-//! implement this contract; core WAL code does not branch on backend.
+//! Object-safe offset/checkpoint store. Sled and DynamoDB implement this
+//! contract; core WAL code does not branch on backend.
 
 use crate::helpers::offsets::{OffsetTypes, OffsetValue};
 use skippr_lease::{decide_wal_publish, OffsetPublishError, PublishAction, PublishMode};
@@ -275,71 +275,6 @@ impl OffsetStore for skippr_offset_store_dynamodb::DynamoDbOffsetStore {
 
     fn reset_published_ingest(&self) -> Result<(), String> {
         skippr_offset_store_dynamodb::DynamoDbOffsetStore::reset_published_ingest(self)
-    }
-}
-
-#[cfg(feature = "offset-store-cloud-tables")]
-impl OffsetStore for skippr_offset_store_cloud_tables::CloudTablesOffsetStore {
-    fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String> {
-        skippr_offset_store_cloud_tables::CloudTablesOffsetStore::get_bytes(self, sk)
-    }
-
-    fn fetch_and_update_journal(
-        &self,
-        key: &JournalKey,
-        update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
-    ) -> Result<Option<Vec<u8>>, String> {
-        skippr_offset_store_cloud_tables::CloudTablesOffsetStore::fetch_and_update_journal(
-            self,
-            key.as_str(),
-            update,
-        )
-    }
-
-    fn get_offset(&self, namespace: &str, partition: &str) -> Result<Option<Vec<u8>>, String> {
-        skippr_offset_store_cloud_tables::CloudTablesOffsetStore::get_offset(
-            self, namespace, partition,
-        )
-    }
-
-    fn get_checkpoint(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        skippr_offset_store_cloud_tables::CloudTablesOffsetStore::get_checkpoint(self, key)
-    }
-
-    fn flush(&self) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn publish_wal_commit(
-        &self,
-        sk: &str,
-        bytes: &[u8],
-        epoch: u64,
-        seq: u64,
-        payload_sha256: &str,
-        mode: PublishMode,
-    ) -> Result<(), OffsetPublishError> {
-        skippr_offset_store_cloud_tables::CloudTablesOffsetStore::publish_wal_commit(
-            self,
-            sk,
-            bytes,
-            epoch,
-            seq,
-            payload_sha256,
-            mode,
-        )
-    }
-
-    fn offset_publish_sk(&self, namespace: &str, partition: &str) -> String {
-        skippr_offset_store_cloud_tables::CloudTablesOffsetStore::offset_sk(namespace, partition)
-    }
-
-    fn checkpoint_publish_sk(&self, key: &str) -> String {
-        skippr_offset_store_cloud_tables::CloudTablesOffsetStore::checkpoint_sk(key)
-    }
-
-    fn reset_published_ingest(&self) -> Result<(), String> {
-        skippr_offset_store_cloud_tables::CloudTablesOffsetStore::reset_published_ingest(self)
     }
 }
 

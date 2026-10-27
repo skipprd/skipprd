@@ -11,8 +11,6 @@ use crate::helpers::Helpers;
 use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use crate::METRICS;
 use serde_derive::{Deserialize, Serialize};
-#[cfg(feature = "offset-store-cloud-tables")]
-use skippr_offset_store_cloud_tables::CloudTablesOffsetStore;
 #[cfg(feature = "offset-store-dynamodb")]
 use skippr_offset_store_dynamodb::DynamoDbOffsetStore;
 use sled::{IVec, Mode};
@@ -218,10 +216,7 @@ impl Offsets {
             .map_err(OffsetsError::AlreadyOpenError)?;
         let use_remote = clustered || remote_kind.is_clustered_control_plane();
         if use_remote {
-            #[cfg(any(
-                feature = "offset-store-dynamodb",
-                feature = "offset-store-cloud-tables"
-            ))]
+            #[cfg(feature = "offset-store-dynamodb")]
             {
                 let warn_without_s3_wal = match config.get_wal_storage() {
                     crate::helpers::wal_storage::WalStorage::S3
@@ -229,47 +224,17 @@ impl Offsets {
                     crate::helpers::wal_storage::WalStorage::Disk => true,
                 };
                 let remote: Arc<dyn OffsetStore> = match remote_kind {
-                    crate::helpers::wal_storage::SkipprStoreKind::CloudTables => {
-                        #[cfg(feature = "offset-store-cloud-tables")]
-                        {
-                            Arc::new(
-                                CloudTablesOffsetStore::open(
-                                    config.get_skippr_store_name(),
-                                    config.offset_store_partition_key(),
-                                    warn_without_s3_wal,
-                                )
-                                .map_err(OffsetsError::AlreadyOpenError)?,
-                            )
-                        }
-                        #[cfg(not(feature = "offset-store-cloud-tables"))]
-                        {
-                            return Err(OffsetsError::AlreadyOpenError(
-                                "skippr.store.type=cloud-tables requires skipprd built with --features offset-store-cloud-tables".into(),
-                            ));
-                        }
-                    }
-                    crate::helpers::wal_storage::SkipprStoreKind::DynamoDb => {
-                        #[cfg(feature = "offset-store-dynamodb")]
-                        {
-                            Arc::new(
-                                DynamoDbOffsetStore::open(
-                                    config.get_skippr_store_name(),
-                                    config.offset_store_partition_key(),
-                                    warn_without_s3_wal,
-                                )
-                                .map_err(OffsetsError::AlreadyOpenError)?,
-                            )
-                        }
-                        #[cfg(not(feature = "offset-store-dynamodb"))]
-                        {
-                            return Err(OffsetsError::AlreadyOpenError(
-                                "skippr.store.type=dynamodb requires skipprd built with --features offset-store-dynamodb".into(),
-                            ));
-                        }
-                    }
+                    crate::helpers::wal_storage::SkipprStoreKind::DynamoDb => Arc::new(
+                        DynamoDbOffsetStore::open(
+                            config.get_skippr_store_name(),
+                            config.offset_store_partition_key(),
+                            warn_without_s3_wal,
+                        )
+                        .map_err(OffsetsError::AlreadyOpenError)?,
+                    ),
                     crate::helpers::wal_storage::SkipprStoreKind::Sled => {
                         return Err(OffsetsError::AlreadyOpenError(
-                            "clustered offsets require dynamodb or cloud-tables".into(),
+                            "clustered offsets require dynamodb".into(),
                         ));
                     }
                 };
@@ -279,13 +244,10 @@ impl Offsets {
                     transport: None,
                 });
             }
-            #[cfg(not(any(
-                feature = "offset-store-dynamodb",
-                feature = "offset-store-cloud-tables"
-            )))]
+            #[cfg(not(feature = "offset-store-dynamodb"))]
             {
                 return Err(OffsetsError::AlreadyOpenError(
-                    "clustered offsets require --features offset-store-dynamodb or offset-store-cloud-tables".into(),
+                    "clustered offsets require --features offset-store-dynamodb".into(),
                 ));
             }
         }
