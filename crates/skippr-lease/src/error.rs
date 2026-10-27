@@ -100,7 +100,7 @@ pub enum OffsetPublishError {
     FenceRegression,
 }
 
-/// Shared fence tuple compare for sled sibling keys and Dynamo/Cloud Tables attributes.
+/// Shared fence tuple compare for sled sibling keys and DynamoDB attributes.
 pub fn decide_wal_publish(
     stored: Option<(u64, u64, &str)>,
     epoch: u64,

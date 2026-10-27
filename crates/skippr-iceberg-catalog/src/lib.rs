@@ -99,8 +99,8 @@ fn default_lake_namespace() -> String {
 /// Query and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)
 /// inside `IcebergCatalogSpec`, not as a standalone query backend.
 /// The Skippr catalog is the only catalog: pointers live in `catalog_table`
-/// (DynamoDB, or Cloud Tables when SkipprStore selects it). Catalog rows MAY
-/// share the SkipprStore table; PK/SK prefixes do not collide with offsets.
+/// (DynamoDB). Catalog rows MAY share the SkipprStore table; PK/SK prefixes
+/// do not collide with offsets.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, SkipprConfig)]
 #[serde(deny_unknown_fields)]
 pub struct SkipprLakeConfig {
@@ -156,36 +156,12 @@ impl SkipprLakeConfig {
     }
 }
 
-/// Which Skippr catalog pointer backend the lake uses. Derived from SkipprStore
-/// type — one function for the plugin process and the query host.
+/// Which Skippr catalog pointer backend the lake uses. Serialized lake identity
+/// keeps DynamoDB as the Skippr catalog (QueryRuntime reload must not guess).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipprCatalogBackend {
     DynamoDb,
-    CloudTables,
-}
-
-impl SkipprCatalogBackend {
-    pub fn from_store_type(raw: &str) -> Self {
-        if store_is_cloud_tables(raw) {
-            Self::CloudTables
-        } else {
-            Self::DynamoDb
-        }
-    }
-}
-
-/// True when SkipprStore type selects Cloud Tables (same aliases as skipprd).
-pub fn store_is_cloud_tables(raw: &str) -> bool {
-    matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "cloud-tables" | "cloud_tables" | "tables"
-    )
-}
-
-/// `SKIPPR_STORE_TYPE` as injected by the host into runtime plugins.
-pub fn store_type_from_env() -> String {
-    std::env::var("SKIPPR_STORE_TYPE").unwrap_or_default()
 }
 
 /// The `s3a://` scheme iceberg-rust/OpenDAL expects for an `s3://` location.
@@ -500,35 +476,6 @@ mod tests {
     }
 
     #[test]
-    fn cloud_tables_store_aliases_match_skipprd() {
-        assert!(store_is_cloud_tables("cloud-tables"));
-        assert!(store_is_cloud_tables("CLOUD_TABLES"));
-        assert!(store_is_cloud_tables(" tables "));
-        assert!(!store_is_cloud_tables("dynamodb"));
-        assert!(!store_is_cloud_tables(""));
-    }
-
-    #[test]
-    fn catalog_backend_follows_store_type_aliases() {
-        assert_eq!(
-            SkipprCatalogBackend::from_store_type("cloud-tables"),
-            SkipprCatalogBackend::CloudTables
-        );
-        assert_eq!(
-            SkipprCatalogBackend::from_store_type("CLOUD_TABLES"),
-            SkipprCatalogBackend::CloudTables
-        );
-        assert_eq!(
-            SkipprCatalogBackend::from_store_type("dynamodb"),
-            SkipprCatalogBackend::DynamoDb
-        );
-        assert_eq!(
-            SkipprCatalogBackend::from_store_type(""),
-            SkipprCatalogBackend::DynamoDb
-        );
-    }
-
-    #[test]
     fn iceberg_file_io_for_file_store_requires_file_uri() {
         super::iceberg_file_io_for("file:///tmp/lake", &WarehouseObjectStore::File).unwrap();
         let err = super::iceberg_file_io_for("s3://bucket/wh", &WarehouseObjectStore::File)
@@ -735,6 +682,17 @@ mod tests {
                 panic!("r2 fixture must not default to s3")
             }
         }
+    }
+
+    #[test]
+    fn skippr_catalog_backend_is_dynamodb_only() {
+        assert_eq!(
+            serde_json::to_string(&SkipprCatalogBackend::DynamoDb).unwrap(),
+            "\"dynamo_db\""
+        );
+        assert!(serde_json::from_str::<SkipprCatalogBackend>("\"cloud_tables\"").is_err());
+        assert!(serde_json::from_str::<SkipprCatalogBackend>("\"cloud-tables\"").is_err());
+        assert!(serde_json::from_str::<SkipprCatalogBackend>("\"tables\"").is_err());
     }
 
     #[test]

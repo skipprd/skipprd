@@ -5,24 +5,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(any(
-    feature = "offset-store-dynamodb",
-    feature = "offset-store-cloud-tables"
-))]
+#[cfg(feature = "offset-store-dynamodb")]
 use std::collections::HashMap;
-#[cfg(any(
-    feature = "offset-store-dynamodb",
-    feature = "offset-store-cloud-tables"
-))]
+#[cfg(feature = "offset-store-dynamodb")]
 use std::time::Instant;
 
 use skippr_lease::{Clock, HostId, NodeId, Sleeper, LEASE_RENEW_PERIOD, LEASE_TIMEOUT};
 use tokio::sync::RwLock;
 
-#[cfg(any(
-    feature = "offset-store-dynamodb",
-    feature = "offset-store-cloud-tables"
-))]
+#[cfg(feature = "offset-store-dynamodb")]
 use skippr_lease::{ClusterId, ClusterMembershipStore, NodeAd};
 
 use crate::cluster::identity::ClusterConfig;
@@ -40,15 +31,9 @@ pub struct MembershipService {
     endpoints: MembershipEndpoints,
     heartbeat: Arc<RwLock<u64>>,
     ready: Arc<RwLock<bool>>,
-    #[cfg(any(
-        feature = "offset-store-dynamodb",
-        feature = "offset-store-cloud-tables"
-    ))]
+    #[cfg(feature = "offset-store-dynamodb")]
     last_seen: Arc<RwLock<HashMap<String, (u64, Instant)>>>,
-    #[cfg(any(
-        feature = "offset-store-dynamodb",
-        feature = "offset-store-cloud-tables"
-    ))]
+    #[cfg(feature = "offset-store-dynamodb")]
     store: Option<Arc<dyn ClusterMembershipStore>>,
 }
 
@@ -59,10 +44,7 @@ impl MembershipService {
         endpoints: MembershipEndpoints,
     ) -> Result<Self, String> {
         let _ = app_cfg;
-        #[cfg(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        ))]
+        #[cfg(feature = "offset-store-dynamodb")]
         let store = if config.table.is_empty() {
             None
         } else {
@@ -76,15 +58,9 @@ impl MembershipService {
             endpoints,
             heartbeat: Arc::new(RwLock::new(1)),
             ready: Arc::new(RwLock::new(false)),
-            #[cfg(any(
-                feature = "offset-store-dynamodb",
-                feature = "offset-store-cloud-tables"
-            ))]
+            #[cfg(feature = "offset-store-dynamodb")]
             last_seen: Arc::new(RwLock::new(HashMap::new())),
-            #[cfg(any(
-                feature = "offset-store-dynamodb",
-                feature = "offset-store-cloud-tables"
-            ))]
+            #[cfg(feature = "offset-store-dynamodb")]
             store,
         })
     }
@@ -102,10 +78,7 @@ impl MembershipService {
     }
 
     pub async fn cold_gossip_seeds(&self) -> Vec<SocketAddr> {
-        #[cfg(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        ))]
+        #[cfg(feature = "offset-store-dynamodb")]
         if let Some(store) = self.store.as_ref() {
             let Ok(records) = store.query_cluster(&self.config.cluster_id).await else {
                 return Vec::new();
@@ -122,10 +95,7 @@ impl MembershipService {
     }
 
     pub async fn replica_candidates(&self) -> Vec<crate::cluster::placement::ReplicaCandidate> {
-        #[cfg(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        ))]
+        #[cfg(feature = "offset-store-dynamodb")]
         if let Some(store) = self.store.as_ref() {
             let Ok(records) = store.query_cluster(&self.config.cluster_id).await else {
                 return Vec::new();
@@ -150,10 +120,7 @@ impl MembershipService {
     pub async fn tick(&self) {
         let mut hb = self.heartbeat.write().await;
         *hb = hb.saturating_add(1);
-        #[cfg(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        ))]
+        #[cfg(feature = "offset-store-dynamodb")]
         if let Some(store) = self.store.as_ref() {
             let ad = NodeAd {
                 node_id: self.config.node_id,
@@ -187,10 +154,7 @@ impl MembershipService {
     }
 }
 
-#[cfg(any(
-    feature = "offset-store-dynamodb",
-    feature = "offset-store-cloud-tables"
-))]
+#[cfg(feature = "offset-store-dynamodb")]
 pub async fn publish_membership(
     store: &dyn ClusterMembershipStore,
     cluster: &ClusterId,
@@ -215,10 +179,7 @@ pub fn exclude_self(candidates: &[NodeId], self_id: NodeId) -> Vec<NodeId> {
         .collect()
 }
 
-#[cfg(any(
-    feature = "offset-store-dynamodb",
-    feature = "offset-store-cloud-tables"
-))]
+#[cfg(feature = "offset-store-dynamodb")]
 async fn prune_stale_members(
     store: &dyn ClusterMembershipStore,
     cluster: &ClusterId,

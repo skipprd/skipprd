@@ -48,7 +48,6 @@ pub struct IcebergLake {
 fn backend_key(backend: SkipprCatalogBackend) -> &'static str {
     match backend {
         SkipprCatalogBackend::DynamoDb => "dynamodb",
-        SkipprCatalogBackend::CloudTables => "cloud-tables",
     }
 }
 
@@ -208,8 +207,6 @@ mod tests {
     #[test]
     fn skippr_physical_key_includes_backend_and_object_store() {
         let dynamo = IcebergLake::skippr(skippr_cfg("bronze"), SkipprCatalogBackend::DynamoDb);
-        let cloud = IcebergLake::skippr(skippr_cfg("bronze"), SkipprCatalogBackend::CloudTables);
-        assert_ne!(dynamo.catalog.physical_key(), cloud.catalog.physical_key());
         let mut r2 = skippr_cfg("bronze");
         r2.object_store = WarehouseObjectStore::R2 {
             endpoint: "https://r2.example".into(),

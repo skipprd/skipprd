@@ -103,9 +103,6 @@ pub enum SkipprStoreKind {
     #[serde(rename = "dynamodb")]
     #[value(name = "dynamodb")]
     DynamoDb,
-    #[serde(rename = "cloud-tables", alias = "cloud_tables", alias = "tables")]
-    #[value(name = "cloud-tables")]
-    CloudTables,
 }
 
 /// Durable Skippr KV store: offsets, checkpoints, leases, membership, and
@@ -115,7 +112,7 @@ pub enum SkipprStoreKind {
 pub struct SkipprStore {
     #[serde(rename = "type")]
     pub kind: SkipprStoreKind,
-    /// Table name for DynamoDB / Cloud Tables. Unused for sled.
+    /// Table name for DynamoDB. Unused for sled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
@@ -125,25 +122,17 @@ impl SkipprStoreKind {
         match self {
             Self::Sled => "sled",
             Self::DynamoDb => "dynamodb",
-            Self::CloudTables => "cloud-tables",
         }
     }
 
     pub fn is_clustered_control_plane(self) -> bool {
-        matches!(self, Self::DynamoDb | Self::CloudTables)
+        matches!(self, Self::DynamoDb)
     }
 
-    /// Disk/S3 default to sled. Clustered defaults to DynamoDB when that
-    /// feature is on, otherwise Cloud Tables.
+    /// Disk/S3 default to sled. Clustered defaults to DynamoDB.
     pub fn default_for_wal(storage: WalStorage) -> Self {
         match storage {
-            WalStorage::Clustered => {
-                if cfg!(feature = "offset-store-dynamodb") {
-                    Self::DynamoDb
-                } else {
-                    Self::CloudTables
-                }
-            }
+            WalStorage::Clustered => Self::DynamoDb,
             WalStorage::Disk | WalStorage::S3 => Self::Sled,
         }
     }
@@ -153,11 +142,7 @@ impl FromStr for SkipprStoreKind {
     type Err = ConfigError;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        let raw = raw.trim().to_ascii_lowercase();
-        if skippr_iceberg_catalog::store_is_cloud_tables(&raw) {
-            return Ok(Self::CloudTables);
-        }
-        match raw.as_str() {
+        match raw.trim().to_ascii_lowercase().as_str() {
             "" | "sled" => Ok(Self::Sled),
             "dynamodb" => Ok(Self::DynamoDb),
             other => Err(ConfigError::InvalidSkipprStore(other.to_owned())),
@@ -171,16 +156,12 @@ pub enum ConfigError {
     InvalidWalStorage(String),
     #[error("invalid skipprd_el_storage_mode value '{0}'; expected local or s3")]
     InvalidElStorageMode(String),
-    #[error("invalid skippr.store.type value '{0}'; expected sled, dynamodb, or cloud-tables")]
+    #[error("invalid skippr.store.type value '{0}'; expected sled or dynamodb")]
     InvalidSkipprStore(String),
-    #[error("WAL_STORAGE=clustered requires skipprd built with --features offset-store-dynamodb or offset-store-cloud-tables")]
+    #[error("WAL_STORAGE=clustered requires skipprd built with --features offset-store-dynamodb")]
     ClusteredFeatureMissing,
     #[error("WAL_STORAGE=clustered requires skippr.store.name (or SKIPPR_STORE_NAME)")]
     ClusteredTableMissing,
-    #[error("skippr.store.type=cloud-tables requires CLOUD_TABLES_ENDPOINT (mesh/loopback, not *.cloud.skippr.io)")]
-    CloudTablesEndpointMissing,
-    #[error("Cloud Tables SkipprStore requires SDK default credentials")]
-    CloudTablesAuthMissing,
     #[error("WAL_STORAGE=clustered requires SKIPPR_CLUSTER_ID")]
     ClusterIdMissing,
     #[error("WAL_STORAGE=clustered requires SKIPPR_CLUSTER_GOSSIP_KEY")]
@@ -190,7 +171,7 @@ pub enum ConfigError {
     #[error("Iceberg sink config is invalid: {0}")]
     IcebergConfigInvalid(String),
     #[error(
-        "WAL_STORAGE=clustered cannot be used with skippr.store.type={0}; clustered mode uses DynamoDB or Cloud tables"
+        "WAL_STORAGE=clustered cannot be used with skippr.store.type={0}; clustered mode uses DynamoDB"
     )]
     ClusteredStoreConflict(String),
     #[error(
@@ -283,38 +264,29 @@ mod tests {
             SkipprStoreKind::default_for_wal(WalStorage::S3),
             SkipprStoreKind::Sled
         );
-        #[cfg(feature = "offset-store-dynamodb")]
         assert_eq!(
             SkipprStoreKind::default_for_wal(WalStorage::Clustered),
             SkipprStoreKind::DynamoDb
-        );
-        #[cfg(all(
-            feature = "offset-store-cloud-tables",
-            not(feature = "offset-store-dynamodb")
-        ))]
-        assert_eq!(
-            SkipprStoreKind::default_for_wal(WalStorage::Clustered),
-            SkipprStoreKind::CloudTables
         );
     }
 
     #[test]
-    fn cloud_tables_store_aliases_parse() {
-        assert_eq!(
-            "cloud-tables".parse::<SkipprStoreKind>().unwrap(),
-            SkipprStoreKind::CloudTables
-        );
-        assert_eq!(
-            "tables".parse::<SkipprStoreKind>().unwrap(),
-            SkipprStoreKind::CloudTables
-        );
-        assert_eq!(
-            "CLOUD_TABLES".parse::<SkipprStoreKind>().unwrap(),
-            SkipprStoreKind::CloudTables
-        );
+    fn cloud_tables_store_aliases_are_invalid() {
+        for raw in ["cloud-tables", "cloud_tables", "tables", "CLOUD_TABLES"] {
+            match raw.parse::<SkipprStoreKind>() {
+                Err(ConfigError::InvalidSkipprStore(value)) => {
+                    assert_eq!(value, raw.trim().to_ascii_lowercase());
+                }
+                other => panic!("{raw} should be invalid, got {other:?}"),
+            }
+        }
         assert_eq!(
             "dynamodb".parse::<SkipprStoreKind>().unwrap(),
             SkipprStoreKind::DynamoDb
+        );
+        assert_eq!(
+            "sled".parse::<SkipprStoreKind>().unwrap(),
+            SkipprStoreKind::Sled
         );
     }
 
@@ -323,5 +295,19 @@ mod tests {
         let store: SkipprStore = serde_yaml::from_str("type: dynamodb\nname: offsets\n").unwrap();
         assert_eq!(store.kind, SkipprStoreKind::DynamoDb);
         assert_eq!(store.name.as_deref(), Some("offsets"));
+    }
+
+    #[test]
+    fn skippr_store_yaml_rejects_removed_cloud_tables() {
+        for raw in [
+            "type: cloud-tables\nname: t\n",
+            "type: cloud_tables\nname: t\n",
+            "type: tables\nname: t\n",
+        ] {
+            assert!(
+                serde_yaml::from_str::<SkipprStore>(raw).is_err(),
+                "{raw} must not deserialize as SkipprStore"
+            );
+        }
     }
 }

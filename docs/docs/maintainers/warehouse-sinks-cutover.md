@@ -13,7 +13,7 @@ This spec fixes the existing DuckDB, Athena, Iceberg and `skipprd query` wiring.
 
    | Plugin key | Writes | Read by |
    |---|---|---|
-   | `SkipprLake` | Iceberg on object storage, Skippr catalog (DynamoDB or Cloud Tables) | `skipprd query` (Iceberg ∪ WAL ingest alias); `skipprd serve` Flight/REST (Iceberg `namespace.table`); Spark/Trino via REST |
+   | `SkipprLake` | Iceberg on object storage, Skippr catalog (DynamoDB) | `skipprd query` (Iceberg ∪ WAL ingest alias); `skipprd serve` Flight/REST (Iceberg `namespace.table`); Spark/Trino via REST |
    | `Athena` | Hive Parquet plus Glue (unchanged) | Athena only (SDE `AthenaProvider`, dbt-athena). `skipprd query` is WAL-only. |
    | `AthenaIceberg` | Iceberg on S3, Glue catalog | `skipprd query` (Iceberg ∪ WAL ingest alias); `skipprd serve` Flight (Iceberg `namespace.table`); Athena SQL |
    | `Duckdb` | Iceberg on `file://`, metadata colocated with data | `skipprd query` (Iceberg ∪ WAL ingest alias); `skipprd serve` Flight (Iceberg `namespace.table`); DuckDB `iceberg_scan`. SDE does not model DuckDB. |
@@ -112,7 +112,6 @@ crates/
   skippr-iceberg-writer/          shared writer (extracted from iceberg_sink.rs)
   skippr-iceberg-catalog/         WarehouseObjectStore + SkipprLakeConfig + SkipprCatalogBackend
   skippr-iceberg-catalog-dynamodb/        KEEP (typed config in)
-  skippr-iceberg-catalog-cloud-tables/    KEEP (typed config in)
   skippr-iceberg-catalog-glue/    Glue opener for host query/serve (no Athena SQL keys)
   skippr-iceberg-catalog-fs/      filesystem catalog (Duckdb sink and host query)
   skippr-iceberg-rest/            Iceberg REST for skipprd serve
@@ -520,7 +519,7 @@ Flat, encapsulated, `deny_unknown_fields`. Lives in `crates/skippr-iceberg-catal
 pub struct SkipprLakeConfig {
     /// Iceberg warehouse root: `s3://bucket/path`, `file:///abs/path`.
     pub warehouse: String,
-    /// DynamoDB table (or Cloud Tables namespace) that holds catalog pointers.
+    /// DynamoDB table that holds catalog pointers.
     /// MAY be the SkipprStore table (`SKIPPR_STORE_NAME`).
     pub catalog_table: String,
     #[serde(default)]
@@ -574,9 +573,13 @@ Removed keys: `catalog` block and `catalog.type`, `table_prefix`, `table_locatio
 
 ### W3.2 Dynamodb and cloud-tables catalogs
 
+**Superseded by skipprd #20:** `skippr-iceberg-catalog-cloud-tables` is deleted. SkipprLake `open_catalog` always opens `DynamoDbCatalog`. The recipe below is the warehouse-sinks landing unit, not current crate layout.
+
 `DynamoDbCatalog::new(&IcebergCatalogConfig)` and `CloudTablesCatalog::new(&IcebergCatalogConfig)` change to take `&SkipprLakeConfig`. Their "requires catalog type skippr" checks (`dynamodb/src/lib.rs:48`, `cloud-tables/src/lib.rs:50`) are deleted (the type now guarantees it). `iceberg_file_io_for_warehouse` takes `&SkipprLakeConfig`.
 
 ### W3.3 Plugin
+
+**Superseded by skipprd #20:** the plugin no longer matches `SkipprCatalogBackend` or depends on `skippr-iceberg-catalog-cloud-tables`. `open_catalog` always calls `DynamoDbCatalog::new`.
 
 Rename directories and packages:
 
