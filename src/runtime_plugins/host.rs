@@ -46,10 +46,10 @@ use crate::runtime_plugins::protocol::{
     CommitReceipt, FinishSink, HandshakeRequest, HostDataFrame, HostFrame, PluginDataFrame,
     PluginFrame, PrepareAck, PrepareSink, PrepareSinkResult, RuntimeBinding,
     RuntimeCheckpointUpdate, RuntimeExecutionContext, RuntimeExecutionMode, RuntimeIngestAck,
-    RuntimeOffsetMaterializationHint, RuntimeOutputLayout, RuntimePluginKind, RuntimeRequestAck,
-    RuntimeSchemaConfig, RuntimeSchemaInstallRequest, RuntimeSchemaState,
-    RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkError,
-    RuntimeSinkInstallRequest, RuntimeSinkPayloadMode, RuntimeSourceConfig,
+    RuntimeOffsetMaterializationHint, RuntimeOutputLayout, RuntimePluginConfigEnvelope,
+    RuntimePluginKind, RuntimeRequestAck, RuntimeSchemaConfig, RuntimeSchemaInstallRequest,
+    RuntimeSchemaState, RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkConfig,
+    RuntimeSinkError, RuntimeSinkInstallRequest, RuntimeSinkPayloadMode, RuntimeSourceConfig,
     RuntimeSourceIngestWindow, SchemaDelta, SchemaNamespaceDelta, SchemaRunRequest, SinkAck,
     SinkChunk, SinkRunRequest, SinkWriteStats, SourceEvent, SourceStartRequest,
     COMMIT_RECEIPT_VERSION, MAX_RUNTIME_SINK_CHUNK_BYTES, RUNTIME_PROTOCOL_VERSION,
@@ -686,12 +686,13 @@ fn build_source_start_request_for_pipeline(
     execution_mode: RuntimeExecutionMode,
     source_once: bool,
 ) -> io::Result<SourceStartRequest> {
-    let source_config = RuntimeSourceConfig::try_from(
-        config
-            .get_pipeline_input_plugin_config()
-            .map_err(io::Error::other)?,
-    )
-    .map_err(io::Error::other)?;
+    let input = config
+        .get_pipeline_input_plugin_config()
+        .map_err(io::Error::other)?;
+    let source_config = RuntimeSourceConfig(RuntimePluginConfigEnvelope::new(
+        input.plugin_name.clone(),
+        input.plugin_body(),
+    ));
 
     Ok(SourceStartRequest {
         context: runtime_execution_context(

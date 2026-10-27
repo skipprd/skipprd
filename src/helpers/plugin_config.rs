@@ -63,8 +63,13 @@ impl PluginConfigEntry {
             .filter(|value| !value.is_empty())
     }
 
+    /// Plugin-facing config: host `version` pin removed.
+    pub fn plugin_body(&self) -> Value {
+        strip_host_plugin_version(self.config.clone())
+    }
+
     pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, String> {
-        serde_json::from_value(self.config.clone()).map_err(|err| {
+        serde_json::from_value(self.plugin_body()).map_err(|err| {
             format!(
                 "Failed to decode config for plugin '{}': {}",
                 self.plugin_name, err
@@ -175,6 +180,14 @@ impl<'de> Deserialize<'de> for DataSinkEntry {
     }
 }
 
+/// `version` selects the downloaded plugin crate. Strip it before plugin decode.
+pub fn strip_host_plugin_version(mut config: Value) -> Value {
+    if let Value::Object(map) = &mut config {
+        map.remove("version");
+    }
+    config
+}
+
 fn plugin_entry_from_map(
     map: HashMap<String, Value>,
     reserved_keys: &[&str],
@@ -212,6 +225,51 @@ mod tests {
         };
 
         assert_eq!(entry.version().as_deref(), Some("0.1.1"));
+    }
+
+    #[test]
+    fn deserialize_strips_host_version_pin_for_deny_unknown_fields() {
+        let entry = PluginConfigEntry {
+            plugin_name: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME.to_string(),
+            config: json!({
+                "version": "0.2.4",
+                "warehouse": "file:///tmp/warehouse",
+                "catalog_table": "cat",
+                "object_store": { "type": "file" },
+                "table_namespace": "bronze"
+            }),
+        };
+
+        assert_eq!(entry.version().as_deref(), Some("0.2.4"));
+        let cfg: skippr_iceberg_catalog::SkipprLakeConfig = entry.deserialize().unwrap();
+        assert_eq!(cfg.warehouse, "file:///tmp/warehouse");
+        assert_eq!(cfg.catalog_table, "cat");
+        assert_eq!(cfg.table_namespace, "bronze");
+    }
+
+    #[test]
+    fn yaml_plugin_entry_keeps_version_pin_off_plugin_body() {
+        let entry: PluginConfigEntry = serde_yaml::from_str(
+            r#"
+SkipprLake:
+  version: "0.2.4"
+  warehouse: file:///tmp/warehouse
+  catalog_table: cat
+  object_store:
+    type: file
+  table_namespace: bronze
+"#,
+        )
+        .unwrap();
+        assert_eq!(entry.plugin_name, "SkipprLake");
+        assert_eq!(entry.version().as_deref(), Some("0.2.4"));
+        assert!(
+            entry.plugin_body().get("version").is_none(),
+            "host version pin must not be sent to plugins: {}",
+            entry.plugin_body()
+        );
+        let cfg: skippr_iceberg_catalog::SkipprLakeConfig = entry.deserialize().unwrap();
+        assert_eq!(cfg.warehouse, "file:///tmp/warehouse");
     }
 
     #[test]

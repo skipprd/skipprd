@@ -37,7 +37,8 @@ use crate::runtime_plugins::host::{
     RuntimeSinkProcessBudget,
 };
 use crate::runtime_plugins::protocol::{
-    RuntimeBinding, RuntimeExecutionMode, RuntimePluginKind, RuntimeSinkConfig,
+    RuntimeBinding, RuntimeExecutionMode, RuntimePluginConfigEnvelope, RuntimePluginKind,
+    RuntimeSinkConfig,
 };
 use crate::runtime_plugins::schema_state::{
     clear_runtime_source_schema_state, current_runtime_schema_state,
@@ -1737,7 +1738,10 @@ fn resolve_runtime_sink_config(
             .map_err(io::Error::other)?
             .ok_or_else(|| io::Error::other("deadletter sink is not configured"))?,
     };
-    RuntimeSinkConfig::try_from(config).map_err(io::Error::other)
+    Ok(RuntimeSinkConfig(RuntimePluginConfigEnvelope::new(
+        config.plugin_name.clone(),
+        config.plugin_body(),
+    )))
 }
 
 pub async fn sync_input_plugin(

@@ -2939,9 +2939,14 @@ impl Config {
                                     .flatten();
                                 match request.config.get_pipeline_deadletter_schema_plugin_name() {
                                     Ok(Some(schema_plugin_name)) => {
-                                        let runtime_config = dl_sink_cfg
-                                            .clone()
-                                            .and_then(|cfg| crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
+                                        let runtime_config = dl_sink_cfg.clone().map(|cfg| {
+                                            crate::runtime_plugins::protocol::RuntimeSchemaConfig(
+                                                crate::runtime_plugins::protocol::RuntimePluginConfigEnvelope::new(
+                                                    cfg.plugin_name.clone(),
+                                                    cfg.plugin_body(),
+                                                ),
+                                            )
+                                        });
                                         let runtime_version =
                                             match request.config.get_pipeline_deadletter_schema_plugin_version()
                                             {
@@ -3160,14 +3165,12 @@ impl Config {
                     err
                 )
             })
-            .and_then(|cfg| {
-                crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).map_err(
-                    |err| {
-                        format!(
-                            "Schema sync: failed to derive runtime schema config: {}",
-                            err
-                        )
-                    },
+            .map(|cfg| {
+                crate::runtime_plugins::protocol::RuntimeSchemaConfig(
+                    crate::runtime_plugins::protocol::RuntimePluginConfigEnvelope::new(
+                        cfg.plugin_name.clone(),
+                        cfg.plugin_body(),
+                    ),
                 )
             })?;
 
