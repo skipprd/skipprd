@@ -213,7 +213,7 @@ impl DataSink for DataSinkS3Plugin {
             ctx.idempotency_key,
             ctx.schema_fingerprint,
             &ctx.wal_refs,
-        );
+        )?;
         if self
             .manifest_matches(&manifest_key, &expected_manifest)
             .await?
@@ -286,7 +286,7 @@ impl DataSink for DataSinkS3Plugin {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             &ctx.wal_refs,
-        );
+        )?;
         if self
             .manifest_matches(&manifest_key, &expected_manifest)
             .await?
@@ -321,7 +321,7 @@ impl DataSink for DataSinkS3Plugin {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             ctx.wal_refs.as_slice(),
-        );
+        )?;
         if self
             .manifest_matches(&manifest_key, &expected_manifest)
             .await?
@@ -447,7 +447,7 @@ impl DataSinkS3Plugin {
         &self,
         ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
         chunk_index: u64,
-    ) -> (String, String, ObjectWriteManifest) {
+    ) -> io::Result<(String, String, ObjectWriteManifest)> {
         let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
         let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
         let manifest_key =
@@ -457,8 +457,8 @@ impl DataSinkS3Plugin {
             object_stem.clone(),
             ctx.schema_fingerprint.clone(),
             ctx.wal_refs.as_slice(),
-        );
-        (object_stem, manifest_key, manifest)
+        )?;
+        Ok((object_stem, manifest_key, manifest))
     }
 
     async fn legacy_chunk_state_exists(
@@ -466,7 +466,7 @@ impl DataSinkS3Plugin {
         ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
         chunk_index: u64,
     ) -> io::Result<bool> {
-        let (object_stem, key, expected) = self.legacy_chunk_manifest(ctx, chunk_index);
+        let (object_stem, key, expected) = self.legacy_chunk_manifest(ctx, chunk_index)?;
         if self.manifest_matches(&key, &expected).await? {
             return Ok(true);
         }
@@ -501,7 +501,7 @@ impl DataSinkS3Plugin {
 
         while let Some(chunk) = reader.next_chunk().await? {
             let (object_stem, manifest_key, expected) =
-                self.legacy_chunk_manifest(ctx, chunk.chunk_index);
+                self.legacy_chunk_manifest(ctx, chunk.chunk_index)?;
             let chunk_filename = ctx.chunk_filename(chunk.chunk_index, false);
             let final_key = self.object_key_for_filename(&chunk_filename, &object_stem);
             let chunk_rows = chunk.rows;

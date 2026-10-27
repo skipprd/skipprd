@@ -268,7 +268,9 @@ async fn cdc_final_state_and_order_tokens_are_unchanged_by_a_rewrite() {
     release_maintenance(&harness).await;
     let before = harness.table().await;
     let expected = rows_with_tokens(&before).await;
-    assert_eq!(expected.iter().filter(|(id, _)| *id == 2).count(), 2);
+    let mut ids: Vec<i64> = expected.iter().map(|(id, _)| *id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![0, 1, 2], "final state keeps one version per key");
     assert!(live_files(&before).await.deletes.len() > maintenance::PARTITION_DELETE_FILES_TRIGGER);
 
     let after = harness

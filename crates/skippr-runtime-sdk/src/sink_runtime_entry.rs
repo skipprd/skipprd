@@ -10,8 +10,8 @@ use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
 use skippr_core::helpers::logging::init_logging;
 use skippr_core::plugins::{
-    DataSink, HasSchemaSinkSpec, HasSinkSpec, RecordBatchChunk, SchemaSink, SchemaSinkSpec,
-    SchemaSyncRequest, SinkCallResult, SinkPreflightOutcome, SinkWriteOutcome,
+    DataSink, HasSchemaSinkSpec, HasSinkSpec, RecordBatchChunk, SchemaSink, SchemaSyncRequest,
+    SinkCallResult, SinkPreflightOutcome, SinkWriteOutcome,
 };
 #[cfg(test)]
 use tokio::io::AsyncRead;
@@ -1287,7 +1287,7 @@ where
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             &ctx.wal_refs,
-        ))
+        )?)
     } else {
         None
     };
@@ -2097,7 +2097,8 @@ mod tests {
             payload_mode: RuntimeSinkPayloadMode::GroupedChunks,
             live_wal_segments: None,
         };
-        let manifest = ObjectWriteManifest::from_context("c9", "k9", "schema", &request.wal_refs);
+        let manifest =
+            ObjectWriteManifest::from_context("c9", "k9", "schema", &request.wal_refs).unwrap();
         write_local_idempotency_manifest(&manifest).unwrap();
         let prepare = PrepareSink {
             request_id: 9,

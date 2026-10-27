@@ -4,16 +4,18 @@ use crate::error::CatalogError;
 use crate::key::{CatalogKey, CatalogPrefix, CompactionId};
 use crate::row::{
     CatalogFence, CatalogRow, CatalogSeq, CompactionRow, CompactionState, FormatPhase, FormatRow,
-    PayloadLocation, PutCond, SegmentRow, SeqRow, SliceBitmap, FORMAT_VERSION,
+    LegacySliceRow, PayloadLocation, PutCond, SegmentRow, SeqRow, SliceBitmap, FORMAT_VERSION,
 };
 use crate::store::{query_all, WalCatalogStore};
 use crate::txn::CatalogTxn;
 
 pub fn assert_wal_catalog_conformance(store: &dyn WalCatalogStore, fence: CatalogFence) {
     not_exists_same_sha_version(store, fence);
+    version_must_advance(store, fence);
     seq_advance(store, fence);
     stale_fence_rejected(store, fence);
     pagination_and_delete_prefix(store, fence);
+    legacy_slice_put_is_rejected(store, fence);
 }
 
 fn not_exists_same_sha_version(store: &dyn WalCatalogStore, fence: CatalogFence) {
@@ -70,7 +72,7 @@ fn not_exists_same_sha_version(store: &dyn WalCatalogStore, fence: CatalogFence)
         .unwrap();
     assert_eq!(
         store.commit(&wrong_ver, fence).unwrap_err(),
-        CatalogError::ConditionFailed
+        CatalogError::VersionMustAdvance
     );
 
     let mut ok_ver = CatalogTxn::new();
@@ -86,6 +88,69 @@ fn not_exists_same_sha_version(store: &dyn WalCatalogStore, fence: CatalogFence)
         Some(CatalogRow::Segment(got)) => assert_eq!(got.version, 1),
         other => panic!("expected segment, got {other:?}"),
     }
+}
+
+fn version_must_advance(store: &dyn WalCatalogStore, fence: CatalogFence) {
+    let key = CatalogKey::Segment(SegmentId::new("seg-ver-advance").unwrap());
+    let row = SegmentRow {
+        segment_id: SegmentId::new("seg-ver-advance").unwrap(),
+        seq: CatalogSeq::new(10),
+        location: PayloadLocation::Disk {
+            path: "/tmp/seg-ver-advance.seg".into(),
+        },
+        payload_len: 1,
+        payload_sha256: [2; 32],
+        slice_count: 1,
+        done: SliceBitmap::new(1),
+        offsets: vec![],
+        checkpoints: vec![],
+        epoch: LeaseEpoch::new(1),
+        version: 0,
+    };
+    let mut create = CatalogTxn::new();
+    create
+        .put(
+            key.clone(),
+            CatalogRow::Segment(row.clone()),
+            PutCond::NotExists,
+        )
+        .unwrap();
+    store.commit(&create, fence).unwrap();
+
+    let mut stuck = CatalogTxn::new();
+    stuck
+        .put(
+            key.clone(),
+            CatalogRow::Segment(row.clone()),
+            PutCond::Version(0),
+        )
+        .unwrap();
+    assert_eq!(
+        store.commit(&stuck, fence).unwrap_err(),
+        CatalogError::VersionMustAdvance
+    );
+
+    let mut next = row.clone();
+    next.version = 1;
+    let mut occ = CatalogTxn::new();
+    occ.put(
+        key.clone(),
+        CatalogRow::Segment(next.clone()),
+        PutCond::Version(0),
+    )
+    .unwrap();
+    store.commit(&occ, fence).unwrap();
+
+    let mut stale = next.clone();
+    stale.version = 1;
+    let mut raced = CatalogTxn::new();
+    raced
+        .put(key, CatalogRow::Segment(stale), PutCond::Version(0))
+        .unwrap();
+    assert_eq!(
+        store.commit(&raced, fence).unwrap_err(),
+        CatalogError::ConditionFailed
+    );
 }
 
 fn seq_advance(store: &dyn WalCatalogStore, fence: CatalogFence) {
@@ -176,6 +241,35 @@ fn pagination_and_delete_prefix(store: &dyn WalCatalogStore, fence: CatalogFence
     assert!(query_all(store, CatalogPrefix::Compaction)
         .unwrap()
         .is_empty());
+}
+
+fn legacy_slice_put_is_rejected(store: &dyn WalCatalogStore, fence: CatalogFence) {
+    let key = CatalogKey::LegacySlice {
+        segment_id: SegmentId::new("legacy-seg").unwrap(),
+        ordinal: 0,
+    };
+    let mut txn = CatalogTxn::new();
+    txn.put(
+        key,
+        CatalogRow::LegacySlice(LegacySliceRow {
+            segment_id: SegmentId::new("legacy-seg").unwrap(),
+            ordinal: 0,
+            namespace: "ns".into(),
+            partition: "p".into(),
+            start: 0,
+            len: 1,
+            codec: 0,
+            part_meta_start: 0,
+            part_meta_len: 0,
+            version: 0,
+        }),
+        PutCond::NotExists,
+    )
+    .unwrap();
+    assert_eq!(
+        store.commit(&txn, fence).unwrap_err(),
+        CatalogError::LegacyRowWrite
+    );
 }
 
 fn segment(seq: u64, version: u64) -> SegmentRow {

@@ -85,7 +85,7 @@ fn accepted_segf_version(version: u32) -> bool {
     version == SEGF_VERSION_V3 || version == VERSION
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PartitionKey {
     pub sink_ref: String,
     pub namespace: String,
@@ -499,17 +499,41 @@ impl SegmentFile {
             (u64 /*bytes*/, SystemTime /*updated*/),
         >,
         part_meta_blobs: &std::collections::HashMap<PartitionKey, Vec<u8>>,
+        created_at: SystemTime,
     ) -> io::Result<(
         SegmentFileMetadata,
         u64,      /*rows*/
         [u8; 32], /*sha256*/
     )> {
-        let encoded = encode_snapshot(offsets, batches, partitions_meta, part_meta_blobs)?;
-        let mut durable = DirectIoFile::create(&self.path)?;
-        durable.write_all(&encoded.bytes)?;
-        durable.sync_data()?;
+        let encoded = encode_snapshot(
+            offsets,
+            batches,
+            partitions_meta,
+            part_meta_blobs,
+            created_at,
+        )?;
+        write_payload_atomically(&self.path, &encoded.bytes)?;
         Ok((encoded.meta, encoded.total_rows, encoded.sha256))
     }
+}
+
+/// Write `.seg` bytes via tmp + fsync + rename so a crash cannot leave a
+/// truncated live payload.
+pub fn write_payload_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("seg.tmp");
+    if tmp.exists() {
+        fs::remove_file(&tmp)?;
+    }
+    {
+        let mut durable = DirectIoFile::create_new(&tmp)?;
+        durable.write_all(bytes)?;
+        durable.sync_data()?;
+    }
+    fs::rename(&tmp, path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "segment path has no parent"))?;
+    crate::helpers::fsync::fsync_dir(parent)
 }
 
 /// Encode a SEGF v4 body + FOOT once. Disk and S3 persist the same bytes.
@@ -521,19 +545,21 @@ pub fn encode_snapshot(
         (u64 /*bytes*/, SystemTime /*updated*/),
     >,
     part_meta_blobs: &std::collections::HashMap<PartitionKey, Vec<u8>>,
+    created_at: SystemTime,
 ) -> io::Result<EncodedSnapshot> {
     let mut file = Cursor::new(Vec::new());
 
     file.write_all(MAGIC)?;
     file.write_all(&VERSION.to_le_bytes())?;
-    let created_at_secs = SystemTime::now()
+    let created_at_secs = created_at
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     file.write_all(&created_at_secs.to_le_bytes())?;
 
-    let offsets_blob = bincode::serialize(offsets)
-        .map_err(|err| invalid_data(format!("encode WAL offsets: {err}")))?;
+    let offsets_blob =
+        bincode::serialize(&offsets.iter().collect::<std::collections::BTreeMap<_, _>>())
+            .map_err(|err| invalid_data(format!("encode WAL offsets: {err}")))?;
     let offsets_len = offsets_blob.len() as u64;
     file.write_all(&offsets_len.to_le_bytes())?;
     file.write_all(&offsets_blob)?;
@@ -543,7 +569,9 @@ pub fn encode_snapshot(
     let mut parts_count: u32 = 0;
     let mut index: Vec<SegmentPartitionIndexEntry> = Vec::with_capacity(batches.len());
 
-    for (key, payload) in batches.iter() {
+    let mut parts: Vec<_> = batches.iter().collect();
+    parts.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (key, payload) in parts {
         if payload.is_empty() {
             continue;
         }
@@ -554,10 +582,7 @@ pub fn encode_snapshot(
         let key_len = key_blob.len() as u64;
         file.write_all(&key_len.to_le_bytes())?;
         file.write_all(&key_blob)?;
-        let (p_bytes, p_updated) = partitions_meta
-            .get(key)
-            .cloned()
-            .unwrap_or((0, SystemTime::now()));
+        let (p_bytes, p_updated) = partitions_meta.get(key).cloned().unwrap_or((0, created_at));
         let updated_secs = p_updated
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -842,7 +867,13 @@ mod tests_wal_writer {
 
         let empty_blobs: HashMap<PartitionKey, Vec<u8>> = HashMap::new();
         let (meta, _rows, sha) = seg
-            .write_snapshot(&offsets, &batches, &parts_meta, &empty_blobs)
+            .write_snapshot(
+                &offsets,
+                &batches,
+                &parts_meta,
+                &empty_blobs,
+                SystemTime::UNIX_EPOCH,
+            )
             .unwrap();
         let parts_count = meta.num_partitions;
         assert_eq!(parts_count, 1);
@@ -941,7 +972,13 @@ mod tests_wal_writer {
         part_meta_blobs.insert(key.clone(), meta_blob.clone());
 
         let (meta, _rows, _sha) = seg
-            .write_snapshot(&offsets, &batches, &parts_meta, &part_meta_blobs)
+            .write_snapshot(
+                &offsets,
+                &batches,
+                &parts_meta,
+                &part_meta_blobs,
+                SystemTime::UNIX_EPOCH,
+            )
             .unwrap();
         assert_eq!(meta.num_partitions, 1);
         let index = &meta.index[0];
@@ -1025,8 +1062,14 @@ mod tests_wal_writer {
         let mut blobs: HashMap<PartitionKey, Vec<u8>> = HashMap::new();
         blobs.insert(key.clone(), meta_blob);
 
-        seg.write_snapshot(&offsets, &batches, &parts_meta, &blobs)
-            .unwrap();
+        seg.write_snapshot(
+            &offsets,
+            &batches,
+            &parts_meta,
+            &blobs,
+            SystemTime::UNIX_EPOCH,
+        )
+        .unwrap();
 
         let bytes = fs::read(&seg.path).unwrap();
         let meta = SegmentFile::read_metadata_from_bytes(&bytes).unwrap();
@@ -1051,7 +1094,13 @@ mod tests_wal_writer {
         let offsets = HashMap::new();
         let empty = HashMap::new();
         let (meta, _rows, sha) = seg
-            .write_snapshot(&offsets, &batches, &parts_meta, &empty)
+            .write_snapshot(
+                &offsets,
+                &batches,
+                &parts_meta,
+                &empty,
+                SystemTime::UNIX_EPOCH,
+            )
             .unwrap();
         (dir, seg, sha, meta)
     }
@@ -1156,7 +1205,13 @@ mod tests_wal_writer {
         parts_meta.insert(arrow_key.clone(), (0, SystemTime::now()));
         parts_meta.insert(copy_key.clone(), (0, SystemTime::now()));
         let (meta, rows, _sha) = seg
-            .write_snapshot(&HashMap::new(), &batches, &parts_meta, &HashMap::new())
+            .write_snapshot(
+                &HashMap::new(),
+                &batches,
+                &parts_meta,
+                &HashMap::new(),
+                SystemTime::UNIX_EPOCH,
+            )
             .unwrap();
         assert_eq!(meta.num_partitions, 2);
         assert_eq!(rows, 4);
@@ -1245,5 +1300,132 @@ mod tests_wal_writer {
         let bytes = payload.estimated_bytes();
         assert!(bytes >= identity.len() as u64);
         assert!(bytes < 64);
+    }
+
+    #[test]
+    fn encode_snapshot_is_deterministic_for_created_at() {
+        let src = include_str!("segment_file.rs");
+        let start = src.find("pub fn encode_snapshot").expect("encode_snapshot");
+        let body = src[start..]
+            .split("\nimpl SegmentFile")
+            .next()
+            .expect("encode_snapshot body");
+        assert!(
+            !body.contains("SystemTime::now()"),
+            "encode_snapshot must not read the wall clock"
+        );
+        let key = PartitionKey {
+            sink_ref: "data_outputs.test".to_string(),
+            namespace: "ns".to_string(),
+            partition: String::new(),
+            time: Some(0),
+            schema_fingerprint: "schema".to_string(),
+        };
+        let mut batches = HashMap::new();
+        batches.insert(key, WalPayload::Arrow(vec![make_batch()]));
+        let created = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let a = encode_snapshot(
+            &HashMap::new(),
+            &batches,
+            &HashMap::new(),
+            &HashMap::new(),
+            created,
+        )
+        .unwrap();
+        let b = encode_snapshot(
+            &HashMap::new(),
+            &batches,
+            &HashMap::new(),
+            &HashMap::new(),
+            created,
+        )
+        .unwrap();
+        assert_eq!(a.sha256, b.sha256);
+        let later = encode_snapshot(
+            &HashMap::new(),
+            &batches,
+            &HashMap::new(),
+            &HashMap::new(),
+            created + std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_ne!(a.sha256, later.sha256);
+        let created = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let mut first = HashMap::new();
+        first.insert(
+            PartitionKey {
+                sink_ref: "s".into(),
+                namespace: "ns".into(),
+                partition: "b".into(),
+                time: None,
+                schema_fingerprint: "fp".into(),
+            },
+            WalPayload::Arrow(vec![make_batch()]),
+        );
+        first.insert(
+            PartitionKey {
+                sink_ref: "s".into(),
+                namespace: "ns".into(),
+                partition: "a".into(),
+                time: None,
+                schema_fingerprint: "fp".into(),
+            },
+            WalPayload::Arrow(vec![make_batch()]),
+        );
+        let mut second = HashMap::new();
+        second.insert(
+            PartitionKey {
+                sink_ref: "s".into(),
+                namespace: "ns".into(),
+                partition: "a".into(),
+                time: None,
+                schema_fingerprint: "fp".into(),
+            },
+            WalPayload::Arrow(vec![make_batch()]),
+        );
+        second.insert(
+            PartitionKey {
+                sink_ref: "s".into(),
+                namespace: "ns".into(),
+                partition: "b".into(),
+                time: None,
+                schema_fingerprint: "fp".into(),
+            },
+            WalPayload::Arrow(vec![make_batch()]),
+        );
+        let left = encode_snapshot(
+            &HashMap::new(),
+            &first,
+            &HashMap::new(),
+            &HashMap::new(),
+            created,
+        )
+        .unwrap();
+        let right = encode_snapshot(
+            &HashMap::new(),
+            &second,
+            &HashMap::new(),
+            &HashMap::new(),
+            created,
+        )
+        .unwrap();
+        assert_eq!(left.sha256, right.sha256);
+    }
+
+    #[test]
+    fn write_payload_atomically_renames_tmp_to_seg() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snap.seg");
+        write_payload_atomically(&path, b"payload").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"payload");
+        assert!(!dir.path().join("snap.seg.tmp").exists());
+        let src = include_str!("segment_file.rs");
+        let start = src.find("pub fn write_snapshot").expect("write_snapshot");
+        let body = src[start..]
+            .split("pub fn write_payload_atomically")
+            .next()
+            .expect("write_snapshot body");
+        assert!(body.contains("write_payload_atomically"));
+        assert!(!body.contains("DirectIoFile::create("));
     }
 }

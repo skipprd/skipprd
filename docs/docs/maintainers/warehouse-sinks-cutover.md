@@ -256,7 +256,7 @@ Plugins hold no wrapper struct: `pub type DataSinkIcebergPlugin = IcebergWriter<
 
 From `plugins/data_sink/iceberg/src/iceberg_sink.rs` into the writer crate (by function, not exhaustive):
 
-- All grouped-commit and CDC machinery: `IcebergGroupedPending`, `PendingIcebergFile`, `PendingFileContent`, `StoredPartitionValue`, `CdcStateSession`, `grouped_pending_key`, `validate_grouped_pending`, `filter_grouped_cdc_batches`, `prepare_grouped_policy_batches`, `grouped_snapshot_properties`, `table_has_grouped_snapshot`.
+- All grouped-commit and CDC machinery: `IcebergGroupedPending`, `PendingIcebergFile`, `PendingFileContent`, `StoredPartitionValue`, `CdcStateSession`, `grouped_pending_key`, `validate_grouped_pending`, `final_state_cdc_batches`, `prepare_grouped_policy_batches`, `grouped_snapshot_properties`, `table_has_grouped_snapshot`.
 - Schema mapping: `iceberg_schema_from_output_metadata`, `field_to_nested_field`, `primitive_type_for_skippr`, `apply_iceberg_field_ids*`, `merge_iceberg_schema_missing_fields`.
 - Object IO: `S3ObjectWriteBackend`, `ObjectLocation`, `parse_object_location`, `to_iceberg_s3_uri`, `parse_s3_uri`, s3-not-found helpers.
 - All 36 tests. `make_v2_minimal_table_for_tests` moves with them.
@@ -407,11 +407,11 @@ pub async fn register_namespace_view(
     let view = PipelineConfigView::for_name(config, pipeline)
         .map_err(|e| DataFusionError::Plan(e.to_string()))?;
     match &view.backend {
-        QueryBackend::Iceberg(_) => register_iceberg_union_view(
-            config, ctx, pipeline, namespace, &view, &namespace_union_opts(config),
-        ).await.map_err(|err| DataFusionError::Plan(format!(
-            "Iceberg catalog unavailable for '{pipeline}.{namespace}': {err}"
-        ))),
+        QueryBackend::Iceberg(_) => register_iceberg_union_view(ctx, pipeline, namespace, &view)
+            .await
+            .map_err(|err| DataFusionError::Plan(format!(
+                "Iceberg catalog unavailable for '{pipeline}.{namespace}': {err}"
+            ))),
         QueryBackend::WalOnly => register_wal_namespace_view(ctx, config, pipeline, namespace).await,
     }
 }
@@ -450,7 +450,7 @@ pub struct ClusteredSelectPlan {
 }
 ```
 
-`plan_clustered_select` returns `ClusteredSelectPlan`. Iceberg pipelines register Iceberg ∪ WAL. WalOnly names go on `wal_only` and are not registered. Catalog-list **errors** fail the plan (not warn+continue). An empty namespace list is success (no tables yet). Rename `iceberg_only` / `run_iceberg_only_query` to `lake_only` / `run_lake_only_query`. Local `skipprd query` serves WAL-only pipelines via `register_wal_namespace_view`.
+`plan_clustered_select` returns `ClusteredSelectPlan`. Iceberg pipelines register Iceberg ∪ WAL. WalOnly names go on `wal_only` and are not registered. Catalog-list **errors** fail the plan (not warn+continue). An empty namespace list is success (no tables yet). Unreachable Flight SQL fails the query. Local `skipprd query` serves WAL-only pipelines via `register_wal_namespace_view`.
 
 ### W2.7 Remove Glue/Athena/Hive from the query REPL
 

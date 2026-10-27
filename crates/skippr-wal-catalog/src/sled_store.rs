@@ -4,12 +4,16 @@ use crate::apply::{eval_ops, Applied};
 use crate::error::CatalogError;
 use crate::key::{CatalogKey, CatalogPrefix};
 use crate::row::{CatalogFence, CatalogRow};
-use crate::store::WalCatalogStore;
+use crate::store::{WalCatalogRead, WalCatalogStore};
 use crate::txn::{CatalogTxn, TXN_MAX_OPS};
 
+/// Local Skippr Store WAL catalog. Concurrent ingest + query on the same sled
+/// path is rejected by sled's file lock (one writer process). The catalog fence
+/// only guards commits inside that process. `open_read` never accepts a commit
+/// fence.
 pub struct SledWalCatalog {
     tree: sled::Tree,
-    fence: CatalogFence,
+    fence: Option<CatalogFence>,
     write: Mutex<()>,
 }
 
@@ -17,21 +21,28 @@ impl SledWalCatalog {
     pub fn open(tree: sled::Tree, fence: CatalogFence) -> Self {
         Self {
             tree,
-            fence,
+            fence: Some(fence),
+            write: Mutex::new(()),
+        }
+    }
+
+    pub fn open_read(tree: sled::Tree) -> Self {
+        Self {
+            tree,
+            fence: None,
             write: Mutex::new(()),
         }
     }
 
     fn check_fence(&self, fence: CatalogFence) -> Result<(), CatalogError> {
-        if self.fence.owner == fence.owner && self.fence.epoch == fence.epoch {
-            Ok(())
-        } else {
-            Err(CatalogError::Fenced)
+        match self.fence {
+            Some(owned) if owned.owner == fence.owner && owned.epoch == fence.epoch => Ok(()),
+            _ => Err(CatalogError::Fenced),
         }
     }
 }
 
-impl WalCatalogStore for SledWalCatalog {
+impl WalCatalogRead for SledWalCatalog {
     fn get(&self, key: &CatalogKey) -> Result<Option<CatalogRow>, CatalogError> {
         let bytes = self
             .tree
@@ -66,7 +77,9 @@ impl WalCatalogStore for SledWalCatalog {
         }
         Ok(out)
     }
+}
 
+impl WalCatalogStore for SledWalCatalog {
     fn commit(&self, txn: &CatalogTxn, fence: CatalogFence) -> Result<(), CatalogError> {
         let _guard = self.write.lock().expect("sled catalog poisoned");
         self.check_fence(fence)?;

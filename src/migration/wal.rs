@@ -186,7 +186,10 @@ fn rewrite_wal_bytes(
         }
         partitions_meta.insert(
             idx.key.clone(),
-            (payload.estimated_bytes(), SystemTime::now()),
+            (
+                idx.bytes,
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(idx.updated_at_secs),
+            ),
         );
         batches.insert(idx.key.clone(), payload);
     }
@@ -198,6 +201,7 @@ fn rewrite_wal_bytes(
         &batches,
         &partitions_meta,
         &part_meta_blobs,
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(meta.created_at_secs),
     )
     .map(Some)
     .map_err(|err| err.to_string())
@@ -219,7 +223,7 @@ fn persist_rewritten_payload(
                 .ok_or_else(|| "WAL segment has no parent".to_string())?;
             let tmp = SegmentFile::new(dir, &format!("{segment_id}-migrating"))
                 .map_err(|err| err.to_string())?;
-            crate::buffer::direct_io::DirectIoFile::write_path_sync(&tmp.path, &encoded.bytes)
+            crate::buffer::segment_file::write_payload_atomically(&tmp.path, &encoded.bytes)
                 .map_err(|err| err.to_string())?;
             crate::helpers::fsync::fsync_dir(dir).map_err(|err| err.to_string())?;
             skippr_wal_catalog::PayloadLocation::Disk {
@@ -261,7 +265,15 @@ fn persist_rewritten_payload(
             let old = std::path::Path::new(path);
             if let skippr_wal_catalog::PayloadLocation::Disk { path: ref new_path } = new_location {
                 if old != std::path::Path::new(new_path) {
-                    let _ = std::fs::remove_file(old);
+                    if let Err(err) = std::fs::remove_file(old) {
+                        if err.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(
+                                path = %old.display(),
+                                error = %err,
+                                "WAL rewrite drop of old payload failed; gc_orphan_payloads is the backstop"
+                            );
+                        }
+                    }
                 }
                 let admitted = SegmentFile::read_index_path(std::path::Path::new(new_path))
                     .map_err(|err| err.to_string())?;
@@ -275,11 +287,22 @@ fn persist_rewritten_payload(
         skippr_wal_catalog::PayloadLocation::S3 { bucket, key } => {
             let bucket = bucket.clone();
             let key = key.clone();
-            let _ = crate::buffer::wal_store::block_on_async(async move {
-                crate::helpers::s3::delete_object(&bucket, &key)
-                    .await
-                    .map_err(|err| std::io::Error::other(err.to_string()))
-            });
+            if let Err(err) = crate::buffer::wal_store::block_on_async({
+                let bucket = bucket.clone();
+                let key = key.clone();
+                async move {
+                    crate::helpers::s3::delete_object(&bucket, &key)
+                        .await
+                        .map_err(|err| std::io::Error::other(err.to_string()))
+                }
+            }) {
+                tracing::warn!(
+                    bucket,
+                    key,
+                    error = %err,
+                    "WAL rewrite drop of old S3 payload failed; gc_orphan_payloads is the backstop"
+                );
+            }
         }
     }
     Ok(())
@@ -374,6 +397,7 @@ mod tests {
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             )
             .await
             .unwrap();
@@ -414,6 +438,25 @@ mod tests {
             !src.contains(concat!("PayloadLocation::S3 { .. } => con", "tinue")),
             "S3 live rows must be rewritten, not skipped"
         );
+        let rewrite = src.find("fn rewrite_wal_bytes").expect("rewrite_wal_bytes");
+        let persist = src
+            .find("fn persist_rewritten_payload")
+            .expect("persist_rewritten_payload");
+        let rewrite_body = &src[rewrite..persist];
+        assert!(
+            !rewrite_body.contains("SystemTime::now()"),
+            "migration encode must use snapshot created_at, not wall clock"
+        );
+        assert!(rewrite_body.contains("meta.created_at_secs"));
+        assert!(rewrite_body.contains("idx.updated_at_secs"));
+        let persist_end = src[persist..]
+            .find("#[cfg(test)]")
+            .map(|off| persist + off)
+            .unwrap_or(src.len());
+        let persist_body = &src[persist..persist_end];
+        assert!(persist_body.contains("write_payload_atomically"));
+        assert!(!persist_body.contains("write_path_sync"));
+        assert!(persist_body.contains("tracing::warn!"));
         let dir = std::env::temp_dir().join(format!("skippr_mig_s3_{}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
         let pipeline_key = skippr_lease::PipelineKey::new("t", "w", "p").unwrap();

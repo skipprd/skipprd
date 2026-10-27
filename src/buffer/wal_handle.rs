@@ -13,7 +13,7 @@ use skippr_wal_catalog::{
     query_all, CatalogFence, CatalogKey, CatalogPrefix, CatalogRow, CatalogSeq, CatalogTxn,
     CheckpointKey, CommittedCheckpoint, CommittedOffset, ControlBody, ControlRow, FormatPhase,
     FormatRow, MemoryWalCatalog, OffsetHintKey, PayloadLocation, PutCond, SegmentIndexRow,
-    SegmentRow, SeqRow, SliceBitmap, SliceDirEntry, SliceIndexEntry, WalCatalogStore,
+    SegmentRow, SeqRow, SliceBitmap, SliceDirEntry, WalCatalogRead, WalCatalogStore,
     FORMAT_VERSION,
 };
 use tokio::sync::Mutex;
@@ -32,6 +32,8 @@ pub const UNPUBLISHED_COMMIT_CEILING: u64 = 32;
 pub(crate) const WAL_CATALOG_PROGRESS_EVERY: u64 = 250;
 /// Durable Acked cleanup batch. Stays under TXN_MAX_OPS. Not an env knob.
 pub(crate) const REDO_ACKED_BATCH: usize = 32;
+/// Reclaim OCC retries with a fresh catalog read. Not an env knob.
+pub(crate) const RECLAIM_OCC_ATTEMPTS: usize = 8;
 
 pub struct PipelineWalHandle {
     key: PipelineKey,
@@ -147,6 +149,13 @@ impl PipelineWalHandle {
         self.catalog.as_ref()
     }
 
+    pub fn reader(&self) -> crate::buffer::wal_reader::WalCatalogReader {
+        crate::buffer::wal_reader::WalCatalogReader::new(
+            self.key.clone(),
+            Arc::clone(&self.catalog) as Arc<dyn WalCatalogRead>,
+        )
+    }
+
     pub fn fence(&self) -> Result<CatalogFence, DurableError> {
         catalog_fence_from_guard(&self.guard)
     }
@@ -229,58 +238,6 @@ impl PipelineWalHandle {
                 _ => None,
             })
             .collect())
-    }
-
-    pub fn select_live_ordinals(&self, exclude_segment_ids: &[String]) -> Vec<(String, u32)> {
-        self.live_slices(exclude_segment_ids)
-            .into_iter()
-            .map(|slice| (slice.segment_id.as_str().to_string(), slice.ordinal))
-            .collect()
-    }
-
-    pub fn live_namespaces(&self) -> Vec<String> {
-        let mut names = Vec::new();
-        for slice in self.live_slices(&[]) {
-            if slice.namespace.is_empty() {
-                continue;
-            }
-            if !names.iter().any(|existing| existing == &slice.namespace) {
-                names.push(slice.namespace);
-            }
-        }
-        names
-    }
-
-    pub fn live_slices(&self, exclude_segment_ids: &[String]) -> Vec<SliceIndexEntry> {
-        let exclude: std::collections::HashSet<&str> =
-            exclude_segment_ids.iter().map(String::as_str).collect();
-        let Ok(rows) = query_all(self.catalog.as_ref(), CatalogPrefix::Index) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for (_, row) in rows {
-            let CatalogRow::Index(index) = row else {
-                continue;
-            };
-            let id = index.segment_id.as_str();
-            if exclude.contains(id) {
-                continue;
-            }
-            let Ok(Some(CatalogRow::Segment(seg))) = self
-                .catalog
-                .get(&CatalogKey::Segment(index.segment_id.clone()))
-            else {
-                continue;
-            };
-            if !payload_present(&seg.location) {
-                tracing::warn!(segment = id, "live WAL scan skipped missing payload");
-                continue;
-            }
-            for entry in index.entries {
-                out.push(slice_index_from_dir(&index.segment_id, &entry));
-            }
-        }
-        out
     }
 
     pub fn slice_is_done(&self, segment_id: &str, ordinal: u32) -> Result<bool, DurableError> {
@@ -381,15 +338,6 @@ impl PipelineWalHandle {
             if txn.state != CompactionTransactionState::Acked && !bits_done {
                 continue;
             }
-            for wal_ref in &txn.refs {
-                let Some(ordinal) = self.resolve_ordinal(wal_ref)? else {
-                    continue;
-                };
-                let slice_count = self
-                    .segment_slice_count(&wal_ref.segment_id)
-                    .unwrap_or(ordinal + 1);
-                self.mark_acked_ordinals_in_memory(&wal_ref.segment_id, &[ordinal], slice_count);
-            }
             acked_ids.push(txn.id.clone());
         }
         Ok(acked_ids)
@@ -401,7 +349,9 @@ impl PipelineWalHandle {
         }
         let handle = Arc::clone(self);
         tokio::spawn(async move {
-            let _ = handle.redo_acked_durable_batches(&acked).await;
+            if let Err(err) = handle.redo_acked_durable_batches(&acked).await {
+                tracing::error!(error = %err, "WAL catalog durable redo failed");
+            }
         });
     }
 
@@ -447,6 +397,7 @@ impl PipelineWalHandle {
             scanned += batch.len() as u64;
             match self.flush_acked_batch(&batch).await {
                 Ok(n) => redone += n,
+                Err(DurableError::CatalogConflict) => return Err(DurableError::CatalogConflict),
                 Err(err) => {
                     deferred += batch.len() as u64;
                     if first_deferred.is_none() {
@@ -469,6 +420,7 @@ impl PipelineWalHandle {
             scanned += batch.len() as u64;
             match self.flush_acked_batch(&batch).await {
                 Ok(n) => redone += n,
+                Err(DurableError::CatalogConflict) => return Err(DurableError::CatalogConflict),
                 Err(err) => {
                     deferred += batch.len() as u64;
                     if first_deferred.is_none() {
@@ -493,7 +445,6 @@ impl PipelineWalHandle {
         batch: &[crate::buffer::compaction_transaction::CompactionTransaction],
     ) -> Result<u64, DurableError> {
         let epoch = self.reclaim_epoch()?;
-        let fence = self.fence()?;
         let mut grouped: HashMap<String, Vec<u32>> = HashMap::new();
         for txn in batch {
             for wal_ref in &txn.refs {
@@ -506,105 +457,99 @@ impl PipelineWalHandle {
                     .push(ordinal);
             }
         }
-        let mut catalog_txn = CatalogTxn::new();
-        let mut reclaim_after: Vec<(String, PayloadLocation)> = Vec::new();
-        for (segment_id, ordinals) in &grouped {
-            let id = SegmentId::new(segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
-            let Some(CatalogRow::Segment(mut row)) = self
-                .catalog
-                .get(&CatalogKey::Segment(id.clone()))
-                .map_err(|err| DurableError::Io(err.to_string()))?
-            else {
-                continue;
-            };
-            row.done.or_bits(ordinals);
-            crate::metrics::counters::add_compaction_catalog_bit_write(ordinals.len() as u64);
-            let all_done = row.done.all_done();
-            let version = row.version;
-            row.version = version.saturating_add(1);
-            let location = row.location.clone();
-            if all_done {
-                catalog_txn
-                    .delete(
-                        CatalogKey::Segment(id.clone()),
-                        skippr_wal_catalog::DeleteCond::Version(version),
-                    )
+        let mut last_conflict = DurableError::CatalogConflict;
+        for _ in 0..RECLAIM_OCC_ATTEMPTS {
+            let fence = self.fence()?;
+            let mut catalog_txn = CatalogTxn::new();
+            let mut reclaim_after: Vec<(String, PayloadLocation)> = Vec::new();
+            let mut memory_bits: Vec<(String, Vec<u32>, u32)> = Vec::new();
+            for (segment_id, ordinals) in &grouped {
+                let id =
+                    SegmentId::new(segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
+                let Some(CatalogRow::Segment(mut row)) = self
+                    .catalog
+                    .get(&CatalogKey::Segment(id.clone()))
+                    .map_err(|err| DurableError::Io(err.to_string()))?
+                else {
+                    continue;
+                };
+                row.done.or_bits(ordinals);
+                crate::metrics::counters::add_compaction_catalog_bit_write(ordinals.len() as u64);
+                let all_done = row.done.all_done();
+                let version = row.version;
+                row.version = next_catalog_version(version)?;
+                let slice_count = row.slice_count;
+                let location = row.location.clone();
+                if all_done {
+                    catalog_txn
+                        .delete(
+                            CatalogKey::Segment(id.clone()),
+                            skippr_wal_catalog::DeleteCond::Version(version),
+                        )
+                        .map_err(|err| DurableError::Io(err.to_string()))?;
+                    if self
+                        .catalog
+                        .get(&CatalogKey::Index(id.clone()))
+                        .map_err(|err| DurableError::Io(err.to_string()))?
+                        .is_some()
+                    {
+                        catalog_txn
+                            .delete(
+                                CatalogKey::Index(id.clone()),
+                                skippr_wal_catalog::DeleteCond::Exists,
+                            )
+                            .map_err(|err| DurableError::Io(err.to_string()))?;
+                    }
+                    reclaim_after.push((segment_id.clone(), location));
+                } else {
+                    catalog_txn
+                        .put(
+                            CatalogKey::Segment(id),
+                            CatalogRow::Segment(row),
+                            PutCond::Version(version),
+                        )
+                        .map_err(|err| DurableError::Io(err.to_string()))?;
+                }
+                memory_bits.push((segment_id.clone(), ordinals.clone(), slice_count));
+            }
+            for txn in batch {
+                let compaction_id = skippr_wal_catalog::CompactionId::new(&txn.id)
                     .map_err(|err| DurableError::Io(err.to_string()))?;
                 if self
                     .catalog
-                    .get(&CatalogKey::Index(id.clone()))
+                    .get(&CatalogKey::Compaction(compaction_id.clone()))
                     .map_err(|err| DurableError::Io(err.to_string()))?
                     .is_some()
                 {
                     catalog_txn
                         .delete(
-                            CatalogKey::Index(id.clone()),
+                            CatalogKey::Compaction(compaction_id),
                             skippr_wal_catalog::DeleteCond::Exists,
                         )
                         .map_err(|err| DurableError::Io(err.to_string()))?;
                 }
-                reclaim_after.push((segment_id.clone(), location));
-            } else {
-                catalog_txn
-                    .put(
-                        CatalogKey::Segment(id),
-                        CatalogRow::Segment(row),
-                        PutCond::Version(version),
-                    )
-                    .map_err(|err| DurableError::Io(err.to_string()))?;
+            }
+            if catalog_txn.ops().is_empty() {
+                return Ok(batch.len() as u64);
+            }
+            match self.commit_durable(&catalog_txn, fence) {
+                Ok(()) => {
+                    for (segment_id, ordinals, slice_count) in &memory_bits {
+                        self.mark_acked_ordinals_in_memory(segment_id, ordinals, *slice_count);
+                    }
+                    for (segment_id, location) in reclaim_after {
+                        self.after_reclaim(&location, &segment_id, epoch).await?;
+                    }
+                    return Ok(batch.len() as u64);
+                }
+                Err(DurableError::CatalogConflict) => {
+                    last_conflict = DurableError::CatalogConflict;
+                    continue;
+                }
+                Err(err) => return Err(err),
             }
         }
-        for txn in batch {
-            let compaction_id = skippr_wal_catalog::CompactionId::new(&txn.id)
-                .map_err(|err| DurableError::Io(err.to_string()))?;
-            if self
-                .catalog
-                .get(&CatalogKey::Compaction(compaction_id.clone()))
-                .map_err(|err| DurableError::Io(err.to_string()))?
-                .is_some()
-            {
-                catalog_txn
-                    .delete(
-                        CatalogKey::Compaction(compaction_id),
-                        skippr_wal_catalog::DeleteCond::Exists,
-                    )
-                    .map_err(|err| DurableError::Io(err.to_string()))?;
-            }
-        }
-        if !catalog_txn.ops().is_empty() {
-            self.commit_durable(&catalog_txn, fence)?;
-        }
-        for (segment_id, location) in reclaim_after {
-            delete_payload(&location)?;
-            if let ReplicationMode::Synchronous(replicator) = &self.replicator {
-                let _ = crate::cluster::peer::drop_payload_at(
-                    replicator.snapshot_endpoint(),
-                    &self.key,
-                    &segment_id,
-                    epoch.get(),
-                    &crate::cluster::identity::process_query_bind()
-                        .map(|bind| bind.identity)
-                        .ok_or_else(|| DurableError::Io("cluster identity missing".into()))?,
-                )
-                .await;
-            }
-            self.forget_in_memory_segment(&segment_id);
-            crate::buffer::ingest_buffer::Buffers::forget_reclaimed_segment(&segment_id);
-            tracing::info!(segment = segment_id.as_str(), "WAL catalog reclaim");
-        }
-        Ok(batch.len() as u64)
-    }
-
-    fn segment_slice_count(&self, segment_id: &str) -> Result<u32, DurableError> {
-        let id = SegmentId::new(segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
-        match self
-            .catalog
-            .get(&CatalogKey::Segment(id))
-            .map_err(|err| DurableError::Io(err.to_string()))?
-        {
-            Some(CatalogRow::Segment(row)) => Ok(row.slice_count),
-            _ => Ok(1),
-        }
+        Err(last_conflict)
     }
 
     fn all_refs_already_done(
@@ -661,7 +606,7 @@ impl PipelineWalHandle {
         };
         let meta = SegmentFile::read_index_path(std::path::Path::new(path))
             .map_err(|err| DurableError::Io(err.to_string()))?;
-        let _ = self.persist_missing_index(&id, &meta);
+        self.persist_missing_index(&id, &meta)?;
         for idx in &meta.index {
             if idx.start == wal_ref.start
                 && idx.len == wal_ref.len
@@ -693,7 +638,22 @@ impl PipelineWalHandle {
         if txn.ops().is_empty() {
             return Ok(());
         }
-        self.commit_durable(&txn, fence)
+        match self.commit_durable(&txn, fence) {
+            Ok(()) => Ok(()),
+            Err(DurableError::CatalogConflict) => {
+                if self
+                    .catalog
+                    .get(&CatalogKey::Index(id.clone()))
+                    .map_err(|err| DurableError::Io(err.to_string()))?
+                    .is_some()
+                {
+                    Ok(())
+                } else {
+                    Err(DurableError::CatalogConflict)
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub fn load_or_build_index_meta(
@@ -709,7 +669,7 @@ impl PipelineWalHandle {
             return Ok(meta_from_index_row(row, &index));
         }
         let meta = read_index_location(&row.location)?;
-        let _ = self.persist_missing_index(&id, &meta);
+        self.persist_missing_index(&id, &meta)?;
         Ok(meta)
     }
 
@@ -721,20 +681,47 @@ impl PipelineWalHandle {
         partitions_meta: &HashMap<PartitionKey, (u64, SystemTime)>,
         part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
         checkpoint_updates: &HashMap<String, CheckpointEnvelope>,
+        created_at: SystemTime,
     ) -> Result<SegmentWriteResult, DurableError> {
         let epoch = self.guard.require_active_epoch()?;
         let fence = self.fence()?;
         let id = SegmentId::new(snapshot_id).map_err(|err| DurableError::Io(err.to_string()))?;
-        std::fs::create_dir_all(&self.paths.segs).map_err(DurableError::from)?;
-        let encoded = encode_snapshot(offsets, batches, partitions_meta, part_meta_blobs)
-            .map_err(DurableError::from)?;
-        let seg_file = SegmentFile::new(&self.paths.segs, snapshot_id)?;
-        {
-            let mut durable = crate::buffer::direct_io::DirectIoFile::create(&seg_file.path)?;
-            use std::io::Write;
-            durable.write_all(&encoded.bytes)?;
-            durable.sync_data()?;
+        let encoded = encode_snapshot(
+            offsets,
+            batches,
+            partitions_meta,
+            part_meta_blobs,
+            created_at,
+        )
+        .map_err(DurableError::from)?;
+        let committed_offsets = committed_offsets_from(offsets, self.offsets.as_ref())?;
+        let checkpoints = checkpoints_from(checkpoint_updates)?;
+        let slice_count = encoded.meta.num_partitions.max(1);
+        if let Some(row) = self.segment_row(&id)? {
+            if row.payload_sha256 != encoded.sha256 {
+                return Err(DurableError::ProtocolMismatch(
+                    "segment_id reuse with different payload sha".into(),
+                ));
+            }
+            self.publish_seq(row.seq, epoch, &committed_offsets, &checkpoints)
+                .await?;
+            return Ok(SegmentWriteResult {
+                meta: encoded.meta,
+                total_rows: encoded.total_rows,
+                sha256: encoded.sha256,
+                location: match row.location {
+                    PayloadLocation::Disk { path } => SegmentWriteLocation::Disk {
+                        path: PathBuf::from(path),
+                    },
+                    PayloadLocation::S3 { bucket, key } => SegmentWriteLocation::S3 { key, bucket },
+                },
+                offsets_published: true,
+            });
         }
+        std::fs::create_dir_all(&self.paths.segs).map_err(DurableError::from)?;
+        let seg_file = SegmentFile::new(&self.paths.segs, snapshot_id)?;
+        crate::buffer::segment_file::write_payload_atomically(&seg_file.path, &encoded.bytes)
+            .map_err(DurableError::from)?;
         if let ReplicationMode::Synchronous(replicator) = &self.replicator {
             replicator
                 .commit_payload(
@@ -754,22 +741,8 @@ impl PipelineWalHandle {
         let location = PayloadLocation::Disk {
             path: seg_file.path.to_string_lossy().into_owned(),
         };
-        let committed_offsets = committed_offsets_from(offsets, self.offsets.as_ref())?;
-        let checkpoints = checkpoints_from(checkpoint_updates)?;
-        let slice_count = encoded.meta.num_partitions.max(1);
-        let existing = self
-            .catalog
-            .get(&CatalogKey::Segment(id.clone()))
-            .map_err(|err| DurableError::Io(err.to_string()))?;
-        let seq = if let Some(CatalogRow::Segment(row)) = existing {
-            if row.payload_sha256 != encoded.sha256 {
-                return Err(DurableError::ProtocolMismatch(
-                    "segment_id reuse with different payload sha".into(),
-                ));
-            }
-            row.seq
-        } else {
-            self.commit_new_segment(
+        let seq = self
+            .commit_new_segment(
                 &id,
                 &encoded,
                 &location,
@@ -779,8 +752,7 @@ impl PipelineWalHandle {
                 fence,
                 epoch,
             )
-            .await?
-        };
+            .await?;
         self.publish_seq(seq, epoch, &committed_offsets, &checkpoints)
             .await?;
         Ok(SegmentWriteResult {
@@ -792,6 +764,20 @@ impl PipelineWalHandle {
             },
             offsets_published: true,
         })
+    }
+
+    fn segment_row(&self, id: &SegmentId) -> Result<Option<SegmentRow>, DurableError> {
+        match self
+            .catalog
+            .get(&CatalogKey::Segment(id.clone()))
+            .map_err(|err| DurableError::Io(err.to_string()))?
+        {
+            Some(CatalogRow::Segment(row)) => Ok(Some(row)),
+            Some(_) => Err(DurableError::ProtocolMismatch(
+                "wal#seg is not a SegmentRow".into(),
+            )),
+            None => Ok(None),
+        }
     }
 
     async fn commit_new_segment(
@@ -1107,7 +1093,10 @@ impl PipelineWalHandle {
         let seq = max_seq
             .next()
             .map_err(|err| DurableError::Io(err.to_string()))?;
-        let version = existing_version.map(|v| v.saturating_add(1)).unwrap_or(0);
+        let version = match existing_version {
+            Some(v) => next_catalog_version(v)?,
+            None => 0,
+        };
         let cond = match existing_version {
             Some(v) => PutCond::Version(v),
             None => PutCond::NotExists,
@@ -1155,7 +1144,7 @@ impl PipelineWalHandle {
         row.location = location;
         row.payload_len = payload_len;
         row.payload_sha256 = payload_sha256;
-        row.version = version.saturating_add(1);
+        row.version = next_catalog_version(version)?;
         let mut txn = CatalogTxn::new();
         txn.put(
             CatalogKey::Segment(id),
@@ -1181,9 +1170,10 @@ impl PipelineWalHandle {
             .get(&CatalogKey::Compaction(compaction_id.clone()))
             .map_err(|err| DurableError::Io(err.to_string()))?;
         let (cond, version) = match existing {
-            Some(CatalogRow::Compaction(row)) => {
-                (PutCond::Version(row.version), row.version.saturating_add(1))
-            }
+            Some(CatalogRow::Compaction(row)) => (
+                PutCond::Version(row.version),
+                next_catalog_version(row.version)?,
+            ),
             _ => (PutCond::NotExists, 0),
         };
         let row = skippr_wal_catalog::CompactionRow {
@@ -1209,78 +1199,103 @@ impl PipelineWalHandle {
     ) -> Result<bool, DurableError> {
         let started = Instant::now();
         let epoch = self.reclaim_epoch()?;
-        let fence = self.fence()?;
         let id = SegmentId::new(segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
-        let Some(CatalogRow::Segment(mut row)) = self
-            .catalog
-            .get(&CatalogKey::Segment(id.clone()))
-            .map_err(|err| DurableError::Io(err.to_string()))?
-        else {
-            return Ok(true);
-        };
-        row.done.or_bits(ordinals);
-        crate::metrics::counters::add_compaction_catalog_bit_write(ordinals.len() as u64);
-        let all_done = row.done.all_done();
-        let version = row.version;
-        row.version = version.saturating_add(1);
-        let location = row.location.clone();
-        let slice_count = row.slice_count;
-        self.mark_acked_ordinals_in_memory(segment_id, ordinals, slice_count);
-        let mut txn = CatalogTxn::new();
-        if all_done {
-            txn.delete(
-                CatalogKey::Segment(id.clone()),
-                skippr_wal_catalog::DeleteCond::Version(version),
-            )
-            .map_err(|err| DurableError::Io(err.to_string()))?;
-            if self
-                .catalog
-                .get(&CatalogKey::Index(id.clone()))
-                .map_err(|err| DurableError::Io(err.to_string()))?
-                .is_some()
-            {
+        let mut last_conflict = DurableError::CatalogConflict;
+        for _ in 0..RECLAIM_OCC_ATTEMPTS {
+            let fence = self.fence()?;
+            let Some(mut row) = self.segment_row(&id)? else {
+                return Ok(true);
+            };
+            row.done.or_bits(ordinals);
+            crate::metrics::counters::add_compaction_catalog_bit_write(ordinals.len() as u64);
+            let all_done = row.done.all_done();
+            let version = row.version;
+            row.version = next_catalog_version(version)?;
+            let location = row.location.clone();
+            let slice_count = row.slice_count;
+            let mut txn = CatalogTxn::new();
+            if all_done {
                 txn.delete(
-                    CatalogKey::Index(id.clone()),
-                    skippr_wal_catalog::DeleteCond::Exists,
+                    CatalogKey::Segment(id.clone()),
+                    skippr_wal_catalog::DeleteCond::Version(version),
+                )
+                .map_err(|err| DurableError::Io(err.to_string()))?;
+                if self
+                    .catalog
+                    .get(&CatalogKey::Index(id.clone()))
+                    .map_err(|err| DurableError::Io(err.to_string()))?
+                    .is_some()
+                {
+                    txn.delete(
+                        CatalogKey::Index(id.clone()),
+                        skippr_wal_catalog::DeleteCond::Exists,
+                    )
+                    .map_err(|err| DurableError::Io(err.to_string()))?;
+                }
+            } else {
+                txn.put(
+                    CatalogKey::Segment(id.clone()),
+                    CatalogRow::Segment(row),
+                    PutCond::Version(version),
                 )
                 .map_err(|err| DurableError::Io(err.to_string()))?;
             }
-        } else {
-            txn.put(
-                CatalogKey::Segment(id.clone()),
-                CatalogRow::Segment(row),
-                PutCond::Version(version),
-            )
-            .map_err(|err| DurableError::Io(err.to_string()))?;
-        }
-        self.commit_durable(&txn, fence)?;
-        if all_done {
-            delete_payload(&location)?;
-            if let ReplicationMode::Synchronous(replicator) = &self.replicator {
-                let _ = crate::cluster::peer::drop_payload_at(
-                    replicator.snapshot_endpoint(),
-                    &self.key,
-                    segment_id,
-                    epoch.get(),
-                    &crate::cluster::identity::process_query_bind()
-                        .map(|bind| bind.identity)
-                        .ok_or_else(|| DurableError::Io("cluster identity missing".into()))?,
-                )
-                .await;
+            match self.commit_durable(&txn, fence) {
+                Ok(()) => {
+                    self.mark_acked_ordinals_in_memory(segment_id, ordinals, slice_count);
+                    if all_done {
+                        self.after_reclaim(&location, segment_id, epoch).await?;
+                        let elapsed_ms = started.elapsed().as_millis() as u64;
+                        tracing::info!(segment = segment_id, elapsed_ms, "WAL catalog reclaim");
+                        crate::helpers::perf::emit(
+                            "wal_reclaim",
+                            serde_json::json!({
+                                "elapsed_ms": elapsed_ms,
+                                "segment": segment_id
+                            }),
+                        );
+                    }
+                    return Ok(all_done);
+                }
+                Err(DurableError::CatalogConflict) => {
+                    last_conflict = DurableError::CatalogConflict;
+                    continue;
+                }
+                Err(err) => return Err(err),
             }
-            self.forget_in_memory_segment(segment_id);
-            crate::buffer::ingest_buffer::Buffers::forget_reclaimed_segment(segment_id);
-            let elapsed_ms = started.elapsed().as_millis() as u64;
-            tracing::info!(segment = segment_id, elapsed_ms, "WAL catalog reclaim");
-            crate::helpers::perf::emit(
-                "wal_reclaim",
-                serde_json::json!({
-                    "elapsed_ms": elapsed_ms,
-                    "segment": segment_id
-                }),
-            );
         }
-        Ok(all_done)
+        Err(last_conflict)
+    }
+
+    async fn after_reclaim(
+        &self,
+        location: &PayloadLocation,
+        segment_id: &str,
+        epoch: skippr_lease::LeaseEpoch,
+    ) -> Result<(), DurableError> {
+        delete_payload(location)?;
+        if let ReplicationMode::Synchronous(replicator) = &self.replicator {
+            if let Err(err) = crate::cluster::peer::drop_payload_at(
+                replicator.snapshot_endpoint(),
+                &self.key,
+                segment_id,
+                epoch.get(),
+                &crate::cluster::identity::process_query_bind()
+                    .map(|bind| bind.identity)
+                    .ok_or_else(|| DurableError::Io("cluster identity missing".into()))?,
+            )
+            .await
+            {
+                tracing::warn!(
+                    segment = segment_id,
+                    error = %err,
+                    "replica payload drop failed; gc_orphan_payloads is the backstop"
+                );
+            }
+        }
+        self.forget_in_memory_segment(segment_id);
+        crate::buffer::ingest_buffer::Buffers::forget_reclaimed_segment(segment_id);
+        Ok(())
     }
 
     pub async fn delete_compaction(&self, id: &str) -> Result<(), DurableError> {
@@ -1403,14 +1418,29 @@ impl PipelineWalHandle {
     }
 }
 
-fn flushing_commit(
+fn next_catalog_version(expected: u64) -> Result<u64, DurableError> {
+    expected
+        .checked_add(1)
+        .ok_or_else(|| DurableError::ProtocolMismatch("catalog row version overflow".into()))
+}
+
+pub(crate) fn catalog_durable_err(err: skippr_wal_catalog::CatalogError) -> DurableError {
+    match err {
+        skippr_wal_catalog::CatalogError::ConditionFailed
+        | skippr_wal_catalog::CatalogError::Conflict => DurableError::CatalogConflict,
+        skippr_wal_catalog::CatalogError::Fenced => DurableError::Fenced,
+        other => DurableError::Io(other.to_string()),
+    }
+}
+
+pub(crate) fn flushing_commit(
     catalog: &dyn WalCatalogStore,
     txn: &CatalogTxn,
     fence: CatalogFence,
 ) -> Result<(), DurableError> {
     catalog
         .commit_durable(txn, fence)
-        .map_err(|err| DurableError::Io(err.to_string()))
+        .map_err(catalog_durable_err)
 }
 
 pub(crate) fn payload_bytes(
@@ -1443,17 +1473,36 @@ pub(crate) fn payload_bytes(
 fn delete_payload(location: &PayloadLocation) -> Result<(), DurableError> {
     match location {
         PayloadLocation::Disk { path } => {
-            let _ = std::fs::remove_file(path);
+            if let Err(err) = std::fs::remove_file(path) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        path,
+                        error = %err,
+                        "WAL payload drop failed; gc_orphan_payloads is the backstop"
+                    );
+                }
+            }
             Ok(())
         }
         PayloadLocation::S3 { bucket, key } => {
             let bucket = bucket.clone();
             let key = key.clone();
-            let _ = crate::buffer::wal_store::block_on_async(async move {
-                crate::helpers::s3::delete_object(&bucket, &key)
-                    .await
-                    .map_err(|err| std::io::Error::other(err.to_string()))
-            });
+            if let Err(err) = crate::buffer::wal_store::block_on_async({
+                let bucket = bucket.clone();
+                let key = key.clone();
+                async move {
+                    crate::helpers::s3::delete_object(&bucket, &key)
+                        .await
+                        .map_err(|err| std::io::Error::other(err.to_string()))
+                }
+            }) {
+                tracing::warn!(
+                    bucket,
+                    key,
+                    error = %err,
+                    "WAL payload drop failed; gc_orphan_payloads is the backstop"
+                );
+            }
             Ok(())
         }
     }
@@ -1547,21 +1596,6 @@ fn slice_dir_entries(
             part_meta_len: idx.part_meta_len,
         })
         .collect()
-}
-
-fn slice_index_from_dir(segment_id: &SegmentId, entry: &SliceDirEntry) -> SliceIndexEntry {
-    SliceIndexEntry {
-        segment_id: segment_id.clone(),
-        ordinal: entry.ordinal,
-        namespace: entry.namespace.clone(),
-        partition: entry.partition.clone(),
-        start: entry.start,
-        len: entry.len,
-        codec: entry.codec,
-        part_meta_start: entry.part_meta_start,
-        part_meta_len: entry.part_meta_len,
-        version: 0,
-    }
 }
 
 pub(crate) fn put_slice_index(
@@ -1750,6 +1784,7 @@ mod tests {
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             )
             .await
             .unwrap();
@@ -1810,6 +1845,7 @@ mod tests {
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             )
             .await
             .unwrap();
@@ -1827,33 +1863,111 @@ mod tests {
         assert_eq!(row.entries[0].part_meta_len, 0);
         assert!(handle
             .catalog
-            .get(&CatalogKey::Slice {
+            .get(&CatalogKey::LegacySlice {
                 segment_id: SegmentId::new("seg-part").unwrap(),
                 ordinal: 0,
             })
             .unwrap()
             .is_none());
-        assert_eq!(handle.live_namespaces(), vec!["ns".to_string()]);
+        assert_eq!(
+            handle.reader().live_namespaces().unwrap(),
+            vec!["ns".to_string()]
+        );
     }
 
-    #[test]
-    fn select_live_ordinals_uses_catalog_slices_not_admit() {
-        let src = include_str!("wal_handle.rs");
-        let start = src
-            .find("pub fn select_live_ordinals")
-            .expect("select_live_ordinals");
-        let body = src[start..]
-            .split("pub fn slice_is_done")
-            .next()
-            .expect("body");
-        assert!(
-            !body.contains("admit_payload"),
-            "query live ordinals must not hash/FOOT-admit payload"
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn fully_completed_row_is_reclaimed() {
+        use crate::buffer::segment_file::{PartitionKey, WalPayload};
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let dir = tempfile::tempdir().unwrap();
+        let handle = leased_handle(dir.path());
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let mut batches = HashMap::new();
+        batches.insert(
+            PartitionKey {
+                sink_ref: "data_sinks.iceberg".into(),
+                namespace: "events".into(),
+                partition: "p0".into(),
+                time: None,
+                schema_fingerprint: "fp".into(),
+            },
+            WalPayload::Arrow(vec![arrow::array::RecordBatch::try_new(
+                schema,
+                vec![Arc::new(StringArray::from(vec!["evt-23"]))],
+            )
+            .unwrap()]),
         );
-        assert!(
-            body.contains("live_slices"),
-            "live ordinals must come from catalog SliceIndexEntry"
-        );
+        handle
+            .persist_segment(
+                "live-seg",
+                &HashMap::new(),
+                &batches,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+        handle
+            .complete_slices_and_reclaim("live-seg", &[0])
+            .await
+            .unwrap();
+        assert!(handle.reader().live_slices("events").unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn catalog_segment_ids_are_catalog_rows() {
+        use crate::buffer::segment_file::{PartitionKey, WalPayload};
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let dir = tempfile::tempdir().unwrap();
+        let handle = leased_handle(dir.path());
+        async fn persist_named(handle: &PipelineWalHandle, segment_id: &str, id: &str) {
+            let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+            let mut batches = HashMap::new();
+            batches.insert(
+                PartitionKey {
+                    sink_ref: "data_sinks.iceberg".into(),
+                    namespace: "events".into(),
+                    partition: "p0".into(),
+                    time: None,
+                    schema_fingerprint: "fp".into(),
+                },
+                WalPayload::Arrow(vec![arrow::array::RecordBatch::try_new(
+                    schema,
+                    vec![Arc::new(StringArray::from(vec![id]))],
+                )
+                .unwrap()]),
+            );
+            handle
+                .persist_segment(
+                    segment_id,
+                    &HashMap::new(),
+                    &batches,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    std::time::SystemTime::UNIX_EPOCH,
+                )
+                .await
+                .unwrap();
+        }
+        persist_named(&handle, "old", "evt-old").await;
+        persist_named(&handle, "new", "evt-new").await;
+        persist_named(&handle, "gone", "evt-gone").await;
+        handle
+            .complete_slices_and_reclaim("gone", &[0])
+            .await
+            .unwrap();
+        let mut ids = handle.catalog_segment_ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["new".to_string(), "old".to_string()]);
     }
 
     #[tokio::test]
@@ -1869,6 +1983,7 @@ mod tests {
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             )
             .await
             .unwrap();
@@ -1880,6 +1995,7 @@ mod tests {
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             )
             .await
             .unwrap();
@@ -1900,6 +2016,7 @@ mod tests {
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             )
             .await
         {
@@ -1992,6 +2109,7 @@ mod tests {
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             )
             .await
             .unwrap();
@@ -2026,6 +2144,7 @@ mod tests {
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             )
             .await
             .unwrap();
@@ -2060,7 +2179,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn apply_acked_marks_bits_before_durable_flush() {
+    async fn apply_acked_lists_ids_without_marking_memory() {
         use crate::buffer::compaction_transaction::{
             CompactionTransaction, SegmentSourceDescriptor, SinkWriteSemantics, WalPartRef,
         };
@@ -2076,6 +2195,7 @@ mod tests {
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             )
             .await
             .unwrap();
@@ -2110,9 +2230,12 @@ mod tests {
             .unwrap();
         let ids = handle.apply_acked_in_memory().unwrap();
         assert_eq!(ids, vec![txn.id.clone()]);
-        assert!(handle
-            .slice_is_done("acked-mem", idx.slice_ordinal)
-            .unwrap());
+        assert!(
+            !handle
+                .slice_is_done("acked-mem", idx.slice_ordinal)
+                .unwrap(),
+            "memory bits must wait for the durable catalog commit"
+        );
         assert!(handle
             .catalog
             .get(&CatalogKey::Compaction(
@@ -2122,6 +2245,9 @@ mod tests {
             .is_some());
         assert!(handle.paths().segs.join("acked-mem.seg").exists());
         handle.redo_acked_durable_batches(&ids).await.unwrap();
+        assert!(handle
+            .slice_is_done("acked-mem", idx.slice_ordinal)
+            .unwrap());
         assert!(handle
             .catalog
             .get(&CatalogKey::Compaction(
@@ -2152,6 +2278,7 @@ mod tests {
                     &HashMap::new(),
                     &HashMap::new(),
                     &HashMap::new(),
+                    std::time::SystemTime::UNIX_EPOCH,
                 )
                 .await
                 .unwrap();
@@ -2232,6 +2359,7 @@ mod tests {
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             )
             .await
             .unwrap();
@@ -2267,10 +2395,10 @@ mod tests {
             .await
             .unwrap();
         let ids = handle.apply_acked_in_memory().unwrap();
+        handle.redo_acked_durable_batches(&ids).await.unwrap();
         assert!(handle
             .slice_is_done("legacy-ord", idx.slice_ordinal)
             .unwrap());
-        handle.redo_acked_durable_batches(&ids).await.unwrap();
         assert!(handle
             .catalog
             .get(&CatalogKey::Compaction(
@@ -2278,6 +2406,254 @@ mod tests {
             ))
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn persist_segment_checks_catalog_before_payload_write() {
+        let src = include_str!("wal_handle.rs");
+        let start = src
+            .find("pub async fn persist_segment")
+            .expect("persist_segment");
+        let body = src[start..]
+            .split("fn segment_row(")
+            .next()
+            .expect("persist_segment body");
+        assert!(
+            !body.contains("SystemTime::now()"),
+            "persist_segment must encode with the caller clock"
+        );
+        let catalog_at = body.find("self.segment_row(&id)").expect("catalog check");
+        let write_at = body
+            .find("write_payload_atomically")
+            .expect("atomic payload write");
+        assert!(
+            catalog_at < write_at,
+            "matching sha must skip payload rewrite"
+        );
+        let src = include_str!("wal_handle.rs");
+        let map = src
+            .find("fn catalog_durable_err")
+            .expect("catalog_durable_err");
+        let map_body = src[map..]
+            .split("pub(crate) fn flushing_commit")
+            .next()
+            .expect("catalog_durable_err body");
+        assert!(map_body.contains("DurableError::CatalogConflict"));
+        assert!(map_body.contains("CatalogError::ConditionFailed"));
+        assert!(map_body.contains("CatalogError::Conflict"));
+        let flush = src.find("fn flushing_commit").expect("flushing_commit");
+        let flush_body = src[flush..]
+            .split("pub(crate) fn payload_bytes")
+            .next()
+            .expect("flushing_commit body");
+        assert!(flush_body.contains("catalog_durable_err"));
+        let drop = src.find("fn delete_payload").expect("delete_payload");
+        let drop_body = src[drop..]
+            .split("fn meta_from_index_row")
+            .next()
+            .expect("delete_payload body");
+        assert!(drop_body.contains("tracing::warn!"));
+        assert!(!drop_body.contains("let _ ="));
+        assert!(
+            !src.contains(concat!("let _ = self.persist_missing", "_index")),
+            "index backfill OCC must not be swallowed"
+        );
+        let index = src
+            .find("fn persist_missing_index")
+            .expect("persist_missing_index");
+        let index_body = src[index..]
+            .split("pub fn load_or_build_index_meta")
+            .next()
+            .expect("persist_missing_index body");
+        assert!(index_body.contains("DurableError::CatalogConflict"));
+        assert!(index_body.contains("CatalogKey::Index"));
+    }
+
+    fn two_arrow_parts(
+    ) -> HashMap<crate::buffer::segment_file::PartitionKey, crate::buffer::segment_file::WalPayload>
+    {
+        use crate::buffer::segment_file::{PartitionKey, WalPayload};
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let mut batches = HashMap::new();
+        for part in ["p0", "p1"] {
+            batches.insert(
+                PartitionKey {
+                    sink_ref: "data_sinks.iceberg".into(),
+                    namespace: "ns".into(),
+                    partition: part.into(),
+                    time: None,
+                    schema_fingerprint: "fp".into(),
+                },
+                WalPayload::Arrow(vec![arrow::array::RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(StringArray::from(vec![part]))],
+                )
+                .unwrap()]),
+            );
+        }
+        batches
+    }
+
+    struct ConditionFailingCatalog {
+        inner: Arc<MemoryWalCatalog>,
+        remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    impl skippr_wal_catalog::WalCatalogRead for ConditionFailingCatalog {
+        fn get(
+            &self,
+            key: &CatalogKey,
+        ) -> Result<Option<CatalogRow>, skippr_wal_catalog::CatalogError> {
+            self.inner.get(key)
+        }
+        fn query_prefix(
+            &self,
+            prefix: CatalogPrefix,
+            after: Option<&CatalogKey>,
+            limit: usize,
+        ) -> Result<Vec<(CatalogKey, CatalogRow)>, skippr_wal_catalog::CatalogError> {
+            self.inner.query_prefix(prefix, after, limit)
+        }
+    }
+
+    impl WalCatalogStore for ConditionFailingCatalog {
+        fn commit(
+            &self,
+            txn: &CatalogTxn,
+            fence: CatalogFence,
+        ) -> Result<(), skippr_wal_catalog::CatalogError> {
+            if self.remaining.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                self.remaining
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(skippr_wal_catalog::CatalogError::ConditionFailed);
+            }
+            self.inner.commit(txn, fence)
+        }
+        fn delete_prefix(
+            &self,
+            prefix: CatalogPrefix,
+            fence: CatalogFence,
+        ) -> Result<(), skippr_wal_catalog::CatalogError> {
+            self.inner.delete_prefix(prefix, fence)
+        }
+        fn flush_durable(&self) -> Result<(), skippr_wal_catalog::CatalogError> {
+            self.inner.flush_durable()
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn persist_retry_matching_sha_does_not_rewrite_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = leased_handle(dir.path());
+        let (batches, _) = one_arrow_part();
+        handle
+            .persist_segment(
+                "seg-mtime",
+                &HashMap::new(),
+                &batches,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+        let path = handle.paths().segs.join("seg-mtime.seg");
+        let before = std::fs::read(&path).unwrap();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        handle
+            .persist_segment(
+                "seg-mtime",
+                &HashMap::new(),
+                &batches,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+        assert_eq!(handle.catalog_seq_seen().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reclaim_condition_failed_exhausts_to_catalog_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let paths = PipelinePaths::legacy_disk(dir.path());
+        let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
+        let fence = catalog_fence_from_guard(&guard).unwrap();
+        let inner = memory_catalog_for_test(fence);
+        let failing = Arc::new(ConditionFailingCatalog {
+            inner,
+            remaining: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let db = sled::open(dir.path().join("offsets")).unwrap();
+        let offsets: Arc<dyn OffsetStore> =
+            Arc::new(SledOffsetStore::new(db.open_tree("offsets").unwrap()));
+        let handle = PipelineWalHandle::new(key, paths, guard, failing.clone(), offsets);
+        let batches = two_arrow_parts();
+        handle
+            .persist_segment(
+                "seg-occ",
+                &HashMap::new(),
+                &batches,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+        failing
+            .remaining
+            .store(RECLAIM_OCC_ATTEMPTS, std::sync::atomic::Ordering::SeqCst);
+        let err = handle
+            .complete_slices_and_reclaim("seg-occ", &[0])
+            .await
+            .unwrap_err();
+        assert_eq!(err, DurableError::CatalogConflict);
+        assert!(!handle.slice_is_done("seg-occ", 0).unwrap());
+        assert!(handle.paths().segs.join("seg-occ.seg").exists());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn concurrent_reclaim_unions_ordinals() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = leased_handle(dir.path());
+        let batches = two_arrow_parts();
+        handle
+            .persist_segment(
+                "seg-union",
+                &HashMap::new(),
+                &batches,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+        let a = handle.clone();
+        let b = handle.clone();
+        let (left, right) = tokio::join!(
+            a.complete_slices_and_reclaim("seg-union", &[0]),
+            b.complete_slices_and_reclaim("seg-union", &[1]),
+        );
+        assert!(left.unwrap() || right.unwrap());
+        assert!(handle
+            .catalog
+            .get(&CatalogKey::Segment(SegmentId::new("seg-union").unwrap()))
+            .unwrap()
+            .is_none());
+        assert!(!handle.paths().segs.join("seg-union.seg").exists());
     }
 
     #[test]

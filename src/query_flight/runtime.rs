@@ -1,9 +1,8 @@
 //! One QueryRuntime: in-process datafusion-distributed Worker + distributed planner.
-//! `lake_only` is a registration option on this context, not a second factory.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use datafusion::error::DataFusionError;
@@ -186,6 +185,26 @@ pub fn query_context() -> datafusion::error::Result<SessionContext> {
         .ok_or_else(|| DataFusionError::Execution("QueryRuntime is not started".into()))
 }
 
+/// Per-query catalog list. Planner, codec, and UDFs stay on QueryRuntime.
+pub fn request_context() -> datafusion::error::Result<SessionContext> {
+    use datafusion::catalog::memory::{
+        MemoryCatalogProvider, MemoryCatalogProviderList, MemorySchemaProvider,
+    };
+    use datafusion::catalog::{CatalogProvider, CatalogProviderList};
+    let base = query_context()?.state();
+    let opts = base.config().options().catalog.clone();
+    let schema = Arc::new(MemorySchemaProvider::new());
+    let catalog = Arc::new(MemoryCatalogProvider::new());
+    catalog.register_schema(&opts.default_schema, schema)?;
+    let catalogs = Arc::new(MemoryCatalogProviderList::new());
+    catalogs.register_catalog(opts.default_catalog.clone(), catalog);
+    Ok(SessionContext::new_with_state(
+        SessionStateBuilder::new_from_existing(base)
+            .with_catalog_list(catalogs)
+            .build(),
+    ))
+}
+
 pub fn advertised_worker() -> Option<SocketAddr> {
     RUNTIME
         .read()
@@ -286,6 +305,44 @@ mod tests {
     use tokio::sync::Mutex;
 
     static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    #[tokio::test]
+    async fn request_context_isolates_same_namespace_providers() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::datasource::MemTable;
+
+        let _guard = TEST_LOCK.lock().await;
+        drain().await;
+        start("127.0.0.1".parse().unwrap()).await.unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let a = request_context().unwrap();
+        let b = request_context().unwrap();
+        let p1 = Arc::new(MemTable::try_new(schema.clone(), vec![vec![]]).unwrap());
+        let p2 = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
+        let a_task = {
+            let a = a.clone();
+            let p1 = p1.clone();
+            tokio::spawn(async move { a.register_table("ns", p1) })
+        };
+        let b_task = {
+            let b = b.clone();
+            let p2 = p2.clone();
+            tokio::spawn(async move { b.register_table("ns", p2) })
+        };
+        a_task.await.unwrap().unwrap();
+        b_task.await.unwrap().unwrap();
+        a.sql("SELECT * FROM ns").await.unwrap();
+        b.sql("SELECT * FROM ns").await.unwrap();
+        assert!(
+            query_context()
+                .unwrap()
+                .sql("SELECT * FROM ns")
+                .await
+                .is_err(),
+            "shared QueryRuntime catalog must stay empty"
+        );
+        drain().await;
+    }
 
     #[tokio::test]
     async fn query_context_fails_closed_without_runtime() {

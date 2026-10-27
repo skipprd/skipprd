@@ -5,8 +5,8 @@ use aws_sdk_dynamodb::Client;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use skippr_lease::{LEASE_ATTR_EPOCH, LEASE_ATTR_OWNER, LEASE_ATTR_RELEASED, LEASE_SK};
 use skippr_wal_catalog::{
-    CatalogError, CatalogFence, CatalogKey, CatalogOp, CatalogPrefix, CatalogRow, CatalogTxn,
-    DeleteCond, PutCond, WalCatalogStore, TXN_MAX_OPS,
+    validate_put, CatalogError, CatalogFence, CatalogKey, CatalogOp, CatalogPrefix, CatalogRow,
+    CatalogTxn, DeleteCond, PutCond, WalCatalogRead, WalCatalogStore, TXN_MAX_OPS,
 };
 
 use crate::run_on_worker;
@@ -22,7 +22,7 @@ impl DynamoWalCatalog {
     }
 }
 
-impl WalCatalogStore for DynamoWalCatalog {
+impl WalCatalogRead for DynamoWalCatalog {
     fn get(&self, key: &CatalogKey) -> Result<Option<CatalogRow>, CatalogError> {
         let table = self.table.clone();
         let pk = self.pk.clone();
@@ -51,7 +51,9 @@ impl WalCatalogStore for DynamoWalCatalog {
             ))
         })
     }
+}
 
+impl WalCatalogStore for DynamoWalCatalog {
     fn commit(&self, txn: &CatalogTxn, fence: CatalogFence) -> Result<(), CatalogError> {
         let table = self.table.clone();
         let pk = self.pk.clone();
@@ -201,6 +203,7 @@ fn lease_check(table: &str, pk: &str, fence: CatalogFence) -> Result<ConditionCh
 }
 
 fn op_to_item(table: &str, pk: &str, op: &CatalogOp) -> Result<TransactWriteItem, CatalogError> {
+    validate_put(op)?;
     match op {
         CatalogOp::Put { key, row, cond } => {
             let bytes = row.encode()?;
@@ -216,7 +219,7 @@ fn op_to_item(table: &str, pk: &str, op: &CatalogOp) -> Result<TransactWriteItem
                     AttributeValue::N(seq.max_seq.get().to_string()),
                 );
             }
-            if let Some(version) = row_version(row) {
+            if let Some(version) = row.version() {
                 item.insert("version".into(), AttributeValue::N(version.to_string()));
             }
             let mut put = Put::builder().table_name(table).set_item(Some(item));
@@ -267,18 +270,6 @@ fn seq_value(row: &CatalogRow) -> Result<u64, CatalogError> {
     match row {
         CatalogRow::Seq(seq) => Ok(seq.max_seq.get()),
         _ => Err(CatalogError::SeqOpOnNonSeqKey),
-    }
-}
-
-fn row_version(row: &CatalogRow) -> Option<u64> {
-    match row {
-        CatalogRow::Segment(r) => Some(r.version),
-        CatalogRow::Index(r) => Some(r.version),
-        CatalogRow::Slice(r) => Some(r.version),
-        CatalogRow::Compaction(r) => Some(r.version),
-        CatalogRow::Control(r) => Some(r.version),
-        CatalogRow::Format(r) => Some(r.row_version),
-        CatalogRow::Seq(_) => None,
     }
 }
 

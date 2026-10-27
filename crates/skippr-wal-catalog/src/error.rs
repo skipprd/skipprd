@@ -10,6 +10,10 @@ pub enum CatalogError {
     Fenced,
     #[error("catalog condition failed")]
     ConditionFailed,
+    #[error("catalog put version must be expected plus one")]
+    VersionMustAdvance,
+    #[error("legacy catalog slice rows are read-only")]
+    LegacyRowWrite,
     #[error("catalog transaction conflict")]
     Conflict,
     #[error("catalog codec: {0}")]

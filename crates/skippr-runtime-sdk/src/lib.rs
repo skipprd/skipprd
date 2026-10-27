@@ -12,7 +12,7 @@ pub mod wire;
 
 pub use skippr_core::RUNNING;
 pub use skippr_core::{
-    buffer, converters, discover, helpers, ingest, lineage, metrics, plugins, serdes,
+    buffer, converters, discover, helpers, ingest, lineage, metrics, plugins, serdes, wal_slice_ref,
 };
 pub use skippr_plugin_macros::SkipprConfig;
 

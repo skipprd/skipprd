@@ -372,12 +372,10 @@ async fn try_promote_and_ingest(
     let statuses = statuses_from_gossip(&gossip, &view.key, &identity).await;
     let candidates = replica_candidates_for(&gossip, &membership).await;
     let ctx = PromoteContext {
-        app_config: app_cfg.clone(),
         paths: paths.clone(),
         identity: identity.clone(),
         local_replica,
         gossip: gossip.clone(),
-        flatten_events: view.flatten_events,
     };
     let outcome = promote_pipeline(
         leases.clone(),
@@ -432,6 +430,14 @@ async fn try_promote_and_ingest(
             replicator,
         );
         install_wal_handle(handle.clone());
+        crate::cluster::schema::load_and_install_pipeline_schema(
+            app_cfg,
+            &view.key,
+            view.flatten_events,
+            session.initialized,
+        )
+        .await
+        .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
         crate::buffer::wal_startup::wal_startup(&handle, app_cfg, true).await?;
         let live = handle.catalog_segment_ids()?;
         let prune_epoch = outcome
@@ -732,69 +738,54 @@ pub async fn clustered_query_collect(
         .filter(|record| record.ad.ready)
         .collect();
     ready.sort_by_key(|record| record.ad.node_id.to_string());
-    let mut last_err = None;
-    for record in &ready {
-        let endpoint = record.ad.flight_addr;
-        match crate::query_flight::client::fetch_flight_sql(endpoint, sql).await {
-            Ok(batches) => {
-                let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
-                tracing::info!(
-                    flight = %endpoint,
-                    rows,
-                    "clustered query Flight SQL"
-                );
-                return Ok(batches);
-            }
-            Err(err) => {
-                tracing::info!(
-                    flight = %endpoint,
-                    error = %err,
-                    "clustered query Flight SQL contact failed; trying next ready node"
-                );
-                last_err = Some(err.to_string());
+    let mut last_err: Option<String>;
+    let mut pin_attempt = 0u32;
+    loop {
+        let mut pin_lost = false;
+        last_err = None;
+        for record in &ready {
+            let endpoint = record.ad.flight_addr;
+            match crate::query_flight::client::fetch_flight_sql(endpoint, sql).await {
+                Ok(batches) => {
+                    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+                    tracing::info!(
+                        flight = %endpoint,
+                        rows,
+                        "clustered query Flight SQL"
+                    );
+                    return Ok(batches);
+                }
+                Err(err) => {
+                    let text = err.to_string();
+                    if crate::sqlrt::wal_table::is_wal_pin_lost_text(&text) {
+                        pin_lost = true;
+                        last_err = Some(text);
+                        break;
+                    }
+                    tracing::info!(
+                        flight = %endpoint,
+                        error = %err,
+                        "clustered query Flight SQL contact failed; trying next ready node"
+                    );
+                    last_err = Some(text);
+                }
             }
         }
+        if pin_lost {
+            pin_attempt += 1;
+            if pin_attempt < crate::sqlrt::wal_table::QUERY_PIN_RETRY_CEILING {
+                continue;
+            }
+            return Err(DurableError::Io(last_err.unwrap_or_else(|| {
+                "WAL slice was reclaimed after the query pinned it; retry the query".into()
+            })));
+        }
+        break;
     }
-    tracing::info!(
-        error = last_err.as_deref().unwrap_or("no ready Flight SQL node"),
-        "clustered query Flight SQL unreachable; Iceberg-only"
-    );
-    run_lake_only_query(app_cfg, sql, &config).await
-}
-
-async fn run_lake_only_query(
-    app_cfg: &Config,
-    sql: &str,
-    config: &ClusterConfig,
-) -> Result<Vec<arrow::array::RecordBatch>, DurableError> {
-    let scope = crate::cluster::identity::query_tenant_scope_from_env()
-        .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
-    let opts = crate::sqlrt::tables::ClusteredSelectOpts {
-        identity: config.identity(),
-        scope,
-        local_flight: "127.0.0.1:0".parse().unwrap(),
-        registry: None,
-        lake_only: true,
-    };
-    let plan = crate::sqlrt::tables::plan_clustered_select(app_cfg, sql, &opts)
-        .await
-        .map_err(|err| DurableError::Io(err.to_string()))?;
-    if !plan.wal_only.is_empty() {
-        tracing::info!(
-            wal_only = ?plan.wal_only,
-            "clustered query does not register WAL-only pipelines"
-        );
-    }
-    let batches = plan
-        .df
-        .collect()
-        .await
-        .map_err(|err| DurableError::Io(err.to_string()))?;
-    tracing::info!(
-        rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
-        "clustered query Iceberg-only"
-    );
-    Ok(batches)
+    Err(DurableError::Io(format!(
+        "no ready Flight SQL node: {}",
+        last_err.unwrap_or_else(|| "no ready Flight SQL node".into())
+    )))
 }
 
 pub struct PipelineScheduler {
@@ -852,6 +843,28 @@ mod tests {
     }
 
     #[test]
+    fn primary_schema_loads_after_writer_handle() {
+        let src = include_str!("scheduler.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let install = prod
+            .find("install_wal_handle(handle.clone())")
+            .expect("install_wal_handle");
+        let schema = prod
+            .find("load_and_install_pipeline_schema")
+            .expect("schema after catalog open");
+        assert!(
+            install < schema,
+            "schema must see Skippr Store via the installed writer handle"
+        );
+        let promote = include_str!("promote.rs");
+        let promote_prod = promote.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !promote_prod.contains("load_and_install_pipeline_schema"),
+            "promote must not consult WAL namespaces before the catalog is open"
+        );
+    }
+
+    #[test]
     fn payload_missing_is_logged_and_retried() {
         let src = include_str!("scheduler.rs");
         assert!(src.contains("promote skipped"));
@@ -864,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn clustered_query_is_one_flight_or_lake_only() {
+    fn clustered_query_fails_closed_without_flight() {
         let src = include_str!("scheduler.rs");
         let query = src
             .split("pub async fn clustered_query_collect")
@@ -874,8 +887,11 @@ mod tests {
             .next()
             .unwrap();
         assert!(query.contains("fetch_flight_sql"));
-        assert!(query.contains("Iceberg-only"));
-        assert!(query.contains("run_lake_only_query"));
+        assert!(query.contains("no ready Flight SQL node"));
+        assert!(query.contains("QUERY_PIN_RETRY_CEILING"));
+        assert!(query.contains("is_wal_pin_lost_text"));
+        assert!(!query.contains("Iceberg-only"));
+        assert!(!query.contains("run_lake_only_query"));
         assert!(!query.contains("query_status"));
         assert!(!query.contains("query_schedulers"));
         assert!(!query.contains("select_highest_hash_consistent"));

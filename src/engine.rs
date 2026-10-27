@@ -1033,21 +1033,17 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
         String::new()
     };
 
-    // CDC compatibility validation at startup (requires a data sink)
+    let pipeline_key = crate::pipeline_backend::pipeline_key(config).map_err(io::Error::other)?;
     if wal_only(config) {
-        crate::plugins::cdc::set_global_cdc_contract(None);
+        crate::plugins::cdc::remove_pipeline_cdc_contracts(&pipeline_key)
+            .map_err(|err| io::Error::other(err.to_string()))?;
     } else {
-        use crate::plugins::cdc::{
-            derive_and_validate, set_global_cdc_contract, set_namespace_cdc_contracts,
-            CompatibilityResult,
-        };
-        use std::collections::BTreeMap;
+        use crate::plugins::cdc::{derive_and_validate, CompatibilityResult};
         let pipeline = config.get_pipeline_config();
         if config.pipeline_type().map_err(io::Error::other)?
             == crate::pipeline_type::PipelineType::Cdc
         {
             let cdc_cfg = pipeline.cdc.clone().unwrap_or_default();
-            let cdc_cfg = &cdc_cfg;
             let input_name = config.get_pipeline_input_plugin_name();
             let runtime_input_version =
                 config
@@ -1083,38 +1079,25 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
                     crate::plugins::cdc::sink_capabilities::by_name(&output_plugin_name).cloned()
                 });
             if let (Some(src), Some(snk)) = (src_cap.as_ref(), sink_cap.as_ref()) {
-                let mut contracts = BTreeMap::new();
-                let default_contract = &cdc_cfg.default;
-                let source_contracts = METADATA.load().source_contracts.clone();
-                let mut namespace_configs = vec![(
-                    "*".to_string(),
-                    default_contract.business_key_columns.clone(),
-                )];
-                namespace_configs.extend(cdc_cfg.namespaces.iter().map(|(namespace, cfg)| {
-                    let keys = if cfg.business_key_columns.is_empty() {
-                        if let Some(source_contract) = source_contracts.get(namespace) {
-                            source_contract.business_key_column_names()
-                        } else {
-                            default_contract.business_key_columns.clone()
-                        }
-                    } else {
-                        cfg.business_key_columns.clone()
-                    };
-                    (namespace.clone(), keys)
-                }));
-                for (namespace, business_key_columns) in namespace_configs {
-                    match derive_and_validate(src, snk, &namespace, &business_key_columns) {
+                let source_keys = crate::plugins::source_contract::cdc_source_key_columns(
+                    &pipeline_metadata.source_contracts,
+                );
+                let resolved = cdc_cfg.resolve_contracts(&source_keys);
+                if resolved.is_empty() {
+                    return Err(io::Error::other(format!(
+                        "CDC pipeline '{pipeline_name}' has no business keys after resolve_contracts"
+                    )));
+                }
+                let mut contracts = crate::plugins::cdc::CdcContracts::default();
+                if let Some(mut default) = resolved.default {
+                    match derive_and_validate(src, snk, "default", &default.business_key_columns) {
                         CompatibilityResult::Compatible(guarantee) => {
                             info!(
-                                "CDC validation passed: namespace={} source={} sink={} enforced_guarantee={:?}",
-                                namespace, src.name, snk.name, guarantee
+                                "CDC validation passed: namespace=default source={} sink={} enforced_guarantee={:?}",
+                                src.name, snk.name, guarantee
                             );
-                            let contract = build_cdc_contract_for_namespace(
-                                &namespace,
-                                business_key_columns,
-                                guarantee,
-                            );
-                            contracts.insert(namespace, contract);
+                            default.effective_guarantee = guarantee;
+                            contracts.default = Some(default);
                         }
                         CompatibilityResult::Incompatible(reasons) => {
                             for r in &reasons {
@@ -1129,17 +1112,43 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
                         }
                     }
                 }
-                set_namespace_cdc_contracts(contracts);
+                for (namespace, mut contract) in resolved.namespaces {
+                    match derive_and_validate(src, snk, &namespace, &contract.business_key_columns)
+                    {
+                        CompatibilityResult::Compatible(guarantee) => {
+                            info!(
+                                "CDC validation passed: namespace={} source={} sink={} enforced_guarantee={:?}",
+                                namespace, src.name, snk.name, guarantee
+                            );
+                            contract.effective_guarantee = guarantee;
+                            contracts.namespaces.insert(namespace, contract);
+                        }
+                        CompatibilityResult::Incompatible(reasons) => {
+                            for r in &reasons {
+                                error!("CDC incompatibility: {}", r);
+                            }
+                            panic!(
+                                "CDC validation failed: source={} sink={} — {} reason(s)",
+                                src.name,
+                                snk.name,
+                                reasons.len()
+                            );
+                        }
+                    }
+                }
+                crate::plugins::cdc::install_pipeline_cdc_contracts(
+                    pipeline_key.clone(),
+                    contracts,
+                )
+                .map_err(|err| io::Error::other(err.to_string()))?;
             } else {
-                warn!(
-                    "CDC config present but source '{}' or sink '{}' has not declared capabilities; \
-                     validation skipped. The pipeline will run in append mode.",
-                    input_name, output_plugin_name
-                );
-                set_global_cdc_contract(None);
+                return Err(io::Error::other(format!(
+                    "CDC pipeline source '{input_name}' or sink '{output_plugin_name}' has not declared capabilities"
+                )));
             }
         } else {
-            set_global_cdc_contract(None);
+            crate::plugins::cdc::remove_pipeline_cdc_contracts(&pipeline_key)
+                .map_err(|err| io::Error::other(err.to_string()))?;
         }
 
         validate_pipeline_source_contracts_at_startup(config, &output_plugin_name).await;
@@ -1683,21 +1692,6 @@ async fn validate_pipeline_source_contracts_at_startup(config: &Config, output_p
                 contract.namespace
             );
         }
-    }
-}
-
-fn build_cdc_contract_for_namespace(
-    namespace: &str,
-    business_key_columns: Vec<String>,
-    effective_guarantee: crate::plugins::cdc::EffectiveGuarantee,
-) -> crate::plugins::cdc::NamespaceContract {
-    crate::plugins::cdc::NamespaceContract {
-        namespace: namespace.to_string(),
-        business_key_columns,
-        effective_guarantee,
-        order_token_semantics: crate::plugins::cdc::OrderTokenSemantics::SourceDefined,
-        null_key_policy: crate::plugins::cdc::NullKeyPolicy::Reject,
-        requires_skippr_system_columns: true,
     }
 }
 

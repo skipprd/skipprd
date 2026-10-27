@@ -120,8 +120,14 @@ fn reference_path_wal_cdc_metadata_roundtrip() {
     let mut blobs = HashMap::new();
     blobs.insert(key.clone(), bincode::serialize(&wal_meta).unwrap());
 
-    seg.write_snapshot(&offsets, &batches, &parts_meta, &blobs)
-        .unwrap();
+    seg.write_snapshot(
+        &offsets,
+        &batches,
+        &parts_meta,
+        &blobs,
+        std::time::SystemTime::UNIX_EPOCH,
+    )
+    .unwrap();
 
     let mut f = std::fs::File::open(&seg.path).unwrap();
     let read_blobs = SegmentFile::read_part_meta_blobs_from_reader(&mut f).unwrap();
@@ -152,8 +158,14 @@ fn reference_path_wal_append_mode_has_empty_meta() {
     let offsets: HashMap<OffsetKey, u64> = HashMap::new();
 
     let empty_blobs: HashMap<PartitionKey, Vec<u8>> = HashMap::new();
-    seg.write_snapshot(&offsets, &batches, &parts_meta, &empty_blobs)
-        .unwrap();
+    seg.write_snapshot(
+        &offsets,
+        &batches,
+        &parts_meta,
+        &empty_blobs,
+        std::time::SystemTime::UNIX_EPOCH,
+    )
+    .unwrap();
 
     let mut f = std::fs::File::open(&seg.path).unwrap();
     let blobs = SegmentFile::read_part_meta_blobs_from_reader(&mut f).unwrap();

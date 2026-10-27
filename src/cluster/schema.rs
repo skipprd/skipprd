@@ -1,10 +1,9 @@
 use skippr_lease::{PipelineKey, PromoteError};
 
-use crate::buffer::wal_handle;
+use crate::buffer::wal_reader;
 use crate::discover::PipelineMetadata;
 use crate::helpers::configuration::Config;
 use crate::runtime_plugins::schema_state::install_from_pipeline_metadata;
-use skippr_wal_catalog::{query_all, CatalogPrefix, CatalogRow};
 
 pub async fn load_and_install_pipeline_schema(
     config: &Config,
@@ -73,29 +72,15 @@ pub fn ensure_live_wal_namespaces_in_metadata(
 }
 
 pub fn live_wal_namespaces(key: &PipelineKey) -> Result<Vec<String>, PromoteError> {
-    let Some(handle) = wal_handle::wal_handle_for(key) else {
-        return Ok(Vec::new());
+    let Some(reader) = wal_reader::wal_reader_for(key) else {
+        return Err(PromoteError::Other(format!(
+            "WAL catalog for pipeline {} is not open",
+            key.pipeline()
+        )));
     };
-    let rows = query_all(handle.catalog(), CatalogPrefix::Segment)
+    let mut out = reader
+        .live_namespaces()
         .map_err(|err| PromoteError::Other(err.to_string()))?;
-    let mut out = Vec::new();
-    for (_, row) in rows {
-        let CatalogRow::Segment(seg) = row else {
-            continue;
-        };
-        let meta = crate::buffer::wal_handle::admit_payload(&seg.location, &seg.payload_sha256)
-            .map_err(|err| {
-                PromoteError::Other(format!(
-                    "live WAL decode failed for {}: {err}",
-                    seg.segment_id.as_str()
-                ))
-            })?;
-        for idx in meta.index {
-            if !idx.key.namespace.is_empty() {
-                out.push(idx.key.namespace);
-            }
-        }
-    }
     out.sort();
     out.dedup();
     Ok(out)
@@ -140,5 +125,58 @@ mod tests {
             crate::pipeline_type::PipelineType::Ingest,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn live_wal_namespaces_use_catalog_index_not_payload_decode() {
+        let src = include_str!("schema.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !prod.contains("admit_payload"),
+            "promote live namespaces must not decode payload bytes"
+        );
+        assert!(
+            prod.contains("live_namespaces"),
+            "promote live namespaces come from WalCatalogReader"
+        );
+        assert!(
+            !prod.contains("Ok(Vec::new())"),
+            "missing catalog must fail closed, not skip Skippr Store"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn live_wal_namespaces_fails_when_catalog_is_not_open() {
+        use crate::buffer::wal_handle::remove_wal_handle;
+        use crate::buffer::wal_reader::clear_query_readers;
+
+        let key = PipelineKey::new("t", "w", "schema-no-catalog").unwrap();
+        remove_wal_handle(&key);
+        clear_query_readers();
+        let err = live_wal_namespaces(&key).unwrap_err();
+        assert!(
+            err.to_string().contains("not open"),
+            "missing catalog must fail closed, got {err}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn live_wal_namespaces_from_query_reader() {
+        use crate::buffer::wal_handle::remove_wal_handle;
+        use crate::buffer::wal_reader::{
+            clear_query_readers, install_query_reader, reader_with_live_slice,
+        };
+
+        let key = PipelineKey::new("t", "w", "schema-query-ns").unwrap();
+        remove_wal_handle(&key);
+        clear_query_readers();
+        install_query_reader(reader_with_live_slice(key.clone(), "events", "live-seg")).unwrap();
+        assert_eq!(
+            live_wal_namespaces(&key).unwrap(),
+            vec!["events".to_string()]
+        );
+        clear_query_readers();
     }
 }

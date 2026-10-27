@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 
@@ -7,6 +8,7 @@ use serde_derive::{Deserialize, Serialize};
 use crate::protocol::RuntimeWalPartRef;
 pub use skippr_core::sink_apply_identity::canonical_wal_refs_fingerprint;
 use skippr_core::sink_apply_identity::SINK_APPLY_ENVELOPE_V2;
+use skippr_core::wal_slice_ref::WalSliceRef;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -25,8 +27,8 @@ pub struct ObjectWriteManifest {
     pub wal_refs_fingerprint_v2: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub has_cdc_metadata: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub wal_segment_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub wal_slices: BTreeSet<WalSliceRef>,
 }
 
 impl ObjectWriteManifest {
@@ -35,21 +37,19 @@ impl ObjectWriteManifest {
         idempotency_key: impl Into<String>,
         schema_fingerprint: impl Into<String>,
         wal_refs: &[RuntimeWalPartRef],
-    ) -> Self {
+    ) -> io::Result<Self> {
         let compaction_id = compaction_id.into();
         let idempotency_key = idempotency_key.into();
         let schema_fingerprint = schema_fingerprint.into();
         let has_cdc_metadata = wal_refs
             .iter()
             .any(|wal_ref| wal_ref.cdc_meta_hash.is_some());
-        let mut wal_segment_ids: Vec<String> = wal_refs
+        let wal_slices = wal_refs
             .iter()
-            .map(|wal_ref| wal_ref.segment_id.clone())
-            .filter(|id| !id.is_empty())
-            .collect();
-        wal_segment_ids.sort();
-        wal_segment_ids.dedup();
-        Self {
+            .map(|wal_ref| WalSliceRef::try_from_parts(&wal_ref.segment_id, wal_ref.start))
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        Ok(Self {
             compaction_id,
             idempotency_key,
             schema_fingerprint,
@@ -58,8 +58,8 @@ impl ObjectWriteManifest {
             identity_version: Some(SINK_APPLY_ENVELOPE_V2),
             wal_refs_fingerprint_v2: Some(canonical_wal_refs_fingerprint(wal_refs)),
             has_cdc_metadata,
-            wal_segment_ids,
-        }
+            wal_slices,
+        })
     }
 
     pub fn grouped_receipt_object_key(
@@ -377,8 +377,34 @@ mod tests {
     fn object_manifest_matches_same_context_independent_of_ref_order() {
         let refs = vec![wal_ref("b", 2), wal_ref("a", 1)];
         let reversed = vec![wal_ref("a", 1), wal_ref("b", 2)];
-        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs);
+        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs).unwrap();
         assert!(manifest.matches_context("c1", "k1", "schema", &reversed));
+    }
+
+    #[test]
+    fn object_manifest_records_slice_refs_not_whole_segments() {
+        let refs = vec![
+            wal_ref("seg-a", 0),
+            wal_ref("seg-a", 100),
+            wal_ref("seg-b", 0),
+        ];
+        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs).unwrap();
+        assert_eq!(
+            manifest.wal_slices,
+            [
+                WalSliceRef::try_from_parts("seg-a", 0).unwrap(),
+                WalSliceRef::try_from_parts("seg-a", 100).unwrap(),
+                WalSliceRef::try_from_parts("seg-b", 0).unwrap(),
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+
+    #[test]
+    fn object_manifest_rejects_invalid_segment_id() {
+        let refs = vec![wal_ref("seg@bad", 0)];
+        assert!(ObjectWriteManifest::from_context("c1", "k1", "schema", &refs).is_err());
     }
 
     #[test]
@@ -403,7 +429,7 @@ mod tests {
     #[test]
     fn object_manifest_rejects_schema_mismatch() {
         let refs = vec![wal_ref("a", 1)];
-        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema-a", &refs);
+        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema-a", &refs).unwrap();
         assert!(!manifest.matches_context("c1", "k1", "schema-b", &refs));
     }
 
@@ -417,14 +443,14 @@ mod tests {
             cdc_meta_hash: Some([2; 32]),
             ..wal_ref("a", 1)
         }];
-        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs);
+        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs).unwrap();
         assert!(!manifest.matches_context("c1", "k1", "schema", &changed));
     }
 
     #[test]
     fn legacy_non_cdc_receipt_matches_v2_manifest() {
         let refs = vec![wal_ref("a", 1)];
-        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs);
+        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs).unwrap();
         let json = serde_json::json!({
             "version": 2,
             "compaction_id": "c1",
@@ -447,7 +473,7 @@ mod tests {
     #[test]
     fn grouped_receipt_remains_readable_as_legacy_object_manifest() {
         let refs = vec![wal_ref("a", 1)];
-        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs);
+        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs).unwrap();
         let receipt = GroupedWriteReceipt::from_manifest_and_upload(
             &manifest,
             "gs://bucket/root/k1.parquet",
@@ -475,7 +501,7 @@ mod tests {
     #[test]
     fn legacy_object_manifest_deserializes_and_matches_v2_manifest() {
         let refs = vec![wal_ref("a", 1)];
-        let expected = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs);
+        let expected = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs).unwrap();
         let json = serde_json::json!({
             "compaction_id": "c1",
             "idempotency_key": "k1",

@@ -169,10 +169,10 @@ Each item: ran the closest existing test if any. `[ ]` means the **process** sce
   - **Result:** pass (harness advanced).
 
 - [ ] Pointer-before-completion and completion-before-query: UNION has each source row once
-  - **Ran:** ingest UNION uniqueness throughout the harness (pass), including immediately after compaction of `batch10`. Iceberg snapshot ancestry now carries `skippr.wal-segment-ids`; live WAL excludes those segments. `select_live_ordinals` is catalog `SliceIndexEntry` minus Iceberg-named segment ids.
+  - **Ran:** ingest UNION uniqueness throughout the harness (pass), including immediately after compaction of `batch10`. Iceberg snapshot ancestry now carries `skippr.wal-slices`; live WAL excludes those slices. Iceberg∪WAL `ReadBoundary::new` subtracts Iceberg-named slices `(segment_id, start)` from `WalCatalogReader::live_slices`.
   - **Remark:** WAL may be behind. Eventual uniqueness after compaction is `wait_unique_ids`.
 
-- [ ] Query skips an unreachable replica; Iceberg-only is allowed
+- [ ] Query skips an unreachable replica; all Flight SQL nodes down fails the query
   - **Harness:** `query_retry_lagging` (2026-08-17 `run.py`).
   - **Result:** pass (harness advanced).
 

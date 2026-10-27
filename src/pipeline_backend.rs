@@ -11,7 +11,7 @@ use skippr_lease::{
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::Offsets;
 use crate::helpers::wal_storage::SkipprStoreKind;
-use skippr_wal_catalog::{CatalogFence, WalCatalogStore};
+use skippr_wal_catalog::{CatalogFence, WalCatalogRead, WalCatalogStore};
 
 pub async fn open_pipeline_lease_store(
     kind: SkipprStoreKind,
@@ -134,11 +134,23 @@ pub fn open_wal_catalog(
             let catalog = offsets.open_sled_wal_catalog(fence)?;
             Ok(Arc::new(catalog))
         }
+        SkipprStoreKind::DynamoDb => open_shared_wal_catalog(kind, table, pk),
+    }
+}
+
+fn open_shared_wal_catalog(
+    kind: SkipprStoreKind,
+    table: String,
+    pk: String,
+) -> Result<Arc<dyn WalCatalogStore>, String> {
+    match kind {
+        SkipprStoreKind::Sled => Err("sled WAL catalog is local, not a shared store".into()),
         SkipprStoreKind::DynamoDb => {
             #[cfg(feature = "offset-store-dynamodb")]
             {
-                let catalog = skippr_offset_store_dynamodb::DynamoWalCatalog::new(table, pk);
-                Ok(Arc::new(catalog))
+                Ok(Arc::new(
+                    skippr_offset_store_dynamodb::DynamoWalCatalog::new(table, pk),
+                ))
             }
             #[cfg(not(feature = "offset-store-dynamodb"))]
             {
@@ -161,6 +173,31 @@ pub fn open_wal_catalog_for_config(
         config.offset_store_partition_key(),
         fence,
     )
+}
+
+/// Same Skippr Store kind/table as ingest. Sled is `open_read` (commits are
+/// fenced). DynamoDB is constructed as `WalCatalogRead` only.
+pub fn open_wal_catalog_reader_for_config(
+    config: &Config,
+    offsets: Option<&Offsets>,
+) -> Result<Arc<dyn WalCatalogRead>, String> {
+    match configured_kind(config)? {
+        SkipprStoreKind::Sled => {
+            let offsets = offsets.ok_or_else(|| {
+                "sled WAL catalog requires an open local offset database".to_string()
+            })?;
+            Ok(Arc::new(offsets.open_sled_wal_catalog_read()?))
+        }
+        SkipprStoreKind::DynamoDb => {
+            let _ = offsets;
+            let store = open_shared_wal_catalog(
+                SkipprStoreKind::DynamoDb,
+                config.get_skippr_store_name(),
+                config.offset_store_partition_key(),
+            )?;
+            Ok(store as Arc<dyn WalCatalogRead>)
+        }
+    }
 }
 
 /// Discover reset: catalog rows (`wal#`) plus published offset/checkpoint
@@ -199,6 +236,7 @@ mod tests {
     use crate::helpers::wal_storage::SkipprStoreKind;
     use serde_json::json;
     use serial_test::serial;
+    use skippr_wal_catalog::WalCatalogRead;
 
     #[test]
     #[serial]
@@ -320,6 +358,62 @@ mod tests {
         assert_eq!(
             lease.get(b"lease-row").unwrap().as_deref(),
             Some(b"held".as_slice())
+        );
+    }
+
+    #[test]
+    fn query_reader_opener_does_not_construct_a_commit_fence() {
+        let src = include_str!("pipeline_backend.rs");
+        let start = src
+            .find("pub fn open_wal_catalog_reader_for_config")
+            .expect("open_wal_catalog_reader_for_config");
+        let body = src[start..]
+            .split("pub fn reset_pipeline_state")
+            .next()
+            .expect("reader opener body");
+        assert!(
+            body.contains("open_sled_wal_catalog_read"),
+            "sled query open must use open_read"
+        );
+        assert!(
+            !body.contains("CatalogFence"),
+            "query opener must not build a commit fence"
+        );
+        assert!(
+            !body.contains("open_wal_catalog("),
+            "query opener must not call the writer factory"
+        );
+        assert!(
+            body.contains("open_shared_wal_catalog"),
+            "DynamoDB reader open shares the fence-free constructor"
+        );
+    }
+
+    #[test]
+    fn sled_query_catalog_read_rejects_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sled::open(dir.path()).unwrap();
+        let offsets = Offsets::from_local_db_for_test(db);
+        let catalog = offsets.open_sled_wal_catalog_read().unwrap();
+        let fence = CatalogFence {
+            owner: skippr_lease::NodeId::generate(),
+            epoch: skippr_lease::LeaseEpoch::new(1),
+        };
+        let mut txn = skippr_wal_catalog::CatalogTxn::new();
+        txn.put(
+            skippr_wal_catalog::CatalogKey::Format,
+            skippr_wal_catalog::CatalogRow::Format(skippr_wal_catalog::FormatRow {
+                version: skippr_wal_catalog::FORMAT_VERSION,
+                phase: skippr_wal_catalog::FormatPhase::Clean,
+                row_version: 0,
+            }),
+            skippr_wal_catalog::PutCond::NotExists,
+        )
+        .unwrap();
+        let err = catalog.commit(&txn, fence).unwrap_err();
+        assert!(
+            matches!(err, skippr_wal_catalog::CatalogError::Fenced),
+            "query-opened sled catalog must not commit, got {err}"
         );
     }
 }

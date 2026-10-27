@@ -650,7 +650,7 @@ impl DataSink for DataSinkAthenaPlugin {
             ctx.idempotency_key,
             ctx.schema_fingerprint,
             &ctx.wal_refs,
-        );
+        )?;
         let receipt_key = ObjectWriteManifest::grouped_receipt_object_key(
             &self.config.s3_prefix,
             &namespace,
@@ -824,7 +824,7 @@ impl DataSink for DataSinkAthenaPlugin {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             &ctx.wal_refs,
-        );
+        )?;
         let (outcome, applied) = self
             .inner_sync(
                 stream,
@@ -1005,7 +1005,7 @@ impl DataSinkAthenaPlugin {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             &ctx.wal_refs.clone_vec(),
-        );
+        )?;
         let receipt_key = ObjectWriteManifest::grouped_receipt_object_key(
             &self.config.s3_prefix,
             &namespace,
@@ -3417,7 +3417,7 @@ mod contract_schema_tests {
             identity_version: Some(2),
             wal_refs_fingerprint_v2: Some("canonical-wal-fingerprint".to_string()),
             has_cdc_metadata: true,
-            wal_segment_ids: Vec::new(),
+            wal_slices: Default::default(),
         };
         let applied = InnerSyncApplied {
             final_key: "root/users/region=eu/compaction-0001.parquet".to_string(),

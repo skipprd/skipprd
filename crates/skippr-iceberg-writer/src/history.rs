@@ -10,6 +10,7 @@ use std::io;
 use iceberg::io::FileIO;
 use iceberg::spec::{ManifestStatus, Snapshot, TableMetadata};
 use skippr_runtime_sdk::plugins::LiveWalSegments;
+use skippr_runtime_sdk::wal_slice_ref::{decode_wal_slices, WalSliceRef, SNAPSHOT_WAL_SLICES};
 
 pub(crate) const SNAPSHOT_RETAIN_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 pub(crate) const SNAPSHOT_RETAIN_LATEST: usize = 100;
@@ -19,7 +20,6 @@ pub(crate) const SNAPSHOT_EXPIRE_MIN_BATCH: usize = 16;
 pub(crate) const SNAPSHOT_EXPIRE_MAX_PER_PASS: usize = 256;
 
 pub(crate) const SNAPSHOT_PIPELINE: &str = "skippr.pipeline";
-pub(crate) const SNAPSHOT_WAL_SEGMENT_IDS: &str = "skippr.wal-segment-ids";
 pub(crate) const DELETE_AFTER_COMMIT: &str = "write.metadata.delete-after-commit.enabled";
 
 const DELETED_DATA_FILES: &str = "deleted-data-files";
@@ -38,7 +38,7 @@ struct SnapshotFacts<'a> {
     timestamp_ms: i64,
     referenced: bool,
     pipeline: Option<&'a str>,
-    segment_ids: Vec<&'a str>,
+    wal_slices: Option<BTreeSet<WalSliceRef>>,
     removes_files: bool,
 }
 
@@ -57,15 +57,9 @@ impl<'a> SnapshotFacts<'a> {
             timestamp_ms: snapshot.timestamp_ms(),
             referenced: referenced.contains(&snapshot.snapshot_id()),
             pipeline: props.get(SNAPSHOT_PIPELINE).map(String::as_str),
-            segment_ids: props
-                .get(SNAPSHOT_WAL_SEGMENT_IDS)
-                .map(|ids| {
-                    ids.split(',')
-                        .map(str::trim)
-                        .filter(|id| !id.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default(),
+            wal_slices: wal_slices_from_property(
+                props.get(SNAPSHOT_WAL_SLICES).map(String::as_str),
+            ),
             removes_files: count(DELETED_DATA_FILES) > 0 || count(REMOVED_DELETE_FILES) > 0,
         }
     }
@@ -74,7 +68,18 @@ impl<'a> SnapshotFacts<'a> {
         !self.referenced
             && self.timestamp_ms <= fence.now_ms.saturating_sub(SNAPSHOT_RETAIN_AGE_MS)
             && self.pipeline == Some(fence.pipeline)
-            && !self.segment_ids.iter().any(|id| fence.live.contains(id))
+            && self.wal_slices.as_ref().is_some_and(|slices| {
+                !slices
+                    .iter()
+                    .any(|slice| fence.live.contains(slice.segment_id.as_str()))
+            })
+    }
+}
+
+fn wal_slices_from_property(value: Option<&str>) -> Option<BTreeSet<WalSliceRef>> {
+    match value {
+        None => None,
+        Some(raw) => decode_wal_slices(raw).ok(),
     }
 }
 
@@ -224,7 +229,9 @@ mod tests {
             timestamp_ms: NOW_MS - age_ms,
             referenced: false,
             pipeline: Some("p"),
-            segment_ids: vec![segment],
+            wal_slices: Some(BTreeSet::from([
+                WalSliceRef::try_from_parts(segment, 0).unwrap()
+            ])),
             removes_files: false,
         }
     }
@@ -265,7 +272,10 @@ mod tests {
     #[test]
     fn keeps_snapshots_naming_a_live_wal_segment() {
         let mut snapshots = history(150, 48 * HOUR_MS);
-        snapshots[4].segment_ids = vec!["seg-a", "seg-live"];
+        snapshots[4].wal_slices = Some(BTreeSet::from([
+            WalSliceRef::try_from_parts("seg-a", 0).unwrap(),
+            WalSliceRef::try_from_parts("seg-live", 0).unwrap(),
+        ]));
 
         let expired = select(&mut snapshots, &["seg-live"]);
 
@@ -295,7 +305,10 @@ mod tests {
     #[test]
     fn a_file_removing_snapshot_waits_for_everything_older() {
         let mut snapshots = history(150, 48 * HOUR_MS);
-        snapshots[0].segment_ids = vec!["seg-live"];
+        snapshots[0].wal_slices =
+            Some(BTreeSet::from([
+                WalSliceRef::try_from_parts("seg-live", 0).unwrap()
+            ]));
         snapshots[30].removes_files = true;
 
         let expired = select(&mut snapshots, &["seg-live"]);
@@ -303,6 +316,26 @@ mod tests {
         assert!(!expired.contains(&1));
         assert!(!expired.contains(&31));
         assert_eq!(expired.len(), 48);
+    }
+
+    #[test]
+    fn keeps_snapshots_with_unknown_or_malformed_wal_slices() {
+        let mut snapshots = history(150, 48 * HOUR_MS);
+        snapshots[0].wal_slices = None;
+        let expired = select(&mut snapshots, &[]);
+        assert!(!expired.contains(&1));
+    }
+
+    #[test]
+    fn malformed_wal_slices_property_is_not_eligible() {
+        assert!(wal_slices_from_property(None).is_none());
+        assert!(wal_slices_from_property(Some("seg-a")).is_none());
+        assert_eq!(
+            wal_slices_from_property(Some("seg-a@0")),
+            Some(BTreeSet::from([
+                WalSliceRef::try_from_parts("seg-a", 0).unwrap()
+            ]))
+        );
     }
 
     #[test]

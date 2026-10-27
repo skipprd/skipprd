@@ -2,7 +2,8 @@ use std::io::Cursor;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use arrow_flight::sql::ProstMessageExt;
+use arrow_flight::sql::{Any as ProstAny, ProstMessageExt};
+use arrow_flight::{Action, Ticket};
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::arrow::ipc::reader::StreamReader;
 use datafusion::arrow::ipc::writer::StreamWriter;
@@ -41,12 +42,12 @@ pub fn encode_flight_sql_command(msg: &impl ProstMessageExt) -> Vec<u8> {
 pub struct FlightSqlExecNode {
     #[prost(string, tag = "1")]
     pub endpoint: String,
-    #[prost(bytes = "vec", tag = "2")]
-    pub prepared_handle: Vec<u8>,
     #[prost(bytes = "vec", tag = "3")]
     pub arrow_schema_ipc: Vec<u8>,
     #[prost(string, tag = "4")]
     pub authorization: String,
+    #[prost(message, optional, tag = "5")]
+    pub ticket: Option<LiveWalTicket>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -67,6 +68,87 @@ pub struct IcebergScanNode {
     pub table_name: String,
 }
 
+#[derive(Clone, PartialEq, Message)]
+pub struct LiveWalPinRequest {
+    #[prost(string, tag = "1")]
+    pub tenant: String,
+    #[prost(string, tag = "2")]
+    pub workspace: String,
+    #[prost(string, tag = "3")]
+    pub pipeline: String,
+    #[prost(string, tag = "4")]
+    pub namespace: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct PinnedSliceRef {
+    #[prost(string, tag = "1")]
+    pub segment_id: String,
+    #[prost(uint64, tag = "2")]
+    pub start: u64,
+    #[prost(uint64, tag = "3")]
+    pub seq: u64,
+    #[prost(uint32, tag = "4")]
+    pub ordinal: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct LiveWalPinResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub slices: Vec<PinnedSliceRef>,
+}
+
+/// Exact WAL slices for owner DoGet. Not SQL `live_wal_scan` text.
+#[derive(Clone, PartialEq, Message)]
+pub struct LiveWalTicket {
+    #[prost(message, optional, tag = "1")]
+    pub target: Option<LiveWalPinRequest>,
+    #[prost(bool, tag = "2")]
+    pub cdc_sidecar: bool,
+    #[prost(message, repeated, tag = "3")]
+    pub slices: Vec<PinnedSliceRef>,
+}
+
+pub const LIVE_WAL_TICKET_TYPE_URL: &str = "type.googleapis.com/skippr.query.LiveWalTicket";
+pub const LIVE_WAL_PIN_ACTION: &str = "skippr.live_wal_pin";
+
+pub fn encode_live_wal_ticket(ticket: &LiveWalTicket) -> Vec<u8> {
+    ProstAny {
+        type_url: LIVE_WAL_TICKET_TYPE_URL.to_string(),
+        value: ticket.encode_to_vec().into(),
+    }
+    .encode_to_vec()
+}
+
+impl LiveWalPinRequest {
+    pub fn decode_bytes(buf: &[u8]) -> Result<Self> {
+        Self::decode(buf).map_err(|err| {
+            DataFusionError::Execution(format!("truncated or invalid LiveWalPinRequest: {err}"))
+        })
+    }
+}
+
+impl LiveWalPinResponse {
+    pub fn encode_bytes(&self) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        self.encode(&mut buf)
+            .map_err(|err| DataFusionError::Internal(err.to_string()))?;
+        Ok(buf)
+    }
+}
+
+pub fn decode_live_wal_ticket(any: &ProstAny) -> Result<LiveWalTicket> {
+    if any.type_url != LIVE_WAL_TICKET_TYPE_URL {
+        return Err(DataFusionError::Execution(format!(
+            "not a LiveWalTicket: {}",
+            any.type_url
+        )));
+    }
+    LiveWalTicket::decode(any.value.as_ref()).map_err(|err| {
+        DataFusionError::Execution(format!("truncated or invalid LiveWalTicket: {err}"))
+    })
+}
+
 impl FlightSqlExecNode {
     pub fn encode_bytes(&self) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
@@ -82,11 +164,11 @@ impl FlightSqlExecNode {
     }
 }
 
-/// Physical node that executes a Flight SQL statement on `endpoint` (`host:port`).
+/// Physical node that DoGets a LiveWalTicket on `endpoint` (`host:port`).
 #[derive(Debug, Clone)]
 pub struct FlightSqlExec {
     pub endpoint: String,
-    pub prepared_handle: Vec<u8>,
+    pub ticket: LiveWalTicket,
     schema: SchemaRef,
     properties: Arc<PlanProperties>,
     authorization: String,
@@ -106,13 +188,9 @@ pub fn validate_flight_endpoint(endpoint: &str) -> Result<()> {
 }
 
 impl FlightSqlExec {
-    pub fn new(endpoint: String, prepared_handle: Vec<u8>, schema: SchemaRef) -> Self {
-        Self::with_authorization(endpoint, prepared_handle, schema, String::new())
-    }
-
-    pub fn with_authorization(
+    pub fn live_wal(
         endpoint: String,
-        prepared_handle: Vec<u8>,
+        ticket: LiveWalTicket,
         schema: SchemaRef,
         authorization: String,
     ) -> Self {
@@ -124,7 +202,7 @@ impl FlightSqlExec {
         ));
         Self {
             endpoint,
-            prepared_handle,
+            ticket,
             schema,
             properties,
             authorization,
@@ -194,19 +272,17 @@ impl ExecutionPlan for FlightSqlExec {
         if let Err(err) = validate_flight_endpoint(&self.endpoint) {
             return Err(err);
         }
-        let sql = String::from_utf8(self.prepared_handle.clone()).map_err(|err| {
-            DataFusionError::Execution(format!("FlightSqlExec handle is not UTF-8: {err}"))
-        })?;
         let schema = self.schema.clone();
         let endpoint = self.endpoint.clone();
         let authorization = self.authorization.clone();
+        let ticket = self.ticket.clone();
         let handle = tokio::runtime::Handle::try_current().map_err(|err| {
             DataFusionError::Execution(format!("FlightSqlExec requires a Tokio runtime: {err}"))
         })?;
         let (tx, rx) = futures::channel::mpsc::channel(8);
         let stream_schema = schema.clone();
         handle.spawn(async move {
-            stream_statement_into(&endpoint, &sql, &authorization, stream_schema, tx).await;
+            stream_live_wal_into(&endpoint, ticket, &authorization, stream_schema, tx).await;
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, rx)))
     }
@@ -255,15 +331,15 @@ fn align_batch(batch: RecordBatch, schema: &SchemaRef) -> Result<RecordBatch> {
         .map_err(|err| DataFusionError::ArrowError(Box::new(err), None))
 }
 
-async fn stream_statement_into(
+async fn stream_live_wal_into(
     endpoint: &str,
-    sql: &str,
+    ticket: LiveWalTicket,
     authorization: &str,
     schema: SchemaRef,
     mut tx: futures::channel::mpsc::Sender<Result<RecordBatch, DataFusionError>>,
 ) {
     use futures::SinkExt;
-    match stream_statement_batches_with_auth(endpoint, sql, authorization).await {
+    match stream_live_wal_batches_with_auth(endpoint, &ticket, authorization).await {
         Ok(mut stream) => {
             while let Some(item) = stream.next().await {
                 let item = item.and_then(|batch| align_batch(batch, &schema));
@@ -276,6 +352,57 @@ async fn stream_statement_into(
             let _ = tx.send(Err(err)).await;
         }
     }
+}
+
+pub async fn stream_live_wal_batches_with_auth(
+    endpoint: &str,
+    ticket: &LiveWalTicket,
+    authorization: &str,
+) -> Result<Pin<Box<dyn Stream<Item = Result<RecordBatch, DataFusionError>> + Send>>, DataFusionError>
+{
+    let channel = flight_channel(endpoint)?
+        .connect()
+        .await
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    let mut client = arrow_flight::sql::client::FlightSqlServiceClient::new(channel);
+    attach_session(&mut client, &resolve_authorization(authorization)?)?;
+    let ticket = Ticket::new(encode_live_wal_ticket(ticket));
+    let stream = client
+        .do_get(ticket)
+        .await
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    Ok(Box::pin(stream.map_err(|err| {
+        DataFusionError::Execution(err.to_string())
+    })))
+}
+
+pub async fn pin_live_wal_with_auth(
+    endpoint: &str,
+    request: &LiveWalPinRequest,
+    authorization: &str,
+) -> Result<LiveWalPinResponse, DataFusionError> {
+    let channel = flight_channel(endpoint)?
+        .connect()
+        .await
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    let mut client = arrow_flight::sql::client::FlightSqlServiceClient::new(channel);
+    attach_session(&mut client, &resolve_authorization(authorization)?)?;
+    let action = Action {
+        r#type: LIVE_WAL_PIN_ACTION.to_string(),
+        body: request.encode_to_vec().into(),
+    };
+    let mut stream = client
+        .do_action(action)
+        .await
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    let result = stream
+        .next()
+        .await
+        .ok_or_else(|| DataFusionError::Execution("skippr.live_wal_pin returned no body".into()))?
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    LiveWalPinResponse::decode(result.body.as_ref()).map_err(|err| {
+        DataFusionError::Execution(format!("truncated or invalid LiveWalPinResponse: {err}"))
+    })
 }
 
 pub fn schema_to_ipc(schema: &Schema) -> Result<Vec<u8>> {
@@ -562,7 +689,6 @@ impl SkipprPhysicalCodec {
         };
         let encoded = FlightSqlExecNode {
             endpoint: flight.endpoint.clone(),
-            prepared_handle: flight.prepared_handle.clone(),
             arrow_schema_ipc: schema_to_ipc(flight.schema.as_ref())?,
             authorization: {
                 if flight.authorization.trim().is_empty() {
@@ -572,6 +698,7 @@ impl SkipprPhysicalCodec {
                 }
                 flight.authorization.clone()
             },
+            ticket: Some(flight.ticket.clone()),
         };
         let mut payload = Vec::new();
         encoded
@@ -600,13 +727,16 @@ impl SkipprPhysicalCodec {
                 "FlightSqlExec node missing session Authorization".into(),
             ));
         }
+        let ticket = node.ticket.ok_or_else(|| {
+            DataFusionError::Internal("FlightSqlExec node missing LiveWalTicket".into())
+        })?;
         validate_flight_endpoint(&node.endpoint).map_err(|err| {
             DataFusionError::Internal(format!("FlightSqlExec node endpoint: {err}"))
         })?;
         let schema = schema_from_ipc(&node.arrow_schema_ipc)?;
-        Ok(Arc::new(FlightSqlExec::with_authorization(
+        Ok(Arc::new(FlightSqlExec::live_wal(
             node.endpoint,
-            node.prepared_handle,
+            ticket,
             schema,
             node.authorization,
         )))
@@ -650,11 +780,98 @@ mod tests {
     }
 
     #[test]
+    fn live_wal_ticket_prost_round_trips() {
+        let ticket = LiveWalTicket {
+            target: Some(LiveWalPinRequest {
+                tenant: "t".into(),
+                workspace: "w".into(),
+                pipeline: "p".into(),
+                namespace: "ns,with)parens".into(),
+            }),
+            cdc_sidecar: true,
+            slices: vec![PinnedSliceRef {
+                segment_id: "seg-1".into(),
+                start: 10,
+                seq: 3,
+                ordinal: 1,
+            }],
+        };
+        let bytes = ticket.encode_to_vec();
+        let got = LiveWalTicket::decode(bytes.as_slice()).unwrap();
+        assert_eq!(got, ticket);
+        assert_eq!(
+            got.target.as_ref().unwrap().namespace,
+            "ns,with)parens",
+            "ticket must carry namespace bytes, not SQL-split live_wal_scan text"
+        );
+    }
+
+    fn sample_ticket() -> LiveWalTicket {
+        LiveWalTicket {
+            target: Some(LiveWalPinRequest {
+                tenant: "t".into(),
+                workspace: "w".into(),
+                pipeline: "p".into(),
+                namespace: "ns,with)parens".into(),
+            }),
+            cdc_sidecar: false,
+            slices: vec![PinnedSliceRef {
+                segment_id: "seg-1".into(),
+                start: 10,
+                seq: 3,
+                ordinal: 1,
+            }],
+        }
+    }
+
+    #[test]
+    fn flight_sql_exec_live_wal_is_not_sql_text() {
+        let src = include_str!("lib.rs");
+        let execute = src
+            .split("fn execute(")
+            .nth(1)
+            .expect("FlightSqlExec::execute")
+            .split("fn align_batch")
+            .next()
+            .unwrap();
+        assert!(
+            !execute.contains("from_utf8"),
+            "LiveWal DoGet must not UTF-8 decode SQL"
+        );
+        assert!(execute.contains("stream_live_wal_into"));
+        assert!(!execute.contains("stream_statement_into"));
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("FlightLeafRequest"));
+        assert!(!prod.contains("fn statement("));
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let node = FlightSqlExec::live_wal(
+            "127.0.0.1:50051".into(),
+            sample_ticket(),
+            schema,
+            test_auth(),
+        );
+        assert_eq!(
+            node.ticket.target.as_ref().unwrap().namespace,
+            "ns,with)parens"
+        );
+    }
+
+    #[test]
+    fn live_wal_ticket_any_round_trips_namespace_with_sql_metacharacters() {
+        let ticket = sample_ticket();
+        let bytes = encode_live_wal_ticket(&ticket);
+        let any = ProstAny::decode(bytes.as_slice()).unwrap();
+        let got = decode_live_wal_ticket(&any).unwrap();
+        assert_eq!(got, ticket);
+        assert_eq!(got.target.as_ref().unwrap().namespace, "ns,with)parens");
+    }
+
+    #[test]
     fn flight_sql_exec_codec_round_trips_schema() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
-        let node = Arc::new(FlightSqlExec::with_authorization(
+        let node = Arc::new(FlightSqlExec::live_wal(
             "127.0.0.1:50051".into(),
-            b"SELECT 1".to_vec(),
+            sample_ticket(),
             schema.clone(),
             test_auth(),
         ));
@@ -665,8 +882,32 @@ mod tests {
         let decoded = codec.try_decode_flight(&buf).unwrap();
         let flight = decoded.downcast_ref::<FlightSqlExec>().unwrap();
         assert_eq!(flight.endpoint, "127.0.0.1:50051");
-        assert_eq!(flight.prepared_handle, b"SELECT 1");
+        assert_eq!(
+            flight.ticket.target.as_ref().unwrap().namespace,
+            "ns,with)parens"
+        );
         assert_eq!(flight.schema(), schema);
+    }
+
+    #[test]
+    fn flight_sql_exec_codec_round_trips_live_wal_ticket() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let node = Arc::new(FlightSqlExec::live_wal(
+            "127.0.0.1:50051".into(),
+            sample_ticket(),
+            schema,
+            test_auth(),
+        ));
+        let codec = SkipprPhysicalCodec::default();
+        let mut buf = Vec::new();
+        codec.try_encode_flight(node.clone(), &mut buf).unwrap();
+        let decoded = codec.try_decode_flight(&buf).unwrap();
+        let flight = decoded.downcast_ref::<FlightSqlExec>().unwrap();
+        assert_eq!(
+            flight.ticket.target.as_ref().unwrap().namespace,
+            "ns,with)parens"
+        );
+        assert_eq!(flight.ticket.slices[0].segment_id, "seg-1");
     }
 
     #[test]
@@ -730,9 +971,9 @@ mod tests {
     #[test]
     fn execute_rejects_non_host_port() {
         let schema = Arc::new(Schema::empty());
-        let node = FlightSqlExec::with_authorization(
+        let node = FlightSqlExec::live_wal(
             "http://127.0.0.1:0".into(),
-            b"SELECT 1".to_vec(),
+            sample_ticket(),
             schema,
             test_auth(),
         );
@@ -747,10 +988,11 @@ mod tests {
     #[test]
     fn encode_rejects_missing_authorization() {
         let schema = Arc::new(Schema::empty());
-        let node = Arc::new(FlightSqlExec::new(
+        let node = Arc::new(FlightSqlExec::live_wal(
             "127.0.0.1:50051".into(),
-            b"SELECT 1".to_vec(),
+            sample_ticket(),
             schema,
+            String::new(),
         ));
         let codec = SkipprPhysicalCodec::default();
         let mut buf = Vec::new();
@@ -760,12 +1002,8 @@ mod tests {
     #[tokio::test]
     async fn execute_against_closed_port_is_execution_error() {
         let schema = Arc::new(Schema::empty());
-        let node = FlightSqlExec::with_authorization(
-            "127.0.0.1:1".into(),
-            b"SELECT 1".to_vec(),
-            schema,
-            test_auth(),
-        );
+        let node =
+            FlightSqlExec::live_wal("127.0.0.1:1".into(), sample_ticket(), schema, test_auth());
         let stream = node.execute(0, Arc::new(TaskContext::default())).unwrap();
         let err = datafusion::physical_plan::common::collect(stream)
             .await

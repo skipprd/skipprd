@@ -47,3 +47,4 @@ pub mod sink_apply_identity;
 pub mod sqlrt;
 mod store;
 pub mod table_formats;
+pub mod wal_slice_ref;

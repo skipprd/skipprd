@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
@@ -7,6 +8,7 @@ use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::Expr;
+use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{StreamExt, TryStreamExt};
@@ -14,6 +16,11 @@ use iceberg::table::Table;
 use iceberg::Catalog;
 
 use skippr_query_plan::{schema_from_ipc, schema_to_ipc, IcebergScanNode};
+
+use crate::wal_slice_ref::{
+    decode_wal_slices, encode_wal_slices, walk_ancestry_wal_slices, WalSliceRef,
+    SNAPSHOT_WAL_SLICES,
+};
 
 /// Read-only Iceberg scan over a pinned snapshot. Iceberg pipelines never fall
 /// back to Parquet listing.
@@ -24,6 +31,7 @@ pub struct IcebergScanTableProvider {
     catalog_json: String,
     catalog_ns: String,
     table_name: String,
+    excluded: HashSet<WalSliceRef>,
 }
 
 impl std::fmt::Debug for IcebergScanTableProvider {
@@ -55,12 +63,15 @@ impl IcebergScanTableProvider {
         let schema = table.metadata().current_schema();
         let arrow = iceberg::arrow::schema_to_arrow_schema(schema)
             .map_err(|err| DataFusionError::External(Box::new(err)))?;
-        let ids = compacted_wal_segment_ids(&table);
-        let arrow = if ids.is_empty() {
+        let slices = match table.metadata().snapshot_by_id(snapshot_id) {
+            Some(_) => excluded_slices(&table, snapshot_id)?,
+            None => HashSet::new(),
+        };
+        let arrow = if slices.is_empty() {
             arrow
         } else {
             let mut metadata = arrow.metadata().clone();
-            metadata.insert("skippr.wal-segment-ids".into(), ids.join(";"));
+            metadata.insert(SNAPSHOT_WAL_SLICES.into(), encode_wal_slices(&slices));
             datafusion::arrow::datatypes::Schema::new_with_metadata(
                 arrow.fields().clone(),
                 metadata,
@@ -73,6 +84,7 @@ impl IcebergScanTableProvider {
             catalog_json,
             catalog_ns,
             table_name,
+            excluded: slices,
         })
     }
 
@@ -83,6 +95,7 @@ impl IcebergScanTableProvider {
             ));
         }
         let schema = schema_from_ipc(&node.arrow_schema_ipc)?;
+        let excluded = slices_from_schema(&schema)?;
         Ok(Self {
             table: None,
             schema,
@@ -90,6 +103,7 @@ impl IcebergScanTableProvider {
             catalog_json: node.catalog_json,
             catalog_ns: node.catalog_ns,
             table_name: node.table_name,
+            excluded,
         })
     }
 
@@ -115,21 +129,22 @@ impl IcebergScanTableProvider {
         self.snapshot_id
     }
 
-    pub fn compacted_segment_ids(&self) -> Vec<String> {
-        match &self.table {
-            Some(table) => compacted_wal_segment_ids(table),
-            None => {
-                let value = self
-                    .schema
-                    .metadata()
-                    .get(SNAPSHOT_WAL_SEGMENT_IDS)
-                    .cloned()
-                    .unwrap_or_default()
-                    .replace(';', ",");
-                segment_ids_from_snapshot_properties(std::iter::once(value))
-            }
-        }
+    pub fn excluded_slices(&self) -> Result<HashSet<WalSliceRef>> {
+        Ok(self.excluded.clone())
     }
+}
+
+fn slices_from_schema(
+    schema: &datafusion::arrow::datatypes::Schema,
+) -> Result<HashSet<WalSliceRef>> {
+    let value = schema
+        .metadata()
+        .get(SNAPSHOT_WAL_SLICES)
+        .cloned()
+        .unwrap_or_default();
+    decode_wal_slices(&value)
+        .map(|set| set.into_iter().collect())
+        .map_err(|err| DataFusionError::Plan(err.to_string()))
 }
 
 #[async_trait::async_trait]
@@ -150,6 +165,13 @@ impl TableProvider for IcebergScanTableProvider {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let schema = crate::sqlrt::wal_table::projected_schema(&self.schema, projection)?;
+        if self
+            .table
+            .as_ref()
+            .is_some_and(|table| table.metadata().snapshot_by_id(self.snapshot_id).is_none())
+        {
+            return Ok(Arc::new(EmptyExec::new(schema)));
+        }
         match &self.table {
             Some(table) => IcebergScanExec::from_table(
                 table.clone(),
@@ -528,7 +550,7 @@ async fn iceberg_arrow_stream(
     ))
 }
 
-async fn reload_iceberg_table(
+pub(crate) async fn reload_iceberg_table(
     catalog_json: &str,
     catalog_ns: &str,
     table_name: &str,
@@ -543,8 +565,10 @@ async fn reload_iceberg_table(
         .map_err(DataFusionError::Plan)?;
     let ident = iceberg::TableIdent::from_strs([catalog_ns, table_name])
         .map_err(|err| DataFusionError::External(Box::new(err)))?;
-    let (table, _) = load_pinned_iceberg_table(catalog, &ident).await?;
-    Ok(table)
+    catalog
+        .load_table(&ident)
+        .await
+        .map_err(|err| DataFusionError::External(Box::new(err)))
 }
 
 pub async fn load_pinned_iceberg_table(
@@ -563,37 +587,20 @@ pub async fn load_pinned_iceberg_table(
     Ok((table, snapshot_id))
 }
 
-const SNAPSHOT_WAL_SEGMENT_IDS: &str = "skippr.wal-segment-ids";
-
-/// WAL segment ids recorded on Iceberg snapshot ancestry after a successful
+/// WAL slice refs recorded on Iceberg snapshot ancestry after a successful
 /// grouped compaction. Live WAL must exclude these even when slice-done bits
 /// have not yet reached the current Iceberg snapshot.
-pub fn compacted_wal_segment_ids(table: &Table) -> Vec<String> {
-    segment_ids_from_snapshot_properties(table.metadata().snapshots().flat_map(|snapshot| {
-        snapshot
+pub fn excluded_slices(table: &Table, snapshot_id: i64) -> Result<HashSet<WalSliceRef>> {
+    walk_ancestry_wal_slices(snapshot_id, |id| {
+        let snap = table.metadata().snapshot_by_id(id)?;
+        let prop = snap
             .summary()
             .additional_properties
-            .get(SNAPSHOT_WAL_SEGMENT_IDS)
-            .cloned()
-    }))
-}
-
-pub fn segment_ids_from_snapshot_properties(
-    values: impl IntoIterator<Item = String>,
-) -> Vec<String> {
-    let mut ids = Vec::new();
-    for value in values {
-        for id in value.split(',') {
-            let id = id.trim();
-            if id.is_empty() {
-                continue;
-            }
-            if !ids.iter().any(|existing| existing == id) {
-                ids.push(id.to_string());
-            }
-        }
-    }
-    ids
+            .get(SNAPSHOT_WAL_SLICES)
+            .cloned();
+        Some((snap.parent_snapshot_id(), prop))
+    })
+    .map_err(|err| DataFusionError::Plan(err.to_string()))
 }
 
 #[cfg(test)]
@@ -661,19 +668,13 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_property_segment_ids_are_deduped() {
-        let ids = super::segment_ids_from_snapshot_properties([
-            "seg-a,seg-b".to_string(),
-            "seg-b,seg-c".to_string(),
-            String::new(),
-        ]);
-        assert_eq!(
-            ids,
-            vec![
-                "seg-a".to_string(),
-                "seg-b".to_string(),
-                "seg-c".to_string()
-            ]
-        );
+    fn exclude_set_is_slice_refs_on_ancestry() {
+        let src = include_str!("iceberg_table.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("excluded_slices"));
+        assert!(prod.contains("SNAPSHOT_WAL_SLICES"));
+        assert!(!prod.contains("skippr.wal-segment-ids"));
+        assert!(!prod.contains("compacted_wal_segment_ids"));
+        assert!(!prod.contains("segment_ids_from_snapshot_properties"));
     }
 }

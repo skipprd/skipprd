@@ -7,7 +7,7 @@ use crate::apply::{eval_ops, Applied};
 use crate::error::CatalogError;
 use crate::key::{CatalogKey, CatalogPrefix};
 use crate::row::{CatalogFence, CatalogRow};
-use crate::store::WalCatalogStore;
+use crate::store::{WalCatalogRead, WalCatalogStore};
 use crate::txn::{CatalogTxn, TXN_MAX_OPS};
 
 struct LeaseSlot {
@@ -51,6 +51,14 @@ impl MemoryWalCatalog {
         }
     }
 
+    /// Fixture format-2 leftover rows. Production commits reject `LegacySlice` via `validate_put`.
+    pub fn seed_historical(&self, key: CatalogKey, row: CatalogRow) -> Result<(), CatalogError> {
+        let bytes = row.encode()?;
+        let mut inner = self.inner.lock().expect("memory catalog poisoned");
+        inner.rows.insert(key.encode(), bytes);
+        Ok(())
+    }
+
     fn check_fence(inner: &Inner, fence: CatalogFence) -> Result<(), CatalogError> {
         match &inner.lease {
             Some(lease)
@@ -69,7 +77,7 @@ impl Default for MemoryWalCatalog {
     }
 }
 
-impl WalCatalogStore for MemoryWalCatalog {
+impl WalCatalogRead for MemoryWalCatalog {
     fn get(&self, key: &CatalogKey) -> Result<Option<CatalogRow>, CatalogError> {
         let inner = self.inner.lock().expect("memory catalog poisoned");
         inner
@@ -106,7 +114,9 @@ impl WalCatalogStore for MemoryWalCatalog {
         }
         Ok(out)
     }
+}
 
+impl WalCatalogStore for MemoryWalCatalog {
     fn commit(&self, txn: &CatalogTxn, fence: CatalogFence) -> Result<(), CatalogError> {
         let mut inner = self.inner.lock().expect("memory catalog poisoned");
         Self::check_fence(&inner, fence)?;

@@ -203,8 +203,14 @@ fn reference_path_full_lifecycle_insert_update_delete() {
 
     let mut blobs = HashMap::new();
     blobs.insert(key.clone(), bincode::serialize(&meta).unwrap());
-    seg.write_snapshot(&offsets, &batches, &parts_meta, &blobs)
-        .unwrap();
+    seg.write_snapshot(
+        &offsets,
+        &batches,
+        &parts_meta,
+        &blobs,
+        std::time::SystemTime::UNIX_EPOCH,
+    )
+    .unwrap();
 
     let mut f = std::fs::File::open(&seg.path).unwrap();
     let read_blobs = SegmentFile::read_part_meta_blobs_from_reader(&mut f).unwrap();

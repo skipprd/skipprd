@@ -178,6 +178,7 @@ pub async fn persist_snapshot_pair(
     partitions_meta: &HashMap<PartitionKey, (u64, SystemTime)>,
     part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
     lease: &LeaseGuard,
+    created_at: SystemTime,
 ) -> Result<SegmentWriteResult, PersistError> {
     let epoch = require_epoch(lease, snapshot_id)?;
     let (bucket, body_key) =
@@ -197,6 +198,7 @@ pub async fn persist_snapshot_pair(
         part_meta_blobs,
         lease,
         epoch,
+        created_at,
     )
     .await
 }
@@ -212,6 +214,7 @@ pub async fn persist_snapshot_keys(
     part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
     lease: &LeaseGuard,
     epoch: skippr_lease::LeaseEpoch,
+    created_at: SystemTime,
 ) -> Result<SegmentWriteResult, PersistError> {
     let result = persist_payload_object(
         store,
@@ -224,6 +227,7 @@ pub async fn persist_snapshot_keys(
         part_meta_blobs,
         lease,
         epoch,
+        created_at,
     )
     .await;
     fence_on_fatal(lease, &result);
@@ -241,16 +245,21 @@ async fn persist_payload_object(
     part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
     lease: &LeaseGuard,
     epoch: skippr_lease::LeaseEpoch,
+    created_at: SystemTime,
 ) -> Result<SegmentWriteResult, PersistError> {
     require_same_epoch(lease, snapshot_id, epoch)?;
-    let encoded =
-        encode_snapshot(offsets, batches, partitions_meta, part_meta_blobs).map_err(|err| {
-            PersistError::Definite {
-                snapshot_id: snapshot_id.to_string(),
-                stage: PersistStage::Body,
-                message: err.to_string(),
-            }
-        })?;
+    let encoded = encode_snapshot(
+        offsets,
+        batches,
+        partitions_meta,
+        part_meta_blobs,
+        created_at,
+    )
+    .map_err(|err| PersistError::Definite {
+        snapshot_id: snapshot_id.to_string(),
+        stage: PersistStage::Body,
+        message: err.to_string(),
+    })?;
     let (body_bytes, body_reconciled) = put_or_reconcile(
         store,
         body_key,
@@ -361,6 +370,7 @@ mod tests {
                     snapshot_id: id.to_string(),
                     message: err.to_string(),
                 })?,
+            SystemTime::UNIX_EPOCH,
         )
         .await
     }

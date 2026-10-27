@@ -31,7 +31,7 @@ pub const SLED_NAME: &str = "db";
 // does not have alignment requirements.
 // sled does not guarantee any particular
 // value alignment as of now.
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[repr(C)]
 pub struct OffsetKey {
     pub namespace: String,
@@ -610,15 +610,27 @@ impl Offsets {
         &self,
         fence: skippr_wal_catalog::CatalogFence,
     ) -> Result<skippr_wal_catalog::SledWalCatalog, String> {
+        Ok(skippr_wal_catalog::SledWalCatalog::open(
+            self.open_sled_wal_tree()?,
+            fence,
+        ))
+    }
+
+    pub fn open_sled_wal_catalog_read(&self) -> Result<skippr_wal_catalog::SledWalCatalog, String> {
+        Ok(skippr_wal_catalog::SledWalCatalog::open_read(
+            self.open_sled_wal_tree()?,
+        ))
+    }
+
+    fn open_sled_wal_tree(&self) -> Result<sled::Tree, String> {
         let local = self
             .local
             .as_ref()
             .ok_or_else(|| "sled WAL catalog requires a local offset database".to_string())?;
-        let tree = local
+        local
             .db
             .open_tree("wal_catalog")
-            .map_err(|err| format!("open wal_catalog tree: {err}"))?;
-        Ok(skippr_wal_catalog::SledWalCatalog::open(tree, fence))
+            .map_err(|err| format!("open wal_catalog tree: {err}"))
     }
 
     #[cfg(test)]

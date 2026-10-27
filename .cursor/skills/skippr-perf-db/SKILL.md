@@ -18,14 +18,24 @@ Opt-in ingest→query matrix. **Correctness first**, then timings, `--log perf` 
 
 Comparison is **file parquet Iceberg** (SkipprLake `object_store: type: file`)
 against **DuckDB Iceberg**. The WAL profile target is skipprd `query` over
-**WAL ∪ file Iceberg UNION** after `sync --once` (compact + reclaim). Lake-only
-cells measure post-compact UNION (`W \ E` empty) as the Iceberg parquet leaf. `SKIPPR_QUERY_LAKE_ONLY` is deleted.
+**WAL ∪ file Iceberg UNION** after `sync --once` (compact + reclaim). Every
+query cell uses the DynamoDB Local Skippr Store, so a query process can pin
+WAL while a held ingest owns the writer lease. `query_pin` reports the frozen
+`(S, E, W)`: `wal_pin: drained` cells assert `W \ E` was empty (lake only);
+`wal_pin: live` cells (STREAM tail, overlap) assert the query read held WAL.
+
+Held cells write `hold_before_compaction_sink` to the local pipeline root
+`{DATA_DIR}/{workspace}_{pipeline}/failpoint`. If `sync --once` exits before
+the measured query, the hold never engaged and the cell fails.
 
 Fail the cell when:
 
-- required `PERF_EVENT` phases are missing (`sync`, `query_collect`)
+- required `PERF_EVENT` phases are missing (`sync`, `query_collect`, `query_pin`)
 - `count(*)` does not equal ingest rows
 - point query does not return id `1`
+- a `query_name` cell returns anything but exactly one row
+- `wal_pin` does not match the last `query_pin`
+- the compaction hold never engaged
 - the warehouse has no `*.parquet` after compact
 
 Wrap scripts read `SKIPPR_LOG_LEVEL` through `skipprd_cli.log_args()` into
@@ -96,7 +106,7 @@ python3 tests/perf_db/run.py \
 ```
 
 Fail the cell if required `PERF_EVENT` lines are missing (`sync`, `query_collect`,
-and `query_reconcile` on CDC merge cells).
+`query_pin`, and `query_reconcile` on CDC merge cells).
 
 ## GitHub
 

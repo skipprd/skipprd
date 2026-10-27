@@ -263,7 +263,7 @@ impl DataSink for DataSinkSftpPlugin {
             ctx.idempotency_key,
             ctx.schema_fingerprint,
             &ctx.wal_refs,
-        );
+        )?;
         if self
             .remote_manifest_matches(&remote_manifest_path, &expected_manifest)
             .await?
@@ -357,7 +357,7 @@ impl DataSink for DataSinkSftpPlugin {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             &ctx.wal_refs,
-        );
+        )?;
         if self
             .remote_manifest_matches(&remote_manifest_path, &expected_manifest)
             .await?
@@ -399,7 +399,7 @@ impl DataSink for DataSinkSftpPlugin {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             ctx.wal_refs.as_slice(),
-        );
+        )?;
         if self
             .remote_manifest_matches(&remote_manifest_path, &expected_manifest)
             .await?
@@ -483,7 +483,7 @@ impl DataSinkSftpPlugin {
         &self,
         ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
         chunk_index: u64,
-    ) -> (String, String, ObjectWriteManifest) {
+    ) -> std::io::Result<(String, String, ObjectWriteManifest)> {
         let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
         let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
         let remote_manifest_path = format!(
@@ -501,8 +501,8 @@ impl DataSinkSftpPlugin {
             object_stem,
             ctx.schema_fingerprint.clone(),
             ctx.wal_refs.as_slice(),
-        );
-        (remote_file_path, remote_manifest_path, manifest)
+        )?;
+        Ok((remote_file_path, remote_manifest_path, manifest))
     }
 
     async fn legacy_chunk_state_exists(
@@ -510,7 +510,7 @@ impl DataSinkSftpPlugin {
         ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
         chunk_index: u64,
     ) -> std::io::Result<bool> {
-        let (remote_file_path, path, expected) = self.legacy_chunk_manifest(ctx, chunk_index);
+        let (remote_file_path, path, expected) = self.legacy_chunk_manifest(ctx, chunk_index)?;
         if self.remote_manifest_matches(&path, &expected).await? {
             return Ok(true);
         }
@@ -538,7 +538,7 @@ impl DataSinkSftpPlugin {
 
         while let Some(chunk) = reader.next_chunk().await? {
             let (remote_file_path, remote_manifest_path, expected) =
-                self.legacy_chunk_manifest(ctx, chunk.chunk_index);
+                self.legacy_chunk_manifest(ctx, chunk.chunk_index)?;
             let chunk_rows = chunk.rows;
             let (chunk_bytes, chunk_transport_count, chunk_etag) = if self
                 .remote_manifest_matches(&remote_manifest_path, &expected)

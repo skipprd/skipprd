@@ -38,6 +38,7 @@ KNOWN_ASSERT_KEYS = frozenset(
         "query_sum",
         "query_unique",
         "query_reconcile",
+        "wal_pin",
     }
 )
 

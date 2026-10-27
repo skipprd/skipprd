@@ -12,17 +12,18 @@ mod txn;
 
 pub mod conformance;
 
+pub use apply::validate_put;
 pub use error::CatalogError;
 pub use key::{CatalogKey, CatalogPrefix, CheckpointKey, CompactionId, OffsetHintKey};
 pub use memory::MemoryWalCatalog;
 pub use row::{
     CatalogFence, CatalogOp, CatalogRow, CatalogSeq, CommittedCheckpoint, CommittedOffset,
     CompactionRow, CompactionState, ControlBody, ControlRow, DeleteCond, FormatPhase, FormatRow,
-    PayloadLocation, PutCond, SegmentIndexRow, SegmentRow, SeqRow, SliceBitmap, SliceDirEntry,
-    SliceIndexEntry, FORMAT_VERSION, ROW_MAX_BYTES,
+    LegacySliceRow, PayloadLocation, PutCond, SegmentIndexRow, SegmentRow, SeqRow, SliceBitmap,
+    SliceDirEntry, FORMAT_VERSION, ROW_MAX_BYTES,
 };
 pub use sled_store::SledWalCatalog;
-pub use store::{query_all, reset_catalog, WalCatalogStore};
+pub use store::{query_all, reset_catalog, WalCatalogRead, WalCatalogStore};
 pub use txn::{CatalogTxn, TXN_MAX_OPS};
 
 #[cfg(test)]
@@ -105,5 +106,27 @@ mod tests {
         let store = SledWalCatalog::open(tree, f);
         conformance::assert_wal_catalog_conformance(&store, f);
         store.flush_durable().unwrap();
+    }
+
+    #[test]
+    fn sled_open_read_rejects_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sled::open(dir.path()).unwrap();
+        let tree = db.open_tree("wal_catalog").unwrap();
+        let store = SledWalCatalog::open_read(tree);
+        let mut txn = CatalogTxn::new();
+        txn.put(
+            CatalogKey::Seq,
+            CatalogRow::Seq(SeqRow {
+                max_seq: CatalogSeq::new(1),
+            }),
+            PutCond::NotExists,
+        )
+        .unwrap();
+        let err = store.commit(&txn, fence()).unwrap_err();
+        assert!(
+            matches!(err, CatalogError::Fenced),
+            "query-opened sled catalog must not commit, got {err}"
+        );
     }
 }

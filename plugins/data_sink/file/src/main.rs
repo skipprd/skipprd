@@ -85,7 +85,7 @@ impl DataSink for FileSinkRuntimePlugin {
             ctx.idempotency_key,
             ctx.schema_fingerprint,
             &ctx.wal_refs,
-        );
+        )?;
         if manifest_file.exists()
             && ObjectWriteManifest::from_json_bytes(&fs::read(&manifest_file)?)?
                 .matches_manifest(&expected_manifest)
@@ -187,7 +187,7 @@ impl DataSink for FileSinkRuntimePlugin {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             &ctx.wal_refs,
-        );
+        )?;
         if manifest_file.exists() {
             let bytes = fs::read(&manifest_file)?;
             if persisted_object_write_matches(&bytes, &expected_manifest)? {
@@ -240,7 +240,7 @@ impl DataSink for FileSinkRuntimePlugin {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             ctx.wal_refs.as_slice(),
-        );
+        )?;
         if manifest_file.exists() {
             let bytes = fs::read(&manifest_file)?;
             if persisted_object_write_matches(&bytes, &expected_manifest)? {
@@ -460,7 +460,7 @@ fn legacy_file_chunk_manifest(
         object_stem,
         ctx.schema_fingerprint.clone(),
         ctx.wal_refs.as_slice(),
-    );
+    )?;
     Ok((output_file, manifest_file, manifest))
 }
 

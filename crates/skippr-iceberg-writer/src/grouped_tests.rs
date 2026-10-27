@@ -12,6 +12,8 @@ use skippr_runtime_sdk::plugins::{
     SinkCallResult,
 };
 use skippr_runtime_sdk::protocol::RuntimeWalPartRef;
+use skippr_runtime_sdk::wal_slice_ref::{decode_wal_slices, WalSliceRef, SNAPSHOT_WAL_SLICES};
+use std::collections::BTreeSet;
 
 skippr_runtime_sdk::declare_sink_spec!(
     GroupedTestSpec,
@@ -450,20 +452,18 @@ fn live(segment_ids: &[&str]) -> Option<LiveWalSegments> {
     ))
 }
 
-fn snapshot_segment_ids(table: &iceberg::table::Table) -> Vec<String> {
-    let mut ids: Vec<String> = table
-        .metadata()
-        .snapshots()
-        .filter_map(|snapshot| {
-            snapshot
-                .summary()
-                .additional_properties
-                .get(SNAPSHOT_WAL_SEGMENT_IDS)
-                .cloned()
-        })
-        .collect();
-    ids.sort();
-    ids
+fn snapshot_wal_slices(table: &iceberg::table::Table) -> BTreeSet<WalSliceRef> {
+    let mut slices = BTreeSet::new();
+    for snapshot in table.metadata().snapshots() {
+        if let Some(value) = snapshot
+            .summary()
+            .additional_properties
+            .get(SNAPSHOT_WAL_SLICES)
+        {
+            slices.extend(decode_wal_slices(value).unwrap());
+        }
+    }
+    slices
 }
 
 fn metadata_files(harness: &Harness, prefix: &str) -> usize {
@@ -507,10 +507,10 @@ async fn expiry_keeps_live_wal_and_newest_snapshots_and_every_row() {
     sequence_numbers.sort_unstable();
     let newest = &sequence_numbers[sequence_numbers.len() - 100..];
     assert_eq!(newest[99] - newest[0], 99, "the newest 100 are all kept");
-    let segments = snapshot_segment_ids(&table);
-    assert!(segments.contains(&"seg-5".to_string()));
-    assert!(segments.contains(&"seg-129".to_string()));
-    assert!(!segments.contains(&"seg-0".to_string()));
+    let slices = snapshot_wal_slices(&table);
+    assert!(slices.contains(&WalSliceRef::try_from_parts("seg-5", 0).unwrap()));
+    assert!(slices.contains(&WalSliceRef::try_from_parts("seg-129", 0).unwrap()));
+    assert!(!slices.contains(&WalSliceRef::try_from_parts("seg-0", 0).unwrap()));
     assert_eq!(metadata_files(&harness, "snap-"), snapshots);
     assert_eq!(scanned_ids(&table).await, (0..130).collect::<Vec<_>>());
 }
@@ -548,7 +548,7 @@ async fn expiry_without_a_fence_keeps_all_history() {
         harness.write(&i.to_string(), i..i + 1).await;
     }
 
-    assert_eq!(snapshot_segment_ids(&harness.table().await).len(), 120);
+    assert_eq!(snapshot_wal_slices(&harness.table().await).len(), 120);
 }
 
 async fn referenced_manifests(table: &iceberg::table::Table) -> std::collections::BTreeSet<String> {

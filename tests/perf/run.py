@@ -246,7 +246,9 @@ def write_skippr_yml(
     warehouse: Path | None,
     flatten: bool,
     extra_source: dict[str, str] | None = None,
+    dynamodb_store: bool = False,
 ) -> None:
+    """SkipprLake always needs the DynamoDB Skippr Store; other sinks opt in with `dynamodb_store`."""
     if kind.startswith("copy"):
         flatten_yaml = ""
         transform_yaml = ""
@@ -351,7 +353,7 @@ schema_sinks:
     else:
         raise PerfError(sink)
     store = ""
-    if sink == "skipprlake":
+    if sink == "skipprlake" or dynamodb_store:
         store = f"""  store:
     type: dynamodb
     name: {STORE_TABLE}
@@ -391,6 +393,20 @@ def stop_ddb() -> None:
     from e2e_support import dynamodb_local as ddb_local
 
     ddb_local.stop(port=DDB_PORT, container=DDB_CONTAINER)
+
+
+def ddb_local_env(port: int, skipprlake_token: str) -> dict[str, str]:
+    endpoint = f"http://127.0.0.1:{port}"
+    return {
+        "AWS_ENDPOINT_URL_DYNAMODB": endpoint,
+        "AWS_ENDPOINT_URL": endpoint,
+        "AWS_ACCESS_KEY_ID": "local",
+        "AWS_SECRET_ACCESS_KEY": "local",
+        "AWS_REGION": "us-east-1",
+        "AWS_DEFAULT_REGION": "us-east-1",
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "SKIPPRLAKE_TOKEN": skipprlake_token,
+    }
 
 
 def start_postgres(name: str, port: int, db: str, extra_args: list[str]) -> None:
@@ -656,18 +672,7 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
         stage_plugins(config, PIPELINE, manifests)
         env = base_env(config, data_dir, manifests)
         if sink == "skipprlake":
-            env.update(
-                {
-                    "AWS_ENDPOINT_URL_DYNAMODB": f"http://127.0.0.1:{DDB_PORT}",
-                    "AWS_ENDPOINT_URL": f"http://127.0.0.1:{DDB_PORT}",
-                    "AWS_ACCESS_KEY_ID": "local",
-                    "AWS_SECRET_ACCESS_KEY": "local",
-                    "AWS_REGION": "us-east-1",
-                    "AWS_DEFAULT_REGION": "us-east-1",
-                    "AWS_EC2_METADATA_DISABLED": "true",
-                    "SKIPPRLAKE_TOKEN": "skippr-perf",
-                }
-            )
+            env.update(ddb_local_env(DDB_PORT, "skippr-perf"))
         skipprd = skipprd_bin()
         started = time.perf_counter()
         logs = ""

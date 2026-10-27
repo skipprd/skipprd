@@ -1,19 +1,21 @@
 //! CDC collapse of uncompacted WAL onto a pinned Iceberg snapshot.
 //!
 //! Latest `order_token` wins per business key. Equal tokens break ties by
-//! `(segment_id, ordinal, row index)`. Deletes suppress the key; insert/update/
-//! snapshot after-images survive. Append WAL rows have no keys to suppress.
-//! v1 has no before-image: a mutated business key is a new row unless the
-//! source emitted delete(old)+insert(new).
+//! `(seq, ordinal, row)`. Deletes suppress the key; insert/update/snapshot
+//! after-images survive. Compacted leftovers are excluded by Iceberg `E` at
+//! pin, not by in-merge snapshot dropping. Append WAL rows have no keys to
+//! suppress. v1 has no before-image: a mutated business key is a new row
+//! unless the source emitted delete(old)+insert(new).
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, RecordBatch, StringArray, UInt32Array, UInt8Array,
+    Array, ArrayRef, BinaryArray, RecordBatch, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow::compute::take;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::row::{OwnedRow, RowConverter, SortField};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -25,7 +27,7 @@ use crate::sqlrt::wal_table::{align_exec_to_schema, project_batch};
 
 pub const CDC_MUTATION_COL: &str = "_skippr_cdc_mutation";
 pub const CDC_ORDER_COL: &str = "_skippr_cdc_order";
-pub const CDC_SEG_COL: &str = "_skippr_cdc_seg";
+pub const CDC_SEQ_COL: &str = "_skippr_cdc_seq";
 pub const CDC_ORD_COL: &str = "_skippr_cdc_ord";
 pub const CDC_ROW_COL: &str = "_skippr_cdc_row";
 
@@ -44,13 +46,82 @@ pub fn mutation_to_u8(kind: MutationKind) -> u8 {
     }
 }
 
+fn decode_mutation(code: u8) -> Result<Option<MutationKind>> {
+    match code {
+        MUT_NONE => Ok(None),
+        MUT_SNAPSHOT => Ok(Some(MutationKind::Snapshot)),
+        MUT_INSERT => Ok(Some(MutationKind::Insert)),
+        MUT_UPDATE => Ok(Some(MutationKind::Update)),
+        MUT_DELETE => Ok(Some(MutationKind::Delete)),
+        other => Err(DataFusionError::Internal(format!(
+            "unknown CDC mutation code {other}"
+        ))),
+    }
+}
+
+enum NullKey {
+    Reject,
+    PassThrough,
+}
+
+struct KeyEncoder {
+    converter: RowConverter,
+    columns: Vec<String>,
+}
+
+impl KeyEncoder {
+    fn new(schema: &Schema, columns: &[String]) -> Result<Self> {
+        let fields = columns
+            .iter()
+            .map(|c| {
+                schema
+                    .field_with_name(c)
+                    .map(|f| SortField::new(f.data_type().clone()))
+                    .map_err(|_| {
+                        DataFusionError::Plan(format!("CDC business key column '{c}' is missing"))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            converter: RowConverter::new(fields)
+                .map_err(|err| DataFusionError::ArrowError(Box::new(err), None))?,
+            columns: columns.to_vec(),
+        })
+    }
+
+    fn encode(&self, batch: &RecordBatch, nulls: NullKey) -> Result<Vec<Option<OwnedRow>>> {
+        let cols = self
+            .columns
+            .iter()
+            .map(|c| {
+                batch.column_by_name(c).cloned().ok_or_else(|| {
+                    DataFusionError::Plan(format!("CDC business key column '{c}' is missing"))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let rows = self
+            .converter
+            .convert_columns(&cols)
+            .map_err(|err| DataFusionError::ArrowError(Box::new(err), None))?;
+        (0..batch.num_rows())
+            .map(|i| match (cols.iter().any(|c| c.is_null(i)), &nulls) {
+                (true, NullKey::Reject) => Err(DataFusionError::Execution(
+                    "CDC WAL row has a null business key".into(),
+                )),
+                (true, NullKey::PassThrough) => Ok(None),
+                (false, _) => Ok(Some(rows.row(i).owned())),
+            })
+            .collect()
+    }
+}
+
 pub fn cdc_sidecar_fields() -> Vec<Field> {
     vec![
         Field::new(CDC_MUTATION_COL, DataType::UInt8, false),
         Field::new(CDC_ORDER_COL, DataType::Binary, false),
-        Field::new(CDC_SEG_COL, DataType::Utf8, false),
+        Field::new(CDC_SEQ_COL, DataType::UInt64, false),
         Field::new(CDC_ORD_COL, DataType::UInt32, false),
-        Field::new(CDC_ROW_COL, DataType::UInt32, false),
+        Field::new(CDC_ROW_COL, DataType::UInt64, false),
     ]
 }
 
@@ -63,29 +134,29 @@ pub fn cdc_sidecar_schema(user: &SchemaRef) -> SchemaRef {
 pub fn is_cdc_sidecar_field(name: &str) -> bool {
     matches!(
         name,
-        CDC_MUTATION_COL | CDC_ORDER_COL | CDC_SEG_COL | CDC_ORD_COL | CDC_ROW_COL
+        CDC_MUTATION_COL | CDC_ORDER_COL | CDC_SEQ_COL | CDC_ORD_COL | CDC_ROW_COL
     )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct TieBreak {
     order_token: Vec<u8>,
-    segment_id: String,
+    seq: u64,
     ordinal: u32,
-    row_index: u32,
+    row: u64,
 }
 
 #[derive(Clone, Debug)]
 struct Winner {
     tie: TieBreak,
-    mutation: u8,
+    mutation: MutationKind,
     batch_idx: usize,
     row: usize,
 }
 
+#[derive(Debug)]
 pub struct CollapseResult {
-    pub changed_keys: HashSet<Vec<u8>>,
-    pub snapshot_keys: HashSet<Vec<u8>>,
+    pub changed_keys: HashSet<OwnedRow>,
     pub survivor_batches: Vec<RecordBatch>,
 }
 
@@ -94,120 +165,116 @@ pub fn collapse_wal_batches(
     batches: &[RecordBatch],
     business_key_columns: &[String],
 ) -> Result<CollapseResult> {
-    let mut winners: BTreeMap<Vec<u8>, Winner> = BTreeMap::new();
+    if business_key_columns.is_empty() {
+        return Err(DataFusionError::Plan(
+            "collapse_wal_batches requires business_key_columns".into(),
+        ));
+    }
+    let mut winners: BTreeMap<OwnedRow, Winner> = BTreeMap::new();
     let mut append_rows: Vec<(usize, usize)> = Vec::new();
+    let mut encoder: Option<KeyEncoder> = None;
     for (batch_idx, batch) in batches.iter().enumerate() {
         let mutation = uint8_col(batch, CDC_MUTATION_COL)?;
         let order = binary_col(batch, CDC_ORDER_COL)?;
-        let seg = string_col(batch, CDC_SEG_COL)?;
+        let seq = uint64_col(batch, CDC_SEQ_COL)?;
         let ord = uint32_col(batch, CDC_ORD_COL)?;
-        let row_idx = uint32_col(batch, CDC_ROW_COL)?;
-        for row in 0..batch.num_rows() {
-            let mut_kind = mutation.value(row);
-            if mut_kind == MUT_NONE {
-                append_rows.push((batch_idx, row));
-                continue;
+        let row_idx = uint64_col(batch, CDC_ROW_COL)?;
+        let enc = match encoder.as_ref() {
+            Some(enc) => enc,
+            None => {
+                encoder = Some(KeyEncoder::new(
+                    batch.schema().as_ref(),
+                    business_key_columns,
+                )?);
+                encoder.as_ref().expect("encoder just set")
             }
-            let Some(key) = row_business_key(batch, row, business_key_columns)? else {
-                continue;
-            };
-            let tie = TieBreak {
-                order_token: order.value(row).to_vec(),
-                segment_id: seg.value(row).to_string(),
-                ordinal: ord.value(row),
-                row_index: row_idx.value(row),
-            };
-            let candidate = Winner {
-                tie,
-                mutation: mut_kind,
-                batch_idx,
-                row,
-            };
-            match winners.get(&key) {
-                Some(existing) if existing.tie >= candidate.tie => {}
-                _ => {
-                    winners.insert(key, candidate);
+        };
+        let keys = enc.encode(batch, NullKey::Reject)?;
+        for row in 0..batch.num_rows() {
+            match decode_mutation(mutation.value(row))? {
+                None => {
+                    append_rows.push((batch_idx, row));
+                    continue;
+                }
+                Some(kind) => {
+                    let Some(key) = keys[row].clone() else {
+                        return Err(DataFusionError::Execution(
+                            "CDC WAL row has a null business key".into(),
+                        ));
+                    };
+                    let tie = TieBreak {
+                        order_token: order.value(row).to_vec(),
+                        seq: seq.value(row),
+                        ordinal: ord.value(row),
+                        row: row_idx.value(row),
+                    };
+                    let candidate = Winner {
+                        tie,
+                        mutation: kind,
+                        batch_idx,
+                        row,
+                    };
+                    match winners.get(&key) {
+                        Some(existing) if existing.tie >= candidate.tie => {}
+                        _ => {
+                            winners.insert(key, candidate);
+                        }
+                    }
                 }
             }
         }
     }
     let mut changed_keys = HashSet::new();
-    let mut snapshot_keys = HashSet::new();
     let mut keep: Vec<(usize, usize)> = append_rows;
     for (key, winner) in &winners {
         match winner.mutation {
-            MUT_SNAPSHOT => {
-                snapshot_keys.insert(key.clone());
-                keep.push((winner.batch_idx, winner.row));
-            }
-            MUT_DELETE => {
-                changed_keys.insert(key.clone());
-            }
-            MUT_INSERT | MUT_UPDATE => {
+            MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
                 changed_keys.insert(key.clone());
                 keep.push((winner.batch_idx, winner.row));
             }
-            _ => {}
+            MutationKind::Delete => {
+                changed_keys.insert(key.clone());
+            }
         }
     }
     keep.sort_unstable();
     Ok(CollapseResult {
         changed_keys,
-        snapshot_keys,
         survivor_batches: take_rows(batches, &keep)?,
     })
 }
 
-fn lake_business_keys(
-    lake: &[RecordBatch],
-    business_key_columns: &[String],
-) -> Result<HashSet<Vec<u8>>> {
-    let mut keys = HashSet::new();
-    for batch in lake {
-        for row in 0..batch.num_rows() {
-            if let Some(key) = row_business_key(batch, row, business_key_columns)? {
-                keys.insert(key);
-            }
-        }
-    }
-    Ok(keys)
-}
-
-pub fn drop_compacted_snapshot_leftover(
-    collapsed: &CollapseResult,
-    lake_keys: &HashSet<Vec<u8>>,
-    business_key_columns: &[String],
-) -> Result<Vec<RecordBatch>> {
-    if collapsed.snapshot_keys.is_empty() {
-        return Ok(collapsed.survivor_batches.clone());
-    }
-    let mut keep = Vec::new();
-    for (batch_idx, batch) in collapsed.survivor_batches.iter().enumerate() {
-        for row in 0..batch.num_rows() {
-            match row_business_key(batch, row, business_key_columns)? {
-                Some(key) if collapsed.snapshot_keys.contains(&key) && lake_keys.contains(&key) => {
-                }
-                _ => keep.push((batch_idx, row)),
-            }
-        }
-    }
-    take_rows(&collapsed.survivor_batches, &keep)
-}
-
 pub fn anti_join_lake(
     lake: &[RecordBatch],
-    changed_keys: &HashSet<Vec<u8>>,
+    changed_keys: &HashSet<OwnedRow>,
     business_key_columns: &[String],
 ) -> Result<Vec<RecordBatch>> {
+    if business_key_columns.is_empty() {
+        return Err(DataFusionError::Plan(
+            "anti_join_lake requires business_key_columns".into(),
+        ));
+    }
     if changed_keys.is_empty() {
         return Ok(lake.to_vec());
     }
+    let mut encoder: Option<KeyEncoder> = None;
     let mut out = Vec::new();
     for batch in lake {
+        let enc = match encoder.as_ref() {
+            Some(enc) => enc,
+            None => {
+                encoder = Some(KeyEncoder::new(
+                    batch.schema().as_ref(),
+                    business_key_columns,
+                )?);
+                encoder.as_ref().expect("encoder just set")
+            }
+        };
+        let keys = enc.encode(batch, NullKey::PassThrough)?;
         let mut keep = Vec::new();
         for row in 0..batch.num_rows() {
-            match row_business_key(batch, row, business_key_columns)? {
-                Some(key) if changed_keys.contains(&key) => {}
+            match &keys[row] {
+                Some(key) if changed_keys.contains(key) => {}
                 _ => keep.push(row),
             }
         }
@@ -252,54 +319,6 @@ fn take_rows(batches: &[RecordBatch], keep: &[(usize, usize)]) -> Result<Vec<Rec
     Ok(out)
 }
 
-fn row_business_key(
-    batch: &RecordBatch,
-    row: usize,
-    columns: &[String],
-) -> Result<Option<Vec<u8>>> {
-    if columns.is_empty() {
-        return Ok(None);
-    }
-    let mut key = Vec::new();
-    for (i, name) in columns.iter().enumerate() {
-        let Some(col) = batch.column_by_name(name) else {
-            return Err(DataFusionError::Plan(format!(
-                "CDC business key column '{name}' is missing from the scan schema"
-            )));
-        };
-        if col.is_null(row) {
-            return Ok(None);
-        }
-        if i > 0 {
-            key.push(0x1f);
-        }
-        key.extend(scalar_key_bytes(col.as_ref(), row));
-    }
-    Ok(Some(key))
-}
-
-fn scalar_key_bytes(array: &dyn Array, row: usize) -> Vec<u8> {
-    if let Some(v) = array.as_any().downcast_ref::<StringArray>() {
-        return v.value(row).as_bytes().to_vec();
-    }
-    if let Some(v) = array.as_any().downcast_ref::<arrow::array::Int64Array>() {
-        return v.value(row).to_le_bytes().to_vec();
-    }
-    if let Some(v) = array.as_any().downcast_ref::<arrow::array::Int32Array>() {
-        return v.value(row).to_le_bytes().to_vec();
-    }
-    if let Some(v) = array.as_any().downcast_ref::<BinaryArray>() {
-        return v.value(row).to_vec();
-    }
-    if let Some(v) = array
-        .as_any()
-        .downcast_ref::<arrow::array::LargeStringArray>()
-    {
-        return v.value(row).as_bytes().to_vec();
-    }
-    format!("{array:?}:{row}").into_bytes()
-}
-
 fn uint8_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a UInt8Array> {
     batch
         .column_by_name(name)
@@ -314,10 +333,10 @@ fn binary_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a BinaryArray>
         .ok_or_else(|| DataFusionError::Internal(format!("missing CDC column {name}")))
 }
 
-fn string_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
+fn uint64_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a UInt64Array> {
     batch
         .column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
         .ok_or_else(|| DataFusionError::Internal(format!("missing CDC column {name}")))
 }
 
@@ -328,16 +347,18 @@ fn uint32_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a UInt32Array>
         .ok_or_else(|| DataFusionError::Internal(format!("missing CDC column {name}")))
 }
 
-pub fn append_sidecar_none(segment_id: &str, ordinal: u32, rows: usize) -> Vec<ArrayRef> {
+pub fn append_sidecar_none(seq: u64, ordinal: u32, row_base: u64, rows: usize) -> Vec<ArrayRef> {
     vec![
         Arc::new(UInt8Array::from(vec![MUT_NONE; rows])),
         Arc::new(BinaryArray::from_iter_values(std::iter::repeat_n(
             [].as_slice(),
             rows,
         ))),
-        Arc::new(StringArray::from(vec![segment_id.to_string(); rows])),
+        Arc::new(UInt64Array::from(vec![seq; rows])),
         Arc::new(UInt32Array::from(vec![ordinal; rows])),
-        Arc::new(UInt32Array::from((0..rows as u32).collect::<Vec<_>>())),
+        Arc::new(UInt64Array::from(
+            (row_base..row_base + rows as u64).collect::<Vec<_>>(),
+        )),
     ]
 }
 
@@ -345,8 +366,9 @@ pub fn attach_cdc_sidecar(
     batch: RecordBatch,
     mutations: &[MutationKind],
     order_tokens: &[Vec<u8>],
-    segment_id: &str,
+    seq: u64,
     ordinal: u32,
+    row_base: u64,
 ) -> Result<RecordBatch> {
     let rows = batch.num_rows();
     if mutations.len() != rows || order_tokens.len() != rows {
@@ -365,13 +387,10 @@ pub fn attach_cdc_sidecar(
     cols.push(Arc::new(BinaryArray::from_iter_values(
         order_tokens.iter().map(|t| t.as_slice()),
     )));
-    cols.push(Arc::new(StringArray::from(vec![
-        segment_id.to_string();
-        rows
-    ])));
+    cols.push(Arc::new(UInt64Array::from(vec![seq; rows])));
     cols.push(Arc::new(UInt32Array::from(vec![ordinal; rows])));
-    cols.push(Arc::new(UInt32Array::from(
-        (0..rows as u32).collect::<Vec<_>>(),
+    cols.push(Arc::new(UInt64Array::from(
+        (row_base..row_base + rows as u64).collect::<Vec<_>>(),
     )));
     let schema = cdc_sidecar_schema(&batch.schema());
     RecordBatch::try_new(schema, cols)
@@ -380,15 +399,26 @@ pub fn attach_cdc_sidecar(
 
 pub fn attach_append_sidecar(
     batch: RecordBatch,
-    segment_id: &str,
+    seq: u64,
     ordinal: u32,
+    row_base: u64,
 ) -> Result<RecordBatch> {
     let rows = batch.num_rows();
     let mut cols: Vec<ArrayRef> = batch.columns().to_vec();
-    cols.extend(append_sidecar_none(segment_id, ordinal, rows));
+    cols.extend(append_sidecar_none(seq, ordinal, row_base, rows));
     let schema = cdc_sidecar_schema(&batch.schema());
     RecordBatch::try_new(schema, cols)
         .map_err(|err| DataFusionError::ArrowError(Box::new(err), None))
+}
+
+fn coalesce_single(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn ExecutionPlan>> {
+    if plan.properties().output_partitioning().partition_count() <= 1 {
+        Ok(plan)
+    } else {
+        Ok(Arc::new(
+            datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(plan),
+        ))
+    }
 }
 
 /// Serving-node merge: scan lake, collapse WAL, anti-join changed keys, union.
@@ -413,6 +443,19 @@ impl CdcReconcileExec {
                 "CdcReconcileExec requires business_key_columns".into(),
             ));
         }
+        if iceberg.schema().as_ref() != schema.as_ref() {
+            return Err(DataFusionError::Plan(
+                "CdcReconcileExec lake child schema must equal the user schema".into(),
+            ));
+        }
+        let wal_schema = cdc_sidecar_schema(&schema);
+        if wal.schema().as_ref() != wal_schema.as_ref() {
+            return Err(DataFusionError::Plan(
+                "CdcReconcileExec WAL child schema must equal cdc_sidecar_schema(user)".into(),
+            ));
+        }
+        let iceberg = coalesce_single(iceberg)?;
+        let wal = coalesce_single(wal)?;
         let properties = Arc::new(PlanProperties::new(
             datafusion::physical_expr::EquivalenceProperties::new(schema.clone()),
             datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
@@ -487,6 +530,14 @@ impl ExecutionPlan for CdcReconcileExec {
         vec![&self.iceberg, &self.wal]
     }
 
+    fn required_input_distribution(&self) -> Vec<datafusion::physical_plan::Distribution> {
+        vec![datafusion::physical_plan::Distribution::SinglePartition; 2]
+    }
+
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        vec![false; 2]
+    }
+
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
@@ -519,17 +570,26 @@ impl ExecutionPlan for CdcReconcileExec {
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let started = std::time::Instant::now();
+        let pool = Arc::clone(context.memory_pool());
         let wal = self.wal.execute(0, Arc::clone(&context))?;
         let iceberg = self.iceberg.execute(0, context)?;
         let keys = self.business_key_columns.clone();
         let schema = self.schema.clone();
         let fut = async move {
+            let consumer =
+                datafusion::execution::memory_pool::MemoryConsumer::new("CdcReconcileExec");
+            let reservation = consumer.register(&pool);
             let wal_batches = wal.try_collect::<Vec<_>>().await?;
+            for batch in &wal_batches {
+                reservation.try_grow(batch.get_array_memory_size())?;
+            }
             let collapsed = collapse_wal_batches(&wal_batches, &keys)?;
             let lake_batches = iceberg.try_collect::<Vec<_>>().await?;
-            let lake_keys = lake_business_keys(&lake_batches, &keys)?;
+            for batch in &lake_batches {
+                reservation.try_grow(batch.get_array_memory_size())?;
+            }
             let lake_kept = anti_join_lake(&lake_batches, &collapsed.changed_keys, &keys)?;
-            let wal_kept = drop_compacted_snapshot_leftover(&collapsed, &lake_keys, &keys)?;
+            let wal_kept = collapsed.survivor_batches;
             let mut out = Vec::new();
             for batch in lake_kept.into_iter().chain(wal_kept) {
                 let projected = project_batch(batch, &schema)?;
@@ -578,7 +638,7 @@ pub fn wrap_limit(
 mod tests {
     use super::*;
     use crate::sqlrt::stream_plan::StreamingBatchesExec;
-    use arrow::array::Int64Array;
+    use arrow::array::{Int64Array, StringArray};
     use datafusion::prelude::SessionContext;
 
     fn user_schema() -> SchemaRef {
@@ -607,19 +667,19 @@ mod tests {
         amount: i64,
         mutation: MutationKind,
         order: u8,
-        seg: &str,
+        seq: u64,
         ordinal: u32,
-        row_i: u32,
+        row_i: u64,
     ) -> RecordBatch {
         attach_cdc_sidecar(
             row(id, name, amount),
             &[mutation],
             &[vec![order]],
-            seg,
+            seq,
             ordinal,
+            row_i,
         )
         .unwrap()
-        .slice(row_i as usize, 1)
     }
 
     fn oracle(
@@ -691,98 +751,45 @@ mod tests {
     }
 
     #[test]
-    fn leftover_snapshot_wal_keeps_lake_keys_not_in_wal() {
-        let lake = vec![
-            row(1, "alpha", 100),
-            row(2, "beta", 50),
-            row(3, "gamma", 30),
-        ];
-        let wal = vec![
-            cdc_row(
-                1,
-                "alpha",
-                100,
-                MutationKind::Snapshot,
-                1,
-                "compacted",
-                0,
-                0,
-            ),
-            cdc_row(2, "beta", 50, MutationKind::Snapshot, 1, "compacted", 1, 0),
-        ];
+    fn uncompacted_snapshot_replaces_lake() {
+        let lake = vec![row(1, "alpha", 120)];
+        let wal = vec![cdc_row(1, "alpha", 100, MutationKind::Snapshot, 1, 1, 0, 0)];
         let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        let lake_keys = lake_business_keys(&lake, &["id".into()]).unwrap();
         let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
-        let wal_kept =
-            drop_compacted_snapshot_leftover(&collapsed, &lake_keys, &["id".into()]).unwrap();
-        let lake_rows = kept.iter().map(|b| b.num_rows()).sum::<usize>();
-        let wal_rows = wal_kept.iter().map(|b| b.num_rows()).sum::<usize>();
-        assert_eq!(lake_rows, 3);
-        assert_eq!(wal_rows, 0);
-        assert_eq!(lake_rows + wal_rows, 3);
-    }
-
-    #[test]
-    fn leftover_snapshots_do_not_replace_updated_lake_amounts() {
-        let lake = vec![
-            row(1, "alpha", 120),
-            row(2, "beta", 50),
-            row(3, "gamma", 30),
-        ];
-        let wal = vec![
-            cdc_row(
-                1,
-                "alpha",
-                100,
-                MutationKind::Snapshot,
-                1,
-                "compacted",
-                0,
-                0,
-            ),
-            cdc_row(2, "beta", 50, MutationKind::Snapshot, 1, "compacted", 1, 0),
-        ];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        assert!(collapsed.changed_keys.is_empty());
-        let lake_keys = lake_business_keys(&lake, &["id".into()]).unwrap();
-        let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
-        let wal_kept =
-            drop_compacted_snapshot_leftover(&collapsed, &lake_keys, &["id".into()]).unwrap();
-        let batches: Vec<_> = kept.into_iter().chain(wal_kept).collect();
-        let mut amounts = Vec::new();
-        for batch in &batches {
-            let col = batch
-                .column_by_name("amount")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap();
-            amounts.extend(col.iter().map(|v| v.unwrap()));
-        }
-        amounts.sort();
-        assert_eq!(amounts, vec![30, 50, 120]);
+        assert!(kept.iter().all(|b| b.num_rows() == 0) || kept.is_empty());
+        let amount = collapsed.survivor_batches[0]
+            .column_by_name("amount")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(amount.value(0), 100);
     }
 
     #[test]
     fn snapshot_wal_fills_empty_lake() {
         let lake: Vec<RecordBatch> = Vec::new();
         let wal = vec![
-            cdc_row(1, "alpha", 100, MutationKind::Snapshot, 1, "s", 0, 0),
-            cdc_row(2, "beta", 50, MutationKind::Snapshot, 1, "s", 1, 0),
+            cdc_row(1, "alpha", 100, MutationKind::Snapshot, 1, 1, 0, 0),
+            cdc_row(2, "beta", 50, MutationKind::Snapshot, 1, 1, 1, 0),
         ];
         let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        let lake_keys = lake_business_keys(&lake, &["id".into()]).unwrap();
         let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
-        let wal_kept =
-            drop_compacted_snapshot_leftover(&collapsed, &lake_keys, &["id".into()]).unwrap();
         assert_eq!(kept.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
-        assert_eq!(wal_kept.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+        assert_eq!(
+            collapsed
+                .survivor_batches
+                .iter()
+                .map(|b| b.num_rows())
+                .sum::<usize>(),
+            2
+        );
     }
 
     #[test]
     fn insert_only_wal_unions_with_lake() {
         let lake = vec![row(1, "alpha", 10)];
-        let wal = vec![cdc_row(2, "beta", 20, MutationKind::Insert, 1, "s", 0, 0)];
+        let wal = vec![cdc_row(2, "beta", 20, MutationKind::Insert, 1, 1, 0, 0)];
         let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
         let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
         assert_eq!(kept.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
@@ -805,7 +812,7 @@ mod tests {
             120,
             MutationKind::Update,
             2,
-            "s",
+            1,
             0,
             0,
         )];
@@ -825,7 +832,7 @@ mod tests {
     #[test]
     fn delete_removes_key() {
         let lake = vec![row(1, "alpha", 10), row(2, "beta", 20)];
-        let wal = vec![cdc_row(2, "beta", 20, MutationKind::Delete, 1, "s", 0, 0)];
+        let wal = vec![cdc_row(2, "beta", 20, MutationKind::Delete, 1, 1, 0, 0)];
         let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
         let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
         assert_eq!(kept.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
@@ -838,9 +845,9 @@ mod tests {
     #[test]
     fn many_updates_keep_max_order_token() {
         let wal = vec![
-            cdc_row(1, "a", 1, MutationKind::Update, 1, "s", 0, 0),
-            cdc_row(1, "b", 2, MutationKind::Update, 3, "s", 1, 0),
-            cdc_row(1, "c", 3, MutationKind::Update, 2, "s", 2, 0),
+            cdc_row(1, "a", 1, MutationKind::Update, 1, 1, 0, 0),
+            cdc_row(1, "b", 2, MutationKind::Update, 3, 1, 1, 0),
+            cdc_row(1, "c", 3, MutationKind::Update, 2, 1, 2, 0),
         ];
         let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
         let batch = &collapsed.survivor_batches[0];
@@ -856,8 +863,8 @@ mod tests {
     #[test]
     fn update_then_delete_absent() {
         let wal = vec![
-            cdc_row(1, "a", 1, MutationKind::Update, 1, "s", 0, 0),
-            cdc_row(1, "a", 1, MutationKind::Delete, 2, "s", 1, 0),
+            cdc_row(1, "a", 1, MutationKind::Update, 1, 1, 0, 0),
+            cdc_row(1, "a", 1, MutationKind::Delete, 2, 1, 1, 0),
         ];
         let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
         assert!(
@@ -870,8 +877,8 @@ mod tests {
     #[test]
     fn delete_then_reinsert() {
         let wal = vec![
-            cdc_row(1, "old", 1, MutationKind::Delete, 1, "s", 0, 0),
-            cdc_row(1, "new", 9, MutationKind::Insert, 2, "s", 1, 0),
+            cdc_row(1, "old", 1, MutationKind::Delete, 1, 1, 0, 0),
+            cdc_row(1, "new", 9, MutationKind::Insert, 2, 1, 1, 0),
         ];
         let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
         let name = collapsed.survivor_batches[0]
@@ -886,8 +893,8 @@ mod tests {
     #[test]
     fn equal_tokens_tie_break_is_deterministic() {
         let wal = vec![
-            cdc_row(1, "a", 1, MutationKind::Update, 5, "s-a", 0, 0),
-            cdc_row(1, "b", 2, MutationKind::Update, 5, "s-b", 0, 0),
+            cdc_row(1, "a", 1, MutationKind::Update, 5, 1, 0, 0),
+            cdc_row(1, "b", 2, MutationKind::Update, 5, 2, 0, 0),
         ];
         let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
         let name = collapsed.survivor_batches[0]
@@ -902,7 +909,7 @@ mod tests {
     #[test]
     fn append_rows_do_not_suppress_lake() {
         let lake = vec![row(1, "alpha", 10)];
-        let wal = vec![attach_append_sidecar(row(2, "extra", 1), "s", 0).unwrap()];
+        let wal = vec![attach_append_sidecar(row(2, "extra", 1), 1, 0, 0).unwrap()];
         let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
         assert!(collapsed.changed_keys.is_empty());
         let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
@@ -921,8 +928,8 @@ mod tests {
     async fn sum_matches_oracle() {
         let lake = vec![row(1, "alpha", 100), row(2, "beta", 50)];
         let wal = vec![
-            cdc_row(1, "alpha-prime", 120, MutationKind::Update, 1, "s", 0, 0),
-            cdc_row(3, "gamma", 30, MutationKind::Insert, 1, "s", 1, 0),
+            cdc_row(1, "alpha-prime", 120, MutationKind::Update, 1, 1, 0, 0),
+            cdc_row(3, "gamma", 30, MutationKind::Insert, 1, 1, 1, 0),
         ];
         let expect: i64 = oracle(
             &[(1, "alpha", 100), (2, "beta", 50)],
@@ -953,7 +960,7 @@ mod tests {
             120,
             MutationKind::Update,
             1,
-            "s",
+            1,
             0,
             0,
         )];
@@ -976,7 +983,7 @@ mod tests {
             120,
             MutationKind::Update,
             1,
-            "s",
+            1,
             0,
             0,
         )];
@@ -990,7 +997,7 @@ mod tests {
                 120,
                 MutationKind::Update,
                 1,
-                "s",
+                1,
                 0,
                 0,
             )],
@@ -998,5 +1005,202 @@ mod tests {
         )
         .await;
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+    }
+
+    fn uuid_batch(id: [u8; 16], name: &str) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("id", DataType::FixedSizeBinary(16), true),
+                Field::new("name", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(
+                    arrow::array::FixedSizeBinaryArray::try_from_iter(std::iter::once(
+                        id.as_slice(),
+                    ))
+                    .unwrap(),
+                ),
+                Arc::new(StringArray::from(vec![name])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn uuid_keys_collapse_to_one_winner() {
+        let id = [7u8; 16];
+        let wal = vec![
+            attach_cdc_sidecar(
+                uuid_batch(id, "old"),
+                &[MutationKind::Update],
+                &[vec![1]],
+                1,
+                0,
+                0,
+            )
+            .unwrap(),
+            attach_cdc_sidecar(
+                uuid_batch(id, "new"),
+                &[MutationKind::Update],
+                &[vec![2]],
+                2,
+                1,
+                0,
+            )
+            .unwrap(),
+        ];
+        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
+        assert_eq!(
+            collapsed
+                .survivor_batches
+                .iter()
+                .map(|b| b.num_rows())
+                .sum::<usize>(),
+            1
+        );
+        let name = collapsed.survivor_batches[0]
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(name.value(0), "new");
+    }
+
+    #[test]
+    fn composite_separator_keys_are_distinct() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Utf8, true),
+            Field::new("b", DataType::Utf8, true),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let batch = |a: &str, b: &str, name: &str| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec![a])),
+                    Arc::new(StringArray::from(vec![b])),
+                    Arc::new(StringArray::from(vec![name])),
+                ],
+            )
+            .unwrap()
+        };
+        let wal = vec![
+            attach_cdc_sidecar(
+                batch("a\x1f", "b", "left"),
+                &[MutationKind::Insert],
+                &[vec![1]],
+                1,
+                0,
+                0,
+            )
+            .unwrap(),
+            attach_cdc_sidecar(
+                batch("a", "\x1fb", "right"),
+                &[MutationKind::Insert],
+                &[vec![1]],
+                1,
+                1,
+                0,
+            )
+            .unwrap(),
+        ];
+        let collapsed = collapse_wal_batches(&wal, &["a".into(), "b".into()]).unwrap();
+        assert_eq!(
+            collapsed
+                .survivor_batches
+                .iter()
+                .map(|b| b.num_rows())
+                .sum::<usize>(),
+            2
+        );
+    }
+
+    #[test]
+    fn lake_null_business_key_is_kept() {
+        let lake = RecordBatch::try_new(
+            user_schema(),
+            vec![
+                Arc::new(Int64Array::from(vec![None])),
+                Arc::new(StringArray::from(vec!["orphan"])),
+                Arc::new(Int64Array::from(vec![1])),
+            ],
+        )
+        .unwrap();
+        let wal = vec![cdc_row(1, "a", 1, MutationKind::Insert, 1, 1, 0, 0)];
+        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
+        let kept = anti_join_lake(&[lake], &collapsed.changed_keys, &["id".into()]).unwrap();
+        assert_eq!(kept.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+        let name = kept[0]
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(name.value(0), "orphan");
+    }
+
+    #[test]
+    fn wal_null_business_key_is_error() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![None])),
+                Arc::new(StringArray::from(vec!["x"])),
+            ],
+        )
+        .unwrap();
+        let wal = attach_cdc_sidecar(batch, &[MutationKind::Insert], &[vec![1]], 1, 0, 0).unwrap();
+        let err = collapse_wal_batches(&[wal], &["id".into()]).unwrap_err();
+        assert!(err.to_string().contains("null business key"), "{err}");
+    }
+
+    #[test]
+    fn unknown_mutation_code_is_error() {
+        let mut wal = cdc_row(1, "a", 1, MutationKind::Insert, 1, 1, 0, 0);
+        let mut cols = wal.columns().to_vec();
+        cols[3] = Arc::new(UInt8Array::from(vec![99u8]));
+        wal = RecordBatch::try_new(wal.schema(), cols).unwrap();
+        let err = collapse_wal_batches(&[wal], &["id".into()]).unwrap_err();
+        assert!(err.to_string().contains("unknown CDC mutation"), "{err}");
+    }
+
+    #[test]
+    fn collapse_wal_batches_requires_keys() {
+        let wal = vec![cdc_row(1, "a", 1, MutationKind::Insert, 1, 1, 0, 0)];
+        let err = collapse_wal_batches(&wal, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("requires business_key_columns"),
+            "{err}"
+        );
+        let lake = vec![row(1, "a", 1)];
+        let err = anti_join_lake(&lake, &HashSet::new(), &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("requires business_key_columns"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn cdc_merge_sot_deletes_legacy_key_and_seg_paths() {
+        let src = include_str!("cdc_reconcile.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("CDC_SEG_COL"));
+        assert!(!prod.contains("_skippr_cdc_seg"));
+        assert!(!prod.contains("fn row_business_key"));
+        assert!(!prod.contains("fn scalar_key_bytes"));
+        assert!(!prod.contains("drop_compacted_snapshot_leftover"));
+        assert!(!prod.contains("snapshot_keys"));
+        assert!(prod.contains("CDC_SEQ_COL"));
+        assert!(prod.contains("_skippr_cdc_seq"));
+        assert!(prod.contains("struct KeyEncoder"));
+        assert!(prod.contains("fn decode_mutation"));
+        assert!(prod.contains("NullKey::Reject"));
+        assert!(prod.contains("Distribution::SinglePartition"));
+        assert!(prod.contains("MemoryConsumer"));
     }
 }

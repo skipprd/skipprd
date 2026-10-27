@@ -14,6 +14,7 @@ pub mod wal_catalog_import;
 pub mod wal_handle;
 pub mod wal_object_store;
 pub mod wal_persist;
+pub mod wal_reader;
 pub mod wal_startup;
 pub mod wal_store;
 pub mod wal_writer;

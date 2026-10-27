@@ -68,6 +68,8 @@ pub enum DurableError {
     Io(String),
     #[error("protocol mismatch: {display}", display = clip_error_detail(.0))]
     ProtocolMismatch(String),
+    #[error("catalog conflict")]
+    CatalogConflict,
     #[error("stale epoch")]
     StaleEpoch,
     #[error("not caught up")]
