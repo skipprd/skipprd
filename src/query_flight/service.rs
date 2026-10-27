@@ -9,17 +9,18 @@ use arrow_flight::sql::metadata::SqlInfoDataBuilder;
 use arrow_flight::sql::server::FlightSqlService;
 use arrow_flight::sql::{
     ActionClosePreparedStatementRequest, ActionCreatePreparedStatementRequest,
-    ActionCreatePreparedStatementResult, CommandGetCatalogs, CommandGetDbSchemas,
+    ActionCreatePreparedStatementResult, Any as ProstAny, CommandGetCatalogs, CommandGetDbSchemas,
     CommandGetSqlInfo, CommandGetTableTypes, CommandGetTables, CommandPreparedStatementQuery,
     CommandStatementQuery, CommandStatementUpdate, SqlInfo, TicketStatementQuery,
 };
 use arrow_flight::{
-    FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest, HandshakeResponse, Ticket,
+    Action, ActionType, FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest,
+    HandshakeResponse, Ticket,
 };
 use bytes::Bytes;
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
-use datafusion::datasource::TableProvider;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use futures::{Stream, StreamExt, TryStreamExt};
 use skippr_lease::{DurableError, CONTROL_FRAME_MAX_BYTES};
@@ -32,7 +33,11 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::cluster::identity::{ClusterIdentity, TenantScope};
 use crate::cluster::peer::ReplicaRegistry;
 use crate::helpers::configuration::Config;
-use crate::query_flight::sql::{classify_sql, matches_sql_like, reject_ddl, ClassifiedSql};
+use crate::query_flight::sql::{matches_sql_like, reject_ddl};
+use skippr_query_plan::{
+    decode_live_wal_ticket, LiveWalPinRequest, LiveWalPinResponse, LiveWalTicket, PinnedSliceRef,
+    LIVE_WAL_PIN_ACTION, LIVE_WAL_TICKET_TYPE_URL,
+};
 
 #[derive(Clone)]
 pub enum FlightAuth {
@@ -279,24 +284,14 @@ impl SkipprFlightSql {
                 .map_err(|err| Status::internal(err.to_string()))?;
             return Ok(df.schema().inner().clone());
         }
-        match classify_sql(sql, scope).map_err(|err| Status::invalid_argument(err.to_string()))? {
-            ClassifiedSql::LiveWal(request) => {
-                Ok(iceberg_schema_for_namespace(config, &request.namespace)
-                    .await
-                    .unwrap_or_else(|_| Arc::new(Schema::empty())))
-            }
-            ClassifiedSql::Iceberg(namespace) => {
-                iceberg_schema_for_namespace(config, &namespace).await
-            }
-            ClassifiedSql::User => crate::sqlrt::tables::schema_for_clustered_select(
-                config,
-                sql,
-                &crate::sqlrt::tables::process_clustered_select_opts(scope.clone())
-                    .map_err(|err| Status::internal(err.to_string()))?,
-            )
-            .await
-            .map_err(|err| Status::internal(err.to_string())),
-        }
+        crate::sqlrt::tables::schema_for_clustered_select(
+            config,
+            sql,
+            &crate::sqlrt::tables::process_clustered_select_opts(scope.clone())
+                .map_err(|err| Status::internal(err.to_string()))?,
+        )
+        .await
+        .map_err(|err| Status::internal(err.to_string()))
     }
 
     async fn execute_sql_stream(
@@ -348,26 +343,6 @@ impl SkipprFlightSql {
                 .map_err(|err| Status::internal(err.to_string()));
             return Ok((schema, Box::pin(stream)));
         }
-        match classify_sql(sql, scope).map_err(|err| Status::invalid_argument(err.to_string()))? {
-            ClassifiedSql::LiveWal(request) => {
-                let (schema, stream) = execute_live_wal(&self.app_config, &request).await?;
-                return Ok((schema, stream));
-            }
-            ClassifiedSql::Iceberg(namespace) => {
-                let df =
-                    crate::sqlrt::tables::plan_iceberg_scan(&self.app_config, &namespace, scope)
-                        .await
-                        .map_err(|err| Status::internal(err.to_string()))?;
-                let schema = df.schema().inner().clone();
-                let stream = df
-                    .execute_stream()
-                    .await
-                    .map_err(|err| Status::internal(err.to_string()))?
-                    .map_err(|err| Status::internal(err.to_string()));
-                return Ok((schema, Box::pin(stream)));
-            }
-            ClassifiedSql::User => {}
-        }
         crate::query_flight::runtime::query_context()
             .map_err(|err| Status::internal(err.to_string()))?;
         let plan = crate::sqlrt::tables::plan_clustered_select(
@@ -389,8 +364,8 @@ impl SkipprFlightSql {
         let stream = df
             .execute_stream()
             .await
-            .map_err(|err| Status::internal(err.to_string()))?
-            .map_err(|err| Status::internal(err.to_string()));
+            .map_err(datafusion_status)?
+            .map_err(datafusion_status);
         Ok((schema, Box::pin(stream)))
     }
 }
@@ -513,6 +488,61 @@ impl FlightSqlService for SkipprFlightSql {
     ) -> Result<(), Status> {
         let _scope = self.session_scope(&request)?;
         Ok(())
+    }
+
+    async fn list_custom_actions(&self) -> Option<Vec<Result<ActionType, Status>>> {
+        Some(vec![Ok(ActionType {
+            r#type: LIVE_WAL_PIN_ACTION.to_string(),
+            description: "Pin live WAL slices for one pipeline namespace".into(),
+        })])
+    }
+
+    async fn do_action_fallback(
+        &self,
+        request: Request<Action>,
+    ) -> Result<Response<<Self as FlightService>::DoActionStream>, Status> {
+        let scope = self.session_scope(&request)?;
+        let action = request.get_ref();
+        if action.r#type != LIVE_WAL_PIN_ACTION {
+            return Err(Status::invalid_argument(format!(
+                "unknown Flight action {}",
+                action.r#type
+            )));
+        }
+        if action.body.len() > CONTROL_FRAME_MAX_BYTES {
+            return Err(Status::invalid_argument("live WAL pin request too large"));
+        }
+        let pin = LiveWalPinRequest::decode_bytes(action.body.as_ref())
+            .map_err(|err| Status::invalid_argument(err.to_string()))?;
+        let body = pin_live_wal(&scope, &pin)?;
+        let output = futures::stream::iter(vec![Ok(arrow_flight::Result { body: body.into() })]);
+        Ok(Response::new(Box::pin(output)))
+    }
+
+    async fn do_get_fallback(
+        &self,
+        request: Request<Ticket>,
+        message: ProstAny,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let scope = self.session_scope(&request)?;
+        if request.get_ref().ticket.len() > CONTROL_FRAME_MAX_BYTES {
+            return Err(Status::invalid_argument("LiveWalTicket too large"));
+        }
+        if message.type_url != LIVE_WAL_TICKET_TYPE_URL {
+            return Err(Status::invalid_argument(format!(
+                "unknown Flight ticket {}",
+                message.type_url
+            )));
+        }
+        let ticket = decode_live_wal_ticket(&message)
+            .map_err(|err| Status::invalid_argument(err.to_string()))?;
+        let guard = self.track_in_flight();
+        let (schema, stream) = execute_live_wal_ticket(&self.app_config, &scope, &ticket).await?;
+        let stream = stream.map(move |item| {
+            let _keep = &guard;
+            item
+        });
+        Self::record_stream_response(schema, stream)
     }
 
     async fn do_put_statement_update(
@@ -710,18 +740,59 @@ impl FlightSqlService for SkipprFlightSql {
     }
 }
 
+fn datafusion_status(err: datafusion::error::DataFusionError) -> Status {
+    if crate::sqlrt::wal_table::is_wal_pin_lost(&err) {
+        Status::failed_precondition(err.to_string())
+    } else {
+        Status::internal(err.to_string())
+    }
+}
+
 async fn iceberg_schema_for_namespace(
     config: &Config,
+    pipeline: &str,
     namespace: &str,
 ) -> Result<SchemaRef, Status> {
-    crate::sqlrt::tables::iceberg_schema_for_namespace(config, namespace)
+    crate::sqlrt::tables::iceberg_schema_for_namespace(config, pipeline, namespace)
         .await
         .map_err(|err| Status::internal(err.to_string()))
 }
 
-async fn execute_live_wal(
+fn pin_live_wal(scope: &TenantScope, pin: &LiveWalPinRequest) -> Result<Bytes, Status> {
+    if pin.tenant != scope.tenant || pin.workspace != scope.workspace {
+        return Err(Status::invalid_argument(
+            "live WAL pin tenant/workspace does not match session",
+        ));
+    }
+    let key = skippr_lease::PipelineKey::new(&pin.tenant, &pin.workspace, &pin.pipeline)
+        .map_err(|err| Status::invalid_argument(err.to_string()))?;
+    let reader = crate::buffer::wal_reader::wal_reader_for(&key)
+        .ok_or_else(|| Status::not_found(format!("unknown pipeline {}", key.pipeline())))?;
+    let slices = reader
+        .live_slices(&pin.namespace)
+        .map_err(|err| Status::internal(err.to_string()))?;
+    let response = LiveWalPinResponse {
+        slices: slices
+            .into_iter()
+            .map(|slice| PinnedSliceRef {
+                segment_id: slice.segment_id.as_str().to_string(),
+                start: slice.entry.start,
+                seq: slice.seq.get(),
+                ordinal: slice.entry.ordinal,
+            })
+            .collect(),
+    };
+    Ok(Bytes::from(
+        response
+            .encode_bytes()
+            .map_err(|err| Status::internal(err.to_string()))?,
+    ))
+}
+
+async fn execute_live_wal_ticket(
     config: &Config,
-    request: &crate::query_flight::live_wal::LiveWalScanRequest,
+    scope: &TenantScope,
+    ticket: &LiveWalTicket,
 ) -> Result<
     (
         SchemaRef,
@@ -729,32 +800,58 @@ async fn execute_live_wal(
     ),
     Status,
 > {
-    crate::buffer::wal_handle::wal_handle_for(&request.pipeline).ok_or_else(|| {
-        Status::not_found(format!("unknown pipeline {}", request.pipeline.pipeline()))
-    })?;
-    let schema = iceberg_schema_for_namespace(config, &request.namespace)
-        .await
-        .unwrap_or_else(|_| Arc::new(Schema::empty()));
-    let cdc = crate::plugins::cdc::get_namespace_cdc_contract(&request.namespace)
-        .map(|c| !c.business_key_columns.is_empty())
-        .unwrap_or(false);
-    let provider = crate::sqlrt::wal_table::WalTableProvider::new(
+    let target = ticket
+        .target
+        .as_ref()
+        .ok_or_else(|| Status::invalid_argument("LiveWalTicket target is required"))?;
+    if target.tenant != scope.tenant || target.workspace != scope.workspace {
+        return Err(Status::invalid_argument(
+            "live WAL ticket tenant/workspace does not match session",
+        ));
+    }
+    let key = skippr_lease::PipelineKey::new(&target.tenant, &target.workspace, &target.pipeline)
+        .map_err(|err| Status::invalid_argument(err.to_string()))?;
+    let reader = crate::buffer::wal_reader::wal_reader_for(&key)
+        .ok_or_else(|| Status::not_found(format!("unknown pipeline {}", key.pipeline())))?;
+    let mut pinned = Vec::with_capacity(ticket.slices.len());
+    for slice in &ticket.slices {
+        let got = reader
+            .pinned_slice(&slice.segment_id, slice.start)
+            .map_err(|err| match err {
+                crate::buffer::wal_reader::PinReadError::Lost(lost) => {
+                    Status::failed_precondition(lost.to_string())
+                }
+                crate::buffer::wal_reader::PinReadError::Durable(err) => {
+                    Status::internal(err.to_string())
+                }
+            })?;
+        if got.entry.namespace != target.namespace {
+            return Err(Status::invalid_argument(format!(
+                "LiveWalTicket slice {}@{} namespace does not match target",
+                slice.segment_id, slice.start
+            )));
+        }
+        pinned.push(got);
+    }
+    let schema = iceberg_schema_for_namespace(config, &target.pipeline, &target.namespace).await?;
+    let schema = if ticket.cdc_sidecar {
+        crate::sqlrt::cdc_reconcile::cdc_sidecar_schema(&schema)
+    } else {
+        schema
+    };
+    let plan = crate::sqlrt::wal_table::WalScanExec::new(
         schema.clone(),
-        request.pipeline.clone(),
-        request.namespace.clone(),
-        request.exclude_segment_ids.clone(),
+        pinned,
+        None,
+        ticket.cdc_sidecar,
+        target.namespace.clone(),
     )
-    .with_cdc_sidecar(cdc);
+    .map_err(|err| Status::internal(err.to_string()))?;
     let ctx = SessionContext::new();
-    let plan = provider
-        .scan(&ctx.state(), None, &[], None)
-        .await
-        .map_err(|err| Status::internal(err.to_string()))?;
-    let schema = plan.schema();
     let stream = plan
         .execute(0, ctx.task_ctx())
         .map_err(|err| Status::internal(err.to_string()))?
-        .map_err(|err| Status::internal(err.to_string()));
+        .map_err(datafusion_status);
     Ok((schema, Box::pin(stream)))
 }
 
@@ -818,10 +915,46 @@ mod tests {
         server.drain().await;
     }
 
+    async fn live_wal_do_get_err(
+        endpoint: &str,
+        ticket: &skippr_query_plan::LiveWalTicket,
+    ) -> datafusion::error::DataFusionError {
+        match skippr_query_plan::stream_live_wal_batches_with_auth(
+            endpoint,
+            ticket,
+            &skippr_query_plan::basic_authorization("t", "w"),
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(stream) => {
+                use futures::TryStreamExt;
+                stream
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .expect_err("expected LiveWal DoGet to fail closed")
+            }
+        }
+    }
+
+    fn live_ticket(pipeline: &str, namespace: &str) -> skippr_query_plan::LiveWalTicket {
+        skippr_query_plan::LiveWalTicket {
+            target: Some(skippr_query_plan::LiveWalPinRequest {
+                tenant: "t".into(),
+                workspace: "w".into(),
+                pipeline: pipeline.into(),
+                namespace: namespace.into(),
+            }),
+            cdc_sidecar: false,
+            slices: Vec::new(),
+        }
+    }
+
     #[tokio::test]
     #[serial_test::serial]
-    async fn live_wal_scan_replica_session_without_handle_fails_closed() {
+    async fn live_wal_pin_without_reader_fails_closed() {
         crate::buffer::wal_handle::clear_wal_handles();
+        crate::buffer::wal_reader::clear_query_readers();
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "p").unwrap();
         let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
@@ -844,9 +977,15 @@ mod tests {
         .await
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let err = skippr_query_plan::fetch_statement_batches(
+        let err = skippr_query_plan::pin_live_wal_with_auth(
             &server.bind_addr().to_string(),
-            "SELECT * FROM live_wal_scan('t', 'w', 'p', 'ns')",
+            &skippr_query_plan::LiveWalPinRequest {
+                tenant: "t".into(),
+                workspace: "w".into(),
+                pipeline: "p".into(),
+                namespace: "ns".into(),
+            },
+            &skippr_query_plan::basic_authorization("t", "w"),
         )
         .await
         .unwrap_err();
@@ -859,43 +998,122 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foreign_tenant_live_wal_scan_fails() {
+    async fn foreign_tenant_live_wal_ticket_fails() {
         let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity())
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let err = skippr_query_plan::fetch_statement_batches(
-            &server.bind_addr().to_string(),
-            "SELECT * FROM live_wal_scan('other', 'prod', 'events', 'ns')",
-        )
-        .await
-        .unwrap_err();
+        let mut ticket = live_ticket("events", "ns");
+        ticket.target.as_mut().unwrap().tenant = "other".into();
+        ticket.target.as_mut().unwrap().workspace = "prod".into();
+        let err = live_wal_do_get_err(&server.bind_addr().to_string(), &ticket).await;
         assert!(
             err.to_string().contains("tenant")
                 || err.to_string().contains("invalid")
-                || err.to_string().contains("does not match")
+                || err.to_string().contains("does not match"),
+            "{err}"
         );
         server.drain().await;
     }
 
     #[tokio::test]
-    async fn unknown_pipeline_fails_closed() {
+    async fn unknown_pipeline_live_wal_ticket_fails_closed() {
         let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity())
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let err = skippr_query_plan::fetch_statement_batches(
+        let err = live_wal_do_get_err(
             &server.bind_addr().to_string(),
-            "SELECT * FROM live_wal_scan('t', 'w', 'missing', 'ns')",
+            &live_ticket("missing", "ns"),
         )
-        .await
-        .unwrap_err();
+        .await;
         assert!(
             err.to_string().contains("unknown")
                 || err.to_string().contains("not")
-                || err.to_string().to_ascii_lowercase().contains("not found")
+                || err.to_string().to_ascii_lowercase().contains("not found"),
+            "{err}"
         );
         server.drain().await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn live_wal_ticket_missing_slice_is_wal_pin_lost() {
+        crate::buffer::wal_handle::clear_wal_handles();
+        crate::buffer::wal_reader::clear_query_readers();
+        let dir = tempfile::tempdir().unwrap();
+        let key = PipelineKey::new("t", "w", "pinlost").unwrap();
+        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
+        let identity = identity();
+        let clock = Arc::new(skippr_lease::SystemClock::new());
+        let guard = skippr_lease::LeaseGuard::single_node(key.clone(), clock);
+        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
+        let db = sled::open(dir.path().join("offsets")).unwrap();
+        let tree = db.open_tree("offsets").unwrap();
+        let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
+            Arc::new(crate::helpers::offset_store::SledOffsetStore::new(tree));
+        let handle = crate::buffer::wal_handle::PipelineWalHandle::new(
+            key.clone(),
+            paths,
+            guard,
+            catalog,
+            offsets,
+        );
+        crate::buffer::wal_handle::install_wal_handle(handle);
+        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let mut ticket = live_ticket("pinlost", "ns");
+        ticket.slices.push(skippr_query_plan::PinnedSliceRef {
+            segment_id: "gone".into(),
+            start: 0,
+            seq: 1,
+            ordinal: 0,
+        });
+        let err = live_wal_do_get_err(&server.bind_addr().to_string(), &ticket).await;
+        assert!(
+            crate::sqlrt::wal_table::is_wal_pin_lost_text(&err.to_string()),
+            "{err}"
+        );
+        server.drain().await;
+        crate::buffer::wal_handle::remove_wal_handle(&key);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn live_wal_ticket_missing_iceberg_schema_fails_closed() {
+        crate::buffer::wal_handle::clear_wal_handles();
+        crate::buffer::wal_reader::clear_query_readers();
+        let key = PipelineKey::new("t", "w", "noschema").unwrap();
+        crate::buffer::wal_reader::install_query_reader(
+            crate::buffer::wal_reader::reader_with_live_slice(key.clone(), "ns", "seg-a"),
+        )
+        .unwrap();
+        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity())
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let mut ticket = live_ticket("noschema", "ns");
+        ticket.slices.push(skippr_query_plan::PinnedSliceRef {
+            segment_id: "seg-a".into(),
+            start: 0,
+            seq: 1,
+            ordinal: 0,
+        });
+        let err = live_wal_do_get_err(&server.bind_addr().to_string(), &ticket).await;
+        let text = err.to_string();
+        assert!(
+            text.contains("no Iceberg schema") || text.contains("Iceberg"),
+            "missing Iceberg schema must fail closed, got {text}"
+        );
+        assert!(
+            !crate::sqlrt::wal_table::is_wal_pin_lost_text(&text),
+            "schema miss is not WalPinLost, got {text}"
+        );
+        server.drain().await;
+        crate::buffer::wal_reader::clear_query_readers();
     }
 
     #[test]
@@ -992,22 +1210,45 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
-        let node = FlightSqlExec::with_authorization(
+        let node = FlightSqlExec::live_wal(
             server.bind_addr().to_string(),
-            b"SELECT * FROM live_wal_scan('t', 'w', 'flightsqllive', 'ns')".to_vec(),
+            live_ticket("flightsqllive", "ns"),
             schema,
             skippr_query_plan::basic_authorization("t", "w"),
         );
         let stream = node
             .execute(0, Arc::new(datafusion::execution::TaskContext::default()))
             .unwrap();
-        let batches = datafusion::physical_plan::common::collect(stream)
+        let err = datafusion::physical_plan::common::collect(stream)
             .await
-            .unwrap();
-        let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
-        assert_eq!(rows, 0);
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no Iceberg schema"),
+            "owner DoGet must fail closed without Iceberg schema, got {err}"
+        );
         server.drain().await;
         crate::buffer::wal_handle::remove_wal_handle(&key);
+    }
+
+    #[test]
+    fn clustered_select_and_live_wal_share_typed_pin_lost_status() {
+        let src = include_str!("service.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("fn datafusion_status"));
+        assert!(prod.contains("is_wal_pin_lost"));
+        assert!(prod.contains("failed_precondition"));
+        let ticket = prod
+            .split("async fn execute_live_wal_ticket")
+            .nth(1)
+            .expect("execute_live_wal_ticket")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(
+            ticket.contains("target.pipeline"),
+            "owner DoGet schema must use the ticket pipeline"
+        );
+        assert!(ticket.contains("iceberg_schema_for_namespace(config, &target.pipeline"));
     }
 
     #[test]

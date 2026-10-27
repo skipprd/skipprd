@@ -3,12 +3,32 @@ use crate::key::CatalogKey;
 use crate::row::{CatalogOp, CatalogRow, DeleteCond, PutCond, SeqRow};
 use crate::txn::CatalogTxn;
 
+pub fn validate_put(op: &CatalogOp) -> Result<(), CatalogError> {
+    let CatalogOp::Put { row, cond, .. } = op else {
+        return Ok(());
+    };
+    if matches!(row, CatalogRow::LegacySlice(_)) {
+        return Err(CatalogError::LegacyRowWrite);
+    }
+    let PutCond::Version(expected) = cond else {
+        return Ok(());
+    };
+    let next = expected
+        .checked_add(1)
+        .ok_or(CatalogError::VersionMustAdvance)?;
+    match row.version() {
+        Some(got) if got == next => Ok(()),
+        _ => Err(CatalogError::VersionMustAdvance),
+    }
+}
+
 pub fn eval_ops(
     txn: &CatalogTxn,
     get: impl Fn(&CatalogKey) -> Result<Option<Vec<u8>>, CatalogError>,
 ) -> Result<Vec<Applied>, CatalogError> {
     let mut planned = Vec::with_capacity(txn.ops().len());
     for op in txn.ops() {
+        validate_put(op)?;
         match op {
             CatalogOp::Put { key, row, cond } => {
                 let incoming = row.encode()?;
@@ -87,15 +107,7 @@ pub enum Applied {
 }
 
 fn row_version(bytes: &[u8]) -> Result<u64, CatalogError> {
-    match CatalogRow::decode(bytes)? {
-        CatalogRow::Segment(row) => Ok(row.version),
-        CatalogRow::Index(row) => Ok(row.version),
-        CatalogRow::Slice(row) => Ok(row.version),
-        CatalogRow::Compaction(row) => Ok(row.version),
-        CatalogRow::Control(row) => Ok(row.version),
-        CatalogRow::Format(row) => Ok(row.row_version),
-        CatalogRow::Seq(_) => Err(CatalogError::Codec(
-            "SeqRow has no version; use SeqAdvance".into(),
-        )),
-    }
+    CatalogRow::decode(bytes)?
+        .version()
+        .ok_or_else(|| CatalogError::Codec("SeqRow has no version; use SeqAdvance".into()))
 }

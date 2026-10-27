@@ -84,11 +84,11 @@ src/buffer/
   wal_catalog_import.rs
 src/query_flight/          # Arrow Flight SQL 59.2 on flight_addr; in-process QueryRuntime
   service.rs
-  live_wal.rs
 src/sqlrt/
   iceberg_table.rs
-  flight_sql_table.rs      # FlightSqlExec leaf, not StreamingBatchesExec
+  tables.rs                # IcebergWalTableProvider pin-at-scan; clustered WAL leaf is FlightSqlExec
   wal_table.rs
+crates/skippr-query-plan/  # FlightSqlExec LiveWalTicket leaf, not StreamingBatchesExec
 ```
 
 # Phase 0 — Spec, config, and compatibility gates
@@ -599,20 +599,20 @@ Iceberg config/catalog errors fail registration. Non-Iceberg/deadletter listing 
 
 **Tests:** no ListingTable for Iceberg, missing catalog error, snapshot pin, pushdown.
 
-## WU-7.2 Unpinned live WAL selector
+## WU-7.2 Pinned live WAL selector
 
-**Replace:** [src/sqlrt/wal_table.rs](../../../src/sqlrt/wal_table.rs) and `src/query_flight/live_wal.rs` (selector lives with Flight SQL).
+**Replace:** [src/sqlrt/wal_table.rs](../../../src/sqlrt/wal_table.rs), `src/buffer/wal_reader.rs` (selector is Skippr Store `WalCatalogReader`), and `open_query_wal_reader` / `open_wal_catalog_reader_for_config` (sled `SledWalCatalog::open_read`; DynamoDB / Cloud Tables as `WalCatalogRead` with no fence).
 
-`select_live_ordinals(handle, exclude_segment_ids)` is the only selector.
+`WalCatalogReader::live_slices` is the only catalog selector. Iceberg∪WAL local scan: `live_slices`, then `load_iceberg_leaf`, then freeze `ReadBoundary::new` (`PinnedWal::Local`). Clustered scan: pick `flight_addr`, pin `W` with `skippr.live_wal_pin`, then `load_iceberg_leaf`, then freeze `ReadBoundary::for_clustered_ticket` (`PinnedWal::Clustered`). WAL-only scan uses `ReadBoundary::pin_wal`. Registration MUST NOT freeze `flight_addr`.
 
-- Live ids = catalog `SliceIndexEntry` (`CatalogPrefix::Slice`).
-- Skip missing `SegmentRow` or unreadable/missing payloads. Slice-complete ordinals stay visible until Iceberg lists the segment.
-- Iceberg `skippr.wal-segment-ids` exclude the whole segment.
-- No pins, no client head cut, no compaction-id maps.
+- Live ids = catalog `SliceDirEntry` from `wal#idx#` (`CatalogPrefix::Index`) joined with `wal#seg#`.
+- Skip missing `SegmentRow`. Slice-complete ordinals stay visible until Iceberg lists that slice.
+- Iceberg `skippr.wal-slices` exclude by `(segment_id, start)`.
+- No client head cut, no compaction-id maps.
 - Stream batches; no MemTable.
 - Project/cast/null-fill to Iceberg schema.
 
-**Tests:** missing file skips, complete ordinal stays visible until Iceberg exclude, Iceberg-named segment not in WAL.
+**Tests:** pin does not stat payload, complete ordinal stays visible until Iceberg exclude, Iceberg-named slice not in WAL.
 
 ## WU-7.3 Flight SQL
 
@@ -624,32 +624,28 @@ Dependencies: Arrow Flight **59.2** `flight-sql`, tonic/prost as required by tha
 
 Implement read-only Flight SQL metadata, statements, prepared statements, bounded execution (`CONTROL_FRAME_MAX_BYTES`), and:
 
-```sql
-live_wal_scan(tenant, workspace, pipeline, namespace, exclude_segment_ids)
-```
+Typed `LiveWalTicket` / `skippr.live_wal_pin`. No `live_wal_scan` SQL TVF.
 
-- TVF, not a public custom ticket. Replica `CURRENT_PROTOCOL` is 3 (cluster hello). Flight SQL is not a second protocol family.
-- GetFlightInfo returns a ticket/prepared handle that does **not** nack reclaim. DoGet uses the plan-time pinned ordinal list.
+- Replica `CURRENT_PROTOCOL` is 3 (cluster hello). Flight SQL is not a second protocol family.
+- The ticket names exact pinned slices and does **not** nack reclaim. DoGet exact-gets Index+Segment (`WalPinLost` on miss).
 - Foreign tenant/workspace and unknown pipeline fail closed. DDL/update rejected.
 - Membership `flight_addr` becomes the gRPC bind. Same ephemeral wildcard, no new knobs.
 - `IcebergWalTableProvider` WAL child is `FlightSqlExec`, not eager `StreamingBatchesExec`. `FlightSqlExec::execute` streams DoGet (including loopback to this process's advertised `flight_addr`).
 - Catalog listing is the Iceberg table name (`catalog_table_to_namespace` is identity). Isolation is `table_namespace`.
 
-**Tests:** metadata lists tables in `table_namespace`, SELECT unique ids, unknown pipeline, read-only rejection, reclaim between GetFlightInfo and DoGet skips the file, oversized SQL, Iceberg-only with no ready member, harness `query_each_replica_socket` over Flight SQL. `cargo test -p skipprd --lib query_flight::` replaces `query_socket::`.
+**Tests:** metadata lists tables in `table_namespace`, SELECT unique ids, unknown pipeline, read-only rejection, reclaim between GetFlightInfo and DoGet is `WalPinLost`, oversized SQL, no ready member fails the query, harness `query_each_replica_socket` over Flight SQL. `cargo test -p skipprd --lib query_flight::` replaces `query_socket::`.
 
 ## WU-7.4 Pinned Iceberg∪WAL merge
 
 **Shipped in-process:** `IcebergWalTableProvider` pins `(S, E, W)` then `UnionExec` (append) or `CdcReconcileExec` (CDC) + `GlobalLimitExec`.
 
-1. load Iceberg current snapshot (fail closed if none);
-2. exclude Iceberg `skippr.wal-segment-ids` from WAL (ancestry-wide);
-3. pin live WAL ordinals at plan; execute must not re-select;
-4. if no WAL replica is reachable, return Iceberg only;
-5. append concat; CDC collapse by business key + `order_token`. Pin is not a reclaim lease.
+- **Local:** pin `W` at scan (`WalCatalogReader::live_slices`), load Iceberg current snapshot `S` (`LakeSnapshot::Empty` if none), exclude `skippr.wal-slices` `E`, freeze `PinnedWal::Local`, `WalScanExec`.
+- **Clustered:** pick `flight_addr` at scan (`pick_wal_endpoint`), pin `W` (`skippr.live_wal_pin`), load `S`, exclude `E`, freeze `PinnedWal::Clustered`, `FlightSqlExec` + `LiveWalTicket`. No replica → fail the query. Catalog registration MUST NOT freeze `flight_addr`.
+- Append concat; CDC collapse by Arrow-row business keys + `order_token` (tie-break `_skippr_cdc_seq` / ordinal / row). Query keys are `query_namespace_business_keys` (`PipelineType::Cdc` only) → `CdcPipelineConfig::resolve_contracts` → `resolve_business_keys` on YAML `cdc` plus `cdc_source_key_columns` from `bound.get_metadata()` (`view.key`). Missing persisted metadata is empty `source_contracts`; YAML keys still apply. A CDC pipeline whose source or sink has not declared capabilities, or that resolves no business keys, fails ingest startup. Query MUST NOT read `PIPELINE_CDC_CONTRACTS`. Compaction uses `pipeline_cdc_contracts(&work.pipeline)` with `work.pipeline` from `pipeline_backend::pipeline_key(config)`. Runtime `source_contracts` publish reinstalls that map via `reinstall_resolved_contracts` before persisting metadata; empty resolve fails closed; new namespaces keep `CdcEncoded`. Pin is not a reclaim lease. Missing payload is `WalPinLost` (replan ≤ `QUERY_PIN_RETRY_CEILING`).
 
 Distributed Flight/QueryRuntime UNION remains WU-7.3 / WU-7.5 ([`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md)).
 
-**Tests:** missing file skips, complete ordinal stays visible until Iceberg exclude, Iceberg-named segment not in WAL, Iceberg-only with no replica.
+**Tests:** missing file is `WalPinLost`, complete ordinal stays visible until Iceberg exclude, Iceberg-named slice not in WAL, no ready Flight node fails the query.
 
 ## WU-7.5 datafusion-distributed extension
 
@@ -657,12 +653,12 @@ Distributed Flight/QueryRuntime UNION remains WU-7.3 / WU-7.5 ([`hla-flight-sql-
 
 - Compile datafusion-distributed + Iceberg Rust + Flight SQL into `skipprd`. Delete wrapper bins.
 - Every clustered node starts one QueryRuntime Worker + coordinating SessionContext in `run_clustered`. `WorkerResolver` lists self plus gossip `worker` addrs. There is no scheduler election.
-- WAL picker: max advertised `catalog_seq_seen` with `payload_ready` (gossip hint, Status fallback); local on tie returns this node's advertised `flight_addr` as `FlightSqlExec`; Iceberg-only if none reachable.
-- Iceberg: in-process Catalog first; parquet on any cluster executor; peer Flight SQL scan if load fails; never listing.
+- WAL picker at `IcebergWalTableProvider::scan`: max advertised `catalog_seq_seen` with `payload_ready` (gossip hint, Status fallback); local on tie returns this node's advertised `flight_addr` as `FlightSqlExec`; none reachable fails the query. Registration MUST NOT freeze `flight_addr`.
+- Iceberg: in-process Catalog first; parquet on any cluster executor; load failure fails the query; never listing.
 - `FlightSqlExec::execute` DoGets; prost schema-in-payload codec; delete `FLSQ`. `WalScanExec` must not enter a distributed plan.
 - `clustered query` uses any ready `flight_addr`. `query-scheduler#` is not used.
 
-**Tests:** codec; UNION shape; local vs remote WAL head as `FlightSqlExec`; WorkerResolver gossip `worker` ads; Iceberg peer fallback; `distributed_cluster_query` HLA scenario.
+**Tests:** codec; UNION shape; local vs remote WAL head as `FlightSqlExec`; WorkerResolver gossip `worker` ads; Iceberg load failure fails the query; `distributed_cluster_query` HLA scenario.
 
 # Phase 8 — Lifecycle and operations
 

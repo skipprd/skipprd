@@ -26,13 +26,12 @@ use crate::buffer::segment_file::{
 use crate::buffer::wal_store::{SegmentWriteLocation, SegmentWriteResult};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
+use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
 use crate::metrics::counters as metrics_hot;
 use crate::plugins::cdc::SinkCapability;
 use crate::plugins::DataSink;
-use crate::METRICS;
 use arrow::array::RecordBatch;
 use arrow::ipc::reader::StreamReader;
 use arrow_schema::{ArrowError, SchemaRef};
@@ -51,8 +50,8 @@ use std::future::Future;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering as AtomicOrdering;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll as TaskPoll};
 use std::time::{Instant, SystemTime};
@@ -226,6 +225,7 @@ struct CompactionEntry {
 }
 
 struct CompactionWork {
+    pipeline: skippr_lease::PipelineKey,
     txn: CompactionTransaction,
     entries: Vec<CompactionEntry>,
 }
@@ -1144,6 +1144,7 @@ impl Buffers {
                 .iter()
                 .cloned()
                 .collect::<std::collections::HashMap<_, _>>(),
+            snapshot.created_at,
         )
         .await
         {
@@ -2160,7 +2161,7 @@ impl Buffers {
                 .iter()
                 .map(|slice| slice.wal_ref.clone())
                 .collect::<Vec<_>>();
-            if let Some(work) = Self::work_from_planned_group(planned, output) {
+            if let Some(work) = Self::work_from_planned_group(planned, output, config) {
                 out.push(work);
             } else {
                 compaction_index().release_refs(&refs, now_secs);
@@ -2201,6 +2202,7 @@ impl Buffers {
     fn work_from_planned_group(
         planned: PlannedCompactionGroup,
         output: &dyn DataSink,
+        config: &Config,
     ) -> Option<CompactionWork> {
         let schema_fingerprint = planned.key.schema_fingerprint.clone();
         let mut entries = Vec::with_capacity(planned.slices.len());
@@ -2218,11 +2220,11 @@ impl Buffers {
                 wal_ref: slice.wal_ref,
             });
         }
-        Self::build_compaction_work(entries, schema_fingerprint, output)
+        Self::build_compaction_work(entries, schema_fingerprint, output, config)
     }
 
     fn work_from_manifest(
-        _config: &Config,
+        config: &Config,
         txn: CompactionTransaction,
         output: &dyn DataSink,
     ) -> Option<CompactionWork> {
@@ -2300,7 +2302,22 @@ impl Buffers {
             );
             return None;
         }
-        Some(CompactionWork { txn, entries })
+        let pipeline = Self::compaction_pipeline_key(config)?;
+        Some(CompactionWork {
+            pipeline,
+            txn,
+            entries,
+        })
+    }
+
+    fn compaction_pipeline_key(config: &Config) -> Option<skippr_lease::PipelineKey> {
+        match crate::pipeline_backend::pipeline_key(config) {
+            Ok(pipeline) => Some(pipeline),
+            Err(err) => {
+                warn!("Compactor: config has no bound pipeline: {}", err);
+                None
+            }
+        }
     }
 
     fn manifest_refs_in_flight(txn: &CompactionTransaction) -> bool {
@@ -2317,6 +2334,7 @@ impl Buffers {
         entries: Vec<CompactionEntry>,
         schema_fingerprint_hint: String,
         output: &dyn DataSink,
+        config: &Config,
     ) -> Option<CompactionWork> {
         let first = entries.first()?;
         let sink_ref = first.idx.key.sink_ref.clone();
@@ -2362,7 +2380,12 @@ impl Buffers {
             target_filename: out_key,
             ..txn
         };
-        Some(CompactionWork { txn, entries })
+        let pipeline = Self::compaction_pipeline_key(config)?;
+        Some(CompactionWork {
+            pipeline,
+            txn,
+            entries,
+        })
     }
 
     fn is_truncated_stream_error(err: &str) -> bool {
@@ -2867,7 +2890,9 @@ impl Buffers {
             }
             let part_meta = crate::plugins::cdc::WalPartMeta::cdc(cdc_rows, total_rows)
                 .map_err(|err| io::Error::other(err.to_string()))?;
-            let contract = crate::plugins::cdc::get_namespace_cdc_contract(&work.txn.namespace);
+            let contract = crate::plugins::cdc::pipeline_cdc_contracts(&work.pipeline)
+                .map_err(|err| io::Error::other(err.to_string()))?
+                .and_then(|contracts| contracts.for_namespace(&work.txn.namespace));
             Some(crate::plugins::cdc::SyncContext {
                 part_meta,
                 contract,
@@ -4011,7 +4036,11 @@ mod tests_wal_commit {
                 entries.iter().map(|entry| entry.wal_ref.clone()).collect(),
                 format!("synthetic-{}.parquet", first.wal_ref.segment_id),
             );
-            CompactionWork { txn, entries }
+            CompactionWork {
+                pipeline: skippr_lease::PipelineKey::new("t", "w", "synthetic").unwrap(),
+                txn,
+                entries,
+            }
         }
     }
 
@@ -4037,7 +4066,13 @@ mod tests_wal_commit {
         let offsets = StdHashMap::new();
         let part_meta_blobs = StdHashMap::new();
         let (meta, _rows, sha) = segf
-            .write_snapshot(&offsets, &batches, &parts_meta, &part_meta_blobs)
+            .write_snapshot(
+                &offsets,
+                &batches,
+                &parts_meta,
+                &part_meta_blobs,
+                std::time::SystemTime::UNIX_EPOCH,
+            )
             .unwrap();
         let _ = sha;
 
@@ -4273,7 +4308,13 @@ mod tests_wal_commit {
         }
         let offsets = StdHashMap::new();
         let (meta, _rows, sha) = segf
-            .write_snapshot(&offsets, &batches, &parts_meta, &part_meta_blobs)
+            .write_snapshot(
+                &offsets,
+                &batches,
+                &parts_meta,
+                &part_meta_blobs,
+                std::time::SystemTime::UNIX_EPOCH,
+            )
             .unwrap();
         let _ = sha;
         assert_eq!(meta.index.len(), PARTS);
@@ -4281,18 +4322,15 @@ mod tests_wal_commit {
             .index
             .iter()
             .all(|index| index.part_meta_summary.is_cdc()));
-        Buffers::segment_cache_register(
-            &Config::new(),
-            SegmentSource::Disk(segf.path.clone()),
-            meta,
-        );
+        let config = Config::new().bind_pipeline("indexed-cdc");
+        Buffers::segment_cache_register(&config, SegmentSource::Disk(segf.path.clone()), meta);
 
         SegmentFile::reset_full_part_meta_scan_count();
         let sink = SyntheticGroupedSink {
             behavior: SyntheticGroupedBehavior::Apply,
         };
         let works = Buffers::next_compaction_transactions(
-            &Config::new(),
+            &config,
             PARTS,
             true,
             &sink,
@@ -4306,7 +4344,7 @@ mod tests_wal_commit {
         );
         assert_eq!(SegmentFile::full_part_meta_scan_count(), 0);
         assert!(Buffers::next_compaction_transactions(
-            &Config::new(),
+            &config,
             PARTS,
             true,
             &sink,
@@ -4524,6 +4562,7 @@ mod tests_wal_commit {
                 &parts_meta,
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             ))
             .unwrap();
         SEGMENT_CACHE.clear();
@@ -4703,24 +4742,29 @@ mod compaction_semantics_tests {
     #[test]
     fn build_compaction_work_uses_per_sink_semantics() {
         let output = mock_router_sink();
+        let config = Config::new().bind_pipeline("synthetic");
         let iceberg = Buffers::build_compaction_work(
             vec![test_entry("data_sinks.ds_datalake")],
             String::new(),
             &output,
+            &config,
         )
         .expect("iceberg work");
         assert_eq!(iceberg.txn.semantics, SinkWriteSemantics::ExactOnce);
+        assert_eq!(iceberg.pipeline.pipeline(), "synthetic");
 
         let athena = Buffers::build_compaction_work(
             vec![test_entry("deadletter_sinks.ds_deadletters")],
             String::new(),
             &output,
+            &config,
         )
         .expect("athena work");
         assert_eq!(
             athena.txn.semantics,
             SinkWriteSemantics::IdempotentAtLeastOnce
         );
+        assert_eq!(athena.pipeline.pipeline(), "synthetic");
     }
 
     #[test]
@@ -4730,8 +4774,17 @@ mod compaction_semantics_tests {
             vec![test_entry("missing.sink")],
             String::new(),
             &output,
+            &Config::new().bind_pipeline("synthetic"),
         )
         .is_none());
+    }
+
+    #[test]
+    fn compaction_cdc_contracts_key_from_config_pipeline() {
+        let src = include_str!("ingest_buffer.rs");
+        assert!(src.contains("pipeline_cdc_contracts(&work.pipeline)"));
+        assert!(src.contains("crate::pipeline_backend::pipeline_key(config)"));
+        assert!(!src.contains(concat!("ingest_wal_handle()?", ".key()")));
     }
 
     #[test]

@@ -401,7 +401,13 @@ mod tests {
         let mut parts_meta = HashMap::new();
         parts_meta.insert(key, (0, SystemTime::now()));
         let (meta, _, sha) = seg
-            .write_snapshot(&HashMap::new(), &batches, &parts_meta, &HashMap::new())
+            .write_snapshot(
+                &HashMap::new(),
+                &batches,
+                &parts_meta,
+                &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
+            )
             .unwrap();
         let key = skippr_lease::PipelineKey::new(
             config.get_tenant(),

@@ -12,7 +12,6 @@ use crate::cluster::gossip::GossipService;
 use crate::cluster::identity::ClusterIdentity;
 use crate::cluster::peer::{assign_replica, query_status};
 use crate::cluster::placement::{rank_replicas, ReplicaCandidate};
-use crate::helpers::configuration::Config;
 
 const REPLICA_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -25,12 +24,10 @@ pub struct PeerStatus {
 }
 
 pub struct PromoteContext {
-    pub app_config: Config,
     pub paths: PipelinePaths,
     pub identity: ClusterIdentity,
     pub local_replica: SocketAddr,
     pub gossip: Arc<GossipService>,
-    pub flatten_events: bool,
 }
 
 pub struct PromoteOutcome {
@@ -181,13 +178,6 @@ async fn promote_after_acquire(
             segment_ids: missing,
         });
     }
-    crate::cluster::schema::load_and_install_pipeline_schema(
-        &ctx.app_config,
-        &key,
-        ctx.flatten_events,
-        session.initialized,
-    )
-    .await?;
     let mut ranked = candidates;
     for candidate in &mut ranked {
         if let Some(status) = statuses.iter().find(|s| s.node_id == candidate.node_id) {

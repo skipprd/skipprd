@@ -1,7 +1,3 @@
-use std::fs::OpenOptions;
-use std::io::BufReader;
-use std::{fs, process};
-// removed unused Write import
 use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
 use crate::helpers::configuration::Config;
 use crate::sqlrt::docs::{print_categorized_sql_docs, SqlDocListingKind};
@@ -13,23 +9,22 @@ use crate::METADATA;
 use arrow::array::{Array, ArrayRef, Int32Array, StringArray};
 use arrow_schema::DataType;
 use datafusion::prelude::SessionContext;
+use std::fs::OpenOptions;
+use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+use std::{fs, process};
 
+use crate::ingest_work::Ingest;
 use crate::sqlrt::doc_parser::SqlDocParser;
 use crate::sqlrt::docs::SqlStatementDoc;
-use chrono::DateTime;
-use datafusion::error::DataFusionError;
-// removed unused SqlIdent
-// no Volatility import needed (UDFs disabled)
-// removed unused ScalarValue
-use datafusion::arrow::array::RecordBatch;
-// removed unused ViewTable
-use crate::ingest_work::Ingest;
 use crate::sqlrt::tui::{QueryEditorConfig, QueryEditorView};
 use crate::ARROW_SCHEMA;
 use arc_swap::ArcSwap;
+use chrono::DateTime;
+use datafusion::arrow::array::RecordBatch;
+use datafusion::error::DataFusionError;
 use datafusion::sql::sqlparser::ast::{
     Expr as StdExpr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
     FunctionArguments, GroupByExpr, Ident, ObjectName as SqlObjectName, OrderByKind,
@@ -59,10 +54,6 @@ pub struct QueryExecutionOptions {
     pub plain: bool,
     pub watch: Option<u64>,
     pub warmup: bool,
-}
-
-fn sql_ident_name(name: &impl std::fmt::Display) -> String {
-    format!("{name}").replace('"', "")
 }
 
 async fn apply_pipeline_toggle(
@@ -355,20 +346,10 @@ pub async fn query_collect_warm(
     warmup: bool,
 ) -> std::io::Result<Vec<arrow::array::RecordBatch>> {
     config.init().await;
-    let cdc_keys = config.query_cdc_business_keys();
-    if !cdc_keys.is_empty() {
-        crate::plugins::cdc::install_query_cdc_contracts(cdc_keys);
-    }
-    if !crate::helpers::configuration::Config::truth_value(
-        &crate::helpers::configuration::Config::getenv("SKIPPR_QUERY_LAKE_ONLY", "false"),
-    ) {
-        for name in config.get_pipelines() {
-            let bound = config.bind_pipeline(&name);
-            bound.init().await;
-            if let Err(err) = crate::buffer::wal_store::ensure_query_wal_handle(&bound) {
-                tracing::warn!(pipeline = %name, error = %err, "query WAL catalog not opened");
-            }
-        }
+    for name in config.get_pipelines() {
+        let bound = config.bind_pipeline(&name);
+        bound.init().await;
+        crate::buffer::wal_store::open_query_wal_reader(&bound)?;
     }
     if !sql_uses_record_batch_collect(sql_str) {
         let mut parser = SParser::new(sql_str).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -406,9 +387,24 @@ pub async fn query_collect_warm(
     let ctx = new_context_all_namespaces(&config)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    sql_collect_timed(&ctx, sql_str, warmup)
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))
+    let mut last_err = None;
+    for attempt in 0..crate::sqlrt::wal_table::QUERY_PIN_RETRY_CEILING {
+        match sql_collect_timed(&ctx, sql_str, warmup && attempt == 0).await {
+            Ok(batches) => return Ok(batches),
+            Err(err)
+                if crate::sqlrt::wal_table::is_wal_pin_lost(&err)
+                    && attempt + 1 < crate::sqlrt::wal_table::QUERY_PIN_RETRY_CEILING =>
+            {
+                last_err = Some(err);
+            }
+            Err(err) => return Err(std::io::Error::other(err.to_string())),
+        }
+    }
+    Err(std::io::Error::other(
+        last_err
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "WalPinLost".into()),
+    ))
 }
 
 pub(crate) fn stream_wal_namespace(
@@ -429,21 +425,13 @@ async fn stream_wal_session(
     let ctx = crate::sqlrt::session::coordinating_query_context().await?;
     *config = config.bind_pipeline(pipeline_name);
     config.init().await;
-    if let Err(err) = crate::buffer::wal_store::ensure_query_wal_handle(config) {
-        tracing::warn!(pipeline = %pipeline_name, error = %err, "STREAM WAL catalog not opened");
-    }
+    let reader = crate::buffer::wal_store::open_query_wal_reader(config)
+        .map_err(|err| DataFusionError::Plan(err.to_string()))?;
     register_catalog(config, &ctx).await;
     let listed = crate::sqlrt::registry::list_namespaces(config, pipeline_name).await;
-    let live = match skippr_lease::PipelineKey::new(
-        config.get_tenant(),
-        config.get_workspace_name(),
-        pipeline_name,
-    ) {
-        Ok(key) => crate::buffer::wal_handle::wal_handle_for(&key)
-            .map(|handle| handle.live_namespaces())
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
+    let live = reader
+        .live_namespaces()
+        .map_err(|err| DataFusionError::Plan(err.to_string()))?;
     let namespace = stream_wal_namespace(listed, live, pipeline_name);
     let Some(provider) =
         crate::sqlrt::tables::wal_table_for_namespace(config, pipeline_name, &namespace).await?
@@ -1876,6 +1864,10 @@ async fn show_pipeline(config: &Config, pipeline_name: &str) {
 #[cfg(test)]
 mod plain_query_document_tests {
     use super::{record_batches_to_plain_query, PlainQueryDocument};
+
+    fn sql_ident_name(name: &impl std::fmt::Display) -> String {
+        format!("{name}").replace('"', "")
+    }
     use arrow::array::{ArrayRef, StringArray};
     use arrow_schema::{DataType, Field, Schema};
     use datafusion::arrow::array::RecordBatch;
@@ -1930,10 +1922,10 @@ mod plain_query_document_tests {
     #[test]
     fn sql_ident_name_strips_quotes_from_hyphenated_namespace() {
         assert_eq!(
-            super::sql_ident_name(&r#""skippr-e2e-sample-data""#),
+            sql_ident_name(&r#""skippr-e2e-sample-data""#),
             "skippr-e2e-sample-data"
         );
-        assert_eq!(super::sql_ident_name(&"s3_alter"), "s3_alter");
+        assert_eq!(sql_ident_name(&"s3_alter"), "s3_alter");
     }
 
     #[test]
@@ -1993,12 +1985,20 @@ mod plain_query_document_tests {
             "query_collect_warm must build a ready context before the timed collect"
         );
         assert!(
-            body.contains("install_query_cdc_contracts"),
-            "query_collect_warm must load CDC business keys before Iceberg ∪ WAL scan"
+            !body.contains("install_query_cdc_contracts"),
+            "query must not install process-global CDC contracts"
         );
         assert!(
-            body.contains("ensure_query_wal_handle"),
+            body.contains("open_query_wal_reader"),
             "query_collect_warm must open the WAL catalog in this process"
+        );
+        assert!(
+            !body.contains("ensure_query_wal_handle"),
+            "query must not open a writer PipelineWalHandle"
+        );
+        assert!(
+            !body.contains("query WAL catalog not opened"),
+            "query WAL catalog open must fail closed"
         );
         let timed = prod
             .split("async fn sql_collect_timed")
@@ -2017,6 +2017,14 @@ mod plain_query_document_tests {
         assert!(
             warmup < timer,
             "query_collect must open catalogs/connections before elapsed_ms starts"
+        );
+        assert!(
+            body.contains("QUERY_PIN_RETRY_CEILING"),
+            "query_collect_warm must replan on WalPinLost up to QUERY_PIN_RETRY_CEILING"
+        );
+        assert!(
+            body.contains("is_wal_pin_lost"),
+            "WalPinLost retry must use the typed helper, not a second string match"
         );
     }
 

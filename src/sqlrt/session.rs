@@ -89,23 +89,12 @@ mod tests {
             "plan_clustered_select must start QueryRuntime"
         );
         assert!(
-            clustered.contains("query_context()"),
-            "plan_clustered_select must use QueryRuntime"
-        );
-        let iceberg = tables
-            .split("pub async fn plan_iceberg_scan")
-            .nth(1)
-            .unwrap()
-            .split("pub async fn execute_iceberg_scan")
-            .next()
-            .unwrap();
-        assert!(
-            iceberg.contains("query_context()"),
-            "plan_iceberg_scan must use QueryRuntime"
+            clustered.contains("request_context()"),
+            "plan_clustered_select must use a per-query request_context"
         );
         assert!(
-            !iceberg.contains("SessionContext::new()"),
-            "plan_iceberg_scan must not construct a second SessionContext"
+            !clustered.contains("deregister_table"),
+            "per-query request_context must not mutate the shared QueryRuntime catalog"
         );
         let api = include_str!("../api.rs");
         let collect = api
@@ -124,7 +113,7 @@ mod tests {
             "collect_namespace must not use the test-only SessionContext factory"
         );
         let live = include_str!("../query_flight/service.rs")
-            .split("async fn execute_live_wal")
+            .split("async fn execute_live_wal_ticket")
             .nth(1)
             .unwrap()
             .split("#[cfg(test)]")
@@ -132,11 +121,19 @@ mod tests {
             .unwrap();
         assert!(
             !live.contains("query_context"),
-            "live_wal_scan DoGet must not use QueryRuntime"
+            "LiveWalTicket DoGet must not use QueryRuntime"
         );
         assert!(
             !live.contains("ensure_started"),
-            "live_wal_scan DoGet must not start QueryRuntime"
+            "LiveWalTicket DoGet must not start QueryRuntime"
+        );
+        assert!(
+            live.contains("pinned_slice"),
+            "owner DoGet must exact-get Index+Segment, not re-select live_slices"
+        );
+        assert!(
+            !live.contains("live_slices"),
+            "owner DoGet must not re-select W"
         );
     }
 

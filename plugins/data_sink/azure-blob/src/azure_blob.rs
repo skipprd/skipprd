@@ -81,7 +81,7 @@ impl DataSink for DataSinkAzureBlobPlugin {
             ctx.idempotency_key,
             ctx.schema_fingerprint,
             &ctx.wal_refs,
-        );
+        )?;
         if self
             .manifest_matches(&manifest_path, &expected_manifest)
             .await?
@@ -162,7 +162,7 @@ impl DataSink for DataSinkAzureBlobPlugin {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             &ctx.wal_refs,
-        );
+        )?;
         if self
             .manifest_matches(&manifest_path, &expected_manifest)
             .await?
@@ -195,7 +195,7 @@ impl DataSink for DataSinkAzureBlobPlugin {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             ctx.wal_refs.as_slice(),
-        );
+        )?;
         if self
             .manifest_matches(&manifest_path, &expected_manifest)
             .await?
@@ -299,7 +299,7 @@ impl DataSinkAzureBlobPlugin {
         &self,
         ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
         chunk_index: u64,
-    ) -> (String, ObjectPath, ObjectWriteManifest) {
+    ) -> io::Result<(String, ObjectPath, ObjectWriteManifest)> {
         let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
         let chunk_filename = ctx.chunk_filename(chunk_index, false);
         let final_key = self.object_key_for_filename(&chunk_filename, &object_stem);
@@ -309,8 +309,8 @@ impl DataSinkAzureBlobPlugin {
             object_stem,
             ctx.schema_fingerprint.clone(),
             ctx.wal_refs.as_slice(),
-        );
-        (final_key, manifest_path, manifest)
+        )?;
+        Ok((final_key, manifest_path, manifest))
     }
 
     async fn legacy_chunk_state_exists(
@@ -318,7 +318,7 @@ impl DataSinkAzureBlobPlugin {
         ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
         chunk_index: u64,
     ) -> io::Result<bool> {
-        let (final_key, path, expected) = self.legacy_chunk_manifest(ctx, chunk_index);
+        let (final_key, path, expected) = self.legacy_chunk_manifest(ctx, chunk_index)?;
         if self.manifest_matches(&path, &expected).await? {
             return Ok(true);
         }
@@ -343,7 +343,7 @@ impl DataSinkAzureBlobPlugin {
 
         while let Some(chunk) = reader.next_chunk().await? {
             let (final_key, manifest_path, expected) =
-                self.legacy_chunk_manifest(ctx, chunk.chunk_index);
+                self.legacy_chunk_manifest(ctx, chunk.chunk_index)?;
             let chunk_rows = chunk.rows;
             let (chunk_bytes, chunk_transport_count, chunk_etag) =
                 if self.manifest_matches(&manifest_path, &expected).await? {

@@ -24,57 +24,51 @@ pub async fn acquire_pipeline(
     key: &PipelineKey,
     node: &NodeId,
 ) -> Result<LeaseSession, LeaseError> {
-    loop {
-        let started = clock.monotonic_now();
-        match store.read_consistent(key).await? {
-            None => match store.create(key, node).await {
-                Ok(observation) => return Ok(to_session(clock, started, observation)?),
-                Err(LeaseError::ConditionalRace) => {
-                    let current = store
-                        .read_consistent(key)
-                        .await?
-                        .ok_or(LeaseError::ConditionalRace)?;
-                    return Err(LeaseError::Held(current.owner));
-                }
-                Err(err) => return Err(err),
-            },
-            Some(first) if first.released => {
-                let started = clock.monotonic_now();
-                return Ok(to_session(
-                    clock,
-                    started,
-                    store.acquire_released(key, &first, node).await?,
-                )?);
-            }
-            Some(first) if first.owner == *node && !first.released => {
-                let current =
-                    LeaseSession::from_observation(first, clock.monotonic_now() + LEASE_TIMEOUT);
-                return Ok(to_session(
-                    clock,
-                    started,
-                    store.renew(key, &current).await?,
-                )?);
-            }
-            Some(first) => {
-                // Sole previous-primary TTL wait. Steal is refused if the
-                // observation changes. Callers MUST NOT sleep another
-                // LEASE_TIMEOUT before GET metadata.json.
-                let observed_at = clock.monotonic_now();
-                sleeper.sleep_until(observed_at + LEASE_TIMEOUT).await;
-                let second = store
+    let started = clock.monotonic_now();
+    match store.read_consistent(key).await? {
+        None => match store.create(key, node).await {
+            Ok(observation) => to_session(clock, started, observation),
+            Err(LeaseError::ConditionalRace) => {
+                let current = store
                     .read_consistent(key)
                     .await?
                     .ok_or(LeaseError::ConditionalRace)?;
-                if second != first {
-                    return Err(LeaseError::Held(second.owner));
-                }
-                let started = clock.monotonic_now();
-                return Ok(to_session(
-                    clock,
-                    started,
-                    store.steal_unchanged(key, &second, node).await?,
-                )?);
+                Err(LeaseError::Held(current.owner))
             }
+            Err(err) => Err(err),
+        },
+        Some(first) if first.released => {
+            let started = clock.monotonic_now();
+            to_session(
+                clock,
+                started,
+                store.acquire_released(key, &first, node).await?,
+            )
+        }
+        Some(first) if first.owner == *node && !first.released => {
+            let current =
+                LeaseSession::from_observation(first, clock.monotonic_now() + LEASE_TIMEOUT);
+            to_session(clock, started, store.renew(key, &current).await?)
+        }
+        Some(first) => {
+            // Sole previous-primary TTL wait. Steal is refused if the
+            // observation changes. Callers MUST NOT sleep another
+            // LEASE_TIMEOUT before GET metadata.json.
+            let observed_at = clock.monotonic_now();
+            sleeper.sleep_until(observed_at + LEASE_TIMEOUT).await;
+            let second = store
+                .read_consistent(key)
+                .await?
+                .ok_or(LeaseError::ConditionalRace)?;
+            if second != first {
+                return Err(LeaseError::Held(second.owner));
+            }
+            let started = clock.monotonic_now();
+            to_session(
+                clock,
+                started,
+                store.steal_unchanged(key, &second, node).await?,
+            )
         }
     }
 }

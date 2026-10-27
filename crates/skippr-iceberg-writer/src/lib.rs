@@ -54,7 +54,7 @@ use tracing::{info, warn};
 
 mod history;
 mod maintenance;
-use history::SNAPSHOT_WAL_SEGMENT_IDS;
+use skippr_runtime_sdk::wal_slice_ref::{encode_wal_slices, SNAPSHOT_WAL_SLICES};
 
 const ICEBERG_FILE_MAX_ROWS: usize = 100_000;
 const ICEBERG_FILE_MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -407,7 +407,7 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint,
             &ctx.wal_refs,
-        );
+        )?;
         let location = self.idempotency_manifest_location(&namespace, &ctx.idempotency_key)?;
         let (bucket, key) = location.parts();
         if self.manifest_matches(&bucket, &key, &manifest).await? {
@@ -511,7 +511,7 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             &ctx.wal_refs,
-        );
+        )?;
         let location = self.idempotency_manifest_location(&namespace, &ctx.idempotency_key)?;
         let (bucket, key) = location.parts();
         if self.manifest_matches(&bucket, &key, &manifest).await? {
@@ -547,7 +547,7 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
             ctx.idempotency_key.clone(),
             ctx.schema_fingerprint.clone(),
             &ctx.wal_refs.clone_vec(),
-        );
+        )?;
         let location = self.idempotency_manifest_location(&namespace, &ctx.idempotency_key)?;
         let (manifest_bucket, manifest_key) = location.parts();
         if let Some(existing) = self.read_manifest(&manifest_bucket, &manifest_key).await? {
@@ -1627,35 +1627,63 @@ impl<S: SinkSpec> IcebergWriter<S> {
         let mut delete_roll_index = 0u64;
         let mut data_rows = 0u64;
         let mut cdc_state = CdcStateSession::default();
+        let mut cdc_envelope = Vec::new();
+        let mut cdc_flushed = exact_cdc_contract.is_none();
         let mut merge_keys = HashSet::new();
 
-        while let Some(chunk) = reader.next_chunk().await? {
-            transport_chunk_count = transport_chunk_count.saturating_add(1);
-            let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
-            let stream = chunk.into_stream(reader_schema.clone());
-            let stream = match chunk_cdc.as_ref() {
-                Some(cdc) => {
-                    crate::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta)
+        loop {
+            let (data_batches, delete_batches) = match reader.next_chunk().await? {
+                None => {
+                    let Some(contract) = exact_cdc_contract.as_ref().filter(|_| !cdc_flushed)
+                    else {
+                        break;
+                    };
+                    cdc_flushed = true;
+                    let final_state = final_state_cdc_batches(contract, &cdc_envelope, |key| {
+                        cdc_state
+                            .loaded_shards
+                            .get(&cdc_state_shard(key))
+                            .and_then(|shard| shard.values.get(key))
+                            .map(String::as_str)
+                    })?;
+                    cdc_envelope.clear();
+                    cdc_state.delta = final_state.tokens;
+                    (final_state.upserts, final_state.deletes)
                 }
-                None => stream,
-            };
-            let batches = collect_record_batches(stream).await?;
-            let (data_batches, delete_batches) = if let Some(contract) = exact_cdc_contract.as_ref()
-            {
-                self.prepare_grouped_cdc_batches(namespace, contract, batches, &mut cdc_state)
-                    .await?
-            } else if matches!(
-                policy,
-                WritePolicy::MergeByKey | WritePolicy::ReplacePartition
-            ) {
-                prepare_grouped_policy_batches(
-                    batches,
-                    policy,
-                    &policy_delete_columns,
-                    &mut merge_keys,
-                )?
-            } else {
-                (batches, Vec::new())
+                Some(chunk) => {
+                    transport_chunk_count = transport_chunk_count.saturating_add(1);
+                    let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
+                    let stream = chunk.into_stream(reader_schema.clone());
+                    let stream = match chunk_cdc.as_ref() {
+                        Some(cdc) => crate::cdc_encode::augment_stream_with_cdc_columns(
+                            stream,
+                            &cdc.part_meta,
+                        ),
+                        None => stream,
+                    };
+                    let batches = collect_record_batches(stream).await?;
+                    if let Some(contract) = exact_cdc_contract.as_ref() {
+                        // Final state needs every version of a key, so the envelope stays in
+                        // memory until the reader ends (bounded by compaction group bytes).
+                        self.load_cdc_shards_for(namespace, contract, &batches, &mut cdc_state)
+                            .await?;
+                        cdc_envelope.extend(batches);
+                        continue;
+                    }
+                    if matches!(
+                        policy,
+                        WritePolicy::MergeByKey | WritePolicy::ReplacePartition
+                    ) {
+                        prepare_grouped_policy_batches(
+                            batches,
+                            policy,
+                            &policy_delete_columns,
+                            &mut merge_keys,
+                        )?
+                    } else {
+                        (batches, Vec::new())
+                    }
+                }
             };
 
             for roll in roll_record_batches(data_batches) {
@@ -1834,13 +1862,13 @@ impl<S: SinkSpec> IcebergWriter<S> {
         Ok((bucket, object_key, file.iceberg_uri()))
     }
 
-    async fn prepare_grouped_cdc_batches(
+    async fn load_cdc_shards_for(
         &self,
         namespace: &str,
         contract: &skippr_runtime_sdk::plugins::cdc::NamespaceContract,
-        batches: Vec<RecordBatch>,
+        batches: &[RecordBatch],
         state: &mut CdcStateSession,
-    ) -> Result<(Vec<RecordBatch>, Vec<RecordBatch>), io::Error> {
+    ) -> Result<(), io::Error> {
         if contract.business_key_columns.is_empty() {
             return Err(io::Error::other(format!(
                 "Iceberg CDC namespace '{}' requires business_key_columns",
@@ -1848,7 +1876,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
             )));
         }
         let mut touched_shards = Vec::new();
-        for batch in &batches {
+        for batch in batches {
             for row in 0..batch.num_rows() {
                 let key = business_key_for_row(batch, &contract.business_key_columns, row)?;
                 touched_shards.push(cdc_state_shard(&key));
@@ -1857,8 +1885,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
         touched_shards.sort_unstable();
         touched_shards.dedup();
         self.ensure_cdc_shards_loaded(namespace, state, &touched_shards)
-            .await?;
-        filter_grouped_cdc_batches(contract, batches, state)
+            .await
     }
 
     async fn ensure_cdc_shards_loaded(
@@ -2128,12 +2155,6 @@ impl<S: SinkSpec> IcebergWriter<S> {
         if let Some(delete_stream) = delete_stream {
             let ctx = cdc_ctx
                 .ok_or_else(|| io::Error::other("Iceberg CDC delete stream requires context"))?;
-            let contract = ctx.contract.as_ref().ok_or_else(|| {
-                io::Error::other(format!(
-                    "Iceberg CDC delete stream for namespace '{}' requires a namespace contract",
-                    namespace
-                ))
-            })?;
             let equality_ids = self
                 .plan_cdc_commit(&table, &namespace, Some(ctx))
                 .await?
@@ -2143,18 +2164,12 @@ impl<S: SinkSpec> IcebergWriter<S> {
                         namespace
                     ))
                 })?;
-            let delete_batches = collect_record_batches(delete_stream).await?;
-            let delete_columns = &contract.business_key_columns;
-            let projected_delete_batches = delete_batches
-                .iter()
-                .map(|batch| project_batch_columns(batch, delete_columns))
-                .collect::<Result<Vec<_>, _>>()?;
-            let projected_delete_batches = apply_iceberg_field_ids_to_batches(
-                projected_delete_batches,
+            let delete_batches = apply_iceberg_field_ids_to_batches(
+                collect_record_batches(delete_stream).await?,
                 table.metadata().current_schema(),
             )?;
             let delete_bytes = crate::parquet_util::serialize_to_parquet_for_iceberg(
-                batch_stream(projected_delete_batches),
+                batch_stream(delete_batches),
                 &date_fields,
                 &self.context.output_layout.order_fields,
             )
@@ -2584,7 +2599,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
 
     async fn prepare_cdc_stream(
         &self,
-        mut stream: SendableRecordBatchStream,
+        stream: SendableRecordBatchStream,
         namespace: &str,
         ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<PreparedCdcStreams, io::Error> {
@@ -2594,98 +2609,25 @@ impl<S: SinkSpec> IcebergWriter<S> {
                 namespace
             ))
         })?;
-        let mut state = self.load_cdc_state(namespace).await?;
-        let mut upsert_batches = Vec::new();
-        let mut delete_batches = Vec::new();
-        let mut state_updates = HashMap::new();
-        let mut upsert_rows = 0u64;
-
-        while let Some(batch) = stream.next().await {
-            let batch = batch.map_err(|err| io::Error::other(err.to_string()))?;
-            let mutation_idx = batch
-                .schema()
-                .index_of("_skippr_mutation")
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            let order_idx = batch
-                .schema()
-                .index_of("_skippr_order_token")
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            let mutations = batch
-                .column(mutation_idx)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| io::Error::other("_skippr_mutation must be Utf8"))?;
-            let orders = batch
-                .column(order_idx)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| io::Error::other("_skippr_order_token must be Utf8"))?;
-
-            let mut upsert_mask = Vec::with_capacity(batch.num_rows());
-            let mut delete_mask = Vec::with_capacity(batch.num_rows());
-
-            for row in 0..batch.num_rows() {
-                let key = business_key_for_row(&batch, &contract.business_key_columns, row)?;
-                let order_token = validate_cdc_order_token(orders.value(row))?.to_string();
-                let is_stale = state
-                    .get(&key)
-                    .map(|seen| compare_cdc_order_tokens(seen, &order_token))
-                    .transpose()?
-                    .unwrap_or(false);
-                if is_stale {
-                    upsert_mask.push(false);
-                    delete_mask.push(false);
-                    continue;
-                }
-
-                state.insert(key.clone(), order_token.clone());
-                state_updates.insert(key, order_token);
-                match mutations.value(row) {
-                    "delete" => {
-                        upsert_mask.push(false);
-                        delete_mask.push(true);
-                    }
-                    "snapshot" | "insert" | "update" => {
-                        upsert_mask.push(true);
-                        delete_mask.push(false);
-                    }
-                    other => {
-                        return Err(io::Error::other(format!(
-                            "unsupported CDC mutation '{}'",
-                            other
-                        )));
-                    }
-                }
-            }
-
-            let upsert_filter = BooleanArray::from(upsert_mask);
-            let delete_filter = BooleanArray::from(delete_mask);
-            let upsert = filter_record_batch(&batch, &upsert_filter)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            let delete = filter_record_batch(&batch, &delete_filter)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            if upsert.num_rows() > 0 {
-                upsert_rows += upsert.num_rows() as u64;
-                upsert_batches.push(upsert);
-            }
-            if delete.num_rows() > 0 {
-                delete_batches.push(project_batch_columns(
-                    &delete,
-                    &contract.business_key_columns,
-                )?);
-            }
-        }
-
-        let upsert_stream = batch_stream(upsert_batches);
-        let delete_stream = if delete_batches.is_empty() {
+        let committed = self.load_cdc_state(namespace).await?;
+        let batches = collect_record_batches(stream).await?;
+        let final_state = final_state_cdc_batches(contract, &batches, |key| {
+            committed.get(key).map(String::as_str)
+        })?;
+        let upsert_rows = final_state
+            .upserts
+            .iter()
+            .map(|batch| batch.num_rows() as u64)
+            .sum();
+        let delete_stream = if final_state.deletes.is_empty() {
             None
         } else {
-            Some(batch_stream(delete_batches))
+            Some(batch_stream(final_state.deletes))
         };
         Ok(PreparedCdcStreams {
-            upsert_stream,
+            upsert_stream: batch_stream(final_state.upserts),
             delete_stream,
-            state_updates,
+            state_updates: final_state.tokens.into_iter().collect(),
             upsert_rows,
         })
     }
@@ -3202,100 +3144,129 @@ fn prepare_grouped_policy_batches(
     Ok((batches, delete_batches))
 }
 
-fn filter_grouped_cdc_batches(
+/// Final state of one `ExactOnceFinalState` CDC envelope.
+struct CdcFinalState {
+    /// The latest version of every key whose winning event is not a delete.
+    upserts: Vec<RecordBatch>,
+    /// Business-key columns to equality-delete. Iceberg applies an equality delete
+    /// only to data files with an older sequence number, so `upserts` in the same
+    /// commit survive while the previously committed version is retired.
+    deletes: Vec<RecordBatch>,
+    /// Winning order token per key the envelope changed.
+    tokens: BTreeMap<String, String>,
+}
+
+struct CdcWinner {
+    batch: usize,
+    row: usize,
+    token: String,
+    delete: bool,
+}
+
+/// Collapse an envelope to one event per business key: the highest order token
+/// above the committed token wins. Iceberg sees each key at most once per commit.
+fn final_state_cdc_batches<'a>(
     contract: &skippr_runtime_sdk::plugins::cdc::NamespaceContract,
-    batches: Vec<RecordBatch>,
-    state: &mut CdcStateSession,
-) -> Result<(Vec<RecordBatch>, Vec<RecordBatch>), io::Error> {
-    let mut upsert_batches = Vec::new();
-    let mut delete_batches = Vec::new();
-    for batch in batches {
-        let mutation_idx = batch
-            .schema()
-            .index_of("_skippr_mutation")
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        let order_idx = batch
-            .schema()
-            .index_of("_skippr_order_token")
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        let mutations = batch
-            .column(mutation_idx)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| io::Error::other("_skippr_mutation must be Utf8"))?;
-        let orders = batch
-            .column(order_idx)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| io::Error::other("_skippr_order_token must be Utf8"))?;
-        let mut upsert_mask = Vec::with_capacity(batch.num_rows());
-        let mut delete_mask = Vec::with_capacity(batch.num_rows());
+    batches: &[RecordBatch],
+    committed_token: impl Fn(&str) -> Option<&'a str>,
+) -> Result<CdcFinalState, io::Error> {
+    let mut winners: HashMap<String, CdcWinner> = HashMap::new();
+    for (batch_idx, batch) in batches.iter().enumerate() {
+        let mutations = utf8_column(batch, "_skippr_mutation")?;
+        let orders = utf8_column(batch, "_skippr_order_token")?;
         for row in 0..batch.num_rows() {
-            let key = business_key_for_row(&batch, &contract.business_key_columns, row)?;
-            let order_token = validate_cdc_order_token(orders.value(row))?.to_string();
-            let shard = cdc_state_shard(&key);
-            let is_stale = state
-                .loaded_shards
-                .get(&shard)
-                .and_then(|state| state.values.get(&key))
-                .map(|seen| compare_cdc_order_tokens(seen, &order_token))
-                .transpose()?
-                .unwrap_or(false);
-            if is_stale {
-                upsert_mask.push(false);
-                delete_mask.push(false);
-                continue;
-            }
-            match mutations.value(row) {
-                "delete" => {
-                    upsert_mask.push(false);
-                    delete_mask.push(true);
-                }
-                "snapshot" | "insert" | "update" => {
-                    upsert_mask.push(true);
-                    delete_mask.push(false);
-                }
+            let key = business_key_for_row(batch, &contract.business_key_columns, row)?;
+            let token = validate_cdc_order_token(orders.value(row))?;
+            let delete = match mutations.value(row) {
+                "delete" => true,
+                "snapshot" | "insert" | "update" => false,
                 other => {
                     return Err(io::Error::other(format!(
                         "unsupported CDC mutation '{}'",
                         other
-                    )));
+                    )))
+                }
+            };
+            let seen = match winners.get(&key) {
+                Some(winner) => Some(winner.token.as_str()),
+                None => committed_token(&key),
+            };
+            if let Some(seen) = seen {
+                if compare_cdc_order_tokens(seen, token)? {
+                    continue;
                 }
             }
-            state
-                .loaded_shards
-                .get_mut(&shard)
-                .ok_or_else(|| {
-                    io::Error::other(format!(
-                        "Iceberg CDC state shard {} was not loaded before filtering",
-                        shard
-                    ))
-                })?
-                .values
-                .insert(key.clone(), order_token.clone());
-            if !state.delta.contains_key(&key) && state.delta.len() >= ICEBERG_MAX_ENVELOPE_KEYS {
+            if !winners.contains_key(&key) && winners.len() >= ICEBERG_MAX_ENVELOPE_KEYS {
                 return Err(io::Error::other(format!(
-                    "Iceberg grouped CDC envelope exceeds the {} unique-key session bound",
+                    "Iceberg CDC envelope exceeds the {} unique-key session bound",
                     ICEBERG_MAX_ENVELOPE_KEYS
                 )));
             }
-            state.delta.insert(key, order_token);
+            winners.insert(
+                key,
+                CdcWinner {
+                    batch: batch_idx,
+                    row,
+                    token: token.to_string(),
+                    delete,
+                },
+            );
         }
-        let upsert = filter_record_batch(&batch, &BooleanArray::from(upsert_mask))
+    }
+
+    let mut upsert_masks: Vec<Vec<bool>> =
+        batches.iter().map(|b| vec![false; b.num_rows()]).collect();
+    let mut delete_masks = upsert_masks.clone();
+    let mut tokens = BTreeMap::new();
+    for (key, winner) in winners {
+        let retire = committed_token(&key).is_some();
+        if winner.delete {
+            if retire {
+                delete_masks[winner.batch][winner.row] = true;
+            }
+        } else {
+            upsert_masks[winner.batch][winner.row] = true;
+            if retire {
+                delete_masks[winner.batch][winner.row] = true;
+            }
+        }
+        tokens.insert(key, winner.token);
+    }
+
+    let mut upserts = Vec::new();
+    let mut deletes = Vec::new();
+    for ((batch, upsert_mask), delete_mask) in batches.iter().zip(upsert_masks).zip(delete_masks) {
+        let upsert = filter_record_batch(batch, &BooleanArray::from(upsert_mask))
             .map_err(|err| io::Error::other(err.to_string()))?;
         if upsert.num_rows() > 0 {
-            upsert_batches.push(upsert);
+            upserts.push(upsert);
         }
-        let delete = filter_record_batch(&batch, &BooleanArray::from(delete_mask))
+        let delete = filter_record_batch(batch, &BooleanArray::from(delete_mask))
             .map_err(|err| io::Error::other(err.to_string()))?;
         if delete.num_rows() > 0 {
-            delete_batches.push(project_batch_columns(
+            deletes.push(project_batch_columns(
                 &delete,
                 &contract.business_key_columns,
             )?);
         }
     }
-    Ok((upsert_batches, delete_batches))
+    Ok(CdcFinalState {
+        upserts,
+        deletes,
+        tokens,
+    })
+}
+
+fn utf8_column<'b>(batch: &'b RecordBatch, name: &str) -> Result<&'b StringArray, io::Error> {
+    let idx = batch
+        .schema()
+        .index_of(name)
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| io::Error::other(format!("{name} must be Utf8")))
 }
 
 fn equality_ids_for_columns(
@@ -3374,8 +3345,8 @@ fn grouped_snapshot_properties(manifest: &ObjectWriteManifest) -> HashMap<String
             manifest.wal_ref_count.to_string(),
         ),
         (
-            SNAPSHOT_WAL_SEGMENT_IDS.to_string(),
-            manifest.wal_segment_ids.join(","),
+            SNAPSHOT_WAL_SLICES.to_string(),
+            encode_wal_slices(&manifest.wal_slices),
         ),
     ])
 }
@@ -4589,7 +4560,12 @@ mod tests {
             identity_version: Some(2),
             wal_refs_fingerprint_v2: Some("canonical-wal-fingerprint".to_string()),
             has_cdc_metadata: true,
-            wal_segment_ids: vec!["seg-a".into(), "seg-b".into()],
+            wal_slices: [
+                WalSliceRef::try_from_parts("seg-a", 0).unwrap(),
+                WalSliceRef::try_from_parts("seg-b", 0).unwrap(),
+            ]
+            .into_iter()
+            .collect(),
         }
     }
 
@@ -4628,72 +4604,122 @@ mod tests {
         .unwrap()
     }
 
-    fn empty_loaded_cdc_state(keys: &[&str]) -> CdcStateSession {
-        let mut state = CdcStateSession::default();
-        for key in keys {
-            state
-                .loaded_shards
-                .entry(cdc_state_shard(key))
-                .or_insert_with(|| LoadedCdcStateShard {
-                    values: BTreeMap::new(),
-                    etag: None,
-                });
-        }
-        state
+    fn rows(batches: &[RecordBatch]) -> usize {
+        batches.iter().map(RecordBatch::num_rows).sum()
+    }
+
+    fn ids(batches: &[RecordBatch]) -> Vec<i32> {
+        let mut ids: Vec<i32> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name("id")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int32Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
     #[test]
-    fn grouped_cdc_filters_stale_rows_and_splits_upserts_from_deletes() {
-        let contract = exact_cdc_contract();
-        let keys = ["2:id1:1", "2:id1:2", "2:id1:3"];
-        let mut state = empty_loaded_cdc_state(&keys);
-        state
-            .loaded_shards
-            .get_mut(&cdc_state_shard(keys[2]))
-            .unwrap()
-            .values
-            .insert(keys[2].to_string(), "00000005".to_string());
-
-        let (upserts, deletes) = filter_grouped_cdc_batches(
-            &contract,
-            vec![cdc_batch(
+    fn cdc_final_state_drops_stale_rows_and_splits_upserts_from_deletes() {
+        let committed = HashMap::from([
+            ("2:id1:2".to_string(), "00000001".to_string()),
+            ("2:id1:3".to_string(), "00000005".to_string()),
+        ]);
+        let state = final_state_cdc_batches(
+            &exact_cdc_contract(),
+            &[cdc_batch(
                 vec![1, 2, 3],
-                vec!["update", "delete", "update"],
+                vec!["insert", "delete", "update"],
                 vec!["00000002", "00000003", "00000004"],
             )],
-            &mut state,
+            |key| committed.get(key).map(String::as_str),
         )
         .unwrap();
 
-        assert_eq!(upserts.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
-        assert_eq!(deletes.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
-        assert_eq!(deletes[0].num_columns(), 1);
-        assert_eq!(state.delta.len(), 2);
-        assert!(!state.delta.contains_key(keys[2]));
+        assert_eq!(ids(&state.upserts), vec![1]);
+        assert_eq!(ids(&state.deletes), vec![2]);
+        assert_eq!(state.deletes[0].num_columns(), 1);
+        assert_eq!(state.tokens.len(), 2);
+        assert!(!state.tokens.contains_key("2:id1:3"));
     }
 
     #[test]
-    fn grouped_cdc_applies_order_filter_across_transport_chunks() {
-        let contract = exact_cdc_contract();
-        let key = "2:id1:1";
-        let mut state = empty_loaded_cdc_state(&[key]);
-        let (first_upserts, _) = filter_grouped_cdc_batches(
-            &contract,
-            vec![cdc_batch(vec![1], vec!["update"], vec!["00000002"])],
-            &mut state,
-        )
-        .unwrap();
-        let (late_upserts, late_deletes) = filter_grouped_cdc_batches(
-            &contract,
-            vec![cdc_batch(vec![1], vec!["delete"], vec!["00000001"])],
-            &mut state,
+    fn cdc_update_of_a_committed_key_retires_the_committed_version() {
+        let committed = HashMap::from([("2:id1:1".to_string(), "00000001".to_string())]);
+        let state = final_state_cdc_batches(
+            &exact_cdc_contract(),
+            &[cdc_batch(
+                vec![1, 2],
+                vec!["update", "insert"],
+                vec!["00000002", "00000002"],
+            )],
+            |key| committed.get(key).map(String::as_str),
         )
         .unwrap();
 
-        assert_eq!(first_upserts[0].num_rows(), 1);
-        assert!(late_upserts.is_empty());
-        assert!(late_deletes.is_empty());
-        assert_eq!(state.delta.get(key).map(String::as_str), Some("00000002"));
+        assert_eq!(ids(&state.upserts), vec![1, 2]);
+        assert_eq!(ids(&state.deletes), vec![1], "new key 2 needs no delete");
+        assert_eq!(
+            state.tokens.get("2:id1:1").map(String::as_str),
+            Some("00000002")
+        );
+    }
+
+    #[test]
+    fn cdc_envelope_keeps_only_the_latest_version_across_transport_chunks() {
+        let state = final_state_cdc_batches(
+            &exact_cdc_contract(),
+            &[
+                cdc_batch(vec![1], vec!["insert"], vec!["00000002"]),
+                cdc_batch(vec![1], vec!["update"], vec!["00000004"]),
+                cdc_batch(vec![1], vec!["delete"], vec!["00000003"]),
+            ],
+            |_| None,
+        )
+        .unwrap();
+
+        assert_eq!(rows(&state.upserts), 1);
+        let token = state.upserts[0]
+            .column_by_name("_skippr_order_token")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0)
+            .to_string();
+        assert_eq!(token, "00000004");
+        assert!(state.deletes.is_empty());
+        assert_eq!(
+            state.tokens.get("2:id1:1").map(String::as_str),
+            Some("00000004")
+        );
+    }
+
+    #[test]
+    fn cdc_insert_then_delete_in_one_envelope_writes_no_data() {
+        let state = final_state_cdc_batches(
+            &exact_cdc_contract(),
+            &[cdc_batch(
+                vec![1, 1],
+                vec!["insert", "delete"],
+                vec!["00000002", "00000003"],
+            )],
+            |_| None,
+        )
+        .unwrap();
+
+        assert!(state.upserts.is_empty());
+        assert!(
+            state.deletes.is_empty(),
+            "a key that never reached Iceberg does not need an equality delete"
+        );
     }
 
     #[test]
@@ -4861,8 +4887,25 @@ mod tests {
             Some("canonical-wal-fingerprint")
         );
         assert_eq!(
-            first.get(SNAPSHOT_WAL_SEGMENT_IDS).map(String::as_str),
-            Some("seg-a,seg-b")
+            first.get(SNAPSHOT_WAL_SLICES).map(String::as_str),
+            Some("seg-a@0,seg-b@0")
+        );
+    }
+
+    #[test]
+    fn grouped_snapshot_wal_slices_keep_two_refs_from_one_segment() {
+        let mut manifest = grouped_manifest("1");
+        manifest.wal_slices = [
+            WalSliceRef::try_from_parts("seg-a", 0).unwrap(),
+            WalSliceRef::try_from_parts("seg-a", 100).unwrap(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            grouped_snapshot_properties(&manifest)
+                .get(SNAPSHOT_WAL_SLICES)
+                .map(String::as_str),
+            Some("seg-a@0,seg-a@100")
         );
     }
 

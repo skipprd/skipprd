@@ -14,9 +14,9 @@ use sha2::{Digest, Sha256};
 use skippr_lease::{DurableError, SegmentId};
 use skippr_wal_catalog::{
     query_all, CatalogFence, CatalogKey, CatalogPrefix, CatalogRow, CatalogTxn, CompactionId,
-    CompactionRow, CompactionState, FormatPhase, FormatRow, PayloadLocation, PutCond,
-    SegmentIndexRow, SegmentRow, SeqRow, SliceBitmap, SliceDirEntry, SliceIndexEntry,
-    WalCatalogStore, FORMAT_VERSION, ROW_MAX_BYTES,
+    CompactionRow, CompactionState, FormatPhase, FormatRow, LegacySliceRow, PayloadLocation,
+    PutCond, SegmentIndexRow, SegmentRow, SeqRow, SliceBitmap, SliceDirEntry, WalCatalogStore,
+    FORMAT_VERSION, ROW_MAX_BYTES,
 };
 
 use crate::buffer::compaction_transaction::{CompactionTransaction, CompactionTransactionState};
@@ -39,6 +39,35 @@ const COMPLETION_CHECKSUM_LEN: usize = 32;
 
 fn invalid_data(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+fn warn_drop_file(path: &Path) {
+    if let Err(err) = fs::remove_file(path) {
+        if err.kind() != io::ErrorKind::NotFound {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "WAL orphan payload drop failed"
+            );
+        }
+    }
+}
+
+fn warn_delete_s3_object(bucket: &str, key: &str) {
+    let bucket_owned = bucket.to_string();
+    let key_owned = key.to_string();
+    if let Err(err) = crate::buffer::wal_store::block_on_async(async move {
+        crate::helpers::s3::delete_object(&bucket_owned, &key_owned)
+            .await
+            .map_err(|err| std::io::Error::other(err.to_string()))
+    }) {
+        tracing::warn!(
+            bucket,
+            key,
+            error = %err,
+            "WAL orphan S3 payload drop failed"
+        );
+    }
 }
 
 fn parse_commit_header(bytes: &[u8]) -> io::Result<([u8; 32], u64, u32)> {
@@ -306,12 +335,7 @@ fn delete_legacy_s3_commits(config: &Config) -> Result<(), DurableError> {
         if !key.ends_with(".seg.commit") {
             continue;
         }
-        let bucket = bucket.clone();
-        let _ = crate::buffer::wal_store::block_on_async(async move {
-            crate::helpers::s3::delete_object(&bucket, &key)
-                .await
-                .map_err(|err| std::io::Error::other(err.to_string()))
-        });
+        warn_delete_s3_object(&bucket, &key);
     }
     Ok(())
 }
@@ -355,10 +379,7 @@ fn commit_imported_segment(
         skippr_wal_catalog::PutCond::SeqAdvance,
     )
     .map_err(|err| DurableError::Io(err.to_string()))?;
-    handle
-        .catalog()
-        .commit_durable(&txn, fence)
-        .map_err(|err| DurableError::Io(err.to_string()))?;
+    crate::buffer::wal_handle::flushing_commit(handle.catalog(), &txn, fence)?;
     Ok(max_seq)
 }
 
@@ -629,7 +650,9 @@ fn import_completion_bitmaps(
                     })?;
                 row.done.or_bits(&bits);
                 let version = row.version;
-                row.version = version.saturating_add(1);
+                row.version = version.checked_add(1).ok_or_else(|| {
+                    DurableError::ProtocolMismatch("catalog row version overflow".into())
+                })?;
                 let mut txn = CatalogTxn::new();
                 txn.put(
                     CatalogKey::Segment(id),
@@ -637,10 +660,7 @@ fn import_completion_bitmaps(
                     PutCond::Version(version),
                 )
                 .map_err(|err| DurableError::Io(err.to_string()))?;
-                handle
-                    .catalog()
-                    .commit_durable(&txn, fence)
-                    .map_err(|err| DurableError::Io(err.to_string()))?;
+                crate::buffer::wal_handle::flushing_commit(handle.catalog(), &txn, fence)?;
                 out.applied += 1;
             }
             Some(_) => {
@@ -788,10 +808,7 @@ fn import_compaction_json(
                 PutCond::NotExists,
             )
             .map_err(|err| DurableError::Io(err.to_string()))?;
-        handle
-            .catalog()
-            .commit_durable(&catalog_txn, fence)
-            .map_err(|err| DurableError::Io(err.to_string()))?;
+        crate::buffer::wal_handle::flushing_commit(handle.catalog(), &catalog_txn, fence)?;
         count += 1;
         if count % WAL_CATALOG_PROGRESS_EVERY == 0 {
             tracing::info!(
@@ -808,7 +825,7 @@ fn migrate_slice_index_if_needed(
     fence: CatalogFence,
     row: &FormatRow,
 ) -> Result<(), DurableError> {
-    let leftover_slices = query_all(handle.catalog(), CatalogPrefix::Slice)
+    let leftover_slices = query_all(handle.catalog(), CatalogPrefix::LegacySlice)
         .map_err(|err| DurableError::Io(err.to_string()))?;
     if row.version >= FORMAT_VERSION && leftover_slices.is_empty() {
         return Ok(());
@@ -816,8 +833,8 @@ fn migrate_slice_index_if_needed(
     rebuild_indexes(handle, fence, &leftover_slices)?;
     handle
         .catalog()
-        .delete_prefix(CatalogPrefix::Slice, fence)
-        .map_err(|err| DurableError::Io(err.to_string()))?;
+        .delete_prefix(CatalogPrefix::LegacySlice, fence)
+        .map_err(crate::buffer::wal_handle::catalog_durable_err)?;
     if row.version < FORMAT_VERSION {
         write_format(
             handle.catalog(),
@@ -834,10 +851,10 @@ fn rebuild_indexes(
     fence: CatalogFence,
     leftover_slices: &[(CatalogKey, CatalogRow)],
 ) -> Result<(), DurableError> {
-    let mut by_segment: std::collections::HashMap<SegmentId, Vec<SliceIndexEntry>> =
+    let mut by_segment: std::collections::HashMap<SegmentId, Vec<LegacySliceRow>> =
         std::collections::HashMap::new();
     for (_, row) in leftover_slices {
-        let CatalogRow::Slice(slice) = row else {
+        let CatalogRow::LegacySlice(slice) = row else {
             continue;
         };
         by_segment
@@ -869,10 +886,7 @@ fn rebuild_indexes(
                 let mut txn = CatalogTxn::new();
                 crate::buffer::wal_handle::put_slice_index(&mut txn, &seg.segment_id, &meta)?;
                 if !txn.ops().is_empty() {
-                    handle
-                        .catalog()
-                        .commit_durable(&txn, fence)
-                        .map_err(|err| DurableError::Io(err.to_string()))?;
+                    crate::buffer::wal_handle::flushing_commit(handle.catalog(), &txn, fence)?;
                 }
                 continue;
             }
@@ -889,7 +903,7 @@ fn persist_index_from_slices(
     handle: &PipelineWalHandle,
     fence: CatalogFence,
     id: &SegmentId,
-    slices: &[SliceIndexEntry],
+    slices: &[LegacySliceRow],
 ) -> Result<(), DurableError> {
     if slices.is_empty() {
         return Ok(());
@@ -923,10 +937,7 @@ fn persist_index_from_slices(
         PutCond::NotExists,
     )
     .map_err(|err| DurableError::Io(err.to_string()))?;
-    handle
-        .catalog()
-        .commit_durable(&txn, fence)
-        .map_err(|err| DurableError::Io(err.to_string()))
+    crate::buffer::wal_handle::flushing_commit(handle.catalog(), &txn, fence)
 }
 
 fn payload_readable(location: &PayloadLocation) -> bool {
@@ -945,7 +956,12 @@ fn write_format(
     let mut txn = CatalogTxn::new();
     let (cond, row_version) = match expected {
         None => (PutCond::NotExists, 0),
-        Some(current) => (PutCond::Version(current), current.saturating_add(1)),
+        Some(current) => (
+            PutCond::Version(current),
+            current.checked_add(1).ok_or_else(|| {
+                DurableError::ProtocolMismatch("catalog row version overflow".into())
+            })?,
+        ),
     };
     txn.put(
         CatalogKey::Format,
@@ -957,9 +973,7 @@ fn write_format(
         cond,
     )
     .map_err(|err| DurableError::Io(err.to_string()))?;
-    catalog
-        .commit_durable(&txn, fence)
-        .map_err(|err| DurableError::Io(err.to_string()))
+    crate::buffer::wal_handle::flushing_commit(catalog, &txn, fence)
 }
 
 pub fn gc_orphan_payloads(handle: &PipelineWalHandle, config: &Config) -> Result<(), DurableError> {
@@ -980,6 +994,14 @@ pub fn gc_orphan_payloads(handle: &PipelineWalHandle, config: &Config) -> Result
     if segs.exists() {
         for entry in fs::read_dir(segs).map_err(DurableError::from)? {
             let path = entry.map_err(DurableError::from)?.path();
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if name.ends_with(".seg.tmp") {
+                warn_drop_file(&path);
+                continue;
+            }
             if path.extension().and_then(|s| s.to_str()) != Some("seg") {
                 continue;
             }
@@ -988,7 +1010,7 @@ pub fn gc_orphan_payloads(handle: &PipelineWalHandle, config: &Config) -> Result
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
             if !live_ids.contains(id) {
-                let _ = fs::remove_file(path);
+                warn_drop_file(&path);
             }
         }
     }
@@ -1008,12 +1030,7 @@ fn gc_orphan_s3_payloads(
         if !key.ends_with(".seg") || live_keys.contains(&key) {
             continue;
         }
-        let bucket = bucket.clone();
-        let _ = crate::buffer::wal_store::block_on_async(async move {
-            crate::helpers::s3::delete_object(&bucket, &key)
-                .await
-                .map_err(|err| std::io::Error::other(err.to_string()))
-        });
+        warn_delete_s3_object(&bucket, &key);
     }
     Ok(())
 }
@@ -1036,6 +1053,15 @@ mod tests {
     use std::time::SystemTime;
 
     fn test_handle(dir: &Path) -> Arc<PipelineWalHandle> {
+        test_handle_with_memory(dir).0
+    }
+
+    fn test_handle_with_memory(
+        dir: &Path,
+    ) -> (
+        Arc<PipelineWalHandle>,
+        Arc<skippr_wal_catalog::MemoryWalCatalog>,
+    ) {
         let key = PipelineKey::new("t", "w", "p").unwrap();
         let paths = PipelinePaths::legacy_disk(dir);
         let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
@@ -1044,7 +1070,10 @@ mod tests {
         let db = sled::open(dir.join("offsets")).unwrap();
         let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
             Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
-        PipelineWalHandle::new(key, paths, guard, catalog, offsets)
+        (
+            PipelineWalHandle::new(key, paths, guard, catalog.clone(), offsets),
+            catalog,
+        )
     }
 
     fn write_seg(segs: &Path, name: &str) -> SegmentFileMetadata {
@@ -1068,7 +1097,13 @@ mod tests {
         let mut parts_meta = HashMap::new();
         parts_meta.insert(key, (0, SystemTime::now()));
         let (meta, _rows, _sha) = seg
-            .write_snapshot(&HashMap::new(), &batches, &parts_meta, &HashMap::new())
+            .write_snapshot(
+                &HashMap::new(),
+                &batches,
+                &parts_meta,
+                &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
+            )
             .unwrap();
         meta
     }
@@ -1386,6 +1421,38 @@ mod tests {
     }
 
     #[test]
+    fn import_occ_commits_use_flushing_commit() {
+        let src = include_str!("wal_catalog_import.rs");
+        let production = src
+            .rsplit("#[cfg(test)]\nmod tests {")
+            .nth(1)
+            .expect("production before tests");
+        assert_eq!(
+            production.matches("flushing_commit(").count(),
+            6,
+            "import/format OCC commits must go through flushing_commit"
+        );
+        assert!(
+            !production.contains("commit_durable"),
+            "production import must not call catalog.commit_durable directly"
+        );
+        assert!(
+            production.contains("delete_prefix(CatalogPrefix::LegacySlice, fence)"),
+            "format slice-index migration must still delete leftover Slice prefix"
+        );
+        assert!(
+            production.contains("catalog_durable_err"),
+            "delete_prefix OCC must map through catalog_durable_err, not Io"
+        );
+        assert!(
+            !production.contains(
+                "delete_prefix(CatalogPrefix::LegacySlice, fence)\n        .map_err(|err| DurableError::Io"
+            ),
+            "delete_prefix ConditionFailed/Conflict must not become DurableError::Io"
+        );
+    }
+
+    #[test]
     fn import_unreadable_owned_pair_is_fail_closed() {
         let dir = tempfile::tempdir().unwrap();
         let handle = test_handle(dir.path());
@@ -1423,7 +1490,7 @@ mod tests {
     #[test]
     fn import_format_2_slice_keys_become_index_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = test_handle(dir.path());
+        let (handle, catalog) = test_handle_with_memory(dir.path());
         let meta = write_seg(&handle.paths().segs, "v2-seg");
         let id = SegmentId::new("v2-seg").unwrap();
         let idx = &meta.index[0];
@@ -1450,26 +1517,6 @@ mod tests {
         )
         .unwrap();
         txn.put(
-            CatalogKey::Slice {
-                segment_id: id.clone(),
-                ordinal: idx.slice_ordinal,
-            },
-            CatalogRow::Slice(SliceIndexEntry {
-                segment_id: id.clone(),
-                ordinal: idx.slice_ordinal,
-                namespace: idx.key.namespace.clone(),
-                partition: idx.key.partition.clone(),
-                start: idx.start,
-                len: idx.len,
-                codec: idx.codec,
-                part_meta_start: idx.part_meta_start,
-                part_meta_len: idx.part_meta_len,
-                version: 0,
-            }),
-            PutCond::NotExists,
-        )
-        .unwrap();
-        txn.put(
             CatalogKey::Format,
             CatalogRow::Format(FormatRow {
                 version: 2,
@@ -1480,6 +1527,26 @@ mod tests {
         )
         .unwrap();
         handle.catalog().commit_durable(&txn, fence).unwrap();
+        catalog
+            .seed_historical(
+                CatalogKey::LegacySlice {
+                    segment_id: id.clone(),
+                    ordinal: idx.slice_ordinal,
+                },
+                CatalogRow::LegacySlice(LegacySliceRow {
+                    segment_id: id.clone(),
+                    ordinal: idx.slice_ordinal,
+                    namespace: idx.key.namespace.clone(),
+                    partition: idx.key.partition.clone(),
+                    start: idx.start,
+                    len: idx.len,
+                    codec: idx.codec,
+                    part_meta_start: idx.part_meta_start,
+                    part_meta_len: idx.part_meta_len,
+                    version: 0,
+                }),
+            )
+            .unwrap();
         import_if_needed(&handle, &crate::helpers::configuration::Config::new()).unwrap();
         match handle.catalog().get(&CatalogKey::Format).unwrap() {
             Some(CatalogRow::Format(row)) => {
@@ -1502,12 +1569,25 @@ mod tests {
         }
         assert!(handle
             .catalog()
-            .get(&CatalogKey::Slice {
+            .get(&CatalogKey::LegacySlice {
                 segment_id: id,
                 ordinal: 0,
             })
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn gc_orphan_payloads_removes_stale_seg_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = test_handle(dir.path());
+        let segs = &handle.paths().segs;
+        fs::create_dir_all(segs).unwrap();
+        let tmp = segs.join("crash.seg.tmp");
+        fs::write(&tmp, b"partial").unwrap();
+        assert!(!segs.join("crash.seg").exists());
+        gc_orphan_payloads(&handle, &crate::helpers::configuration::Config::new()).unwrap();
+        assert!(!tmp.exists());
     }
 
     #[test]

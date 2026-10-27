@@ -3,7 +3,7 @@ use crate::key::{CatalogKey, CatalogPrefix};
 use crate::row::{CatalogFence, CatalogRow};
 use crate::txn::CatalogTxn;
 
-pub trait WalCatalogStore: Send + Sync {
+pub trait WalCatalogRead: Send + Sync {
     fn get(&self, key: &CatalogKey) -> Result<Option<CatalogRow>, CatalogError>;
     fn query_prefix(
         &self,
@@ -11,6 +11,9 @@ pub trait WalCatalogStore: Send + Sync {
         after: Option<&CatalogKey>,
         limit: usize,
     ) -> Result<Vec<(CatalogKey, CatalogRow)>, CatalogError>;
+}
+
+pub trait WalCatalogStore: WalCatalogRead {
     fn commit(&self, txn: &CatalogTxn, fence: CatalogFence) -> Result<(), CatalogError>;
     fn delete_prefix(&self, prefix: CatalogPrefix, fence: CatalogFence)
         -> Result<(), CatalogError>;
@@ -22,7 +25,7 @@ pub trait WalCatalogStore: Send + Sync {
 }
 
 pub fn query_all(
-    store: &dyn WalCatalogStore,
+    store: &dyn WalCatalogRead,
     prefix: CatalogPrefix,
 ) -> Result<Vec<(CatalogKey, CatalogRow)>, CatalogError> {
     const PAGE: usize = 100;

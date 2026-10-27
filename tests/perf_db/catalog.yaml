@@ -1,10 +1,12 @@
 # skippr-perf-db: ingest then skipprd query. File parquet Iceberg vs DuckDB.
 # WAL leftover import is out of suite.
+# wal_pin: drained = the measured query pinned no WAL (W \ E empty, lake only);
+#          live    = the measured query read WAL held behind the compaction hold.
 defaults:
   rows: 10000
   smoke_rows: 200
   linux_rows: 2000
-  required_perf: [sync, query_collect]
+  required_perf: [sync, query_collect, query_pin]
   table: events
 
 scenarios:
@@ -14,7 +16,6 @@ scenarios:
     sink: skipprlake
     fixture: exact_arrow
     sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
-    required_perf: [sync, query_collect]
     asserts:
       query_count: true
       iceberg_parquet: true
@@ -25,7 +26,6 @@ scenarios:
     sink: skipprlake
     fixture: exact_arrow
     sql: "SELECT id FROM perf_cell.perf_cell WHERE id = 1"
-    required_perf: [sync, query_collect]
     asserts:
       query_point: true
       iceberg_parquet: true
@@ -36,7 +36,6 @@ scenarios:
     sink: duckdb
     fixture: exact_arrow
     sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
-    required_perf: [sync, query_collect]
     asserts:
       query_count: true
       iceberg_parquet: true
@@ -47,7 +46,6 @@ scenarios:
     sink: skipprlake
     fixture: exact_arrow
     sql: "SELECT count(*) AS n FROM perf_cell.perf_cell GROUP BY name"
-    required_perf: [sync, query_collect]
     asserts:
       query_group: true
       iceberg_parquet: true
@@ -59,22 +57,21 @@ scenarios:
     fixture: exact_arrow
     wal_tail: true
     sql: "STREAM * FROM perf_cell LIMIT 10"
-    required_perf: [sync, query_collect]
     asserts:
       stream_limit: true
       iceberg_parquet: true
+      wal_pin: live
 
   q-iceberg-only-iceberg:
     group: always
     kind: query_after_ingest
     sink: skipprlake
     fixture: exact_arrow
-    iceberg_only: true
     sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
-    required_perf: [sync, query_collect]
     asserts:
       query_count: true
       iceberg_parquet: true
+      wal_pin: drained
 
   q-union-point-duckdb:
     group: always
@@ -82,7 +79,6 @@ scenarios:
     sink: duckdb
     fixture: exact_arrow
     sql: "SELECT id FROM perf_cell.perf_cell WHERE id = 1"
-    required_perf: [sync, query_collect]
     asserts:
       query_point: true
       iceberg_parquet: true
@@ -93,7 +89,6 @@ scenarios:
     sink: duckdb
     fixture: exact_arrow
     sql: "SELECT count(*) AS n FROM perf_cell.perf_cell GROUP BY name"
-    required_perf: [sync, query_collect]
     asserts:
       query_group: true
       iceberg_parquet: true
@@ -103,12 +98,11 @@ scenarios:
     kind: query_after_ingest
     sink: duckdb
     fixture: exact_arrow
-    iceberg_only: true
     sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
-    required_perf: [sync, query_collect]
     asserts:
       query_count: true
       iceberg_parquet: true
+      wal_pin: drained
 
   q-union-overlap-duckdb:
     group: smoke
@@ -117,18 +111,18 @@ scenarios:
     fixture: exact_arrow
     overlap: true
     sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
-    required_perf: [sync, query_collect]
     asserts:
       query_count: true
       query_unique: true
       iceberg_parquet: true
+      wal_pin: live
 
   q-cdc-union-count-pg:
     group: always
     kind: query_after_cdc
     sql: "SELECT count(*) AS n FROM postgres_skipprlake_cdc.postgres_orders"
     mutation: "INSERT INTO orders (id, name, amount) VALUES (3, 'gamma', 30);"
-    required_perf: [sync, query_collect, query_reconcile]
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_count: 3
       query_reconcile: true
@@ -138,7 +132,7 @@ scenarios:
     kind: query_after_cdc
     sql: "SELECT name FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 1"
     mutation: "UPDATE orders SET name = 'alpha-prime' WHERE id = 1;"
-    required_perf: [sync, query_collect, query_reconcile]
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_name: alpha-prime
       query_reconcile: true
@@ -148,7 +142,7 @@ scenarios:
     kind: query_after_cdc
     sql: "SELECT count(*) AS n FROM postgres_skipprlake_cdc.postgres_orders"
     mutation: "DELETE FROM orders WHERE id = 2;"
-    required_perf: [sync, query_collect, query_reconcile]
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_count: 1
       query_absent_id: 2
@@ -159,7 +153,7 @@ scenarios:
     kind: query_after_cdc
     sql: "SELECT name FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 2"
     mutation: "DELETE FROM orders WHERE id = 2; INSERT INTO orders (id, name, amount) VALUES (2, 'beta-new', 50);"
-    required_perf: [sync, query_collect, query_reconcile]
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_name: beta-new
       query_reconcile: true
@@ -169,7 +163,7 @@ scenarios:
     kind: query_after_cdc
     sql: "SELECT SUM(amount) FROM postgres_skipprlake_cdc.postgres_orders"
     mutation: "INSERT INTO orders (id, name, amount) VALUES (3, 'gamma', 30); UPDATE orders SET amount = 120 WHERE id = 1;"
-    required_perf: [sync, query_collect, query_reconcile]
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_sum: 200
       query_reconcile: true
@@ -180,17 +174,17 @@ scenarios:
     overlap: true
     sql: "SELECT name FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 1"
     mutation: "UPDATE orders SET name = 'alpha-wal' WHERE id = 1;"
-    required_perf: [sync, query_collect, query_reconcile]
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_name: alpha-wal
       query_reconcile: true
+      wal_pin: live
 
   q-cdc-iceberg-only-pg:
     group: always
     kind: query_after_cdc
-    iceberg_only: true
     sql: "SELECT count(*) AS n FROM postgres_skipprlake_cdc.postgres_orders"
     mutation: "INSERT INTO orders (id, name, amount) VALUES (3, 'gamma', 30);"
-    required_perf: [sync, query_collect]
     asserts:
       query_count: 3
+      wal_pin: drained

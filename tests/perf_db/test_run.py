@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import importlib.util
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -23,6 +26,14 @@ CATALOG_PATH = HARNESS_DIR / "catalog.yaml"
 
 def db_catalog() -> dict:
     return load_catalog(CATALOG_PATH)
+
+
+def perf_db_run():
+    spec = importlib.util.spec_from_file_location("perf_db_run", HARNESS_DIR / "run.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 SMOKE = (
@@ -87,6 +98,7 @@ class PerfDbCatalogTests(unittest.TestCase):
             phases = required_perf_for(catalog, spec)
             self.assertIn("sync", phases, name)
             self.assertIn("query_collect", phases, name)
+            self.assertIn("query_pin", phases, name)
 
     def test_unknown_catalog_assert_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -107,10 +119,12 @@ class PerfDbCatalogTests(unittest.TestCase):
         union = catalog["scenarios"]["q-union-count-duckdb"]
         self.assertEqual(union["sink"], "duckdb")
         self.assertTrue((union.get("asserts") or {}).get("query_count"))
-        only_file = catalog["scenarios"]["q-iceberg-only-iceberg"]
-        self.assertTrue(only_file.get("iceberg_only"))
-        only_duck = catalog["scenarios"]["q-iceberg-only-duckdb"]
-        self.assertTrue(only_duck.get("iceberg_only"))
+        scenarios = catalog["scenarios"]
+        for name in ("q-iceberg-only-iceberg", "q-iceberg-only-duckdb", "q-cdc-iceberg-only-pg"):
+            self.assertEqual(scenarios[name]["asserts"].get("wal_pin"), "drained", name)
+            self.assertNotIn("iceberg_only", scenarios[name], name)
+        for name in ("q-stream-tail-iceberg", "q-union-overlap-duckdb", "q-cdc-overlap-pg"):
+            self.assertEqual(scenarios[name]["asserts"].get("wal_pin"), "live", name)
         deleted = catalog["scenarios"]["q-cdc-union-delete-pg"]
         self.assertEqual((deleted.get("asserts") or {}).get("query_count"), 1)
         self.assertEqual((deleted.get("asserts") or {}).get("query_absent_id"), 2)
@@ -176,15 +190,89 @@ class PerfDbRunnerContractTests(unittest.TestCase):
             measured,
             "File overlap must hold compact until after the measured query",
         )
-        self.assertIn("clustered", text)
         self.assertIn("arm_compaction_hold", text)
         self.assertIn("OVERLAP_WAIT_SECONDS", text)
-        self.assertIn("hold_armed", text)
+        self.assertNotIn("CLUSTER_TENANT", text)
         wal_tail = text.split('if scenario.get("wal_tail")')[1].split("else:")[0]
-        self.assertIn("time.time() + 90", wal_tail)
+        self.assertIn("seconds=90", wal_tail)
         self.assertNotIn("failpoint.unlink", ingest[:measured])
+        self.assertLess(
+            ingest.find("require_hold_engaged"),
+            measured,
+            "held cells must prove the hold engaged before the measured query",
+        )
+        cdc = text.split("def run_query_after_cdc")[1]
+        self.assertLess(cdc.find("require_hold_engaged"), cdc.find("measured_query"))
         self.assertNotIn("from tests.perf.run import", text)
         self.assertNotIn("copy_b-json-json", text)
+
+    def test_compaction_hold_targets_local_pipeline_root(self) -> None:
+        run = perf_db_run()
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            hold = run.arm_compaction_hold(data_dir, "perf", "perf_cell")
+            self.assertEqual(hold, data_dir / "perf_perf_cell" / "failpoint")
+            self.assertEqual(hold.read_text(encoding="utf-8").strip(), "hold_before_compaction_sink")
+            self.assertEqual(sorted(p.name for p in data_dir.rglob("failpoint")), ["failpoint"])
+            run.disarm_compaction_hold(hold)
+            self.assertFalse(hold.exists())
+
+    def test_query_name_rejects_a_second_version(self) -> None:
+        run = perf_db_run()
+        scenario = {"asserts": {"query_name": "alpha-prime"}}
+        run.assert_query_doc("cell", scenario, 0, {"header": ["name"], "rows": [["alpha-prime"]]})
+        with self.assertRaisesRegex(run.perf_run.PerfError, "expected 1 row"):
+            run.assert_query_doc(
+                "cell",
+                scenario,
+                0,
+                {"header": ["name"], "rows": [["alpha-prime"], ["alpha"]]},
+            )
+
+    def test_wal_pin_assert_reads_the_last_query_pin(self) -> None:
+        run = perf_db_run()
+        drained = {"asserts": {"wal_pin": "drained"}}
+        live = {"asserts": {"wal_pin": "live"}}
+        events = [
+            {"phase": "query_pin", "wal_slices": 3},
+            {"phase": "query_pin", "wal_slices": 0},
+        ]
+        run.assert_wal_pin("cell", drained, events)
+        with self.assertRaisesRegex(run.perf_run.PerfError, "wal_pin live"):
+            run.assert_wal_pin("cell", live, events)
+        with self.assertRaisesRegex(run.perf_run.PerfError, "no query_pin"):
+            run.assert_wal_pin("cell", live, [{"phase": "query_collect"}])
+        run.assert_wal_pin("cell", {"asserts": {}}, [])
+
+    def test_every_query_cell_uses_the_shared_dynamodb_store(self) -> None:
+        text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        ingest = text.split("def run_query_after_ingest")[1].split("def write_cdc")[0]
+        self.assertIn("dynamodb_store=True", ingest)
+        self.assertNotIn('if sink == "skipprlake"', ingest)
+
+    def test_hold_that_never_engaged_fails_the_cell(self) -> None:
+        run = perf_db_run()
+        with tempfile.TemporaryDirectory() as tmp:
+            hold = run.arm_compaction_hold(Path(tmp), "perf", "perf_cell")
+            exited = subprocess.Popen([sys.executable, "-c", "pass"])
+            exited.wait()
+            with self.assertRaisesRegex(run.perf_run.PerfError, "never engaged"):
+                run.require_hold_engaged("cell", exited, hold)
+            held = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            try:
+                run.require_hold_engaged("cell", held, hold)
+            finally:
+                held.kill()
+                held.wait()
+
+    def test_cdc_postgres_failure_includes_container_logs(self) -> None:
+        text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        helper = text.split("def _cdc_postgres_failed")[1].split("def start_cdc_postgres")[0]
+        self.assertIn("docker", helper)
+        self.assertIn("logs", helper)
+        start = text.split("def start_cdc_postgres")[1].split("def stop_cdc_postgres")[0]
+        self.assertIn("State.Running", start)
+        self.assertIn("_cdc_postgres_failed", start)
 
     def test_download_accepts_perf_db_workflow(self) -> None:
         download = (

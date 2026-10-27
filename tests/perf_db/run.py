@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 HARNESS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = HARNESS_DIR.parents[1]
@@ -40,7 +40,6 @@ COMMAND_TIMEOUT_SECONDS = perf_run.COMMAND_TIMEOUT_SECONDS
 CATALOG_PATH = HARNESS_DIR / "catalog.yaml"
 INGEST_WORKSPACE = "perf"
 CDC_WORKSPACE = "test"
-CLUSTER_TENANT = "default"
 OVERLAP_WAIT_SECONDS = 480
 
 
@@ -52,24 +51,71 @@ def log(message: str) -> None:
     print(f"[skippr-perf-db] {message}", flush=True)
 
 
-def compaction_hold_paths(data_dir: Path, workspace: str, pipeline: str) -> list[Path]:
-    return [
-        data_dir / "failpoint",
-        data_dir / "clustered" / CLUSTER_TENANT / workspace / pipeline / "failpoint",
-    ]
+def arm_compaction_hold(data_dir: Path, workspace: str, pipeline: str) -> Path:
+    # Local storage mode pipeline root is `{DATA_DIR}/{workspace}_{pipeline}` (Config::try_data_dir).
+    hold = data_dir / f"{workspace}_{pipeline}" / "failpoint"
+    hold.parent.mkdir(parents=True, exist_ok=True)
+    hold.write_text("hold_before_compaction_sink\n", encoding="utf-8")
+    return hold
 
 
-def arm_compaction_hold(data_dir: Path, workspace: str, pipeline: str) -> list[Path]:
-    paths = compaction_hold_paths(data_dir, workspace, pipeline)
-    for path in paths:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("hold_before_compaction_sink\n", encoding="utf-8")
-    return paths
+def disarm_compaction_hold(hold: Path | None) -> None:
+    if hold is not None:
+        hold.unlink(missing_ok=True)
 
 
-def disarm_compaction_hold(paths: list[Path]) -> None:
-    for path in paths:
-        path.unlink(missing_ok=True)
+def require_hold_engaged(scenario_id: str, ingest: subprocess.Popen, hold: Path) -> None:
+    """`sync --once` blocks at the hold until disarm; an exit means compaction ran unheld."""
+    code = ingest.poll()
+    if code is not None:
+        raise perf_run.PerfError(
+            f"{scenario_id}: compaction hold at {hold} never engaged; ingest exited rc={code}"
+        )
+
+
+def start_held_ingest(sync_cmd: list[str], env: dict[str, str]) -> subprocess.Popen:
+    return subprocess.Popen(
+        sync_cmd,
+        env=env,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+
+def first_cell(doc: dict[str, Any]) -> str:
+    rows = doc.get("rows") or [[""]]
+    return str((rows[0] or [""])[0])
+
+
+def peek_until(
+    skipprd: Path,
+    config: Path,
+    env: dict[str, str],
+    work: Path,
+    sql: str,
+    ingest: subprocess.Popen,
+    *,
+    seconds: int,
+    done: Callable[[dict[str, Any]], bool],
+) -> None:
+    """Poll `sql` while the held ingest runs; the caller asserts the hold afterwards."""
+    deadline = time.time() + seconds
+    while time.time() < deadline and ingest.poll() is None:
+        try:
+            peek = perf_run.run_skipprd(
+                skipprd,
+                ["--config", str(config), "query", "--plain", "--sql", sql],
+                env=env,
+                work=work,
+                profile="none",
+            )
+            if done(parse_plain_query(peek)):
+                return
+        except Exception:  # noqa: BLE001 — peeks race ingest startup; the measured query asserts
+            pass
+        time.sleep(1)
 
 
 def parse_plain_query(captured: str) -> dict[str, Any]:
@@ -109,7 +155,11 @@ def assert_query_doc(
             raise perf_run.PerfError(f"{scenario_id}: duplicate ids in overlap query")
     expect_name = asserts.get("query_name")
     if expect_name:
-        got = str(result_rows[0][0]) if result_rows else ""
+        if len(result_rows) != 1:
+            raise perf_run.PerfError(
+                f"{scenario_id}: query_name expected 1 row, got {len(result_rows)}: {result_rows}"
+            )
+        got = str(result_rows[0][0])
         if got != str(expect_name):
             raise perf_run.PerfError(f"{scenario_id}: name {got!r} != {expect_name!r}")
     if "query_count" in asserts and asserts["query_count"] not in {True, False}:
@@ -128,6 +178,23 @@ def assert_query_doc(
             raise perf_run.PerfError(
                 f"{scenario_id}: STREAM returned {len(result_rows)} rows, expected {expect}"
             )
+
+
+def assert_wal_pin(scenario_id: str, scenario: dict[str, Any], events: list[dict[str, Any]]) -> None:
+    """`drained`: the measured query pinned no WAL (`W \\ E` empty). `live`: it read held WAL."""
+    expect = (scenario.get("asserts") or {}).get("wal_pin")
+    if expect is None:
+        return
+    if expect not in {"drained", "live"}:
+        raise perf_run.PerfError(f"{scenario_id}: unknown wal_pin {expect!r}")
+    pins = [ev for ev in events if ev.get("phase") == "query_pin"]
+    if not pins:
+        raise perf_run.PerfError(f"{scenario_id}: no query_pin PERF event")
+    slices = int(pins[-1].get("wal_slices") or 0)
+    if expect == "drained" and slices != 0:
+        raise perf_run.PerfError(f"{scenario_id}: wal_pin drained but query pinned {slices} WAL slices")
+    if expect == "live" and slices == 0:
+        raise perf_run.PerfError(f"{scenario_id}: wal_pin live but query pinned no WAL slices")
 
 
 def stream_limit_rows(scenario: dict[str, Any]) -> int:
@@ -168,29 +235,17 @@ def run_query_after_ingest(
         sink=sink,
         warehouse=warehouse,
         flatten=False,
+        dynamodb_store=True,
     )
-    if sink == "skipprlake":
-        perf_run.start_ddb()
+    perf_run.start_ddb()
     tail_proc = None
     overlap_proc = None
-    hold_paths: list[Path] = []
+    hold: Path | None = None
     logs = ""
     try:
         perf_run.stage_plugins(config, PIPELINE, manifests)
         env = perf_run.base_env(config, data_dir, manifests)
-        if sink == "skipprlake":
-            env.update(
-                {
-                    "AWS_ENDPOINT_URL_DYNAMODB": f"http://127.0.0.1:{perf_run.DDB_PORT}",
-                    "AWS_ENDPOINT_URL": f"http://127.0.0.1:{perf_run.DDB_PORT}",
-                    "AWS_ACCESS_KEY_ID": "local",
-                    "AWS_SECRET_ACCESS_KEY": "local",
-                    "AWS_REGION": "us-east-1",
-                    "AWS_DEFAULT_REGION": "us-east-1",
-                    "AWS_EC2_METADATA_DISABLED": "true",
-                    "SKIPPRLAKE_TOKEN": "skippr-perf-db",
-                }
-            )
+        env.update(perf_run.ddb_local_env(perf_run.DDB_PORT, "skippr-perf-db"))
         skipprd = perf_run.skipprd_bin()
         write_ndjson(source / "events.json", fixture_kind, rows)
         logs += perf_run.run_skipprd(
@@ -210,44 +265,23 @@ def run_query_after_ingest(
             PIPELINE,
             "--once",
         ]
+        sql = str(scenario["sql"])
         measured_sync = ""
         if scenario.get("wal_tail"):
-            hold_paths = arm_compaction_hold(data_dir, INGEST_WORKSPACE, PIPELINE)
-            tail_proc = subprocess.Popen(
-                sync_cmd,
-                env=env,
-                cwd=REPO_ROOT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
+            hold = arm_compaction_hold(data_dir, INGEST_WORKSPACE, PIPELINE)
+            tail_proc = start_held_ingest(sync_cmd, env)
             expect = stream_limit_rows(scenario)
-            deadline = time.time() + 90
-            while time.time() < deadline:
-                try:
-                    peek = perf_run.run_skipprd(
-                        skipprd,
-                        [
-                            "--config",
-                            str(config),
-                            "query",
-                            "--plain",
-                            "--sql",
-                            str(scenario["sql"]),
-                        ],
-                        env=env,
-                        work=work,
-                        profile="none",
-                    )
-                    doc = parse_plain_query(peek)
-                    if len(doc.get("rows") or []) == expect:
-                        break
-                except Exception:
-                    pass
-                hold_armed = any(path.is_file() for path in hold_paths)
-                if tail_proc.poll() is not None and not hold_armed:
-                    break
-                time.sleep(1)
+            peek_until(
+                skipprd,
+                config,
+                env,
+                work,
+                sql,
+                tail_proc,
+                seconds=90,
+                done=lambda doc: len(doc.get("rows") or []) == expect,
+            )
+            require_hold_engaged(scenario_id, tail_proc, hold)
         else:
             measured_sync = perf_run.run_skipprd(
                 skipprd,
@@ -258,7 +292,7 @@ def run_query_after_ingest(
             )
             logs += measured_sync
         if scenario.get("overlap"):
-            hold_paths = arm_compaction_hold(data_dir, INGEST_WORKSPACE, PIPELINE)
+            hold = arm_compaction_hold(data_dir, INGEST_WORKSPACE, PIPELINE)
             records = [
                 {"id": index, "name": f"user_{index}", "amount": index * 10}
                 for index in range(rows + 1, (2 * rows) + 1)
@@ -268,57 +302,24 @@ def run_query_after_ingest(
                 encoding="utf-8",
             )
             rows = 2 * rows
-            overlap_cmd = [
-                str(skipprd),
-                *log_args(env),
-                "--config",
-                str(config),
-                "sync",
-                "--pipeline",
-                PIPELINE,
-                "--once",
-            ]
-            overlap_proc = subprocess.Popen(
-                overlap_cmd,
-                env=env,
-                cwd=REPO_ROOT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
+            overlap_proc = start_held_ingest(sync_cmd, env)
+            peek_until(
+                skipprd,
+                config,
+                env,
+                work,
+                sql,
+                overlap_proc,
+                seconds=OVERLAP_WAIT_SECONDS,
+                done=lambda doc: first_cell(doc) == str(rows),
             )
-            deadline = time.time() + OVERLAP_WAIT_SECONDS
-            while time.time() < deadline:
-                try:
-                    peek = perf_run.run_skipprd(
-                        skipprd,
-                        [
-                            "--config",
-                            str(config),
-                            "query",
-                            "--plain",
-                            "--sql",
-                            str(scenario["sql"]),
-                        ],
-                        env=env,
-                        work=work,
-                        profile="none",
-                    )
-                    doc = parse_plain_query(peek)
-                    got = int(float((doc.get("rows") or [[0]])[0][0]))
-                    if got == rows:
-                        break
-                except Exception:
-                    pass
-                if overlap_proc.poll() is not None:
-                    break
-                time.sleep(1)
+            require_hold_engaged(scenario_id, overlap_proc, hold)
         if (scenario.get("asserts") or {}).get("iceberg_parquet") and not scenario.get("wal_tail"):
             parquet_files = list(warehouse.rglob("*.parquet"))
             if not parquet_files:
                 raise perf_run.PerfError(
                     f"{scenario_id}: no Iceberg parquet under {warehouse}"
                 )
-        sql = str(scenario["sql"])
         log(f"skipprd query --sql {sql!r} --plain --warmup")
         query_cmd = perf_run.time_prefix() + perf_run.wrap_profile(
             [
@@ -337,8 +338,8 @@ def run_query_after_ingest(
         )
         measured_query = perf_run.run_logged(query_cmd, env=env)
         if scenario.get("wal_tail"):
-            disarm_compaction_hold(hold_paths)
-            hold_paths = []
+            disarm_compaction_hold(hold)
+            hold = None
             if tail_proc is not None:
                 try:
                     out, _ = tail_proc.communicate(timeout=120)
@@ -362,6 +363,7 @@ def run_query_after_ingest(
             raise perf_run.PerfError(f"missing PERF phases {missing}; events={events}")
         doc = parse_plain_query(measured_query)
         assert_query_doc(scenario_id, scenario, rows, doc)
+        assert_wal_pin(scenario_id, scenario, parse_perf_events(measured_query))
         payload = perf_run.report_payload(scenario_id, rows, 0, events, logs, work)
         payload["kind"] = "query_after_ingest"
         payload["sql"] = sql
@@ -378,20 +380,14 @@ def run_query_after_ingest(
         )
         return payload
     finally:
-        disarm_compaction_hold(hold_paths)
-        if overlap_proc is not None:
-            try:
-                out, _ = overlap_proc.communicate(timeout=120)
-                logs += out or ""
-            except Exception:
-                overlap_proc.kill()
-        if tail_proc is not None:
-            try:
-                tail_proc.communicate(timeout=120)
-            except Exception:
-                tail_proc.kill()
-        if sink == "skipprlake":
-            perf_run.stop_ddb()
+        disarm_compaction_hold(hold)
+        for proc in (overlap_proc, tail_proc):
+            if proc is not None:
+                try:
+                    proc.communicate(timeout=120)
+                except Exception:
+                    proc.kill()
+        perf_run.stop_ddb()
 
 
 PG_CDC_PORT = 5435
@@ -477,6 +473,16 @@ schema_sinks:
     )
 
 
+def _cdc_postgres_failed(reason: str) -> perf_run.PerfError:
+    logs = subprocess.run(
+        ["docker", "logs", "--tail", "80", PG_CDC_CONTAINER],
+        capture_output=True,
+        text=True,
+    )
+    detail = f"{logs.stdout}{logs.stderr}".strip()
+    return perf_run.PerfError(f"postgres CDC container {reason}\n{detail}")
+
+
 def start_cdc_postgres() -> None:
     subprocess.run(["docker", "rm", "-f", PG_CDC_CONTAINER], capture_output=True, check=False)
     subprocess.run(
@@ -500,6 +506,19 @@ def start_cdc_postgres() -> None:
         check=True,
     )
     for _ in range(60):
+        state = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                "-f",
+                "{{.State.Running}} {{.State.ExitCode}}",
+                PG_CDC_CONTAINER,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if state.returncode == 0 and state.stdout.strip().startswith("false"):
+            raise _cdc_postgres_failed("exited before accepting SQL")
         ready = subprocess.run(
             [
                 "docker",
@@ -519,7 +538,7 @@ def start_cdc_postgres() -> None:
             break
         time.sleep(1)
     else:
-        raise perf_run.PerfError("postgres CDC container did not accept SQL")
+        raise _cdc_postgres_failed("did not accept SQL")
     subprocess.run(
         [
             "docker",
@@ -560,8 +579,8 @@ def pg_sql(sql: str) -> None:
     )
 
 
-def run_cdc_once(skipprd: Path, config: Path, env: dict[str, str]) -> str:
-    cmd = [
+def cdc_sync_cmd(skipprd: Path, config: Path, env: dict[str, str]) -> list[str]:
+    return [
         str(skipprd),
         *log_args(env),
         "--config",
@@ -572,6 +591,10 @@ def run_cdc_once(skipprd: Path, config: Path, env: dict[str, str]) -> str:
         PG_CDC_PIPELINE,
         "--once",
     ]
+
+
+def run_cdc_once(skipprd: Path, config: Path, env: dict[str, str]) -> str:
+    cmd = cdc_sync_cmd(skipprd, config, env)
     gnu = shutil.which("gtimeout") or shutil.which("timeout")
     if gnu is not None:
         cmd = [gnu, "--signal=KILL", "120", *cmd]
@@ -603,7 +626,7 @@ def run_query_after_cdc(
     from e2e_support import dynamodb_local as ddb_local
 
     overlap_proc = None
-    hold_paths: list[Path] = []
+    hold: Path | None = None
     start_cdc_postgres()
     try:
         ddb_local.start(
@@ -613,69 +636,30 @@ def run_query_after_cdc(
         )
         perf_run.stage_plugins(config, PG_CDC_PIPELINE, manifests)
         env = perf_run.base_env(config, data_dir, manifests)
-        env.update(
-            {
-                "AWS_ENDPOINT_URL_DYNAMODB": f"http://127.0.0.1:{PG_CDC_DDB_PORT}",
-                "AWS_ENDPOINT_URL": f"http://127.0.0.1:{PG_CDC_DDB_PORT}",
-                "AWS_ACCESS_KEY_ID": "local",
-                "AWS_SECRET_ACCESS_KEY": "local",
-                "AWS_REGION": "us-east-1",
-                "AWS_DEFAULT_REGION": "us-east-1",
-                "AWS_EC2_METADATA_DISABLED": "true",
-                "SKIPPRLAKE_TOKEN": "skippr-perf-db-cdc",
-            }
-        )
+        env.update(perf_run.ddb_local_env(PG_CDC_DDB_PORT, "skippr-perf-db-cdc"))
         skipprd = perf_run.skipprd_bin()
+        sql = str(scenario["sql"])
         logs = run_cdc_once(skipprd, config, env)
         mutation = str(scenario.get("mutation") or "")
         if mutation:
             pg_sql(mutation)
         if scenario.get("overlap"):
-            hold_paths = arm_compaction_hold(data_dir, CDC_WORKSPACE, PG_CDC_PIPELINE)
-            overlap_cmd = [
-                str(skipprd),
-                *log_args(env),
-                "--config",
-                str(config),
-                "sync",
-                "--log",
-                "--pipeline",
-                PG_CDC_PIPELINE,
-                "--once",
-            ]
-            overlap_proc = subprocess.Popen(
-                overlap_cmd, env=env, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-            )
+            hold = arm_compaction_hold(data_dir, CDC_WORKSPACE, PG_CDC_PIPELINE)
+            overlap_proc = start_held_ingest(cdc_sync_cmd(skipprd, config, env), env)
             expect_name = str((scenario.get("asserts") or {}).get("query_name") or "")
-            deadline = time.time() + OVERLAP_WAIT_SECONDS
-            while time.time() < deadline:
-                try:
-                    peek = perf_run.run_skipprd(
-                        skipprd,
-                        [
-                            "--config",
-                            str(config),
-                            "query",
-                            "--plain",
-                            "--sql",
-                            str(scenario["sql"]),
-                        ],
-                        env=env,
-                        work=work,
-                        profile="none",
-                    )
-                    doc = parse_plain_query(peek)
-                    got = str(((doc.get("rows") or [[""]])[0] or [""])[0])
-                    if expect_name and got == expect_name:
-                        break
-                except Exception:
-                    pass
-                if overlap_proc.poll() is not None:
-                    break
-                time.sleep(1)
+            peek_until(
+                skipprd,
+                config,
+                env,
+                work,
+                sql,
+                overlap_proc,
+                seconds=OVERLAP_WAIT_SECONDS,
+                done=lambda doc: first_cell(doc) == expect_name,
+            )
+            require_hold_engaged(scenario_id, overlap_proc, hold)
         else:
             logs += run_cdc_once(skipprd, config, env)
-        sql = str(scenario["sql"])
         query_cmd = perf_run.time_prefix() + perf_run.wrap_profile(
             [
                 str(skipprd),
@@ -693,22 +677,25 @@ def run_query_after_cdc(
         )
         measured_query = perf_run.run_logged(query_cmd, env=env)
         logs += measured_query
-        disarm_compaction_hold(hold_paths)
+        disarm_compaction_hold(hold)
+        hold = None
         if overlap_proc is not None:
             try:
                 out, _ = overlap_proc.communicate(timeout=120)
                 logs += out or ""
             except Exception:
                 overlap_proc.kill()
+            overlap_proc = None
         perf_run.convert_flamegraph(work)
         perf_run.require_profile_outputs(work, profile)
-        events = parse_perf_events(logs + measured_query)
+        events = parse_perf_events(logs)
         required = required_perf_for(load_perf_db_catalog(), scenario)
         missing = [phase for phase in required if not any(ev.get("phase") == phase for ev in events)]
         if missing:
             raise perf_run.PerfError(f"missing PERF phases {missing}; events={events}")
         doc = parse_plain_query(measured_query)
         assert_query_doc(scenario_id, scenario, 0, doc)
+        assert_wal_pin(scenario_id, scenario, parse_perf_events(measured_query))
         absent = (scenario.get("asserts") or {}).get("query_absent_id")
         if absent is not None:
             ids_doc = parse_plain_query(
@@ -740,7 +727,7 @@ def run_query_after_cdc(
         )
         return payload
     finally:
-        disarm_compaction_hold(hold_paths)
+        disarm_compaction_hold(hold)
         if overlap_proc is not None:
             try:
                 overlap_proc.communicate(timeout=120)

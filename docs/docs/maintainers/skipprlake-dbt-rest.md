@@ -449,7 +449,7 @@ match &self.engine {
 }
 ```
 
-Local serve Flight registers Iceberg `namespace.table` only (`register_user_namespaces`). It does not call `new_context_all_namespaces` (that is `skipprd query` Iceberg ∪ WAL). Clustered HLA Flight still classifies `LiveWal` / `Iceberg`.
+Local serve Flight registers Iceberg `namespace.table` only (`register_user_namespaces`). It does not call `new_context_all_namespaces` (that is `skipprd query` Iceberg ∪ WAL). Clustered HLA Flight user SQL is `CommandStatementQuery`; live WAL is `LiveWalTicket` DoGet, not a classified SQL TVF.
 
 Tests first:
 

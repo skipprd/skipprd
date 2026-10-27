@@ -68,7 +68,7 @@ impl OffsetHintKey {
 pub enum CatalogPrefix {
     Segment,
     Index,
-    Slice,
+    LegacySlice,
     Compaction,
     Checkpoint,
     OffsetHint,
@@ -78,7 +78,7 @@ impl CatalogPrefix {
     pub const ALL: [Self; 6] = [
         Self::Segment,
         Self::Index,
-        Self::Slice,
+        Self::LegacySlice,
         Self::Compaction,
         Self::Checkpoint,
         Self::OffsetHint,
@@ -88,7 +88,7 @@ impl CatalogPrefix {
         match self {
             Self::Segment => "wal#seg#",
             Self::Index => "wal#idx#",
-            Self::Slice => "wal#slice#",
+            Self::LegacySlice => "wal#slice#",
             Self::Compaction => "wal#cmp#",
             Self::Checkpoint => "wal#cp#",
             Self::OffsetHint => "wal#hint#",
@@ -100,7 +100,7 @@ impl CatalogPrefix {
 pub enum CatalogKey {
     Segment(SegmentId),
     Index(SegmentId),
-    Slice { segment_id: SegmentId, ordinal: u32 },
+    LegacySlice { segment_id: SegmentId, ordinal: u32 },
     Compaction(CompactionId),
     Checkpoint(CheckpointKey),
     OffsetHint(OffsetHintKey),
@@ -113,7 +113,7 @@ impl CatalogKey {
         match self {
             Self::Segment(id) => format!("wal#seg#{}", id.as_str()),
             Self::Index(id) => format!("wal#idx#{}", id.as_str()),
-            Self::Slice {
+            Self::LegacySlice {
                 segment_id,
                 ordinal,
             } => format!("wal#slice#{}#{ordinal}", segment_id.as_str()),
@@ -147,7 +147,7 @@ impl CatalogKey {
             let ordinal: u32 = ordinal.parse().map_err(|_| {
                 PathError::InvalidComponent(format!("slice ordinal is not u32: {sk}"))
             })?;
-            return Ok(Self::Slice {
+            return Ok(Self::LegacySlice {
                 segment_id: SegmentId::new(segment)?,
                 ordinal,
             });
@@ -182,7 +182,7 @@ mod tests {
         let keys = [
             CatalogKey::Segment(SegmentId::new("seg-1").unwrap()),
             CatalogKey::Index(SegmentId::new("seg-1").unwrap()),
-            CatalogKey::Slice {
+            CatalogKey::LegacySlice {
                 segment_id: SegmentId::new("seg-1").unwrap(),
                 ordinal: 3,
             },
@@ -213,7 +213,7 @@ mod tests {
     fn prefixes_are_stable() {
         assert_eq!(CatalogPrefix::Segment.as_str(), "wal#seg#");
         assert_eq!(CatalogPrefix::Index.as_str(), "wal#idx#");
-        assert_eq!(CatalogPrefix::Slice.as_str(), "wal#slice#");
+        assert_eq!(CatalogPrefix::LegacySlice.as_str(), "wal#slice#");
         assert_eq!(CatalogPrefix::Compaction.as_str(), "wal#cmp#");
         assert_eq!(CatalogPrefix::Checkpoint.as_str(), "wal#cp#");
         assert_eq!(CatalogPrefix::OffsetHint.as_str(), "wal#hint#");
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn slice_key_is_segment_plus_ordinal() {
-        let key = CatalogKey::Slice {
+        let key = CatalogKey::LegacySlice {
             segment_id: SegmentId::new("live-seg").unwrap(),
             ordinal: 0,
         };

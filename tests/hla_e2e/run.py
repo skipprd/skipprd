@@ -33,7 +33,7 @@ Scenarios (in order):
   corrupt_replica_purge — diverged replica purges only that pipeline
   before_compaction_sink_replay — abort before Iceberg sink; replay once
   query_each_replica_socket — handshake every ready replica; WAL lists may differ
-  query_retry_lagging — query still succeeds after a stopped replica (Iceberg + remaining WAL, or Iceberg-only)
+  query_retry_lagging — query still succeeds after a stopped replica; all nodes down fails closed
   failed_drain_holds_lease — SIGTERM+SIGKILL leaves lease unreleased
   two_pipelines — one ActivePrimary per process; the other pipeline continues
   mixed_protocol_handshake — current protocol HelloOk; incompatible range rejected
@@ -1884,11 +1884,12 @@ def scenario_query_retry_lagging(harness: Harness, ids: list[str]) -> list[str]:
                 continue
             os.kill(node.process.pid, signal.SIGSTOP)
         try:
-            iceberg_only = run_query(harness, ROW_SQL)
-            iceberg_ids = parse_ids(iceberg_only)
-            log(f"Iceberg-only query after all SIGSTOP ids={iceberg_ids}")
+            run_query(harness, ROW_SQL)
+            raise HarnessError("query after all SIGSTOP must fail closed")
         except HarnessError as err:
-            raise HarnessError(f"Iceberg-only query failed with no query socket: {err}") from err
+            log(f"query failed closed after all SIGSTOP: {err}")
+            if "must fail closed" in str(err):
+                raise
         finally:
             for node in stopped:
                 if node.process is not None:

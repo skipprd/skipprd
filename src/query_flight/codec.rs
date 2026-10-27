@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::ExecutionPlan;
@@ -91,7 +90,7 @@ impl PhysicalExtensionCodec for SkipprHostCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use datafusion_proto::physical_plan::DefaultPhysicalProtoConverter;
     use skippr_query_plan::PHYSICAL_MAGIC;
 
@@ -101,9 +100,18 @@ mod tests {
 
     #[test]
     fn host_codec_round_trips_flight_sql() {
-        let node = Arc::new(FlightSqlExec::with_authorization(
+        let node = Arc::new(FlightSqlExec::live_wal(
             "127.0.0.1:9".into(),
-            b"SELECT 1".to_vec(),
+            skippr_query_plan::LiveWalTicket {
+                target: Some(skippr_query_plan::LiveWalPinRequest {
+                    tenant: "t".into(),
+                    workspace: "w".into(),
+                    pipeline: "p".into(),
+                    namespace: "ns".into(),
+                }),
+                cdc_sidecar: false,
+                slices: Vec::new(),
+            },
             schema(),
             skippr_query_plan::basic_authorization("t", "w"),
         )) as Arc<dyn ExecutionPlan>;
@@ -142,18 +150,9 @@ mod tests {
             .unwrap();
         assert_eq!(decoded.name(), "IcebergScanExec");
 
-        let key = skippr_lease::PipelineKey::new("t", "w", "p").unwrap();
-        let wal = Arc::new(
-            WalScanExec::new(
-                schema(),
-                key,
-                "ns".into(),
-                vec![("seg".into(), 0)],
-                None,
-                false,
-            )
-            .unwrap(),
-        ) as Arc<dyn ExecutionPlan>;
+        let wal =
+            Arc::new(WalScanExec::new(schema(), Vec::new(), None, false, "ns".into()).unwrap())
+                as Arc<dyn ExecutionPlan>;
         buf.clear();
         let err = codec.try_encode(wal, &mut buf, &conv).unwrap_err();
         assert!(err

@@ -116,6 +116,7 @@ mod tests {
                 &parts_meta,
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             )
             .await
             .unwrap();
@@ -149,13 +150,13 @@ mod tests {
             .await
             .unwrap();
         wal_startup(&handle, &Config::new(), true).await.unwrap();
-        assert!(handle
-            .slice_is_done("acked-seg", idx.slice_ordinal)
-            .unwrap());
         handle
             .redo_acked_durable_batches(&[txn.id.clone()])
             .await
             .unwrap();
+        assert!(handle
+            .slice_is_done("acked-seg", idx.slice_ordinal)
+            .unwrap());
         assert!(handle
             .catalog()
             .get(&CatalogKey::Compaction(CompactionId::new(txn.id).unwrap()))
@@ -234,6 +235,7 @@ mod tests {
                 &parts_meta,
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             ))
             .unwrap();
         let mut ids = Vec::new();
@@ -332,6 +334,7 @@ mod tests {
                 &parts_meta,
                 &HashMap::new(),
                 &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
             )
             .await
             .unwrap();

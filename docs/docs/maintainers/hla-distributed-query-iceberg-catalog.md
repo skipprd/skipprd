@@ -217,6 +217,8 @@ SeqRow        high-water mark, never derived from live rows
 FormatRow     Imported | Clean
 ```
 
+Persist is check-catalog-then-atomic-write. `encode_snapshot(created_at)` is deterministic; a matching `payload_sha256` never rewrites disk or S3 bytes. Disk writes go through `write_payload_atomically` (tmp, fsync, rename). Catalog `ConditionFailed` and `Conflict` both map to `DurableError::CatalogConflict` (`catalog_durable_err`, used by `flushing_commit` and `delete_prefix`). Reclaim retries with a fresh read (`RECLAIM_OCC_ATTEMPTS`) and updates in-memory done bits only after the durable commit. Store `PutCond::Version` requires the incoming row version to be expected plus one (`validate_put`). Import and format OCC commits go through `flushing_commit`. Migration rewrite uses snapshot `created_at` and `write_payload_atomically`.
+
 There is no schema or Glue catalog-outbox mutation.
 
 ### Portable WAL identity
@@ -401,15 +403,15 @@ Iceberg snapshot summaries preserve Skippr compaction ID, idempotency key, schem
 
 ### Table history and the live-WAL fence
 
-Every grouped commit also records `skippr.pipeline` and `skippr.wal-segment-ids`. Those snapshot properties are two things at once: the replay gate for a crash between the lake commit and slice-done bits (`already_committed`), and the exclude set the live-WAL selector subtracts. Expiry therefore MUST NOT remove a snapshot whose segments the host still holds.
+Every grouped commit also records `skippr.pipeline` and `skippr.wal-slices`. Those snapshot properties are two things at once: the replay gate for a crash between the lake commit and slice-done bits (`already_committed`), and the exclude set the live-WAL selector subtracts (`seg@start` refs). Expiry therefore MUST NOT remove a snapshot whose slices name a segment the host still holds. The old property `skippr.wal-segment-ids` is not read.
 
-The host sends the live set on every grouped sink request as `live_wal_segments`: catalog `SegmentRow` ids (`catalog_segment_ids`). Query `select_live_ordinals` is a different derivation: catalog `SliceIndexEntry` minus Iceberg named ids. An unreadable catalog sends `None`, and `None` expires nothing.
+The host sends the live set on every grouped sink request as `live_wal_segments`: catalog `SegmentRow` ids (`catalog_segment_ids`). Query `WalCatalogReader::live_slices` lists catalog `SliceDirEntry` rows. Iceberg∪WAL local subtracts named slices at `ReadBoundary::new` after `load_iceberg_leaf`. WAL-only scan uses `ReadBoundary::pin_wal`. An unreadable catalog fails the pin.
 
 Under the table lane, after the commit and its idempotency manifest, the writer expires a snapshot only when all of these hold:
 
 - it is not `main`, a branch or tag head, or among the newest 100 snapshots;
 - it is at least 24 hours old (injected clock);
-- its `skippr.pipeline` is this pipeline, and none of its `skippr.wal-segment-ids` is live;
+- its `skippr.pipeline` is this pipeline, and none of its `skippr.wal-slices` names a live segment;
 - if it removed files (`deleted-data-files` or `removed-delete-files`), no older snapshot is retained.
 
 Expiry commits at least 16 and at most 256 snapshots, asserts the current `main`, and never fails the write: a conflict or error keeps history. Retention is a code ceiling, not configuration. It is not a time-travel promise.
@@ -433,7 +435,7 @@ Invariants:
 - Rewritten rows are read through the Iceberg reader with every live equality delete applied. The outputs take the new snapshot's sequence number, so deletes older than it no longer apply to them. That is only correct because the commit asserts the starting snapshot (`RewriteFilesAction`, `RefSnapshotIdMatch`). A conflict aborts; the next pass replans.
 - Output names are a hash of the starting snapshot id and the input and removed file set. Inputs are read one file at a time, so a retried upload rewrites identical bytes under the same name.
 - A receipt (`metadata/skippr-maintenance/{hash}.pending.json`) records the uploaded outputs. A retry from the same snapshot commits the receipt without rewriting. The receipt is deleted after the commit.
-- Maintenance snapshots carry `skippr.pipeline` and `skippr.maintenance`, and no WAL segment ids. They never satisfy the grouped replay gate and never change the live-WAL exclude set.
+- Maintenance snapshots carry `skippr.pipeline` and `skippr.maintenance`, and no WAL slices. They never satisfy the grouped replay gate and never change the live-WAL exclude set.
 
 ## Query architecture
 
@@ -445,13 +447,13 @@ Iceberg catalog schema is authoritative. WAL batches project/cast into it; missi
 
 ### Live WAL (pinned read boundary)
 
-Iceberg snapshot `S` is the lake pointer captured at plan. WAL set `W` is catalog `SliceIndexEntry` rows minus exclude set `E` (`skippr.wal-segment-ids` across snapshot ancestry). `select_live_ordinals` is the only selector; it runs at plan and the ordinal list is reused at execute. A later query MAY see more WAL. Writes never observe query state.
+Iceberg snapshot `S` is the lake pointer captured at plan. WAL set `W` is catalog `SliceDirEntry` rows minus exclude set `E` (`skippr.wal-slices` across snapshot ancestry). `WalCatalogReader::live_slices` is the only catalog selector (owner `skippr.live_wal_pin` uses it). Iceberg∪WAL local scan: `live_slices`, then `load_iceberg_leaf`, then freeze `ReadBoundary::new` (`PinnedWal::Local`). Clustered scan: pick `flight_addr`, pin `W` with `skippr.live_wal_pin`, then `load_iceberg_leaf`, then freeze `ReadBoundary::for_clustered_ticket` (`PinnedWal::Clustered`). WAL-only scan uses `ReadBoundary::pin_wal`. A later query MAY see more WAL. Writes never observe query state.
 
-If the matching `SegmentRow` is missing or the payload is unreadable or gone, skip that ordinal (do not scan it, do not fail the query). Slice-complete ordinals stay visible until Iceberg lists the segment.
+If the matching `SegmentRow` is missing, skip that Index row (Iceberg `E` covers a reclaim between the two prefix scans). Slice-complete ordinals stay visible until Iceberg lists that slice.
 
-Slice-done bits live on the `SegmentRow` as compaction progress; they are not the query cut. Iceberg-named segment ids close the window after the lake pointer commit.
+Slice-done bits live on the `SegmentRow` as compaction progress; they are not the query cut. Iceberg-named slices `(segment_id, start)` close the window after the lake pointer commit.
 
-The pin is a query-local ordinal list, not a reclaim lease. Reclaim deletes the catalog row, then the payload; a scan that misses the file skips it. Readers MUST NOT nack reclaim.
+The pin is a query-local ordinal list, not a reclaim lease. Reclaim deletes the catalog row, then the payload; a scan that misses the file is `WalPinLost`. Readers MUST NOT nack reclaim.
 
 ### Query transport
 
@@ -459,28 +461,26 @@ The pin is a query-local ordinal list, not a reclaim lease. Reclaim deletes the 
 
 Locked here so other HLA docs do not drift:
 
-- Skippr SQL extension remains `live_wal_scan(tenant, workspace, pipeline, namespace, exclude_segment_ids)` as an internal sole-FROM statement, not a public custom ticket.
+- Clustered live WAL is `FlightSqlExec` + `LiveWalTicket` (action `skippr.live_wal_pin` pins `W`). There is no `live_wal_scan` SQL TVF.
 - DoGet/`WalScanExec` uses the plan-time pinned ordinal list. Handles MUST NOT nack reclaim.
 - Flight SQL is read-only. Foreign tenant/workspace and unknown pipeline fail closed.
 - `CURRENT_PROTOCOL` is **3** (cluster hello). There is no query-planner protocol on DynamoDB.
 - No new address/port/scheduler knobs. Dual framed+Flight protocols are forbidden.
 - Each clustered `skipprd` node runs Flight SQL plus one QueryRuntime Worker. `WorkerResolver` lists self plus gossip `worker` addrs; there is no elected coordinator. `clustered query` talks Flight SQL to any ready `flight_addr`. WAL is a one-partition `FlightSqlExec` to the serving node's best-effort max advertised `catalog_seq_seen` with `payload_ready` (local on tie if this process holds paths → this process's advertised `flight_addr`). Iceberg parquet may run on any QueryRuntime Worker.
-- Merge (append concat or CDC reconcile) stays above Iceberg and WAL leaves, before aggregate/join. Iceberg-only is a valid behind read.
+- Merge (append concat or CDC reconcile) stays above Iceberg and WAL leaves, before aggregate/join. Unreachable WAL fails the query.
 
 ### Merge (Iceberg + WAL)
 
-**Shipped:** `IcebergWalTableProvider::scan` pins `(S, E, W)` and builds either `UnionExec` (append) or `CdcReconcileExec` (CDC business keys) of the Iceberg plan and the live WAL plan, with `GlobalLimitExec` on the result. Catalog listing returns tables in that pipeline's Iceberg namespace (`catalog_table_to_namespace` is the table name); an empty second pipeline MUST NOT fail the first.
+**Shipped:** `IcebergWalTableProvider::scan` pins `(S, E, W)` and builds either `UnionExec` (append) or `CdcReconcileExec` (Arrow-row business keys, `_skippr_cdc_seq` tie-break) of the Iceberg plan and the live WAL plan, with `GlobalLimitExec` on the result. CDC keys come from `query_namespace_business_keys` (`PipelineType::Cdc` only) → `CdcPipelineConfig::resolve_contracts` → `resolve_business_keys` on YAML `cdc` plus `cdc_source_key_columns` from `bound.get_metadata()` (`view.key`). Missing persisted metadata is empty `source_contracts`; YAML keys still apply. Query MUST NOT read `PIPELINE_CDC_CONTRACTS`. Catalog listing returns tables in that pipeline's Iceberg namespace (`catalog_table_to_namespace` is the table name); an empty second pipeline MUST NOT fail the first.
 
-For each table:
+For each table, `IcebergWalTableProvider::scan` (not catalog registration):
 
-1. load the Iceberg table and scan the current snapshot (fail closed if none);
-2. pass `skippr.wal-segment-ids` from snapshot ancestry as WAL exclude ids;
-3. scan live WAL ordinals via one `FlightSqlExec` DoGet to the picker winner's advertised `flight_addr`;
-4. if no WAL replica is reachable, return Iceberg only.
+- **Local:** pin `W` (`WalCatalogReader::live_slices`), load Iceberg current snapshot `S` (`LakeSnapshot::Empty` if none), walk `skippr.wal-slices` ancestry as `E`, freeze `ReadBoundary` as `PinnedWal::Local`, scan WAL with `WalScanExec`.
+- **Clustered:** pick the WAL owner `flight_addr` (`pick_wal_endpoint`), pin `W` (`skippr.live_wal_pin`), load `S`, walk `E`, freeze `ReadBoundary` as `PinnedWal::Clustered`, scan WAL with one `FlightSqlExec` DoGet of a `LiveWalTicket`. No replica → fail the query. Catalog registration MUST NOT freeze `flight_addr`.
 
-Gossip ads are not a query cut. Replica WAL row counts are not voted. Iceberg-only is a valid behind read.
+Gossip ads are not a query cut. Replica WAL row counts are not voted. Unreachable WAL fails the query.
 
-**Shipped (WU-7.5):** datafusion-distributed **inside** each clustered node starts one QueryRuntime Worker and executes UNION before aggregate/join. WAL child is always `FlightSqlExec` to the picker winner. Prost codec carries endpoint, statement SQL, and Arrow schema. Details: [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md).
+**Shipped (WU-7.5):** datafusion-distributed **inside** each clustered node starts one QueryRuntime Worker and executes UNION before aggregate/join. WAL child is always `FlightSqlExec` carrying a `LiveWalTicket` to the picker winner. Prost codec carries endpoint, `LiveWalTicket`, and Arrow schema. Details: [`hla-flight-sql-query-runtime.md`](./hla-flight-sql-query-runtime.md).
 
 ## Lifecycle
 
@@ -519,7 +519,7 @@ Replica RPC and the query socket v1 assume a trusted private routed network and 
 - All head copies lost: no promotion.
 - Disk full/corruption: node becomes ineligible; primary replaces it before new writes. Unmeasurable free space is treated as disk pressure.
 - Sink success with lost Acked `CompactionRow`: idempotent preflight resolves.
-- Query peer failure: skip that replica; use another Flight endpoint or Iceberg-only.
+- Query peer failure: skip that replica; use another Flight endpoint; none reachable fails the query.
 - Iceberg CAS conflict: reload/retry; orphan metadata is safe.
 - Dynamo conditional writes detect `ConditionalCheckFailedException` via SDK error `code()`, not substring match.
 
@@ -534,7 +534,7 @@ Shipped:
 - WAL, compaction transactions, completion state, and reclaim survive failover.
 - Promotion requires catalog-seq + `payload_ready` state, schemas, reconciled offsets, and a synchronous replica.
 - No absolute disk path appears in clustered durable identity.
-- Iceberg snapshot reads are consistent. Query pins `(S, E, W)` at plan; live WAL is eventually consistent at that pin. Merge must not double-count Iceberg-named segments (`SliceIndexEntry` minus ancestry-wide `skippr.wal-segment-ids`; append `UnionExec` or CDC `CdcReconcileExec` over Iceberg Rust + local WAL or `FlightSqlExec`).
+- Iceberg snapshot reads are consistent. Query pins `(S, E, W)` at plan; live WAL is eventually consistent at that pin. Merge must not double-count Iceberg-named slices (`SliceIndexEntry` minus ancestry-wide `skippr.wal-slices`; append `UnionExec` or CDC `CdcReconcileExec` over Iceberg Rust + local WAL or `FlightSqlExec`).
 - Iceberg pipelines never fall back to Parquet listing.
 - Disk and clustered share one catalog-backed writer (`PipelineWalHandle`).
 - Deterministic failure, DDB contract (`tests/hla_e2e/ddb_cas.py`), subprocess crash, protocol-version, and query-consistency tests exist in the harness (process ticks wait on `run.py`).

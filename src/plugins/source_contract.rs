@@ -87,6 +87,7 @@ pub enum SourceContractError {
     ReplacePartitionRequiresPartitionKey,
     DuplicateNamespace(String),
     SinkPolicyUnsupported(String),
+    CdcContracts(String),
 }
 
 /// Declared sink support for native write policies (from runtime manifest metadata).
@@ -162,6 +163,7 @@ impl fmt::Display for SourceContractError {
             }
             Self::DuplicateNamespace(ns) => write!(f, "duplicate namespace contract: {ns}"),
             Self::SinkPolicyUnsupported(msg) => write!(f, "{msg}"),
+            Self::CdcContracts(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -215,6 +217,16 @@ impl SourceNamespaceContract {
             requires_skippr_system_columns,
         }
     }
+}
+
+/// The only map from persisted source contracts into `resolve_business_keys`.
+pub fn cdc_source_key_columns(
+    source_contracts: &HashMap<String, SourceNamespaceContract>,
+) -> HashMap<String, Vec<String>> {
+    source_contracts
+        .iter()
+        .map(|(namespace, contract)| (namespace.clone(), contract.business_key_column_names()))
+        .collect()
 }
 
 /// Validate a batch of contracts (unique namespaces, per-contract rules).
@@ -340,6 +352,15 @@ pub async fn apply_runtime_source_namespace_contracts(
     let mut pipeline = crate::METADATA.load().as_ref().clone();
     let changed = replace_source_contracts_authoritative(config, &mut pipeline, contracts)?;
     if changed {
+        if config.pipeline_type().ok() == Some(crate::pipeline_type::PipelineType::Cdc) {
+            let key = crate::pipeline_backend::pipeline_key(config)
+                .map_err(SourceContractError::CdcContracts)?;
+            let cdc = config.get_pipeline_config().cdc.clone().unwrap_or_default();
+            let resolved =
+                cdc.resolve_contracts(&cdc_source_key_columns(&pipeline.source_contracts));
+            crate::plugins::cdc::reinstall_resolved_contracts(key, resolved)
+                .map_err(|err| SourceContractError::CdcContracts(err.to_string()))?;
+        }
         persist_pipeline_metadata(config, &pipeline).await;
     }
     Ok(changed)
@@ -395,6 +416,26 @@ pub fn namespace_source_contract(namespace: &str) -> Option<SourceNamespaceContr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cdc_source_key_columns_uses_primary_key_names() {
+        let mut contracts = HashMap::new();
+        contracts.insert(
+            "orders".into(),
+            SourceNamespaceContract {
+                namespace: "orders".into(),
+                primary_key: vec![FieldPath::single("src_id")],
+                cursor: None,
+                partition_key: vec![],
+                write_policy: WritePolicy::Append,
+                refresh_window: None,
+                description: String::new(),
+                semantics: None,
+            },
+        );
+        let keys = cdc_source_key_columns(&contracts);
+        assert_eq!(keys.get("orders").unwrap(), &vec!["src_id".to_string()]);
+    }
 
     #[test]
     fn field_path_serializes_as_segment_array() {

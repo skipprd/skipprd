@@ -108,7 +108,8 @@ impl SliceBitmap {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SliceIndexEntry {
+/// Catalog format <= 2 only. Read by import migration; never written.
+pub struct LegacySliceRow {
     pub segment_id: SegmentId,
     pub ordinal: u32,
     pub namespace: String,
@@ -219,7 +220,8 @@ pub struct FormatRow {
 pub enum CatalogRow {
     Segment(SegmentRow),
     Index(SegmentIndexRow),
-    Slice(SliceIndexEntry),
+    /// Catalog format <= 2 only. Variant index 2 is on-disk format and MUST NOT move.
+    LegacySlice(LegacySliceRow),
     Compaction(CompactionRow),
     Control(ControlRow),
     Seq(SeqRow),
@@ -244,6 +246,18 @@ impl CatalogRow {
 
     pub fn sha256(bytes: &[u8]) -> [u8; 32] {
         Sha256::digest(bytes).into()
+    }
+
+    pub fn version(&self) -> Option<u64> {
+        match self {
+            Self::Segment(row) => Some(row.version),
+            Self::Index(row) => Some(row.version),
+            Self::LegacySlice(row) => Some(row.version),
+            Self::Compaction(row) => Some(row.version),
+            Self::Control(row) => Some(row.version),
+            Self::Format(row) => Some(row.row_version),
+            Self::Seq(_) => None,
+        }
     }
 }
 
@@ -327,9 +341,12 @@ mod tests {
         assert_eq!(CatalogRow::decode(&bytes).unwrap(), row);
     }
 
-    #[test]
-    fn slice_index_entry_is_the_query_authority() {
-        let row = CatalogRow::Slice(SliceIndexEntry {
+    fn variant_index(row: &CatalogRow) -> u32 {
+        u32::from_le_bytes(row.encode().unwrap()[..4].try_into().unwrap())
+    }
+
+    fn legacy_slice_row() -> CatalogRow {
+        CatalogRow::LegacySlice(LegacySliceRow {
             segment_id: SegmentId::new("s").unwrap(),
             ordinal: 0,
             namespace: "pipe".into(),
@@ -340,9 +357,66 @@ mod tests {
             part_meta_start: 8,
             part_meta_len: 0,
             version: 0,
+        })
+    }
+
+    #[test]
+    fn catalog_row_variant_indexes_are_pinned() {
+        let segment = CatalogRow::Segment(SegmentRow {
+            segment_id: SegmentId::new("s").unwrap(),
+            seq: CatalogSeq::new(1),
+            location: PayloadLocation::Disk {
+                path: "/tmp/s.seg".into(),
+            },
+            payload_len: 8,
+            payload_sha256: [0; 32],
+            slice_count: 1,
+            done: SliceBitmap::new(1),
+            offsets: vec![],
+            checkpoints: vec![],
+            epoch: LeaseEpoch::new(1),
+            version: 0,
         });
-        let bytes = row.encode().unwrap();
-        assert_eq!(CatalogRow::decode(&bytes).unwrap(), row);
+        let index = CatalogRow::Index(SegmentIndexRow {
+            segment_id: SegmentId::new("s").unwrap(),
+            version: 0,
+            entries: vec![],
+        });
+        let compaction = CatalogRow::Compaction(CompactionRow {
+            id: crate::key::CompactionId::new("c").unwrap(),
+            state: CompactionState::Pending,
+            body: vec![1],
+            version: 0,
+        });
+        let control = CatalogRow::Control(ControlRow {
+            seq: CatalogSeq::new(1),
+            epoch: LeaseEpoch::new(1),
+            body: ControlBody::OffsetHint {
+                position: 0,
+                closed: false,
+            },
+            version: 0,
+        });
+        let seq = CatalogRow::Seq(SeqRow {
+            max_seq: CatalogSeq::new(1),
+        });
+        let format = CatalogRow::Format(FormatRow {
+            version: FORMAT_VERSION,
+            phase: FormatPhase::Clean,
+            row_version: 0,
+        });
+        assert_eq!(variant_index(&segment), 0);
+        assert_eq!(variant_index(&index), 1);
+        assert_eq!(variant_index(&legacy_slice_row()), 2);
+        assert_eq!(variant_index(&compaction), 3);
+        assert_eq!(variant_index(&control), 4);
+        assert_eq!(variant_index(&seq), 5);
+        assert_eq!(&seq.encode().unwrap()[..4], &5u32.to_le_bytes());
+        assert_eq!(variant_index(&format), 6);
+        assert_eq!(
+            CatalogRow::decode(&legacy_slice_row().encode().unwrap()).unwrap(),
+            legacy_slice_row()
+        );
     }
 
     #[test]

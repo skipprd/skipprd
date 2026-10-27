@@ -561,6 +561,48 @@ pub struct CdcNamespaceConfig {
     pub null_key_policy: Option<String>,
 }
 
+impl CdcPipelineConfig {
+    /// YAML default plus named namespace key lists. The only YAML adapter
+    /// into [`crate::plugins::cdc::resolve_business_keys`].
+    pub fn yaml_business_keys(&self) -> (Vec<String>, BTreeMap<String, Vec<String>>) {
+        (
+            self.default.business_key_columns.clone(),
+            self.namespaces
+                .iter()
+                .map(|(namespace, cfg)| (namespace.clone(), cfg.business_key_columns.clone()))
+                .collect(),
+        )
+    }
+
+    pub fn resolve_contracts(
+        &self,
+        source_key_columns: &HashMap<String, Vec<String>>,
+    ) -> crate::plugins::cdc::CdcContracts {
+        let (default_keys, named) = self.yaml_business_keys();
+        crate::plugins::cdc::resolve_business_keys(&default_keys, &named, source_key_columns)
+    }
+}
+
+/// Query Iceberg∪WAL CDC keys. Ingest-only / copy pipelines never merge CDC
+/// even if a stray `cdc:` block is present. Missing source metadata is an
+/// empty map; YAML keys still apply.
+pub fn query_namespace_business_keys(
+    pipeline_type: crate::pipeline_type::PipelineType,
+    cdc: Option<&CdcPipelineConfig>,
+    source_key_columns: &HashMap<String, Vec<String>>,
+    namespace: &str,
+) -> Vec<String> {
+    if pipeline_type != crate::pipeline_type::PipelineType::Cdc {
+        return Vec::new();
+    }
+    cdc.map(|cfg| cfg.resolve_contracts(source_key_columns))
+        .unwrap_or_default()
+        .for_namespace(namespace)
+        .map(|contract| contract.business_key_columns)
+        .filter(|keys| !keys.is_empty())
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -1608,37 +1650,6 @@ impl Config {
         self.pipeline_type()
             .map(crate::pipeline_type::PipelineType::as_str)
             .unwrap_or("")
-    }
-
-    /// Business keys for `skipprd query`. Scans every CDC pipeline in the file
-    /// because the query CLI may not bind `--pipeline`.
-    pub fn query_cdc_business_keys(&self) -> BTreeMap<String, Vec<String>> {
-        let mut keys = BTreeMap::new();
-        for pipeline in self.pipelines.values() {
-            if crate::pipeline_type::resolve_pipeline_type(pipeline.r#type, pipeline.cdc.is_some())
-                .ok()
-                != Some(crate::pipeline_type::PipelineType::Cdc)
-            {
-                continue;
-            }
-            let Some(cdc) = pipeline.cdc.as_ref() else {
-                continue;
-            };
-            if !cdc.default.business_key_columns.is_empty() {
-                keys.insert("*".to_string(), cdc.default.business_key_columns.clone());
-            }
-            for (namespace, cfg) in &cdc.namespaces {
-                let columns = if cfg.business_key_columns.is_empty() {
-                    cdc.default.business_key_columns.clone()
-                } else {
-                    cfg.business_key_columns.clone()
-                };
-                if !columns.is_empty() {
-                    keys.insert(namespace.clone(), columns);
-                }
-            }
-        }
-        keys
     }
 
     fn copy_pipeline_violations(pipeline: &Pipeline) -> Option<String> {
@@ -3567,46 +3578,6 @@ pipelines:
     }
 
     #[test]
-    fn query_cdc_business_keys_empty_for_ingest() {
-        let mut config = Config::new();
-        config
-            .pipelines
-            .insert("query_cdc_keys_ingest".to_string(), Pipeline::default());
-        assert!(config.query_cdc_business_keys().is_empty());
-    }
-
-    #[test]
-    fn query_cdc_business_keys_uses_default_star_and_named_namespace() {
-        let mut config = Config::new();
-        let mut pipeline = Pipeline::default();
-        pipeline.r#type = Some(crate::pipeline_type::PipelineType::Cdc);
-        let mut namespaces = BTreeMap::new();
-        namespaces.insert(
-            "orders".to_string(),
-            CdcNamespaceConfig {
-                business_key_columns: vec!["order_id".to_string()],
-                null_key_policy: None,
-            },
-        );
-        pipeline.cdc = Some(CdcPipelineConfig {
-            default: CdcNamespaceConfig {
-                business_key_columns: vec!["id".to_string()],
-                null_key_policy: None,
-            },
-            namespaces,
-        });
-        config
-            .pipelines
-            .insert("query_cdc_keys_cdc".to_string(), pipeline);
-        let keys = config.query_cdc_business_keys();
-        assert_eq!(keys.get("*").cloned(), Some(vec!["id".to_string()]));
-        assert_eq!(
-            keys.get("orders").cloned(),
-            Some(vec!["order_id".to_string()])
-        );
-    }
-
-    #[test]
     fn unresolved_pipeline_type_does_not_format_check_as_ingest() {
         let mut config = Config::new();
         let mut pipeline = Pipeline::default();
@@ -5372,6 +5343,73 @@ schema_sinks:
         assert_eq!(
             lake.schema_sink.as_deref(),
             Some("schema_sinks.lake_schema")
+        );
+    }
+
+    #[test]
+    fn query_namespace_business_keys_requires_cdc_pipeline_type() {
+        use crate::pipeline_type::PipelineType;
+        let cdc = CdcPipelineConfig {
+            default: CdcNamespaceConfig {
+                business_key_columns: vec!["id".into()],
+                null_key_policy: None,
+            },
+            namespaces: BTreeMap::new(),
+        };
+        let empty = HashMap::new();
+        assert!(
+            query_namespace_business_keys(PipelineType::Ingest, Some(&cdc), &empty, "orders",)
+                .is_empty()
+        );
+        assert!(
+            query_namespace_business_keys(PipelineType::Copy, Some(&cdc), &empty, "orders",)
+                .is_empty()
+        );
+        assert_eq!(
+            query_namespace_business_keys(PipelineType::Cdc, Some(&cdc), &empty, "orders",),
+            vec!["id".to_string()]
+        );
+        assert!(
+            query_namespace_business_keys(PipelineType::Cdc, None, &empty, "orders",).is_empty()
+        );
+    }
+
+    #[test]
+    fn cdc_pipeline_config_resolve_contracts_uses_source_then_default() {
+        let cdc = CdcPipelineConfig {
+            default: CdcNamespaceConfig {
+                business_key_columns: vec!["def_id".into()],
+                null_key_policy: None,
+            },
+            namespaces: BTreeMap::from([(
+                "orders".into(),
+                CdcNamespaceConfig {
+                    business_key_columns: Vec::new(),
+                    null_key_policy: None,
+                },
+            )]),
+        };
+        let source = HashMap::from([("orders".into(), vec!["src_id".into()])]);
+        assert_eq!(
+            cdc.resolve_contracts(&source)
+                .for_namespace("orders")
+                .unwrap()
+                .business_key_columns,
+            vec!["src_id".to_string()]
+        );
+        assert_eq!(
+            cdc.resolve_contracts(&HashMap::new())
+                .for_namespace("orders")
+                .unwrap()
+                .business_key_columns,
+            vec!["def_id".to_string()]
+        );
+        assert_eq!(
+            cdc.resolve_contracts(&HashMap::new())
+                .for_namespace("discovered")
+                .unwrap()
+                .business_key_columns,
+            vec!["def_id".to_string()]
         );
     }
 

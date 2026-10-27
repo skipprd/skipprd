@@ -111,7 +111,13 @@ fn cdc_wal_roundtrip_with_postgres_metadata() {
     blobs.insert(key.clone(), blob);
 
     let (_meta, rows, _sha) = seg
-        .write_snapshot(&offsets, &batches, &parts_meta, &blobs)
+        .write_snapshot(
+            &offsets,
+            &batches,
+            &parts_meta,
+            &blobs,
+            std::time::SystemTime::UNIX_EPOCH,
+        )
         .unwrap();
     assert_eq!(rows, 3);
 }
