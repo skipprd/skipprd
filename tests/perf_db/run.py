@@ -191,8 +191,6 @@ def run_query_after_ingest(
                     "SKIPPRLAKE_TOKEN": "skippr-perf-db",
                 }
             )
-        if scenario.get("iceberg_only"):
-            env["SKIPPR_QUERY_LAKE_ONLY"] = "1"
         skipprd = perf_run.skipprd_bin()
         write_ndjson(source / "events.json", fixture_kind, rows)
         logs += perf_run.run_skipprd(
@@ -627,8 +625,6 @@ def run_query_after_cdc(
                 "SKIPPRLAKE_TOKEN": "skippr-perf-db-cdc",
             }
         )
-        if scenario.get("iceberg_only"):
-            env["SKIPPR_QUERY_LAKE_ONLY"] = "1"
         skipprd = perf_run.skipprd_bin()
         logs = run_cdc_once(skipprd, config, env)
         mutation = str(scenario.get("mutation") or "")
