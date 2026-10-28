@@ -14,7 +14,7 @@ Opt-in. Do not stop because the tag exists. Stop when wheels, host binaries, and
 
 Read `AGENTS.md` and skill **`skipprd-docs`** first. Call skipprd-docs; do not duplicate it.
 
-Plugin crate `version` in `plugins/**/Cargo.toml` is the CDN path identity. Version paths are immutable. Root skipprd crate stays `0.1.0` until CI stamps the tag. Engine tags are unprefixed semver (`18.3.6`), not `v18.3.6`. Repo: `skipprd/skipprd`. Clobberable pre-release testing is **`/skippr-beta-release`** (`x.y.z-beta`), not this skill.
+Plugin crate `version` in sibling **skipprd-plugins** `plugins/**/Cargo.toml` is the CDN path identity. Version paths are immutable. Root skipprd crate stays `0.1.0` until CI stamps the tag. Engine tags are unprefixed semver (`18.3.6`), not `v18.3.6`. Repos: `skipprd/skipprd` and `skipprd/skipprd-plugins`. Clobberable pre-release testing is **`/skippr-beta-release`** (`x.y.z-beta`), not this skill.
 
 ## Loop (do not skip)
 
@@ -37,7 +37,7 @@ skippr-release:
 Last tag: `git tag --list '[0-9]*' --sort=-v:refname` (skip `0.0.0`).
 
 ```bash
-python3 .github/scripts/bump_changed_plugin_crates.py --base <last-tag>
+python3 ../skipprd-plugins/.github/scripts/bump_changed_plugin_crates.py --base <last-tag>
 python3 .github/scripts/runtime_plugin_release_plan.py
 ./scripts/install-git-hooks.sh   # if the hook is missing
 git add … && git commit …        # hook runs scripts/precommit.sh; never --no-verify

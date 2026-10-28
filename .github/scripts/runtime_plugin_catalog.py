@@ -6,6 +6,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+from plugin_workspace import (
+    _has_plugin_tree,
+    _is_plugin_workspace,
+    _is_skipprd_host,
+    resolve_plugin_workspace,
+    resolve_skipprd_workspace,
+)
+
 
 def load_toml_document(path: Path) -> dict:
     try:
@@ -39,8 +47,10 @@ PLAIN_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 RUNTIME_PROTOCOL_VERSION_RE = re.compile(r"pub const RUNTIME_PROTOCOL_VERSION: u32 = (\d+);")
 RUNTIME_PROTOCOL_VERSION_CANDIDATES = (
     Path("crates/skippr-runtime-sdk/src/protocol.rs"),
+    Path(".host/crates/skippr-runtime-sdk/src/protocol.rs"),
 )
 RUNTIME_SDK_MANIFEST = Path("crates/skippr-runtime-sdk/Cargo.toml")
+RUNTIME_SDK_MANIFEST_HOST_LINK = Path(".host/crates/skippr-runtime-sdk/Cargo.toml")
 RUNTIME_SDK_FINGERPRINT_SCHEME = "skippr-runtime-sdk-build-v1"
 RUNTIME_SDK_GLOBAL_BUILD_INPUTS = (
     Path("Cargo.toml"),
@@ -56,6 +66,9 @@ RUNTIME_PLUGIN_BUILD_INPUTS = (
     Path("Cargo.lock"),
     Path("crates/skippr-runtime-sdk/Cargo.toml"),
     Path("crates/skippr-runtime-sdk/src"),
+    Path(".host/Cargo.lock"),
+    Path(".host/crates/skippr-runtime-sdk/Cargo.toml"),
+    Path(".host/crates/skippr-runtime-sdk/src"),
 )
 PLUGIN_KIND_SUFFIX = {
     "DataSource": "source",
@@ -64,7 +77,32 @@ PLUGIN_KIND_SUFFIX = {
 }
 
 
+def catalog_plugin_workspace(workspace: Path) -> Path:
+    """Plugin crates live in skipprd-plugins, never leftover skipprd/plugins."""
+    if _is_plugin_workspace(workspace):
+        return workspace
+    if _is_skipprd_host(workspace):
+        return resolve_plugin_workspace(workspace)
+    if _has_plugin_tree(workspace):
+        return workspace
+    raise SystemExit(
+        "no runtime plugin Cargo.toml manifests found under skipprd-plugins/plugins/"
+    )
+
+
+def catalog_host_workspace(workspace: Path) -> Path:
+    if _is_skipprd_host(workspace):
+        return workspace
+    if (workspace / ".host" / "crates" / "skippr-runtime-sdk").is_dir():
+        return (workspace / ".host").resolve()
+    try:
+        return resolve_skipprd_workspace(workspace)
+    except SystemExit:
+        return workspace
+
+
 def discover_plugin_manifest_paths(workspace: Path) -> list[Path]:
+    workspace = catalog_plugin_workspace(workspace)
     manifests: list[Path] = []
     for prefix in PLUGIN_ROOT_PREFIXES:
         plugin_root = workspace / prefix
@@ -324,7 +362,7 @@ def runtime_sdk_build_input_paths(workspace: Path) -> list[Path]:
 
 
 def workspace_runtime_sdk_build_fingerprint(workspace: Path) -> str:
-    workspace = workspace.resolve()
+    workspace = catalog_host_workspace(workspace).resolve()
     entries = [("fingerprint_scheme", RUNTIME_SDK_FINGERPRINT_SCHEME)]
     for path in runtime_sdk_build_input_paths(workspace):
         entries.append(
@@ -340,7 +378,7 @@ def package_build_checksum(
     package_dir: Path, workspace: Path, extra_input_paths: list[Path] | None = None
 ) -> str:
     package_dir = package_dir.resolve()
-    workspace = workspace.resolve()
+    workspace = catalog_plugin_workspace(workspace).resolve()
     entries = [
         (
             package_dir.relative_to(workspace).as_posix(),
@@ -413,9 +451,12 @@ def runtime_protocol_version_from_file(path: Path) -> int | None:
 
 
 def workspace_runtime_protocol_version(workspace: Path) -> int:
+    host = catalog_host_workspace(workspace)
     checked_paths = []
     for relative_path in RUNTIME_PROTOCOL_VERSION_CANDIDATES:
-        protocol_path = workspace / relative_path
+        protocol_path = host / relative_path
+        if not protocol_path.exists():
+            protocol_path = workspace / relative_path
         checked_paths.append(protocol_path)
         version = runtime_protocol_version_from_file(protocol_path)
         if version is not None:
@@ -688,6 +729,7 @@ def catalog_package_names(workspace: Path) -> list[str]:
 
 
 def load_workspace_plugin_catalog(workspace: Path) -> list[dict]:
+    plugin_ws = catalog_plugin_workspace(workspace).resolve()
     packages = load_plugin_packages(workspace)
     packages_by_name = {package["name"]: package for package in packages}
     sdk_build_fingerprint = workspace_runtime_sdk_build_fingerprint(workspace)
@@ -695,7 +737,7 @@ def load_workspace_plugin_catalog(workspace: Path) -> list[dict]:
 
     for package in packages:
         manifest_path = Path(package["manifest_path"]).resolve()
-        rel_manifest_path = manifest_path.relative_to(workspace).as_posix()
+        rel_manifest_path = manifest_path.relative_to(plugin_ws).as_posix()
 
         bin_targets = [target["name"] for target in package["targets"] if "bin" in target["kind"]]
         if not bin_targets:
@@ -712,7 +754,7 @@ def load_workspace_plugin_catalog(workspace: Path) -> list[dict]:
             )
 
         validated = validate_plugin_metadata(package, plugin_metadata_for_package(package))
-        relative_dir = manifest_path.parent.relative_to(workspace).as_posix()
+        relative_dir = manifest_path.parent.relative_to(plugin_ws).as_posix()
         manifest_filename = manifest_filename_for_plugin(relative_dir, validated["kind"])
         catalog.append(
             {

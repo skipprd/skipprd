@@ -179,7 +179,17 @@ mod tests {
             host.contains("skippr_store_type_value"),
             "runtime plugin spawn must inject the host-resolved SkipprStore type"
         );
-        let plugin = include_str!("../../plugins/data_sink/skipprlake/src/lib.rs");
+        let plugins_root = std::env::var("SKIPPR_PLUGINS_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .expect("sibling parent")
+                    .join("skipprd-plugins")
+            });
+        let plugin =
+            std::fs::read_to_string(plugins_root.join("plugins/data_sink/skipprlake/src/lib.rs"))
+                .expect("skipprd-plugins skipprlake source");
         assert!(
             plugin.contains("DynamoDbCatalog::new"),
             "plugin catalog must open DynamoDB"

@@ -1,0 +1,26 @@
+name: Checkout skipprd-plugins
+description: 'Clone skipprd-plugins and export SKIPPR_PLUGINS_ROOT plus a .host link'
+inputs:
+  host-root:
+    description: 'skipprd checkout relative to GITHUB_WORKSPACE'
+    required: false
+    default: '.'
+  path:
+    description: 'Where to place the skipprd-plugins checkout'
+    required: false
+    default: 'skipprd-plugins'
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: skipprd/skipprd-plugins
+        path: ${{ inputs.path }}
+    - name: Export plugin workspace
+      shell: bash
+      run: |
+        set -euo pipefail
+        plugins="$(cd "${{ inputs.path }}" && pwd)"
+        host="$(cd "${{ inputs.host-root }}" && pwd)"
+        ln -sfn "$host" "$plugins/.host"
+        echo "SKIPPR_PLUGINS_ROOT=$plugins" >> "$GITHUB_ENV"

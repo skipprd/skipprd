@@ -22,6 +22,10 @@ All notable changes to this project will be documented in this file.
 - WAL metadata lives in the skipprd store catalog (sled / DynamoDB). `mutation.log`, completion bitmaps, `.seg.commit`, and clustered protocol v2 are gone. First start imports existing installs once and archives leftover files. Clustered peers must all run protocol v3; start the former primary first. Deleting `DATA_DIR` with sled deletes the catalog.
 - Experimental `skippr.store.type=cloud-tables`, Python `CloudTablesStore`, and `--features offset-store-cloud-tables` are removed. Skippr Store is sled (local) or DynamoDB (remote). Clustered WAL and SkipprLake catalog pointers use DynamoDB.
 
+### Changed
+
+- Runtime plugin crates live in sibling [`skipprd/skipprd-plugins`](https://github.com/skipprd/skipprd-plugins). Clone it next to `skipprd` (or set `SKIPPR_PLUGINS_ROOT`). This host workspace no longer contains `plugins/`.
+
 ### Fixed
 
 - S3 source starts GET as soon as a ListObjects page has an offset that is not Closed. Closed keys are still skipped per page. Each run re-lists the prefix; it does not resume from a continuation token.

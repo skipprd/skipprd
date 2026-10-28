@@ -40,7 +40,10 @@ def bump_patch(version: str) -> str:
 
 
 def posix_path(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
+    path = path.replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path
 
 
 def is_shared_build_input(relative: str) -> bool:
@@ -71,9 +74,12 @@ def plugin_rel_dir_for_path(relative: str) -> str | None:
 
 
 def catalog_rel_dirs(workspace: Path) -> dict[str, Path]:
+    from runtime_plugin_catalog import catalog_plugin_workspace
+
+    plugin_ws = catalog_plugin_workspace(workspace).resolve()
     dirs: dict[str, Path] = {}
     for manifest in discover_plugin_manifest_paths(workspace):
-        rel = manifest.parent.relative_to(workspace.resolve()).as_posix()
+        rel = manifest.parent.relative_to(plugin_ws).as_posix()
         dirs[rel] = manifest
     return dirs
 

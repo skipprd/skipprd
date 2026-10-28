@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from plugin_workspace import resolve_plugin_workspace, resolve_skipprd_workspace
 from runtime_plugin_catalog import (
     load_workspace_plugin_catalog,
     manifest_payload_for_catalog_entry,
@@ -16,7 +17,8 @@ from runtime_plugin_catalog import (
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = resolve_skipprd_workspace(Path(__file__).resolve().parents[2])
+PLUGIN_ROOT = resolve_plugin_workspace(REPO_ROOT)
 DEFAULT_MANIFEST_DIR = REPO_ROOT / ".skippr" / "local-runtime-plugins" / "manifests"
 PLUGIN_COLLECTIONS = {
     "data_sources": "DataSource",
@@ -62,9 +64,9 @@ def ensure_tool(name: str) -> str:
     return path
 
 
-def run_command(command: list[str], *, env: dict[str, str] | None = None) -> None:
+def run_command(command: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None) -> None:
     print_step("+ " + " ".join(command))
-    subprocess.run(command, cwd=REPO_ROOT, env=env, check=True)
+    subprocess.run(command, cwd=cwd or REPO_ROOT, env=env, check=True)
 
 
 def current_rust_target_triple() -> str:
@@ -255,7 +257,7 @@ def build_local_runtime_plugins(
     if not skip_cargo_build:
         ensure_tool("cargo")
     selected = configured_runtime_plugins(config_path, pipeline)
-    catalog = catalog_by_plugin(REPO_ROOT)
+    catalog = catalog_by_plugin(PLUGIN_ROOT)
     missing = sorted(ref for ref in selected if ref not in catalog)
     if missing:
         formatted = ", ".join(f"{ref.kind}:{ref.plugin_name}" for ref in missing)
@@ -273,14 +275,14 @@ def build_local_runtime_plugins(
             build_command.append("--release")
         for package in packages:
             build_command.extend(["-p", package])
-        run_command(build_command, env=build_env)
+        run_command(build_command, env=build_env, cwd=PLUGIN_ROOT)
 
-    target_dir = Path(build_env.get("CARGO_TARGET_DIR", REPO_ROOT / "target"))
+    target_dir = Path(build_env.get("CARGO_TARGET_DIR", PLUGIN_ROOT / "target"))
     if not target_dir.is_absolute():
-        target_dir = REPO_ROOT / target_dir
+        target_dir = PLUGIN_ROOT / target_dir
     profile = "release" if release else "debug"
     target_triple = current_rust_target_triple()
-    protocol_version = workspace_runtime_protocol_version(REPO_ROOT)
+    protocol_version = workspace_runtime_protocol_version(PLUGIN_ROOT)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for entry in entries:

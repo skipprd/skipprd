@@ -39,12 +39,17 @@ jobs:
         with:
           path: skipprd
           submodules: true
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/skipprd-plugins
+          path: skipprd-plugins
       - name: Build linux x86 release (perf plugin subset)
         uses: ./skipprd/.github/actions/rust-build-release
         with:
           rust-version: "1.94.1"
           architecture_name: linux_x86
           workspace-root: skipprd
+          plugins-workspace-root: skipprd-plugins
           runtime_plugin_packages_json: >-
             ["skippr-plugin-data-source-file","skippr-plugin-data-sink-file","skippr-plugin-data-sink-duckdb","skippr-plugin-schema-sink-duckdb","skippr-plugin-data-sink-skipprlake","skippr-plugin-schema-sink-skipprlake","skippr-plugin-data-source-postgres","skippr-plugin-data-sink-postgres","skippr-plugin-schema-sink-postgres","skippr-plugin-data-source-stdin","skippr-plugin-data-source-socket","skippr-plugin-data-source-s3","skippr-plugin-data-sink-s3"]
 

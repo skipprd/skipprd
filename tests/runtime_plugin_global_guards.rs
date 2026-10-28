@@ -3,9 +3,19 @@ use std::path::PathBuf;
 use regex::Regex;
 use walkdir::WalkDir;
 
+fn plugins_root() -> PathBuf {
+    if let Ok(env) = std::env::var("SKIPPR_PLUGINS_ROOT") {
+        return PathBuf::from(env);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("sibling parent")
+        .join("skipprd-plugins")
+}
+
 #[test]
 fn runtime_plugin_binaries_use_bounded_sdk_main() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = plugins_root();
     let tokio_main = Regex::new(r"#\s*\[\s*tokio::main\b").unwrap();
     let mut main_count = 0;
     let mut violations = Vec::new();
@@ -48,7 +58,7 @@ fn runtime_plugin_binaries_use_bounded_sdk_main() {
 
 #[test]
 fn runtime_sink_and_schema_plugins_do_not_reintroduce_host_globals() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = plugins_root();
     assert!(
         !root.join("plugins/skippr-plugin-runtime-link").exists(),
         "legacy runtime-link crate should be deleted"
@@ -89,7 +99,7 @@ fn runtime_sink_and_schema_plugins_do_not_reintroduce_host_globals() {
 
 #[test]
 fn runtime_source_plugins_do_not_reload_host_yaml_config() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = plugins_root();
     let banned = Regex::new(r"\bConfig::").unwrap();
     let mut violations = Vec::new();
     for entry in WalkDir::new(root.join("plugins/data_source"))
@@ -123,7 +133,7 @@ fn legacy_runtime_plugin_authoring_artifacts_are_deleted() {
 
 #[test]
 fn runtime_sink_and_schema_plugins_use_sdk_entrypoints() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = plugins_root();
     let entrypoint_bans = [
         (
             "RuntimeSessionHello",
@@ -187,7 +197,7 @@ fn runtime_sink_and_schema_plugins_use_sdk_entrypoints() {
 
 #[test]
 fn athena_data_upload_stays_on_the_shared_async_object_writer() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = plugins_root();
     let path = root.join("plugins/data_sink/athena/src/athena.rs");
     let contents = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {}", path.display(), err));

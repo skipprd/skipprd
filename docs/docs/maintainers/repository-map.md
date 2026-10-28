@@ -1,6 +1,6 @@
 # Repository Map
 
-This repository is a Cargo workspace with a single host binary and many separately versioned runtime plugin crates.
+This repository is a Cargo workspace with the host binary and SDK crates. Runtime plugin crates live in sibling `skipprd-plugins`.
 
 ## Workspace layout
 
@@ -11,10 +11,10 @@ This repository is a Cargo workspace with a single host binary and many separate
 | `crates/skippr-query-plan/` | `FlightSqlExec` physical node and SkipprPhysicalCodec for datafusion-distributed. |
 | `src/cluster/` | Clustered WAL replica, lease scheduler, gossip, promotion, WAL head picker. |
 | `src/query_flight/` | Arrow Flight SQL 59.2 on `flight_addr`, live WAL selector, in-process QueryRuntime. |
-| `plugins/data_source/*/` | Runtime source plugin crates. Each crate owns its connector implementation and Cargo metadata. |
-| `plugins/data_sink/*/` | Runtime sink plugin crates. Each crate owns its connector implementation and Cargo metadata. |
-| `plugins/schema_sink/*/` | Runtime schema sink plugin crates. |
-| `plugins/shared/` | Shared plugin crates such as `api_source`. CDC/parquet helpers live in `skippr-runtime-sdk`. |
+| sibling `skipprd-plugins/plugins/data_source/*/` | Runtime source plugin crates. |
+| sibling `skipprd-plugins/plugins/data_sink/*/` | Runtime sink plugin crates. |
+| sibling `skipprd-plugins/plugins/schema_sink/*/` | Runtime schema sink plugin crates. |
+| sibling `skipprd-plugins/plugins/shared/` | Shared plugin crates such as `api_source`. CDC/parquet helpers live in `skippr-runtime-sdk`. |
 | `tests/` | Host integration tests plus runtime plugin guard tests. |
 | `.github/scripts/` | CI and release scripts, including runtime plugin catalog generation, release planning, publishing, and the runtime e2e harness. |
 | `.github/actions/e2e/` | Scenario configs and wrappers used by the runtime e2e jobs. |

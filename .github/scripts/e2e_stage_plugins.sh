@@ -20,6 +20,7 @@ e2e_stage_plugins() {
     mkdir -p target/release
     cp "${PLUGIN_BINARIES_DIR}"/* target/release/
     chmod +x target/release/skippr-plugin-* || true
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
     python3 "${GITHUB_WORKSPACE}/.github/scripts/local_runtime_plugins.py" \
       --config "$config" \
       --pipeline "$pipeline" \

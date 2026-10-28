@@ -1284,6 +1284,24 @@ mod tests {
         }
     }
 
+    fn plugins_root() -> std::path::PathBuf {
+        if let Ok(env) = std::env::var("SKIPPR_PLUGINS_ROOT") {
+            return std::path::PathBuf::from(env);
+        }
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("skipprd workspace")
+            .parent()
+            .expect("sibling parent")
+            .join("skipprd-plugins")
+    }
+
+    fn plugin_toml(relative: &str) -> String {
+        std::fs::read_to_string(plugins_root().join(relative))
+            .unwrap_or_else(|err| panic!("read {relative}: {err}"))
+    }
+
     #[test]
     fn wal_part_meta_cdc_rejects_empty_rows() {
         assert_eq!(
@@ -1465,7 +1483,7 @@ mod tests {
             sink_capabilities::by_name("Motherduck").map(|c| c.name),
             Some(sink_capabilities::DUCKDB.name)
         );
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = plugins_root();
         assert!(
             !root.join("plugins/data_sink/iceberg").exists(),
             "data_sink/iceberg must be deleted"
@@ -1486,7 +1504,7 @@ mod tests {
 
     #[test]
     fn skipprlake_capability_matches_cargo_metadata() {
-        let toml = include_str!("../../../../plugins/data_sink/skipprlake/Cargo.toml");
+        let toml = plugin_toml("plugins/data_sink/skipprlake/Cargo.toml");
         assert!(
             toml.contains("plugin_name = \"SkipprLake\""),
             "data-sink crate metadata must use SkipprLake"
@@ -1503,7 +1521,7 @@ mod tests {
 
     #[test]
     fn athena_iceberg_capability_matches_cargo_metadata() {
-        let toml = include_str!("../../../../plugins/data_sink/athena_iceberg/Cargo.toml");
+        let toml = plugin_toml("plugins/data_sink/athena_iceberg/Cargo.toml");
         assert!(
             toml.contains("plugin_name = \"AthenaIceberg\""),
             "data-sink crate metadata must use AthenaIceberg"
@@ -1525,7 +1543,7 @@ mod tests {
 
     #[test]
     fn duckdb_capability_matches_cargo_metadata() {
-        let toml = include_str!("../../../../plugins/data_sink/duckdb/Cargo.toml");
+        let toml = plugin_toml("plugins/data_sink/duckdb/Cargo.toml");
         assert!(
             toml.contains("plugin_name = \"Duckdb\""),
             "data-sink crate metadata must use Duckdb"
@@ -1537,7 +1555,7 @@ mod tests {
         assert!(toml.contains("supports_replace_partition = false"));
         assert!(toml.contains("supports_replace_table = true"));
         assert!(toml.contains("grouping_support = \"FinalStateBatches\""));
-        let schema = include_str!("../../../../plugins/schema_sink/duckdb/Cargo.toml");
+        let schema = plugin_toml("plugins/schema_sink/duckdb/Cargo.toml");
         assert!(schema.contains("plugin_name = \"Duckdb\""));
     }
 

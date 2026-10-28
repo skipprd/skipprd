@@ -10,13 +10,17 @@ inputs:
     required: true
     default: 'stable'
   runtime_plugin_packages_json:
-    description: 'JSON array of runtime plugin package names, or catalog for every workspace plugin'
+    description: 'JSON array of runtime plugin package names, or catalog for every skipprd-plugins crate'
     required: false
     default: catalog
   workspace-root:
     description: 'Path to the skipprd checkout relative to GITHUB_WORKSPACE'
     required: false
     default: '.'
+  plugins-workspace-root:
+    description: 'Path to the skipprd-plugins checkout relative to GITHUB_WORKSPACE'
+    required: false
+    default: ''
 runs:
   using: "composite"
   steps:
@@ -101,8 +105,14 @@ runs:
     - name: Build release
       shell: bash
       run: |
-        cd "${{ inputs.workspace-root }}"
+        host_root="$(cd "${{ inputs.workspace-root }}" && pwd)"
+        plugins_root=""
+        if [ -n "${{ inputs.plugins-workspace-root }}" ]; then
+          plugins_root="$(cd "${{ inputs.plugins-workspace-root }}" && pwd)"
+        fi
+        cd "$host_root"
         export RUNTIME_PLUGIN_PACKAGES_JSON='${{ inputs.runtime_plugin_packages_json }}'
+        export PLUGINS_WORKSPACE_ROOT="$plugins_root"
         plugin_packages_file="$(mktemp)"
         python3 - <<'PY' > "${plugin_packages_file}"
         import json
@@ -114,38 +124,47 @@ runs:
         from runtime_plugin_catalog import catalog_package_names
 
         raw = os.environ["RUNTIME_PLUGIN_PACKAGES_JSON"].strip()
-        packages = (
-            catalog_package_names(Path(".").resolve())
-            if raw == "catalog"
-            else json.loads(raw)
-        )
+        plugins_root = os.environ.get("PLUGINS_WORKSPACE_ROOT", "").strip()
+        if raw in ("", "[]"):
+            packages = []
+        elif raw == "catalog":
+            if not plugins_root:
+                raise SystemExit("plugins-workspace-root is required when runtime_plugin_packages_json=catalog")
+            packages = catalog_package_names(Path(plugins_root).resolve())
+        else:
+            packages = json.loads(raw)
         for package in packages:
             print(package)
         PY
 
         cargo build --release \
           -p skipprd --bin skipprd --features offset-store-dynamodb
+        mkdir -p skipprd-${{ inputs.architecture_name }}
+        mkdir -p runtime-plugin-binaries-${{ inputs.architecture_name }}
+        cp target/release/skipprd skipprd-${{ inputs.architecture_name }}/skipprd
+
         if [ -s "${plugin_packages_file}" ]; then
+          if [ -z "$plugins_root" ]; then
+            echo "::error::plugins-workspace-root is required to compile runtime plugins"
+            exit 1
+          fi
+          ln -sfn "$(cd "$host_root" && pwd)" "$plugins_root/.host"
           cargo_args=()
           while IFS= read -r package; do
             [ -n "${package}" ] || continue
             cargo_args+=(-p "$package")
           done < "${plugin_packages_file}"
-          cargo build --release "${cargo_args[@]}"
+          (cd "$plugins_root" && cargo build --release "${cargo_args[@]}")
+          while IFS= read -r package; do
+            [ -n "${package}" ] || continue
+            plugin_bin="$plugins_root/target/release/${package}"
+            if [ ! -f "${plugin_bin}" ]; then
+              echo "::error::Expected runtime plugin binary was not produced: ${plugin_bin}"
+              exit 1
+            fi
+            cp "${plugin_bin}" "runtime-plugin-binaries-${{ inputs.architecture_name }}/$(basename "${plugin_bin}")"
+          done < "${plugin_packages_file}"
         fi
-
-        mkdir -p skipprd-${{ inputs.architecture_name }}
-        mkdir -p runtime-plugin-binaries-${{ inputs.architecture_name }}
-        cp target/release/skipprd skipprd-${{ inputs.architecture_name }}/skipprd
-        while IFS= read -r package; do
-          [ -n "${package}" ] || continue
-          plugin_bin="target/release/${package}"
-          if [ ! -f "${plugin_bin}" ]; then
-            echo "::error::Expected runtime plugin binary was not produced: ${plugin_bin}"
-            exit 1
-          fi
-          cp "${plugin_bin}" "runtime-plugin-binaries-${{ inputs.architecture_name }}/$(basename "${plugin_bin}")"
-        done < "${plugin_packages_file}"
         rm -f "${plugin_packages_file}"
         ls -la skipprd-${{ inputs.architecture_name }}
         ls -la runtime-plugin-binaries-${{ inputs.architecture_name }}

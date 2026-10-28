@@ -112,6 +112,7 @@ runs:
         mkdir -p target/release
         cp "${{ inputs.plugin_binaries_dir }}"/* target/release/
         chmod +x target/release/skippr-plugin-* || true
+        export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
         python3 .github/scripts/local_runtime_plugins.py \
           --config .github/actions/e2e/${{ inputs.scenario }}/skippr.yml \
           --pipeline ${{ inputs.scenario }} \

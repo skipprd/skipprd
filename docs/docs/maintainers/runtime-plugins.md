@@ -1,6 +1,6 @@
 # Runtime Plugins
 
-Skippr treats runtime plugins as independently versioned packages. The host binary is published separately, while source, sink, and schema plugins are resolved from published manifests by default.
+Skippr treats runtime plugins as independently versioned packages. Plugin **source** lives in sibling [`skipprd/skipprd-plugins`](https://github.com/skipprd/skipprd-plugins) (`SKIPPR_PLUGINS_ROOT` or a directory named `skipprd-plugins` next to this repo). The host binary is published separately, while source, sink, and schema plugins are resolved from published manifests by default.
 
 The runtime boundary is intentionally narrow:
 

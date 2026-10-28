@@ -7,13 +7,27 @@ import sys
 from pathlib import Path
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from plugin_workspace import resolve_plugin_workspace
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PLUGIN_MANIFESTS = sorted(REPO_ROOT.glob("plugins/**/Cargo.toml"))
-PLUGIN_SOURCE_FILES = sorted(
-    path
-    for path in REPO_ROOT.glob("plugins/**/*")
-    if path.is_file() and path.suffix in {".rs", ".toml"}
-)
+
+
+def plugin_root() -> Path:
+    return resolve_plugin_workspace(REPO_ROOT)
+
+
+def plugin_manifests() -> list[Path]:
+    return sorted(plugin_root().glob("plugins/**/Cargo.toml"))
+
+
+def plugin_source_files() -> list[Path]:
+    root = plugin_root()
+    return sorted(
+        path
+        for path in root.glob("plugins/**/*")
+        if path.is_file() and path.suffix in {".rs", ".toml"}
+    )
 
 # Connector plugin packages must not leak back into the host dependency
 # closure for the root `skipprd` crate, including test-only edges.
@@ -143,14 +157,24 @@ def collect_leaked_host_packages(*, widest_features: bool) -> set[str]:
     return leaked
 
 
+def collect_in_tree_plugin_tree() -> list[str]:
+    leftover = REPO_ROOT / "plugins"
+    if leftover.exists():
+        return [
+            "skipprd/plugins/ is illegal; runtime plugins live in skipprd/skipprd-plugins"
+        ]
+    return []
+
+
 def collect_plugin_manifest_violations() -> list[str]:
     violations = []
-    for manifest_path in PLUGIN_MANIFESTS:
+    root = plugin_root()
+    for manifest_path in plugin_manifests():
         text = manifest_path.read_text(encoding="utf-8")
         if re.search(r"(?m)^\s*skippr\s*=", text):
-            violations.append(str(manifest_path.relative_to(REPO_ROOT)))
+            violations.append(str(manifest_path.relative_to(root)))
         if re.search(r"(?m)^\s*skippr-core(?:\.workspace|\s*=)", text):
-            violations.append(str(manifest_path.relative_to(REPO_ROOT)))
+            violations.append(str(manifest_path.relative_to(root)))
     return violations
 
 
@@ -178,8 +202,9 @@ FORBIDDEN_PLUGIN_PATTERNS = {
 
 def collect_plugin_source_violations() -> list[str]:
     violations = []
-    for source_path in PLUGIN_SOURCE_FILES:
-        relative = source_path.relative_to(REPO_ROOT)
+    root = plugin_root()
+    for source_path in plugin_source_files():
+        relative = source_path.relative_to(root)
         text = source_path.read_text(encoding="utf-8", errors="ignore")
         for label, pattern in FORBIDDEN_PLUGIN_PATTERNS.items():
             if pattern.search(text):
@@ -190,6 +215,7 @@ def collect_plugin_source_violations() -> list[str]:
 def main() -> int:
     leaked_default = collect_leaked_host_packages(widest_features=False)
     leaked_widest = collect_leaked_host_packages(widest_features=True)
+    in_tree_plugins = collect_in_tree_plugin_tree()
     manifest_violations = collect_plugin_manifest_violations()
     source_violations = collect_plugin_source_violations()
     sdk_skippr_core_imports = collect_sdk_skippr_core_imports()
@@ -200,6 +226,7 @@ def main() -> int:
     if (
         leaked_default
         or leaked_widest
+        or in_tree_plugins
         or manifest_violations
         or source_violations
         or sdk_skippr_core_imports
@@ -224,6 +251,10 @@ def main() -> int:
             )
             for name in sorted(leaked_widest):
                 print(f"    - {name}", file=sys.stderr)
+        if in_tree_plugins:
+            print("  host tree must not contain a plugins/ catalog:", file=sys.stderr)
+            for path in in_tree_plugins:
+                print(f"    - {path}", file=sys.stderr)
         if manifest_violations:
             print(
                 "  plugin manifests must depend only on the narrow runtime SDK, never root `skipprd` or `skippr-core`:",

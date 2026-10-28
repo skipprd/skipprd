@@ -12,6 +12,9 @@ cd "$ROOT"
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
 unset SKIPPR_STREAM_TEST_PROFILE || true
 
+echo "precommit: python3 .github/scripts/test_plugin_workspace.py"
+python3 .github/scripts/test_plugin_workspace.py
+
 echo "precommit: python3 .github/scripts/test_python_bindings_ci.py"
 python3 .github/scripts/test_python_bindings_ci.py
 

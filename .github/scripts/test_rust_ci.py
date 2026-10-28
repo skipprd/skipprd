@@ -113,16 +113,23 @@ class RustCiTests(unittest.TestCase):
         linux_test = text.split("\n  linux_test_suite:", 1)[1].split("\n  linux_x86:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", linux_test)
         self.assertNotIn("dtolnay/rust-toolchain", linux_test)
+        self.assertIn("test_plugin_workspace.py", linux_test)
+        self.assertIn("SKIPPR_PLUGINS_ROOT", linux_test)
+        self.assertIn("skipprd/skipprd-plugins", linux_test)
         linux_build = text.split("\n  linux_x86:", 1)[1].split("\n  macos_arm64:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", linux_build)
         self.assertNotIn("linux_test_suite", linux_build)
         self.assertNotIn("[self-hosted", linux_build)
         self.assertNotIn("runtime_plugin_packages_json", linux_build)
+        self.assertIn("plugins-workspace-root: skipprd-plugins", linux_build)
+        self.assertIn("repository: skipprd/skipprd-plugins", linux_build)
         macos_build = text.split("\n  macos_arm64:", 1)[1].split("\n  chaos_mode_test:", 1)[0]
         self.assertIn("runs-on: [self-hosted, skippr-darwin-arm64]", macos_build)
         self.assertNotIn("skippr-darwin-arm64-8", macos_build)
         self.assertNotIn("macos-14", macos_build)
         self.assertNotIn("runtime_plugin_packages_json", macos_build)
+        self.assertIn("plugins-workspace-root: skipprd-plugins", macos_build)
+        self.assertIn("repository: skipprd/skipprd-plugins", macos_build)
         chaos = text.split("\n  chaos_mode_test:", 1)[1].split("\n  e2e_file_duckdb:", 1)[0]
         self.assertIn("runs-on: ubuntu-latest", chaos)
         self.assertNotIn("ubuntu-latest-8-cores", chaos)
@@ -367,14 +374,65 @@ class RustCiTests(unittest.TestCase):
     def test_rust_build_release_accepts_skipprd_workspace_root(self) -> None:
         action = BUILD_RELEASE.read_text(encoding="utf-8")
         self.assertIn("workspace-root:", action)
+        self.assertIn("plugins-workspace-root:", action)
         self.assertIn("catalog_package_names", action)
         self.assertRegex(action, r"(?m)^    default: catalog$")
         self.assertIn("if-no-files-found: error", action)
         workflow = RUST.read_text(encoding="utf-8")
         self.assertIn("workspace-root: skipprd", workflow)
+        self.assertIn("plugins-workspace-root: skipprd-plugins", workflow)
         self.assertIn("path: skipprd", workflow)
         self.assertIn("path: cloud", workflow)
         self.assertIn("skipprd/cloud", workflow)
+        self.assertIn("skipprd/skipprd-plugins", workflow)
+        resolve = action.find('plugins_root="$(cd "${{ inputs.plugins-workspace-root }}" && pwd)"')
+        self.assertNotEqual(resolve, -1)
+        self.assertLess(
+            resolve,
+            action.find('cd "$host_root"'),
+            "plugins-workspace-root is a GITHUB_WORKSPACE-relative path; resolve it before cd host_root",
+        )
+
+    def test_local_plugin_e2e_jobs_checkout_skipprd_plugins(self) -> None:
+        text = RUST.read_text(encoding="utf-8")
+        slices = {
+            "chaos_mode_test": text.split("\n  chaos_mode_test:", 1)[1].split(
+                "\n  e2e_file_duckdb:", 1
+            )[0],
+            "e2e_file_duckdb": text.split("\n  e2e_file_duckdb:", 1)[1].split(
+                "\n  e2e_file_copy:", 1
+            )[0],
+            "e2e_file_copy": text.split("\n  e2e_file_copy:", 1)[1].split(
+                "\n  release_notes:", 1
+            )[0],
+            "publish_runtime_plugins": text.split("\n  publish_runtime_plugins:", 1)[1].split(
+                "\n  chaos_mode_published:", 1
+            )[0],
+            "e2e_s3_list_open_keys": text.split("\n  e2e_s3_list_open_keys:", 1)[1].split(
+                "\n  e2e_s3_file_copy:", 1
+            )[0],
+        }
+        checkout = (
+            ROOT / ".github" / "actions" / "checkout-skipprd-plugins" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("skipprd/skipprd-plugins", checkout)
+        self.assertIn("SKIPPR_PLUGINS_ROOT", checkout)
+        for job, body in slices.items():
+            self.assertIn(
+                "checkout-skipprd-plugins",
+                body,
+                f"{job} must checkout skipprd-plugins so local_runtime_plugins can load the catalog",
+            )
+        stage = (ROOT / ".github" / "scripts" / "e2e_stage_plugins.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CARGO_TARGET_DIR", stage)
+        duckdb = text.split("\n  e2e_file_duckdb:", 1)[1].split("\n  e2e_file_copy:", 1)[0]
+        self.assertIn("CARGO_TARGET_DIR", duckdb)
+        scenario = (
+            ROOT / ".github" / "actions" / "e2e" / "runtime_scenario" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("CARGO_TARGET_DIR", scenario)
 
     def test_release_docs_describe_github_hosted_rust_ci(self) -> None:
         text = RELEASE_DOCS.read_text(encoding="utf-8")

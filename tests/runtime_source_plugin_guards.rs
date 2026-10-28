@@ -4,7 +4,14 @@ use regex::Regex;
 
 #[test]
 fn runtime_source_plugins_stay_on_sdk_protocol_boundary() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = if let Ok(env) = std::env::var("SKIPPR_PLUGINS_ROOT") {
+        PathBuf::from(env)
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("sibling parent")
+            .join("skipprd-plugins")
+    };
     let data_source_root = root.join("plugins").join("data_source");
     let banned_patterns = [
         (

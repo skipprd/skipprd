@@ -31,6 +31,10 @@ class HostDependencyBoundaryTests(unittest.TestCase):
             "skippr-core is illegal; plugins compile skippr-runtime-sdk only",
         )
 
+    def test_host_tree_has_no_plugins_catalog(self) -> None:
+        self.assertEqual(check_host.collect_in_tree_plugin_tree(), [])
+        self.assertFalse((check_host.REPO_ROOT / "plugins").exists())
+
     def test_sdk_sources_do_not_import_skippr_core(self) -> None:
         self.assertEqual(check_host.collect_sdk_skippr_core_imports(), [])
 
@@ -152,7 +156,7 @@ class HostDependencyBoundaryTests(unittest.TestCase):
         for root in (
             check_host.SDK_CRATE_DIR / "src",
             check_host.REPO_ROOT / "crates" / "skippr-iceberg-writer" / "src",
-            check_host.REPO_ROOT / "plugins",
+            check_host.plugin_root() / "plugins",
             check_host.REPO_ROOT / "src",
         ):
             if not root.exists():

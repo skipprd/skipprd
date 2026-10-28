@@ -495,14 +495,30 @@ mod tests {
         assert_eq!(std::fs::read(&final_path).unwrap(), b"parquet");
     }
 
+    fn plugin_source(relative: &str) -> String {
+        let root = std::env::var("SKIPPR_PLUGINS_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .ancestors()
+                    .nth(2)
+                    .expect("skipprd workspace")
+                    .parent()
+                    .expect("sibling parent")
+                    .join("skipprd-plugins")
+            });
+        std::fs::read_to_string(root.join(relative))
+            .unwrap_or_else(|err| panic!("read {}/{}: {err}", root.display(), relative))
+    }
+
     #[test]
     fn migrated_hot_paths_cannot_restore_full_parquet_buffers() {
         let sources = [
-            include_str!("../../../plugins/data_sink/s3/src/s3.rs"),
-            include_str!("../../../plugins/data_sink/gcs/src/gcs.rs"),
-            include_str!("../../../plugins/data_sink/azure-blob/src/azure_blob.rs"),
-            include_str!("../../../plugins/data_sink/file/src/main.rs"),
-            include_str!("../../../plugins/data_sink/sftp/src/sftp.rs"),
+            plugin_source("plugins/data_sink/s3/src/s3.rs"),
+            plugin_source("plugins/data_sink/gcs/src/gcs.rs"),
+            plugin_source("plugins/data_sink/azure-blob/src/azure_blob.rs"),
+            plugin_source("plugins/data_sink/file/src/main.rs"),
+            plugin_source("plugins/data_sink/sftp/src/sftp.rs"),
         ];
         for source in sources {
             assert!(

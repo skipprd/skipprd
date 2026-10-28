@@ -130,10 +130,45 @@ pub fn workspace_root(from: &Path) -> PathBuf {
     from.to_path_buf()
 }
 
+/// skipprd-plugins checkout. Host skipprd has no plugins/ tree.
+pub fn plugin_workspace_root(host_root: &Path) -> Result<PathBuf, String> {
+    if let Ok(env) = std::env::var("SKIPPR_PLUGINS_ROOT") {
+        let path = PathBuf::from(env);
+        if path.join("plugins").join("data_source").is_dir()
+            && !path.join("crates").join("skippr-runtime-sdk").is_dir()
+        {
+            return Ok(path);
+        }
+        return Err(format!(
+            "SKIPPR_PLUGINS_ROOT={} is not a skipprd-plugins workspace",
+            path.display()
+        ));
+    }
+    if host_root.join("plugins").join("data_source").is_dir()
+        && !host_root.join("crates").join("skippr-runtime-sdk").is_dir()
+    {
+        return Ok(host_root.to_path_buf());
+    }
+    let sibling = host_root
+        .parent()
+        .ok_or_else(|| "host root has no parent directory".to_string())?
+        .join("skipprd-plugins");
+    if sibling.join("plugins").join("data_source").is_dir()
+        && !sibling.join("crates").join("skippr-runtime-sdk").is_dir()
+    {
+        return Ok(sibling);
+    }
+    Err(
+        "runtime plugin workspace not found: clone skipprd/skipprd-plugins as a sibling named skipprd-plugins or set SKIPPR_PLUGINS_ROOT"
+            .to_string(),
+    )
+}
+
 pub fn discover_plugins(root: &Path) -> Result<Vec<PluginSpec>, String> {
+    let plugins_root = plugin_workspace_root(root)?;
     let mut plugins = Vec::new();
     for kind_dir in ["data_source", "data_sink", "schema_sink"] {
-        let dir = root.join("plugins").join(kind_dir);
+        let dir = plugins_root.join("plugins").join(kind_dir);
         if !dir.exists() {
             continue;
         }
@@ -255,6 +290,48 @@ fn dependency_type_files(
     Ok(files)
 }
 
+fn workspace_root_for(crate_dir: &Path) -> Option<PathBuf> {
+    let mut dir = crate_dir.to_path_buf();
+    loop {
+        let manifest = dir.join("Cargo.toml");
+        if manifest.exists() {
+            if let Ok(text) = fs::read_to_string(&manifest) {
+                if let Ok(value) = toml::from_str::<toml::Value>(&text) {
+                    if value
+                        .get("workspace")
+                        .and_then(|w| w.get("members"))
+                        .is_some()
+                    {
+                        return Some(dir);
+                    }
+                }
+            }
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+fn workspace_or_path_dep(crate_dir: &Path, spec: &toml::Value) -> Option<PathBuf> {
+    if let Some(rel) = spec.get("path").and_then(|v| v.as_str()) {
+        return Some(crate_dir.join(rel));
+    }
+    if spec.get("workspace").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let ws = workspace_root_for(crate_dir)?;
+    let cargo: toml::Value =
+        toml::from_str(&fs::read_to_string(ws.join("Cargo.toml")).ok()?).ok()?;
+    let rel = cargo
+        .get("workspace")?
+        .get("dependencies")?
+        .get("skippr-iceberg-catalog")?
+        .get("path")?
+        .as_str()?;
+    Some(ws.join(rel))
+}
+
 fn schema_sink_dep_dir(crate_dir: &Path, cargo: &toml::Value) -> Option<PathBuf> {
     let deps = cargo.get("dependencies")?.as_table()?;
     for (name, spec) in deps {
@@ -285,8 +362,7 @@ fn reflect_crate(crate_dir: &Path) -> Result<Option<ReflectedConfig>, String> {
         if let Ok(cargo) = toml::from_str::<toml::Value>(&cargo_text) {
             if let Some(deps) = cargo.get("dependencies").and_then(|v| v.as_table()) {
                 if let Some(spec) = deps.get("skippr-iceberg-catalog") {
-                    if let Some(rel) = spec.get("path").and_then(|v| v.as_str()) {
-                        let dep_dir = crate_dir.join(rel);
+                    if let Some(dep_dir) = workspace_or_path_dep(crate_dir, spec) {
                         collect_mod_graph(&dep_dir, &dep_dir.join("src/lib.rs"), &mut files)?;
                     }
                 }
@@ -1418,6 +1494,19 @@ mod tests {
             engine.types.enums.contains_key("PipelineType"),
             "PipelineType lives in crates/skippr-runtime-sdk/src/pipeline_type.rs"
         );
+    }
+
+    #[test]
+    fn plugin_workspace_is_sibling_not_host_plugins_dir() {
+        let host = root();
+        assert!(
+            !host.join("plugins/data_source").is_dir(),
+            "skipprd must not keep an in-tree plugins catalog"
+        );
+        let plugins = plugin_workspace_root(&host).expect("skipprd-plugins");
+        assert_ne!(plugins, host);
+        assert!(plugins.join("plugins/data_source").is_dir());
+        assert!(!plugins.join("crates/skippr-runtime-sdk").is_dir());
     }
 
     #[test]

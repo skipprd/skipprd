@@ -158,7 +158,7 @@ data_sinks:
                 },
             ]
 
-            def fake_run(command: list[str], *, env: dict[str, str] | None = None) -> None:
+            def fake_run(command: list[str], *, env: dict[str, str] | None = None, cwd=None) -> None:
                 self.assertIn("-p", command)
                 self.assertIn("skippr-plugin-data-source-mssql", command)
                 self.assertIn("skippr-plugin-data-sink-snowflake", command)

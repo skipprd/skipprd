@@ -31,15 +31,18 @@ from runtime_plugin_catalog import (
 from runtime_plugin_targets import published_runtime_plugin_targets, resolve_target_artifact
 
 
+from plugin_workspace import resolve_plugin_workspace
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
+PLUGIN_ROOT = resolve_plugin_workspace(REPO_ROOT)
 BIKE_HIRE_MANY_EXPECTED_ROWS = 5_100_000
 DUCKDB_ICEBERG_PREAMBLE = (
     "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg;"
 )
 DEFAULT_AWS_REGION = "us-east-1"
-STRIPE_FIXTURE_DIR = REPO_ROOT / "plugins/data_source/stripe/tests/fixtures"
+STRIPE_FIXTURE_DIR = PLUGIN_ROOT / "plugins/data_source/stripe/tests/fixtures"
 STRIPE_FIXTURE_TWO_CHARGES_DIR = (
-    REPO_ROOT / "plugins/data_source/stripe/tests/fixtures_merge_by_key_two_charges"
+    PLUGIN_ROOT / "plugins/data_source/stripe/tests/fixtures_merge_by_key_two_charges"
 )
 ICEBERG_EQUALITY_COMMIT_SCENARIOS = (
     "postgres_iceberg_cdc_late_delete",
@@ -641,7 +644,7 @@ SCENARIOS = {
                 extra_env=(
                     (
                         "SKIPPR_STRIPE_FIXTURE_DIR",
-                        str(REPO_ROOT / "plugins/data_source/stripe/tests/fixtures"),
+                        str(PLUGIN_ROOT / "plugins/data_source/stripe/tests/fixtures"),
                     ),
                 ),
             ),
@@ -652,7 +655,7 @@ SCENARIOS = {
                 extra_env=(
                     (
                         "SKIPPR_STRIPE_FIXTURE_DIR",
-                        str(REPO_ROOT / "plugins/data_source/stripe/tests/fixtures"),
+                        str(PLUGIN_ROOT / "plugins/data_source/stripe/tests/fixtures"),
                     ),
                 ),
             ),
@@ -661,7 +664,7 @@ SCENARIOS = {
                 extra_env=(
                     (
                         "SKIPPR_STRIPE_FIXTURE_DIR",
-                        str(REPO_ROOT / "plugins/data_source/stripe/tests/fixtures"),
+                        str(PLUGIN_ROOT / "plugins/data_source/stripe/tests/fixtures"),
                     ),
                 ),
             ),

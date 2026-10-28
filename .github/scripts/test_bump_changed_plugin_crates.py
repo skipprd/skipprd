@@ -55,16 +55,16 @@ class BumpChangedPluginCratesTests(unittest.TestCase):
         )
         self.write_workspace_file(
             workspace,
-            "crates/skippr-runtime-sdk/src/protocol.rs",
+            ".host/crates/skippr-runtime-sdk/src/protocol.rs",
             "pub const RUNTIME_PROTOCOL_VERSION: u32 = 22;\n",
         )
         self.write_workspace_file(
             workspace,
-            "crates/skippr-runtime-sdk/Cargo.toml",
+            ".host/crates/skippr-runtime-sdk/Cargo.toml",
             '[package]\nname = "skippr-runtime-sdk"\nversion = "0.1.0"\n',
         )
         self.write_workspace_file(
-            workspace, "crates/skippr-runtime-sdk/src/lib.rs", "pub fn sdk() {}\n"
+            workspace, ".host/crates/skippr-runtime-sdk/src/lib.rs", "pub fn sdk() {}\n"
         )
         self.write_workspace_file(workspace, "Cargo.lock", "version = 4\n")
 
@@ -123,7 +123,7 @@ class BumpChangedPluginCratesTests(unittest.TestCase):
             self.write_plugin_workspace(workspace)
             bumped = bump_changed_plugin_crates.bump_changed_plugin_crates(
                 workspace,
-                changed_paths=["crates/skippr-runtime-sdk/src/protocol.rs"],
+                changed_paths=[".host/crates/skippr-runtime-sdk/src/protocol.rs"],
             )
             self.assertEqual(
                 bumped,
@@ -141,7 +141,7 @@ class BumpChangedPluginCratesTests(unittest.TestCase):
                 workspace,
                 changed_paths=[
                     "plugins/shared/api_source/src/lib.rs",
-                    "crates/skippr-runtime-sdk/src/lib.rs",
+                    ".host/crates/skippr-runtime-sdk/src/lib.rs",
                 ],
             )
             self.assertEqual(

@@ -216,7 +216,7 @@ edition = "2021"
             )
             self.write_workspace_file(
                 workspace,
-                "crates/skippr-runtime-sdk/src/lib.rs",
+                ".host/crates/skippr-runtime-sdk/src/lib.rs",
                 "pub fn runtime_entry() {}\n",
             )
 
@@ -224,7 +224,7 @@ edition = "2021"
 
             self.write_workspace_file(
                 workspace,
-                "crates/skippr-runtime-sdk/src/lib.rs",
+                ".host/crates/skippr-runtime-sdk/src/lib.rs",
                 "pub fn runtime_entry() { println!(\"updated\"); }\n",
             )
             updated = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
@@ -561,7 +561,7 @@ edition = "2021"
         ).read_text(encoding="utf-8")
         self.assertIn("SkipprLake is the dest", otel_wbs)
         self.assertNotIn("Iceberg is the dest", otel_wbs)
-        plugins = repo / "plugins"
+        plugins = runtime_plugin_catalog.catalog_plugin_workspace(repo) / "plugins"
         self.assertFalse((plugins / "data_sink" / "iceberg").exists())
         self.assertFalse((plugins / "schema_sink" / "iceberg").exists())
         iceberg_plugin_tomls = [
