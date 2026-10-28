@@ -487,6 +487,13 @@ fn update_partition_offset(entry: &mut IngestBufferBatch, ok: &OffsetKey, pos: u
     }
 }
 
+fn take_cdc_sidecar(
+    attached: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+    leftover: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+) -> Option<Vec<crate::plugins::cdc::WalRowMeta>> {
+    attached.or(leftover)
+}
+
 fn push_cdc_row_meta(
     cdc_row_buf: &mut HashMap<IngestPartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
     key: &IngestPartitionKey,
@@ -3662,7 +3669,7 @@ impl Ingest {
                     match crate::stream_transform::apply_configured_ops(
                         &ops,
                         merged,
-                        cdc_row_buf.remove(k),
+                        take_cdc_sidecar(entry.cdc_rows.take(), cdc_row_buf.remove(k)),
                     ) {
                         Ok((batches, cdc_rows)) => {
                             if let Some(batch) = batches.first() {
@@ -4051,6 +4058,34 @@ impl Ingest {
             .store(true, Ordering::Relaxed);
 
         Ok(_schema_ref)
+    }
+}
+
+#[cfg(test)]
+mod cdc_sidecar_tests {
+    use super::*;
+    use crate::plugins::cdc::{MutationKind, WalRowMeta};
+
+    fn update_meta() -> WalRowMeta {
+        WalRowMeta {
+            mutation: MutationKind::Update,
+            event_id: b"e1".to_vec(),
+            order_token: b"e1".to_vec(),
+        }
+    }
+
+    #[test]
+    fn take_cdc_sidecar_keeps_rows_already_moved_onto_the_entry() {
+        let attached = Some(vec![update_meta()]);
+        let got = take_cdc_sidecar(attached, None).expect("sidecar");
+        assert_eq!(got[0].mutation, MutationKind::Update);
+    }
+
+    #[test]
+    fn take_cdc_sidecar_falls_back_to_the_partition_buffer() {
+        let leftover = Some(vec![update_meta()]);
+        let got = take_cdc_sidecar(None, leftover).expect("sidecar");
+        assert_eq!(got[0].mutation, MutationKind::Update);
     }
 }
 
