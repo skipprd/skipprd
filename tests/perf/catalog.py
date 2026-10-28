@@ -39,6 +39,9 @@ KNOWN_ASSERT_KEYS = frozenset(
         "query_unique",
         "query_reconcile",
         "wal_pin",
+        "query_header",
+        "query_column_absent",
+        "query_value",
     }
 )
 

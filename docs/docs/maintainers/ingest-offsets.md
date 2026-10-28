@@ -34,4 +34,4 @@ This avoids per-record `Offsets::validate` sled lookups on the hot path.
 ## Operational notes
 
 - Do not rely on line-based resume for immutable objects; use `Closed` and source-side skip logic.
-- If a single large object is split across multiple `IngestBatch`es in one run, the first flush may set `Closed=1` before later chunks arrive — defer closing until end-of-object if that pattern appears in production.
+- If a single large object is split across multiple `IngestBatch`es in one run, the first flush may set `Closed=1` before later chunks arrive. File sources submit every chunk of a file in one payload group so that flush covers the whole object.

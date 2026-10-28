@@ -68,13 +68,13 @@ def skipprd_bin() -> Path:
     raise PerfError("SKIPPRD_BIN unset and target/{release,debug}/skipprd missing")
 
 
+PERF_ROWS = 100_000
+
+
 def row_count(scenario: dict[str, Any], scale: str) -> int:
-    defaults = load_catalog().get("defaults", {})
-    if scale == "smoke":
-        return int(scenario.get("smoke_rows", defaults.get("smoke_rows", 200)))
-    if scale == "linux":
-        return int(scenario.get("linux_rows", defaults.get("linux_rows", 2000)))
-    return int(scenario.get("rows", defaults.get("rows", 10000)))
+    """Every cell uses the same fixture size so timings compare across scales."""
+    del scenario, scale
+    return PERF_ROWS
 
 
 def r2_ready() -> bool:
@@ -281,7 +281,7 @@ def write_skippr_yml(
         source_block = f"""    File:
       path: {source_path}
       format: {file_format}
-      batch_size_bytes: 1048576
+      batch_size_bytes: 67108864
 """
     elif source_kind == "Stdin":
         source_block = """    Stdin:

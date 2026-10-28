@@ -69,6 +69,12 @@ QUERY_LABELS = {
     "q-union-count-duckdb": "DuckDB UNION count",
     "q-iceberg-only-iceberg": "File Iceberg-only count",
     "q-iceberg-only-duckdb": "DuckDB Iceberg-only count",
+    "q-migrate-rename-iceberg": "In-stream rename Iceberg",
+    "q-migrate-rename-duckdb": "In-stream rename DuckDB",
+    "q-migrate-rename-nested-iceberg": "In-stream nested rename Iceberg",
+    "q-migrate-promote-iceberg": "In-stream promote Iceberg",
+    "q-migrate-merge-iceberg": "In-stream merge Iceberg",
+    "q-migrate-drop-iceberg": "In-stream drop Iceberg",
 }
 
 
@@ -106,6 +112,12 @@ def timings_from_reports(reports: dict[str, dict[str, Any]]) -> list[str]:
         if elapsed is None:
             elapsed = payload.get("elapsed_ms")
         if rows is None or elapsed is None:
+            continue
+        migrate_ms = payload.get("migrate_ms")
+        if migrate_ms is not None:
+            lines.append(
+                f"{label} migrated {rows:,} ingest rows in {migrate_ms}ms then queried in {elapsed}ms."
+            )
             continue
         lines.append(f"{label} queried {rows:,} ingest rows in {elapsed}ms.")
     return lines

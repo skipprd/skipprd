@@ -25,6 +25,20 @@ def nested_flatten_record(index: int) -> dict[str, Any]:
     }
 
 
+def migrate_stream_record(index: int) -> dict[str, Any]:
+    """One shape for every in-stream ALTER cell so migrate types compare."""
+    return {
+        "id": index,
+        "name": f"user_{index}",
+        "amount": index * 10,
+        "amount_string": str(index * 10),
+        "note": f"note_{index}",
+        "region": "eu",
+        "detail": {"truck_reg": f"T{index}", "geofence_id": "g1"},
+        "detail_record": {"geofence_id": "g2"},
+    }
+
+
 def is_exact_arrow_eligible_record(record: dict[str, Any], flatten: bool) -> bool:
     if flatten:
         return False
@@ -43,6 +57,7 @@ def _factory(kind: str):
         "exact_arrow": exact_arrow_record,
         "exact_arrow_ts": exact_arrow_ts_record,
         "nested_flatten": nested_flatten_record,
+        "migrate_stream": migrate_stream_record,
     }
     factory = factories.get(kind)
     if factory is None:

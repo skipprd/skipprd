@@ -26,6 +26,7 @@ from fixtures import (  # noqa: E402
     nested_flatten_record,
 )
 from parse import PREFIX, PerfParseError, missing_phases, parse_perf_events  # noqa: E402
+from run import row_count  # noqa: E402
 
 
 class PerfCatalogTests(unittest.TestCase):
@@ -85,9 +86,10 @@ class PerfCatalogTests(unittest.TestCase):
         self.assertEqual(skipprd_csv["kind"], "ingest")
         self.assertEqual(skipprd_csv["source_format"], "csv")
         self.assertEqual(skipprd_csv["sink"], "duckdb")
-        self.assertGreaterEqual(int(fast.get("rows") or 0), 100000)
-        self.assertGreaterEqual(int(csv_fast.get("rows") or 0), 100000)
-        self.assertLess(int(inserts.get("rows") or 0), int(fast.get("rows") or 0))
+        self.assertEqual(row_count(fast, "smoke"), 100_000)
+        self.assertEqual(row_count(csv_fast, "linux"), 100_000)
+        self.assertEqual(row_count(inserts, "ci"), 100_000)
+        self.assertEqual(row_count(nested, "smoke"), 100_000)
         workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
         for name in (
             "duckdb-ndjson",
@@ -182,6 +184,19 @@ class PerfFixtureTests(unittest.TestCase):
         self.assertFalse(is_exact_arrow_eligible_record(record, flatten=True))
         self.assertIsInstance(record["user"], dict)
 
+    def test_migrate_stream_fixture_has_every_alter_column(self) -> None:
+        from fixtures import migrate_stream_record
+
+        record = migrate_stream_record(1)
+        self.assertFalse(is_exact_arrow_eligible_record(record, flatten=False))
+        self.assertEqual(record["region"], "eu")
+        self.assertEqual(record["amount"], 10)
+        self.assertEqual(record["amount_string"], "10")
+        self.assertEqual(record["note"], "note_1")
+        self.assertEqual(record["detail"]["truck_reg"], "T1")
+        self.assertEqual(record["detail"]["geofence_id"], "g1")
+        self.assertEqual(record["detail_record"]["geofence_id"], "g2")
+
     def test_timestamp_fixture_stays_flat_and_carries_rfc3339(self) -> None:
         from fixtures import exact_arrow_ts_record, write_ndjson
 
@@ -236,6 +251,7 @@ class FileParquetYamlTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
         self.assertIn("format: parquet", text)
         self.assertIn("output_dir: /out", text)
+        self.assertIn("batch_size_bytes: 67108864", text)
         self.assertNotIn("type: copy", text)
         self.assertNotIn("schema_sink:", text)
 
@@ -257,6 +273,7 @@ class FileParquetYamlTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
         self.assertIn("format: csv", text)
         self.assertIn("path: /src", text)
+        self.assertIn("batch_size_bytes: 67108864", text)
 
     def test_socket_copy_batches_ndjson_instead_of_one_line_per_ingest(self) -> None:
         from run import write_skippr_yml
@@ -419,6 +436,30 @@ class PerfSkillTests(unittest.TestCase):
         self.assertIn("duckdb-ndjson", text)
         self.assertIn("duckdb-csv", text)
         self.assertIn("ingest-csv-duckdb", text)
+        self.assertIn("100,000", text)
+        self.assertIn("only select which cells run, not how many rows", text)
+        self.assertIn("skippr-perf-db", text)
+
+
+class PerfRowCountTests(unittest.TestCase):
+    def test_every_scale_uses_one_hundred_thousand_rows(self) -> None:
+        catalog = load_catalog()
+        self.assertEqual(catalog["defaults"]["rows"], 100_000)
+        self.assertNotIn("smoke_rows", catalog["defaults"])
+        self.assertNotIn("linux_rows", catalog["defaults"])
+        yaml = (HARNESS_DIR / "catalog.yaml").read_text(encoding="utf-8")
+        self.assertNotIn("smoke_rows", yaml)
+        self.assertNotIn("linux_rows", yaml)
+        for name, spec in catalog["scenarios"].items():
+            self.assertNotIn("smoke_rows", spec, name)
+            self.assertNotIn("linux_rows", spec, name)
+            self.assertEqual(row_count(spec, "smoke"), 100_000, name)
+            self.assertEqual(row_count(spec, "linux"), 100_000, name)
+            self.assertEqual(row_count(spec, "ci"), 100_000, name)
+        self.assertEqual(
+            row_count({"rows": 7, "smoke_rows": 1, "linux_rows": 2}, "smoke"),
+            100_000,
+        )
 
 
 class SkipprdCliTests(unittest.TestCase):
@@ -451,6 +492,10 @@ class PerfRunnerContractTests(unittest.TestCase):
         self.assertNotIn("run_cdc", text)
         self.assertIn("run_duckdb_ingest", text)
         self.assertIn("duckdb_ingest", text)
+        self.assertIn("PERF_ROWS = 100_000", text)
+        row_count_fn = text.split("def row_count")[1].split("def ", 1)[0]
+        self.assertNotIn("smoke_rows", row_count_fn)
+        self.assertNotIn("linux_rows", row_count_fn)
         self.assertNotIn('list(scenario.get("required_perf") or [])', text)
         self.assertNotIn("collect_log_text", text)
         self.assertNotIn('"--log", "perf"', text)
@@ -590,6 +635,23 @@ class MemoTests(unittest.TestCase):
         self.assertIn("DuckDB UNION count", joined)
         self.assertIn("17ms", joined)
         self.assertIn("9ms", joined)
+        migrate_lines = timings_from_reports(
+            {
+                "q-migrate-rename-iceberg": {
+                    "scenario": "q-migrate-rename-iceberg",
+                    "kind": "query_after_ingest",
+                    "sink": "skipprlake",
+                    "rows": 100000,
+                    "migrate_ms": 80,
+                    "query_collect_ms": 12,
+                    "elapsed_ms": 80,
+                }
+            }
+        )
+        joined_migrate = " ".join(migrate_lines)
+        self.assertIn("In-stream rename Iceberg", joined_migrate)
+        self.assertIn("80ms", joined_migrate)
+        self.assertIn("12ms", joined_migrate)
 
 
 class WrapProfileTests(unittest.TestCase):
