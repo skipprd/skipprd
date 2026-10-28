@@ -45,7 +45,6 @@ def main() -> None:
     workspace = Path(args.workspace).resolve()
     release_manifests = {
         "skipprd": workspace / "Cargo.toml",
-        "skippr-cli": workspace / "crates" / "skippr-cli" / "Cargo.toml",
     }
     for package_name, manifest_path in release_manifests.items():
         replace_manifest_package_version(manifest_path, package_name, args.version)

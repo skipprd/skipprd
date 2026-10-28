@@ -1,0 +1,26 @@
+{
+  "bundle_version": "15.12.1",
+  "manifests": [
+    {
+      "name": "s3-runtime-source",
+      "plugin_name": "S3",
+      "kind": "DataSource",
+      "manifest_filename": "s3-source.json",
+      "manifest_url": "https://install.skippr.io/releases/runtime-plugins/plugins/s3-source/versions/0.1.5/s3-source.json"
+    },
+    {
+      "name": "athena-runtime-sink",
+      "plugin_name": "Athena",
+      "kind": "DataSink",
+      "manifest_filename": "athena-sink.json",
+      "manifest_url": "https://install.skippr.io/releases/runtime-plugins/plugins/athena-sink/versions/0.1.10/athena-sink.json"
+    },
+    {
+      "name": "glue-runtime-schema",
+      "plugin_name": "Glue",
+      "kind": "SchemaSink",
+      "manifest_filename": "glue-schema.json",
+      "manifest_url": "https://install.skippr.io/releases/runtime-plugins/plugins/glue-schema/versions/0.1.3/glue-schema.json"
+    }
+  ]
+}

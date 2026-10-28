@@ -10,22 +10,7 @@ members = [
     "crates/skippr-object-writer",
     "crates/skippr-offset-store-dynamodb",
     "crates/skippr-runtime-sdk",
-    "crates/skippr-cli",
-    "crates/skippr-admin",
     "crates/skipprd-dfs-hub-compat-tests",
-    "crates/skipprd-react-suite-data-engineer",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-postgres",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-bigquery",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-athena",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-dbt",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-catalog",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-snowflake",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-mssql",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-databricks",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-synapse",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-redshift",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-clickhouse",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-motherduck",
     "plugins/data_source/*",
     "plugins/data_sink/*",
     "plugins/schema_sink/*",
@@ -67,13 +52,6 @@ thiserror = "1.0.58"
 skippr-core = { path = "crates/skippr-core" }
 skippr-object-writer = { path = "crates/skippr-object-writer" }
 skippr-runtime-sdk = { path = "crates/skippr-runtime-sdk" }
-react-core = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
-react = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
-react-module-storage-s3 = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
-react-module-storage-local = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
-react-module-storage-memory = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
-react-module-provider-vector-lance = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
-react-suite-debugger = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
 chrono-tz = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 

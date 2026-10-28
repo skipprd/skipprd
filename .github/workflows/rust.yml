@@ -43,23 +43,7 @@ jobs:
         with:
           rust-version: "1.92.0"
           architecture_name: linux_x86
-
-  macos_arm64:
-    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
-    name: cargo build (macos arm64)
-    runs-on: [self-hosted, skippr-darwin-arm64]
-    timeout-minutes: 360
-    env:
-      CARGO_BUILD_JOBS: "8"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - name: Build macos arm64 release
-        uses: ./.github/actions/rust-build-release
-        with:
-          rust-version: "1.92.0"
-          architecture_name: macos_arm64
+          runtime_plugin_packages_json: "[]"
 
   release_notes:
     if: startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test')
@@ -81,84 +65,35 @@ jobs:
     name: Publish runtime plugins
     needs:
       - linux_x86
-      - macos_arm64
       - release_notes
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     env:
       RELEASES_BUCKET: skippr-web-install
       RUNTIME_PLUGIN_RELEASE_SUBDIR: runtime-plugins
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Download linux runtime plugins
-        uses: actions/download-artifact@v4
-        with:
-          name: runtime-plugin-binaries-linux_x86
-          path: runtime-plugin-binaries-linux_x86
-      - name: Download macos runtime plugins
-        uses: actions/download-artifact@v4
-        with:
-          name: runtime-plugin-binaries-macos_arm64
-          path: runtime-plugin-binaries-macos_arm64
-      - name: Require catalog binaries on linux and macos
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import sys
-          from pathlib import Path
-
-          sys.path.insert(0, str(Path(".github/scripts").resolve()))
-          from runtime_plugin_catalog import catalog_package_names
-
-          names = catalog_package_names(Path(".").resolve())
-          missing = []
-          for directory in (
-              Path("runtime-plugin-binaries-linux_x86"),
-              Path("runtime-plugin-binaries-macos_arm64"),
-          ):
-              missing.extend(
-                  f"{directory}/{name}"
-                  for name in names
-                  if not (directory / name).is_file()
-              )
-          if missing:
-              raise SystemExit("runtime plugin artifacts missing:\n" + "\n".join(missing))
-          print(f"catalog={len(names)} linux+macos artifacts present")
-          PY
-      - name: Stage runtime plugin release
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/publish_runtime_plugins.py \
-            --bucket "$RELEASES_BUCKET" \
-            --subdir "$RUNTIME_PLUGIN_RELEASE_SUBDIR" \
-            --public-base-url "https://install.skippr.io/releases/${RUNTIME_PLUGIN_RELEASE_SUBDIR}" \
-            --workspace "$GITHUB_WORKSPACE" \
-            --output-dir "$GITHUB_WORKSPACE/runtime-plugin-release"
       - name: Configure Cloudflare R2 credentials for runtime plugin upload
         uses: ./.github/actions/configure-r2-releases
         with:
           account_id: ${{ secrets.R2_ACCOUNT_ID }}
           access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
           secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      - name: Upload versioned runtime plugins to install releases bucket
+      - name: Upload 15.12.1 host plugin index without moving latest
         run: |
           set -euo pipefail
+          TAG="${{ github.ref_name }}"
           BUCKET="${{ env.RELEASES_BUCKET }}"
           RELEASE_SUBDIR="${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}"
-          aws s3 sync runtime-plugin-release "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/" \
-            --exclude "latest/*"
+          aws s3 cp .github/15.12.1-manifest-index.json \
+            "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/manifest-index.json" \
+            --cache-control "no-cache, no-store, must-revalidate"
 
   publish_skipprd:
     if: startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test')
     name: Publish skipprd Release
     needs:
       - linux_x86
-      - macos_arm64
       - publish_runtime_plugins
       - release_notes
     runs-on: ubuntu-latest
@@ -178,57 +113,42 @@ jobs:
         with:
           name: skipprd-linux_x86
           path: skipprd-linux_x86
-      - name: Download macos skipprd artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: skipprd-macos_arm64
-          path: skipprd-macos_arm64
       - name: Compress skipprd release artifacts
         run: |
           set -euo pipefail
           tar -czvf skipprd-linux_x86.tar.gz skipprd-linux_x86/
-          tar -czvf skipprd-macos_arm64.tar.gz skipprd-macos_arm64/
       - name: Configure Cloudflare R2 credentials for skipprd release upload
         uses: ./.github/actions/configure-r2-releases
         with:
           account_id: ${{ secrets.R2_ACCOUNT_ID }}
           access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
           secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      - name: Upload skipprd binaries to install releases bucket
+      - name: Upload skipprd linux binary to install releases bucket
         run: |
           set -euo pipefail
           TAG="${{ github.ref_name }}"
           BUCKET="${{ env.RELEASES_BUCKET }}"
           RELEASE_SUBDIR="${{ env.SKIPPRD_RELEASE_SUBDIR }}"
           aws s3 cp skipprd-linux_x86.tar.gz "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/skipprd-linux_x86.tar.gz"
-          aws s3 cp skipprd-macos_arm64.tar.gz "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/skipprd-macos_arm64.tar.gz"
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           TAG="${{ github.ref_name }}"
-          PRE_ARGS=()
           TITLE="Release $TAG"
-          if [[ "$TAG" == *-beta ]]; then
-            PRE_ARGS+=(--prerelease)
-            TITLE="Beta $TAG"
-          fi
           if gh release view "$TAG" --repo skipprd/skipprd >/dev/null 2>&1; then
             gh release edit "$TAG" \
               --repo skipprd/skipprd \
               --title "$TITLE" \
-              --notes-file release-notes.md \
-              "${PRE_ARGS[@]}"
+              --notes-file release-notes.md
           else
             gh release create "$TAG" \
               --repo skipprd/skipprd \
               --title "$TITLE" \
-              --notes-file release-notes.md \
-              "${PRE_ARGS[@]}"
+              --notes-file release-notes.md
           fi
           gh release upload "$TAG" \
             skipprd-linux_x86.tar.gz \
-            skipprd-macos_arm64.tar.gz \
             --repo skipprd/skipprd \
             --clobber

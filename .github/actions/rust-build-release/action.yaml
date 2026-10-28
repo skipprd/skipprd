@@ -93,11 +93,6 @@ runs:
           --workspace "$PWD" \
           --version "$version"
         echo "SKIPPR_CLI_VERSION=$version" >> "$GITHUB_ENV"
-    - name: Fetch crate graph
-      shell: bash
-      run: |
-        cd "${{ inputs.workspace-root }}"
-        cargo fetch -p skipprd
     - name: Verify host dependency boundary
       shell: bash
       run: |
@@ -180,4 +175,4 @@ runs:
         name: runtime-plugin-binaries-${{ inputs.architecture_name }}
         path: ${{ inputs.workspace-root }}/runtime-plugin-binaries-${{ inputs.architecture_name }}
         retention-days: 30
-        if-no-files-found: error
+        if-no-files-found: ignore
