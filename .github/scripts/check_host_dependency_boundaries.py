@@ -61,10 +61,13 @@ def collect_leaked_host_packages(*, widest_features: bool) -> set[str]:
     result = subprocess.run(
         command,
         cwd=REPO_ROOT,
-        check=True,
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        raise SystemExit(result.returncode)
 
     leaked = set()
     for line in result.stdout.splitlines():

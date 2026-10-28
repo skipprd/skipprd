@@ -41,6 +41,14 @@ runs:
     - name: Setup Rust toolchain
       shell: bash
       run: |
+        set -euo pipefail
+        export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+        echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+        if ! command -v rustup >/dev/null 2>&1; then
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          # shellcheck source=/dev/null
+          source "${CARGO_HOME:-$HOME/.cargo}/env"
+        fi
         rustup toolchain install "${{ inputs.rust-version }}"
         rustup default "${{ inputs.rust-version }}"
         rustup component add rustfmt
@@ -85,6 +93,11 @@ runs:
           --workspace "$PWD" \
           --version "$version"
         echo "SKIPPR_CLI_VERSION=$version" >> "$GITHUB_ENV"
+    - name: Fetch crate graph
+      shell: bash
+      run: |
+        cd "${{ inputs.workspace-root }}"
+        cargo fetch -p skipprd
     - name: Verify host dependency boundary
       shell: bash
       run: |
