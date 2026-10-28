@@ -348,7 +348,7 @@ async fn discover_runtime_plugin(
 ) -> io::Result<ResolvedRuntimePlugin> {
     let client = reqwest::Client::new();
     let requested_plugin_version = configured_runtime_plugin_version(configured_plugin_version);
-    let index_url = latest_manifest_index_url();
+    let index_url = host_manifest_index_url();
     debug!(
         "Resolving runtime {} plugin '{}' from published registry requested_version='{}' index_url={}",
         runtime_plugin_kind_label(expected_kind),
@@ -385,8 +385,16 @@ async fn discover_runtime_plugin(
     ResolvedRuntimePlugin::load(manifest_path)
 }
 
-fn latest_manifest_index_url() -> String {
-    format!("{DEFAULT_DISCOVERY_BASE_URL}/latest/manifest-index.json")
+fn host_release_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+fn format_host_manifest_index_url(host_version: &str) -> String {
+    format!("{DEFAULT_DISCOVERY_BASE_URL}/{host_version}/manifest-index.json")
+}
+
+fn host_manifest_index_url() -> String {
+    format_host_manifest_index_url(host_release_version())
 }
 
 fn rewrite_manifest_url_version(manifest_url: &str, version: &str) -> io::Result<String> {
@@ -589,7 +597,7 @@ mod tests {
 
     use super::{
         append_metadata_refresh_query, configured_runtime_plugin_version, is_retryable_status,
-        latest_manifest_index_url, manifest_cache_key, manifest_refresh_enabled,
+        format_host_manifest_index_url, manifest_cache_key, manifest_refresh_enabled,
         metadata_fetch_backoff, missing_runtime_plugin_message, resolve_local_runtime_plugin,
         resolved_runtime_plugin_cache_key, rewrite_manifest_url_version, runtime_plugin_cache_root,
         use_local_plugin_code, RuntimePluginIndex, RuntimePluginIndexEntry,
@@ -634,11 +642,13 @@ mod tests {
     }
 
     #[test]
-    fn manifest_index_url_uses_latest_prefix() {
+    fn manifest_index_url_uses_host_semver() {
         assert_eq!(
-            latest_manifest_index_url(),
-            "https://install.skippr.io/releases/runtime-plugins/latest/manifest-index.json"
+            format_host_manifest_index_url("15.12.1"),
+            "https://install.skippr.io/releases/runtime-plugins/15.12.1/manifest-index.json"
         );
+        assert!(!format_host_manifest_index_url("15.12.1")
+            .contains("/latest/manifest-index.json"));
     }
 
     #[test]

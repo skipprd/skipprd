@@ -315,6 +315,20 @@ def main() -> None:
         json.dump(latest_index, handle, indent=2)
         handle.write("\n")
 
+    # Tagged hosts fetch /{semver}/manifest-index.json, not /latest/.
+    ref = os.environ.get("GITHUB_REF", "")
+    tag = os.environ.get("GITHUB_REF_NAME", "").strip()
+    if ref.startswith("refs/tags/") and tag and tag != "latest":
+        host_index = copy.deepcopy(latest_index)
+        host_index["bundle_version"] = tag
+        host_dir = output_dir / tag
+        host_dir.mkdir(parents=True, exist_ok=True)
+        host_index_path = host_dir / "manifest-index.json"
+        validate_manifest_index_sdk_build_fingerprint(host_index, catalog_entries)
+        with host_index_path.open("w", encoding="utf-8") as handle:
+            json.dump(host_index, handle, indent=2)
+            handle.write("\n")
+
 
 if __name__ == "__main__":
     main()

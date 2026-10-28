@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [15.12.1]
+
+### Fixed
+
+- Runtime plugin discovery uses `{skipprd-semver}/manifest-index.json`, not `/latest/`. Tagged 15.12.1 hosts stay on the protocol-17 plugin bundle published with this tag.
+
 ## [5.7.2] - 2024-03-23
 
 ### Added

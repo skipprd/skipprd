@@ -1134,6 +1134,7 @@ jobs:
             --recursive \
             --exclude "*" \
             --include "*.json" \
+            --exclude "latest/*" \
             --cache-control "no-cache, no-store, must-revalidate" \
             --content-type "application/json"
 
@@ -2100,12 +2101,9 @@ jobs:
           TAG="${{ github.ref_name }}"
           BUCKET="${{ env.RELEASES_BUCKET }}"
           RELEASE_SUBDIR="${{ env.SKIPPRD_RELEASE_SUBDIR }}"
-          LATEST_POINTER="${{ env.SKIPPRD_LATEST_POINTER }}"
           for f in skipprd-*.tar.gz; do
             aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
           done
-          printf '%s' "$TAG" > "$LATEST_POINTER"
-          aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
 
   publish_skippr:
     name: Publish skippr Release
@@ -2148,12 +2146,6 @@ jobs:
               aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
             fi
           done
-          printf '%s' "$TAG" > "$LATEST_POINTER"
-          aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
-          # Root install scripts on the CDN (install.skippr.io/install.sh)
-          aws s3 cp install.sh "s3://${BUCKET}/install.sh" \
-            --content-type "text/x-shellscript; charset=utf-8" \
-            --cache-control "no-cache, no-store, must-revalidate"
 
   publish_github_release:
     name: Publish GitHub Release
@@ -2223,8 +2215,6 @@ jobs:
               aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
             fi
           done
-          printf '%s' "$TAG" > "$LATEST_POINTER"
-          aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
 
   publish_mac_release:
     name: Publish macOS Release Assets
