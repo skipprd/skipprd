@@ -45,15 +45,20 @@ Each memo is a short plain-English note to `paul@paulhudson.me`: what the number
 
 ## Local smoke (this Mac, before GitHub)
 
-Release host + only the plugins the cell needs (`USE_LOCAL_PLUGIN_CODE=1`):
+Release host + only the plugins the cell needs (`USE_LOCAL_PLUGIN_CODE=1`). Plugin crates live in sibling `skipprd-plugins`; point `.host` at this skipprd checkout and share `CARGO_TARGET_DIR`:
 
 ```bash
-cargo build --release -p skipprd --bin skipprd \
+plugins="${SKIPPR_PLUGINS_ROOT:-$PWD/../skipprd-plugins}"
+ln -sfn "$PWD" "$plugins/.host"
+export CARGO_TARGET_DIR="$PWD/target"
+cargo build --release -p skipprd --bin skipprd
+(cd "$plugins" && cargo build --release \
   -p skippr-plugin-data-source-file \
   -p skippr-plugin-data-sink-file \
   -p skippr-plugin-data-sink-duckdb \
-  -p skippr-plugin-schema-sink-duckdb
+  -p skippr-plugin-schema-sink-duckdb)
 export SKIPPRD_BIN="$PWD/target/release/skipprd"
+export SKIP_CARGO_PLUGIN_BUILD=1
 python3 tests/perf/run.py --scenario ingest-a-duckdb,copy-b-json-json,ingest-json-parquet,ingest-csv-duckdb,duckdb-ndjson,duckdb-csv,duckdb-json-array,duckdb-insert-values,ingest-ops-duckdb,ingest-aggregates-duckdb --scale smoke
 ```
 

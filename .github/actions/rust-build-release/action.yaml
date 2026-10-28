@@ -194,4 +194,4 @@ runs:
         name: runtime-plugin-binaries-${{ inputs.architecture_name }}
         path: ${{ inputs.workspace-root }}/runtime-plugin-binaries-${{ inputs.architecture_name }}
         retention-days: 30
-        if-no-files-found: ignore
+        if-no-files-found: error
