@@ -428,6 +428,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("fetch-depth: 0", checkout)
         self.assertIn("fetch-tags: true", checkout)
         self.assertIn("github.ref_name", checkout)
+        self.assertIn("python-", checkout)
+        self.assertIn("'test'", checkout)
         for job, body in slices.items():
             self.assertIn(
                 "checkout-skipprd-plugins",

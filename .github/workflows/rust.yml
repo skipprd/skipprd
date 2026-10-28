@@ -28,7 +28,7 @@ jobs:
           path: skipprd-plugins
           fetch-depth: 0
           fetch-tags: true
-          ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'main' }}
+          ref: ${{ (startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref_name, 'python-') && !startsWith(github.ref_name, 'test')) && github.ref_name || 'main' }}
       - name: Link host workspace
         run: ln -sfn "$GITHUB_WORKSPACE" skipprd-plugins/.host
       - uses: actions/setup-python@v5
@@ -68,7 +68,7 @@ jobs:
           path: skipprd-plugins
           fetch-depth: 0
           fetch-tags: true
-          ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'main' }}
+          ref: ${{ (startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref_name, 'python-') && !startsWith(github.ref_name, 'test')) && github.ref_name || 'main' }}
       - name: Build linux x86 release
         uses: ./skipprd/.github/actions/rust-build-release
         with:
@@ -100,7 +100,7 @@ jobs:
           path: skipprd-plugins
           fetch-depth: 0
           fetch-tags: true
-          ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'main' }}
+          ref: ${{ (startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref_name, 'python-') && !startsWith(github.ref_name, 'test')) && github.ref_name || 'main' }}
       - name: Build macos arm64 release
         uses: ./skipprd/.github/actions/rust-build-release
         with:

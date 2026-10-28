@@ -35,6 +35,10 @@ Last production tag: `git tag --list '[0-9]*' --sort=-v:refname` (skip `0.0.0` a
 ```bash
 python3 -c "import sys; sys.path.insert(0,'.github/scripts'); from engine_tag import next_beta_tag; import subprocess; print(next_beta_tag(subprocess.check_output(['git','tag','--list','[0-9]*'], text=True).split()))"
 # example: 18.3.10-beta when 18.3.9 is latest production
+# Tag skipprd-plugins first so host tag CI can check out that ref (not plugins main).
+git -C ../skipprd-plugins tag -f <x.y.z-beta>
+git -C ../skipprd-plugins push origin :refs/tags/<x.y.z-beta> || true
+git -C ../skipprd-plugins push origin <x.y.z-beta>
 git push origin HEAD
 git tag -f <x.y.z-beta>
 git push origin :refs/tags/<x.y.z-beta> || true
