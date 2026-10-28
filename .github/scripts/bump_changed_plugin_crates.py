@@ -39,6 +39,21 @@ def bump_patch(version: str) -> str:
     return f"{major}.{minor}.{int(patch) + 1}"
 
 
+def parse_xyz(version: str) -> tuple[int, int, int]:
+    match = PLAIN_PATCH_SEMVER_RE.fullmatch(version.strip())
+    if match is None:
+        raise SystemExit(f"plugin version {version!r} is not x.y.z; bump it by hand")
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def next_publishable_version(current: str, published: str) -> str:
+    """New patch that is strictly newer than both the working tree and last published."""
+    nxt = bump_patch(current)
+    if parse_xyz(nxt) <= parse_xyz(published):
+        return bump_patch(published)
+    return nxt
+
+
 def posix_path(path: str) -> str:
     path = path.replace("\\", "/")
     while path.startswith("./"):
@@ -131,13 +146,29 @@ def git_env(workspace: Path | None = None) -> dict[str, str]:
 
 
 def git_changed_paths(workspace: Path, base: str) -> list[str]:
+    env = git_env(workspace)
+    probe = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{base}^{{commit}}"],
+        cwd=workspace,
+        capture_output=True,
+        env=env,
+    )
+    if probe.returncode != 0:
+        from plugin_workspace import resolve_skipprd_workspace
+
+        try:
+            host = resolve_skipprd_workspace(workspace)
+        except SystemExit as exc:
+            raise SystemExit(f"git ref {base} not found in {workspace}: {exc}") from exc
+        if host.resolve() != workspace.resolve():
+            return git_changed_paths(host, base)
+        raise SystemExit(f"git ref {base} not found in {workspace}")
     seen: set[str] = set()
     commands = (
         ["git", "diff", "--name-only", base],
         ["git", "diff", "--name-only", "--cached", base],
         ["git", "ls-files", "--others", "--exclude-standard"],
     )
-    env = git_env(workspace)
     for command in commands:
         output = subprocess.check_output(command, cwd=workspace, text=True, env=env)
         for line in output.splitlines():
@@ -147,14 +178,14 @@ def git_changed_paths(workspace: Path, base: str) -> list[str]:
     return sorted(seen)
 
 
-def git_base_package_version(workspace: Path, base: str, rel_dir: str) -> str | None:
+def _package_version_from_git(git_root: Path, base: str, rel_dir: str) -> str | None:
     git_path = f"{rel_dir}/Cargo.toml"
     result = subprocess.run(
         ["git", "show", f"{base}:{git_path}"],
-        cwd=workspace,
+        cwd=git_root,
         text=True,
         capture_output=True,
-        env=git_env(workspace),
+        env=git_env(git_root),
     )
     if result.returncode != 0:
         return None
@@ -170,6 +201,21 @@ def git_base_package_version(workspace: Path, base: str, rel_dir: str) -> str | 
         if match is not None:
             return match.group(1)
     return None
+
+
+def git_base_package_version(workspace: Path, base: str, rel_dir: str) -> str | None:
+    version = _package_version_from_git(workspace, base, rel_dir)
+    if version is not None:
+        return version
+    from plugin_workspace import resolve_skipprd_workspace
+
+    try:
+        host = resolve_skipprd_workspace(workspace)
+    except SystemExit:
+        return None
+    if host.resolve() == workspace.resolve():
+        return None
+    return _package_version_from_git(host, base, rel_dir)
 
 
 def packages_selected_for_bump(
@@ -199,9 +245,12 @@ def bump_changed_plugin_crates(
         if base_versions is not None:
             if rel_dir not in base_versions:
                 continue
-            if current != base_versions[rel_dir]:
+            published = base_versions[rel_dir]
+            if parse_xyz(current) > parse_xyz(published):
                 continue
-        new_version = bump_patch(current)
+            new_version = next_publishable_version(current, published)
+        else:
+            new_version = bump_patch(current)
         manifest.write_text(
             replace_package_version(manifest.read_text(encoding="utf-8"), new_version),
             encoding="utf-8",
@@ -263,9 +312,16 @@ def main(argv: list[str] | None = None) -> int:
         for rel_dir in selected:
             current = read_package_version(catalog[rel_dir])
             if base_versions is not None:
-                if rel_dir not in base_versions or current != base_versions[rel_dir]:
+                if rel_dir not in base_versions:
                     continue
-            print(f"{rel_dir}: {current} -> {bump_patch(current)}")
+                published = base_versions[rel_dir]
+                if parse_xyz(current) > parse_xyz(published):
+                    continue
+                print(
+                    f"{rel_dir}: {current} -> {next_publishable_version(current, published)}"
+                )
+            else:
+                print(f"{rel_dir}: {current} -> {bump_patch(current)}")
         return 0
 
     bumped = bump_changed_plugin_crates(

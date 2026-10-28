@@ -172,6 +172,18 @@ class PreviousProtocolCompatibleReleaseTests(unittest.TestCase):
         finally:
             compat.git_output = original
 
+    def test_skips_when_matching_protocol_tag_has_no_plugin_versions(self) -> None:
+        result = compat.previous_protocol_compatible_release(
+            current_tag="18.4.0",
+            current_protocol=22,
+            tags=["18.4.0", "18.3.11", "0.0.0"],
+            protocol_by_tag={"18.3.11": 22},
+            versions_by_tag={"18.3.11": {}},
+            current_versions={"file": "0.1.10"},
+        )
+        self.assertTrue(result["skip"])
+        self.assertIsNone(result.get("prev_tag"))
+
     def test_current_workspace_versions_reads_skipprd_plugins_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             parent = Path(tmp)

@@ -15,6 +15,8 @@ python3 ../skipprd-plugins/.github/scripts/bump_changed_plugin_crates.py --base 
 python3 .github/scripts/runtime_plugin_release_plan.py
 ```
 
+The same engine tag MUST also land on skipprd-plugins (`git tag <tag>` there) so `versions_at_tag` can read crate versions after skipprd no longer contains `plugins/`.
+
 Everyday plugin commits do **not** bump. `/skippr-release` does. Skill: **`skippr-release`**. Public copy: **`skipprd-docs`**.
 
 MUST NOT `--no-verify`, MUST NOT `aws s3 sync --delete`, MUST NOT stamp root `Cargo.toml` locally (CI stamps the tag; crate stays `0.1.0`).

@@ -102,6 +102,21 @@ class BumpChangedPluginCratesTests(unittest.TestCase):
             )
             self.assertIn('other = "0.1.12"', manifest)
 
+    def test_crate_behind_published_version_bumps_past_published(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            self.write_plugin_workspace(workspace)
+            bumped = bump_changed_plugin_crates.bump_changed_plugin_crates(
+                workspace,
+                changed_paths=["plugins/data_source/s3/src/lib.rs"],
+                base_versions={"plugins/data_source/s3": "0.1.9"},
+            )
+            self.assertEqual(bumped, {"plugins/data_source/s3": "0.1.10"})
+            self.assertEqual(
+                self.package_version(workspace, "plugins/data_source/s3/Cargo.toml"),
+                "0.1.10",
+            )
+
     def test_already_bumped_crate_is_left_alone(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)

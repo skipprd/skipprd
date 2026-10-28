@@ -54,7 +54,7 @@ python3 ../skipprd-plugins/.github/scripts/bump_changed_plugin_crates.py --base 
 python3 .github/scripts/runtime_plugin_release_plan.py
 ```
 
-Do not bump plugin crates on everyday commits. Do not stamp root `Cargo.toml` locally (stays `0.1.0`; CI stamps the tag). Engine tags are unprefixed semver.
+Tag skipprd-plugins with the same engine semver so previous-protocol e2e can `git show <tag>:plugins/...`. Do not bump plugin crates on everyday commits. Do not stamp root `Cargo.toml` locally (stays `0.1.0`; CI stamps the tag). Engine tags are unprefixed semver.
 
 ## Key gotchas
 

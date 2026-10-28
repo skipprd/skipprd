@@ -131,6 +131,8 @@ def previous_protocol_compatible_release(
         if protocol != current_protocol:
             continue
         previous_versions = versions_by_tag.get(tag, {})
+        if not previous_versions:
+            continue
         return {
             "skip": False,
             "prev_tag": tag,

@@ -1142,6 +1142,13 @@ schema_sinks:
         self.assertIn("file:///tmp/lake", rewritten)
         self.assertNotIn("R2_S3_ENDPOINT_PLACEHOLDER", rewritten)
 
+    def test_stage_local_runtime_release_builds_plugins_from_plugin_workspace(self) -> None:
+        import inspect
+
+        source = inspect.getsource(runtime_e2e_harness.stage_local_runtime_release)
+        self.assertIn("cwd=PLUGIN_ROOT", source)
+        self.assertNotIn("cwd=REPO_ROOT", source)
+
 
 if __name__ == "__main__":
     unittest.main()

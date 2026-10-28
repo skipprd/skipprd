@@ -43,6 +43,11 @@ python3 .github/scripts/runtime_plugin_release_plan.py
 git add … && git commit …        # hook runs scripts/precommit.sh; never --no-verify
 git push origin HEAD
 git tag <tag> && git push origin <tag>
+# skipprd-plugins must carry the same engine tag so previous-protocol pins can git-show crate versions.
+git -C ../skipprd-plugins add plugins
+git -C ../skipprd-plugins commit -m "Bump plugin crate versions for <tag>."
+git -C ../skipprd-plugins push origin HEAD
+git -C ../skipprd-plugins tag <tag> && git -C ../skipprd-plugins push origin <tag>
 ```
 
 Python wheel: bump `pyproject.toml` and `python/Cargo.toml` together **only** when `python/` or `pyproject.toml` changed since `<last-tag>`. Do not bump Python just to clobber PyPI. Do not stamp root `Cargo.toml`.

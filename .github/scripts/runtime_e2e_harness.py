@@ -1422,7 +1422,7 @@ def stage_local_runtime_release(
     build_env = os.environ.copy()
     build_env["CARGO_TARGET_DIR"] = str(build_target_dir)
     build_env.setdefault("CARGO_INCREMENTAL", "0")
-    run_command(build_command, env=build_env)
+    run_command(build_command, env=build_env, cwd=PLUGIN_ROOT)
 
     output_dir = output_dir.expanduser().resolve()
     manifest_index_entries = []
