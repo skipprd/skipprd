@@ -411,6 +411,12 @@ class RustCiTests(unittest.TestCase):
             "e2e_s3_list_open_keys": text.split("\n  e2e_s3_list_open_keys:", 1)[1].split(
                 "\n  e2e_s3_file_copy:", 1
             )[0],
+            "e2e_prev_plugins": text.split("\n  e2e_prev_plugins:", 1)[1].split(
+                "\n  e2e_prev_host:", 1
+            )[0],
+            "e2e_prev_host": text.split("\n  e2e_prev_host:", 1)[1].split(
+                "\n  publish_skipprd:", 1
+            )[0],
         }
         checkout = (
             ROOT / ".github" / "actions" / "checkout-skipprd-plugins" / "action.yaml"
@@ -488,11 +494,13 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("perf-*-linux-flamegraph", text)
         self.assertIn("analyze.py", text)
         self.assertIn("python3 -m pip install --quiet boto3", text)
-        self.assertRegex(
+        self.assertIn(
+            "cargo build --profile profiling -p skipprd --bin skipprd",
             text,
-            r"cargo build --profile profiling -p skipprd --bin skipprd[^\n]*\n\s+cargo build --profile profiling",
         )
+        self.assertIn('(cd "$plugins" && cargo build --profile profiling', text)
         self.assertIn("target/profiling/", text)
+        self.assertIn("checkout-skipprd-plugins", text)
         self.assertIn("perf", text)
         self.assertNotIn("--delete", text)
         self.assertIn("actions/e2e/perf", text)
@@ -551,6 +559,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("perf-stat", text)
         self.assertIn("skippr-plugin-data-sink-skipprlake", text)
         self.assertNotIn("skippr-plugin-data-sink-file", text)
+        self.assertIn('(cd "$plugins" && cargo build --profile profiling', text)
+        self.assertIn("checkout-skipprd-plugins", text)
         self.assertIn("linux_analyze", text)
         self.assertIn("build_linux_profile", text)
         self.assertIn("perf.folded", text)

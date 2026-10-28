@@ -20,8 +20,26 @@ def _has_plugin_tree(root: Path) -> bool:
     return False
 
 
+def _toml_package_name(root: Path) -> str | None:
+    cargo = root / "Cargo.toml"
+    if not cargo.is_file():
+        return None
+    in_package = False
+    for line in cargo.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_package = stripped == "[package]"
+            continue
+        if in_package and stripped.startswith("name"):
+            _, _, value = stripped.partition("=")
+            return value.strip().strip("\"'")
+    return None
+
+
 def _is_skipprd_host(root: Path) -> bool:
-    return (root / "crates" / "skippr-runtime-sdk").is_dir()
+    if (root / "crates" / "skippr-runtime-sdk").is_dir():
+        return True
+    return _toml_package_name(root) == "skipprd"
 
 
 def _is_plugin_workspace(root: Path) -> bool:

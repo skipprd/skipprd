@@ -1,4 +1,6 @@
 import importlib.util
+import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -169,6 +171,25 @@ class PreviousProtocolCompatibleReleaseTests(unittest.TestCase):
             self.assertEqual(compat.protocol_at_tag(Path("/tmp"), "1.2.3"), 22)
         finally:
             compat.git_output = original
+
+    def test_current_workspace_versions_reads_skipprd_plugins_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            host = parent / "skipprd"
+            plugins = parent / "skipprd-plugins"
+            host.mkdir()
+            crate = plugins / "plugins" / "data_source" / "file"
+            crate.mkdir(parents=True)
+            (crate / "Cargo.toml").write_text(
+                '[package]\nname = "skippr-plugin-data-source-file"\nversion = "0.9.9"\n',
+                encoding="utf-8",
+            )
+            os.environ["SKIPPR_PLUGINS_ROOT"] = str(plugins)
+            try:
+                versions = compat.current_workspace_versions(host)
+            finally:
+                os.environ.pop("SKIPPR_PLUGINS_ROOT", None)
+            self.assertEqual(versions.get("file"), "0.9.9")
 
 
 if __name__ == "__main__":

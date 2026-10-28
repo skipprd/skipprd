@@ -276,6 +276,22 @@ data_sources:
             self.assertNotIn("sha256", artifact)
             self.assertNotIn("url", artifact)
 
+    def test_skip_cargo_build_resolves_relative_target_dir_against_host(self) -> None:
+        host = local_runtime_plugins.REPO_ROOT
+        plugins = local_runtime_plugins.PLUGIN_ROOT
+        relative_skip = local_runtime_plugins.resolve_plugin_artifact_dir(
+            skip_cargo_build=True, env={"CARGO_TARGET_DIR": "target"}
+        )
+        self.assertEqual(relative_skip, host / "target")
+        relative_build = local_runtime_plugins.resolve_plugin_artifact_dir(
+            skip_cargo_build=False, env={"CARGO_TARGET_DIR": "target"}
+        )
+        self.assertEqual(relative_build, plugins / "target")
+        default_skip = local_runtime_plugins.resolve_plugin_artifact_dir(
+            skip_cargo_build=True, env={}
+        )
+        self.assertEqual(default_skip, host / "target")
+
     def test_host_triple_without_rustc_uses_uname(self) -> None:
         host = type("Uname", (), {"sysname": "Linux", "machine": "x86_64"})()
         with mock.patch.dict(os.environ, {"SKIPPR_TARGET_TRIPLE": ""}, clear=False):

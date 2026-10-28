@@ -47,6 +47,12 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("test_bump_changed_plugin_crates.py", text)
         self.assertIn("cargo test -p skipprd --lib", text)
         self.assertIn("skippr-connect-gen", text)
+        self.assertIn("checkout-skipprd-plugins", text)
+        self.assertGreaterEqual(
+            text.count("checkout-skipprd-plugins"),
+            2,
+            "linux and darwin must both checkout skipprd-plugins for connect-gen and --lib",
+        )
         self.assertNotIn("cargo test --workspace", text)
 
     def test_write_document_uses_posix_fsync_not_apple_fullfsync(self):

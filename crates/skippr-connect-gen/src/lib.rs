@@ -130,13 +130,35 @@ pub fn workspace_root(from: &Path) -> PathBuf {
     from.to_path_buf()
 }
 
+fn has_plugin_tree(path: &Path) -> bool {
+    ["data_source", "data_sink", "schema_sink"]
+        .iter()
+        .any(|kind| path.join("plugins").join(kind).is_dir())
+}
+
+fn is_skipprd_host(path: &Path) -> bool {
+    if path.join("crates").join("skippr-runtime-sdk").is_dir() {
+        return true;
+    }
+    fs::read_to_string(path.join("Cargo.toml"))
+        .ok()
+        .is_some_and(|text| {
+            text.lines().any(|line| {
+                let trimmed = line.trim();
+                trimmed == "name = \"skipprd\"" || trimmed == "name = 'skipprd'"
+            })
+        })
+}
+
+fn is_plugin_workspace(path: &Path) -> bool {
+    has_plugin_tree(path) && !is_skipprd_host(path)
+}
+
 /// skipprd-plugins checkout. Host skipprd has no plugins/ tree.
 pub fn plugin_workspace_root(host_root: &Path) -> Result<PathBuf, String> {
     if let Ok(env) = std::env::var("SKIPPR_PLUGINS_ROOT") {
         let path = PathBuf::from(env);
-        if path.join("plugins").join("data_source").is_dir()
-            && !path.join("crates").join("skippr-runtime-sdk").is_dir()
-        {
+        if is_plugin_workspace(&path) {
             return Ok(path);
         }
         return Err(format!(
@@ -144,18 +166,14 @@ pub fn plugin_workspace_root(host_root: &Path) -> Result<PathBuf, String> {
             path.display()
         ));
     }
-    if host_root.join("plugins").join("data_source").is_dir()
-        && !host_root.join("crates").join("skippr-runtime-sdk").is_dir()
-    {
+    if is_plugin_workspace(host_root) {
         return Ok(host_root.to_path_buf());
     }
     let sibling = host_root
         .parent()
         .ok_or_else(|| "host root has no parent directory".to_string())?
         .join("skipprd-plugins");
-    if sibling.join("plugins").join("data_source").is_dir()
-        && !sibling.join("crates").join("skippr-runtime-sdk").is_dir()
-    {
+    if is_plugin_workspace(&sibling) {
         return Ok(sibling);
     }
     Err(

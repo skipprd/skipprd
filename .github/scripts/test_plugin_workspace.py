@@ -68,6 +68,28 @@ class PluginWorkspaceTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 plugin_workspace.resolve_plugin_workspace(host)
 
+    def test_leftover_host_plugins_without_sdk_crate_is_not_the_plugin_workspace(self) -> None:
+        """A leftover skipprd/plugins tree is illegal even if the SDK crate is missing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            host = Path(tmp) / "skipprd"
+            leftover = host / "plugins" / "data_source" / "file"
+            leftover.mkdir(parents=True)
+            (leftover / "Cargo.toml").write_text("[package]\nname = 'file'\n", encoding="utf-8")
+            (host / "Cargo.toml").write_text(
+                '[package]\nname = "skipprd"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+            os.environ.pop(plugin_workspace.ENV_PLUGINS_ROOT, None)
+            with self.assertRaises(SystemExit) as raised:
+                plugin_workspace.resolve_plugin_workspace(host)
+            self.assertIn("skipprd-plugins", str(raised.exception))
+            os.environ[plugin_workspace.ENV_PLUGINS_ROOT] = str(host)
+            try:
+                with self.assertRaises(SystemExit):
+                    plugin_workspace.resolve_plugin_workspace(host)
+            finally:
+                os.environ.pop(plugin_workspace.ENV_PLUGINS_ROOT, None)
+
     def test_skipprd_root_from_plugins_sibling(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             parent = Path(tmp)

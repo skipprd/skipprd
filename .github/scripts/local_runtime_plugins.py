@@ -57,6 +57,24 @@ def print_step(message: str) -> None:
     print(message, file=sys.stderr)
 
 
+def resolve_plugin_artifact_dir(*, skip_cargo_build: bool, env: dict[str, str] | None = None) -> Path:
+    """Binaries from `cargo -p skipprd` / copied artifacts live in the host target.
+
+    `cargo build` for plugins runs with cwd=PLUGIN_ROOT, so a relative CARGO_TARGET_DIR
+    during a real build is plugin-workspace-relative. `--skip-cargo-build` looks at
+    the host skipprd target (File smoke, perf cells, rust-build-release copies).
+    """
+    environ = env if env is not None else os.environ
+    raw = str(environ.get("CARGO_TARGET_DIR", "")).strip()
+    if raw:
+        path = Path(raw)
+        if path.is_absolute():
+            return path
+        base = REPO_ROOT if skip_cargo_build else PLUGIN_ROOT
+        return base / path
+    return (REPO_ROOT if skip_cargo_build else PLUGIN_ROOT) / "target"
+
+
 def ensure_tool(name: str) -> str:
     path = shutil.which(name)
     if path is None:
@@ -277,9 +295,7 @@ def build_local_runtime_plugins(
             build_command.extend(["-p", package])
         run_command(build_command, env=build_env, cwd=PLUGIN_ROOT)
 
-    target_dir = Path(build_env.get("CARGO_TARGET_DIR", PLUGIN_ROOT / "target"))
-    if not target_dir.is_absolute():
-        target_dir = PLUGIN_ROOT / target_dir
+    target_dir = resolve_plugin_artifact_dir(skip_cargo_build=skip_cargo_build, env=build_env)
     profile = "release" if release else "debug"
     target_triple = current_rust_target_triple()
     protocol_version = workspace_runtime_protocol_version(PLUGIN_ROOT)

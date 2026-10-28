@@ -27,19 +27,22 @@ runs:
         CARGO_INCREMENTAL: "0"
         RUSTFLAGS: "-C debuginfo=0"
       run: |
-        cargo build \
-          -p skipprd \
+        set -euo pipefail
+        export CARGO_TARGET_DIR="${PWD}/target"
+        cargo build -p skipprd
+        plugins="${SKIPPR_PLUGINS_ROOT:?}"
+        ln -sfn "$PWD" "$plugins/.host"
+        (cd "$plugins" && cargo build \
           -p skippr-plugin-data-source-file \
           -p skippr-plugin-data-sink-duckdb \
-          -p skippr-plugin-schema-sink-duckdb
+          -p skippr-plugin-schema-sink-duckdb)
 
     - name: Stage local runtime manifests
       id: local_runtime
       shell: bash
-      env:
-        CARGO_TARGET_DIR: target
       run: |
         set -euo pipefail
+        export CARGO_TARGET_DIR="${PWD}/target"
         work="${RUNNER_TEMP:-/tmp}/skippr-file-duckdb-append"
         mkdir -p "${work}/source" "${work}/warehouse" "${work}/data" "${work}/manifests"
         cp tests/fixtures/formats/people.csv "${work}/source/people.csv"

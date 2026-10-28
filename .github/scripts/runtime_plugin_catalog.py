@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 
 from plugin_workspace import (
-    _has_plugin_tree,
     _is_plugin_workspace,
     _is_skipprd_host,
     resolve_plugin_workspace,
@@ -83,8 +82,6 @@ def catalog_plugin_workspace(workspace: Path) -> Path:
         return workspace
     if _is_skipprd_host(workspace):
         return resolve_plugin_workspace(workspace)
-    if _has_plugin_tree(workspace):
-        return workspace
     raise SystemExit(
         "no runtime plugin Cargo.toml manifests found under skipprd-plugins/plugins/"
     )

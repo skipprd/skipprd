@@ -84,6 +84,9 @@ jobs:
         with:
           path: skipprd
           submodules: true
+      - uses: ./skipprd/.github/actions/checkout-skipprd-plugins
+        with:
+          host-root: skipprd
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -146,34 +149,41 @@ jobs:
         with:
           path: skipprd
           submodules: true
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/skipprd-plugins
+          path: skipprd-plugins
       - name: Install system deps
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev libssl-dev pkg-config
       - name: Release build with frame pointers
-        working-directory: skipprd
         env:
           RUSTFLAGS: "-C force-frame-pointers=yes -C debuginfo=1"
         run: |
           set -euo pipefail
-          cargo build --profile profiling -p skipprd --bin skipprd --features offset-store-dynamodb
-          cargo build --profile profiling \
+          host="$GITHUB_WORKSPACE/skipprd"
+          plugins="$GITHUB_WORKSPACE/skipprd-plugins"
+          ln -sfn "$host" "$plugins/.host"
+          export CARGO_TARGET_DIR="$host/target"
+          (cd "$host" && cargo build --profile profiling -p skipprd --bin skipprd --features offset-store-dynamodb)
+          (cd "$plugins" && cargo build --profile profiling \
             -p skippr-plugin-data-source-file \
             -p skippr-plugin-data-source-postgres \
             -p skippr-plugin-data-sink-duckdb \
             -p skippr-plugin-schema-sink-duckdb \
             -p skippr-plugin-data-sink-skipprlake \
-            -p skippr-plugin-schema-sink-skipprlake
-          mkdir -p skipprd-linux_x86-profile runtime-plugin-binaries-linux_x86-profile
-          cp target/profiling/skipprd skipprd-linux_x86-profile/skipprd
-          cp target/profiling/skippr-plugin-data-source-file \
-             target/profiling/skippr-plugin-data-source-postgres \
-             target/profiling/skippr-plugin-data-sink-duckdb \
-             target/profiling/skippr-plugin-schema-sink-duckdb \
-             target/profiling/skippr-plugin-data-sink-skipprlake \
-             target/profiling/skippr-plugin-schema-sink-skipprlake \
-             runtime-plugin-binaries-linux_x86-profile/
+            -p skippr-plugin-schema-sink-skipprlake)
+          mkdir -p "$host/skipprd-linux_x86-profile" "$host/runtime-plugin-binaries-linux_x86-profile"
+          cp "$host/target/profiling/skipprd" "$host/skipprd-linux_x86-profile/skipprd"
+          cp "$host/target/profiling/skippr-plugin-data-source-file" \
+             "$host/target/profiling/skippr-plugin-data-source-postgres" \
+             "$host/target/profiling/skippr-plugin-data-sink-duckdb" \
+             "$host/target/profiling/skippr-plugin-schema-sink-duckdb" \
+             "$host/target/profiling/skippr-plugin-data-sink-skipprlake" \
+             "$host/target/profiling/skippr-plugin-schema-sink-skipprlake" \
+             "$host/runtime-plugin-binaries-linux_x86-profile/"
       - name: Install inferno
         run: |
           set -euo pipefail
@@ -228,6 +238,9 @@ jobs:
         with:
           path: skipprd
           submodules: true
+      - uses: ./skipprd/.github/actions/checkout-skipprd-plugins
+        with:
+          host-root: skipprd
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

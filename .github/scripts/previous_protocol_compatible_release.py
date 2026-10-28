@@ -17,6 +17,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from plugin_workspace import resolve_plugin_workspace  # noqa: E402
 from runtime_plugin_catalog import RUNTIME_PROTOCOL_VERSION_RE  # noqa: E402
 
 
@@ -176,10 +177,10 @@ def protocol_at_tag(workspace: Path, tag: str) -> int | None:
     return None
 
 
-def versions_at_tag(workspace: Path, tag: str) -> dict[str, str]:
+def _manifest_versions_from_git(git_root: Path, tag: str) -> dict[str, str]:
     versions: dict[str, str] = {}
     for name, relative in COMPAT_MANIFESTS.items():
-        text = git_output(workspace, "show", f"{tag}:{relative.as_posix()}")
+        text = git_output(git_root, "show", f"{tag}:{relative.as_posix()}")
         if text is None:
             continue
         version = parse_package_version(text)
@@ -188,10 +189,24 @@ def versions_at_tag(workspace: Path, tag: str) -> dict[str, str]:
     return versions
 
 
+def versions_at_tag(workspace: Path, tag: str) -> dict[str, str]:
+    versions = _manifest_versions_from_git(workspace, tag)
+    if versions:
+        return versions
+    plugins = os.environ.get("SKIPPR_PLUGINS_ROOT", "").strip()
+    if plugins:
+        return _manifest_versions_from_git(Path(plugins), tag)
+    try:
+        return _manifest_versions_from_git(resolve_plugin_workspace(workspace), tag)
+    except SystemExit:
+        return versions
+
+
 def current_workspace_versions(workspace: Path) -> dict[str, str]:
+    plugins_root = resolve_plugin_workspace(workspace)
     versions: dict[str, str] = {}
     for name, relative in COMPAT_MANIFESTS.items():
-        path = workspace / relative
+        path = plugins_root / relative
         if not path.is_file():
             continue
         version = parse_package_version(path.read_text(encoding="utf-8"))

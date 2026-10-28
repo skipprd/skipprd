@@ -19,20 +19,23 @@ runs:
         CARGO_INCREMENTAL: "0"
         RUSTFLAGS: "-C debuginfo=0"
       run: |
-        cargo build \
-          -p skipprd \
+        set -euo pipefail
+        export CARGO_TARGET_DIR="${PWD}/target"
+        cargo build -p skipprd
+        plugins="${SKIPPR_PLUGINS_ROOT:?}"
+        ln -sfn "$PWD" "$plugins/.host"
+        (cd "$plugins" && cargo build \
           -p skippr-plugin-data-source-postgres \
           -p skippr-plugin-data-source-stripe \
           -p skippr-plugin-data-sink-athena-iceberg \
-          -p skippr-plugin-schema-sink-athena-iceberg
+          -p skippr-plugin-schema-sink-athena-iceberg)
 
     - name: Stage local runtime manifests
       id: local_runtime
       shell: bash
-      env:
-        CARGO_TARGET_DIR: target
       run: |
         set -euo pipefail
+        export CARGO_TARGET_DIR="${PWD}/target"
         manifest_dir="${RUNNER_TEMP:-/tmp}/skippr-iceberg-equality-commit-manifests"
         mkdir -p "${manifest_dir}"
         stage_manifest() {

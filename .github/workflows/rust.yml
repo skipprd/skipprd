@@ -656,6 +656,7 @@ jobs:
           submodules: true
           fetch-depth: 0
           fetch-tags: true
+      - uses: ./.github/actions/checkout-skipprd-plugins
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -705,6 +706,7 @@ jobs:
           submodules: true
           fetch-depth: 0
           fetch-tags: true
+      - uses: ./.github/actions/checkout-skipprd-plugins
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
