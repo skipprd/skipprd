@@ -16,7 +16,7 @@ skipprd --version
 You see the installed version, for example:
 
 ```text
-skipprd 17.0.0
+skipprd 16.0.0
 ```
 
 If the command is not found, follow [Install](/getting-started/install).
