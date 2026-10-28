@@ -67,13 +67,13 @@ thiserror = "1.0.58"
 skippr-core = { path = "crates/skippr-core" }
 skippr-object-writer = { path = "crates/skippr-object-writer" }
 skippr-runtime-sdk = { path = "crates/skippr-runtime-sdk" }
-react-core = { version = "1.5.0", registry = "react-cargo" }
-react = { version = "1.5.0", registry = "react-cargo" }
-react-module-storage-s3 = { version = "1.5.0", registry = "react-cargo" }
-react-module-storage-local = { version = "1.5.0", registry = "react-cargo" }
-react-module-storage-memory = { version = "1.5.0", registry = "react-cargo" }
-react-module-provider-vector-lance = { version = "1.5.0", registry = "react-cargo" }
-react-suite-debugger = { version = "1.5.0", registry = "react-cargo" }
+react-core = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
+react = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
+react-module-storage-s3 = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
+react-module-storage-local = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
+react-module-storage-memory = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
+react-module-provider-vector-lance = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
+react-suite-debugger = { git = "https://github.com/skipprd/react.git", tag = "1.5.0" }
 chrono-tz = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 

@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Runtime plugin discovery uses `{skipprd-semver}/manifest-index.json`, not `/latest/`. Tagged 15.12.1 hosts stay on the protocol-17 plugin bundle published with this tag.
+- Release CI matches current rust.yml: GitHub-hosted runners and Cloudflare R2. No Depot, ECR, CodeArtifact, or AWS S3.
 
 ## [5.7.2] - 2024-03-23
 

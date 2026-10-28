@@ -18,4 +18,4 @@ Endpoint used by CI: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`
 
 Token permission: **Object Read & Write** on both buckets (or account-wide).
 
-**Still AWS (not R2):** `RELEASE_AWS_ACCESS_KEY_ID` / `RELEASE_AWS_SECRET_ACCESS_KEY` for CodeArtifact only. E2E jobs keep using `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` for real AWS resources.
+This 15.12.1 pipeline does not use AWS CodeArtifact, ECR, or AWS S3. The AWS CLI talks to the R2 S3 API only.

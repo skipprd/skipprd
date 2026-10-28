@@ -2,3 +2,4 @@ Release 15.12.1
 
 Tagged hosts fetch {skipprd-semver}/manifest-index.json instead of /latest/.
 15.12.1 Hive boxes stay on the protocol-17 plugin bundle published with this tag.
+Release CI uses GitHub-hosted runners and Cloudflare R2 (no Depot/ECR/CodeArtifact/AWS S3).
