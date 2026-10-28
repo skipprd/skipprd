@@ -631,9 +631,12 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("analyze.py", text)
         self.assertIn("python3 -m pip install --quiet boto3", text)
         self.assertIn("-p skippr-plugin-data-source-file", text)
+        self.assertIn('ln -sfn "$host" "$plugins/.host"', text)
+        self.assertIn('CARGO_TARGET_DIR="$host/target"', text)
         self.assertRegex(
             text,
-            r"cargo build --profile profiling -p skipprd --bin skipprd[^\n]*\n\s+cargo build --profile profiling",
+            r'\(cd "\$host" && cargo build --profile profiling -p skipprd --bin skipprd[^\n]*\n'
+            r'\s+\(cd "\$plugins" && cargo build --profile profiling',
         )
         self.assertIn("target/profiling/", text)
         self.assertNotIn("if-no-files-found: warn", text)
