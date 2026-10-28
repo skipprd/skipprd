@@ -93,16 +93,21 @@ SkipprLake cells need DynamoDB Local (Docker). DuckDB cells need the DuckDB CLI.
 Release host + only the plugins the cell needs (`USE_LOCAL_PLUGIN_CODE=1`):
 
 ```bash
+plugins="${SKIPPR_PLUGINS_ROOT:-$PWD/../skipprd-plugins}"
+ln -sfn "$PWD" "$plugins/.host"
+export CARGO_TARGET_DIR="$PWD/target"
 cargo build --release -p skipprd --bin skipprd --features offset-store-dynamodb
-cargo build --release \
+(cd "$plugins" && cargo build --release \
   -p skippr-plugin-data-source-file \
+  -p skippr-plugin-data-source-postgres \
   -p skippr-plugin-data-sink-duckdb \
   -p skippr-plugin-schema-sink-duckdb \
   -p skippr-plugin-data-sink-skipprlake \
-  -p skippr-plugin-schema-sink-skipprlake
+  -p skippr-plugin-schema-sink-skipprlake)
 export SKIPPRD_BIN="$PWD/target/release/skipprd"
+export SKIP_CARGO_PLUGIN_BUILD=1
 python3 tests/perf_db/run.py \
-  --scenario q-wal-count-iceberg,q-wal-point-iceberg,q-union-count-duckdb --scale smoke
+  --scenario q-wal-count-iceberg,q-wal-point-iceberg,q-union-count-duckdb,q-union-overlap-duckdb --scale smoke
 ```
 
 Fail the cell if required `PERF_EVENT` lines are missing (`sync`, `query_collect`,
