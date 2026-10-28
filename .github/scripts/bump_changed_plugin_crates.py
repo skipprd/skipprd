@@ -145,24 +145,41 @@ def git_env(workspace: Path | None = None) -> dict[str, str]:
     return env
 
 
-def git_changed_paths(workspace: Path, base: str) -> list[str]:
-    env = git_env(workspace)
+def _bump_git_roots(workspace: Path) -> list[Path]:
+    from plugin_workspace import resolve_plugin_workspace, resolve_skipprd_workspace
+
+    roots: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(root: Path) -> None:
+        resolved = root.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        roots.append(resolved)
+
+    add(workspace)
+    try:
+        add(resolve_plugin_workspace(workspace))
+    except SystemExit:
+        pass
+    try:
+        add(resolve_skipprd_workspace(workspace))
+    except SystemExit:
+        pass
+    return roots
+
+
+def _changed_in_repo(git_root: Path, base: str) -> list[str] | None:
+    env = git_env(git_root)
     probe = subprocess.run(
         ["git", "rev-parse", "--verify", f"{base}^{{commit}}"],
-        cwd=workspace,
+        cwd=git_root,
         capture_output=True,
         env=env,
     )
     if probe.returncode != 0:
-        from plugin_workspace import resolve_skipprd_workspace
-
-        try:
-            host = resolve_skipprd_workspace(workspace)
-        except SystemExit as exc:
-            raise SystemExit(f"git ref {base} not found in {workspace}: {exc}") from exc
-        if host.resolve() != workspace.resolve():
-            return git_changed_paths(host, base)
-        raise SystemExit(f"git ref {base} not found in {workspace}")
+        return None
     seen: set[str] = set()
     commands = (
         ["git", "diff", "--name-only", base],
@@ -170,11 +187,27 @@ def git_changed_paths(workspace: Path, base: str) -> list[str]:
         ["git", "ls-files", "--others", "--exclude-standard"],
     )
     for command in commands:
-        output = subprocess.check_output(command, cwd=workspace, text=True, env=env)
+        output = subprocess.check_output(command, cwd=git_root, text=True, env=env)
         for line in output.splitlines():
             path = posix_path(line.strip())
             if path:
                 seen.add(path)
+    return sorted(seen)
+
+
+def git_changed_paths(workspace: Path, base: str) -> list[str]:
+    seen: set[str] = set()
+    found = False
+    for root in _bump_git_roots(workspace):
+        paths = _changed_in_repo(root, base)
+        if paths is None:
+            continue
+        found = True
+        seen.update(paths)
+    if not found:
+        raise SystemExit(
+            f"git ref {base} not found in skipprd or skipprd-plugins"
+        )
     return sorted(seen)
 
 
@@ -204,18 +237,11 @@ def _package_version_from_git(git_root: Path, base: str, rel_dir: str) -> str | 
 
 
 def git_base_package_version(workspace: Path, base: str, rel_dir: str) -> str | None:
-    version = _package_version_from_git(workspace, base, rel_dir)
-    if version is not None:
-        return version
-    from plugin_workspace import resolve_skipprd_workspace
-
-    try:
-        host = resolve_skipprd_workspace(workspace)
-    except SystemExit:
-        return None
-    if host.resolve() == workspace.resolve():
-        return None
-    return _package_version_from_git(host, base, rel_dir)
+    for root in _bump_git_roots(workspace):
+        version = _package_version_from_git(root, base, rel_dir)
+        if version is not None:
+            return version
+    return None
 
 
 def packages_selected_for_bump(
@@ -266,8 +292,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--workspace",
         type=Path,
-        default=Path.cwd(),
-        help="skipprd workspace root",
+        default=None,
+        help="skipprd-plugins workspace (default: sibling skipprd-plugins or SKIPPR_PLUGINS_ROOT)",
     )
     parser.add_argument(
         "--base",
@@ -289,8 +315,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from plugin_workspace import resolve_plugin_workspace
+
     args = parse_args(argv)
-    workspace = args.workspace.resolve()
+    workspace = (args.workspace or resolve_plugin_workspace()).resolve()
     if args.changed_paths:
         changed_paths = [posix_path(path) for path in args.changed_paths]
         base_versions = None

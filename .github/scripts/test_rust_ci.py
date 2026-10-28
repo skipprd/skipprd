@@ -385,6 +385,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("path: cloud", workflow)
         self.assertIn("skipprd/cloud", workflow)
         self.assertIn("skipprd/skipprd-plugins", workflow)
+        self.assertIn("fetch-tags: true", workflow)
+        self.assertIn("github.ref_name", workflow)
         resolve = action.find('plugins_root="$(cd "${{ inputs.plugins-workspace-root }}" && pwd)"')
         self.assertNotEqual(resolve, -1)
         self.assertLess(
@@ -423,6 +425,9 @@ class RustCiTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("skipprd/skipprd-plugins", checkout)
         self.assertIn("SKIPPR_PLUGINS_ROOT", checkout)
+        self.assertIn("fetch-depth: 0", checkout)
+        self.assertIn("fetch-tags: true", checkout)
+        self.assertIn("github.ref_name", checkout)
         for job, body in slices.items():
             self.assertIn(
                 "checkout-skipprd-plugins",

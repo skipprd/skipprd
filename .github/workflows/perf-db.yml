@@ -43,6 +43,9 @@ jobs:
         with:
           repository: skipprd/skipprd-plugins
           path: skipprd-plugins
+          fetch-depth: 0
+          fetch-tags: true
+          ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'main' }}
       - name: Build linux x86 release (query plugin subset)
         uses: ./skipprd/.github/actions/rust-build-release
         with:
@@ -153,6 +156,9 @@ jobs:
         with:
           repository: skipprd/skipprd-plugins
           path: skipprd-plugins
+          fetch-depth: 0
+          fetch-tags: true
+          ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'main' }}
       - name: Install system deps
         run: |
           set -euo pipefail

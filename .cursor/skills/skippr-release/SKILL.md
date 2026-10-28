@@ -39,15 +39,15 @@ Last tag: `git tag --list '[0-9]*' --sort=-v:refname` (skip `0.0.0`).
 ```bash
 python3 ../skipprd-plugins/.github/scripts/bump_changed_plugin_crates.py --base <last-tag>
 python3 .github/scripts/runtime_plugin_release_plan.py
-./scripts/install-git-hooks.sh   # if the hook is missing
-git add … && git commit …        # hook runs scripts/precommit.sh; never --no-verify
-git push origin HEAD
-git tag <tag> && git push origin <tag>
-# skipprd-plugins must carry the same engine tag so previous-protocol pins can git-show crate versions.
+# Tag skipprd-plugins first so host tag CI can check out that ref (not plugins main).
 git -C ../skipprd-plugins add plugins
 git -C ../skipprd-plugins commit -m "Bump plugin crate versions for <tag>."
 git -C ../skipprd-plugins push origin HEAD
 git -C ../skipprd-plugins tag <tag> && git -C ../skipprd-plugins push origin <tag>
+./scripts/install-git-hooks.sh   # if the hook is missing
+git add … && git commit …        # hook runs scripts/precommit.sh; never --no-verify
+git push origin HEAD
+git tag <tag> && git push origin <tag>
 ```
 
 Python wheel: bump `pyproject.toml` and `python/Cargo.toml` together **only** when `python/` or `pyproject.toml` changed since `<last-tag>`. Do not bump Python just to clobber PyPI. Do not stamp root `Cargo.toml`.

@@ -15,7 +15,7 @@ python3 ../skipprd-plugins/.github/scripts/bump_changed_plugin_crates.py --base 
 python3 .github/scripts/runtime_plugin_release_plan.py
 ```
 
-The same engine tag MUST also land on skipprd-plugins (`git tag <tag>` there) so `versions_at_tag` can read crate versions after skipprd no longer contains `plugins/`.
+Push and tag skipprd-plugins with the same engine semver **before** tagging skipprd, so host tag CI checks out that plugins ref instead of plugins `main`.
 
 Everyday plugin commits do **not** bump. `/skippr-release` does. Skill: **`skippr-release`**. Public copy: **`skipprd-docs`**.
 

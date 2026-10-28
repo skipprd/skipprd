@@ -16,6 +16,9 @@ runs:
       with:
         repository: skipprd/skipprd-plugins
         path: ${{ inputs.path }}
+        fetch-depth: 0
+        fetch-tags: true
+        ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'main' }}
     - name: Export plugin workspace
       shell: bash
       run: |
