@@ -39,7 +39,7 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Seed world_schedule corpus from named DST scripts
-        run: cargo test -p skipprd --lib --offline -- fuzz_corpus_has_every_named_script
+        run: cargo test -p skipprd --lib -- fuzz_corpus_has_every_named_script
       - name: Timeboxed fuzz (timeout fails)
         run: |
           set -euo pipefail
