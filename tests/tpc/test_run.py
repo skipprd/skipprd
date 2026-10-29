@@ -53,6 +53,10 @@ class TpcContractTests(unittest.TestCase):
         contracts = WORKFLOW.split("\n  tpc_h_sf10:", 1)[0]
         self.assertIn("test_local_runtime_plugins.py", contracts)
         self.assertIn("test_release_sha_batteries.py", contracts)
+        build = WORKFLOW.split("Build skipprd", 1)[1].split("TPC-H SF10 Q1 Q3 Q6", 1)[0]
+        self.assertIn("cargo build --release -p skipprd --bin skipprd\n", build)
+        self.assertIn("-p skippr-plugin-data-sink-duckdb", build)
+        self.assertNotIn("--bin skipprd \\", build)
 
     def test_skill_laptop_sf1_is_not_sha_substitute(self) -> None:
         self.assertIn("name: skippr-tpc", SKILL)

@@ -61,7 +61,8 @@ jobs:
         run: python3 -m pip install --quiet tpcgen-cli==4.0.0 datafusion
       - name: Build skipprd + File/DuckDB plugins
         run: |
-          cargo build --release -p skipprd --bin skipprd \
+          cargo build --release -p skipprd --bin skipprd
+          cargo build --release \
             -p skippr-plugin-data-source-file \
             -p skippr-plugin-data-sink-duckdb \
             -p skippr-plugin-schema-sink-duckdb

@@ -136,6 +136,8 @@ pub enum Op {
 }
 
 const OPS_MAGIC: &[u8; 4] = b"DST1";
+/// Untrusted `DST1` schedules must not `Vec::with_capacity` a mutated u32.
+const MAX_SCHEDULE_OPS: usize = 1024;
 
 /// Iceberg snapshot captured by compact / lake ingest. `S` in query pin `(S,E,W)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -750,6 +752,9 @@ fn decode_ops(bytes: &[u8]) -> Option<Vec<Op>> {
     }
     let mut i = 4;
     let count = take_u32(bytes, &mut i)? as usize;
+    if count > MAX_SCHEDULE_OPS {
+        return None;
+    }
     let mut ops = Vec::with_capacity(count);
     for _ in 0..count {
         ops.push(decode_op(bytes, &mut i)?);
