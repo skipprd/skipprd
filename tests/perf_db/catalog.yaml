@@ -3,9 +3,7 @@
 # wal_pin: drained = the measured query pinned no WAL (W \ E empty, lake only);
 #          live    = the measured query read WAL held behind the compaction hold.
 defaults:
-  rows: 10000
-  smoke_rows: 200
-  linux_rows: 2000
+  rows: 100000
   required_perf: [sync, query_collect, query_pin]
   table: events
 

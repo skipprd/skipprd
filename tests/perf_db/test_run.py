@@ -74,6 +74,19 @@ class PerfDbCatalogTests(unittest.TestCase):
         self.assertNotIn("q-union-count-skipprlake", ids)
         self.assertIn("q-cdc-union-update-pg", ids)
         self.assertIn("q-union-overlap-duckdb", ids)
+        self.assertNotIn("smoke_rows", text)
+        self.assertNotIn("linux_rows", text)
+        self.assertEqual(int(catalog["defaults"]["rows"]), 100_000)
+
+    def test_query_after_ingest_always_uses_100k_rows(self) -> None:
+        run = perf_db_run()
+        catalog = db_catalog()
+        for name, spec in catalog["scenarios"].items():
+            if spec.get("kind") != "query_after_ingest":
+                continue
+            self.assertEqual(run.perf_run.row_count(spec, "smoke"), 100_000, name)
+            self.assertEqual(run.perf_run.row_count(spec, "linux"), 100_000, name)
+            self.assertEqual(run.perf_run.row_count(spec, "ci"), 100_000, name)
 
     def test_smoke_is_wal_file_iceberg_versus_duckdb(self) -> None:
         catalog = db_catalog()
@@ -150,6 +163,7 @@ class PerfDbSkillTests(unittest.TestCase):
         self.assertIn("--warmup", text)
         self.assertIn("query time", text.lower())
         self.assertIn("offset-store-dynamodb", text)
+        self.assertIn("100,000", text)
         self.assertIn("tests/perf/download.py", text)
         self.assertIn("tests/perf/analyze.py", text)
         self.assertIn("tests/perf/memo.py", text)
@@ -205,6 +219,16 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertLess(cdc.find("require_hold_engaged"), cdc.find("measured_query"))
         self.assertNotIn("from tests.perf.run import", text)
         self.assertNotIn("copy_b-json-json", text)
+
+    def test_perf_db_yml_retries_duckdb_install(self) -> None:
+        text = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "curl -fsSL --retry 3 --retry-delay 2 https://install.duckdb.org",
+            text,
+        )
+        self.assertGreaterEqual(text.count("for attempt in 1 2 3"), 2)
 
     def test_compaction_hold_targets_local_pipeline_root(self) -> None:
         run = perf_db_run()

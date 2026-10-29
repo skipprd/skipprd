@@ -582,6 +582,11 @@ class RustCiTests(unittest.TestCase):
         )
         self.assertIn("tests/perf_db/run.py", (ROOT / ".github" / "scripts" / "run_perf_db_cell.sh").read_text(encoding="utf-8"))
         self.assertNotIn("python3 tests/perf_db/run.py", text)
+        self.assertIn(
+            "curl -fsSL --retry 3 --retry-delay 2 https://install.duckdb.org",
+            text,
+        )
+        self.assertGreaterEqual(text.count("for attempt in 1 2 3"), 2)
         runner = (ROOT / "tests" / "perf_db" / "run.py").read_text(encoding="utf-8")
         self.assertIn("log_args", runner)
         self.assertIn("query_after_ingest", runner)

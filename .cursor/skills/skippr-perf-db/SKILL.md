@@ -43,6 +43,10 @@ Wrap scripts read `SKIPPR_LOG_LEVEL` through `skipprd_cli.log_args()` into
 consume CHANGELOG Unreleased. Do **not** bump plugin crates. Do **not** write
 CloudCycle EU buckets. `aws s3 sync --delete` is illegal.
 
+Every File ingest query cell uses **100,000 rows**. `--scale smoke` / GitHub `ci` /
+`linux` only select which cells run, not how many rows. Do not restore per-scale
+`smoke_rows` / `linux_rows`. CDC mutation counts stay small.
+
 This is **not** skippr-perf (ingest/copy). Cells always `sync --once` then
 `skipprd query --sql --plain --warmup`. `--warmup` starts QueryRuntime, opens
 catalog connections, and runs the statement once; `query_collect` elapsed is

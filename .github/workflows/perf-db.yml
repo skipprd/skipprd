@@ -113,7 +113,15 @@ jobs:
             duckdb --version
             exit 0
           fi
-          curl -fsSL https://install.duckdb.org | sh
+          for attempt in 1 2 3; do
+            if curl -fsSL --retry 3 --retry-delay 2 https://install.duckdb.org | sh; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 2
+          done
           echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
       - name: Run scenario
         uses: ./skipprd/.github/actions/e2e/perf-db
@@ -276,7 +284,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r) heaptrack
           if ! command -v duckdb >/dev/null 2>&1; then
-            curl -fsSL https://install.duckdb.org | sh
+            for attempt in 1 2 3; do
+              if curl -fsSL --retry 3 --retry-delay 2 https://install.duckdb.org | sh; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                exit 1
+              fi
+              sleep 2
+            done
             echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
           fi
       - name: Run flamegraph or perf-stat cell
