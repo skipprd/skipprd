@@ -228,6 +228,21 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
         self.assertNotIn("src/sqlrt/dst/scripts.rs", fuzz)
         self.assertIn("cargo +nightly fuzz run world_schedule", fuzz)
         self.assertNotIn("\ncargo fuzz run world_schedule", fuzz)
+        self.assertIn("WalEvent.seq/ordinal/row_i", fuzz)
+
+    def test_dst1_decode_bounds_seq_ordinal_row_i(self) -> None:
+        dst = (ROOT / "src" / "sqlrt" / "dst" / "mod.rs").read_text(encoding="utf-8")
+        self.assertIn("if ordinal as u64 > MAX_SCHEDULE_OPS as u64", dst)
+        self.assertIn("if !schedule_seq_ok(row_i)", dst)
+        self.assertIn("if !schedule_seq_ok(seq)", dst)
+        regressions = (ROOT / "src" / "sqlrt" / "dst" / "regressions" / "mod.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("world_schedule_crash_0b179261_is_not_a_schedule", regressions)
+        self.assertTrue((ROOT / "fuzz" / "corpus" / "world_schedule" / "crash_0b179261").is_file())
+        engine = (ROOT / "src" / "engine.rs").read_text(encoding="utf-8")
+        self.assertIn("fn empty_sink_ref_maps_to_primary", engine)
+        self.assertIn("capability_for_sink_ref(\"\")", engine)
 
 
 if __name__ == "__main__":

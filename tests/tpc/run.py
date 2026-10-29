@@ -47,7 +47,13 @@ WHERE l_shipdate >= DATE '1994-01-01'
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
     print("+", " ".join(cmd), file=sys.stderr)
-    return subprocess.run(cmd, check=True, text=True, **kwargs)
+    proc = subprocess.run(cmd, check=False, text=True, **kwargs)
+    if proc.returncode != 0:
+        err = proc.stderr or ""
+        if err:
+            print(err, file=sys.stderr)
+        proc.check_returncode()
+    return proc
 
 
 def parquet_glob(parquet_dir: Path, table: str) -> str:

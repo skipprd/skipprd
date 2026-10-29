@@ -62,6 +62,7 @@ class TpcContractTests(unittest.TestCase):
         self.assertIn("with_batch_size", file_src)
         self.assertIn("InputFormat::Parquet", file_src)
         self.assertIn("submit_arrow_ipc_batches", file_src)
+        self.assertIn('sink_ref: String::new()', file_src)
         contracts = WORKFLOW.split("\n  tpc_h_sf10:", 1)[0]
         self.assertIn("test_local_runtime_plugins.py", contracts)
         self.assertIn("test_release_sha_batteries.py", contracts)
