@@ -664,8 +664,8 @@ class MemoTests(unittest.TestCase):
 
 
 class WrapProfileTests(unittest.TestCase):
-    def test_perf_stat_uses_portable_events(self) -> None:
-        from run import wrap_profile
+    def test_perf_stat_uses_software_events(self) -> None:
+        from run import PERF_STAT_EVENTS, wrap_profile
 
         work = Path("/tmp/skippr-perf-cell")
         with (
@@ -679,7 +679,7 @@ class WrapProfileTests(unittest.TestCase):
                 "/usr/bin/perf",
                 "stat",
                 "-e",
-                "task-clock,cycles,instructions,cache-misses,page-faults",
+                PERF_STAT_EVENTS,
                 "-o",
                 str(work / "perf-stat.txt"),
                 "--",
@@ -687,7 +687,28 @@ class WrapProfileTests(unittest.TestCase):
                 "sync",
             ],
         )
-        self.assertNotIn("topdown-retiring", " ".join(cmd))
+        joined = " ".join(cmd)
+        self.assertIn("task-clock", joined)
+        self.assertIn("page-faults", joined)
+        self.assertIn("context-switches", joined)
+        self.assertIn("cpu-migrations", joined)
+        self.assertNotIn("cycles", joined)
+        self.assertNotIn("instructions", joined)
+        self.assertNotIn("cache-misses", joined)
+        self.assertNotIn("topdown-retiring", joined)
+
+    def test_perf_stat_rejects_unsupported_counters(self) -> None:
+        from run import PerfError, require_profile_outputs
+
+        with tempfile.TemporaryDirectory() as raw:
+            work = Path(raw)
+            (work / "perf-stat.txt").write_text(
+                "   <not supported>      cycles\n             20834      page-faults\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(PerfError) as raised:
+                require_profile_outputs(work, "perf-stat")
+            self.assertIn("cannot count", str(raised.exception))
 
 
 class PerfWorkflowContractTests(unittest.TestCase):

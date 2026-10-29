@@ -19,6 +19,8 @@ from typing import Any
 
 HARNESS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = HARNESS_DIR.parents[1]
+# GitHub-hosted ubuntu-latest has no hardware PMU. Software events only.
+PERF_STAT_EVENTS = "task-clock,page-faults,context-switches,cpu-migrations"
 sys.path.insert(0, str(HARNESS_DIR))
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
@@ -170,13 +172,11 @@ def wrap_profile(cmd: list[str], profile: str, work: Path) -> list[str]:
         return [heaptrack, "-o", str(work / "heaptrack"), "--", *cmd]
     if profile == "perf-stat":
         perf = _linux_perf()
-        # Default `perf stat` events include topdown-retiring, which some
-        # GitHub-hosted CPUs do not expose.
         return [
             perf,
             "stat",
             "-e",
-            "task-clock,cycles,instructions,cache-misses,page-faults",
+            PERF_STAT_EVENTS,
             "-o",
             str(work / "perf-stat.txt"),
             "--",
@@ -564,6 +564,9 @@ def require_profile_outputs(work: Path, profile: str) -> None:
         stat = work / "perf-stat.txt"
         if not stat.is_file() or stat.stat().st_size == 0:
             raise PerfError("perf-stat produced no output")
+        text = stat.read_text(encoding="utf-8", errors="replace")
+        if "<not supported>" in text:
+            raise PerfError("perf-stat requested a counter this runner cannot count")
 
 
 def write_report(path: Path, payload: dict[str, Any]) -> None:
