@@ -764,7 +764,10 @@ fn output_metadata_for_arrow_field(field: &ArrowField) -> OutputMetadata {
     metadata.out_field_name = field.name().clone();
     metadata.source_field_name = field.name().clone();
     metadata.determined_type = skippr_type_for_arrow(field.data_type());
-    metadata.nullable = field.is_nullable();
+    // Arrow IPC / parquet "required" is not a lake write contract: WAL compact
+    // and Iceberg files can contain nulls. Copying required=true makes
+    // `skipprd query` fail with "non-nullable but contains null values".
+    metadata.nullable = true;
     if let ArrowDataType::Struct(fields) = field.data_type() {
         metadata.fields = Box::new(
             fields
@@ -4456,6 +4459,17 @@ mod tests {
 
     fn env_lock() -> MutexGuard<'static, ()> {
         ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn arrow_ipc_fields_are_nullable_so_iceberg_query_accepts_compact_nulls() {
+        let field =
+            arrow::datatypes::Field::new("l_quantity", arrow::datatypes::DataType::Float64, false);
+        let meta = super::output_metadata_for_arrow_field(&field);
+        assert!(
+            meta.nullable(),
+            "TPC-H parquet marks required columns; Iceberg scan must still accept nulls after compact"
+        );
     }
 
     #[test]
