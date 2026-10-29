@@ -189,52 +189,52 @@ def parse_plugin_collection(lines: list[str], section: str) -> dict[str, ConfigP
     }
 
 
-def select_pipeline(pipelines: dict[str, dict[str, str]], pipeline: str | None) -> str:
+def pipeline_names(pipelines: dict[str, dict[str, str]], pipeline: str | None) -> list[str]:
+    if not pipelines:
+        raise LocalRuntimePluginError("config contains no pipelines")
     if pipeline is not None:
         if pipeline not in pipelines:
             raise LocalRuntimePluginError(
                 f"pipeline {pipeline!r} was not found in config; available: {', '.join(sorted(pipelines)) or 'none'}"
             )
-        return pipeline
-    if len(pipelines) == 1:
-        return next(iter(pipelines))
-    raise LocalRuntimePluginError(
-        "--pipeline is required when config contains multiple pipelines; available: "
-        + (", ".join(sorted(pipelines)) or "none")
-    )
+        return [pipeline]
+    return sorted(pipelines)
 
 
 def configured_runtime_plugins(config_path: Path, pipeline: str | None) -> set[RuntimePluginRef]:
     lines = config_path.read_text(encoding="utf-8").splitlines()
     pipelines = parse_pipeline_refs(lines)
-    selected_pipeline = select_pipeline(pipelines, pipeline)
+    names = pipeline_names(pipelines, pipeline)
     collections = {
         name: parse_plugin_collection(lines, name)
         for name in PLUGIN_COLLECTIONS
     }
 
     selected: set[RuntimePluginRef] = set()
-    for ref_key, raw_ref in pipelines[selected_pipeline].items():
-        collection_name = PIPELINE_REF_KEYS[ref_key]
-        entry_name = reference_name(raw_ref)
-        entry = collections[collection_name].get(entry_name)
-        if entry is None:
-            raise LocalRuntimePluginError(
-                f"pipeline {selected_pipeline!r} references {raw_ref!r}, but {entry_name!r} was not found in {collection_name}"
-            )
-        selected.add(RuntimePluginRef(PLUGIN_COLLECTIONS[collection_name], entry.plugin_name))
-        if entry.schema_sink:
-            schema_entry = collections["schema_sinks"].get(entry.schema_sink)
-            if schema_entry is None:
+    for name in names:
+        refs = pipelines[name]
+        added = 0
+        for ref_key, raw_ref in refs.items():
+            collection_name = PIPELINE_REF_KEYS[ref_key]
+            entry_name = reference_name(raw_ref)
+            entry = collections[collection_name].get(entry_name)
+            if entry is None:
                 raise LocalRuntimePluginError(
-                    f"{collection_name}.{entry_name} references schema sink {entry.schema_sink!r}, but it was not found in schema_sinks"
+                    f"pipeline {name!r} references {raw_ref!r}, but {entry_name!r} was not found in {collection_name}"
                 )
-            selected.add(RuntimePluginRef("SchemaSink", schema_entry.plugin_name))
-
-    if not selected:
-        raise LocalRuntimePluginError(
-            f"pipeline {selected_pipeline!r} did not reference any runtime plugins"
-        )
+            selected.add(RuntimePluginRef(PLUGIN_COLLECTIONS[collection_name], entry.plugin_name))
+            added += 1
+            if entry.schema_sink:
+                schema_entry = collections["schema_sinks"].get(entry.schema_sink)
+                if schema_entry is None:
+                    raise LocalRuntimePluginError(
+                        f"{collection_name}.{entry_name} references schema sink {entry.schema_sink!r}, but it was not found in schema_sinks"
+                    )
+                selected.add(RuntimePluginRef("SchemaSink", schema_entry.plugin_name))
+        if added == 0:
+            raise LocalRuntimePluginError(
+                f"pipeline {name!r} did not reference any runtime plugins"
+            )
     return selected
 
 
@@ -322,7 +322,10 @@ def main(argv: list[str] | None = None) -> int:
         description="Build runtime plugins referenced by a Skippr config and write local manifests."
     )
     parser.add_argument("--config", required=True, help="Path to a Skippr YAML config")
-    parser.add_argument("--pipeline", help="Pipeline name when the config contains multiple")
+    parser.add_argument(
+        "--pipeline",
+        help="Pipeline name; omit to install plugins for every pipeline in the config",
+    )
     parser.add_argument(
         "--output-dir",
         default=str(DEFAULT_MANIFEST_DIR),

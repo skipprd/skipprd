@@ -123,6 +123,9 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
     def test_fuzz_timeout_fails(self) -> None:
         text = (ROOT / ".github" / "workflows" / "skippr-fuzz.yml").read_text(encoding="utf-8")
         self.assertIn("timeout-minutes: 90", text)
+        self.assertIn("linux_contracts:", text)
+        self.assertIn("test_release_sha_batteries.py", text)
+        self.assertIn("needs: linux_contracts", text)
         self.assertIn("cargo fuzz", text)
         self.assertIn("fuzz_corpus_has_every_named_script", text)
         seed_at = text.index("fuzz_corpus_has_every_named_script")

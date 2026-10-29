@@ -9,8 +9,22 @@ env:
   CARGO_BUILD_JOBS: "2"
 
 jobs:
+  linux_contracts:
+    name: fuzz workflow contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 .github/scripts/test_release_sha_batteries.py
+
   linux_fuzz:
     name: cargo fuzz (linux x86)
+    needs: linux_contracts
     runs-on: ubuntu-latest
     timeout-minutes: 90
     defaults:

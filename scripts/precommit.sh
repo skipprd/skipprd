@@ -21,6 +21,9 @@ python3 .github/scripts/test_rust_ci.py
 echo "precommit: python3 .github/scripts/test_release_sha_batteries.py"
 python3 .github/scripts/test_release_sha_batteries.py
 
+echo "precommit: python3 .github/scripts/test_local_runtime_plugins.py"
+python3 .github/scripts/test_local_runtime_plugins.py
+
 echo "precommit: python3 tests/tpc/test_run.py"
 python3 tests/tpc/test_run.py
 

@@ -593,8 +593,8 @@ class MemoTests(unittest.TestCase):
 
 
 class WrapProfileTests(unittest.TestCase):
-    def test_perf_stat_writes_perf_stat_txt(self) -> None:
-        from run import wrap_profile
+    def test_perf_stat_pins_portable_events(self) -> None:
+        from run import PERF_STAT_EVENTS, wrap_profile
 
         work = Path("/tmp/skippr-perf-cell")
         with (
@@ -604,8 +604,32 @@ class WrapProfileTests(unittest.TestCase):
             cmd = wrap_profile(["skipprd", "sync"], "perf-stat", work)
         self.assertEqual(
             cmd,
-            ["/usr/bin/perf", "stat", "-o", str(work / "perf-stat.txt"), "--", "skipprd", "sync"],
+            [
+                "/usr/bin/perf",
+                "stat",
+                "-e",
+                ",".join(PERF_STAT_EVENTS),
+                "-o",
+                str(work / "perf-stat.txt"),
+                "--",
+                "skipprd",
+                "sync",
+            ],
         )
+        self.assertEqual(
+            PERF_STAT_EVENTS,
+            (
+                "task-clock",
+                "context-switches",
+                "cpu-migrations",
+                "page-faults",
+                "cycles",
+                "instructions",
+                "branches",
+                "branch-misses",
+            ),
+        )
+        self.assertNotIn("topdown", ",".join(PERF_STAT_EVENTS))
 
 
 class PerfWorkflowContractTests(unittest.TestCase):
@@ -659,6 +683,8 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("linux_contracts", matrix_job)
         profile_job = workflow.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0]
         self.assertIn("linux_contracts", profile_job)
+        contracts = workflow.split("\n  linux_contracts:")[1].split("\n  build_linux:")[0]
+        self.assertIn("test_release_sha_batteries.py", contracts)
 
     def test_ci_does_not_skip_r2_cells(self) -> None:
         src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
