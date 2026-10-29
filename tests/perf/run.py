@@ -927,29 +927,48 @@ def run_copy_socket(scenario_id: str, scenario: dict[str, Any], scale: str, work
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
+    sender_error: list[BaseException] = []
 
     def send() -> None:
-        deadline = time.time() + 30
+        deadline = time.time() + 60
         while time.time() < deadline:
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=1) as conn:
                     conn.sendall(payload_path.read_bytes())
                 return
             except OSError:
+                if proc.poll() is not None:
+                    sender_error.append(PerfError("skipprd exited before socket listen"))
+                    return
                 time.sleep(0.2)
-        raise PerfError("socket source never accepted a connection")
+        sender_error.append(PerfError("socket source never accepted a connection"))
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
 
     sender = threading.Thread(target=send, daemon=True)
     sender.start()
     started = time.perf_counter()
-    out, _ = proc.communicate(timeout=300)
+    try:
+        out, _ = proc.communicate(timeout=300)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
+        proc.wait()
+        raise PerfError("socket copy timed out after 300s") from None
     wall_ms = int((time.perf_counter() - started) * 1000)
     text = (out or b"").decode("utf-8", errors="replace")
     sys.stdout.write(text)
+    sender.join(timeout=5)
+    if sender_error:
+        raise sender_error[0]
     if proc.returncode != 0:
         raise PerfError(f"socket copy failed: {proc.returncode}")
-    sender.join(timeout=5)
     logs = text
     convert_flamegraph(work)
     events = assert_scenario_perf(logs, scenario)

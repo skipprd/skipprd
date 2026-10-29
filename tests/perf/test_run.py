@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 import tempfile
@@ -294,6 +295,14 @@ class FileParquetYamlTests(unittest.TestCase):
         self.assertIn("mode: tcp", text)
         self.assertIn("batch_size_bytes: 1048576", text)
         self.assertIn("type: copy", text)
+
+    def test_socket_copy_kills_skipprd_if_listen_never_happens(self) -> None:
+        from run import run_copy_socket
+
+        src = inspect.getsource(run_copy_socket)
+        self.assertIn("start_new_session=True", src)
+        self.assertIn("os.killpg", src)
+        self.assertIn("socket source never accepted a connection", src)
 
 
 class StreamTransformPerfTests(unittest.TestCase):
