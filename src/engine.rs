@@ -381,6 +381,28 @@ fn metadata_from_runtime_output(output: &OutputMetadata) -> Metadata {
     metadata
 }
 
+/// Arrow IPC / runtime-plugin ingest keeps schema in `current_runtime_schema_state`
+/// (and often writes an empty `metadata.json` before the first JSON analyse).
+/// Discover and sync both persist those namespaces so `skipprd query` can
+/// register `pipeline.namespace` after WAL reclaim.
+fn pipeline_metadata_with_runtime_schema(
+    pipeline_metadata: &PipelineMetadata,
+    config: &Config,
+) -> PipelineMetadata {
+    let mut updated_metadata = pipeline_metadata.clone();
+    for (namespace, output_metadata) in current_runtime_schema_state().namespaces {
+        updated_metadata
+            .metadata
+            .entry(namespace)
+            .or_insert_with(|| metadata_from_runtime_output(&output_metadata));
+    }
+    let flatten = config.get_transform_flatten_events();
+    for (_namespace, metadata) in updated_metadata.metadata.iter_mut() {
+        metadata.finalize_field_types(config, flatten);
+    }
+    updated_metadata
+}
+
 struct OutputRouter {
     primary_sink_ref: String,
     sinks: HashMap<String, Arc<Box<dyn DataSink + Send + Sync>>>,
@@ -706,19 +728,7 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
 
     info!("Reached end of source data, persisting discovered metadata");
 
-    let flatten = config.get_transform_flatten_events();
-
-    let mut updated_metadata = METADATA.load().as_ref().clone();
-    let runtime_schema_state = current_runtime_schema_state();
-    for (namespace, output_metadata) in runtime_schema_state.namespaces {
-        updated_metadata
-            .metadata
-            .entry(namespace)
-            .or_insert_with(|| metadata_from_runtime_output(&output_metadata));
-    }
-    for (_namespace, metadata) in updated_metadata.metadata.iter_mut() {
-        metadata.finalize_field_types(config, flatten);
-    }
+    let updated_metadata = pipeline_metadata_with_runtime_schema(METADATA.load().as_ref(), config);
     // Discover must not force-enable a DISABLED pipeline; DISABLE is freeze-only.
     METADATA.store(Arc::new(updated_metadata.clone()));
 
@@ -1522,11 +1532,15 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
         return Err(std::io::Error::other(err));
     }
 
+    let updated_metadata = pipeline_metadata_with_runtime_schema(METADATA.load().as_ref(), config);
+    METADATA.store(Arc::new(updated_metadata.clone()));
+    config.set_metadata(&updated_metadata, false).await;
+
     info!("Pipeline sync complete");
 
     {
         use crate::metrics::counters;
-        let namespaces_synced = pipeline_metadata.metadata.len();
+        let namespaces_synced = updated_metadata.metadata.len();
         let total_rows =
             counters::PARQUET_PERSISTED_ROWS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
         let elapsed_ms = sync_started.elapsed().as_millis() as u64;
@@ -2055,5 +2069,76 @@ mod output_router_capability_tests {
             .await
             .unwrap();
         assert_eq!(outcome, crate::plugins::SinkWriteOutcome::Applied);
+    }
+}
+
+#[cfg(test)]
+mod runtime_schema_persist_tests {
+    use super::{pipeline_metadata_with_runtime_schema, METADATA};
+    use crate::discover::{Metadata, OutputMetadata, PipelineMetadata, SkipprDataType};
+    use crate::helpers::configuration::Config;
+    use crate::runtime_plugins::protocol::RuntimeSchemaState;
+    use crate::runtime_plugins::schema_state::{
+        apply_runtime_source_schema_state, clear_runtime_source_schema_state,
+    };
+    use serial_test::serial;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    fn root_record_with_field(field_name: &str, field_type: SkipprDataType) -> Metadata {
+        let mut root = Metadata::new_with_type(SkipprDataType::Record, "");
+        root.fields.insert(
+            field_name.to_string(),
+            Metadata::new_with_type(field_type, field_name),
+        );
+        root
+    }
+
+    #[test]
+    #[serial]
+    fn empty_skippr_metadata_picks_up_arrow_ipc_runtime_namespaces() {
+        let _guard = crate::metadata_test_lock();
+        METADATA.store(Arc::new(PipelineMetadata::new(&Config::new())));
+        clear_runtime_source_schema_state();
+        let output = OutputMetadata::from_metadata(&root_record_with_field(
+            "l_quantity",
+            SkipprDataType::Double,
+        ));
+        apply_runtime_source_schema_state(
+            &Config::new(),
+            RuntimeSchemaState {
+                version: 1,
+                namespaces: BTreeMap::from([("lineitem".to_string(), output)]),
+                namespace_versions: BTreeMap::from([("lineitem".to_string(), 1)]),
+            },
+        );
+        let merged = pipeline_metadata_with_runtime_schema(
+            &PipelineMetadata::new(&Config::new()),
+            &Config::new(),
+        );
+        assert!(
+            merged.metadata.contains_key("lineitem"),
+            "TPC File parquet Arrow IPC must persist lineitem so skipprd query can register lineitem.lineitem"
+        );
+        assert!(merged.metadata["lineitem"]
+            .fields
+            .contains_key("l_quantity"));
+        clear_runtime_source_schema_state();
+        METADATA.store(Arc::new(PipelineMetadata::new(&Config::new())));
+    }
+
+    #[test]
+    fn sync_complete_persists_runtime_schema_before_returning() {
+        let src = include_str!("engine.rs");
+        let before_complete = src
+            .split("info!(\"Pipeline sync complete\")")
+            .next()
+            .unwrap();
+        let tail = &before_complete[before_complete.len().saturating_sub(1500)..];
+        assert!(
+            tail.contains("pipeline_metadata_with_runtime_schema"),
+            "sync must persist Arrow IPC runtime namespaces before Pipeline sync complete"
+        );
+        assert!(tail.contains("set_metadata"));
     }
 }

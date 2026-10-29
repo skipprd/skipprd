@@ -75,6 +75,14 @@ class TpcContractTests(unittest.TestCase):
             WORKFLOW,
         )
 
+    def test_sync_persists_runtime_schema_so_query_can_register_tables(self) -> None:
+        engine = (ROOT / "src" / "engine.rs").read_text(encoding="utf-8")
+        before_complete, _, _ = engine.partition('info!("Pipeline sync complete")')
+        self.assertIn("pipeline_metadata_with_runtime_schema", before_complete[-1500:])
+        self.assertIn("set_metadata", before_complete[-1500:])
+        self.assertIn("current_runtime_schema_state", engine)
+        self.assertIn("rewrite_skipprd_sql", RUN)
+
     def test_skill_laptop_sf1_is_not_sha_substitute(self) -> None:
         self.assertIn("name: skippr-tpc", SKILL)
         self.assertIn("SF10", SKILL)
