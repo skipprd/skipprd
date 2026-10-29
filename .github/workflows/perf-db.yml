@@ -82,6 +82,11 @@ jobs:
           - q-cdc-union-sum-pg
           - q-cdc-overlap-pg
           - q-cdc-iceberg-only-pg
+          - q-migrate-rename-iceberg
+          - q-migrate-rename-duckdb
+          - q-migrate-rename-nested-iceberg
+          - q-migrate-merge-iceberg
+          - q-migrate-drop-iceberg
     steps:
       - uses: actions/checkout@v4
         with:

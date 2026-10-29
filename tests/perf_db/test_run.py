@@ -56,6 +56,11 @@ REQUIRED = SMOKE + (
     "q-cdc-union-sum-pg",
     "q-cdc-overlap-pg",
     "q-cdc-iceberg-only-pg",
+    "q-migrate-rename-iceberg",
+    "q-migrate-rename-duckdb",
+    "q-migrate-rename-nested-iceberg",
+    "q-migrate-merge-iceberg",
+    "q-migrate-drop-iceberg",
 )
 
 
@@ -76,6 +81,7 @@ class PerfDbCatalogTests(unittest.TestCase):
         self.assertIn("q-union-overlap-duckdb", ids)
         self.assertNotIn("smoke_rows", text)
         self.assertNotIn("linux_rows", text)
+        self.assertNotIn("true: true", text)
         self.assertEqual(int(catalog["defaults"]["rows"]), 100_000)
 
     def test_query_after_ingest_always_uses_100k_rows(self) -> None:
@@ -142,6 +148,44 @@ class PerfDbCatalogTests(unittest.TestCase):
         self.assertEqual((deleted.get("asserts") or {}).get("query_count"), 1)
         self.assertEqual((deleted.get("asserts") or {}).get("query_absent_id"), 2)
 
+    def test_migrate_cells_apply_alter_then_query(self) -> None:
+        catalog = db_catalog()
+        expected = {
+            "q-migrate-rename-iceberg": ("skipprlake", "RENAME COLUMN name TO display_name"),
+            "q-migrate-rename-duckdb": ("duckdb", "RENAME COLUMN name TO display_name"),
+            "q-migrate-rename-nested-iceberg": (
+                "skipprlake",
+                "RENAME COLUMN region TO detail.region",
+            ),
+            "q-migrate-merge-iceberg": (
+                "skipprlake",
+                "MERGE COLUMN amount_string INTO amount",
+            ),
+            "q-migrate-drop-iceberg": ("skipprlake", "DROP COLUMN note"),
+        }
+        for name, (sink, fragment) in expected.items():
+            spec = catalog["scenarios"][name]
+            self.assertEqual(spec["kind"], "query_after_ingest", name)
+            self.assertEqual(spec["sink"], sink, name)
+            self.assertEqual(spec["fixture"], "migrate_stream", name)
+            self.assertIn(fragment, spec["migrate"], name)
+            self.assertTrue((spec.get("asserts") or {}).get("iceberg_parquet"), name)
+        nested = catalog["scenarios"]["q-migrate-rename-nested-iceberg"]
+        self.assertIn("detail_region", nested["sql"])
+        workflow = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(
+            encoding="utf-8"
+        )
+        for name in expected:
+            self.assertIn(name, workflow)
+
+    def test_workflow_lists_every_catalog_cell(self) -> None:
+        catalog = db_catalog()
+        workflow = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(
+            encoding="utf-8"
+        )
+        for name in catalog["scenarios"]:
+            self.assertIn(name, workflow, name)
+
 
 class PerfDbSkillTests(unittest.TestCase):
     def test_skill_is_query_matrix_not_ingest_copy(self) -> None:
@@ -164,6 +208,7 @@ class PerfDbSkillTests(unittest.TestCase):
         self.assertIn("query time", text.lower())
         self.assertIn("offset-store-dynamodb", text)
         self.assertIn("100,000", text)
+        self.assertIn("q-migrate-rename-iceberg", text)
         self.assertIn("tests/perf/download.py", text)
         self.assertIn("tests/perf/analyze.py", text)
         self.assertIn("tests/perf/memo.py", text)
@@ -219,6 +264,13 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertLess(cdc.find("require_hold_engaged"), cdc.find("measured_query"))
         self.assertNotIn("from tests.perf.run import", text)
         self.assertNotIn("copy_b-json-json", text)
+        self.assertIn("write_migration_sql", text)
+        self.assertIn('"migrate", "--pipeline"', text)
+        self.assertLess(
+            ingest.find("write_migration_sql"),
+            ingest.find("measured_query"),
+            "migrate must run after sync and before the measured query",
+        )
 
     def test_perf_db_yml_retries_duckdb_install(self) -> None:
         text = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(
@@ -252,6 +304,36 @@ class PerfDbRunnerContractTests(unittest.TestCase):
                 0,
                 {"header": ["name"], "rows": [["alpha-prime"], ["alpha"]]},
             )
+
+    def test_query_header_absent_and_value_asserts(self) -> None:
+        run = perf_db_run()
+        doc = {"header": ["display_name", "amount"], "rows": [["user_1", "10"]]}
+        run.assert_query_doc(
+            "cell",
+            {"asserts": {"query_header": "display_name", "query_value": "user_1"}},
+            0,
+            doc,
+        )
+        with self.assertRaisesRegex(run.perf_run.PerfError, "lacks"):
+            run.assert_query_doc(
+                "cell",
+                {"asserts": {"query_header": "name"}},
+                0,
+                doc,
+            )
+        with self.assertRaisesRegex(run.perf_run.PerfError, "still in"):
+            run.assert_query_doc(
+                "cell",
+                {"asserts": {"query_column_absent": "amount"}},
+                0,
+                doc,
+            )
+        run.assert_query_doc(
+            "cell",
+            {"asserts": {"query_column_absent": "note", "query_value": "user_1"}},
+            0,
+            doc,
+        )
 
     def test_wal_pin_assert_reads_the_last_query_pin(self) -> None:
         run = perf_db_run()

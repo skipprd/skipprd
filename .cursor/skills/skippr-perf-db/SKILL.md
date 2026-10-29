@@ -47,6 +47,13 @@ Every File ingest query cell uses **100,000 rows**. `--scale smoke` / GitHub `ci
 `linux` only select which cells run, not how many rows. Do not restore per-scale
 `smoke_rows` / `linux_rows`. CDC mutation counts stay small.
 
+In-stream ALTER cells (`q-migrate-rename-iceberg`, `q-migrate-rename-duckdb`,
+`q-migrate-rename-nested-iceberg`, `q-migrate-merge-iceberg`,
+`q-migrate-drop-iceberg`) ingest the shared `migrate_stream` fixture, run
+`skipprd migrate`, then query the exact renamed, nested, merged, or dropped
+column. Integer→BIGINT promote is out until skipprd query can read Iceberg files
+that still store Int32 after the schema says Long.
+
 This is **not** skippr-perf (ingest/copy). Cells always `sync --once` then
 `skipprd query --sql --plain --warmup`. `--warmup` starts QueryRuntime, opens
 catalog connections, and runs the statement once; `query_collect` elapsed is

@@ -178,6 +178,27 @@ def assert_query_doc(
             raise perf_run.PerfError(
                 f"{scenario_id}: STREAM returned {len(result_rows)} rows, expected {expect}"
             )
+    header = [str(col) for col in (doc.get("header") or [])]
+    expect_header = asserts.get("query_header")
+    if expect_header and str(expect_header) not in header:
+        raise perf_run.PerfError(
+            f"{scenario_id}: header {header} lacks {expect_header!r}"
+        )
+    absent = asserts.get("query_column_absent")
+    if absent and str(absent) in header:
+        raise perf_run.PerfError(f"{scenario_id}: column {absent!r} still in {header}")
+    expect_value = asserts.get("query_value")
+    if expect_value is not None:
+        got = first_cell(doc)
+        if got != str(expect_value):
+            try:
+                same = float(got) == float(expect_value)
+            except (TypeError, ValueError):
+                same = False
+            if not same:
+                raise perf_run.PerfError(
+                    f"{scenario_id}: value {got!r} != {expect_value!r}"
+                )
 
 
 def assert_wal_pin(scenario_id: str, scenario: dict[str, Any], events: list[dict[str, Any]]) -> None:
@@ -195,6 +216,17 @@ def assert_wal_pin(scenario_id: str, scenario: dict[str, Any], events: list[dict
         raise perf_run.PerfError(f"{scenario_id}: wal_pin drained but query pinned {slices} WAL slices")
     if expect == "live" and slices == 0:
         raise perf_run.PerfError(f"{scenario_id}: wal_pin live but query pinned no WAL slices")
+
+
+def write_migration_sql(config: Path, sql: str) -> Path:
+    migrations = config.parent / "migrations"
+    migrations.mkdir(parents=True, exist_ok=True)
+    path = migrations / "20261029_perf_db.sql"
+    body = sql.strip()
+    if not body.endswith(";"):
+        body += ";"
+    path.write_text(f"-- migrate:up\n{body}\n", encoding="utf-8")
+    return path
 
 
 def stream_limit_rows(scenario: dict[str, Any]) -> int:
@@ -320,6 +352,19 @@ def run_query_after_ingest(
                 raise perf_run.PerfError(
                     f"{scenario_id}: no Iceberg parquet under {warehouse}"
                 )
+        migrate_sql = str(scenario.get("migrate") or "").strip()
+        migrate_ms = None
+        if migrate_sql:
+            write_migration_sql(config, migrate_sql)
+            started = time.perf_counter()
+            logs += perf_run.run_skipprd(
+                skipprd,
+                ["--config", str(config), "migrate", "--pipeline", PIPELINE],
+                env=env,
+                work=work,
+                profile="none",
+            )
+            migrate_ms = int((time.perf_counter() - started) * 1000)
         log(f"skipprd query --sql {sql!r} --plain --warmup")
         query_cmd = perf_run.time_prefix() + perf_run.wrap_profile(
             [
@@ -368,6 +413,8 @@ def run_query_after_ingest(
         payload["kind"] = "query_after_ingest"
         payload["sql"] = sql
         payload["sink"] = sink
+        if migrate_ms is not None:
+            payload["migrate_ms"] = migrate_ms
         query_events = [ev for ev in events if ev.get("phase") == "query_collect"]
         if query_events:
             payload["query_collect_ms"] = int(query_events[-1].get("elapsed_ms") or 0)
