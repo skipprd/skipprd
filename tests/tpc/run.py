@@ -208,8 +208,6 @@ def skipprd_ingest(binary: Path, work: Path, parquet_dir: Path) -> Path:
     env.update(
         {
             "DATA_DIR": str(data),
-            "DATA_DIR_MIN_FREE_BYTES": "0",
-            "DATA_DIR_HIGH_WATERMARK_PCT": "0",
             "USE_LOCAL_PLUGIN_CODE": "1",
             "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR": str(manifests),
         }
@@ -239,8 +237,6 @@ def skipprd_query(binary: Path, work: Path, config: Path, sql: str) -> str:
     env.update(
         {
             "DATA_DIR": str(work / "data"),
-            "DATA_DIR_MIN_FREE_BYTES": "0",
-            "DATA_DIR_HIGH_WATERMARK_PCT": "0",
             "USE_LOCAL_PLUGIN_CODE": "1",
             "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR": str(work / "manifests"),
         }

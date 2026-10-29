@@ -86,6 +86,8 @@ class TpcContractTests(unittest.TestCase):
         duck_call = RUN.index("duckdb_query(parquet_dir, sql)")
         ingest_call = RUN.index("skipprd_ingest(Path(skipprd)")
         self.assertLess(duck_call, ingest_call)
+        self.assertNotIn('DATA_DIR_HIGH_WATERMARK_PCT": "0"', RUN)
+        self.assertNotIn('DATA_DIR_MIN_FREE_BYTES": "0"', RUN)
 
     def test_sync_persists_runtime_schema_so_query_can_register_tables(self) -> None:
         engine = (ROOT / "src" / "engine.rs").read_text(encoding="utf-8")
