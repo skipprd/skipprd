@@ -100,6 +100,8 @@ class TpcContractTests(unittest.TestCase):
         self.assertIn("set_metadata", before_complete[-1500:])
         self.assertIn("current_runtime_schema_state", engine)
         self.assertIn("rewrite_skipprd_sql", RUN)
+        self.assertIn("plain_json_to_csv", RUN)
+        self.assertIn('"rows"', RUN)
 
     def test_skill_laptop_sf1_is_not_sha_substitute(self) -> None:
         self.assertIn("name: skippr-tpc", SKILL)

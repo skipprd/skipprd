@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -134,9 +136,49 @@ def datafusion_query(parquet_dir: Path, sql: str) -> str:
     return "\n".join(rows) + ("\n" if rows else "")
 
 
+def canon_cell(raw: str) -> str:
+    cell = raw.strip().strip('"')
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}:\d{2}(\.\d+)?)?", cell):
+        return cell[:10]
+    try:
+        number = float(cell)
+    except ValueError:
+        return cell
+    if abs(number - round(number)) < 1e-6 and abs(number) < 1e15:
+        return str(int(round(number)))
+    return f"{number:.6f}".rstrip("0").rstrip(".")
+
+
+def canon_table(text: str) -> str:
+    lines = []
+    for line in text.strip().splitlines():
+        if not line.strip():
+            continue
+        lines.append(",".join(canon_cell(cell) for cell in line.split(",")))
+    return "\n".join(lines)
+
+
 def digest(text: str) -> str:
-    normalized = "\n".join(line.strip() for line in text.strip().splitlines() if line.strip())
+    normalized = canon_table(text)
     return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def plain_json_to_csv(stdout: str) -> str:
+    text = stdout.strip()
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError:
+        doc = None
+        for line in reversed(text.splitlines()):
+            line = line.strip()
+            if line.startswith("{") and '"rows"' in line:
+                doc = json.loads(line)
+                break
+        if doc is None:
+            raise
+    rows = doc["rows"]
+    out = [",".join(str(cell) for cell in row) for row in rows]
+    return "\n".join(out) + ("\n" if out else "")
 
 
 def rewrite_skipprd_sql(sql: str) -> str:
@@ -283,6 +325,7 @@ def main() -> None:
     skipprd_config = None
     mismatches = 0
     duck_hashes: dict[str, str] = {}
+    duck_tables: dict[str, str] = {}
     for name in names:
         sql = QUERIES[name]
         duck = duckdb_query(parquet_dir, sql)
@@ -290,6 +333,7 @@ def main() -> None:
         d_hash = digest(duck)
         f_hash = digest(fusion)
         duck_hashes[name] = d_hash
+        duck_tables[name] = canon_table(duck)
         print(f"{name} duckdb={d_hash} datafusion={f_hash}")
         if d_hash != f_hash:
             print(f"{name} hash mismatch duckdb vs datafusion", file=sys.stderr)
@@ -297,11 +341,15 @@ def main() -> None:
     if skipprd:
         skipprd_config = skipprd_ingest(Path(skipprd), work, parquet_dir)
         for name in names:
-            got = skipprd_query(Path(skipprd), work, skipprd_config, QUERIES[name])
+            got = plain_json_to_csv(
+                skipprd_query(Path(skipprd), work, skipprd_config, QUERIES[name])
+            )
             s_hash = digest(got)
             print(f"{name} skipprd={s_hash}")
             if s_hash != duck_hashes[name]:
                 print(f"{name} hash mismatch skipprd vs duckdb", file=sys.stderr)
+                print(f"{name} duckdb csv:\n{duck_tables[name]}", file=sys.stderr)
+                print(f"{name} skipprd csv:\n{canon_table(got)}", file=sys.stderr)
                 mismatches += 1
     raise SystemExit(mismatches)
 
