@@ -170,7 +170,18 @@ def wrap_profile(cmd: list[str], profile: str, work: Path) -> list[str]:
         return [heaptrack, "-o", str(work / "heaptrack"), "--", *cmd]
     if profile == "perf-stat":
         perf = _linux_perf()
-        return [perf, "stat", "-o", str(work / "perf-stat.txt"), "--", *cmd]
+        # Default `perf stat` events include topdown-retiring, which some
+        # GitHub-hosted CPUs do not expose.
+        return [
+            perf,
+            "stat",
+            "-e",
+            "task-clock,cycles,instructions,cache-misses,page-faults",
+            "-o",
+            str(work / "perf-stat.txt"),
+            "--",
+            *cmd,
+        ]
     if profile != "flamegraph":
         raise PerfError(f"unknown profile {profile!r}")
     if sys.platform.startswith("linux"):

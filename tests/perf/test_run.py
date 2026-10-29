@@ -664,7 +664,7 @@ class MemoTests(unittest.TestCase):
 
 
 class WrapProfileTests(unittest.TestCase):
-    def test_perf_stat_writes_perf_stat_txt(self) -> None:
+    def test_perf_stat_uses_portable_events(self) -> None:
         from run import wrap_profile
 
         work = Path("/tmp/skippr-perf-cell")
@@ -675,8 +675,19 @@ class WrapProfileTests(unittest.TestCase):
             cmd = wrap_profile(["skipprd", "sync"], "perf-stat", work)
         self.assertEqual(
             cmd,
-            ["/usr/bin/perf", "stat", "-o", str(work / "perf-stat.txt"), "--", "skipprd", "sync"],
+            [
+                "/usr/bin/perf",
+                "stat",
+                "-e",
+                "task-clock,cycles,instructions,cache-misses,page-faults",
+                "-o",
+                str(work / "perf-stat.txt"),
+                "--",
+                "skipprd",
+                "sync",
+            ],
         )
+        self.assertNotIn("topdown-retiring", " ".join(cmd))
 
 
 class PerfWorkflowContractTests(unittest.TestCase):
@@ -701,6 +712,8 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("ingest-slow-flatten-duckdb", text)
         self.assertIn("analyze.py", text)
         self.assertIn("python3 -m pip install --quiet boto3", text)
+        self.assertIn("curl -fsSL --retry 3 --retry-delay 2 https://install.duckdb.org", text)
+        self.assertNotIn("topdown-retiring", text)
         self.assertIn("-p skippr-plugin-data-source-file", text)
         self.assertIn('ln -sfn "$host" "$plugins/.host"', text)
         self.assertIn('CARGO_TARGET_DIR="$host/target"', text)
