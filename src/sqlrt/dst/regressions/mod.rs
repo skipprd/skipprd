@@ -55,6 +55,48 @@ fn ff_padded_dst1_schedules_do_not_abort() {
 }
 
 #[test]
+fn world_schedule_crash_0b179261_is_not_a_schedule() {
+    // cargo-fuzz world_schedule crash-0b179261f232b6964a73ce080d6db23dadfd005d
+    let bytes: &[u8] = &[
+        0x44, 0x53, 0x54, 0x31, 0x02, 0x00, 0x00, 0x00, 0x03, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x01, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff,
+    ];
+    assert!(super::schedule_from_bytes(bytes).is_empty());
+    let world = super::run(&super::schedule_from_bytes(bytes));
+    let _ = super::current_table(&world);
+}
+
+fn wal_event(ordinal: u32, row_i: u64) -> super::WalEvent {
+    super::WalEvent {
+        row: super::UserRow {
+            id: 1,
+            name: "a".into(),
+            amount: 1,
+        },
+        mutation: None,
+        order: 0,
+        seq: 0,
+        ordinal,
+        row_i,
+    }
+}
+
+#[test]
+fn huge_wal_ordinal_is_not_a_schedule() {
+    let bytes = super::encode_ops(&[super::Op::IngestWal(wal_event(u32::MAX, 0))]);
+    assert!(super::schedule_from_bytes(&bytes).is_empty());
+}
+
+#[test]
+fn huge_wal_row_i_is_not_a_schedule() {
+    let bytes = super::encode_ops(&[super::Op::IngestWal(wal_event(0, u64::MAX))]);
+    assert!(super::schedule_from_bytes(&bytes).is_empty());
+}
+
+#[test]
 fn compacted_seqs_does_not_materialize_u64_max() {
     let mut world = super::World::new();
     world.compacted_thru = u64::MAX;

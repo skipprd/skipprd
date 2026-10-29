@@ -2015,6 +2015,21 @@ mod output_router_capability_tests {
         assert!(router.capability_for_sink_ref("unknown_sink").is_none());
     }
 
+    #[test]
+    fn empty_sink_ref_maps_to_primary() {
+        let primary = "data_sinks.ds_datalake".to_string();
+        let mut sinks = HashMap::new();
+        sinks.insert(primary.clone(), boxed_sink(&sink_capabilities::SKIPPRLAKE));
+        let router = OutputRouter {
+            primary_sink_ref: primary,
+            sinks,
+        };
+        assert_eq!(
+            router.capability_for_sink_ref("").map(|cap| cap.name),
+            Some("SkipprLake")
+        );
+    }
+
     #[tokio::test]
     async fn sync_bytes_forwards_to_registered_sink() {
         let primary = "data_sinks.file".to_string();

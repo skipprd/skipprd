@@ -193,7 +193,7 @@ fn for_each_parquet_ipc_batch(
         let batch = batch.map_err(std::io::Error::other)?;
         offset_pos = offset_pos.saturating_add(batch.num_rows() as u64);
         on_batch(RuntimeIngestPartitionBatch {
-            sink_ref: offset_key.namespace.clone(),
+            sink_ref: String::new(),
             namespace: offset_key.namespace.clone(),
             partition: offset_key.partition.clone(),
             time: None,
@@ -466,6 +466,7 @@ mod tests {
         .unwrap();
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].sink_ref, "");
         assert_eq!(batches[0].namespace, "people");
         assert_eq!(batches[0].offsets[0].position, 2);
         let decoded = decode_record_batch_stream(batches[0].arrow_stream_bytes.clone()).unwrap();
