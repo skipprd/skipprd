@@ -50,6 +50,10 @@ class TpcContractTests(unittest.TestCase):
         self.assertIn("\n  lineitem:", yml)
         self.assertIn("\n  orders:", yml)
         self.assertIn("\n  customer:", yml)
+        self.assertIn("format: json", yml)
+        self.assertNotIn("format: parquet", yml)
+        self.assertIn("FORMAT JSON", RUN)
+        self.assertIn("read_parquet", RUN)
         contracts = WORKFLOW.split("\n  tpc_h_sf10:", 1)[0]
         self.assertIn("test_local_runtime_plugins.py", contracts)
         self.assertIn("test_release_sha_batteries.py", contracts)
