@@ -128,6 +128,14 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
         seed_at = text.index("fuzz_corpus_has_every_named_script")
         fuzz_at = text.index("cargo +nightly fuzz run world_schedule")
         self.assertLess(seed_at, fuzz_at)
+        self.assertNotIn(
+            "cargo test -p skipprd --lib --offline -- fuzz_corpus_has_every_named_script",
+            text,
+        )
+        self.assertIn(
+            "cargo test -p skipprd --lib -- fuzz_corpus_has_every_named_script",
+            text,
+        )
         self.assertNotIn("continue-on-error", text)
         self.assertNotRegex(text, r"(?m)^          cargo fuzz run")
         self.assertEqual(text.count("cargo +nightly fuzz run"), 12)
