@@ -122,7 +122,7 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
 
     def test_fuzz_timeout_fails(self) -> None:
         text = (ROOT / ".github" / "workflows" / "skippr-fuzz.yml").read_text(encoding="utf-8")
-        self.assertIn("timeout-minutes:", text)
+        self.assertIn("timeout-minutes: 90", text)
         self.assertIn("cargo fuzz", text)
         self.assertIn("fuzz_corpus_has_every_named_script", text)
         seed_at = text.index("fuzz_corpus_has_every_named_script")
@@ -136,6 +136,9 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
             "cargo test -p skipprd --lib -- fuzz_corpus_has_every_named_script",
             text,
         )
+        fuzz_toml = (ROOT / "fuzz" / "Cargo.toml").read_text(encoding="utf-8")
+        self.assertIn("[patch.crates-io]", fuzz_toml)
+        self.assertIn('iceberg = { path = "../third_party/iceberg" }', fuzz_toml)
         self.assertNotIn("continue-on-error", text)
         self.assertNotRegex(text, r"(?m)^          cargo fuzz run")
         self.assertEqual(text.count("cargo +nightly fuzz run"), 12)

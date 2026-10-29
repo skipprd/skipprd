@@ -19,6 +19,9 @@ skipprd = { path = ".." }
 [workspace]
 members = ["."]
 
+[patch.crates-io]
+iceberg = { path = "../third_party/iceberg" }
+
 [[bin]]
 name = "world_schedule"
 path = "fuzz_targets/world_schedule.rs"
