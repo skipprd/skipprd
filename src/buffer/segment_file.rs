@@ -184,6 +184,75 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
+fn claimed_len_capped_by_remaining(
+    claimed: u64,
+    pos: u64,
+    file_len: u64,
+    what: &'static str,
+) -> io::Result<usize> {
+    let remaining = file_len.saturating_sub(pos);
+    if claimed > remaining {
+        return Err(invalid_data(format!(
+            "{what} length {claimed} exceeds remaining {remaining}"
+        )));
+    }
+    usize::try_from(claimed).map_err(|_| invalid_data(format!("{what} is too large")))
+}
+
+fn read_len_capped_by_remaining<R: Read + Seek>(
+    reader: &mut R,
+    file_len: u64,
+    what: &'static str,
+) -> io::Result<usize> {
+    let mut buf = [0u8; 8];
+    reader.read_exact(&mut buf)?;
+    claimed_len_capped_by_remaining(
+        u64::from_le_bytes(buf),
+        reader.stream_position()?,
+        file_len,
+        what,
+    )
+}
+
+fn read_blob_capped_by_remaining<R: Read + Seek>(
+    reader: &mut R,
+    file_len: u64,
+    what: &'static str,
+) -> io::Result<Vec<u8>> {
+    let len = read_len_capped_by_remaining(reader, file_len, what)?;
+    let mut blob = vec![0u8; len];
+    reader.read_exact(&mut blob)?;
+    Ok(blob)
+}
+
+fn skip_claimed_len<R: Read + Seek>(
+    reader: &mut R,
+    file_len: u64,
+    what: &'static str,
+) -> io::Result<()> {
+    let len = read_len_capped_by_remaining(reader, file_len, what)? as u64;
+    let end = reader
+        .stream_position()?
+        .checked_add(len)
+        .ok_or_else(|| invalid_data(format!("{what} range overflow")))?;
+    reader.seek(io::SeekFrom::Start(end))?;
+    Ok(())
+}
+
+fn skip_payload<R: Seek>(reader: &mut R, data_len: u64, file_len: u64) -> io::Result<()> {
+    let start = reader.stream_position()?;
+    let end = start
+        .checked_add(data_len)
+        .ok_or_else(|| invalid_data("WAL PART payload range overflow"))?;
+    if end > file_len {
+        return Err(invalid_data(format!(
+            "Compactor: partition length beyond segment end start={start} len={data_len} file_len={file_len}"
+        )));
+    }
+    reader.seek(io::SeekFrom::Start(end))?;
+    Ok(())
+}
+
 fn read_part_codec_and_len<R: Read>(reader: &mut R, version: u32) -> io::Result<(u8, u64)> {
     let codec = if version >= VERSION {
         let mut codec = [0u8; 1];
@@ -355,13 +424,7 @@ impl SegmentFile {
         let mut created = [0u8; 8];
         reader.read_exact(&mut created)?;
         let created_at_secs = u64::from_le_bytes(created);
-        let mut off_len_buf = [0u8; 8];
-        reader.read_exact(&mut off_len_buf)?;
-        let offsets_len = u64::from_le_bytes(off_len_buf);
-        let offsets_len_usize = usize::try_from(offsets_len)
-            .map_err(|_| invalid_data("WAL offsets blob is too large"))?;
-        let mut offsets_blob = vec![0u8; offsets_len_usize];
-        reader.read_exact(&mut offsets_blob)?;
+        let offsets_blob = read_blob_capped_by_remaining(reader, file_len, "WAL offsets blob")?;
         let offsets: std::collections::HashMap<OffsetKey, u64> =
             bincode::deserialize(&offsets_blob)
                 .map_err(|err| invalid_data(format!("invalid WAL offsets metadata: {err}")))?;
@@ -383,13 +446,7 @@ impl SegmentFile {
             if &tag != PART {
                 return Err(invalid_data("WAL segment expected PART or FOOT"));
             }
-            let mut key_len_buf = [0u8; 8];
-            reader.read_exact(&mut key_len_buf)?;
-            let key_len = u64::from_le_bytes(key_len_buf);
-            let key_len_usize = usize::try_from(key_len)
-                .map_err(|_| invalid_data("WAL partition key is too large"))?;
-            let mut key_blob = vec![0u8; key_len_usize];
-            reader.read_exact(&mut key_blob)?;
+            let key_blob = read_blob_capped_by_remaining(reader, file_len, "WAL partition key")?;
             let key: PartitionKey = bincode::deserialize(&key_blob)
                 .map_err(|err| invalid_data(format!("invalid WAL partition key: {err}")))?;
             let mut bytes_buf = [0u8; 8];
@@ -403,6 +460,12 @@ impl SegmentFile {
             reader.read_exact(&mut meta_len_buf)?;
             let meta_len = u64::from_le_bytes(meta_len_buf);
             let part_meta_start = reader.stream_position()?;
+            let remaining = file_len.saturating_sub(part_meta_start);
+            if meta_len > remaining {
+                return Err(invalid_data(format!(
+                    "WAL PART metadata length {meta_len} exceeds remaining {remaining}"
+                )));
+            }
             let part_meta_summary = if meta_len == 0 {
                 SegmentPartMetaSummary::Append
             } else {
@@ -423,11 +486,7 @@ impl SegmentFile {
 
             let (codec, data_len) = read_part_codec_and_len(reader, version)?;
             let start = reader.stream_position()?;
-            if start.saturating_add(data_len) > file_len {
-                return Err(invalid_data(format!(
-                    "Compactor: partition length beyond segment end start={start} len={data_len} file_len={file_len}"
-                )));
-            }
+            skip_payload(reader, data_len, file_len)?;
             total_bytes = total_bytes.saturating_add(data_len);
             let slice_ordinal = u32::try_from(index.len())
                 .map_err(|_| invalid_data("WAL segment contains too many partitions"))?;
@@ -443,7 +502,6 @@ impl SegmentFile {
                 start,
                 len: data_len,
             });
-            reader.seek(io::SeekFrom::Current(data_len as i64))?;
         }
 
         if index.iter().any(|entry| entry.part_meta_len > 0) {
@@ -744,6 +802,8 @@ impl SegmentFile {
         let mut result: std::collections::HashMap<PartitionKey, Vec<u8>> =
             std::collections::HashMap::new();
 
+        let file_len = reader.seek(io::SeekFrom::End(0))?;
+        reader.seek(io::SeekFrom::Start(0))?;
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;
         if &magic != MAGIC {
@@ -759,12 +819,8 @@ impl SegmentFile {
             ));
         }
 
-        // Skip created_at + offsets blob
         reader.seek(io::SeekFrom::Current(8))?;
-        let mut off_len_buf = [0u8; 8];
-        reader.read_exact(&mut off_len_buf)?;
-        let offsets_len = u64::from_le_bytes(off_len_buf);
-        reader.seek(io::SeekFrom::Current(offsets_len as i64))?;
+        skip_claimed_len(reader, file_len, "WAL offsets blob")?;
 
         loop {
             let mut tag = [0u8; 4];
@@ -776,32 +832,34 @@ impl SegmentFile {
             if &tag != PART {
                 break;
             }
-            let mut key_len_buf = [0u8; 8];
-            reader.read_exact(&mut key_len_buf)?;
-            let key_len = u64::from_le_bytes(key_len_buf);
-            let mut key_blob = vec![0u8; key_len as usize];
-            reader.read_exact(&mut key_blob)?;
+            let key_blob = read_blob_capped_by_remaining(reader, file_len, "WAL partition key")?;
             let key: PartitionKey = bincode::deserialize(&key_blob).map_err(|err| {
                 invalid_data(format!(
                     "invalid WAL partition key in part-meta scan: {err}"
                 ))
             })?;
 
-            // Skip part_bytes + updated_secs
             reader.seek(io::SeekFrom::Current(16))?;
 
-            // Read part_meta_blob
             let mut meta_len_buf = [0u8; 8];
             reader.read_exact(&mut meta_len_buf)?;
             let meta_len = u64::from_le_bytes(meta_len_buf);
+            let remaining = file_len.saturating_sub(reader.stream_position()?);
+            if meta_len > remaining {
+                return Err(invalid_data(format!(
+                    "WAL PART metadata length {meta_len} exceeds remaining {remaining}"
+                )));
+            }
             if meta_len > 0 {
-                let mut meta_blob = vec![0u8; meta_len as usize];
+                let meta_len_usize = usize::try_from(meta_len)
+                    .map_err(|_| invalid_data("WAL PART metadata is too large"))?;
+                let mut meta_blob = vec![0u8; meta_len_usize];
                 reader.read_exact(&mut meta_blob)?;
                 result.insert(key, meta_blob);
             }
 
             let (_codec, data_len) = read_part_codec_and_len(reader, version)?;
-            reader.seek(io::SeekFrom::Current(data_len as i64))?;
+            skip_payload(reader, data_len, file_len)?;
         }
 
         Ok(result)
@@ -1427,5 +1485,17 @@ mod tests_wal_writer {
             .expect("write_snapshot body");
         assert!(body.contains("write_payload_atomically"));
         assert!(!body.contains("DirectIoFile::create("));
+    }
+
+    #[test]
+    fn huge_segf_offsets_len_fails_closed() {
+        // cargo-fuzz wal_slices crash-3ec3c9b046a3bd6ac6e281b6d88b42eb60a924a2
+        let bytes: &[u8] = include_bytes!("../../fuzz/corpus/wal_slices/crash_3ec3c9b0");
+        assert_eq!(&bytes[..4], b"SEGF");
+        let err = SegmentFile::read_metadata_from_bytes(bytes).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let err =
+            SegmentFile::read_part_meta_blobs_from_reader(&mut Cursor::new(bytes)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
