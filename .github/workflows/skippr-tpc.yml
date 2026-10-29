@@ -45,7 +45,8 @@ jobs:
       - name: Free runner disk
         run: |
           df -h
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell /opt/hostedtoolcache/go /opt/hostedtoolcache/Ruby || true
+          sudo docker system prune -af || true
           df -h
       - uses: actions/setup-python@v5
         with:
@@ -71,7 +72,7 @@ jobs:
             -p skippr-plugin-data-source-file \
             -p skippr-plugin-data-sink-duckdb \
             -p skippr-plugin-schema-sink-duckdb
-          rm -rf target/release/{build,deps,incremental,.fingerprint} target/debug
+          rm -rf target/release/{build,deps,incremental,.fingerprint} target/debug ~/.cargo/registry ~/.cargo/git
       - name: TPC-H SF10 Q1 Q3 Q6 vs DuckDB vs DataFusion vs skipprd query
         env:
           SKIPPRD_BIN: ${{ github.workspace }}/skipprd/target/release/skipprd

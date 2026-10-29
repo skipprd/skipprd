@@ -79,6 +79,8 @@ class TpcContractTests(unittest.TestCase):
         self.assertIn("/usr/share/dotnet", WORKFLOW)
         self.assertIn("/usr/local/lib/android", WORKFLOW)
         self.assertIn("/opt/ghc", WORKFLOW)
+        self.assertIn("docker system prune", WORKFLOW)
+        self.assertIn("~/.cargo/registry", WORKFLOW)
         self.assertIn("df -h", WORKFLOW)
         self.assertIn("disk_usage", RUN)
         self.assertIn("drop_non_parquet", RUN)
@@ -88,6 +90,8 @@ class TpcContractTests(unittest.TestCase):
         self.assertLess(duck_call, ingest_call)
         self.assertNotIn('DATA_DIR_HIGH_WATERMARK_PCT": "0"', RUN)
         self.assertNotIn('DATA_DIR_MIN_FREE_BYTES": "0"', RUN)
+        self.assertIn("WAL_COMPACTION_GROUP_MAX_PARTS", RUN)
+        self.assertIn("WAL_COMPACTION_GROUP_TARGET_BYTES", RUN)
 
     def test_sync_persists_runtime_schema_so_query_can_register_tables(self) -> None:
         engine = (ROOT / "src" / "engine.rs").read_text(encoding="utf-8")

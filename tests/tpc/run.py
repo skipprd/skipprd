@@ -210,6 +210,8 @@ def skipprd_ingest(binary: Path, work: Path, parquet_dir: Path) -> Path:
             "DATA_DIR": str(data),
             "USE_LOCAL_PLUGIN_CODE": "1",
             "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR": str(manifests),
+            "WAL_COMPACTION_GROUP_MAX_PARTS": "32",
+            "WAL_COMPACTION_GROUP_TARGET_BYTES": str(512 * 1024 * 1024),
         }
     )
     for pipeline in ("lineitem", "orders", "customer"):
@@ -239,6 +241,8 @@ def skipprd_query(binary: Path, work: Path, config: Path, sql: str) -> str:
             "DATA_DIR": str(work / "data"),
             "USE_LOCAL_PLUGIN_CODE": "1",
             "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR": str(work / "manifests"),
+            "WAL_COMPACTION_GROUP_MAX_PARTS": "32",
+            "WAL_COMPACTION_GROUP_TARGET_BYTES": str(512 * 1024 * 1024),
         }
     )
     proc = _run(
