@@ -42,6 +42,11 @@ jobs:
         with:
           path: skipprd
           submodules: true
+      - name: Free runner disk
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -70,4 +75,7 @@ jobs:
       - name: TPC-H SF10 Q1 Q3 Q6 vs DuckDB vs DataFusion vs skipprd query
         env:
           SKIPPRD_BIN: ${{ github.workspace }}/skipprd/target/release/skipprd
-        run: python3 tests/tpc/run.py --scale 10 --queries Q1,Q3,Q6
+        run: |
+          df -h
+          python3 tests/tpc/run.py --scale 10 --queries Q1,Q3,Q6
+          df -h

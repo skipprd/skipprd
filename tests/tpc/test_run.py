@@ -75,6 +75,18 @@ class TpcContractTests(unittest.TestCase):
             WORKFLOW,
         )
 
+    def test_sf10_frees_runner_disk_before_generate(self) -> None:
+        self.assertIn("/usr/share/dotnet", WORKFLOW)
+        self.assertIn("/usr/local/lib/android", WORKFLOW)
+        self.assertIn("/opt/ghc", WORKFLOW)
+        self.assertIn("df -h", WORKFLOW)
+        self.assertIn("disk_usage", RUN)
+        self.assertIn("drop_non_parquet", RUN)
+        self.assertIn("drop_table_parquet", RUN)
+        duck_call = RUN.index("duckdb_query(parquet_dir, sql)")
+        ingest_call = RUN.index("skipprd_ingest(Path(skipprd)")
+        self.assertLess(duck_call, ingest_call)
+
     def test_sync_persists_runtime_schema_so_query_can_register_tables(self) -> None:
         engine = (ROOT / "src" / "engine.rs").read_text(encoding="utf-8")
         before_complete, _, _ = engine.partition('info!("Pipeline sync complete")')

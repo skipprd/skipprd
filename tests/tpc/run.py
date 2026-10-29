@@ -65,6 +65,29 @@ def parquet_glob(parquet_dir: Path, table: str) -> str:
     return src.as_posix()
 
 
+def log_disk(label: str, path: Path) -> None:
+    usage = shutil.disk_usage(path)
+    print(
+        f"disk {label} total={usage.total} used={usage.used} free={usage.free}",
+        file=sys.stderr,
+    )
+
+
+def drop_non_parquet(out_dir: Path) -> None:
+    for path in out_dir.rglob("*"):
+        if path.is_file() and path.suffix.lower() != ".parquet":
+            path.unlink()
+
+
+def drop_table_parquet(parquet_dir: Path, table: str) -> None:
+    file_path = parquet_dir / f"{table}.parquet"
+    dir_path = parquet_dir / table
+    if file_path.is_file():
+        file_path.unlink()
+    if dir_path.is_dir():
+        shutil.rmtree(dir_path)
+
+
 def generate(scale: int, out_dir: Path) -> None:
     _run(
         [
@@ -77,6 +100,7 @@ def generate(scale: int, out_dir: Path) -> None:
             str(out_dir),
         ]
     )
+    drop_non_parquet(out_dir)
 
 
 def duckdb_query(parquet_dir: Path, sql: str) -> str:
@@ -204,6 +228,9 @@ def skipprd_ingest(binary: Path, work: Path, parquet_dir: Path) -> Path:
             ],
             env=env,
         )
+        shutil.rmtree(sources[pipeline], ignore_errors=True)
+        drop_table_parquet(parquet_dir, pipeline)
+        log_disk(f"after {pipeline} sync", work)
     return config
 
 
@@ -249,27 +276,31 @@ def main() -> None:
     work = args.work or Path(tempfile.mkdtemp(prefix="skippr-tpc-"))
     parquet_dir = work / "parquet"
     parquet_dir.mkdir(parents=True, exist_ok=True)
+    log_disk("before generate", work)
     generate(args.scale, parquet_dir)
+    log_disk("after generate", work)
     skipprd = os.environ.get("SKIPPRD_BIN")
     skipprd_config = None
-    if skipprd:
-        skipprd_config = skipprd_ingest(Path(skipprd), work, parquet_dir)
     mismatches = 0
+    duck_hashes: dict[str, str] = {}
     for name in names:
         sql = QUERIES[name]
         duck = duckdb_query(parquet_dir, sql)
         fusion = datafusion_query(parquet_dir, sql)
         d_hash = digest(duck)
         f_hash = digest(fusion)
+        duck_hashes[name] = d_hash
         print(f"{name} duckdb={d_hash} datafusion={f_hash}")
         if d_hash != f_hash:
             print(f"{name} hash mismatch duckdb vs datafusion", file=sys.stderr)
             mismatches += 1
-        if skipprd and skipprd_config is not None:
-            got = skipprd_query(Path(skipprd), work, skipprd_config, sql)
+    if skipprd:
+        skipprd_config = skipprd_ingest(Path(skipprd), work, parquet_dir)
+        for name in names:
+            got = skipprd_query(Path(skipprd), work, skipprd_config, QUERIES[name])
             s_hash = digest(got)
             print(f"{name} skipprd={s_hash}")
-            if s_hash != d_hash:
+            if s_hash != duck_hashes[name]:
                 print(f"{name} hash mismatch skipprd vs duckdb", file=sys.stderr)
                 mismatches += 1
     raise SystemExit(mismatches)
