@@ -9,7 +9,7 @@ use serde_json::Map;
 
 use crate::discover::date_formats::DateFormats;
 use crate::discover::evolution::Evolution;
-use crate::discover::{AnalyseSchema, Metadata, SkipprDataType};
+use crate::discover::{Metadata, SkipprDataType};
 
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ResolvedFieldValue;
@@ -18,6 +18,7 @@ use dashmap::DashMap;
 #[allow(unused_imports)]
 use crate::discover::DateCandidate;
 use crate::helpers::configuration::Config;
+use crate::ingest::scalar::{coerce_scalar, scalar_mismatch};
 #[allow(unused_imports)]
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 
@@ -161,23 +162,19 @@ pub fn fast_path_ingest(
         .ok_or("Template is not an object")?;
     for (field, value, data_type) in fields_to_process {
         // No need to convert string to enum since we already have the enum
-        let resolved_value = match fast_set_value_optimized(
-            config, &data_type, field, value, metadata, None, flatten,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                if crate::helpers::configuration::Config::log_wal_enabled() {
-                    println!(
-                        "fast_path_ingest: set_value failed for field='{}' err={}",
-                        field, e
-                    );
-                }
-                if e.to_string().contains("Falling back to slow path") {
+        let resolved_value =
+            match fast_set_value(config, &data_type, field, value, metadata, None, flatten) {
+                Ok(v) => v,
+                Err(e) => {
+                    if crate::helpers::configuration::Config::log_wal_enabled() {
+                        println!(
+                            "fast_path_ingest: set_value failed for field='{}' err={}",
+                            field, e
+                        );
+                    }
                     return Err(e);
                 }
-                return Err(e);
-            }
-        };
+            };
 
         if !resolved_value.value.is_null() {
             obj.insert(resolved_value.field, resolved_value.value);
@@ -223,9 +220,9 @@ pub fn validate_required_fields(
     Ok(())
 }
 
-/// Optimized version of fast_set_value that uses the DataType enum
+/// Fast-path set_value: structural walk or scalar coerce; apply-only evolution.
 #[inline]
-pub fn fast_set_value_optimized(
+pub fn fast_set_value(
     config: &Config,
     data_type: &SkipprDataType,
     field: &str,
@@ -251,11 +248,49 @@ pub fn fast_set_value_optimized(
     let apply_evolution_bool = apply_evolution.unwrap_or(true);
 
     match data_type {
-        SkipprDataType::Record => process_record_field(config, field, value, metadata, flatten),
-        SkipprDataType::Map => process_map_field(config, field, value, metadata, flatten),
-        SkipprDataType::Array => process_array_field(config, field, value, metadata, flatten),
-        SkipprDataType::Date => fast_set_date(field, value, metadata),
-        _ => match_scalar_value_optimized(
+        SkipprDataType::Record | SkipprDataType::Map | SkipprDataType::Array => {
+            if apply_evolution_bool {
+                if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
+                    return Ok(v);
+                }
+            }
+            match data_type {
+                SkipprDataType::Record => {
+                    process_record_field(config, field, value, metadata, flatten)
+                }
+                SkipprDataType::Map => process_map_field(config, field, value, metadata, flatten),
+                SkipprDataType::Array => {
+                    process_array_field(config, field, value, metadata, flatten)
+                }
+                _ => unreachable!("container arm"),
+            }
+        }
+        SkipprDataType::Date => {
+            if apply_evolution_bool {
+                if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
+                    return Ok(v);
+                }
+            }
+            fast_set_date(field, value, metadata)
+        }
+        SkipprDataType::String
+        | SkipprDataType::Long
+        | SkipprDataType::Integer
+        | SkipprDataType::Short
+        | SkipprDataType::Byte
+        | SkipprDataType::Double
+        | SkipprDataType::Float
+        | SkipprDataType::Decimal
+        | SkipprDataType::Boolean
+        | SkipprDataType::TimestampMilli
+        | SkipprDataType::Timestamp
+        | SkipprDataType::Time
+        | SkipprDataType::Binary
+        | SkipprDataType::Uuid
+        | SkipprDataType::Fixed
+        | SkipprDataType::Json
+        | SkipprDataType::Null
+        | SkipprDataType::Unknown => match_scalar_value_optimized(
             config,
             field,
             data_type,
@@ -288,6 +323,14 @@ fn try_fast_path_evolution(
     if !has_evolution {
         return None;
     }
+    if let Some(evo) = metadata.get(field).and_then(|m| m.evolution.get("array")) {
+        if metadata.contains_key(&evo.new_field) {
+            return Some(ResolvedFieldValue::new(
+                evo.new_field.clone(),
+                value.clone(),
+            ));
+        }
+    }
     let mut meta_ev = metadata.clone();
     match Evolution::apply_evolution_factory(config, field, value, &mut meta_ev, flatten) {
         Ok(v) if accept_fast_path_evolution(field, &v, metadata) => Some(v),
@@ -295,7 +338,7 @@ fn try_fast_path_evolution(
     }
 }
 
-/// Optimized version of match_scalar_value_fast that uses the DataType enum
+/// Scalar coerce on the fast path; existing siblings only via try_fast_path_evolution.
 #[inline]
 pub fn match_scalar_value_optimized(
     config: &Config,
@@ -306,7 +349,6 @@ pub fn match_scalar_value_optimized(
     apply_evolution: bool,
     flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
-    // Return early for null values
     if value.is_null() {
         return Ok(ResolvedFieldValue {
             field: Metadata::get_field_out_field_name(metadata, field),
@@ -314,313 +356,25 @@ pub fn match_scalar_value_optimized(
         });
     }
 
-    // Use cached field name lookups to reduce repetitive transformations
     let output_field_name = Metadata::get_field_out_field_name(metadata, field);
 
-    match data_type {
-        SkipprDataType::String => {
-            if let Some(s) = value.as_str() {
-                // Fast path for actual strings
-                return Ok(ResolvedFieldValue {
-                    field: output_field_name,
-                    value: Value::String(s.to_string()),
-                });
-            } else if value.is_number() {
-                // Preserve large numeric identifiers exactly instead of round-tripping through f64.
-                return Ok(ResolvedFieldValue {
-                    field: output_field_name,
-                    value: Value::String(value.to_string()),
-                });
-            } else if let Some(b) = value.as_bool() {
-                // Convert boolean to string
-                return Ok(ResolvedFieldValue {
-                    field: output_field_name,
-                    value: Value::String(b.to_string()),
-                });
-            } else if apply_evolution {
-                if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
-                    return Ok(v);
-                }
-            }
-
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Value {} is not a string", value),
-            )))
-        }
-        SkipprDataType::Long => {
-            if let Some(i) = value.as_i64() {
-                // Fast path for actual integers
-                return Ok(ResolvedFieldValue {
-                    field: output_field_name,
-                    value: Value::Number(serde_json::Number::from(i)),
-                });
-            } else if let Some(s) = value.as_str() {
-                // Try parsing string as integer
-                if let Ok(i) = s.parse::<i64>() {
-                    return Ok(ResolvedFieldValue {
-                        field: output_field_name,
-                        value: Value::Number(serde_json::Number::from(i)),
-                    });
-                }
-            }
-
+    match coerce_scalar(data_type, value) {
+        Ok(v) => Ok(ResolvedFieldValue {
+            field: output_field_name,
+            value: v,
+        }),
+        Err(_) => {
             if apply_evolution {
                 if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
                     return Ok(v);
                 }
             }
-
             Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Value {} is not a long", value),
+                scalar_mismatch(data_type, None, field, value),
             )))
         }
-        SkipprDataType::Integer => {
-            if let Some(i) = value.as_i64() {
-                if let Ok(i32v) = i32::try_from(i) {
-                    return Ok(ResolvedFieldValue {
-                        field: output_field_name,
-                        value: Value::Number(serde_json::Number::from(i32v)),
-                    });
-                }
-            } else if let Some(s) = value.as_str() {
-                // Try parsing string as integer
-                if let Ok(i) = s.parse::<i32>() {
-                    return Ok(ResolvedFieldValue {
-                        field: output_field_name,
-                        value: Value::Number(serde_json::Number::from(i)),
-                    });
-                } else if s == "true" {
-                    return Ok(ResolvedFieldValue {
-                        field: output_field_name,
-                        value: Value::Number(serde_json::Number::from(1)),
-                    });
-                } else if s == "false" {
-                    return Ok(ResolvedFieldValue {
-                        field: output_field_name,
-                        value: Value::Number(serde_json::Number::from(0)),
-                    });
-                }
-            } else if let Some(b) = value.as_bool() {
-                // Convert boolean to integer (true -> 1, false -> 0)
-                return Ok(ResolvedFieldValue {
-                    field: output_field_name,
-                    value: Value::Number(serde_json::Number::from(if b { 1 } else { 0 })),
-                });
-            }
-
-            if apply_evolution {
-                if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
-                    return Ok(v);
-                }
-            }
-
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Value {} is not an integer", value),
-            )))
-        }
-        SkipprDataType::TimestampMilli | SkipprDataType::Timestamp => {
-            if let Some(i) = value.as_i64() {
-                // Convert to milliseconds if necessary
-                return Ok(ResolvedFieldValue {
-                    field: output_field_name,
-                    value: AnalyseSchema::coerce_to_milli_seconds(Value::Number(
-                        serde_json::Number::from(i),
-                    )),
-                });
-            } else if let Some(s) = value.as_str() {
-                // Try parsing string as timestamp
-                if let Ok(i) = s.parse::<i64>() {
-                    return Ok(ResolvedFieldValue {
-                        field: output_field_name,
-                        value: AnalyseSchema::coerce_to_milli_seconds(Value::Number(
-                            serde_json::Number::from(i),
-                        )),
-                    });
-                }
-                if chrono::DateTime::parse_from_rfc3339(s).is_ok()
-                    || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").is_ok()
-                    || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f").is_ok()
-                {
-                    return Ok(ResolvedFieldValue {
-                        field: output_field_name,
-                        value: Value::String(s.replace(' ', "T")),
-                    });
-                }
-            } else if let Some(b) = value.as_bool() {
-                // Convert boolean to timestamp (true -> 1, false -> 0)
-                return Ok(ResolvedFieldValue {
-                    field: output_field_name,
-                    value: Value::Number(serde_json::Number::from(if b { 1 } else { 0 })),
-                });
-            }
-
-            if apply_evolution {
-                if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
-                    return Ok(v);
-                }
-            }
-
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Field {} value {} is not a timestamp", field, value),
-            )))
-        }
-        SkipprDataType::Double => {
-            if let Some(f) = value.as_f64() {
-                // Fast path for floats
-                return Ok(ResolvedFieldValue {
-                    field: output_field_name,
-                    value: Value::Number(serde_json::Number::from_f64(f).unwrap()),
-                });
-            } else if let Some(s) = value.as_str() {
-                // Try parsing string as float
-                if let Ok(f) = s.parse::<f64>() {
-                    if let Some(num) = serde_json::Number::from_f64(f) {
-                        return Ok(ResolvedFieldValue {
-                            field: output_field_name,
-                            value: Value::Number(num),
-                        });
-                    }
-                }
-            }
-
-            if apply_evolution {
-                if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
-                    return Ok(v);
-                }
-            }
-
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Value {} is not a double", value),
-            )))
-        }
-        SkipprDataType::Decimal => {
-            if let Some(s) = value.as_str() {
-                if s.parse::<f64>().is_ok() {
-                    return Ok(ResolvedFieldValue {
-                        field: output_field_name,
-                        value: Value::String(s.to_string()),
-                    });
-                }
-            } else if value.as_f64().is_some() || value.as_i64().is_some() {
-                return Ok(ResolvedFieldValue {
-                    field: output_field_name,
-                    value: Value::String(value.to_string()),
-                });
-            }
-
-            if apply_evolution {
-                if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
-                    return Ok(v);
-                }
-            }
-
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Value {} is not a decimal", value),
-            )))
-        }
-        SkipprDataType::Boolean => {
-            if let Some(b) = value.as_bool() {
-                // Fast path for booleans
-                return Ok(ResolvedFieldValue {
-                    field: output_field_name,
-                    value: Value::Bool(b),
-                });
-            } else if let Some(s) = value.as_str() {
-                // Try parsing string as boolean
-                if let Ok(b) = s.parse::<bool>() {
-                    return Ok(ResolvedFieldValue {
-                        field: output_field_name,
-                        value: Value::Bool(b),
-                    });
-                } else if s == "0" {
-                    return Ok(ResolvedFieldValue {
-                        field: output_field_name,
-                        value: Value::Bool(false),
-                    });
-                } else if s == "1" {
-                    return Ok(ResolvedFieldValue {
-                        field: output_field_name,
-                        value: Value::Bool(true),
-                    });
-                }
-            } else if let Some(i) = value.as_i64() {
-                // Convert 0/1 to boolean
-                if i == 0 || i == 1 {
-                    return Ok(ResolvedFieldValue {
-                        field: output_field_name,
-                        value: Value::Bool(i == 1),
-                    });
-                }
-            }
-
-            if apply_evolution {
-                if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
-                    return Ok(v);
-                }
-            }
-
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Value {} is not a boolean", value),
-            )))
-        }
-        _ => Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("Unknown data type 'unknown'"),
-        ))),
     }
-}
-
-// Keep the original functions for backward compatibility
-
-pub fn fast_set_value(
-    config: &Config,
-    data_type: &str,
-    field: &str,
-    value: &Value,
-    metadata: &HashMap<String, Metadata>,
-    apply_evolution: Option<bool>,
-    flatten: bool,
-) -> Result<ResolvedFieldValue, Box<dyn Error>> {
-    // Convert string data type to enum and delegate to the optimized version
-    let data_type_enum = SkipprDataType::from_str(data_type);
-    fast_set_value_optimized(
-        config,
-        &data_type_enum,
-        field,
-        value,
-        metadata,
-        apply_evolution,
-        flatten,
-    )
-}
-
-pub fn match_scalar_value_fast(
-    config: &Config,
-    field: &str,
-    data_type: &str,
-    value: &Value,
-    metadata: &HashMap<String, Metadata>,
-    apply_evolution: bool,
-    flatten: bool,
-) -> Result<ResolvedFieldValue, Box<dyn Error>> {
-    // Convert string data type to enum and delegate to the optimized version
-    let data_type_enum = SkipprDataType::from_str(data_type);
-    match_scalar_value_optimized(
-        config,
-        field,
-        &data_type_enum,
-        value,
-        metadata,
-        apply_evolution,
-        flatten,
-    )
 }
 
 pub fn fast_set_date(
@@ -764,8 +518,7 @@ fn process_record_field(
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     let _m = Map::new();
 
-    let mut resolved_value: Result<ResolvedFieldValue, Box<dyn Error>> =
-        Ok(ResolvedFieldValue::new(field.to_string(), Value::Null));
+    let resolved_value: Result<ResolvedFieldValue, Box<dyn Error>>;
 
     if value.is_array() {
         let values = value.as_array().ok_or("Value is not an array")?;
@@ -786,7 +539,7 @@ fn process_record_field(
             // println!("field: {}: value {}\n", sub_field, val);
 
             if meta_field.enabled {
-                let new_val = fast_set_value_optimized(
+                let new_val = fast_set_value(
                     config,
                     &meta_field.determined_type,
                     &sub_field,
@@ -831,7 +584,7 @@ fn process_record_field(
                 .get(sub_field)
                 .ok_or_else(|| format!("Subfield '{}' not found in fields", sub_field))?;
             if meta_field.enabled {
-                let newval = fast_set_value_optimized(
+                let newval = fast_set_value(
                     config,
                     &meta_field.determined_type,
                     sub_field,
@@ -844,6 +597,11 @@ fn process_record_field(
             }
         }
         resolved_value = Ok(ResolvedFieldValue::new(field.to_string(), Value::Object(m)));
+    } else {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Field '{field}' is not a record"),
+        )));
     }
 
     resolved_value
@@ -857,11 +615,11 @@ fn process_map_field(
     metadata: &HashMap<String, Metadata>,
     flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
-    let mut new_value = Value::Null;
-
-    // Early return if not an object
     if !value.is_object() {
-        return Ok(ResolvedFieldValue::new(field.to_string(), new_value));
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Field '{field}' is not a map"),
+        )));
     }
 
     // Get field metadata once
@@ -898,7 +656,7 @@ fn process_map_field(
                 }
             }
 
-            let new_val = fast_set_value_optimized(
+            let new_val = fast_set_value(
                 config,
                 &meta_field.determined_type,
                 key,
@@ -919,8 +677,10 @@ fn process_map_field(
         }
     }
 
-    new_value = Value::Object(map);
-    Ok(ResolvedFieldValue::new(field.to_string(), new_value))
+    Ok(ResolvedFieldValue::new(
+        field.to_string(),
+        Value::Object(map),
+    ))
 }
 
 #[inline]
@@ -962,7 +722,6 @@ fn process_array_field(
             .map(|m| m.determined_type_values == Some(SkipprDataType::Record))
             .unwrap_or(false);
         for (idx, val) in values.iter().enumerate() {
-            // Preserve original error behavior: error on first iteration with current idx if parent metadata missing
             let parent_meta = match parent_meta_opt {
                 Some(m) => m,
                 None => {
@@ -979,42 +738,29 @@ fn process_array_field(
                     .determined_type_values
                     .as_ref()
                     .unwrap_or(&SkipprDataType::Unknown);
-                if is_record_values {
-                    let sub_field = "0";
-                    let _new_val = match fast_set_value_optimized(
-                        config,
-                        values_type,
-                        sub_field,
-                        val,
-                        &parent_meta.fields,
-                        None,
-                        flatten,
-                    ) {
-                        Ok(v) => array.push(v.value),
-                        Err(_e) => {
-                            array.push(Value::Null);
-                        }
-                    };
+                let index = idx.to_string();
+                let sub_field = if is_record_values {
+                    "0"
                 } else {
-                    let sub_field_owned = idx.to_string();
-                    let sub_field = sub_field_owned.as_str();
-                    let _new_val = match fast_set_value_optimized(
-                        config,
-                        values_type,
-                        sub_field,
-                        val,
-                        &parent_meta.fields,
-                        None,
-                        flatten,
-                    ) {
-                        Ok(v) => array.push(v.value),
-                        Err(_e) => {
-                            array.push(Value::Null);
-                        }
-                    };
-                }
+                    index.as_str()
+                };
+                let new_val = fast_set_value(
+                    config,
+                    values_type,
+                    sub_field,
+                    val,
+                    &parent_meta.fields,
+                    None,
+                    flatten,
+                )?;
+                array.push(new_val.value);
             }
         }
+    } else {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Field '{field}' is not an array"),
+        )));
     }
     if flatten {
         Ok(ResolvedFieldValue::new(out_field_name, Value::Array(array)))
@@ -1029,9 +775,11 @@ fn process_array_field(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discover::AnalyseSchema;
     use crate::discover::DateCandidate;
     #[allow(unused_imports)]
     use chrono::{FixedOffset, NaiveDateTime, Utc};
+    use serde_json::json;
 
     use std::collections::HashMap;
 
@@ -1148,6 +896,65 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().value, expected_millis);
     }
+
+    #[test]
+    fn fast_set_date_unparseable_string_is_err() {
+        let field = "test_field";
+        let format_name = AnalyseSchema::is_valid_date("2023-05-21 12:34:56").unwrap();
+        let mut meta = generate_metadata(field, format_name);
+        let result = fast_set_date(field, &json!("20mm"), &mut meta);
+        assert!(result.is_err(), "fast date parse fail must bubble to slow");
+    }
+
+    #[test]
+    fn date_without_evolution_bubbles_to_slow_path() {
+        let field = "when";
+        let format_name = AnalyseSchema::is_valid_date("2023-05-21 12:34:56").unwrap();
+        let meta = generate_metadata(field, format_name);
+        let err = fast_set_value(
+            &Config::new(),
+            &SkipprDataType::Date,
+            field,
+            &json!("20mm"),
+            &meta,
+            Some(true),
+            false,
+        )
+        .expect_err("fast Date must miss without has_evolution");
+        assert!(err.to_string().contains("date") || err.to_string().contains("20mm"));
+        assert!(meta.get("when_string").is_none());
+    }
+
+    #[test]
+    fn date_with_existing_string_sibling_applies() {
+        let field = "when";
+        let format_name = AnalyseSchema::is_valid_date("2023-05-21 12:34:56").unwrap();
+        let mut meta = generate_metadata(field, format_name);
+        meta.get_mut(field).unwrap().evolution.insert(
+            "when_string".into(),
+            Evolution {
+                type_string: SkipprDataType::String,
+                new_field: "when_string".into(),
+                sovled: true,
+            },
+        );
+        let mut sibling = Metadata::new().unwrap();
+        sibling.determined_type = SkipprDataType::String;
+        sibling.out_field_name = "when_string".into();
+        meta.insert("when_string".into(), sibling);
+        let resolved = fast_set_value(
+            &Config::new(),
+            &SkipprDataType::Date,
+            field,
+            &json!("20mm"),
+            &meta,
+            Some(true),
+            false,
+        )
+        .expect("fast Date applies existing sibling");
+        assert_eq!(resolved.field, "when_string");
+        assert_eq!(resolved.value, json!("20mm"));
+    }
 }
 
 #[cfg(test)]
@@ -1183,10 +990,10 @@ mod tests_match_scalar_value_fast {
         let flatten = false;
 
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "string",
+                &SkipprDataType::String,
                 &str_to_val("hello"),
                 &metadata,
                 true,
@@ -1196,10 +1003,10 @@ mod tests_match_scalar_value_fast {
             str_to_val("hello")
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "string",
+                &SkipprDataType::String,
                 &i64_to_val(123),
                 &metadata,
                 true,
@@ -1209,10 +1016,10 @@ mod tests_match_scalar_value_fast {
             str_to_val("123")
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "string",
+                &SkipprDataType::String,
                 &f64_to_val(123.4),
                 &metadata,
                 true,
@@ -1222,10 +1029,10 @@ mod tests_match_scalar_value_fast {
             str_to_val("123.4")
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "string",
+                &SkipprDataType::String,
                 &bool_to_val(true),
                 &metadata,
                 true,
@@ -1243,10 +1050,10 @@ mod tests_match_scalar_value_fast {
         let flatten = false;
 
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "int",
+                &SkipprDataType::Integer,
                 &i64_to_val(123),
                 &metadata,
                 true,
@@ -1256,10 +1063,10 @@ mod tests_match_scalar_value_fast {
             i64_to_val(123)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "int",
+                &SkipprDataType::Integer,
                 &str_to_val("123"),
                 &metadata,
                 true,
@@ -1270,10 +1077,10 @@ mod tests_match_scalar_value_fast {
         );
 
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "int",
+                &SkipprDataType::Integer,
                 &bool_to_val(true),
                 &metadata,
                 true,
@@ -1283,10 +1090,10 @@ mod tests_match_scalar_value_fast {
             i64_to_val(1)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "int",
+                &SkipprDataType::Integer,
                 &bool_to_val(false),
                 &metadata,
                 true,
@@ -1297,10 +1104,10 @@ mod tests_match_scalar_value_fast {
         );
 
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "int",
+                &SkipprDataType::Integer,
                 &str_to_val("true"),
                 &metadata,
                 true,
@@ -1310,10 +1117,10 @@ mod tests_match_scalar_value_fast {
             i64_to_val(1)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "int",
+                &SkipprDataType::Integer,
                 &str_to_val("false"),
                 &metadata,
                 true,
@@ -1323,10 +1130,10 @@ mod tests_match_scalar_value_fast {
             i64_to_val(0)
         );
         assert_eq!(
-            match_scalar_value_fast(
+            match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "int",
+                &SkipprDataType::Integer,
                 &str_to_val("True"),
                 &metadata,
                 true,
@@ -1336,10 +1143,10 @@ mod tests_match_scalar_value_fast {
             true
         );
         assert_eq!(
-            match_scalar_value_fast(
+            match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "int",
+                &SkipprDataType::Integer,
                 &str_to_val("False"),
                 &metadata,
                 true,
@@ -1349,10 +1156,10 @@ mod tests_match_scalar_value_fast {
             true
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "int",
+                &SkipprDataType::Integer,
                 &i64_to_val(1),
                 &metadata,
                 true,
@@ -1362,10 +1169,10 @@ mod tests_match_scalar_value_fast {
             i64_to_val(1)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "int",
+                &SkipprDataType::Integer,
                 &str_to_val("1"),
                 &metadata,
                 true,
@@ -1375,10 +1182,10 @@ mod tests_match_scalar_value_fast {
             i64_to_val(1)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "int",
+                &SkipprDataType::Integer,
                 &i64_to_val(0),
                 &metadata,
                 true,
@@ -1388,10 +1195,10 @@ mod tests_match_scalar_value_fast {
             i64_to_val(0)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "int",
+                &SkipprDataType::Integer,
                 &str_to_val("0"),
                 &metadata,
                 true,
@@ -1409,10 +1216,10 @@ mod tests_match_scalar_value_fast {
         let flatten = false;
 
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "double",
+                &SkipprDataType::Double,
                 &f64_to_val(123.4),
                 &metadata,
                 true,
@@ -1422,10 +1229,10 @@ mod tests_match_scalar_value_fast {
             f64_to_val(123.4)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "double",
+                &SkipprDataType::Double,
                 &str_to_val("123.4"),
                 &metadata,
                 true,
@@ -1443,10 +1250,10 @@ mod tests_match_scalar_value_fast {
         let flatten = false;
 
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "decimal",
+                &SkipprDataType::Decimal,
                 &str_to_val("120.50"),
                 &metadata,
                 true,
@@ -1456,10 +1263,10 @@ mod tests_match_scalar_value_fast {
             str_to_val("120.50")
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "decimal",
+                &SkipprDataType::Decimal,
                 &f64_to_val(50.0),
                 &metadata,
                 true,
@@ -1477,10 +1284,10 @@ mod tests_match_scalar_value_fast {
         let flatten = false;
 
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "timestamp",
+                &SkipprDataType::Timestamp,
                 &str_to_val("2025-01-03T09:15:00"),
                 &metadata,
                 true,
@@ -1498,10 +1305,10 @@ mod tests_match_scalar_value_fast {
         let flatten = false;
 
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "boolean",
+                &SkipprDataType::Boolean,
                 &bool_to_val(true),
                 &metadata,
                 true,
@@ -1511,10 +1318,10 @@ mod tests_match_scalar_value_fast {
             bool_to_val(true)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "boolean",
+                &SkipprDataType::Boolean,
                 &bool_to_val(false),
                 &metadata,
                 true,
@@ -1524,10 +1331,10 @@ mod tests_match_scalar_value_fast {
             bool_to_val(false)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "boolean",
+                &SkipprDataType::Boolean,
                 &str_to_val("true"),
                 &metadata,
                 true,
@@ -1537,10 +1344,10 @@ mod tests_match_scalar_value_fast {
             bool_to_val(true)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "boolean",
+                &SkipprDataType::Boolean,
                 &str_to_val("false"),
                 &metadata,
                 true,
@@ -1550,10 +1357,10 @@ mod tests_match_scalar_value_fast {
             bool_to_val(false)
         );
         assert_eq!(
-            match_scalar_value_fast(
+            match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "boolean",
+                &SkipprDataType::Boolean,
                 &str_to_val("True"),
                 &metadata,
                 true,
@@ -1563,10 +1370,10 @@ mod tests_match_scalar_value_fast {
             true
         );
         assert_eq!(
-            match_scalar_value_fast(
+            match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "boolean",
+                &SkipprDataType::Boolean,
                 &str_to_val("False"),
                 &metadata,
                 true,
@@ -1576,10 +1383,10 @@ mod tests_match_scalar_value_fast {
             true
         );
         assert_eq!(
-            match_scalar_value_fast(
+            match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "boolean",
+                &SkipprDataType::Boolean,
                 &str_to_val("Yes"),
                 &metadata,
                 true,
@@ -1589,10 +1396,10 @@ mod tests_match_scalar_value_fast {
             true
         );
         assert_eq!(
-            match_scalar_value_fast(
+            match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "boolean",
+                &SkipprDataType::Boolean,
                 &str_to_val("No"),
                 &metadata,
                 true,
@@ -1602,10 +1409,10 @@ mod tests_match_scalar_value_fast {
             true
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "boolean",
+                &SkipprDataType::Boolean,
                 &i64_to_val(1),
                 &metadata,
                 true,
@@ -1615,10 +1422,10 @@ mod tests_match_scalar_value_fast {
             bool_to_val(true)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "boolean",
+                &SkipprDataType::Boolean,
                 &i64_to_val(0),
                 &metadata,
                 true,
@@ -1628,10 +1435,10 @@ mod tests_match_scalar_value_fast {
             bool_to_val(false)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "boolean",
+                &SkipprDataType::Boolean,
                 &str_to_val("1"),
                 &metadata,
                 true,
@@ -1641,10 +1448,10 @@ mod tests_match_scalar_value_fast {
             bool_to_val(true)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast(
+            get_or_panic(match_scalar_value_optimized(
                 &Config::new(),
                 "field",
-                "boolean",
+                &SkipprDataType::Boolean,
                 &str_to_val("0"),
                 &metadata,
                 true,
@@ -1654,7 +1461,7 @@ mod tests_match_scalar_value_fast {
             bool_to_val(false)
         );
         // assert_eq!(
-        //     get_or_panic(match_scalar_value_fast("field", "boolean", &f64_to_val(1.0))),
+        //     get_or_panic(match_scalar_value_optimized("field", &SkipprDataType::Boolean, &f64_to_val(1.0))),
         //     bool_to_val(true)
         // );
     }
@@ -1665,10 +1472,10 @@ mod tests_match_scalar_value_fast {
         metadata.insert("field".to_string(), Metadata::new().unwrap());
         let flatten = false;
 
-        let result = match_scalar_value_fast(
+        let result = match_scalar_value_optimized(
             &Config::new(),
             "field",
-            "unknown",
+            &SkipprDataType::Unknown,
             &str_to_val("hello"),
             &metadata,
             true,
@@ -1678,8 +1485,8 @@ mod tests_match_scalar_value_fast {
         assert!(result.is_err(), "unknown data type should error");
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("Unknown data type"),
-            "error should mention unknown type"
+            err_msg.contains("is not a unknown"),
+            "error should name the unknown type, got {err_msg}"
         );
     }
 }
@@ -1866,9 +1673,21 @@ mod tests_process_array_field_repetition_count {
         meta_data_item.determined_type_values = Some(SkipprDataType::Record);
         meta_data_item.repetition_count = 2;
 
+        let mut name_meta = Metadata::new()?;
+        name_meta.determined_type = SkipprDataType::String;
+        name_meta.out_field_name = "name".to_string();
+        name_meta.enabled = true;
+        let mut tel_meta = Metadata::new()?;
+        tel_meta.determined_type = SkipprDataType::Integer;
+        tel_meta.out_field_name = "tel".to_string();
+        tel_meta.enabled = true;
         let mut field_zero = Metadata::new()?;
         field_zero.determined_type = SkipprDataType::Record;
         field_zero.determined_type_values = None;
+        field_zero.enabled = true;
+        field_zero.fields.insert("name".to_string(), name_meta);
+        field_zero.fields.insert("tel".to_string(), tel_meta);
+        meta_data_item.enabled = true;
         meta_data_item.fields.insert("0".to_string(), field_zero);
 
         metadata.insert(field.to_string(), meta_data_item);
@@ -1913,10 +1732,21 @@ mod tests_process_record_field {
         record_meta.determined_type = SkipprDataType::Record;
         record_meta.fields = Box::new(HashMap::new());
 
+        let mut name_meta = Metadata::new().unwrap();
+        name_meta.determined_type = SkipprDataType::String;
+        name_meta.out_field_name = "name".to_string();
+        name_meta.enabled = true;
+        let mut elem = Metadata::new().unwrap();
+        elem.determined_type = SkipprDataType::Record;
+        elem.out_field_name = "0".to_string();
+        elem.enabled = true;
+        elem.fields.insert("name".to_string(), name_meta);
         let mut array_field_meta = Metadata::new().unwrap();
         array_field_meta.determined_type = SkipprDataType::Array;
         array_field_meta.determined_type_values = Some(SkipprDataType::Record);
         array_field_meta.repetition_count = 2;
+        array_field_meta.enabled = true;
+        array_field_meta.fields.insert("0".to_string(), elem);
 
         record_meta
             .fields
@@ -2007,6 +1837,182 @@ mod tests_process_record_field {
         // The optimization we made is that this error would be caught in process_array_field
         // when it processes the "tags" field, not in the process_record_field check
         assert!(nested_result_exceeds.is_ok());
+    }
+
+    #[test]
+    fn nested_decimal_without_evolution_bubbles_to_slow_path() {
+        let mut child = Metadata::new().unwrap();
+        child.determined_type = SkipprDataType::Decimal;
+        child.out_field_name = "docket_aggregate_size_code".into();
+        let mut parent = Metadata::new().unwrap();
+        parent.determined_type = SkipprDataType::Record;
+        parent
+            .fields
+            .insert("docket_aggregate_size_code".into(), child);
+        let mut metadata = HashMap::new();
+        metadata.insert("detail".into(), parent);
+        let live_keys_before: Vec<_> = metadata
+            .get("detail")
+            .unwrap()
+            .fields
+            .keys()
+            .cloned()
+            .collect();
+        let err = process_record_field(
+            &Config::new(),
+            "detail",
+            &json!({"docket_aggregate_size_code": "20mm"}),
+            &metadata,
+            true,
+        )
+        .expect_err("fast path must not create a sibling");
+        assert!(
+            err.to_string().contains("decimal"),
+            "expected decimal coerce error, got {err}"
+        );
+        let live_keys_after: Vec<_> = metadata
+            .get("detail")
+            .unwrap()
+            .fields
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(live_keys_before, live_keys_after);
+    }
+
+    #[test]
+    fn nested_decimal_with_existing_string_sibling_applies() {
+        let mut child = Metadata::new().unwrap();
+        child.determined_type = SkipprDataType::Decimal;
+        child.out_field_name = "docket_aggregate_size_code".into();
+        child.evolution.insert(
+            "docket_aggregate_size_code_string".into(),
+            Evolution {
+                type_string: SkipprDataType::String,
+                new_field: "docket_aggregate_size_code_string".into(),
+                sovled: true,
+            },
+        );
+        let mut sibling = Metadata::new().unwrap();
+        sibling.determined_type = SkipprDataType::String;
+        sibling.out_field_name = "docket_aggregate_size_code_string".into();
+        let mut parent = Metadata::new().unwrap();
+        parent.determined_type = SkipprDataType::Record;
+        parent
+            .fields
+            .insert("docket_aggregate_size_code".into(), child);
+        parent
+            .fields
+            .insert("docket_aggregate_size_code_string".into(), sibling);
+        let mut metadata = HashMap::new();
+        metadata.insert("detail".into(), parent);
+        let resolved = process_record_field(
+            &Config::new(),
+            "detail",
+            &json!({"docket_aggregate_size_code": "20mm"}),
+            &metadata,
+            true,
+        )
+        .expect("fast path applies existing leaf sibling");
+        assert_eq!(resolved.value["docket_aggregate_size_code_string"], "20mm");
+    }
+
+    #[test]
+    fn nested_decimal_fast_miss_slow_create_then_fast_apply() {
+        let mut child = Metadata::new().unwrap();
+        child.determined_type = SkipprDataType::Decimal;
+        child.out_field_name = "docket_aggregate_size_code".into();
+        child.enabled = true;
+        let mut parent = Metadata::new().unwrap();
+        parent.determined_type = SkipprDataType::Record;
+        parent
+            .fields
+            .insert("docket_aggregate_size_code".into(), child);
+        let mut metadata = HashMap::new();
+        metadata.insert("detail".into(), parent);
+        process_record_field(
+            &Config::new(),
+            "detail",
+            &json!({"docket_aggregate_size_code": "20mm"}),
+            &metadata,
+            true,
+        )
+        .expect_err("fast path must miss without has_evolution");
+        assert!(metadata
+            .get("detail")
+            .unwrap()
+            .fields
+            .get("docket_aggregate_size_code_string")
+            .is_none());
+        let mut updated = "no".to_string();
+        crate::ingest::ingest::set_value(
+            &Config::new(),
+            "record",
+            "detail",
+            &json!({"docket_aggregate_size_code": "20mm"}),
+            None,
+            None,
+            &mut metadata,
+            &mut updated,
+            true,
+            true,
+        )
+        .expect("slow path creates the sibling");
+        let resolved = process_record_field(
+            &Config::new(),
+            "detail",
+            &json!({"docket_aggregate_size_code": "10mm"}),
+            &metadata,
+            true,
+        )
+        .expect("fast path applies after slow publish");
+        assert_eq!(resolved.value["docket_aggregate_size_code_string"], "10mm");
+    }
+
+    #[test]
+    fn mixed_primitive_array_fast_miss_slow_parent_split_then_fast_apply() {
+        let mut arr = Metadata::new().unwrap();
+        arr.determined_type = SkipprDataType::Array;
+        arr.determined_type_values = Some(SkipprDataType::Integer);
+        arr.out_field_name = "codes".into();
+        arr.enabled = true;
+        let mut metadata = HashMap::new();
+        metadata.insert("codes".into(), arr);
+        process_array_field(
+            &Config::new(),
+            "codes",
+            &json!([1234, "BWL"]),
+            &metadata,
+            false,
+        )
+        .expect_err("fast path must miss mixed primitive arrays");
+        let mut updated = "no".to_string();
+        crate::ingest::ingest::ingest(
+            &Config::new(),
+            &json!({"codes": [1234, "BWL"]}),
+            &mut metadata,
+            "default",
+            &mut updated,
+            false,
+        )
+        .expect("slow path parent-splits the array");
+        assert!(metadata.keys().any(|k| k.contains("codes_array")));
+        let applied = fast_set_value(
+            &Config::new(),
+            &SkipprDataType::Array,
+            "codes",
+            &json!([1, "HNL"]),
+            &metadata,
+            Some(true),
+            false,
+        )
+        .expect("fast path applies published array evolution");
+        assert!(
+            applied.field.contains("array") || applied.value.is_array(),
+            "expected array sibling apply, field={} value={}",
+            applied.field,
+            applied.value
+        );
     }
 }
 
@@ -2418,7 +2424,7 @@ mod tests_fast_set_value_proptest {
         ) {
             let metadata: HashMap<String, Metadata> = HashMap::new();
             let _ = fast_set_value(
-                &Config::new(), data_type.as_str(),
+                &Config::new(), &data_type,
                 "test_field",
                 &value,
                 &metadata,
@@ -2451,26 +2457,15 @@ mod tests_data_loss_regression {
     }
 
     #[test]
-    fn array_element_coercion_failure_inserts_null() {
+    fn array_element_coercion_failure_bubbles_to_slow_path() {
         let metadata = create_array_metadata(SkipprDataType::Integer);
 
         let value = json!(["not_an_int", 42, "also_not_int"]);
         let result = process_array_field(&Config::new(), "arr", &value, &metadata, false);
-        assert!(result.is_ok(), "array processing should not error");
-        let resolved = result.unwrap();
-        if let serde_json::Value::Array(arr) = &resolved.value {
-            assert_eq!(arr.len(), 3);
-            assert!(
-                arr[0].is_null(),
-                "failed element should become null (data loss path)"
-            );
-            assert!(
-                arr[2].is_null(),
-                "failed element should become null (data loss path)"
-            );
-        } else {
-            panic!("expected array output");
-        }
+        assert!(
+            result.is_err(),
+            "mixed primitive array must miss fast path so slow can parent-split"
+        );
     }
 
     #[test]
@@ -2486,7 +2481,7 @@ mod tests_data_loss_regression {
         let metadata: HashMap<String, Metadata> = HashMap::new();
         let result = fast_set_value(
             &Config::new(),
-            "unknown",
+            &SkipprDataType::Unknown,
             "test_field",
             &json!(42),
             &metadata,
@@ -2496,8 +2491,8 @@ mod tests_data_loss_regression {
         assert!(result.is_err(), "unknown data type should error");
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("Unknown data type"),
-            "error should mention unknown type"
+            err_msg.contains("is not a unknown"),
+            "error should name the unknown type, got {err_msg}"
         );
     }
 

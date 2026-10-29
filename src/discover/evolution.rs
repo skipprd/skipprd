@@ -221,7 +221,7 @@ impl Evolution {
                     // Try fast mapping first; only discover if needed
                     match fast_set_value(
                         config,
-                        type_string.as_str(),
+                        &type_string,
                         &new_field,
                         value,
                         metadata,
@@ -253,7 +253,7 @@ impl Evolution {
                             );
                             if let Ok(v2) = fast_set_value(
                                 config,
-                                type_string.as_str(),
+                                &type_string,
                                 &new_field,
                                 value,
                                 metadata,
@@ -400,7 +400,7 @@ impl Evolution {
                     // Try fast mapping first; if it fails, discover then retry
                     match fast_set_value(
                         config,
-                        evolution.type_string.as_str(),
+                        &evolution.type_string,
                         &evolution.new_field,
                         value,
                         metadata,
@@ -438,7 +438,7 @@ impl Evolution {
                             );
                             match fast_set_value(
                                 config,
-                                evolution.type_string.as_str(),
+                                &evolution.type_string,
                                 &evolution.new_field,
                                 value,
                                 metadata,
@@ -1646,7 +1646,7 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn integer_to_string() {
-        assert_no_panic(
+        assert_evolves_ok(
             SkipprDataType::Integer,
             SkipprDataType::String,
             json!("hello"),
@@ -1698,7 +1698,7 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn long_to_string() {
-        assert_no_panic(SkipprDataType::Long, SkipprDataType::String, json!("hello"));
+        assert_evolves_ok(SkipprDataType::Long, SkipprDataType::String, json!("hello"));
     }
 
     #[test]
@@ -1733,7 +1733,7 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn double_to_string() {
-        assert_no_panic(
+        assert_evolves_ok(
             SkipprDataType::Double,
             SkipprDataType::String,
             json!("hello"),
@@ -1764,11 +1764,30 @@ mod tests_evolution_type_matrix {
         );
     }
 
+    #[test]
+    fn decimal_to_string() {
+        assert_evolves_ok(
+            SkipprDataType::Decimal,
+            SkipprDataType::String,
+            json!("20mm"),
+        );
+    }
+
+    #[test]
+    fn float_to_string() {
+        assert_evolves_ok(SkipprDataType::Float, SkipprDataType::String, json!("20mm"));
+    }
+
+    #[test]
+    fn short_to_string() {
+        assert_evolves_ok(SkipprDataType::Short, SkipprDataType::String, json!("BWL"));
+    }
+
     // ── boolean → X ─────────────────────────────────────────
 
     #[test]
     fn boolean_to_string() {
-        assert_no_panic(
+        assert_evolves_ok(
             SkipprDataType::Boolean,
             SkipprDataType::String,
             json!("hello"),
@@ -1794,7 +1813,7 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn record_to_string() {
-        assert_no_panic(
+        assert_evolves_ok(
             SkipprDataType::Record,
             SkipprDataType::String,
             json!("fallback"),
@@ -1810,7 +1829,7 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn timestamp_to_string() {
-        assert_no_panic(
+        assert_evolves_ok(
             SkipprDataType::Timestamp,
             SkipprDataType::String,
             json!("hello"),

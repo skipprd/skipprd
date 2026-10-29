@@ -115,6 +115,242 @@ fn e_discover_never_panics_then_query() {
 }
 
 #[test]
+fn e_nested_leaf_type_split_must_not_evolve_parent_record() {
+    use crate::discover::{AnalyseSchema, SkipprDataType};
+    use crate::helpers::configuration::Config;
+    use crate::ingest::ingest::{ingest, set_value};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    let mut child = crate::discover::Metadata::new().unwrap();
+    child.determined_type = SkipprDataType::Decimal;
+    child.out_field_name = "docket_aggregate_size_code".into();
+    child.enabled = true;
+    let mut children = HashMap::new();
+    children.insert("docket_aggregate_size_code".into(), child);
+    let mut parent = crate::discover::Metadata::new().unwrap();
+    parent.determined_type = SkipprDataType::Record;
+    parent.out_field_name = "detail".into();
+    parent.fields = Box::new(children);
+    let mut metadata = HashMap::new();
+    metadata.insert("detail".into(), parent);
+    let mut updated = "no".to_string();
+    let resolved = set_value(
+        &Config::new(),
+        "record",
+        "detail",
+        &json!({"docket_aggregate_size_code": "20mm"}),
+        None,
+        None,
+        &mut metadata,
+        &mut updated,
+        true,
+        true,
+    );
+    let resolved =
+        resolved.unwrap_or_else(|err| panic!("DST: leaf type-split must keep the row, got {err}"));
+    assert!(
+        metadata
+            .get("detail")
+            .unwrap()
+            .fields
+            .get("docket_aggregate_size_code_string")
+            .is_some(),
+        "DST: sibling must be a leaf, not detail_record"
+    );
+    assert_eq!(resolved.value["docket_aggregate_size_code_string"], "20mm");
+
+    let disc = concat!(
+        r#"{"version":"0","id":"disc-1","detail-type":"cloudcycle-docket","source":"com.cloudcycle","account":"1","time":"2024-10-10T10:00:00Z","region":"eu-west-1","resources":[],"detail":{"docket_aggregate_size_code":"20.00","docket_plant_code":"1234"}}"#
+    );
+    let mut discovered = HashMap::new();
+    AnalyseSchema { i: 0 }.infer_json_schema(
+        &Config::new(),
+        &mut disc.to_string(),
+        Some(1),
+        &mut discovered,
+        Some("cloudcycle_docket"),
+    );
+    let ns = discovered
+        .keys()
+        .find(|k| k.contains("docket") || k.as_str() == "default")
+        .cloned()
+        .or_else(|| discovered.keys().next().cloned())
+        .expect("discovered namespace");
+    let fields = discovered.get_mut(&ns).unwrap().fields.as_mut();
+    if let Some(leaf) = fields
+        .get_mut("detail")
+        .and_then(|d| d.fields.get_mut("docket_aggregate_size_code"))
+    {
+        leaf.determined_type = SkipprDataType::Decimal;
+    } else {
+        panic!(
+            "DST discover must nest detail.docket_aggregate_size_code, ns={ns} keys={:?}",
+            fields.keys().collect::<Vec<_>>()
+        );
+    }
+    let mut updated = "no".to_string();
+    let later = json!({
+        "version": "0",
+        "id": "2cbc9030-adbe-afe2-b6be-c879f6eed5f5",
+        "detail-type": "cloudcycle-docket",
+        "source": "com.cloudcycle",
+        "account": "1",
+        "time": "2024-10-10T10:39:54Z",
+        "region": "eu-west-1",
+        "resources": [],
+        "detail": {
+            "docket_aggregate_size_code": "20mm",
+            "docket_plant_code": "BWL"
+        }
+    });
+    let row = ingest(&Config::new(), &later, fields, &ns, &mut updated, true)
+        .unwrap_or_else(|err| panic!("DST ingest must not deadletter leaf coerce: {err}"));
+    let obj = row.as_object().expect("DST flattened object");
+    assert!(
+        obj.keys().all(|k| !k.starts_with("detail_record_")),
+        "DST must not evolve parent detail, row={row}"
+    );
+    assert!(
+        obj.keys()
+            .any(|k| k.ends_with("docket_aggregate_size_code_string")),
+        "DST flatten must emit the leaf string sibling, row={row}"
+    );
+}
+
+#[test]
+fn e_array_of_records_leaf_type_split() {
+    use crate::discover::SkipprDataType;
+    use crate::helpers::configuration::Config;
+    use crate::ingest::ingest::set_value;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    let mut leaf = crate::discover::Metadata::new().unwrap();
+    leaf.determined_type = SkipprDataType::Decimal;
+    leaf.out_field_name = "max_size_mm".into();
+    leaf.enabled = true;
+    let mut elem = crate::discover::Metadata::new().unwrap();
+    elem.determined_type = SkipprDataType::Record;
+    elem.out_field_name = "0".into();
+    elem.fields.insert("max_size_mm".into(), leaf);
+    let mut arr = crate::discover::Metadata::new().unwrap();
+    arr.determined_type = SkipprDataType::Array;
+    arr.determined_type_values = Some(SkipprDataType::Record);
+    arr.out_field_name = "aggregate".into();
+    arr.fields.insert("0".into(), elem);
+    let mut metadata = HashMap::new();
+    metadata.insert("aggregate".into(), arr);
+    let mut updated = "no".to_string();
+    let resolved = set_value(
+        &Config::new(),
+        "array",
+        "aggregate",
+        &json!([{"max_size_mm": "20mm"}]),
+        None,
+        None,
+        &mut metadata,
+        &mut updated,
+        true,
+        false,
+    )
+    .expect("DST: array-of-records leaf must type-split");
+    assert!(metadata
+        .get("aggregate")
+        .unwrap()
+        .fields
+        .get("0")
+        .unwrap()
+        .fields
+        .get("max_size_mm_string")
+        .is_some());
+    assert_eq!(resolved.value[0]["max_size_mm_string"], "20mm");
+}
+
+#[test]
+fn e_primitive_array_parent_type_split() {
+    use crate::discover::SkipprDataType;
+    use crate::helpers::configuration::Config;
+    use crate::ingest::ingest::ingest;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    let mut arr = crate::discover::Metadata::new().unwrap();
+    arr.determined_type = SkipprDataType::Array;
+    arr.determined_type_values = Some(SkipprDataType::Integer);
+    arr.out_field_name = "codes".into();
+    arr.enabled = true;
+    let mut metadata = HashMap::new();
+    metadata.insert("codes".into(), arr);
+    let mut updated = "no".to_string();
+    let row = ingest(
+        &Config::new(),
+        &json!({"codes": [1234, "BWL"]}),
+        &mut metadata,
+        "default",
+        &mut updated,
+        false,
+    )
+    .expect("DST: primitive mixed array must parent-evolve via ingest");
+    assert!(metadata.get("codes_0_string").is_none());
+    let obj = row.as_object().expect("row object");
+    assert!(
+        obj.keys().any(|k| k.contains("codes_array"))
+            || metadata.keys().any(|k| k.contains("codes_array")),
+        "DST: parent array sibling, keys={:?} row={row}",
+        metadata.keys().collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn e_leaf_split_then_fast_apply() {
+    use crate::discover::SkipprDataType;
+    use crate::helpers::configuration::Config;
+    use crate::ingest::fast_ingest::fast_set_value;
+    use crate::ingest::ingest::set_value;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    let mut child = crate::discover::Metadata::new().unwrap();
+    child.determined_type = SkipprDataType::Decimal;
+    child.out_field_name = "docket_aggregate_size_code".into();
+    child.enabled = true;
+    let mut children = HashMap::new();
+    children.insert("docket_aggregate_size_code".into(), child);
+    let mut parent = crate::discover::Metadata::new().unwrap();
+    parent.determined_type = SkipprDataType::Record;
+    parent.out_field_name = "detail".into();
+    parent.fields = Box::new(children);
+    let mut metadata = HashMap::new();
+    metadata.insert("detail".into(), parent);
+    let mut updated = "no".to_string();
+    set_value(
+        &Config::new(),
+        "record",
+        "detail",
+        &json!({"docket_aggregate_size_code": "20mm"}),
+        None,
+        None,
+        &mut metadata,
+        &mut updated,
+        true,
+        true,
+    )
+    .expect("DST: slow create");
+    let applied = fast_set_value(
+        &Config::new(),
+        &SkipprDataType::Record,
+        "detail",
+        &json!({"docket_aggregate_size_code": "10mm"}),
+        &metadata,
+        Some(true),
+        true,
+    )
+    .expect("DST: fast apply after publish");
+    assert_eq!(applied.value["docket_aggregate_size_code_string"], "10mm");
+}
+
+#[test]
 fn j_cube_events_namespaces() {
     let events = [
         json!({"detail-type": "pour_start", "id": 10}),

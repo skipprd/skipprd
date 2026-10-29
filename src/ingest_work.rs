@@ -87,6 +87,7 @@ use arrow::error::ArrowError;
 use arrow::json::ReaderBuilder as ArrowJsonReaderBuilder;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
+use std::panic::AssertUnwindSafe;
 use tokio::runtime;
 use tokio::sync::{mpsc, oneshot};
 // wal_accumulator removed
@@ -157,18 +158,26 @@ fn ensure_slow_ingest_worker(config: &Config) {
                     .insert(task.namespace.clone(), Metadata::new().unwrap());
             }
             let mut updated = "no".to_string();
-            let ingest_result = if let Some(ns_meta) = md_local.metadata.get_mut(&task.namespace) {
-                ingest(
-                    &worker_config,
-                    task.record.inner(),
-                    &mut ns_meta.fields,
+            let ingest_result = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                if let Some(ns_meta) = md_local.metadata.get_mut(&task.namespace) {
+                    ingest(
+                        &worker_config,
+                        task.record.inner(),
+                        &mut ns_meta.fields,
+                        &task.namespace,
+                        &mut updated,
+                        task.flatten,
+                    )
+                    .map_err(|e| e.to_string())
+                } else {
+                    Err(format!("No metadata for namespace {}", task.namespace))
+                }
+            })) {
+                Ok(r) => r.map_err(|e| slow_ingest_failed_error(&task.namespace, &e)),
+                Err(payload) => Err(slow_ingest_panic_error(
                     &task.namespace,
-                    &mut updated,
-                    task.flatten,
-                )
-                .map_err(|e| e.to_string())
-            } else {
-                Err(format!("No metadata for namespace {}", task.namespace))
+                    &panic_payload(&payload),
+                )),
             };
 
             let result = match ingest_result {
@@ -440,13 +449,36 @@ fn slow_ingest_blocking(
         flatten,
         resp_tx,
     };
-    // Send and wait
     if let Err(_e) = tx.blocking_send(task) {
-        return Err("Slow ingest worker unavailable".to_string());
+        return Err(slow_ingest_channel_closed_error(namespace));
     }
     resp_rx
         .blocking_recv()
-        .unwrap_or_else(|_| Err("Slow ingest response dropped".to_string()))
+        .unwrap_or_else(|_| Err(slow_ingest_response_dropped_error(namespace)))
+}
+
+fn slow_ingest_channel_closed_error(ns: &str) -> String {
+    format!("Slow ingest: worker channel closed ns={ns} (worker exited); record not evolved")
+}
+
+fn slow_ingest_response_dropped_error(ns: &str) -> String {
+    format!("Slow ingest: worker dropped response ns={ns}")
+}
+
+fn slow_ingest_panic_error(ns: &str, payload: &str) -> String {
+    format!("Slow ingest: worker panicked ns={ns}: {payload}")
+}
+
+fn slow_ingest_failed_error(ns: &str, err: &str) -> String {
+    format!("Slow ingest ns={ns}: {err}")
+}
+
+fn panic_payload(payload: &Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
 }
 
 use crate::ingest::deadletter::{self, DeadletterRecord};
@@ -4313,6 +4345,21 @@ mod transform_inject_fields_tests {
         assert_eq!(record["domain"], "snowflake.com");
         assert_eq!(record["domain_id"], "skippr.io");
         assert_eq!(record["workspace_id"], "ws-1");
+    }
+
+    #[test]
+    fn slow_ingest_errors_name_namespace_and_cause() {
+        let closed = slow_ingest_channel_closed_error("cloudcycle_docket");
+        assert!(closed.contains("ns=cloudcycle_docket"));
+        assert!(closed.contains("channel closed"));
+        assert!(!closed.contains("unavailable"));
+        let dropped = slow_ingest_response_dropped_error("cloudcycle_docket");
+        assert!(dropped.contains("ns=cloudcycle_docket"));
+        assert!(dropped.contains("dropped response"));
+        let panicked = slow_ingest_panic_error("cloudcycle_docket", "boom");
+        assert!(panicked.contains("ns=cloudcycle_docket"));
+        assert!(panicked.contains("panicked"));
+        assert!(panicked.contains("boom"));
     }
 }
 

@@ -25,6 +25,9 @@ static SEEN_FIELDS_BY_NAMESPACE: Lazy<Mutex<HashMap<String, HashSet<String>>>> =
 
 use crate::discover::evolution::Evolution;
 use crate::ingest::fast_ingest::{validate_required_fields, DEFAULT_NESTED_MESSAGE};
+use crate::ingest::scalar::{
+    coerce_scalar, scalar_mismatch, skippr_data_type_is_scalar_or_structural,
+};
 
 #[derive(Debug)]
 pub struct ResolvedFieldValue {
@@ -120,22 +123,21 @@ pub fn ingest(
             flatten,
         ) {
             Ok(v) => v,
-            Err(_e) => {
-                // apply evolution strategy
-                match Evolution::evolve_field(
-                    config,
-                    &field.to_string(),
-                    value,
-                    None,
-                    None,
-                    metadata,
-                    updated_schema,
-                    flatten,
-                ) {
-                    Ok(v) => v,
-                    Err(e) => return Err(e),
-                }
-            }
+            Err(e) => match evolve_or_err(
+                config,
+                field,
+                value,
+                None,
+                None,
+                metadata,
+                updated_schema,
+                true,
+                flatten,
+                e,
+            ) {
+                Ok(v) => v,
+                Err(e) => return Err(e),
+            },
         };
 
         // println!("Setting message with field: {:?} and value {:?}", field, resolved_value);
@@ -227,9 +229,51 @@ pub fn set_value(
 
         let x: Value;
         let mut new_value = Ok(ResolvedFieldValue::new(field.to_string(), Value::Null));
+        let dt = SkipprDataType::from_str(data_type);
+        skippr_data_type_is_scalar_or_structural(dt.clone());
+
+        if dt == SkipprDataType::Unknown {
+            let discoverd_data_type = discover_ingest(
+                config,
+                &field.to_string(),
+                value,
+                parent_field,
+                parent_data_type,
+                metadata,
+                updated_schema,
+            );
+            if !discoverd_data_type.is_empty() && discoverd_data_type != "unknown" {
+                return set_value(
+                    config,
+                    &discoverd_data_type,
+                    &field.to_string(),
+                    value,
+                    parent_field,
+                    parent_data_type,
+                    metadata,
+                    updated_schema,
+                    allow_evolve,
+                    flatten,
+                );
+            }
+            return Ok(ResolvedFieldValue::new(field.to_string(), Value::Null));
+        }
 
         if !value.to_string().is_empty() {
-            if data_type == "record" {
+            if dt == SkipprDataType::Record {
+                if !value.is_object() && !value.is_array() {
+                    return evolve_own_shape(
+                        config,
+                        field,
+                        value,
+                        parent_field,
+                        parent_data_type,
+                        metadata,
+                        updated_schema,
+                        allow_evolve,
+                        flatten,
+                    );
+                }
                 // println!("{} is record", field);
 
                 let mut m = Map::new();
@@ -306,7 +350,21 @@ pub fn set_value(
                                 Ok(v) => {
                                     m.insert(v.field, v.value);
                                 }
-                                Err(e) => return Err(e),
+                                Err(e) => {
+                                    let evolved = evolve_or_err(
+                                        config,
+                                        sub_field,
+                                        sub_value,
+                                        Some(field),
+                                        Some(data_type),
+                                        &mut metadata.get_mut(&field.to_string()).unwrap().fields,
+                                        updated_schema,
+                                        allow_evolve,
+                                        flatten,
+                                        e,
+                                    )?;
+                                    m.insert(evolved.field, evolved.value);
+                                }
                             }
                         }
                     }
@@ -385,7 +443,21 @@ pub fn set_value(
                                 Ok(v) => {
                                     m.insert(v.field, v.value);
                                 }
-                                Err(e) => return Err(e),
+                                Err(e) => {
+                                    let evolved = evolve_or_err(
+                                        config,
+                                        &i.to_string(),
+                                        sub_value,
+                                        Some(field),
+                                        Some(data_type),
+                                        &mut metadata.get_mut(&field.to_string()).unwrap().fields,
+                                        updated_schema,
+                                        allow_evolve,
+                                        flatten,
+                                        e,
+                                    )?;
+                                    m.insert(evolved.field, evolved.value);
+                                }
                             }
                         }
 
@@ -395,7 +467,7 @@ pub fn set_value(
 
                 x = m.into();
                 new_value = Ok(ResolvedFieldValue::new(field.to_string(), x));
-            } else if data_type == "map" {
+            } else if dt == SkipprDataType::Map {
                 if value.is_object() {
                     let mut m = Map::new();
 
@@ -458,12 +530,38 @@ pub fn set_value(
                                 Ok(v) => {
                                     m.insert(v.field, v.value);
                                 }
-                                Err(e) => return Err(e),
+                                Err(e) => {
+                                    let evolved = evolve_or_err(
+                                        config,
+                                        key,
+                                        val,
+                                        Some(field),
+                                        Some(data_type),
+                                        &mut metadata.get_mut(field).unwrap().fields,
+                                        updated_schema,
+                                        allow_evolve,
+                                        flatten,
+                                        e,
+                                    )?;
+                                    m.insert(evolved.field, evolved.value);
+                                }
                             }
                         }
                     }
 
                     new_value = Ok(ResolvedFieldValue::new(field.to_string(), m.into()));
+                } else {
+                    new_value = evolve_own_shape(
+                        config,
+                        field,
+                        value,
+                        parent_field,
+                        parent_data_type,
+                        metadata,
+                        updated_schema,
+                        allow_evolve,
+                        flatten,
+                    );
                 }
                 // for (key, val) in value.as_object().unwrap() {
                 //     if Some(val) != None {
@@ -480,12 +578,23 @@ pub fn set_value(
                 //         );
                 //     }
                 // }
-            } else if data_type == "array" {
+            } else if dt == SkipprDataType::Array {
                 let flatten = config.get_transform_flatten_events();
 
-                if metadata.get(field).unwrap().determined_type_values
+                if !value.is_array() {
+                    new_value = evolve_own_shape(
+                        config,
+                        field,
+                        value,
+                        parent_field,
+                        parent_data_type,
+                        metadata,
+                        updated_schema,
+                        allow_evolve,
+                        flatten,
+                    );
+                } else if metadata.get(field).unwrap().determined_type_values
                     == Some(SkipprDataType::Record)
-                    && value.is_array()
                 {
                     let mut arr_new_value: Vec<Value> = Vec::new();
 
@@ -520,14 +629,14 @@ pub fn set_value(
 
                         let foo = set_value(
                             config,
-                            "record",
+                            SkipprDataType::Record.as_str(),
                             index,
                             sub_value,
                             Some(field),
                             parent_type,
                             &mut metadata.get_mut(field).unwrap().fields,
                             updated_schema,
-                            true,
+                            allow_evolve,
                             flatten,
                         );
 
@@ -535,7 +644,18 @@ pub fn set_value(
 
                         let val = match foo {
                             Ok(v) => v,
-                            Err(e) => return Err(e),
+                            Err(e) => evolve_or_err(
+                                config,
+                                index,
+                                sub_value,
+                                Some(field),
+                                parent_type,
+                                &mut metadata.get_mut(field).unwrap().fields,
+                                updated_schema,
+                                allow_evolve,
+                                flatten,
+                                e,
+                            )?,
                         };
                         arr_new_value.insert(i, val.value);
                     }
@@ -553,20 +673,14 @@ pub fn set_value(
 
                     let mut arr_new_value: Vec<Value> = Vec::new();
 
-                    let mut values_valid = true;
-
                     // For nested arrays (array-of-arrays) the parent metadata
                     // describes the outer array; the inner element metadata
                     // lives under parent.fields["0"].  Clone it once so we can
                     // recurse with the correct type context.
-                    let sub_data_type = metadata
+                    let sub_dt = metadata
                         .get(&field.to_string())
-                        .unwrap()
-                        .determined_type_values
-                        .as_ref()
-                        .map(|t| t.to_string())
-                        .unwrap_or_default();
-                    let mut inner_fields = if sub_data_type == "array" {
+                        .and_then(|m| m.determined_type_values.clone());
+                    let mut inner_fields = if sub_dt == Some(SkipprDataType::Array) {
                         let flds = &metadata.get(&field.to_string()).unwrap().fields;
                         if !flds.is_empty() {
                             Some(flds.as_ref().clone())
@@ -580,15 +694,10 @@ pub fn set_value(
                     match value.as_array() {
                         Some(t) => {
                             for (i, sub_value) in t.iter().enumerate() {
-                                if !values_valid {
-                                    return Err(Box::new(std::io::Error::new(
-                                        std::io::ErrorKind::InvalidData,
-                                        format!("Array values not match type: {}", field),
-                                    )));
-                                } else if let Some(ref mut inner) = inner_fields {
+                                if let Some(ref mut inner) = inner_fields {
                                     let foo = set_value(
                                         config,
-                                        "array",
+                                        SkipprDataType::Array.as_str(),
                                         "0",
                                         sub_value,
                                         Some(field),
@@ -600,10 +709,7 @@ pub fn set_value(
                                     );
                                     let res = match foo {
                                         Ok(v) => v,
-                                        Err(_e) => {
-                                            values_valid = false;
-                                            ResolvedFieldValue::new(field.to_string(), Value::Null)
-                                        }
+                                        Err(e) => return Err(e),
                                     };
                                     arr_new_value.insert(i, res.value);
                                 } else {
@@ -629,11 +735,9 @@ pub fn set_value(
 
                                     let sub_data_type = metadata
                                         .get(&field.to_string())
-                                        .unwrap()
-                                        .determined_type_values
-                                        .as_ref()
-                                        .map(|t| t.to_string())
-                                        .unwrap_or_default();
+                                        .and_then(|m| m.determined_type_values.as_ref())
+                                        .map(|t| t.as_str())
+                                        .unwrap_or("");
                                     let foo = set_value(
                                         config,
                                         &sub_data_type,
@@ -649,11 +753,7 @@ pub fn set_value(
 
                                     let res = match foo {
                                         Ok(v) => v,
-                                        Err(_e) => {
-                                            // println!("Error: {}", e);
-                                            values_valid = false;
-                                            ResolvedFieldValue::new(field.to_string(), Value::Null)
-                                        }
+                                        Err(e) => return Err(e),
                                     };
 
                                     arr_new_value.insert(i, res.value);
@@ -676,8 +776,8 @@ pub fn set_value(
                 // println!("field is {}", field);
                 // println!("data_type is {}", data_type);
 
-                if data_type == "date" {
-                    new_value = set_date(
+                if dt == SkipprDataType::Date {
+                    new_value = match set_date(
                         field,
                         value,
                         parent_field,
@@ -685,9 +785,21 @@ pub fn set_value(
                         metadata,
                         updated_schema,
                         flatten,
-                    );
-                    // let date_new_value = set_date(field, value, parent_field, parent_data_type, metadata, updated_schema);
-                    // new_value = date_new_value.unwrap_or(ResolvedFieldValue::new(field.to_string(), Value::Null));
+                    ) {
+                        Ok(v) => Ok(v),
+                        Err(e) => evolve_or_err(
+                            config,
+                            field,
+                            value,
+                            parent_field,
+                            parent_data_type,
+                            metadata,
+                            updated_schema,
+                            allow_evolve,
+                            flatten,
+                            e,
+                        ),
+                    };
                 } else {
                     // let scalar_value = match data_type {
                     //     "string" => value.as_str().map(|s| Value::String(s.to_string())),
@@ -703,7 +815,7 @@ pub fn set_value(
                     new_value = match_scalar_value(
                         config,
                         field,
-                        data_type,
+                        &dt,
                         value,
                         parent_field,
                         parent_data_type,
@@ -789,10 +901,19 @@ pub fn set_value(
     }
 }
 
-fn match_scalar_value(
+fn type_split_forbidden(metadata: &HashMap<String, Metadata>, field: &str) -> bool {
+    metadata.get(field).is_some_and(|m| {
+        matches!(
+            m.determined_type,
+            SkipprDataType::Record | SkipprDataType::Map
+        ) || (m.determined_type == SkipprDataType::Array
+            && m.determined_type_values == Some(SkipprDataType::Record))
+    })
+}
+
+fn evolve_own_shape(
     config: &Config,
     field: &str,
-    data_type: &str,
     value: &Value,
     parent_field: Option<&str>,
     parent_data_type: Option<&str>,
@@ -801,7 +922,72 @@ fn match_scalar_value(
     allow_evolve: bool,
     flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
-    // Return early for null values
+    if !allow_evolve {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Field: {} => {} value: {:?} is not a {}",
+                parent_field.unwrap_or("-"),
+                field,
+                value,
+                metadata
+                    .get(field)
+                    .map(|m| m.determined_type.as_str())
+                    .unwrap_or("unknown")
+            ),
+        )));
+    }
+    Evolution::evolve_field(
+        config,
+        &field.to_string(),
+        value,
+        parent_field,
+        parent_data_type,
+        metadata,
+        updated_schema,
+        flatten,
+    )
+}
+
+fn evolve_or_err(
+    config: &Config,
+    field: &str,
+    value: &Value,
+    parent_field: Option<&str>,
+    parent_data_type: Option<&str>,
+    metadata: &mut HashMap<String, Metadata>,
+    updated_schema: &mut String,
+    allow_evolve: bool,
+    flatten: bool,
+    err: Box<dyn std::error::Error>,
+) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
+    if !allow_evolve || type_split_forbidden(metadata, field) {
+        return Err(err);
+    }
+    Evolution::evolve_field(
+        config,
+        &field.to_string(),
+        value,
+        parent_field,
+        parent_data_type,
+        metadata,
+        updated_schema,
+        flatten,
+    )
+}
+
+fn match_scalar_value(
+    config: &Config,
+    field: &str,
+    data_type: &SkipprDataType,
+    value: &Value,
+    parent_field: Option<&str>,
+    parent_data_type: Option<&str>,
+    metadata: &mut HashMap<String, Metadata>,
+    updated_schema: &mut String,
+    allow_evolve: bool,
+    flatten: bool,
+) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
     if value.is_null() {
         return Ok(ResolvedFieldValue::new(
             Metadata::get_field_out_field_name(metadata, field),
@@ -809,280 +995,25 @@ fn match_scalar_value(
         ));
     }
 
-    // Use cached field name lookups to reduce repetitive transformations
     let output_field_name = Metadata::get_field_out_field_name(metadata, field);
 
-    match data_type {
-        "string" => match value.as_str().map(Value::from) {
-            Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-            None => match value.as_i64().map(|v| v.to_string()).map(Value::from) {
-                Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-                None => match value.as_f64().map(|v| v.to_string()).map(Value::from) {
-                    Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-                    None => match value.as_bool().map(|v| v.to_string()).map(Value::from) {
-                        Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-                        None => {
-                            if !allow_evolve {
-                                return Err(Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Field: {} => {} value: {} is not a string",
-                                        parent_field.unwrap_or("root"),
-                                        field,
-                                        value
-                                    ),
-                                )));
-                            }
-                            // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(
-                                config,
-                                &field.to_string(),
-                                value,
-                                parent_field,
-                                parent_data_type,
-                                metadata,
-                                updated_schema,
-                                flatten,
-                            )
-                        }
-                    },
-                },
-            },
-        },
-        "int" | "integer" => match value.as_i64().map(|v| v as i32).map(Value::from) {
-            Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-            None => match value
-                .as_str()
-                .and_then(|v| v.parse::<i32>().ok())
-                .map(Value::from)
-            {
-                Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-                None => match value
-                    .as_f64()
-                    .and_then(|v| v.to_string().parse::<i32>().ok())
-                    .map(Value::from)
-                {
-                    Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-                    None => match value
-                        .as_bool()
-                        .and_then(|v| v.to_string().parse::<i32>().ok())
-                        .map(Value::from)
-                    {
-                        Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-                        None => {
-                            if !allow_evolve {
-                                return Err(Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Field: {} => {} value: {} is not an integer",
-                                        parent_field.unwrap_or("root"),
-                                        field,
-                                        value
-                                    ),
-                                )));
-                            }
-                            // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(
-                                config,
-                                &field.to_string(),
-                                value,
-                                parent_field,
-                                parent_data_type,
-                                metadata,
-                                updated_schema,
-                                flatten,
-                            )
-                        }
-                    },
-                },
-            },
-        },
-        "timestamp" | "timestamp_milli" | "long" => match value.as_i64().map(Value::from) {
-            Some(v) => {
-                if data_type == "timestamp_milli" || data_type == "timestamp" {
-                    Ok(ResolvedFieldValue::new(
-                        output_field_name,
-                        AnalyseSchema::coerce_to_milli_seconds(v),
-                    ))
-                } else {
-                    Ok(ResolvedFieldValue::new(output_field_name, v))
-                }
-            }
-            None => match value
-                .as_str()
-                .and_then(|v| v.parse::<i64>().ok())
-                .map(Value::from)
-            {
-                Some(v) => {
-                    if data_type == "timestamp_milli" || data_type == "timestamp" {
-                        Ok(ResolvedFieldValue::new(
-                            output_field_name,
-                            AnalyseSchema::coerce_to_milli_seconds(v),
-                        ))
-                    } else {
-                        Ok(ResolvedFieldValue::new(output_field_name, v))
-                    }
-                }
-                None => match value
-                    .as_f64()
-                    .and_then(|v| v.to_string().parse::<i64>().ok())
-                    .map(Value::from)
-                {
-                    Some(v) => {
-                        if data_type == "timestamp_milli" || data_type == "timestamp" {
-                            Ok(ResolvedFieldValue::new(
-                                output_field_name,
-                                AnalyseSchema::coerce_to_milli_seconds(v),
-                            ))
-                        } else {
-                            Ok(ResolvedFieldValue::new(output_field_name, v))
-                        }
-                    }
-                    None => match value
-                        .as_bool()
-                        .and_then(|v| v.to_string().parse::<i64>().ok())
-                        .map(Value::from)
-                    {
-                        Some(v) => {
-                            if data_type == "timestamp_milli" || data_type == "timestamp" {
-                                Ok(ResolvedFieldValue::new(
-                                    output_field_name,
-                                    AnalyseSchema::coerce_to_milli_seconds(v),
-                                ))
-                            } else {
-                                Ok(ResolvedFieldValue::new(output_field_name, v))
-                            }
-                        }
-                        None => {
-                            if !allow_evolve {
-                                return Err(Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Field: {} => {} value: {} is not an integer",
-                                        parent_field.unwrap_or("root"),
-                                        field,
-                                        value
-                                    ),
-                                )));
-                            }
-                            // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(
-                                config,
-                                &field.to_string(),
-                                value,
-                                parent_field,
-                                parent_data_type,
-                                metadata,
-                                updated_schema,
-                                flatten,
-                            )
-                        }
-                    },
-                },
-            },
-        },
-        "double" => match value.as_f64().map(Value::from) {
-            Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-            None => match value
-                .as_str()
-                .and_then(|v| v.parse::<f64>().ok())
-                .map(Value::from)
-            {
-                Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-                None => match value
-                    .as_i64()
-                    .and_then(|v| v.to_string().parse::<f64>().ok())
-                    .map(Value::from)
-                {
-                    Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-                    None => match value
-                        .as_bool()
-                        .and_then(|v| v.to_string().parse::<f64>().ok())
-                        .map(Value::from)
-                    {
-                        Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-                        None => {
-                            if !allow_evolve {
-                                return Err(Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Field: {} => {} value: {} is not a double",
-                                        parent_field.unwrap_or("root"),
-                                        field,
-                                        value
-                                    ),
-                                )));
-                            }
-                            // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(
-                                config,
-                                &field.to_string(),
-                                value,
-                                parent_field,
-                                parent_data_type,
-                                metadata,
-                                updated_schema,
-                                flatten,
-                            )
-                        }
-                    },
-                },
-            },
-        },
-        "boolean" => match value.as_bool().map(Value::from) {
-            Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-            None => match value
-                .as_str()
-                .and_then(|v| v.parse::<bool>().ok())
-                .map(Value::from)
-            {
-                Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-                None => match value
-                    .as_i64()
-                    .and_then(|v| v.to_string().parse::<bool>().ok())
-                    .map(Value::from)
-                {
-                    Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-                    None => match value.as_i64().and_then(|v| {
-                        if v == 0 || v == 1 {
-                            Some((v == 1).to_string().parse::<bool>().ok()).map(Value::from)
-                        } else {
-                            None
-                        }
-                    }) {
-                        Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
-                        None => {
-                            if !allow_evolve {
-                                return Err(Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!(
-                                        "Field: {} => {} value: {} is not a boolean",
-                                        parent_field.unwrap_or("root"),
-                                        field,
-                                        value
-                                    ),
-                                )));
-                            }
-                            // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(
-                                config,
-                                &field.to_string(),
-                                value,
-                                parent_field,
-                                parent_data_type,
-                                metadata,
-                                updated_schema,
-                                flatten,
-                            )
-                        }
-                    },
-                },
-            },
-        },
-        _ => Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("Unknown data type '{}'", data_type),
-        ))),
+    match coerce_scalar(data_type, value) {
+        Ok(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
+        Err(_) => evolve_or_err(
+            config,
+            field,
+            value,
+            parent_field,
+            parent_data_type,
+            metadata,
+            updated_schema,
+            allow_evolve,
+            flatten,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                scalar_mismatch(data_type, parent_field, field, value),
+            )),
+        ),
     }
 }
 
@@ -1225,14 +1156,16 @@ pub fn set_date(
     // Hive Timestamp doesn't support string dates
     match value.clone().as_str() {
         Some(val) => {
-            let fmt = &metadata
-                .get(field)
-                .unwrap()
-                .date_candidate
-                .as_ref()
-                .unwrap()
-                .format;
-            match DateFormats::from_str(fmt) {
+            let fmt = match metadata.get(field).and_then(|m| m.date_candidate.as_ref()) {
+                Some(c) => c.format.clone(),
+                None => {
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("No date format for field {}", field),
+                    )));
+                }
+            };
+            match DateFormats::from_str(&fmt) {
                 Ok(f) => {
                     let meta = metadata.get(field).unwrap();
                     let kind = meta.date_parser_kind.clone();
@@ -1301,13 +1234,19 @@ pub fn set_date(
                     };
                     match millis {
                         Some(ms) => Ok(ResolvedFieldValue::new(output_field_name, ms.into())),
-                        None => Ok(ResolvedFieldValue::new(output_field_name, Value::Null)),
+                        None => Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "Could not parse date {} with format {} for field {}",
+                                val, fmt, field
+                            ),
+                        ))),
                     }
                 }
-                Err(err) => {
-                    info!("Error date: {}", err);
-                    Ok(ResolvedFieldValue::new(output_field_name, Value::Null))
-                }
+                Err(err) => Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Invalid date format for field {}: {}", field, err),
+                ))),
             }
         }
         None => {
@@ -1461,6 +1400,317 @@ mod tests_nested_ingest_evolution {
         assert!(profile.fields.get("age_string").is_some());
         assert_eq!(resolved.value["age_string"], "senior");
     }
+
+    #[test]
+    fn record_field_wrong_shape_evolves_own_string_sibling() {
+        let mut metadata = root_with_record("detail", HashMap::new());
+        let mut updated_schema = "no".to_string();
+        let resolved = set_value(
+            &Config::new(),
+            "record",
+            "detail",
+            &json!("not-an-object"),
+            None,
+            None,
+            &mut metadata,
+            &mut updated_schema,
+            true,
+            false,
+        )
+        .expect("record vs string is an own-shape type-split");
+        assert!(
+            metadata.get("detail_string").is_some(),
+            "expected detail_string, keys={:?}",
+            metadata.keys().collect::<Vec<_>>()
+        );
+        assert!(metadata.get("detail_record").is_none());
+        assert_eq!(resolved.field, "detail_string");
+        assert_eq!(resolved.value, json!("not-an-object"));
+    }
+
+    #[test]
+    fn record_ingest_evolves_nested_decimal_leaf_to_string_sibling() {
+        let mut children = HashMap::new();
+        children.insert(
+            "docket_aggregate_size_code".to_string(),
+            scalar("docket_aggregate_size_code", SkipprDataType::Decimal),
+        );
+        let mut metadata = root_with_record("detail", children);
+        let mut updated_schema = "no".to_string();
+
+        let resolved = set_value(
+            &Config::new(),
+            "record",
+            "detail",
+            &json!({"docket_aggregate_size_code": "20mm"}),
+            None,
+            None,
+            &mut metadata,
+            &mut updated_schema,
+            true,
+            true,
+        )
+        .expect("nested decimal leaf should type-split to a string sibling");
+
+        let err = resolved.value.to_string();
+        assert!(
+            !err.contains("No schema evolutions succeeded for field: 'detail'"),
+            "leaf coerce must not evolve parent detail: {err}"
+        );
+        let detail = metadata.get("detail").unwrap();
+        assert!(
+            detail
+                .fields
+                .get("docket_aggregate_size_code_string")
+                .is_some(),
+            "expected leaf sibling, fields={:?}",
+            detail.fields.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(resolved.value["docket_aggregate_size_code_string"], "20mm");
+    }
+
+    #[test]
+    fn map_ingest_evolves_nested_decimal_leaf_to_string_sibling() {
+        let mut children = HashMap::new();
+        children.insert(
+            "docket_aggregate_size_code".to_string(),
+            scalar("docket_aggregate_size_code", SkipprDataType::Decimal),
+        );
+        let mut metadata = root_with_map("attrs", children);
+        let mut updated_schema = "no".to_string();
+
+        let resolved = set_value(
+            &Config::new(),
+            "map",
+            "attrs",
+            &json!({"docket_aggregate_size_code": "20mm"}),
+            None,
+            None,
+            &mut metadata,
+            &mut updated_schema,
+            true,
+            false,
+        )
+        .expect("nested map decimal leaf should type-split");
+
+        assert!(metadata.get("attrs_record").is_none());
+        let attrs = metadata.get("attrs").unwrap();
+        assert!(attrs
+            .fields
+            .get("docket_aggregate_size_code_string")
+            .is_some());
+        assert_eq!(resolved.value["docket_aggregate_size_code_string"], "20mm");
+    }
+
+    #[test]
+    fn record_ingest_evolves_l2_decimal_leaf_to_string_sibling() {
+        let mut inner = HashMap::new();
+        inner.insert("leaf".to_string(), scalar("leaf", SkipprDataType::Decimal));
+        let mut nested = Metadata::new().unwrap();
+        nested.determined_type = SkipprDataType::Record;
+        nested.out_field_name = "nested".to_string();
+        nested.fields = Box::new(inner);
+        let mut children = HashMap::new();
+        children.insert("nested".to_string(), nested);
+        let mut metadata = root_with_record("detail", children);
+        let mut updated_schema = "no".to_string();
+
+        let resolved = set_value(
+            &Config::new(),
+            "record",
+            "detail",
+            &json!({"nested": {"leaf": "20mm"}}),
+            None,
+            None,
+            &mut metadata,
+            &mut updated_schema,
+            true,
+            false,
+        )
+        .expect("L2 nested decimal leaf should type-split");
+
+        let detail = metadata.get("detail").unwrap();
+        assert!(
+            detail.fields.get("nested_record").is_none(),
+            "must not evolve L1 nested record, fields={:?}",
+            detail.fields.keys().collect::<Vec<_>>()
+        );
+        assert!(metadata.get("detail_record").is_none());
+        let nested = detail.fields.get("nested").unwrap();
+        assert!(
+            nested.fields.get("leaf_string").is_some(),
+            "expected L2 leaf sibling, fields={:?}",
+            nested.fields.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(resolved.value["nested"]["leaf_string"], "20mm");
+    }
+
+    #[test]
+    fn nested_primitive_array_evolves_array_parent_not_record() {
+        let mut arr = Metadata::new().unwrap();
+        arr.determined_type = SkipprDataType::Array;
+        arr.determined_type_values = Some(SkipprDataType::Integer);
+        arr.out_field_name = "codes".to_string();
+        arr.enabled = true;
+        let mut children = HashMap::new();
+        children.insert("codes".to_string(), arr);
+        let mut metadata = root_with_record("detail", children);
+        let mut updated_schema = "no".to_string();
+
+        let resolved = set_value(
+            &Config::new(),
+            "record",
+            "detail",
+            &json!({"codes": [1234, "BWL"]}),
+            None,
+            None,
+            &mut metadata,
+            &mut updated_schema,
+            true,
+            false,
+        )
+        .expect("nested primitive array must parent-evolve, not deadletter");
+
+        let detail = metadata.get("detail").unwrap();
+        assert!(
+            metadata.get("detail_record").is_none()
+                && detail.fields.get("codes_0_string").is_none(),
+            "must not evolve parent record or primitive indexes, fields={:?}",
+            detail.fields.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            detail.fields.keys().any(|k| k.contains("codes_array"))
+                || resolved
+                    .value
+                    .as_object()
+                    .is_some_and(|o| o.keys().any(|k| k.contains("codes_array"))),
+            "expected nested array parent sibling, fields={:?} value={}",
+            detail.fields.keys().collect::<Vec<_>>(),
+            resolved.value
+        );
+    }
+
+    #[test]
+    fn leaf_type_split_matrix_scalars_under_record() {
+        let scalars = [
+            SkipprDataType::Integer,
+            SkipprDataType::Long,
+            SkipprDataType::Short,
+            SkipprDataType::Byte,
+            SkipprDataType::Double,
+            SkipprDataType::Float,
+            SkipprDataType::Decimal,
+            SkipprDataType::Boolean,
+            SkipprDataType::Timestamp,
+            SkipprDataType::TimestampMilli,
+            SkipprDataType::Date,
+            SkipprDataType::Time,
+            SkipprDataType::Uuid,
+            SkipprDataType::Json,
+            SkipprDataType::Null,
+        ];
+        for dt in scalars {
+            let mut children = HashMap::new();
+            children.insert("leaf".to_string(), scalar("leaf", dt.clone()));
+            let mut metadata = root_with_record("detail", children);
+            let mut updated_schema = "no".to_string();
+            let resolved = set_value(
+                &Config::new(),
+                "record",
+                "detail",
+                &json!({"leaf": "20mm"}),
+                None,
+                None,
+                &mut metadata,
+                &mut updated_schema,
+                true,
+                false,
+            )
+            .unwrap_or_else(|err| panic!("{dt:?} nested leaf must type-split, got {err}"));
+            let detail = metadata.get("detail").unwrap();
+            assert!(
+                detail.fields.get("leaf_string").is_some(),
+                "{dt:?}: expected leaf_string, fields={:?}",
+                detail.fields.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                metadata.get("detail_record").is_none(),
+                "{dt:?}: must not evolve parent record"
+            );
+            assert_eq!(resolved.value["leaf_string"], "20mm");
+        }
+    }
+
+    #[test]
+    fn array_of_records_evolves_object_element_leaf() {
+        let leaf = scalar("max_size_mm", SkipprDataType::Decimal);
+        let mut elem = Metadata::new().unwrap();
+        elem.determined_type = SkipprDataType::Record;
+        elem.out_field_name = "0".to_string();
+        elem.fields.insert("max_size_mm".to_string(), leaf);
+        let mut arr = Metadata::new().unwrap();
+        arr.determined_type = SkipprDataType::Array;
+        arr.determined_type_values = Some(SkipprDataType::Record);
+        arr.out_field_name = "aggregate".to_string();
+        arr.fields.insert("0".to_string(), elem);
+        let mut metadata = HashMap::new();
+        metadata.insert("aggregate".to_string(), arr);
+        let mut updated_schema = "no".to_string();
+        let resolved = set_value(
+            &Config::new(),
+            "array",
+            "aggregate",
+            &json!([{"max_size_mm": "20mm"}]),
+            None,
+            None,
+            &mut metadata,
+            &mut updated_schema,
+            true,
+            false,
+        )
+        .expect("array-of-records leaf must type-split");
+        let elem = metadata.get("aggregate").unwrap().fields.get("0").unwrap();
+        assert!(
+            elem.fields.get("max_size_mm_string").is_some(),
+            "expected object-element leaf sibling, fields={:?}",
+            elem.fields.keys().collect::<Vec<_>>()
+        );
+        assert!(metadata.get("aggregate_record").is_none());
+        assert_eq!(resolved.value[0]["max_size_mm_string"], "20mm");
+    }
+
+    #[test]
+    fn primitive_array_mixed_types_evolve_parent_not_index() {
+        let mut arr = Metadata::new().unwrap();
+        arr.determined_type = SkipprDataType::Array;
+        arr.determined_type_values = Some(SkipprDataType::Integer);
+        arr.out_field_name = "codes".to_string();
+        arr.enabled = true;
+        let mut metadata = HashMap::new();
+        metadata.insert("codes".to_string(), arr);
+        let mut updated_schema = "no".to_string();
+        let row = ingest(
+            &Config::new(),
+            &json!({"codes": [1234, "BWL"]}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            false,
+        )
+        .expect("primitive mixed array must parent-evolve via ingest");
+        assert!(
+            metadata.get("codes_0_string").is_none(),
+            "must not type-split primitive array indexes"
+        );
+        let obj = row.as_object().expect("row object");
+        assert!(
+            obj.keys()
+                .any(|k| k.contains("codes_array") || k == "codes")
+                || metadata.keys().any(|k| k.contains("codes_array")),
+            "expected parent array sibling, keys={:?} row={row}",
+            metadata.keys().collect::<Vec<_>>(),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1609,6 +1859,42 @@ mod tests_set_date {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().value, expected_millis);
+    }
+
+    #[test]
+    fn set_date_unparseable_string_is_err_not_null() {
+        let field = "test_field";
+        let format_name = AnalyseSchema::is_valid_date("2023-05-21 12:34:56").unwrap();
+        let mut meta = generate_metadata(field, format_name);
+        let mut updated_schema = "no".to_string();
+        let result = set_date(
+            field,
+            &serde_json::json!("20mm"),
+            None,
+            None,
+            &mut meta,
+            &mut updated_schema,
+            false,
+        );
+        assert!(
+            result.is_err(),
+            "unparseable date must Err so evolve_or_err can CREATE, got {result:?}"
+        );
+        let resolved = set_value(
+            &Config::new(),
+            SkipprDataType::Date.as_str(),
+            field,
+            &serde_json::json!("20mm"),
+            None,
+            None,
+            &mut meta,
+            &mut updated_schema,
+            true,
+            false,
+        )
+        .expect("date S_non must type-split");
+        assert!(meta.get("test_field_string").is_some());
+        assert_eq!(resolved.value, serde_json::json!("20mm"));
     }
 }
 
@@ -1785,5 +2071,115 @@ mod test_smoke_tests {
         assert_eq!(&map, &trip_map);
 
         // remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn cloudcycle_docket_nested_type_split_keeps_row() {
+        let disc = concat!(
+            r#"{"version":"0","id":"disc-1","detail-type":"cloudcycle-docket","source":"com.cloudcycle.concrete-control-centre.cloudcycle-docket","account":"201015722121","time":"2024-10-10T10:00:00Z","region":"eu-west-1","resources":[],"detail":{"docket_rmc":"Cemex","docket_id":"Cemex--1","docket_aggregate_size_code":"20.00","docket_plant_code":"1234","docket_order_code":"1025594637","docket_datetime_batch_utc":"2024-10-10T10:00:00.000Z"}}"#
+        );
+        let later = serde_json::json!({
+            "version": "0",
+            "id": "2cbc9030-adbe-afe2-b6be-c879f6eed5f5",
+            "detail-type": "cloudcycle-docket",
+            "source": "com.cloudcycle.concrete-control-centre.cloudcycle-docket",
+            "account": "201015722121",
+            "time": "2024-10-10T10:39:54Z",
+            "region": "eu-west-1",
+            "resources": [],
+            "detail": {
+                "docket_aggregate_size_code": "20mm",
+                "docket_plant_code": "I324",
+                "docket_order_code": "1025594637",
+                "docket_rmc": "Cemex",
+                "docket_id": "Cemex--1025603147",
+                "docket_datetime_batch_utc": "2024-10-10T10:31:11.000Z"
+            }
+        });
+        let mut metadata = HashMap::new();
+        AnalyseSchema { i: 0 }.infer_json_schema(
+            &Config::new(),
+            &mut disc.to_string(),
+            Some(1),
+            &mut metadata,
+            Some("cloudcycle_docket"),
+        );
+        let ns = metadata
+            .keys()
+            .find(|k| k.contains("docket") || k.as_str() == "default")
+            .cloned()
+            .unwrap_or_else(|| {
+                metadata
+                    .keys()
+                    .next()
+                    .cloned()
+                    .expect("discovered namespace")
+            });
+        let fields = metadata
+            .get_mut(&ns)
+            .expect("namespace metadata")
+            .fields
+            .as_mut();
+        if let Some(leaf) = fields
+            .get_mut("detail")
+            .and_then(|d| d.fields.get_mut("docket_aggregate_size_code"))
+        {
+            leaf.determined_type = crate::discover::SkipprDataType::Decimal;
+        } else {
+            panic!(
+                "discover must produce nested detail.docket_aggregate_size_code, keys={:?}",
+                fields.keys().collect::<Vec<_>>()
+            );
+        }
+        if let Some(leaf) = fields
+            .get_mut("detail")
+            .and_then(|d| d.fields.get_mut("docket_plant_code"))
+        {
+            leaf.determined_type = crate::discover::SkipprDataType::Integer;
+        } else {
+            panic!(
+                "discover must produce nested detail.docket_plant_code, keys={:?}",
+                fields.keys().collect::<Vec<_>>()
+            );
+        }
+        let mut updated_schema = "no".to_string();
+        let ingested = ingest(
+            &Config::new(),
+            &later,
+            fields,
+            &ns,
+            &mut updated_schema,
+            true,
+        );
+        let row = ingested.unwrap_or_else(|err| {
+            panic!("record 2 must stay on the live table, not deadletter: {err}")
+        });
+        let obj = row.as_object().expect("flattened object");
+        let size_string = obj
+            .keys()
+            .find(|k| k.ends_with("docket_aggregate_size_code_string"))
+            .cloned();
+        let plant_string = obj
+            .keys()
+            .find(|k| k.ends_with("docket_plant_code_string"))
+            .cloned();
+        assert!(
+            size_string.is_some(),
+            "expected flattened *_string sibling for size code, keys={:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(row[size_string.as_ref().unwrap()], "20mm");
+        assert!(
+            plant_string.is_some(),
+            "expected flattened *_string sibling for plant code, keys={:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(row[plant_string.as_ref().unwrap()], "I324");
+        assert!(
+            obj.keys().all(|k| !k.starts_with("detail_record_")),
+            "leaf coerce must not emit detail_record_* keys={:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
     }
 }
