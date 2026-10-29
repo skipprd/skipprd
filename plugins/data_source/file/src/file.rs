@@ -176,19 +176,23 @@ fn process_reader<R: Read>(
     }
 }
 
-fn parquet_path_to_ipc_batches(
+const PARQUET_ARROW_ROWS: usize = 16_384;
+
+fn for_each_parquet_ipc_batch(
     path: &Path,
     offset_key: &OffsetKey,
-) -> Result<Vec<RuntimeIngestPartitionBatch>, std::io::Error> {
+    mut on_batch: impl FnMut(RuntimeIngestPartitionBatch) -> Result<(), std::io::Error>,
+) -> Result<(), std::io::Error> {
     let file = File::open(path)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(std::io::Error::other)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(std::io::Error::other)?
+        .with_batch_size(PARQUET_ARROW_ROWS);
     let reader = builder.build().map_err(std::io::Error::other)?;
-    let mut out = Vec::new();
     let mut offset_pos = 0u64;
     for batch in reader {
         let batch = batch.map_err(std::io::Error::other)?;
         offset_pos = offset_pos.saturating_add(batch.num_rows() as u64);
-        out.push(RuntimeIngestPartitionBatch {
+        on_batch(RuntimeIngestPartitionBatch {
             sink_ref: offset_key.namespace.clone(),
             namespace: offset_key.namespace.clone(),
             partition: offset_key.partition.clone(),
@@ -201,9 +205,9 @@ fn parquet_path_to_ipc_batches(
             arrow_stream_bytes: encode_record_batches(&[batch])?,
             cdc_rows: None,
             checkpoint_update: None,
-        });
+        })?;
     }
-    Ok(out)
+    Ok(())
 }
 
 impl DataSourceLocalFilePlugin {
@@ -227,10 +231,9 @@ impl DataSourceLocalFilePlugin {
             }
             // Arrow ingest publishes offset keys as submitted; list-time Closed
             // checks the twice-normalized key, so submit that key.
-            let batches = parquet_path_to_ipc_batches(&path, &closed_key)?;
-            if !batches.is_empty() {
-                submit_arrow_ipc_batches(ctx.as_ref(), batches)?;
-            }
+            for_each_parquet_ipc_batch(&path, &closed_key, |batch| {
+                submit_arrow_ipc_batches(ctx.as_ref(), vec![batch]).map(|_| ())
+            })?;
         }
         Ok(())
     }
@@ -390,7 +393,7 @@ impl DataSource for DataSourceLocalFilePlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_source_files, file_source_namespace, parquet_path_to_ipc_batches};
+    use super::{collect_source_files, file_source_namespace, for_each_parquet_ipc_batch};
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -455,7 +458,12 @@ mod tests {
         writer.write(&batch).unwrap();
         writer.close().unwrap();
         let offset_key = OffsetKey::new("people", path.to_str().unwrap());
-        let batches = parquet_path_to_ipc_batches(&path, &offset_key).unwrap();
+        let mut batches = Vec::new();
+        for_each_parquet_ipc_batch(&path, &offset_key, |batch| {
+            batches.push(batch);
+            Ok(())
+        })
+        .unwrap();
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].namespace, "people");

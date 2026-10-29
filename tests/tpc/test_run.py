@@ -58,7 +58,8 @@ class TpcContractTests(unittest.TestCase):
         file_src = (ROOT / "plugins" / "data_source" / "file" / "src" / "file.rs").read_text(
             encoding="utf-8"
         )
-        self.assertIn("parquet_path_to_ipc_batches", file_src)
+        self.assertIn("for_each_parquet_ipc_batch", file_src)
+        self.assertIn("with_batch_size", file_src)
         self.assertIn("InputFormat::Parquet", file_src)
         self.assertIn("submit_arrow_ipc_batches", file_src)
         contracts = WORKFLOW.split("\n  tpc_h_sf10:", 1)[0]
