@@ -90,7 +90,12 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("publish_skipprd:", text)
         self.assertIn("endsWith(github.ref_name, '-beta')", text)
         self.assertIn("--prerelease", text)
-        self.assertNotIn("cargo test -p skipprd", text)
+        linux_test = text.split("\n  linux_test_suite:", 1)[1].split("\n  linux_x86:", 1)[0]
+        linux_build = text.split("\n  linux_x86:", 1)[1].split("\n  macos_arm64:", 1)[0]
+        self.assertNotIn("cargo test -p skipprd", linux_test)
+        self.assertNotIn("cargo test -p skipprd", linux_build)
+        self.assertIn("linux_dst:", text)
+        self.assertIn("sqlrt::dst::", text)
         self.assertNotIn("cargo test -p skippr-lease", text)
         self.assertNotIn("cargo check --all-features", text)
         self.assertIn("test_runtime_e2e_harness.py", text)
@@ -100,6 +105,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("test_engine_tag.py", text)
         self.assertIn("tests/perf/test_run.py", text)
         self.assertIn("tests/perf/test_analyze.py", text)
+        self.assertIn("tests/perf_db/test_run.py", text)
         self.assertIn("chaos_mode_published:", text)
         self.assertIn("e2e_prev_plugins:", text)
         self.assertIn("e2e_prev_host:", text)
@@ -111,6 +117,9 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("scenario: bike_hire_many", text)
         self.assertIn("e2e/runtime_scenario", text)
         linux_test = text.split("\n  linux_test_suite:", 1)[1].split("\n  linux_x86:", 1)[0]
+        self.assertIn("test_release_sha_batteries.py", linux_test)
+        self.assertIn("tests/tpc/test_run.py", linux_test)
+        self.assertIn("tests/perf_db/test_run.py", linux_test)
         self.assertIn("runs-on: ubuntu-latest", linux_test)
         self.assertNotIn("dtolnay/rust-toolchain", linux_test)
         linux_build = text.split("\n  linux_x86:", 1)[1].split("\n  macos_arm64:", 1)[0]
@@ -274,6 +283,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("macos_arm64", plugins)
         self.assertIn("e2e_file_duckdb", plugins)
         self.assertIn("e2e_file_copy", plugins)
+        self.assertIn("linux_dst", plugins)
         self.assertIn("publish_runtime_plugins.py", plugins)
         self.assertIn("runtime-plugin-binaries-linux_x86", plugins)
         self.assertIn("aws s3 sync", plugins)
@@ -294,6 +304,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_schema_lifecycle", publish)
         self.assertIn("e2e_file_postgres", publish)
         self.assertIn("e2e_file_copy", publish)
+        self.assertIn("linux_dst", publish)
         self.assertIn("e2e_s3_file_copy", publish)
         self.assertIn("e2e_s3_s3_copy", publish)
         self.assertIn("macos_arm64", publish)
@@ -386,6 +397,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("4 GiB", text)
         self.assertIn("schema evolution", text)
         self.assertIn("Python workflow contracts", text)
+        self.assertIn("linux_dst", text)
         self.assertIn("skippr-beta-release", text)
         self.assertIn("-beta", text)
         self.assertNotIn("full `cargo test -p skipprd`", text)
@@ -401,6 +413,15 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("pull_request:", header)
         self.assertIn("ingest-a-duckdb", text)
         self.assertIn("copy-b-json-json", text)
+        import sys
+
+        sys.path.insert(0, str(ROOT / "tests" / "perf"))
+        from catalog import load_catalog, scenario_ids
+
+        perf_catalog = load_catalog(ROOT / "tests" / "perf" / "catalog.yaml")
+        matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
+        for scenario_id in scenario_ids(perf_catalog):
+            self.assertIn(scenario_id, matrix, scenario_id)
         self.assertIn("ubuntu-latest", text)
         self.assertNotIn("skippr-darwin-arm64", text)
         self.assertNotIn("[self-hosted", text)
@@ -412,6 +433,14 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("build_linux_profile", text)
         self.assertIn("perf.folded", text)
         self.assertIn("needs.linux_profile.result == 'success'", text)
+        self.assertIn(
+            "linux_contracts",
+            text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0],
+        )
+        self.assertIn(
+            "linux_contracts",
+            text.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0],
+        )
         self.assertIn("perf-*-linux-flamegraph", text)
         self.assertIn("analyze.py", text)
         self.assertIn("python3 -m pip install --quiet boto3", text)
@@ -467,6 +496,16 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("q-union-count-duckdb", text)
         self.assertIn("q-stream-tail-iceberg", text)
         self.assertIn("q-iceberg-only-iceberg", text)
+        import sys
+
+        sys.path.insert(0, str(ROOT / "tests" / "perf"))
+        sys.path.insert(0, str(ROOT / "tests" / "perf_db"))
+        from catalog import load_catalog, scenario_ids
+
+        db_catalog = load_catalog(ROOT / "tests" / "perf_db" / "catalog.yaml")
+        matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
+        for scenario_id in scenario_ids(db_catalog):
+            self.assertIn(scenario_id, matrix, scenario_id)
         self.assertNotIn("q-wal-count-file", text)
         self.assertNotIn("q-union-count-skipprlake", text)
         self.assertIn("ubuntu-latest", text)
@@ -482,6 +521,14 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("build_linux_profile", text)
         self.assertIn("perf.folded", text)
         self.assertIn("needs.linux_profile.result == 'success'", text)
+        self.assertIn(
+            "linux_contracts",
+            text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0],
+        )
+        self.assertIn(
+            "linux_contracts",
+            text.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0],
+        )
         self.assertIn("analyze.py", text)
         self.assertNotIn("--delete", text)
         self.assertIn("actions/e2e/perf-db", text)

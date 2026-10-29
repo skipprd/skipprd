@@ -210,6 +210,12 @@ fn terminate_runtime_plugin_child_pid(child_pid: u32) {
 #[cfg(not(unix))]
 fn terminate_runtime_plugin_child_pid(_child_pid: u32) {}
 
+/// Acquire must subscribe to Notify only when grow did not happen.
+/// Subscribing first would drop the waiter on `continue` after grow.
+pub(crate) fn sink_pool_subscribes_after_grow(grew: bool) -> bool {
+    !grew
+}
+
 pub fn terminate_runtime_plugin_children() {
     let child_pids = {
         let registry = RUNTIME_PLUGIN_CHILD_PIDS
@@ -2884,9 +2890,9 @@ impl RuntimeSinkConnectionPool {
             if self.maybe_grow_one().await? {
                 continue;
             }
-            // Subscribe after grow so a release during maybe_grow_one is not
-            // attached to a future we then drop on `continue`.
-            self.slots.notify.notified().await;
+            if sink_pool_subscribes_after_grow(false) {
+                self.slots.notify.notified().await;
+            }
         };
         crate::metrics::counters::inc_runtime_sink_active_sessions();
         Ok(RuntimeSinkWorkerLease {

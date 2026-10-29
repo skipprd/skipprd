@@ -32,8 +32,11 @@ jobs:
       - run: python3 .github/scripts/test_bump_changed_plugin_crates.py
       - run: python3 .github/scripts/test_previous_protocol_compatible_release.py
       - run: python3 .github/scripts/test_engine_tag.py
+      - run: python3 .github/scripts/test_release_sha_batteries.py
       - run: python3 tests/perf/test_run.py
       - run: python3 tests/perf/test_analyze.py
+      - run: python3 tests/perf_db/test_run.py
+      - run: python3 tests/tpc/test_run.py
 
   linux_x86:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
@@ -242,6 +245,38 @@ jobs:
           skipprd_path: ./skipprd-linux_x86/skipprd
           plugin_binaries_dir: ./runtime-plugin-binaries-linux_x86
 
+  linux_dst:
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+    name: DST World (linux x86)
+    needs:
+      - e2e_file_duckdb
+      - e2e_file_copy
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: skipprd
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/cloud
+          path: cloud
+          token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
+          submodules: true
+      - name: Install Linux x86 build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: skipprd
+      - name: DST named scripts and bounded proptest
+        run: cargo test -p skipprd --lib -- sqlrt::dst::
+
   release_notes:
     if: startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test')
     name: Release notes
@@ -266,6 +301,7 @@ jobs:
       - release_notes
       - e2e_file_duckdb
       - e2e_file_copy
+      - linux_dst
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -701,6 +737,7 @@ jobs:
       - e2e_schema_lifecycle
       - e2e_file_postgres
       - e2e_file_copy
+      - linux_dst
       - e2e_s3_file_copy
       - e2e_s3_s3_copy
       - e2e_prev_plugins

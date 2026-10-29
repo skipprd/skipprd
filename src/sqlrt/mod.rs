@@ -7,6 +7,7 @@ mod alter_table_matrix;
 pub mod cdc_reconcile;
 pub mod doc_parser;
 pub mod docs;
+pub mod dst;
 pub mod iceberg_table;
 pub mod metadata;
 pub mod operators;

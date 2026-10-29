@@ -682,39 +682,6 @@ mod tests {
         .unwrap()
     }
 
-    fn oracle(
-        lake: &[(i64, &str, i64)],
-        wal: &[(i64, &str, i64, MutationKind, u8)],
-    ) -> BTreeMap<i64, (String, i64)> {
-        let mut state: BTreeMap<i64, (String, i64, Vec<u8>)> = BTreeMap::new();
-        for (id, name, amount) in lake {
-            state.insert(*id, ((*name).to_string(), *amount, vec![]));
-        }
-        for (id, name, amount, mutation, order) in wal {
-            let token = vec![*order];
-            match state.get(id) {
-                Some((_, _, existing))
-                    if existing.as_slice() > token.as_slice() && !existing.is_empty() =>
-                {
-                    continue;
-                }
-                _ => {}
-            }
-            match mutation {
-                MutationKind::Delete => {
-                    state.remove(id);
-                }
-                _ => {
-                    state.insert(*id, ((*name).to_string(), *amount, token));
-                }
-            }
-        }
-        state
-            .into_iter()
-            .map(|(id, (name, amount, _))| (id, (name, amount)))
-            .collect()
-    }
-
     async fn merge_sql(
         lake: Vec<RecordBatch>,
         wal: Vec<RecordBatch>,
@@ -925,22 +892,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sum_matches_oracle() {
+    async fn sum_matches_dst_current_table() {
+        use crate::sqlrt::dst::{current_table, run, Op, UserRow, WalEvent};
+        let ops = vec![
+            Op::IngestLake(UserRow {
+                id: 1,
+                name: "alpha".into(),
+                amount: 100,
+            }),
+            Op::IngestLake(UserRow {
+                id: 2,
+                name: "beta".into(),
+                amount: 50,
+            }),
+            Op::IngestWal(WalEvent {
+                row: UserRow {
+                    id: 1,
+                    name: "alpha-prime".into(),
+                    amount: 120,
+                },
+                mutation: Some(MutationKind::Update),
+                order: 1,
+                seq: 1,
+                ordinal: 0,
+                row_i: 0,
+            }),
+            Op::IngestWal(WalEvent {
+                row: UserRow {
+                    id: 3,
+                    name: "gamma".into(),
+                    amount: 30,
+                },
+                mutation: Some(MutationKind::Insert),
+                order: 1,
+                seq: 2,
+                ordinal: 1,
+                row_i: 0,
+            }),
+        ];
+        let expect: i64 = current_table(&run(&ops))
+            .values()
+            .map(|(_, amount)| *amount)
+            .sum();
         let lake = vec![row(1, "alpha", 100), row(2, "beta", 50)];
         let wal = vec![
             cdc_row(1, "alpha-prime", 120, MutationKind::Update, 1, 1, 0, 0),
             cdc_row(3, "gamma", 30, MutationKind::Insert, 1, 1, 1, 0),
         ];
-        let expect: i64 = oracle(
-            &[(1, "alpha", 100), (2, "beta", 50)],
-            &[
-                (1, "alpha-prime", 120, MutationKind::Update, 1),
-                (3, "gamma", 30, MutationKind::Insert, 1),
-            ],
-        )
-        .values()
-        .map(|(_, amount)| *amount)
-        .sum();
         let batches = merge_sql(lake, wal, "SELECT SUM(amount) FROM t").await;
         let got = batches[0]
             .column(0)

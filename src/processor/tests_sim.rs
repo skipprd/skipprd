@@ -1,4 +1,5 @@
-//! Deterministic simulation: scripted CDC streams vs a golden in-memory model.
+//! Disk sled agg vs production `apply_mutation`. CDC merge SoT is
+//! `sqlrt::dst::current_table` (`g_processor_*` World scripts).
 
 use super::test_support::*;
 use super::*;

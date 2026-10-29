@@ -18,7 +18,7 @@ pub(crate) fn looks_like_omitted_prepare_sink_length_prefix(bytes: &[u8]) -> boo
     bytes.len() == PREPARE_SINK_VARIANT_TAG as usize
 }
 
-pub(crate) fn decode_payload<T>(bytes: &[u8]) -> io::Result<T>
+pub fn decode_payload<T>(bytes: &[u8]) -> io::Result<T>
 where
     T: DeserializeOwned,
 {

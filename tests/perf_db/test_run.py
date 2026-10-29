@@ -160,6 +160,30 @@ class PerfDbSkillTests(unittest.TestCase):
         self.assertNotIn("q-wal-count-file", text)
 
 
+class PerfDbWorkflowContractTests(unittest.TestCase):
+    def test_perf_db_yml_linux_matrix_lists_every_catalog_scenario(self) -> None:
+        text = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(encoding="utf-8")
+        matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
+        for scenario_id in scenario_ids(db_catalog()):
+            self.assertIn(scenario_id, matrix, scenario_id)
+        self.assertIn("actions/e2e/perf-db", text)
+        self.assertIn("ubuntu-latest", text)
+        self.assertNotIn("skippr-darwin-arm64", text)
+        self.assertNotIn("if-no-files-found: warn", text)
+        self.assertIn("if-no-files-found: error", text)
+        self.assertIn("linux_contracts", matrix)
+        profile_job = text.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0]
+        self.assertIn("linux_contracts", profile_job)
+
+    def test_ci_does_not_skip_docker_cdc_cells(self) -> None:
+        src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        start = src.index("def run_query_after_cdc")
+        chunk = src[start : start + 900]
+        self.assertIn("GITHUB_ACTIONS", chunk)
+        self.assertIn("Docker required on GitHub", chunk)
+        self.assertLess(chunk.index("GITHUB_ACTIONS"), chunk.index("docker-down"))
+
+
 class PerfDbRunnerContractTests(unittest.TestCase):
     def test_runner_queries_after_sync_and_shares_perf_helpers(self) -> None:
         text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")

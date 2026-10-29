@@ -1,16 +1,19 @@
 # Release Workflow
 
-Operator path is **`/skippr-release`**: bump changed plugin crates, move `CHANGELOG` Unreleased into the tag, commit with the pre-commit hook, tag, push, watch both GitHub Actions pipelines until publish jobs succeed, then surgical public docs via **`skipprd-docs`**. Everyday plugin commits do not bump crate versions. Clobberable pre-release testing is **`/skippr-beta-release`**: next production patch plus `-beta` (`18.3.10-beta`), full artifact publish (`python-publish` + skipprd host tarballs + runtime plugins), overwrite that tag on every run, skip `latest` pointers, skip skipprd-docs.
+Operator path is **`/skippr-release`**: bump changed plugin crates, move `CHANGELOG` Unreleased into the tag, commit with the pre-commit hook, wait until SHA batteries are green on this commit (`rust.yml` File smoke + `linux_dst`, `skippr-fuzz.yml`, `skippr-tpc.yml` TPC-H SF10, `perf.yml`, `perf-db.yml`), then tag, push, watch both GitHub Actions pipelines until publish jobs succeed, then surgical public docs via **`skipprd-docs`**. Re-dispatch a workflow unless that SHA already succeeded; `rust.yml` also requires the named File smoke + `linux_dst` jobs. Never skip matrix cells. There is no `skippr-gate`. Everyday plugin commits do not bump crate versions. Clobberable pre-release testing is **`/skippr-beta-release`**: same SHA batteries, then next production patch plus `-beta` (`18.3.10-beta`), full artifact publish (`python-publish` + skipprd host tarballs + runtime plugins), overwrite that tag on every run, skip `latest` pointers, skip skipprd-docs.
 
-Python wheels publish from `.github/workflows/ci.yml` (**Python CI/CD Pipeline**). Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`) plus macOS arm64 on the self-hosted `skippr-darwin-arm64` runner. Both pipelines run on tags (and `workflow_dispatch`), not on `main` / master pushes. Local File smoke (`e2e_file_duckdb`, `e2e_file_copy`) gates `publish_runtime_plugins`. Product-tag e2e after that download `{tag}/manifest-index.json` from the CDN. `publish_skipprd` runs after CDN e2e, `chaos_mode_published`, protocol-compat jobs, Darwin, and plugin publish. Scratch `0.0.0` runs File smoke plus local `chaos_mode_test` and does not publish. Windows is not a publish target.
+Python wheels publish from `.github/workflows/ci.yml` (**Python CI/CD Pipeline**). Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`) plus macOS arm64 on the self-hosted `skippr-darwin-arm64` runner. Both pipelines run on tags (and `workflow_dispatch`), not on `main` / master pushes. Local File smoke (`e2e_file_duckdb`, `e2e_file_copy`) then `linux_dst` gates `publish_runtime_plugins`. Product-tag e2e after that download `{tag}/manifest-index.json` from the CDN. `publish_skipprd` runs after CDN e2e, `chaos_mode_published`, protocol-compat jobs, Darwin, `linux_dst`, and plugin publish. Scratch `0.0.0` runs File smoke plus local `chaos_mode_test` and does not publish. Windows is not a publish target.
 
 ## High-level flow
 
-1. target-specific catalog builds (`linux_x86`, `macos_arm64`) plus Python workflow contracts
-2. local File smoke (`e2e_file_duckdb`, `e2e_file_copy`) — and local `chaos_mode_test` on `0.0.0`
-3. `publish_runtime_plugins` (product tags only)
-4. CDN e2e (`chaos_mode_published`, SkipprLake, S3, Postgres) plus protocol-compat jobs
-5. `publish_skipprd`
+1. precommit: `cargo test -p skipprd --lib` (DST World named scripts + bounded proptest)
+2. SHA batteries on the commit (workflow_dispatch; skip re-dispatch per workflow when that SHA succeeded; `rust.yml` also requires File smoke + `linux_dst` jobs): `rust.yml` File smoke + `linux_dst`, `skippr-fuzz.yml`, `skippr-tpc.yml` SF10, `perf.yml`, `perf-db.yml`
+3. product tag
+4. target-specific catalog builds (`linux_x86`, `macos_arm64`) plus Python workflow contracts
+5. local File smoke (`e2e_file_duckdb`, `e2e_file_copy`) then `linux_dst` (`sqlrt::dst::`) — and local `chaos_mode_test` on `0.0.0`
+6. `publish_runtime_plugins` (product tags only; needs File smoke **and** `linux_dst`)
+7. CDN e2e (`chaos_mode_published`, SkipprLake, S3, Postgres) plus protocol-compat jobs
+8. `publish_skipprd`
 
 ## 1. Plan which plugins need rebuilding
 
@@ -74,13 +77,14 @@ Bump `pyproject.toml` and `python/Cargo.toml` together, then tag the engine (`18
 
 `.github/workflows/rust.yml` (**Rust CI/CD Pipeline**) is the linux x86 plus Darwin arm64 release lane. It runs on unprefixed engine tags (`18.3.6`) and `workflow_dispatch`, not on `main` or master branch pushes.
 
-- `linux_test_suite` — Python workflow contracts (`test_rust_ci.py`, harness/plugin/host-boundary scripts). Cargo tests are skipped for now because they take too long on GitHub-hosted runners.
+- `linux_test_suite` — Python workflow contracts (`test_rust_ci.py`, harness/plugin/host-boundary scripts). Does not run `cargo test -p skipprd`.
 - `linux_x86` — `rust-build-release` of skipprd plus the full workspace plugin catalog; starts in parallel with `linux_test_suite`
 - `macos_arm64` — the same catalog build on the self-hosted `skippr-darwin-arm64` runner
 - `e2e_file_duckdb` — local File source append into Duckdb Iceberg; gates plugin publish
 - `e2e_file_copy` — local File → File `type: copy`; gates plugin publish
+- `linux_dst` — `cargo test -p skipprd --lib -- sqlrt::dst::` after File smoke; gates plugin publish and `publish_skipprd`
 - `chaos_mode_test` — local plugins on scratch `0.0.0` only. `bike_hire_many` reads 5,100,000 mixed-size bike-hire JSON objects from R2 (`skippr-e2e-sample-data/bike-hire/`) into SkipprLake on the runner (DynamoDB Local catalog, `file://` warehouse) and asserts that exact row count. Mid-sync SIGKILL chaos is off on GitHub-hosted runners so the 5.1M ingest can finish. Pipeline buffers hold until 4 GiB or 7200s so R2 ingest is not overlapping SkipprLake compact; drain then compact in `WAL_COMPACTION_GROUP_MAX_PARTS=16` / 8 MiB groups on GitHub-hosted `ubuntu-latest` (4 cores / 16 GB). The skipprd org is GitHub Free, so larger 8-core hosted runners are not available. R2 secrets only; no AWS.
-- `publish_runtime_plugins` — on product engine tags, after linux and Darwin catalog builds plus File smoke, stage and upload protocol-matching manifests plus binaries
+- `publish_runtime_plugins` — on product engine tags, after linux and Darwin catalog builds plus File smoke **and** `linux_dst`, stage and upload protocol-matching manifests plus binaries
 - `chaos_mode_published` — same `bike_hire_many` path after plugin publish; skipprd downloads `{tag}/manifest-index.json`. Product tags only (not `0.0.0`).
 - `e2e_skipprlake` — File source into SkipprLake (`tests/skipprlake_e2e`), including atomic dbt replace, against published plugins
 - `e2e_postgres_cdc` — Postgres snapshot-then-CDC upsert into SkipprLake
@@ -91,7 +95,7 @@ Bump `pyproject.toml` and `python/Cargo.toml` together, then tag the engine (`18
 - `e2e_s3_s3_copy` — S3 (R2) → S3 (R2) `type: copy` Identity PUT (source and sink plugins together)
 - `e2e_prev_plugins` — this tag’s host with previous protocol-compatible File/S3/SkipprLake crate pins
 - `e2e_prev_host` — previous tag’s `skipprd-linux_x86` with current crate pins (skips if that GitHub release asset is missing)
-- `publish_skipprd` — on engine tags, after CDN e2e, Darwin, and plugin publish, upload `skipprd-linux_x86.tar.gz` and `skipprd-macos_arm64.tar.gz` to the install CDN and create the GitHub release
+- `publish_skipprd` — on engine tags, after CDN e2e, Darwin, `linux_dst`, and plugin publish, upload `skipprd-linux_x86.tar.gz` and `skipprd-macos_arm64.tar.gz` to the install CDN and create the GitHub release
 
 `check_host_dependency_boundaries.py` and `test_runtime_e2e_harness.py` run on that test lane. Windows is not a publish target.
 

@@ -611,8 +611,9 @@ class WrapProfileTests(unittest.TestCase):
 class PerfWorkflowContractTests(unittest.TestCase):
     def test_perf_yml_lists_every_catalog_scenario_and_one_runner(self) -> None:
         text = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
         for scenario_id in scenario_ids():
-            self.assertIn(scenario_id, text)
+            self.assertIn(scenario_id, matrix, scenario_id)
         self.assertIn("actions/e2e/perf", text)
         self.assertIn("actions/e2e/heaptrack", text)
         self.assertNotIn("python3 tests/perf/run.py", text)
@@ -653,6 +654,19 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("heaptrack produced no profile", heaptrack)
         self.assertIn("if-no-files-found: error", heaptrack)
         self.assertNotIn("if-no-files-found: warn", heaptrack)
+        workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        matrix_job = workflow.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
+        self.assertIn("linux_contracts", matrix_job)
+        profile_job = workflow.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0]
+        self.assertIn("linux_contracts", profile_job)
+
+    def test_ci_does_not_skip_r2_cells(self) -> None:
+        src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        start = src.index('scenario.get("secrets") == "r2"')
+        chunk = src[start : start + 700]
+        self.assertIn("GITHUB_ACTIONS", chunk)
+        self.assertIn("R2 secrets required on CI", chunk)
+        self.assertLess(chunk.index("GITHUB_ACTIONS"), chunk.index("missing_r2_secrets"))
 
 
 if __name__ == "__main__":

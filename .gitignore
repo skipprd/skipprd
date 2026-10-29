@@ -15,6 +15,9 @@ skipprd/data
 skippr_data_tmp/
 /data/
 /target/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/coverage/
 /legacy/test-tmp/
 /legacy/test-data/
 /flamegraph*

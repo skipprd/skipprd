@@ -18,6 +18,18 @@ python3 .github/scripts/test_python_bindings_ci.py
 echo "precommit: python3 .github/scripts/test_rust_ci.py"
 python3 .github/scripts/test_rust_ci.py
 
+echo "precommit: python3 .github/scripts/test_release_sha_batteries.py"
+python3 .github/scripts/test_release_sha_batteries.py
+
+echo "precommit: python3 tests/tpc/test_run.py"
+python3 tests/tpc/test_run.py
+
+echo "precommit: python3 tests/perf/test_run.py"
+python3 tests/perf/test_run.py
+
+echo "precommit: python3 tests/perf_db/test_run.py"
+python3 tests/perf_db/test_run.py
+
 echo "precommit: python3 .github/scripts/test_stream_transforms_ci.py"
 python3 .github/scripts/test_stream_transforms_ci.py
 

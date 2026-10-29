@@ -5,12 +5,12 @@
 
 mod apply;
 mod file;
-mod journal;
+pub(crate) mod journal;
 mod wal;
 
 pub use apply::{
     apply_migration, apply_pending_files, apply_pending_with_ingest_lease, apply_query_alter,
-    schema_barrier_held,
+    require_native_alter_support, schema_barrier_held,
 };
 pub use file::{load_sql_file, write_sql_file, LoadedMigration, MigrationFileError};
 pub use journal::{

@@ -37,6 +37,13 @@ const COMPLETION_VERSION: u32 = 1;
 const COMPLETION_HEADER_LEN: usize = 16;
 const COMPLETION_CHECKSUM_LEN: usize = 32;
 
+pub(crate) fn unreadable_compaction_json_error(
+    name: &str,
+    err: impl std::fmt::Display,
+) -> DurableError {
+    DurableError::ProtocolMismatch(format!("unreadable compaction json {name}: {err}"))
+}
+
 fn invalid_data(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
@@ -774,9 +781,8 @@ fn import_compaction_json(
                 bytes.len()
             )));
         }
-        let txn: CompactionTransaction = serde_json::from_slice(&bytes).map_err(|err| {
-            DurableError::ProtocolMismatch(format!("unreadable compaction json {name}: {err}"))
-        })?;
+        let txn: CompactionTransaction = serde_json::from_slice(&bytes)
+            .map_err(|err| unreadable_compaction_json_error(&name, err))?;
         let id = CompactionId::new(&txn.id).map_err(|err| {
             DurableError::Io(format!("compaction json {name} has invalid id: {err}"))
         })?;

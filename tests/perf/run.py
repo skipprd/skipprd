@@ -1167,6 +1167,8 @@ def run_scenario(scenario_id: str, scale: str, work: Path, profile: str) -> dict
     catalog = load_catalog()
     scenario = catalog["scenarios"][scenario_id]
     if scenario.get("secrets") == "r2" and scenario.get("skip_if_missing_secrets") and not r2_ready():
+        if os.environ.get("GITHUB_ACTIONS"):
+            raise PerfError(f"{scenario_id}: R2 secrets required on CI")
         log(f"{scenario_id}: skipping; R2 secrets not present")
         payload = {"scenario": scenario_id, "skipped": "missing_r2_secrets"}
         write_report(work / "perf-report.json", payload)

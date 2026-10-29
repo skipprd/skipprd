@@ -1,0 +1,70 @@
+name: skippr-tpc
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "2"
+
+jobs:
+  linux_contracts:
+    name: tpc workflow contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 .github/scripts/test_release_sha_batteries.py
+      - run: python3 tests/tpc/test_run.py
+
+  tpc_h_sf10:
+    name: TPC-H SF10 Q1/Q3/Q6
+    needs: linux_contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: skipprd
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/cloud
+          path: cloud
+          token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Linux x86 build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: skipprd
+      - name: Install DuckDB
+        run: |
+          curl -fsSL https://install.duckdb.org | sh
+          echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
+      - name: Install tpcgen-cli
+        run: python3 -m pip install --quiet tpcgen-cli==4.0.0 datafusion
+      - name: Build skipprd + File/DuckDB plugins
+        run: |
+          cargo build --release -p skipprd --bin skipprd \
+            -p skippr-plugin-data-source-file \
+            -p skippr-plugin-data-sink-duckdb \
+            -p skippr-plugin-schema-sink-duckdb
+      - name: TPC-H SF10 Q1 Q3 Q6 vs DuckDB vs DataFusion vs skipprd query
+        env:
+          SKIPPRD_BIN: ${{ github.workspace }}/skipprd/target/release/skipprd
+        run: python3 tests/tpc/run.py --scale 10 --queries Q1,Q3,Q6
