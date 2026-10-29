@@ -21,6 +21,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 .github/scripts/test_release_sha_batteries.py
+      - run: python3 .github/scripts/test_local_runtime_plugins.py
       - run: python3 tests/tpc/test_run.py
 
   tpc_h_sf10:

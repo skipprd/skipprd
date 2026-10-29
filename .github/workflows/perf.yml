@@ -22,6 +22,7 @@ jobs:
       - run: python3 tests/perf/test_run.py
       - run: python3 tests/perf/test_analyze.py
       - run: python3 .github/scripts/test_rust_ci.py
+      - run: python3 .github/scripts/test_release_sha_batteries.py
 
   build_linux:
     name: release host + perf plugins (linux x86)

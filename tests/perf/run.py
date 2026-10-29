@@ -160,6 +160,18 @@ def _linux_perf() -> str:
     return perf
 
 
+PERF_STAT_EVENTS = (
+    "task-clock",
+    "context-switches",
+    "cpu-migrations",
+    "page-faults",
+    "cycles",
+    "instructions",
+    "branches",
+    "branch-misses",
+)
+
+
 def wrap_profile(cmd: list[str], profile: str, work: Path) -> list[str]:
     if profile in {"", "none"}:
         return cmd
@@ -170,7 +182,16 @@ def wrap_profile(cmd: list[str], profile: str, work: Path) -> list[str]:
         return [heaptrack, "-o", str(work / "heaptrack"), "--", *cmd]
     if profile == "perf-stat":
         perf = _linux_perf()
-        return [perf, "stat", "-o", str(work / "perf-stat.txt"), "--", *cmd]
+        return [
+            perf,
+            "stat",
+            "-e",
+            ",".join(PERF_STAT_EVENTS),
+            "-o",
+            str(work / "perf-stat.txt"),
+            "--",
+            *cmd,
+        ]
     if profile != "flamegraph":
         raise PerfError(f"unknown profile {profile!r}")
     if sys.platform.startswith("linux"):

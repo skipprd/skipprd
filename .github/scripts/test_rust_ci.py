@@ -458,6 +458,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("actions/e2e/perf", text)
         self.assertIn("actions/e2e/heaptrack", text)
         self.assertNotIn("python3 tests/perf/run.py", text)
+        contracts = text.split("\n  linux_contracts:")[1].split("\n  build_linux:")[0]
+        self.assertIn("test_release_sha_batteries.py", contracts)
         runner = (ROOT / "tests" / "perf" / "run.py").read_text(encoding="utf-8")
         self.assertIn("log_args", runner)
         self.assertIn('"perf"', runner)
@@ -543,6 +545,9 @@ class RustCiTests(unittest.TestCase):
         )
         self.assertIn("tests/perf_db/run.py", (ROOT / ".github" / "scripts" / "run_perf_db_cell.sh").read_text(encoding="utf-8"))
         self.assertNotIn("python3 tests/perf_db/run.py", text)
+        contracts = text.split("\n  linux_contracts:")[1].split("\n  build_linux:")[0]
+        self.assertIn("tests/perf/test_run.py", contracts)
+        self.assertIn("test_release_sha_batteries.py", contracts)
         runner = (ROOT / "tests" / "perf_db" / "run.py").read_text(encoding="utf-8")
         self.assertIn("log_args", runner)
         self.assertIn("query_after_ingest", runner)

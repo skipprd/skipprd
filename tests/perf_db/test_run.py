@@ -174,6 +174,9 @@ class PerfDbWorkflowContractTests(unittest.TestCase):
         self.assertIn("linux_contracts", matrix)
         profile_job = text.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0]
         self.assertIn("linux_contracts", profile_job)
+        contracts = text.split("\n  linux_contracts:")[1].split("\n  build_linux:")[0]
+        self.assertIn("tests/perf/test_run.py", contracts)
+        self.assertIn("test_release_sha_batteries.py", contracts)
 
     def test_ci_does_not_skip_docker_cdc_cells(self) -> None:
         src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")

@@ -42,6 +42,18 @@ class TpcContractTests(unittest.TestCase):
         self.assertNotIn("cloudcycle-datalake", RUN)
         self.assertNotIn("eu-west", RUN)
 
+    def test_ingest_unions_local_plugins_without_pipeline_flag(self) -> None:
+        start = RUN.index('str(ROOT / ".github" / "scripts" / "local_runtime_plugins.py")')
+        helper = RUN[start : RUN.index("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR", start)]
+        self.assertNotIn("--pipeline", helper)
+        yml = (ROOT / "tests" / "tpc" / "skippr.yml").read_text(encoding="utf-8")
+        self.assertIn("\n  lineitem:", yml)
+        self.assertIn("\n  orders:", yml)
+        self.assertIn("\n  customer:", yml)
+        contracts = WORKFLOW.split("\n  tpc_h_sf10:", 1)[0]
+        self.assertIn("test_local_runtime_plugins.py", contracts)
+        self.assertIn("test_release_sha_batteries.py", contracts)
+
     def test_skill_laptop_sf1_is_not_sha_substitute(self) -> None:
         self.assertIn("name: skippr-tpc", SKILL)
         self.assertIn("SF10", SKILL)
