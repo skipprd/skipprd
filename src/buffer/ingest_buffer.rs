@@ -1691,7 +1691,9 @@ impl Buffers {
         ) > 0
     }
 
-    fn grouped_compaction_timeout() -> TokioDuration {
+    pub(crate) const GROUPED_COMPACTION_TIMEOUT_SECS: u64 = 900;
+
+    pub(crate) fn grouped_compaction_timeout() -> TokioDuration {
         let secs = Config::getenv("WAL_GROUPED_COMPACTION_TIMEOUT_SECS", "")
             .parse::<u64>()
             .ok()
@@ -1702,7 +1704,7 @@ impl Buffers {
                     .ok()
                     .filter(|value| *value > 0)
             })
-            .unwrap_or(900);
+            .unwrap_or(Self::GROUPED_COMPACTION_TIMEOUT_SECS);
         TokioDuration::from_secs(secs)
     }
 

@@ -1,0 +1,57 @@
+name: skippr-fuzz
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "2"
+
+jobs:
+  linux_fuzz:
+    name: cargo fuzz (linux x86)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: skipprd
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/cloud
+          path: cloud
+          token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
+          submodules: true
+      - name: Install Linux x86 build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev libssl-dev pkg-config clang
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview, rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: skipprd
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Seed world_schedule corpus from named DST scripts
+        run: cargo test -p skipprd --lib --offline -- fuzz_corpus_has_every_named_script
+      - name: Timeboxed fuzz (timeout fails)
+        run: |
+          set -euo pipefail
+          cargo +nightly fuzz run world_schedule --fuzz-dir fuzz -- -max_total_time=120
+          cargo +nightly fuzz run copy_frames --fuzz-dir fuzz -- -max_total_time=60
+          cargo +nightly fuzz run failpoint_names --fuzz-dir fuzz -- -max_total_time=30
+          cargo +nightly fuzz run alter_sql --fuzz-dir fuzz -- -max_total_time=60
+          cargo +nightly fuzz run wal_slices --fuzz-dir fuzz -- -max_total_time=30
+          cargo +nightly fuzz run catalog_row --fuzz-dir fuzz -- -max_total_time=30
+          cargo +nightly fuzz run iceberg_metadata --fuzz-dir fuzz -- -max_total_time=30
+          cargo +nightly fuzz run discover_json --fuzz-dir fuzz -- -max_total_time=30
+          cargo +nightly fuzz run migrate_journal --fuzz-dir fuzz -- -max_total_time=30
+          cargo +nightly fuzz run pipeline_yaml --fuzz-dir fuzz -- -max_total_time=30
+          cargo +nightly fuzz run checkpoint_envelope --fuzz-dir fuzz -- -max_total_time=30
+          cargo +nightly fuzz run order_tokens --fuzz-dir fuzz -- -max_total_time=30

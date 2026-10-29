@@ -32,6 +32,16 @@ pub enum FailpointName {
 }
 
 impl FailpointName {
+    pub const ALL: [Self; 7] = [
+        Self::BeforeCatalogCommit,
+        Self::AfterCatalogCommit,
+        Self::AfterReplicaPayloadAck,
+        Self::AfterOffsetsPublished,
+        Self::BeforeCompactionSink,
+        Self::AfterCompactionSink,
+        Self::HoldBeforeCompactionSink,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::BeforeCatalogCommit => BEFORE_CATALOG_COMMIT,

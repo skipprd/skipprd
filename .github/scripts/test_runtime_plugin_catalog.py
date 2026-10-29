@@ -16,6 +16,12 @@ SPEC.loader.exec_module(runtime_plugin_catalog)
 
 
 class RuntimePluginCatalogTests(unittest.TestCase):
+    def test_shebang_scripts_postpone_pep604(self) -> None:
+        catalog = MODULE_PATH.read_text(encoding="utf-8")
+        plugins = (SCRIPTS_DIR / "local_runtime_plugins.py").read_text(encoding="utf-8")
+        self.assertIn("from __future__ import annotations", catalog)
+        self.assertIn("from __future__ import annotations", plugins)
+
     def write_workspace_file(self, workspace: Path, relative_path: str, contents: str) -> None:
         path = workspace / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -667,6 +667,19 @@ pub fn partition_already_closed(
     Ok(!validate_offset_key(ctx, key, OffsetTypes::Closed, 1)?)
 }
 
+/// Keep list-page keys whose Closed offset is unset. GET starts on the first
+/// non-Closed key in page order.
+pub fn collect_open_list_keys(
+    items: Vec<(String, i64)>,
+    should_process: Vec<bool>,
+) -> Vec<(String, i64)> {
+    items
+        .into_iter()
+        .zip(should_process)
+        .filter_map(|(item, process)| process.then_some(item))
+        .collect()
+}
+
 /// Validate a single offset key through the batched offset service.
 ///
 /// For Closed offsets this returns whether the partition should still be processed.
@@ -851,6 +864,19 @@ mod tests {
         ) -> Result<Option<CheckpointEnvelope>, String> {
             Ok(None)
         }
+    }
+
+    #[test]
+    fn collect_open_list_keys_skips_closed_and_gets_first_open() {
+        let page = vec![
+            ("closed/a".into(), 10),
+            ("open/b".into(), 20),
+            ("closed/c".into(), 30),
+            ("open/d".into(), 40),
+        ];
+        let get = collect_open_list_keys(page, vec![false, true, false, true]);
+        assert_eq!(get, vec![("open/b".into(), 20), ("open/d".into(), 40)]);
+        assert_eq!(get[0].0, "open/b");
     }
 
     #[test]

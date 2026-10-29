@@ -9,10 +9,7 @@ use proptest::prelude::*;
 use std::sync::Arc;
 
 fn stream_test_cases() -> u32 {
-    match std::env::var("SKIPPR_STREAM_TEST_PROFILE").ok().as_deref() {
-        Some("smoke") => 8,
-        _ => 32,
-    }
+    crate::processor::test_support::stream_test_cases()
 }
 
 fn batch_amounts(ids: &[&str], amounts: &[i64]) -> RecordBatch {

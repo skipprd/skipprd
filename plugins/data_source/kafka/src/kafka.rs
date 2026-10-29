@@ -67,13 +67,7 @@ impl DataSourceKafkaPlugin {
     }
 
     fn parse_debezium_op(op: &str) -> MutationKind {
-        match op {
-            "c" => MutationKind::Insert,
-            "u" => MutationKind::Update,
-            "d" => MutationKind::Delete,
-            "r" => MutationKind::Snapshot,
-            _ => MutationKind::Insert,
-        }
+        MutationKind::from_debezium_op(op)
     }
 
     fn parse_debezium_envelope(

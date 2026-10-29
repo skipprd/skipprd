@@ -50,7 +50,9 @@ jobs:
 
   linux_matrix:
     name: perf ${{ matrix.scenario }}
-    needs: build_linux
+    needs:
+      - linux_contracts
+      - build_linux
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -195,7 +197,9 @@ jobs:
 
   linux_profile:
     name: linux ${{ matrix.scenario }} ${{ matrix.profile }}
-    needs: build_linux_profile
+    needs:
+      - linux_contracts
+      - build_linux_profile
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:

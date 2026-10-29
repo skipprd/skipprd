@@ -308,6 +308,19 @@ pub enum MutationKind {
     Delete,
 }
 
+impl MutationKind {
+    /// Debezium envelope `op` (`c`/`u`/`d`/`r`). Unknown codes are inserts.
+    pub fn from_debezium_op(op: &str) -> Self {
+        match op {
+            "c" => Self::Insert,
+            "u" => Self::Update,
+            "d" => Self::Delete,
+            "r" => Self::Snapshot,
+            _ => Self::Insert,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Source order model
 // ---------------------------------------------------------------------------

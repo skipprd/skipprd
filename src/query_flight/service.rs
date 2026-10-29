@@ -24,6 +24,10 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use futures::{Stream, StreamExt, TryStreamExt};
 use skippr_lease::{DurableError, CONTROL_FRAME_MAX_BYTES};
+
+pub(crate) fn sql_is_within_ceiling(sql: &str) -> bool {
+    sql.len() <= CONTROL_FRAME_MAX_BYTES
+}
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -184,7 +188,7 @@ impl SkipprFlightSql {
     }
 
     fn check_sql(sql: &str) -> Result<(), Status> {
-        if sql.len() > CONTROL_FRAME_MAX_BYTES {
+        if !sql_is_within_ceiling(sql) {
             return Err(Status::invalid_argument("SQL too large"));
         }
         reject_ddl(sql).map_err(|err| Status::invalid_argument(err.to_string()))
@@ -758,7 +762,7 @@ async fn iceberg_schema_for_namespace(
         .map_err(|err| Status::internal(err.to_string()))
 }
 
-fn pin_live_wal(scope: &TenantScope, pin: &LiveWalPinRequest) -> Result<Bytes, Status> {
+pub(crate) fn pin_live_wal(scope: &TenantScope, pin: &LiveWalPinRequest) -> Result<Bytes, Status> {
     if pin.tenant != scope.tenant || pin.workspace != scope.workspace {
         return Err(Status::invalid_argument(
             "live WAL pin tenant/workspace does not match session",

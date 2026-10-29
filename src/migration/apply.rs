@@ -23,6 +23,15 @@ pub fn set_schema_barrier(held: bool) {
     SCHEMA_BARRIER.store(held, Ordering::SeqCst);
 }
 
+pub fn require_native_alter_support(support: AlterSupport) -> Result<(), String> {
+    if support != AlterSupport::Native {
+        return Err(format!(
+            "schema sink does not support migrations ({support:?})"
+        ));
+    }
+    Ok(())
+}
+
 pub async fn apply_query_alter(
     config: &Config,
     stmt: &AlterTableStatement,
@@ -38,13 +47,18 @@ pub async fn apply_query_alter(
     bound.init().await;
     let offsets = Offsets::init(&bound).map_err(|err| err.to_string())?;
     let store = journal_store(&offsets)?;
-    let _lease = match bound.get_wal_storage() {
+    let lease = match bound.get_wal_storage() {
         crate::helpers::wal_storage::WalStorage::Disk
         | crate::helpers::wal_storage::WalStorage::S3 => {
             Some(crate::pipeline_backend::acquire_ingest_lease(&bound, &offsets).await?)
         }
         crate::helpers::wal_storage::WalStorage::Clustered => None,
     };
+    if let Some(lease) = &lease {
+        lease
+            .activate()
+            .map_err(|err| format!("pipeline writer lease activate failed: {err}"))?;
+    }
     let loaded = crate::migration::file::load_sql_file(
         MigrationId::query(crate::migration::MigrationChecksum::of(sql)).as_str(),
         sql,
@@ -137,12 +151,7 @@ async fn apply_with(
     set_schema_barrier(true);
     let _release = SchemaBarrierGuard;
     wait_sink_idle().await;
-    if plugin.alter_support() != AlterSupport::Native {
-        return Err(format!(
-            "schema sink does not support migrations ({:?})",
-            plugin.alter_support()
-        ));
-    }
+    require_native_alter_support(plugin.alter_support())?;
 
     let mut metadata = config
         .get_metadata()
@@ -487,6 +496,21 @@ mod tests {
             .rfind("apply_pending_files(config, store, direction)")
             .expect("CLI migrate must apply after activate");
         assert!(cli_activate < cli_apply);
+        let query_start = cli
+            .find("pub async fn apply_query_alter")
+            .expect("query ALTER entry");
+        let query_body = &cli[query_start
+            ..query_start
+                + cli[query_start..]
+                    .find("\npub async fn apply_pending_files")
+                    .expect("apply_pending_files follows query ALTER")];
+        let query_activate = query_body
+            .find(".activate()")
+            .expect("query ALTER must activate the ingest lease");
+        let query_persist = query_body
+            .find("apply_loaded")
+            .expect("query ALTER must persist after activate");
+        assert!(query_activate < query_persist);
     }
 
     fn wal_field_name(path: &std::path::Path) -> String {

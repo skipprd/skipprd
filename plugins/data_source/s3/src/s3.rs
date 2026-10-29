@@ -17,7 +17,7 @@ use serde_derive::Deserialize;
 
 use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
 use skippr_runtime_sdk::source_compat::{IngestBatch, SourcePayloadTask, SourceSyncContext};
-use skippr_runtime_sdk::source_sync::offset_validation_entry;
+use skippr_runtime_sdk::source_sync::{collect_open_list_keys, offset_validation_entry};
 
 use crate::helpers::Helpers;
 use futures::stream::{self, StreamExt};
@@ -262,18 +262,17 @@ impl DataSourceS3Plugin {
                 })
                 .collect::<Vec<_>>();
             let should_process = ctx.validate_offset_batch(&validation_entries)?;
-            for ((key, size), process) in items.into_iter().zip(should_process) {
-                if !process {
-                    if runtime_log_wal_enabled() {
+            if runtime_log_wal_enabled() {
+                for ((key, _), process) in items.iter().zip(&should_process) {
+                    if !process {
                         info!(
                             "s3 source: skipping closed object namespace={} key={}",
                             s3_bucket_filter, key
                         );
                     }
-                    continue;
                 }
-                listed_keys.push((key, size));
             }
+            listed_keys.extend(collect_open_list_keys(items, should_process));
         }
 
         let keys_stream = stream::iter(listed_keys);
