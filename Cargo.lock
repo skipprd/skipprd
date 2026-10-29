@@ -11466,11 +11466,13 @@ dependencies = [
 name = "skippr-plugin-data-source-file"
 version = "0.1.7"
 dependencies = [
+ "arrow 59.3.1",
  "async-trait",
  "clap",
  "datafusion 55.2.0",
  "flate2",
  "futures",
+ "parquet 59.3.1",
  "serde",
  "serde_derive",
  "skippr-runtime-sdk",

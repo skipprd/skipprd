@@ -91,7 +91,7 @@ impl OutputFormat {
             InputFormat::Json => Some(Self::Jsonl),
             InputFormat::Csv => Some(Self::Csv),
             InputFormat::Xml => Some(Self::Xml),
-            InputFormat::ArrowIpc => None,
+            InputFormat::ArrowIpc | InputFormat::Parquet => None,
         }
     }
 }
@@ -350,6 +350,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, Some(OutputFormat::Jsonl));
+    }
+
+    #[test]
+    fn copy_omitted_format_rejects_parquet_source() {
+        let err = resolve_output_format(
+            "File",
+            &[
+                OutputFormat::Parquet,
+                OutputFormat::Jsonl,
+                OutputFormat::Csv,
+                OutputFormat::Xml,
+            ],
+            Some(OutputFormat::Parquet),
+            None,
+            PipelineType::Copy,
+            Some(InputFormat::Parquet),
+        )
+        .unwrap_err();
+        assert!(err.contains("does not accept Arrow IPC input"));
     }
 
     #[test]

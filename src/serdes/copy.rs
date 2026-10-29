@@ -102,7 +102,7 @@ pub fn decode_copy(
     format: InputFormat,
     payload: &str,
 ) -> Result<Vec<CopyWalRecord>, CopyDecodeError> {
-    if format == InputFormat::ArrowIpc {
+    if matches!(format, InputFormat::ArrowIpc | InputFormat::Parquet) {
         return Err(CopyDecodeError::Input(
             "type: copy does not accept Arrow IPC input".to_string(),
         ));
@@ -408,6 +408,18 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn copy_rejects_arrow_ipc_and_parquet_text() {
+        let config = Config::new();
+        for format in [InputFormat::ArrowIpc, InputFormat::Parquet] {
+            let err = decode_copy(&config, format, "").unwrap_err();
+            assert!(
+                err.to_string().contains("does not accept Arrow IPC input"),
+                "{format:?}: {err}"
+            );
         }
     }
 

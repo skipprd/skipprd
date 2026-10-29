@@ -50,10 +50,17 @@ class TpcContractTests(unittest.TestCase):
         self.assertIn("\n  lineitem:", yml)
         self.assertIn("\n  orders:", yml)
         self.assertIn("\n  customer:", yml)
-        self.assertIn("format: json", yml)
-        self.assertNotIn("format: parquet", yml)
-        self.assertIn("FORMAT JSON", RUN)
+        self.assertIn("format: parquet", yml)
+        self.assertNotIn("format: json", yml)
+        self.assertNotIn("FORMAT JSON", RUN)
+        self.assertIn("stage_parquet_source", RUN)
         self.assertIn("read_parquet", RUN)
+        file_src = (ROOT / "plugins" / "data_source" / "file" / "src" / "file.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("parquet_path_to_ipc_batches", file_src)
+        self.assertIn("InputFormat::Parquet", file_src)
+        self.assertIn("submit_arrow_ipc_batches", file_src)
         contracts = WORKFLOW.split("\n  tpc_h_sf10:", 1)[0]
         self.assertIn("test_local_runtime_plugins.py", contracts)
         self.assertIn("test_release_sha_batteries.py", contracts)
@@ -61,6 +68,10 @@ class TpcContractTests(unittest.TestCase):
         self.assertIn("cargo build --release -p skipprd --bin skipprd\n", build)
         self.assertIn("-p skippr-plugin-data-sink-duckdb", build)
         self.assertNotIn("--bin skipprd \\", build)
+        self.assertIn(
+            "rm -rf target/release/{build,deps,incremental,.fingerprint} target/debug",
+            WORKFLOW,
+        )
 
     def test_skill_laptop_sf1_is_not_sha_substitute(self) -> None:
         self.assertIn("name: skippr-tpc", SKILL)

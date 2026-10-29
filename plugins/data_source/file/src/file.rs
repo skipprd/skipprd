@@ -16,11 +16,15 @@ use zip::ZipArchive;
 
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::serdes::input_format::InputFormat;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use skippr_runtime_sdk::helpers::configuration::runtime_child_config;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::protocol::RuntimeOffsetPosition;
+use skippr_runtime_sdk::sdk::encode_record_batches;
 use skippr_runtime_sdk::source_compat::{
-    partition_already_closed, submit_payload_batch_groups, IngestBatch, SourceSyncContext,
+    partition_already_closed, submit_arrow_ipc_batches, submit_payload_batch_groups, IngestBatch,
+    RuntimeIngestPartitionBatch, SourceSyncContext,
 };
 
 type BatchSender = UnboundedSender<Vec<Vec<IngestBatch>>>;
@@ -172,6 +176,36 @@ fn process_reader<R: Read>(
     }
 }
 
+fn parquet_path_to_ipc_batches(
+    path: &Path,
+    offset_key: &OffsetKey,
+) -> Result<Vec<RuntimeIngestPartitionBatch>, std::io::Error> {
+    let file = File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(std::io::Error::other)?;
+    let reader = builder.build().map_err(std::io::Error::other)?;
+    let mut out = Vec::new();
+    let mut offset_pos = 0u64;
+    for batch in reader {
+        let batch = batch.map_err(std::io::Error::other)?;
+        offset_pos = offset_pos.saturating_add(batch.num_rows() as u64);
+        out.push(RuntimeIngestPartitionBatch {
+            sink_ref: offset_key.namespace.clone(),
+            namespace: offset_key.namespace.clone(),
+            partition: offset_key.partition.clone(),
+            time: None,
+            schema_fingerprint: String::new(),
+            offsets: vec![RuntimeOffsetPosition {
+                key: offset_key.clone(),
+                position: offset_pos,
+            }],
+            arrow_stream_bytes: encode_record_batches(&[batch])?,
+            cdc_rows: None,
+            checkpoint_update: None,
+        });
+    }
+    Ok(out)
+}
+
 impl DataSourceLocalFilePlugin {
     pub fn with_runtime_config(config: DataSourceLocalFilePluginConfig, data_dir: &str) -> Self {
         let temp_dir = format!("{}/source", data_dir);
@@ -179,10 +213,36 @@ impl DataSourceLocalFilePlugin {
         DataSourceLocalFilePlugin { temp_dir, config }
     }
 
+    fn sync_parquet(&self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
+        let ingest_config = runtime_child_config();
+        let source_dir = self.config.path.clone();
+        for path in collect_source_files(Path::new(&source_dir)) {
+            let closed_key = IngestBatch::runtime_roundtrip_offset_key(
+                &ingest_config,
+                file_source_namespace(&source_dir),
+                path.to_str().unwrap().to_string(),
+            );
+            if partition_already_closed(ctx.as_ref(), &closed_key)? {
+                continue;
+            }
+            // Arrow ingest publishes offset keys as submitted; list-time Closed
+            // checks the twice-normalized key, so submit that key.
+            let batches = parquet_path_to_ipc_batches(&path, &closed_key)?;
+            if !batches.is_empty() {
+                submit_arrow_ipc_batches(ctx.as_ref(), batches)?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn run_sync(
         &mut self,
         ctx: Arc<dyn SourceSyncContext>,
     ) -> Result<(), std::io::Error> {
+        let input_format = InputFormat::from_option(self.config.format.as_deref());
+        if input_format == InputFormat::Parquet {
+            return self.sync_parquet(ctx);
+        }
         let mut data_batches_stream = Box::pin(self.prepare_data_for_processing(
             ctx.clone(),
             self.config.path.clone(),
@@ -203,6 +263,11 @@ impl DataSourceLocalFilePlugin {
     ) -> Result<impl futures::Stream<Item = Vec<Vec<IngestBatch>>>, std::io::Error> {
         let (tx, rx) = futures::channel::mpsc::unbounded();
         let input_format = InputFormat::from_option(self.config.format.as_deref());
+        if input_format == InputFormat::Parquet {
+            return Err(std::io::Error::other(
+                "parquet File ingest uses Arrow IPC, not text payloads",
+            ));
+        }
         let ingest_config = runtime_child_config();
         for path in collect_source_files(Path::new(&source_dir)) {
             let offset_key = OffsetKey {
@@ -325,8 +390,16 @@ impl DataSource for DataSourceLocalFilePlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_source_files, file_source_namespace};
+    use super::{collect_source_files, file_source_namespace, parquet_path_to_ipc_batches};
+    use arrow::array::{Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::arrow_writer::ArrowWriter;
+    use skippr_runtime_sdk::progress::OffsetKey;
+    use skippr_runtime_sdk::sdk::decode_record_batch_stream;
     use std::fs;
+    use std::fs::File;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -354,5 +427,45 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         assert!(found.iter().any(|path| path.ends_with("batch1.jsonl")));
         assert!(found.iter().any(|path| path.ends_with("batch2.jsonl")));
+    }
+
+    #[test]
+    fn parquet_files_become_arrow_ipc_ingest_batches() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("skippr-file-parquet-{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("people.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let file = File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let offset_key = OffsetKey::new("people", path.to_str().unwrap());
+        let batches = parquet_path_to_ipc_batches(&path, &offset_key).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].namespace, "people");
+        assert_eq!(batches[0].offsets[0].position, 2);
+        let decoded = decode_record_batch_stream(batches[0].arrow_stream_bytes.clone()).unwrap();
+        futures::executor::block_on(async {
+            use futures::StreamExt;
+            let mut stream = decoded;
+            let got = stream.next().await.unwrap().unwrap();
+            assert_eq!(got.num_rows(), 2);
+        });
     }
 }

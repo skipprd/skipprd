@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -116,6 +117,31 @@ def rewrite_skipprd_sql(sql: str) -> str:
     return rewritten
 
 
+def _link_or_copy(src: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(src, dest)
+    except OSError:
+        shutil.copy2(src, dest)
+
+
+def stage_parquet_source(parquet_dir: Path, table: str, dest_dir: Path) -> None:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    file_path = parquet_dir / f"{table}.parquet"
+    dir_path = parquet_dir / table
+    if file_path.is_file():
+        _link_or_copy(file_path, dest_dir / file_path.name)
+        return
+    if dir_path.is_dir():
+        files = sorted(dir_path.glob("*.parquet"))
+        if not files:
+            raise SystemExit(f"no parquet files for {table} in {dir_path}")
+        for path in files:
+            _link_or_copy(path, dest_dir / path.name)
+        return
+    raise SystemExit(f"missing parquet for {table} under {parquet_dir}")
+
+
 def skipprd_ingest(binary: Path, work: Path, parquet_dir: Path) -> Path:
     data = work / "data"
     warehouse = work / "warehouse"
@@ -124,16 +150,7 @@ def skipprd_ingest(binary: Path, work: Path, parquet_dir: Path) -> Path:
     sources = {}
     for table in ("lineitem", "orders", "customer"):
         src_dir = work / "source" / table
-        src_dir.mkdir(parents=True, exist_ok=True)
-        json_path = src_dir / f"{table}.json"
-        glob = parquet_glob(parquet_dir, table)
-        _run(
-            [
-                "duckdb",
-                "-c",
-                f"COPY (SELECT * FROM read_parquet('{glob}')) TO '{json_path.as_posix()}' (FORMAT JSON);",
-            ]
-        )
+        stage_parquet_source(parquet_dir, table, src_dir)
         sources[table] = src_dir
     config = work / "skippr.yml"
     text = (ROOT / "tests" / "tpc" / "skippr.yml").read_text(encoding="utf-8")
