@@ -1240,13 +1240,23 @@ fn fuzz_corpus_has_every_named_script() {
             script.name
         );
     }
+    let crash = root.join("crash_0b179261");
+    assert!(
+        crash.is_file(),
+        "missing world_schedule crash corpus crash_0b179261"
+    );
+    assert!(
+        schedule_from_bytes(&std::fs::read(&crash).unwrap()).is_empty(),
+        "crash_0b179261 must fail closed"
+    );
     for entry in std::fs::read_dir(&root).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if !wanted.contains(name.as_str()) {
+        if !wanted.contains(name.as_str()) && !name.starts_with("crash_") {
             std::fs::remove_file(&path).unwrap();
         }
     }
+    assert!(crash.is_file(), "janitor must keep crash_0b179261");
 }
 
 #[test]

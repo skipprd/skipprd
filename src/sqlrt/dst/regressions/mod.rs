@@ -57,13 +57,7 @@ fn ff_padded_dst1_schedules_do_not_abort() {
 #[test]
 fn world_schedule_crash_0b179261_is_not_a_schedule() {
     // cargo-fuzz world_schedule crash-0b179261f232b6964a73ce080d6db23dadfd005d
-    let bytes: &[u8] = &[
-        0x44, 0x53, 0x54, 0x31, 0x02, 0x00, 0x00, 0x00, 0x03, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x72, 0x65, 0x70, 0x6c, 0x69, 0x63, 0x61, 0x01, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0xff, 0xff,
-    ];
+    let bytes: &[u8] = include_bytes!("../../../../fuzz/corpus/world_schedule/crash_0b179261");
     assert!(super::schedule_from_bytes(bytes).is_empty());
     let world = super::run(&super::schedule_from_bytes(bytes));
     let _ = super::current_table(&world);
@@ -94,6 +88,17 @@ fn huge_wal_ordinal_is_not_a_schedule() {
 fn huge_wal_row_i_is_not_a_schedule() {
     let bytes = super::encode_ops(&[super::Op::IngestWal(wal_event(0, u64::MAX))]);
     assert!(super::schedule_from_bytes(&bytes).is_empty());
+}
+
+#[test]
+fn wal_ordinal_and_row_i_bound_is_max_schedule_ops() {
+    let max = super::MAX_SCHEDULE_OPS as u32;
+    let ok = super::encode_ops(&[super::Op::IngestWal(wal_event(max, max as u64))]);
+    assert_eq!(super::schedule_from_bytes(&ok).len(), 1);
+    let bad_ord = super::encode_ops(&[super::Op::IngestWal(wal_event(max + 1, 0))]);
+    assert!(super::schedule_from_bytes(&bad_ord).is_empty());
+    let bad_row = super::encode_ops(&[super::Op::IngestWal(wal_event(0, max as u64 + 1))]);
+    assert!(super::schedule_from_bytes(&bad_row).is_empty());
 }
 
 #[test]

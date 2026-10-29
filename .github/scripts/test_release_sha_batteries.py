@@ -232,17 +232,26 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
 
     def test_dst1_decode_bounds_seq_ordinal_row_i(self) -> None:
         dst = (ROOT / "src" / "sqlrt" / "dst" / "mod.rs").read_text(encoding="utf-8")
-        self.assertIn("if ordinal as u64 > MAX_SCHEDULE_OPS as u64", dst)
+        self.assertIn("if !schedule_seq_ok(ordinal as u64)", dst)
         self.assertIn("if !schedule_seq_ok(row_i)", dst)
         self.assertIn("if !schedule_seq_ok(seq)", dst)
         regressions = (ROOT / "src" / "sqlrt" / "dst" / "regressions" / "mod.rs").read_text(
             encoding="utf-8"
         )
         self.assertIn("world_schedule_crash_0b179261_is_not_a_schedule", regressions)
+        self.assertIn(
+            'include_bytes!("../../../../fuzz/corpus/world_schedule/crash_0b179261")',
+            regressions,
+        )
         self.assertTrue((ROOT / "fuzz" / "corpus" / "world_schedule" / "crash_0b179261").is_file())
+        scripts = (ROOT / "src" / "sqlrt" / "dst" / "scripts.rs").read_text(encoding="utf-8")
+        self.assertIn('name.starts_with("crash_")', scripts)
+        self.assertIn("janitor must keep crash_0b179261", scripts)
         engine = (ROOT / "src" / "engine.rs").read_text(encoding="utf-8")
         self.assertIn("fn empty_sink_ref_maps_to_primary", engine)
-        self.assertIn("capability_for_sink_ref(\"\")", engine)
+        self.assertIn("if sink_ref.is_empty()", engine)
+        cap = engine.split("fn capability_for_sink_ref(", 1)[1].split("fn capability(", 1)[0]
+        self.assertIn("if sink_ref.is_empty()", cap)
 
 
 if __name__ == "__main__":
