@@ -88,13 +88,13 @@ class PreviousProtocolCompatibleReleaseTests(unittest.TestCase):
         result = compat.previous_protocol_compatible_release(
             current_tag="18.4.0",
             current_protocol=22,
-            tags=["18.4.0", "18.3.9-beta", "18.3.5", "0.0.0"],
+            tags=["18.4.0", "18.3.9-beta-1", "18.3.5", "0.0.0"],
             protocol_by_tag={
-                "18.3.9-beta": 22,
+                "18.3.9-beta-1": 22,
                 "18.3.5": 22,
             },
             versions_by_tag={
-                "18.3.9-beta": {"file": "9.9.9"},
+                "18.3.9-beta-1": {"file": "9.9.9"},
                 "18.3.5": {"file": "0.1.4", "s3": "0.1.6"},
             },
             current_versions={"file": "0.1.5", "s3": "0.1.7"},
@@ -104,9 +104,9 @@ class PreviousProtocolCompatibleReleaseTests(unittest.TestCase):
 
     def test_skips_when_current_tag_is_beta(self) -> None:
         result = compat.previous_protocol_compatible_release(
-            current_tag="18.3.9-beta",
+            current_tag="18.3.9-beta-1",
             current_protocol=22,
-            tags=["18.3.9-beta", "18.3.8", "0.0.0"],
+            tags=["18.3.9-beta-1", "18.3.8", "0.0.0"],
             protocol_by_tag={"18.3.8": 22},
             versions_by_tag={"18.3.8": {"file": "0.1.7"}},
             current_versions={"file": "0.1.7"},

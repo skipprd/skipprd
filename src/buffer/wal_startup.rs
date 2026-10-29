@@ -309,6 +309,18 @@ mod tests {
         assert!(redo.contains("WAL catalog redo_acked begin"));
         assert!(redo.contains("WAL catalog redo_acked progress"));
         assert!(redo.contains("WAL catalog redo_acked complete"));
+        assert!(redo.contains("if compactions == 0"));
+        let cycle = redo
+            .find("pub async fn redo_acked_compactions")
+            .expect("redo_acked_compactions");
+        let cycle_body = redo[cycle..]
+            .split("pub async fn redo_acked_durable_batches")
+            .next()
+            .expect("cycle");
+        assert!(
+            !cycle_body.contains("tracing::info!"),
+            "compaction-cycle redo_acked must not log at info"
+        );
         assert!(redo.contains("WAL catalog republish begin"));
         assert!(redo.contains("WAL catalog republish complete"));
         assert!(!redo.contains("acked compaction redo deferred; catalog row kept"));

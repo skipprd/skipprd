@@ -360,9 +360,12 @@ impl PipelineWalHandle {
         let started = Instant::now();
         let acked = self.apply_acked_in_memory()?;
         let compactions = acked.len();
-        tracing::info!(compactions, "WAL catalog redo_acked begin");
+        if compactions == 0 {
+            return Ok(());
+        }
+        tracing::debug!(compactions, "WAL catalog redo_acked begin");
         self.redo_acked_durable_batches(&acked).await?;
-        tracing::info!(
+        tracing::debug!(
             scanned = compactions,
             redone = compactions,
             deferred = 0u64,
@@ -406,7 +409,7 @@ impl PipelineWalHandle {
                 }
             }
             if scanned % WAL_CATALOG_PROGRESS_EVERY == 0 {
-                tracing::info!(
+                tracing::debug!(
                     scanned,
                     redone,
                     deferred,
@@ -2676,6 +2679,35 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(!handle.paths().segs.join("seg-union.seg").exists());
+    }
+
+    #[test]
+    fn redo_acked_cycle_logs_are_debug_and_skip_idle() {
+        let src = include_str!("wal_handle.rs");
+        let cycle = src
+            .find("pub async fn redo_acked_compactions")
+            .expect("redo_acked_compactions");
+        let body = src[cycle..]
+            .split("pub async fn redo_acked_durable_batches")
+            .next()
+            .expect("cycle body");
+        assert!(
+            body.contains("if compactions == 0"),
+            "idle compaction ticks must not log empty redo_acked"
+        );
+        assert!(body.contains("tracing::debug!(compactions, \"WAL catalog redo_acked begin\")"));
+        assert!(body.contains("\"WAL catalog redo_acked complete\""));
+        assert!(!body.contains("tracing::info!"));
+        let durable = src
+            .find("pub async fn redo_acked_durable_batches")
+            .expect("durable");
+        let durable_body = src[durable..]
+            .split("async fn flush_acked_batch")
+            .next()
+            .expect("durable body");
+        assert!(durable_body.contains("tracing::debug!("));
+        assert!(durable_body.contains("\"WAL catalog redo_acked progress\""));
+        assert!(!durable_body.contains("tracing::info!"));
     }
 
     #[test]

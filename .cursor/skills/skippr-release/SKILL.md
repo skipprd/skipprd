@@ -16,7 +16,7 @@ There is **no skippr-gate**. This skill is the orchestrator. Never skip matrix c
 
 Read `AGENTS.md` and skill **`skipprd-docs`** first. Call skipprd-docs; do not duplicate it.
 
-Plugin crate `version` in `plugins/**/Cargo.toml` is the CDN path identity. Version paths are immutable. Root skipprd crate stays `0.1.0` until CI stamps the tag. Engine tags are unprefixed semver (`18.3.6`), not `v18.3.6`. Repo: `skipprd/skipprd`. Clobberable pre-release testing is **`/skippr-beta-release`** (`x.y.z-beta`), not this skill.
+Plugin crate `version` in `plugins/**/Cargo.toml` is the CDN path identity. Version paths are immutable. Root skipprd crate stays `0.1.0` until CI stamps the tag. Engine tags are unprefixed semver (`18.3.6`), not `v18.3.6`. Repo: `skipprd/skipprd`. Immutable pre-release testing is **`/skippr-beta-release`** (`x.y.z-beta-N`), not this skill.
 
 ## Loop (do not skip)
 
@@ -45,8 +45,8 @@ Batteries (all must pass; never skip a cell):
 | `rust.yml` | File smoke e2e + `linux_dst` (`sqlrt::dst::`). CDN e2e still waits for the tag. |
 | `skippr-fuzz.yml` | Timeboxed cargo fuzz; timeout fails |
 | `skippr-tpc.yml` | TPC-H **SF10** Q1/Q3/Q6 vs DuckDB + vanilla DataFusion + `skipprd query` |
-| `perf.yml` | Full skippr-perf matrix |
-| `perf-db.yml` | Full skippr-perf-db matrix |
+| `perf.yml` | skippr-perf `linux_matrix` (timings/correctness). Not frame-pointer / flamegraph / heaptrack / perf-stat. |
+| `perf-db.yml` | skippr-perf-db `linux_matrix`. Not frame-pointer / flamegraph / heaptrack / perf-stat. |
 
 ```bash
 python3 .github/scripts/release_sha_batteries.py --ensure --sha "$(git rev-parse HEAD)"

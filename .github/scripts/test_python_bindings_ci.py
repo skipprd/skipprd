@@ -152,7 +152,8 @@ class PythonBindingsCiTests(unittest.TestCase):
         stamp = script.index("set_root_package_version.py")
         maturin = script.index("maturin build --release")
         self.assertLess(stamp, maturin)
-        self.assertIn("python_semver()", script)
+        self.assertIn("prepare_ci_package_versions()", script)
+        self.assertNotIn("python_semver()", script)
         self.assertIn('--workspace "$ROOT"', script)
 
     def test_release_profile_strips_debug_so_pypi_fits(self):
@@ -270,14 +271,14 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertNotIn("SKIPPR_VERSION=v", install)
         script = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("unprefixed semver", script)
-        self.assertIn(r"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*(-beta)?$", script)
+        self.assertIn(r"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*(-beta-[1-9][0-9]*)?$", script)
 
     def test_host_release_action_stamps_unprefixed_tags_only(self):
         action = (
             ROOT / ".github" / "actions" / "rust-build-release" / "action.yaml"
         ).read_text(encoding="utf-8")
         self.assertIn("set_root_package_version.py", action)
-        self.assertIn("^[0-9]+\\.[0-9]+\\.[0-9]+(-beta)?$", action)
+        self.assertIn("^[0-9]+\\.[0-9]+\\.[0-9]+(-beta-[1-9][0-9]*)?$", action)
         self.assertIn("unprefixed semver", action)
         self.assertIn('echo "SKIPPR_CLI_VERSION=$version" >> "$GITHUB_ENV"', action)
         self.assertNotIn('export SKIPPR_CLI_VERSION="${GITHUB_REF_NAME}"', action)
@@ -309,6 +310,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("skippr-connect-gen", script)
         self.assertIn("test_python_bindings_ci.py", script)
         self.assertIn("test_rust_ci.py", script)
+        self.assertIn("test_engine_tag.py", script)
         self.assertIn("test_publish_runtime_plugins.py", script)
         self.assertIn("test_bump_changed_plugin_crates.py", script)
         self.assertIn("test_stream_transforms_ci.py", script)
@@ -324,6 +326,45 @@ class PythonBindingsCiTests(unittest.TestCase):
         )
         self.assertFalse(module.should_publish("18.0.0", unpublished=[]))
         self.assertFalse(module.should_publish("0.0.0", unpublished=["skippr-0.0.0-any.whl"]))
+
+    def test_beta_tag_stamps_unique_pep440_python_version(self):
+        module = load_wheel_version()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "python").mkdir()
+            pyproject = root / "pyproject.toml"
+            cargo = root / "python" / "Cargo.toml"
+            pyproject.write_text('version = "18.3.6"\n', encoding="utf-8")
+            cargo.write_text('[package]\nname = "skipprd-python"\nversion = "18.3.6"\n', encoding="utf-8")
+            stamped = module.prepare_ci_package_versions(
+                "18.3.10-beta-2", pyproject=pyproject, cargo=cargo
+            )
+            self.assertEqual(stamped, "18.3.10-beta-2")
+            self.assertEqual(module.pep440_version("18.3.10-beta-2"), "18.3.10b2")
+            self.assertIn('version = "18.3.10b2"', pyproject.read_text(encoding="utf-8"))
+            self.assertIn('version = "18.3.10b2"', cargo.read_text(encoding="utf-8"))
+            pyproject.write_text('version = "18.3.6"\n', encoding="utf-8")
+            cargo.write_text('[package]\nname = "skipprd-python"\nversion = "18.3.6"\n', encoding="utf-8")
+            self.assertEqual(
+                module.prepare_ci_package_versions("18.3.10", pyproject=pyproject, cargo=cargo),
+                "18.3.6",
+            )
+
+    def test_beta_publish_does_not_stamp_pep427_build_tag(self):
+        module = load_wheel_version()
+        name = "skippr-18.3.10b1-cp310-abi3-manylinux_2_28_x86_64.whl"
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp)
+            (dist / name).write_bytes(b"linux")
+            missing = module.wheels_to_publish(
+                dist, {name}, "18.3.10b1", allow_rebuild_stamp=False
+            )
+            self.assertEqual(missing, [])
+            self.assertTrue((dist / name).exists())
+            self.assertEqual(
+                [p.name for p in module.wheels_to_publish(dist, set(), "18.3.10b1", allow_rebuild_stamp=False)],
+                [name],
+            )
 
     def test_publish_uploads_only_wheels_missing_from_pypi(self):
         module = load_wheel_version()
@@ -412,7 +453,9 @@ class PythonBindingsCiTests(unittest.TestCase):
     def test_normalize_semver_rejects_v_prefix(self):
         module = load_set_version()
         self.assertEqual(module.normalize_semver("1.2.3"), "1.2.3")
-        self.assertEqual(module.normalize_semver("1.2.3-beta"), "1.2.3-beta")
+        self.assertEqual(module.normalize_semver("1.2.3-beta-1"), "1.2.3-beta-1")
+        with self.assertRaises(SystemExit):
+            module.normalize_semver("1.2.3-beta")
         with self.assertRaises(SystemExit):
             module.normalize_semver("v1.2.3")
         with self.assertRaises(SystemExit):
@@ -431,7 +474,8 @@ class PythonBindingsCiTests(unittest.TestCase):
         assert spec.loader is not None
         spec.loader.exec_module(module)
         self.assertEqual(module.release_bundle_version("15.13.0"), "15.13.0")
-        self.assertEqual(module.release_bundle_version("15.13.0-beta"), "15.13.0-beta")
+        self.assertEqual(module.release_bundle_version("15.13.0-beta-1"), "15.13.0-beta-1")
+        self.assertIsNone(module.release_bundle_version("15.13.0-beta"))
         self.assertIsNone(module.release_bundle_version("v15.13.0"))
         self.assertIsNone(module.release_bundle_version("python-v0.1.0"))
         self.assertIsNone(module.release_bundle_version("latest"))

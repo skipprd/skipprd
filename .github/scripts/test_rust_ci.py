@@ -34,7 +34,7 @@ class ReleaseNotesTests(unittest.TestCase):
         from release_notes import notes_for_tag
 
         changelog = "# Changelog\n\n## [Unreleased]\n\n- wip\n\n## [1.0.0]\n\n- a\n"
-        self.assertEqual(notes_for_tag(changelog, "1.0.1-beta"), "- wip\n")
+        self.assertEqual(notes_for_tag(changelog, "1.0.1-beta-1"), "- wip\n")
         self.assertEqual(notes_for_tag(changelog, "1.0.0"), "- a\n")
 
     def test_github_release_reads_changelog_md_only(self) -> None:
@@ -88,7 +88,9 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("chaos_mode_test:", text)
         self.assertIn("publish_runtime_plugins:", text)
         self.assertIn("publish_skipprd:", text)
-        self.assertIn("endsWith(github.ref_name, '-beta')", text)
+        self.assertIn("contains(github.ref_name, '-beta-')", text)
+        self.assertNotIn("endsWith(github.ref_name, '-beta')", text)
+        self.assertIn('"$TAG" == *-beta-*', text)
         self.assertIn("--prerelease", text)
         linux_test = text.split("\n  linux_test_suite:", 1)[1].split("\n  linux_x86:", 1)[0]
         linux_build = text.split("\n  linux_x86:", 1)[1].split("\n  macos_arm64:", 1)[0]
@@ -403,7 +405,9 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("Python workflow contracts", text)
         self.assertIn("linux_dst", text)
         self.assertIn("skippr-beta-release", text)
-        self.assertIn("-beta", text)
+        self.assertIn("-beta-N", text)
+        self.assertNotIn("overwrite that tag", text)
+        self.assertNotIn("Clobberable pre-release", text)
         self.assertNotIn("full `cargo test -p skipprd`", text)
         self.assertNotIn("commented out for now", text)
         self.assertNotIn("stay commented", text)

@@ -100,8 +100,8 @@ main() {
     if [ -z "$tag" ]; then
         err "Could not determine latest release."
     fi
-    printf '%s' "$tag" | grep -Eq '^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*(-beta)?$' \
-        || err "release version must be unprefixed semver (x.y.z or x.y.z-beta), got: $tag"
+    printf '%s' "$tag" | grep -Eq '^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*(-beta-[1-9][0-9]*)?$' \
+        || err "release version must be unprefixed semver (x.y.z or x.y.z-beta-N), got: $tag"
 
     say "Latest release: $tag ($BINARY)"
 

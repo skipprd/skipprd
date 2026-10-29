@@ -20,10 +20,52 @@ class Plan(str, Enum):
     WAIT = "wait"
 
 
+IN_FLIGHT = frozenset({"queued", "in_progress", "waiting", "pending"})
+
+
 class Battery(NamedTuple):
     workflow: str
     name: str
     required_jobs: tuple[str, ...] = ()
+    # When set, these jobs *are* the SHA battery. Frame-pointer / inferno /
+    # flamegraph / heaptrack / perf-stat may still be running or red.
+    gate_jobs: tuple[str, ...] = ()
+
+
+def linux_matrix_scenarios(workflow: Path) -> tuple[str, ...]:
+    text = workflow.read_text(encoding="utf-8")
+    block = text.split("\n  linux_matrix:", 1)[1].split("\n  build_linux_profile:", 1)[0]
+    found: list[str] = []
+    in_ids = False
+    for line in block.splitlines():
+        stripped = line.strip()
+        if stripped == "scenario:":
+            in_ids = True
+            continue
+        if in_ids:
+            if stripped.startswith("- "):
+                found.append(stripped[2:].strip())
+            elif stripped:
+                break
+    if not found:
+        raise SystemExit(f"no linux_matrix scenarios in {workflow}")
+    return tuple(found)
+
+
+def linux_matrix_job_prefix(workflow: Path) -> str:
+    text = workflow.read_text(encoding="utf-8")
+    block = text.split("\n  linux_matrix:", 1)[1].split("\n  build_linux_profile:", 1)[0]
+    for line in block.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("name:"):
+            raw = stripped.split("name:", 1)[1].strip()
+            return raw.split("${{", 1)[0].strip() + " "
+    raise SystemExit(f"no linux_matrix job name in {workflow}")
+
+
+def perf_gate_jobs(workflow: Path, contracts: str, build: str) -> tuple[str, ...]:
+    prefix = linux_matrix_job_prefix(workflow)
+    return (contracts, build, *tuple(f"{prefix}{s}" for s in linux_matrix_scenarios(workflow)))
 
 
 BATTERIES: tuple[Battery, ...] = (
@@ -38,8 +80,24 @@ BATTERIES: tuple[Battery, ...] = (
     ),
     Battery("skippr-fuzz.yml", "skippr-fuzz"),
     Battery("skippr-tpc.yml", "skippr-tpc"),
-    Battery("perf.yml", "skippr-perf"),
-    Battery("perf-db.yml", "skippr-perf-db"),
+    Battery(
+        "perf.yml",
+        "skippr-perf",
+        gate_jobs=perf_gate_jobs(
+            ROOT / ".github" / "workflows" / "perf.yml",
+            "perf workflow contracts",
+            "release host + perf plugins (linux x86)",
+        ),
+    ),
+    Battery(
+        "perf-db.yml",
+        "skippr-perf-db",
+        gate_jobs=perf_gate_jobs(
+            ROOT / ".github" / "workflows" / "perf-db.yml",
+            "perf-db workflow contracts",
+            "release host + query plugins (linux x86)",
+        ),
+    ),
 )
 
 
@@ -51,7 +109,7 @@ def plan_for_runs(sha: str, runs: list[dict]) -> Plan:
     in_flight = [
         run
         for run in matched
-        if str(run.get("status", "")) in {"queued", "in_progress", "waiting", "pending"}
+        if str(run.get("status", "")) in IN_FLIGHT
     ]
     if in_flight:
         return Plan.WAIT
@@ -75,6 +133,18 @@ def refine_skip(plan: Plan, required: tuple[str, ...], jobs: list[dict]) -> Plan
         return plan
     if required_jobs_succeeded(required, jobs):
         return Plan.SKIP_DISPATCH
+    return Plan.DISPATCH
+
+
+def plan_for_gate_jobs(sha: str, runs: list[dict], jobs: list[dict], gate_jobs: tuple[str, ...]) -> Plan:
+    want = sha.lower()
+    matched = [run for run in runs if str(run.get("headSha", "")).lower() == want]
+    if not matched:
+        return Plan.DISPATCH
+    if required_jobs_succeeded(gate_jobs, jobs):
+        return Plan.SKIP_DISPATCH
+    if any(str(run.get("status", "")) in IN_FLIGHT for run in matched):
+        return Plan.WAIT
     return Plan.DISPATCH
 
 
@@ -133,37 +203,60 @@ def ensure_sha(sha: str, *, repo: str = "skipprd/skipprd") -> int:
         )
         if not isinstance(runs, list):
             raise SystemExit(f"unexpected gh run list for {battery.workflow}")
-        plan = plan_for_runs(sha, runs)
-        if plan is Plan.SKIP_DISPATCH and battery.required_jobs:
-            matched_success = [
+        if battery.gate_jobs:
+            matched = [
                 run
                 for run in runs
                 if str(run.get("headSha", "")).lower() == sha.lower()
-                and str(run.get("conclusion", "")) == "success"
             ]
-            if not matched_success:
+            if not matched:
                 plan = Plan.DISPATCH
-                print(f"{battery.workflow}: {plan.value}", file=sys.stderr)
-                failed += 1
-                print(
-                    f"{battery.workflow} is not success on {sha}; do not tag",
-                    file=sys.stderr,
+            else:
+                viewed = _gh_json(
+                    [
+                        "run",
+                        "view",
+                        str(matched[0]["databaseId"]),
+                        "--repo",
+                        repo,
+                        "--json",
+                        "jobs",
+                    ]
                 )
-                continue
-            latest = matched_success[0]
-            viewed = _gh_json(
-                [
-                    "run",
-                    "view",
-                    str(latest["databaseId"]),
-                    "--repo",
-                    repo,
-                    "--json",
-                    "jobs",
+                jobs = viewed.get("jobs", []) if isinstance(viewed, dict) else []
+                plan = plan_for_gate_jobs(sha, runs, jobs, battery.gate_jobs)
+        else:
+            plan = plan_for_runs(sha, runs)
+            if plan is Plan.SKIP_DISPATCH and battery.required_jobs:
+                matched_success = [
+                    run
+                    for run in runs
+                    if str(run.get("headSha", "")).lower() == sha.lower()
+                    and str(run.get("conclusion", "")) == "success"
                 ]
-            )
-            jobs = viewed.get("jobs", []) if isinstance(viewed, dict) else []
-            plan = refine_skip(plan, battery.required_jobs, jobs)
+                if not matched_success:
+                    plan = Plan.DISPATCH
+                    print(f"{battery.workflow}: {plan.value}", file=sys.stderr)
+                    failed += 1
+                    print(
+                        f"{battery.workflow} is not success on {sha}; do not tag",
+                        file=sys.stderr,
+                    )
+                    continue
+                latest = matched_success[0]
+                viewed = _gh_json(
+                    [
+                        "run",
+                        "view",
+                        str(latest["databaseId"]),
+                        "--repo",
+                        repo,
+                        "--json",
+                        "jobs",
+                    ]
+                )
+                jobs = viewed.get("jobs", []) if isinstance(viewed, dict) else []
+                plan = refine_skip(plan, battery.required_jobs, jobs)
         print(f"{battery.workflow}: {plan.value}", file=sys.stderr)
         if plan is Plan.SKIP_DISPATCH:
             continue
