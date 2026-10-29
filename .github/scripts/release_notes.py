@@ -8,10 +8,14 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS = Path(__file__).resolve().parent
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+from engine_tag import is_beta_engine_tag
 
 
 def notes_for_tag(changelog: str, tag: str) -> str:
-    if tag.endswith("-beta"):
+    if is_beta_engine_tag(tag):
         try:
             return section(changelog, tag)
         except SystemExit:

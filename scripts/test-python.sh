@@ -20,8 +20,8 @@ WHEEL_VERSION="$(python3 - <<'PY'
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(".github/scripts").resolve()))
-from python_wheel_version import python_semver
-print(python_semver())
+from python_wheel_version import prepare_ci_package_versions
+print(prepare_ci_package_versions())
 PY
 )"
 python3 .github/scripts/set_root_package_version.py \

@@ -86,6 +86,78 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
             mod.Plan.DISPATCH,
         )
 
+    def test_perf_gate_is_matrix_not_frame_pointer(self) -> None:
+        perf = next(b for b in mod.BATTERIES if b.workflow == "perf.yml")
+        perf_db = next(b for b in mod.BATTERIES if b.workflow == "perf-db.yml")
+        self.assertIn("perf ingest-a-duckdb", perf.gate_jobs)
+        self.assertIn("perf copy-b-json-json", perf.gate_jobs)
+        self.assertIn("perf workflow contracts", perf.gate_jobs)
+        self.assertIn("release host + perf plugins (linux x86)", perf.gate_jobs)
+        self.assertNotIn("frame-pointer host + inferno (linux x86)", perf.gate_jobs)
+        self.assertTrue(all("flamegraph" not in name for name in perf.gate_jobs))
+        self.assertTrue(all("heaptrack" not in name for name in perf.gate_jobs))
+        self.assertTrue(all("perf-stat" not in name for name in perf.gate_jobs))
+        self.assertIn("perf-db q-wal-count-iceberg", perf_db.gate_jobs)
+        self.assertIn("perf-db workflow contracts", perf_db.gate_jobs)
+        self.assertNotIn("frame-pointer host + inferno (linux x86)", perf_db.gate_jobs)
+        rust = next(b for b in mod.BATTERIES if b.workflow == "rust.yml")
+        self.assertEqual(rust.gate_jobs, ())
+        workflow = (ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        for name in perf.gate_jobs:
+            token = name.removeprefix("perf ").removeprefix("release host + ")
+            self.assertTrue(
+                name in workflow or token in workflow,
+                name,
+            )
+
+    def test_gate_jobs_skip_while_frame_pointer_still_running(self) -> None:
+        runs = [
+            {
+                "conclusion": "",
+                "status": "in_progress",
+                "headSha": "abc",
+                "databaseId": 9,
+            }
+        ]
+        jobs = [
+            {"name": "perf workflow contracts", "conclusion": "success"},
+            {"name": "release host + perf plugins (linux x86)", "conclusion": "success"},
+            {"name": "perf ingest-a-duckdb", "conclusion": "success"},
+            {"name": "frame-pointer host + inferno (linux x86)", "conclusion": ""},
+        ]
+        gate = (
+            "perf workflow contracts",
+            "release host + perf plugins (linux x86)",
+            "perf ingest-a-duckdb",
+        )
+        self.assertEqual(
+            mod.plan_for_gate_jobs("abc", runs, jobs, gate),
+            mod.Plan.SKIP_DISPATCH,
+        )
+        jobs[2] = {"name": "perf ingest-a-duckdb", "conclusion": "failure"}
+        self.assertEqual(
+            mod.plan_for_gate_jobs("abc", runs, jobs, gate),
+            mod.Plan.WAIT,
+        )
+        jobs[2] = {"name": "perf ingest-a-duckdb", "conclusion": "success"}
+        del jobs[0]
+        self.assertEqual(
+            mod.plan_for_gate_jobs("abc", runs, jobs, gate),
+            mod.Plan.WAIT,
+        )
+        runs[0]["status"] = "completed"
+        runs[0]["conclusion"] = "failure"
+        jobs = [
+            {"name": "perf workflow contracts", "conclusion": "success"},
+            {"name": "release host + perf plugins (linux x86)", "conclusion": "success"},
+            {"name": "perf ingest-a-duckdb", "conclusion": "success"},
+            {"name": "frame-pointer host + inferno (linux x86)", "conclusion": "failure"},
+        ]
+        self.assertEqual(
+            mod.plan_for_gate_jobs("abc", runs, jobs, gate),
+            mod.Plan.SKIP_DISPATCH,
+        )
+
     def test_success_with_required_jobs_skips(self) -> None:
         jobs = [
             {"name": "DST World (linux x86)", "conclusion": "success"},
@@ -239,6 +311,7 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("world_schedule_crash_0b179261_is_not_a_schedule", regressions)
+        self.assertIn("dst1_bounds_accept_max_schedule_ops_and_reject_one_past", regressions)
         self.assertIn(
             'include_bytes!("../../../../fuzz/corpus/world_schedule/crash_0b179261")',
             regressions,

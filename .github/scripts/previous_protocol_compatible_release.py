@@ -17,6 +17,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from engine_tag import is_beta_engine_tag  # noqa: E402
 from runtime_plugin_catalog import RUNTIME_PROTOCOL_VERSION_RE  # noqa: E402
 
 
@@ -116,7 +117,7 @@ def previous_protocol_compatible_release(
     versions_by_tag: dict[str, dict[str, str]],
     current_versions: dict[str, str],
 ) -> dict:
-    if current_tag.endswith("-beta"):
+    if is_beta_engine_tag(current_tag):
         return {
             "skip": True,
             "prev_tag": None,
@@ -124,7 +125,7 @@ def previous_protocol_compatible_release(
             "current_versions": current_versions,
         }
     for tag in tags:
-        if tag in {current_tag, "0.0.0"} or tag.startswith("test") or tag.endswith("-beta"):
+        if tag in {current_tag, "0.0.0"} or tag.startswith("test") or is_beta_engine_tag(tag):
             continue
         protocol = protocol_by_tag.get(tag)
         if protocol != current_protocol:

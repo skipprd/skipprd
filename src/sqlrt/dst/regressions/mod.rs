@@ -63,7 +63,7 @@ fn world_schedule_crash_0b179261_is_not_a_schedule() {
     let _ = super::current_table(&world);
 }
 
-fn wal_event(ordinal: u32, row_i: u64) -> super::WalEvent {
+fn wal_event(seq: u64, ordinal: u32, row_i: u64) -> super::WalEvent {
     super::WalEvent {
         row: super::UserRow {
             id: 1,
@@ -72,7 +72,7 @@ fn wal_event(ordinal: u32, row_i: u64) -> super::WalEvent {
         },
         mutation: None,
         order: 0,
-        seq: 0,
+        seq,
         ordinal,
         row_i,
     }
@@ -80,25 +80,57 @@ fn wal_event(ordinal: u32, row_i: u64) -> super::WalEvent {
 
 #[test]
 fn huge_wal_ordinal_is_not_a_schedule() {
-    let bytes = super::encode_ops(&[super::Op::IngestWal(wal_event(u32::MAX, 0))]);
+    let bytes = super::encode_ops(&[super::Op::IngestWal(wal_event(0, u32::MAX, 0))]);
     assert!(super::schedule_from_bytes(&bytes).is_empty());
 }
 
 #[test]
 fn huge_wal_row_i_is_not_a_schedule() {
-    let bytes = super::encode_ops(&[super::Op::IngestWal(wal_event(0, u64::MAX))]);
+    let bytes = super::encode_ops(&[super::Op::IngestWal(wal_event(0, 0, u64::MAX))]);
     assert!(super::schedule_from_bytes(&bytes).is_empty());
 }
 
 #[test]
-fn wal_ordinal_and_row_i_bound_is_max_schedule_ops() {
-    let max = super::MAX_SCHEDULE_OPS as u32;
-    let ok = super::encode_ops(&[super::Op::IngestWal(wal_event(max, max as u64))]);
-    assert_eq!(super::schedule_from_bytes(&ok).len(), 1);
-    let bad_ord = super::encode_ops(&[super::Op::IngestWal(wal_event(max + 1, 0))]);
+fn dst1_bounds_accept_max_schedule_ops_and_reject_one_past() {
+    let max = super::MAX_SCHEDULE_OPS as u64;
+    let ok_count: Vec<_> = (0..super::MAX_SCHEDULE_OPS)
+        .map(|i| {
+            super::Op::IngestLake(super::UserRow {
+                id: i as i64,
+                name: "a".into(),
+                amount: 1,
+            })
+        })
+        .collect();
+    assert_eq!(
+        super::schedule_from_bytes(&super::encode_ops(&ok_count)).len(),
+        super::MAX_SCHEDULE_OPS
+    );
+    let mut over_count = ok_count;
+    over_count.push(super::Op::IngestLake(super::UserRow {
+        id: max as i64,
+        name: "a".into(),
+        amount: 1,
+    }));
+    assert!(super::schedule_from_bytes(&super::encode_ops(&over_count)).is_empty());
+
+    let ok_seq = super::encode_ops(&[super::Op::IngestWal(wal_event(max, 0, 0))]);
+    assert_eq!(super::schedule_from_bytes(&ok_seq).len(), 1);
+    let bad_seq = super::encode_ops(&[super::Op::IngestWal(wal_event(max + 1, 0, 0))]);
+    assert!(super::schedule_from_bytes(&bad_seq).is_empty());
+
+    let max_ord = super::MAX_SCHEDULE_OPS as u32;
+    let ok_ord_row = super::encode_ops(&[super::Op::IngestWal(wal_event(0, max_ord, max))]);
+    assert_eq!(super::schedule_from_bytes(&ok_ord_row).len(), 1);
+    let bad_ord = super::encode_ops(&[super::Op::IngestWal(wal_event(0, max_ord + 1, 0))]);
     assert!(super::schedule_from_bytes(&bad_ord).is_empty());
-    let bad_row = super::encode_ops(&[super::Op::IngestWal(wal_event(0, max as u64 + 1))]);
+    let bad_row = super::encode_ops(&[super::Op::IngestWal(wal_event(0, 0, max + 1))]);
     assert!(super::schedule_from_bytes(&bad_row).is_empty());
+
+    let ok_thru = super::encode_ops(&[super::Op::CompactThru(max)]);
+    assert_eq!(super::schedule_from_bytes(&ok_thru).len(), 1);
+    let bad_thru = super::encode_ops(&[super::Op::CompactThru(max + 1)]);
+    assert!(super::schedule_from_bytes(&bad_thru).is_empty());
 }
 
 #[test]

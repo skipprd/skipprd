@@ -297,14 +297,15 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             Path("plugins/s3-source/versions/0.1.1/s3-source.json"),
         )
         self.assertEqual(
-            staged_relative_path(relative, "18.3.9-beta"),
-            Path("18.3.9-beta/plugins/s3-source/versions/0.1.1/s3-source.json"),
+            staged_relative_path(relative, "18.3.9-beta-1"),
+            Path("18.3.9-beta-1/plugins/s3-source/versions/0.1.1/s3-source.json"),
         )
         self.assertEqual(staged_relative_path(relative, "18.3.9"), relative)
 
     def test_release_bundle_version_parses_semver_tags(self) -> None:
         self.assertEqual(publish_runtime_plugins.release_bundle_version("15.13.0"), "15.13.0")
-        self.assertEqual(publish_runtime_plugins.release_bundle_version("15.13.0-beta"), "15.13.0-beta")
+        self.assertEqual(publish_runtime_plugins.release_bundle_version("15.13.0-beta-1"), "15.13.0-beta-1")
+        self.assertIsNone(publish_runtime_plugins.release_bundle_version("15.13.0-beta"))
         self.assertIsNone(publish_runtime_plugins.release_bundle_version("v15.13.0"))
         self.assertIsNone(publish_runtime_plugins.release_bundle_version("python-v0.1.0"))
         self.assertIsNone(publish_runtime_plugins.release_bundle_version("latest"))

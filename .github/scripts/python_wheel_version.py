@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Python wheel semver lives in pyproject.toml, not skipprd git tags."""
+"""Python wheel semver lives in pyproject.toml, not skipprd git tags.
+
+Beta engine tags stamp a unique PEP 440 pre-release (`x.y.zbN`) in CI so PyPI
+never reuses a filename. Committed pyproject stays x.y.z.
+"""
 
 from __future__ import annotations
 
@@ -7,16 +11,23 @@ import argparse
 import json
 import os
 import re
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from engine_tag import is_beta_engine_tag, pep440_version
+
 PYPROJECT = ROOT / "pyproject.toml"
 PYTHON_CARGO = ROOT / "python" / "Cargo.toml"
 PYPI_PROJECT = "skippr"
 VERSION_RE = re.compile(r'(?m)^version\s*=\s*"([^"]+)"')
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+PEP440_RE = re.compile(r"^\d+\.\d+\.\d+(b[1-9]\d*)?$")
 
 
 def read_first_version(path: Path) -> str:
@@ -37,6 +48,39 @@ def python_semver(pyproject: Path = PYPROJECT, cargo: Path = PYTHON_CARGO) -> st
             f"python semver mismatch: {pyproject}={pyproject_version} {cargo}={cargo_version}"
         )
     return pyproject_version
+
+
+def stamp_python_package_version(
+    version: str,
+    pyproject: Path = PYPROJECT,
+    cargo: Path = PYTHON_CARGO,
+) -> None:
+    if not PEP440_RE.fullmatch(version):
+        raise SystemExit(f"python version must be x.y.z or x.y.zbN, got: {version}")
+    for path in (pyproject, cargo):
+        text = path.read_text(encoding="utf-8")
+        updated, count = re.subn(
+            r'(?m)^(version\s*=\s*")[^"]+(")',
+            rf"\g<1>{version}\g<2>",
+            text,
+            count=1,
+        )
+        if count != 1:
+            raise SystemExit(f"failed updating python version in {path}")
+        path.write_text(updated, encoding="utf-8")
+
+
+def prepare_ci_package_versions(
+    ref_name: str | None = None,
+    pyproject: Path = PYPROJECT,
+    cargo: Path = PYTHON_CARGO,
+) -> str:
+    """Return the skipprd stamp version. On beta tags, also stamp unique wheel semver."""
+    tag = (ref_name if ref_name is not None else os.environ.get("GITHUB_REF_NAME", "")).strip()
+    if is_beta_engine_tag(tag):
+        stamp_python_package_version(pep440_version(tag), pyproject=pyproject, cargo=cargo)
+        return tag
+    return python_semver(pyproject=pyproject, cargo=cargo)
 
 
 def pypi_filenames(
@@ -70,7 +114,7 @@ def local_wheels(dist: Path) -> list[Path]:
 
 
 WHEEL_NAME_RE = re.compile(
-    r"^(?P<name>skippr)-(?P<version>\d+\.\d+\.\d+)(?:-(?P<build>\d[\w.]*))?-(?P<tags>.+)\.whl$"
+    r"^(?P<name>skippr)-(?P<version>\d+\.\d+\.\d+(?:b[1-9]\d*)?)(?:-(?P<build>\d[\w.]*))?-(?P<tags>.+)\.whl$"
 )
 
 
@@ -106,6 +150,19 @@ def with_build_tag(filename: str, build: int) -> str:
     if match is None:
         raise ValueError(f"not a skippr wheel filename: {filename}")
     return f"skippr-{match.group('version')}-{build}-{match.group('tags')}.whl"
+
+
+def wheels_to_publish(
+    dist: Path,
+    published: set[str] | None,
+    version: str,
+    *,
+    allow_rebuild_stamp: bool,
+) -> list[Path]:
+    """Production may stamp a PEP 427 build tag. Beta versions are unique; never stamp."""
+    if allow_rebuild_stamp:
+        return stamp_rebuild_wheels(dist, published, version)
+    return unpublished_wheels(dist, published)
 
 
 def stamp_rebuild_wheels(
@@ -156,13 +213,19 @@ def main() -> None:
         help="Write needed=true/false when any local wheel filename is new on PyPI.",
     )
     args = parser.parse_args()
-    version = python_semver()
+    tag = os.environ.get("GITHUB_REF_NAME", "").strip()
+    version = pep440_version(tag) if is_beta_engine_tag(tag) else python_semver()
     if not args.skip_if_published:
         print(version)
         return
     dist = wheel_dist_dir()
     published = pypi_filenames(version)
-    missing = stamp_rebuild_wheels(dist, published, version)
+    missing = wheels_to_publish(
+        dist,
+        published,
+        version,
+        allow_rebuild_stamp=not is_beta_engine_tag(tag),
+    )
     prune_published_wheels(dist, missing)
     needed = should_publish(version, unpublished=missing)
     output = os.environ.get("GITHUB_OUTPUT")

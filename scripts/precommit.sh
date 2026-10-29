@@ -15,6 +15,9 @@ unset SKIPPR_STREAM_TEST_PROFILE || true
 echo "precommit: python3 .github/scripts/test_python_bindings_ci.py"
 python3 .github/scripts/test_python_bindings_ci.py
 
+echo "precommit: python3 .github/scripts/test_engine_tag.py"
+python3 .github/scripts/test_engine_tag.py
+
 echo "precommit: python3 .github/scripts/test_rust_ci.py"
 python3 .github/scripts/test_rust_ci.py
 

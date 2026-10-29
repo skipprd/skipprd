@@ -372,7 +372,7 @@ jobs:
           RELEASE_SUBDIR="${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}"
           aws s3 sync runtime-plugin-release "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/"
       - name: Point latest plugin index at this release
-        if: ${{ !endsWith(github.ref_name, '-beta') }}
+        if: ${{ !contains(github.ref_name, '-beta-') }}
         run: |
           set -euo pipefail
           BUCKET="${{ env.RELEASES_BUCKET }}"
@@ -790,7 +790,7 @@ jobs:
           aws s3 cp skipprd-linux_x86.tar.gz "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/skipprd-linux_x86.tar.gz"
           aws s3 cp skipprd-macos_arm64.tar.gz "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/skipprd-macos_arm64.tar.gz"
       - name: Point latest skipprd at this release
-        if: ${{ !endsWith(github.ref_name, '-beta') }}
+        if: ${{ !contains(github.ref_name, '-beta-') }}
         run: |
           set -euo pipefail
           TAG="${{ github.ref_name }}"
@@ -806,7 +806,7 @@ jobs:
           TAG="${{ github.ref_name }}"
           PRE_ARGS=()
           TITLE="Release $TAG"
-          if [[ "$TAG" == *-beta ]]; then
+          if [[ "$TAG" == *-beta-* ]]; then
             PRE_ARGS+=(--prerelease)
             TITLE="Beta $TAG"
           fi

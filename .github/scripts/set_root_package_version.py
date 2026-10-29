@@ -14,7 +14,9 @@ from engine_tag import is_engine_tag
 
 def normalize_semver(version: str) -> str:
     if not is_engine_tag(version):
-        raise SystemExit(f"version must be unprefixed semver (x.y.z or x.y.z-beta), got: {version}")
+        raise SystemExit(
+            f"version must be unprefixed semver (x.y.z or x.y.z-beta-N), got: {version}"
+        )
     return version
 
 
@@ -48,7 +50,7 @@ def main() -> None:
     parser.add_argument(
         "--version",
         required=True,
-        help="Unprefixed semver version to write (x.y.z or x.y.z-beta)",
+        help="Unprefixed semver version to write (x.y.z or x.y.z-beta-N)",
     )
     args = parser.parse_args()
 
