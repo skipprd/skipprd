@@ -32,6 +32,36 @@ fn huge_dst1_op_count_is_not_a_schedule() {
 }
 
 #[test]
+fn huge_compact_thru_seq_is_not_a_schedule() {
+    let bytes = super::encode_ops(&[super::Op::CompactThru(u64::MAX)]);
+    assert!(super::schedule_from_bytes(&bytes).is_empty());
+    let world = super::run(&[super::Op::CompactThru(u64::MAX)]);
+    let _ = super::current_table(&world);
+    assert!(super::compacted_seqs(&world).len() <= super::MAX_SCHEDULE_OPS);
+}
+
+#[test]
+fn ff_padded_dst1_schedules_do_not_abort() {
+    // cargo-fuzz world_schedule crash-3c1f58c0 / crash-ad5f6166 shape:
+    // DST1 + small count + 0xFF padding (CompactThru/seq become u64::MAX).
+    for count in [1u32, 3] {
+        let mut bytes = Vec::from(*b"DST1");
+        bytes.extend_from_slice(&count.to_le_bytes());
+        bytes.extend(std::iter::repeat_n(0xff, 64));
+        let world = super::run(&super::schedule_from_bytes(&bytes));
+        let _ = super::current_table(&world);
+        assert!(super::compacted_seqs(&world).len() <= super::MAX_SCHEDULE_OPS);
+    }
+}
+
+#[test]
+fn compacted_seqs_does_not_materialize_u64_max() {
+    let mut world = super::World::new();
+    world.compacted_thru = u64::MAX;
+    assert_eq!(super::compacted_seqs(&world).len(), super::MAX_SCHEDULE_OPS);
+}
+
+#[test]
 fn regressions_land_as_named_scripts() {
     let names: BTreeSet<_> = super::scripts::all_scripts()
         .into_iter()

@@ -9,7 +9,7 @@ disable-model-invocation: true
 
 # skippr-tpc
 
-Opt-in. SHA battery is `.github/workflows/skippr-tpc.yml` **TPC-H SF10** (`tpcgen-cli tpch parquet -s 10`) Q1/Q3/Q6. Hash mismatch vs DuckDB or vanilla DataFusion fails. Do **not** run skipprd-docs. Do **not** publish. Do **not** write CloudCycle EU buckets. Do **not** put SF1 on precommit.
+Opt-in. SHA battery is `.github/workflows/skippr-tpc.yml` **TPC-H SF10** (`tpcgen-cli tpch parquet -s 10`) Q1/Q3/Q6. File ingest is parquet → Arrow IPC (not a JSON conversion of SF10). Hash mismatch vs DuckDB or vanilla DataFusion fails. Do **not** run skipprd-docs. Do **not** publish. Do **not** write CloudCycle EU buckets. Do **not** put SF1 on precommit.
 
 Laptop SF1 is iteration only and **not a SHA substitute**.
 

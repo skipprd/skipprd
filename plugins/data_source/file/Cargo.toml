@@ -9,7 +9,9 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait.workspace = true
+arrow.workspace = true
 datafusion.workspace = true
+parquet.workspace = true
 clap.workspace = true
 tokio.workspace = true
 skippr-runtime-sdk.workspace = true

@@ -23,7 +23,7 @@ pub fn decode_records(
     payload: &str,
 ) -> Result<Vec<Value>, DecodeError> {
     match format {
-        InputFormat::ArrowIpc => Err(DecodeError::Unsupported(
+        InputFormat::ArrowIpc | InputFormat::Parquet => Err(DecodeError::Unsupported(
             "Arrow IPC input must be submitted through runtime Arrow IPC batches".to_string(),
         )),
         InputFormat::Csv => SerderCsv::deserialize(payload).map_err(DecodeError::from),
@@ -65,5 +65,8 @@ mod tests {
     fn arrow_ipc_is_not_text_decoded() {
         let err = decode_records(&Config::new(), InputFormat::ArrowIpc, "not arrow").unwrap_err();
         assert!(err.to_string().contains("Arrow IPC input"));
+        let parquet =
+            decode_records(&Config::new(), InputFormat::Parquet, "not parquet").unwrap_err();
+        assert!(parquet.to_string().contains("Arrow IPC input"));
     }
 }

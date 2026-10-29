@@ -66,6 +66,7 @@ jobs:
             -p skippr-plugin-data-source-file \
             -p skippr-plugin-data-sink-duckdb \
             -p skippr-plugin-schema-sink-duckdb
+          rm -rf target/release/{build,deps,incremental,.fingerprint} target/debug
       - name: TPC-H SF10 Q1 Q3 Q6 vs DuckDB vs DataFusion vs skipprd query
         env:
           SKIPPRD_BIN: ${{ github.workspace }}/skipprd/target/release/skipprd

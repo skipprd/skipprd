@@ -137,7 +137,11 @@ pub enum Op {
 
 const OPS_MAGIC: &[u8; 4] = b"DST1";
 /// Untrusted `DST1` schedules must not `Vec::with_capacity` a mutated u32.
-const MAX_SCHEDULE_OPS: usize = 1024;
+pub(crate) const MAX_SCHEDULE_OPS: usize = 1024;
+
+fn schedule_seq_ok(seq: u64) -> bool {
+    seq <= MAX_SCHEDULE_OPS as u64
+}
 
 /// Iceberg snapshot captured by compact / lake ingest. `S` in query pin `(S,E,W)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -264,6 +268,9 @@ pub fn apply(world: &mut World, op: Op) {
             }
         }
         Op::CompactThru(seq) => {
+            if !schedule_seq_ok(seq) {
+                return;
+            }
             if matches!(
                 world.armed,
                 Some(FailpointName::HoldBeforeCompactionSink)
@@ -777,6 +784,9 @@ fn decode_op(bytes: &[u8], i: &mut usize) -> Option<Op> {
             };
             let order = take_u8(bytes, i)?;
             let seq = take_u64(bytes, i)?;
+            if !schedule_seq_ok(seq) {
+                return None;
+            }
             let ordinal = take_u32(bytes, i)?;
             let row_i = take_u64(bytes, i)?;
             Some(Op::IngestWal(WalEvent {
@@ -788,7 +798,13 @@ fn decode_op(bytes: &[u8], i: &mut usize) -> Option<Op> {
                 row_i,
             }))
         }
-        2 => Some(Op::CompactThru(take_u64(bytes, i)?)),
+        2 => {
+            let seq = take_u64(bytes, i)?;
+            if !schedule_seq_ok(seq) {
+                return None;
+            }
+            Some(Op::CompactThru(seq))
+        }
         3 => {
             let idx = take_u8(bytes, i)? as usize;
             Some(Op::Failpoint(*FailpointName::ALL.get(idx)?))
@@ -814,5 +830,6 @@ pub fn schedule_from_bytes(bytes: &[u8]) -> Vec<Op> {
 }
 
 pub fn compacted_seqs(world: &World) -> BTreeSet<u64> {
-    (1..=world.compacted_thru).collect()
+    let thru = world.compacted_thru.min(MAX_SCHEDULE_OPS as u64);
+    (1..=thru).collect()
 }

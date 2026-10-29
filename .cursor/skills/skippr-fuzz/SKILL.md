@@ -9,7 +9,7 @@ disable-model-invocation: true
 
 # skippr-fuzz
 
-Opt-in. GitHub workflow `.github/workflows/skippr-fuzz.yml` is `workflow_dispatch` only. Timeout fails the job (`continue-on-error` is illegal). Shrinking crashes become named scripts under `src/sqlrt/dst/regressions/`. Do **not** run skipprd-docs. Do **not** publish. Do **not** write CloudCycle EU buckets.
+Opt-in. GitHub workflow `.github/workflows/skippr-fuzz.yml` is `workflow_dispatch` only. Timeout fails the job (`continue-on-error` is illegal). Untrusted `DST1` decode fails closed when op count or CompactThru/WalEvent.seq exceeds 1024. Shrinking crashes become named scripts under `src/sqlrt/dst/regressions/`. Do **not** run skipprd-docs. Do **not** publish. Do **not** write CloudCycle EU buckets.
 
 Targets (production parsers / World checker, never a second oracle):
 
