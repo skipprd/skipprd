@@ -788,7 +788,7 @@ fn decode_op(bytes: &[u8], i: &mut usize) -> Option<Op> {
                 return None;
             }
             let ordinal = take_u32(bytes, i)?;
-            if ordinal as u64 > MAX_SCHEDULE_OPS as u64 {
+            if !schedule_seq_ok(ordinal as u64) {
                 return None;
             }
             let row_i = take_u64(bytes, i)?;
