@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -126,12 +125,15 @@ def skipprd_ingest(binary: Path, work: Path, parquet_dir: Path) -> Path:
     for table in ("lineitem", "orders", "customer"):
         src_dir = work / "source" / table
         src_dir.mkdir(parents=True, exist_ok=True)
+        json_path = src_dir / f"{table}.json"
         glob = parquet_glob(parquet_dir, table)
-        if "*" in glob:
-            for part in Path(glob.replace("/*.parquet", "")).glob("*.parquet"):
-                shutil.copy(part, src_dir / part.name)
-        else:
-            shutil.copy(glob, src_dir / Path(glob).name)
+        _run(
+            [
+                "duckdb",
+                "-c",
+                f"COPY (SELECT * FROM read_parquet('{glob}')) TO '{json_path.as_posix()}' (FORMAT JSON);",
+            ]
+        )
         sources[table] = src_dir
     config = work / "skippr.yml"
     text = (ROOT / "tests" / "tpc" / "skippr.yml").read_text(encoding="utf-8")

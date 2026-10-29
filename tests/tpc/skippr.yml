@@ -23,15 +23,15 @@ data_sources:
   lineitem:
     File:
       path: SOURCE_LINEITEM
-      format: parquet
+      format: json
   orders:
     File:
       path: SOURCE_ORDERS
-      format: parquet
+      format: json
   customer:
     File:
       path: SOURCE_CUSTOMER
-      format: parquet
+      format: json
 
 data_sinks:
   local:
