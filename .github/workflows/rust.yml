@@ -275,7 +275,7 @@ jobs:
         with:
           workspaces: skipprd
       - name: DST named scripts and bounded proptest
-        run: cargo test -p skipprd --lib -- sqlrt::dst::
+        run: "cargo test -p skipprd --lib -- sqlrt::dst::"
 
   release_notes:
     if: startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test')

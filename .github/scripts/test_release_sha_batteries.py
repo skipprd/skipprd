@@ -168,6 +168,7 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
         linux_build = text.split("\n  linux_x86:", 1)[1].split("\n  macos_arm64:", 1)[0]
         self.assertNotIn("cargo test -p skipprd", linux_build)
         dst = text.split("\n  linux_dst:", 1)[1].split("\n  release_notes:", 1)[0]
+        self.assertIn('run: "cargo test -p skipprd --lib -- sqlrt::dst::"', dst)
         self.assertIn("e2e_file_copy", dst)
         self.assertIn("e2e_file_duckdb", dst)
         plugins = text.split("\n  publish_runtime_plugins:", 1)[1].split("\n    steps:", 1)[0]

@@ -96,6 +96,10 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("cargo test -p skipprd", linux_build)
         self.assertIn("linux_dst:", text)
         self.assertIn("sqlrt::dst::", text)
+        self.assertIn(
+            'run: "cargo test -p skipprd --lib -- sqlrt::dst::"',
+            text,
+        )
         self.assertNotIn("cargo test -p skippr-lease", text)
         self.assertNotIn("cargo check --all-features", text)
         self.assertIn("test_runtime_e2e_harness.py", text)
