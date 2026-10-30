@@ -14,7 +14,7 @@ skipprd stays JWT-ignorant. Fully functional on `skipprd sync` + `sde query` (an
 - Compile-time invariants first: newtypes, enums, exhaustive matches, typed errors.
 - Host MUST NOT depend on `plugins/data_source/otlp`.
 - Do not add `plugins/data_sink/otel`. SkipprLake is the dest.
-- OTLP plugin MUST NOT call Iceberg `Catalog` / `DataSink` APIs. Lake writes are host WAL via existing Arrow IPC (`ingest_runtime_batches_into_core`).
+- OTLP plugin MUST NOT call Iceberg `Catalog` / `DataSink` APIs. Lake writes are host WAL via `IngestBatch` (Arrow IPC bytes, omitted `format` → `ArrowIpc`) through `process_batch`.
 - UDF code is keyed by `PipelineConfigView` / `register_namespace_view` — never `Config::get_pipeline_name()` or `PIPELINE_NAME`.
 - No env/config knobs for payload ceilings, series caps, lookback, or timeouts (code constants).
 - No `skippr observe`, `src/observe/`, `console/`, or skipprd alarm store.
@@ -32,9 +32,9 @@ skipprd stays JWT-ignorant. Fully functional on `skipprd sync` + `sde query` (an
 6. Clustered discover stays rejected. Schema from **host-seeded `OutputMetadata`**.
 7. Dual-plane is shipped (`IcebergWalTableProvider`). UDFs run on that provider. No listing fallback.
 8. skipprd JWT-ignorant. Tenant prune is SQL `WHERE tenant_id = …`.
-9. **Arrow IPC ingest:** plugin decodes OTLP binary (or OTLP JSON → proto) to bronze structs, then Arrow builders. Submit `RuntimeIngestPartitionBatch` via `submit_arrow_ipc_batches`. MUST NOT emit `IngestBatch` NDJSON. MUST NOT add a serde path in `ingest_work.rs`.
+9. **IngestBatch ingest:** plugin decodes OTLP binary (or OTLP JSON → proto) to bronze structs, then Arrow builders, then encodes Arrow IPC **bytes**. Submit `IngestBatch` with `namespace` set to the bronze table (`spans`, `log_records`, …). Host `process_batch` is the only ingest authority. MUST NOT `submit_arrow_ipc_batches` / `PluginDataFrame::IngestBatches`. MUST NOT emit NDJSON.
 10. Dead letters: invalid wire → HTTP 400 / gRPC invalid argument. Builder/schema failure → Arrow batch on `_dl_{pipeline}` with existing deadletter columns.
-11. `inject_fields` for empty `tenant_id` is applied **in the plugin** (Arrow path skips ingest_work JSON inject).
+11. `inject_fields` for empty `tenant_id` is applied **in the plugin** before Arrow IPC bytes are submitted as `IngestBatch`. Host Arrow ingest still applies configured `inject_fields` as columns when set.
 
 ## Constants (code, not env)
 
@@ -51,7 +51,7 @@ skipprd stays JWT-ignorant. Fully functional on `skipprd sync` + `sde query` (an
 
 ```text
 plugins/data_source/otlp/          # DataSource only
-  src/{lib,main,config,bronze,decode,arrow,http,grpc,sync}.rs
+  src/{lib,main,config,bronze,decode,arrow_batch,http,grpc,plugin}.rs
   proto/                           # OTLP protos for tonic-build
   tests/fixtures/
 plugins/data_sink/skipprlake/      # A.19/A.20 partition spec + write values
@@ -84,7 +84,7 @@ docs/docs/query/observability-udfs.md
 | A.7–A.9 | One decode for HTTP protobuf, HTTP JSON, gRPC | fixtures |
 | A.10 | Attribute allowlist; promotion first | keep/drop keys |
 | A.11–A.14 | HTTP `/v1/traces\|logs\|metrics`, JSON content-type, gRPC, bearer, 16 MiB | 401/413/signal filter |
-| A.15 | Contracts + Arrow IPC emit (not IngestBatch JSON) | traces → three namespaces; logs-only no spans |
+| A.15 | Contracts + IngestBatch Arrow IPC bytes (not NDJSON) | traces → three namespaces; logs-only no spans |
 | A.16 | `skipprd connect data-source otlp` | `--help`; plugin name `Otlp` |
 | A.17 | Example three-pipeline YAML | Config parse |
 | A.18 | Discover goldens from bronze/Arrow + `otel_columns.txt` | names match |
@@ -96,7 +96,7 @@ docs/docs/query/observability-udfs.md
 | A.24 | OSS three-process topology notes | docs |
 | A.25 | Bronze → Arrow builders; schema equals seed | IPC round-trip; column names |
 | A.26 | Deadletter Arrow on builder failure; 400 on wire decode | `_dl_*` failure_code |
-| A.27 | SDK `submit_arrow_ipc_batches` | empty / one batch; no ingest_work.rs change |
+| A.27 | SDK `submit_payload_batches` | empty / one batch; host `process_batch` only |
 
 ## Phase B — SQL / UDFs
 

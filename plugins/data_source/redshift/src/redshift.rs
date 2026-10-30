@@ -188,7 +188,7 @@ impl DataSource for DataSourceRedshiftPlugin {
                     let bytes = json_str.len();
                     IngestBatch {
                         offset_key: offset_key.clone(),
-                        data: json_str,
+                        data: json_str.into(),
                         bytes,
                         offset_pos: None,
                         source_uri: format!("redshift://{}/{}", self.config.database, table_name),

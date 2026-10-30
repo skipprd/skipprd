@@ -10,7 +10,7 @@ use tracing::info;
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceNamespaceContract, SourceOnceContract,
 };
-use skippr_runtime_sdk::source_compat::{submit_arrow_ipc_batches, SourceSyncContext};
+use skippr_runtime_sdk::source_compat::{submit_payload_batches, SourceSyncContext};
 use skippr_runtime_sdk::RUNNING;
 
 use crate::arrow_batch::{batches_from_signal, deadletter_batch, ipc_batch, NS_SPANS};
@@ -103,7 +103,7 @@ impl DataSource for DataSourceOtlpPlugin {
                     counter = counter.saturating_add(1);
                     match batches_from_signal(&signal, counter) {
                         Ok(batches) => {
-                            submit_arrow_ipc_batches(ctx.as_ref(), batches)?;
+                            submit_payload_batches(ctx.as_ref(), batches)?;
                         }
                         Err(err) => {
                             let ns = format!("_dl_{}", self.pipeline_name);
@@ -118,7 +118,7 @@ impl DataSource for DataSourceOtlpPlugin {
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                             let ipc = ipc_batch(&ns, &counter.to_string(), batch, counter)
                                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-                            submit_arrow_ipc_batches(ctx.as_ref(), vec![ipc])?;
+                            submit_payload_batches(ctx.as_ref(), vec![ipc])?;
                         }
                     }
                 }
@@ -149,7 +149,10 @@ mod tests {
         let bytes = traces_fixture_request().encode_to_vec();
         let decoded = decode_traces(&bytes, &cfg, &BTreeMap::new()).unwrap();
         let batches = batches_from_signal(&DecodedSignal::Traces(decoded), 1).unwrap();
-        let names: Vec<_> = batches.iter().map(|b| b.namespace.as_str()).collect();
+        let names: Vec<_> = batches
+            .iter()
+            .map(|b| b.namespace.as_deref().unwrap_or(""))
+            .collect();
         assert_eq!(names, ["spans", "span_events", "span_links"]);
     }
 

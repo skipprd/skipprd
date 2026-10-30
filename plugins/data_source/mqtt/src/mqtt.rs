@@ -94,7 +94,7 @@ impl DataSource for DataSourceMqttPlugin {
                 Ok(Ok(Event::Incoming(Packet::Publish(publish)))) => {
                     last_msg = Instant::now();
                     counter += 1;
-                    let data = String::from_utf8_lossy(&publish.payload).into_owned();
+                    let data = publish.payload.to_vec();
                     let bytes = data.len();
                     let offset_key = OffsetKey {
                         namespace: namespace.clone(),

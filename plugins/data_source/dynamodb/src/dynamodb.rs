@@ -241,7 +241,7 @@ impl DataSourceDynamodbPlugin {
 
                         current_batch.push(IngestBatch {
                             offset_key: offset_key.clone(),
-                            data: json_str,
+                            data: json_str.into(),
                             bytes,
                             offset_pos: None,
                             source_uri: format!("dynamodb://{}", table_name),
@@ -571,7 +571,7 @@ impl DataSourceDynamodbPlugin {
 
                     batch.push(IngestBatch {
                         offset_key: shard_offset_key.clone(),
-                        data: json_str,
+                        data: json_str.into(),
                         bytes,
                         offset_pos: None,
                         source_uri: format!("dynamodb-stream://{}/{}", table_name, shard_id),

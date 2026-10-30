@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::helpers::configuration::Config;
-use crate::serdes::decode::decode_records;
+use crate::serdes::decode::{decode_ingest, DecodedIngest};
 use crate::serdes::input_format::InputFormat;
 use crate::serdes::output_format::OutputFormat;
 
@@ -97,29 +97,40 @@ pub enum CopyEncodeError {
     Output(String),
 }
 
-pub fn decode_copy(
+pub fn decode_copy_bytes(
     config: &Config,
     format: InputFormat,
-    payload: &str,
+    payload: &[u8],
 ) -> Result<Vec<CopyWalRecord>, CopyDecodeError> {
-    if matches!(format, InputFormat::ArrowIpc | InputFormat::Parquet) {
-        return Err(CopyDecodeError::Input(
-            "type: copy does not accept Arrow IPC input".to_string(),
-        ));
+    if format == InputFormat::Json {
+        if let Ok(text) = std::str::from_utf8(payload) {
+            if let Some(records) = identity_ndjson(config, format, text) {
+                return Ok(records);
+            }
+        }
     }
-    if let Some(records) = identity_ndjson(config, format, payload) {
-        return Ok(records);
-    }
-    let values = decode_records(config, format, payload).map_err(|err| {
+    match decode_ingest(config, format, payload).map_err(|err| {
         CopyDecodeError::Input(format!("unparseable {} payload: {err}", format.as_str()))
-    })?;
-    Ok(explode_arrays(values)
-        .into_iter()
-        .map(|value| CopyWalRecord {
-            value,
-            identity: None,
-        })
-        .collect())
+    })? {
+        DecodedIngest::Rows(values) => Ok(explode_arrays(values)
+            .into_iter()
+            .map(|value| CopyWalRecord {
+                value,
+                identity: None,
+            })
+            .collect()),
+        DecodedIngest::Arrow(batches) => {
+            let values = crate::ingest::schema_arrow::coerced_batches_to_json_values(&batches)
+                .map_err(|err| CopyDecodeError::Input(err.to_string()))?;
+            Ok(values
+                .into_iter()
+                .map(|value| CopyWalRecord {
+                    value,
+                    identity: None,
+                })
+                .collect())
+        }
+    }
 }
 
 pub fn encode_copy(
@@ -384,7 +395,7 @@ mod tests {
         let sinks = [OutputFormat::Jsonl, OutputFormat::Csv, OutputFormat::Xml];
         for (input, payload) in sources {
             for output in sinks {
-                let decoded = decode_copy(&config, input, &payload).unwrap();
+                let decoded = decode_copy_bytes(&config, input, payload.as_bytes()).unwrap();
                 assert_eq!(decoded.len(), 1, "{input:?} -> {output:?}");
                 let encoded = encode_copy(output, &decoded).unwrap();
                 let round_trip_format = match output {
@@ -393,12 +404,7 @@ mod tests {
                     OutputFormat::Xml => InputFormat::Xml,
                     _ => unreachable!(),
                 };
-                let again = decode_copy(
-                    &config,
-                    round_trip_format,
-                    std::str::from_utf8(&encoded).unwrap(),
-                )
-                .unwrap();
+                let again = decode_copy_bytes(&config, round_trip_format, &encoded).unwrap();
                 let object = cell_map(&again);
                 for (key, expect) in FIXTURE {
                     assert_eq!(
@@ -412,22 +418,60 @@ mod tests {
     }
 
     #[test]
-    fn copy_rejects_arrow_ipc_and_parquet_text() {
+    fn copy_empty_parquet_payload_fails_closed() {
         let config = Config::new();
-        for format in [InputFormat::ArrowIpc, InputFormat::Parquet] {
-            let err = decode_copy(&config, format, "").unwrap_err();
-            assert!(
-                err.to_string().contains("does not accept Arrow IPC input"),
-                "{format:?}: {err}"
-            );
-        }
+        let err = decode_copy_bytes(&config, InputFormat::Parquet, b"").unwrap_err();
+        assert!(err.to_string().contains("unparseable parquet"), "{err}");
+    }
+
+    #[test]
+    fn copy_parquet_bytes_materialize_json_wal_records() {
+        use crate::serdes::parquet::encode_parquet;
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![7i64]))]).unwrap();
+        let bytes = encode_parquet(&[batch]).unwrap();
+        let decoded = decode_copy_bytes(&Config::new(), InputFormat::Parquet, &bytes).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].value["id"], 7);
+        assert!(decoded[0].identity.is_none());
+    }
+
+    #[test]
+    fn copy_parquet_decimal_15_2_materializes_skippr_json() {
+        use crate::serdes::parquet::encode_parquet;
+        use arrow::array::Decimal128Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+        let arr = Decimal128Array::from(vec![Some(12345i128)])
+            .with_precision_and_scale(15, 2)
+            .unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "price",
+            DataType::Decimal128(15, 2),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let bytes = encode_parquet(&[batch]).unwrap();
+        let decoded = decode_copy_bytes(&Config::new(), InputFormat::Parquet, &bytes).unwrap();
+        assert_eq!(decoded.len(), 1);
+        let text = decoded[0].value["price"].to_string();
+        assert!(
+            text.contains("123.45"),
+            "expected coerced 123.45, got {text}"
+        );
     }
 
     #[test]
     fn identity_ndjson_keeps_original_bytes() {
         let config = Config::new();
         let payload = "{\"id\":1,\"name\":\"keep\"}\n";
-        let decoded = decode_copy(&config, InputFormat::Json, payload).unwrap();
+        let decoded = decode_copy_bytes(&config, InputFormat::Json, payload.as_bytes()).unwrap();
         assert_eq!(decoded[0].identity.as_deref(), Some(payload.as_bytes()));
         let encoded = encode_copy(OutputFormat::Jsonl, &decoded).unwrap();
         assert_eq!(encoded, payload.as_bytes());
@@ -436,7 +480,8 @@ mod tests {
     #[test]
     fn json_array_canonicalizes() {
         let config = Config::new();
-        let decoded = decode_copy(&config, InputFormat::Json, r#"[{"id":1},{"id":2}]"#).unwrap();
+        let decoded =
+            decode_copy_bytes(&config, InputFormat::Json, br#"[{"id":1},{"id":2}]"#).unwrap();
         assert_eq!(decoded.len(), 2);
         assert!(decoded.iter().all(|record| record.identity.is_none()));
         let encoded =
@@ -448,7 +493,7 @@ mod tests {
     fn pretty_json_canonicalizes() {
         let config = Config::new();
         let payload = "{\n  \"id\": 1\n}\n";
-        let decoded = decode_copy(&config, InputFormat::Json, payload).unwrap();
+        let decoded = decode_copy_bytes(&config, InputFormat::Json, payload.as_bytes()).unwrap();
         assert!(decoded[0].identity.is_none());
         let encoded =
             String::from_utf8(encode_copy(OutputFormat::Jsonl, &decoded).unwrap()).unwrap();
@@ -458,10 +503,10 @@ mod tests {
     #[test]
     fn nested_json_to_csv_stringifies_objects_and_arrays() {
         let config = Config::new();
-        let decoded = decode_copy(
+        let decoded = decode_copy_bytes(
             &config,
             InputFormat::Json,
-            r#"{"id":1,"detail":{"rmc":"x"},"tags":["a","b"]}"#,
+            br#"{"id":1,"detail":{"rmc":"x"},"tags":["a","b"]}"#,
         )
         .unwrap();
         let csv = String::from_utf8(encode_copy(OutputFormat::Csv, &decoded).unwrap()).unwrap();
@@ -487,10 +532,10 @@ mod tests {
     #[test]
     fn nested_xml_to_csv_stringifies_objects() {
         let config = Config::new();
-        let decoded = decode_copy(
+        let decoded = decode_copy_bytes(
             &config,
             InputFormat::Xml,
-            "<records><record><id>1</id><detail><rmc>x</rmc></detail></record></records>",
+            b"<records><record><id>1</id><detail><rmc>x</rmc></detail></record></records>",
         )
         .unwrap();
         let csv = String::from_utf8(encode_copy(OutputFormat::Csv, &decoded).unwrap()).unwrap();
@@ -552,7 +597,7 @@ mod tests {
             payload.push_str(&format!("{{\"id\":{i},\"name\":\"alpha\"}}\n"));
         }
         let started = std::time::Instant::now();
-        let decoded = decode_copy(&config, InputFormat::Json, &payload).unwrap();
+        let decoded = decode_copy_bytes(&config, InputFormat::Json, payload.as_bytes()).unwrap();
         assert_eq!(decoded.len(), n);
         let encoded = encode_copy(OutputFormat::Jsonl, &decoded).unwrap();
         let estimate: u64 = decoded.iter().map(CopyWalRecord::estimated_wal_bytes).sum();
@@ -578,7 +623,7 @@ mod tests {
             ));
         }
         let started = std::time::Instant::now();
-        let decoded = decode_copy(&config, InputFormat::Json, &payload).unwrap();
+        let decoded = decode_copy_bytes(&config, InputFormat::Json, payload.as_bytes()).unwrap();
         let encoded = encode_copy(OutputFormat::Jsonl, &decoded).unwrap();
         let estimate: u64 = decoded.iter().map(CopyWalRecord::estimated_wal_bytes).sum();
         let elapsed = started.elapsed();

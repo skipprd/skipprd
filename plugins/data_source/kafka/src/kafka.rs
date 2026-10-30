@@ -12,6 +12,7 @@ use tokio::time::{Duration, Instant};
 use tracing::{error, info};
 
 use crate::helpers::plugin_config::PluginConfigEntry;
+use crate::serdes::input_format::InputFormat;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::cdc::{source_capabilities, MutationKind, WalRowMeta};
 use skippr_runtime_sdk::plugins::{
@@ -163,6 +164,7 @@ impl DataSource for DataSourceKafkaPlugin {
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let namespace = format!("kafka.{}", self.config.topic);
+        let format = InputFormat::from_option(self.config.format.as_deref());
         let is_batch = self.config.mode.as_deref() == Some("batch");
         let idle_timeout_dur = Duration::from_secs(self.config.idle_timeout_seconds.unwrap_or(5));
         let mut last_msg = Instant::now();
@@ -183,13 +185,59 @@ impl DataSource for DataSourceKafkaPlugin {
                 Ok(Some(Ok(msg))) => {
                     last_msg = Instant::now();
                     _counter += 1;
-                    let payload = match msg.payload_view::<str>() {
-                        Some(Ok(s)) => s.to_string(),
-                        Some(Err(_)) => {
-                            let bytes = msg.payload().unwrap_or(&[]);
-                            String::from_utf8_lossy(bytes).into_owned()
+                    let payload_bytes = match msg.payload() {
+                        Some(bytes) if !bytes.is_empty() => bytes.to_vec(),
+                        _ => continue,
+                    };
+                    if !cdc && format.requires_whole_payload() {
+                        let offset_key = OffsetKey {
+                            namespace: namespace.clone(),
+                            partition: format!("{}:{}", msg.partition(), msg.offset()),
+                        };
+                        let bytes = payload_bytes.len();
+                        submit_payload_batches(
+                            ctx.as_ref(),
+                            vec![IngestBatch {
+                                offset_key,
+                                data: payload_bytes,
+                                bytes,
+                                offset_pos: None,
+                                source_uri: format!(
+                                    "kafka://{}/{}",
+                                    self.config.brokers, self.config.topic
+                                ),
+                                namespace: Some(namespace.clone()),
+                                cdc_rows: None,
+                            }],
+                        )?;
+                        continue;
+                    }
+                    let payload = match std::str::from_utf8(&payload_bytes) {
+                        Ok(text) => text.to_string(),
+                        Err(_) if !cdc => {
+                            let offset_key = OffsetKey {
+                                namespace: namespace.clone(),
+                                partition: format!("{}:{}", msg.partition(), msg.offset()),
+                            };
+                            let bytes = payload_bytes.len();
+                            submit_payload_batches(
+                                ctx.as_ref(),
+                                vec![IngestBatch {
+                                    offset_key,
+                                    data: payload_bytes,
+                                    bytes,
+                                    offset_pos: None,
+                                    source_uri: format!(
+                                        "kafka://{}/{}",
+                                        self.config.brokers, self.config.topic
+                                    ),
+                                    namespace: Some(namespace.clone()),
+                                    cdc_rows: None,
+                                }],
+                            )?;
+                            continue;
                         }
-                        None => continue,
+                        Err(_) => continue,
                     };
 
                     let offset_key = OffsetKey {
@@ -228,7 +276,7 @@ impl DataSource for DataSourceKafkaPlugin {
                         ctx.as_ref(),
                         vec![IngestBatch {
                             offset_key,
-                            data,
+                            data: data.into(),
                             bytes,
                             offset_pos: None,
                             source_uri: format!(

@@ -9,6 +9,9 @@ use arrow::datatypes::TimeUnit::{Microsecond, Millisecond};
 
 const EMPTY_STRUCT_MARKER_FIELD: &str = "__skippr_empty_struct";
 
+pub const SKIPPR_DECIMAL_PRECISION: u8 = 38;
+pub const SKIPPR_DECIMAL_SCALE: i8 = 9;
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum InferredType {
@@ -131,7 +134,7 @@ fn set_object_scalar_field_type(
     Ok(())
 }
 
-fn convert_skippr_type_to_arrow_data_type(
+pub(crate) fn convert_skippr_type_to_arrow_data_type(
     skippr_type: &SkipprDataType,
 ) -> Result<DataType, ArrowError> {
     match skippr_type {
@@ -143,7 +146,10 @@ fn convert_skippr_type_to_arrow_data_type(
         SkipprDataType::Long => Ok(DataType::Int64),
         SkipprDataType::Double => Ok(DataType::Float64),
         SkipprDataType::Float => Ok(DataType::Float32),
-        SkipprDataType::Decimal => Ok(DataType::Decimal128(38, 9)),
+        SkipprDataType::Decimal => Ok(DataType::Decimal128(
+            SKIPPR_DECIMAL_PRECISION,
+            SKIPPR_DECIMAL_SCALE,
+        )),
         SkipprDataType::String => Ok(DataType::Utf8),
         SkipprDataType::Timestamp => Ok(DataType::Timestamp(Millisecond, None)),
         SkipprDataType::TimestampMilli => Ok(DataType::Timestamp(Millisecond, None)),
@@ -453,7 +459,7 @@ fn convert_skippr_to_arrow_field_types(
             SkipprDataType::Decimal => set_object_scalar_field_type(
                 &mut field_types,
                 &v.out_field_name,
-                DataType::Decimal128(38, 9),
+                DataType::Decimal128(SKIPPR_DECIMAL_PRECISION, SKIPPR_DECIMAL_SCALE),
             )
             .expect("Error setting object scalar field decimal type"),
             SkipprDataType::String => {
@@ -542,7 +548,10 @@ mod tests {
             (SkipprDataType::Long, DataType::Int64),
             (SkipprDataType::Float, DataType::Float32),
             (SkipprDataType::Double, DataType::Float64),
-            (SkipprDataType::Decimal, DataType::Decimal128(38, 9)),
+            (
+                SkipprDataType::Decimal,
+                DataType::Decimal128(SKIPPR_DECIMAL_PRECISION, SKIPPR_DECIMAL_SCALE),
+            ),
             (SkipprDataType::String, DataType::Utf8),
             (
                 SkipprDataType::Timestamp,

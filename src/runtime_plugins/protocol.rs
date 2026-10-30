@@ -25,13 +25,14 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
+// Protocol 24: IngestBatch.data is bytes; prepared IPC ingest frames are gone.
 // Protocol 23: HostFrame::ApplyAlter for SchemaSink migrations.
 // Protocol 22: PipelineType is a bincode u32 (YAML/JSON stay lowercase names).
 // 18.3.1 keeps protocol 22 and rejects trailing frame bytes so a too-long
 // payload cannot steal the next length prefix (EU Staging COPY desync).
 // Bump every plugin crate patch when this constant changes so catalog paths
 // stay immutable.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 23;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 24;
 pub const COMMIT_RECEIPT_VERSION: u32 = 1;
 pub const CATALOG_INTENT_VERSION: u32 = 2;
 pub const GLUE_PARTITION_CATALOG_INTENT_VERSION: u32 = 1;
@@ -454,12 +455,6 @@ pub struct RuntimeCheckpointUpdate {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct RuntimeOffsetPosition {
-    pub key: OffsetKey,
-    pub position: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeOffsetMaterializationHint {
     pub key: OffsetKey,
     pub position: u64,
@@ -499,24 +494,9 @@ pub enum HostOffsetFrame {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeIngestPartitionBatch {
-    pub sink_ref: String,
-    pub namespace: String,
-    pub partition: String,
-    pub time: Option<i64>,
-    pub schema_fingerprint: String,
-    pub offsets: Vec<RuntimeOffsetPosition>,
-    pub arrow_stream_bytes: Vec<u8>,
-    pub cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
-    /// When set, persisted atomically with this batch's WAL segment after offsets are durable.
-    #[serde(default)]
-    pub checkpoint_update: Option<RuntimeCheckpointUpdate>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimeRawIngestBatch {
     pub offset_key: OffsetKey,
-    pub data: String,
+    pub data: Vec<u8>,
     pub bytes: usize,
     /// Always present on the bincode wire (use `None` when unset). Do not use
     /// `skip_serializing_if` here — bincode + serde will not apply defaults for omitted fields.
@@ -919,10 +899,6 @@ pub enum PluginDataFrame {
     SourcePayloadBatches {
         request_id: u64,
         tasks: Vec<Vec<RuntimeRawIngestBatch>>,
-    },
-    IngestBatches {
-        request_id: u64,
-        batches: Vec<RuntimeIngestPartitionBatch>,
     },
     CheckpointUpdate {
         update: RuntimeCheckpointUpdate,
@@ -1481,8 +1457,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_hard_cut_to_v23() {
-        assert_eq!(RUNTIME_PROTOCOL_VERSION, 23);
+    fn protocol_version_is_hard_cut_to_v24() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 24);
     }
 
     #[test]

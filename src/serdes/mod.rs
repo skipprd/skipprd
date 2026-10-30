@@ -1,3 +1,4 @@
+pub mod avro;
 pub mod copy;
 pub mod csv;
 pub mod decode;
@@ -7,4 +8,5 @@ pub mod json_benchmarks;
 pub mod ndjson_fast;
 pub mod optimized_json;
 pub mod output_format;
+pub mod parquet;
 pub mod xml;

@@ -220,7 +220,7 @@ impl DataSourceLinkedInAdsPlugin {
             ctx,
             vec![IngestBatch {
                 offset_key: OffsetKey::new(stream.namespace, offset),
-                data: payload,
+                data: payload.into(),
                 bytes,
                 offset_pos: None,
                 source_uri: format!("linkedin-ads://{}", self.account_id),

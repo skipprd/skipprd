@@ -29,6 +29,49 @@ fn a_flatten_on_vs_off_field_ids_stable() {
 }
 
 #[test]
+fn e_schema_arrow_decimal_15_2_rescales_to_38_9() {
+    use crate::ingest::schema_arrow::{
+        coerce_record_batch_to_skippr, skippr_schema_from_source, SKIPPR_DECIMAL_PRECISION,
+        SKIPPR_DECIMAL_SCALE,
+    };
+    use crate::serdes::decode::{decode_ingest, DecodedIngest};
+    use crate::serdes::input_format::InputFormat;
+    use crate::serdes::parquet::encode_parquet;
+    use arrow::array::Decimal128Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    let arr = Decimal128Array::from(vec![Some(12345i128)])
+        .with_precision_and_scale(15, 2)
+        .unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "l_extendedprice",
+        DataType::Decimal128(15, 2),
+        true,
+    )]));
+    let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+    let bytes = encode_parquet(&[batch]).unwrap();
+    let DecodedIngest::Arrow(batches) = decode_ingest(
+        &crate::helpers::configuration::Config::new(),
+        InputFormat::Parquet,
+        &bytes,
+    )
+    .unwrap() else {
+        panic!("parquet must be Arrow");
+    };
+    let skippr_schema = skippr_schema_from_source(&batches[0].schema()).unwrap();
+    let coerced = coerce_record_batch_to_skippr(&batches[0], skippr_schema).unwrap();
+    match coerced.schema().field(0).data_type() {
+        DataType::Decimal128(p, s) => {
+            assert_eq!(*p, SKIPPR_DECIMAL_PRECISION);
+            assert_eq!(*s, SKIPPR_DECIMAL_SCALE);
+        }
+        other => panic!("expected Decimal128(38,9), got {other}"),
+    }
+}
+
+#[test]
 fn e_type_widen_legal_illegal_promotion() {
     assert!(is_iceberg_legal_promote(
         &SkipprDataType::Integer,

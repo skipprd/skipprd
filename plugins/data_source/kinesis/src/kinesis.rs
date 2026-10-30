@@ -297,7 +297,7 @@ impl DataSourceKinesisPlugin {
 
                 for rec in records {
                     let seq = rec.sequence_number().to_string();
-                    let data = String::from_utf8_lossy(rec.data().as_ref()).into_owned();
+                    let data = rec.data().as_ref().to_vec();
                     let bytes = data.len();
                     let offset_key = OffsetKey {
                         namespace: format!("kinesis:{stream_name}:{sid}"),

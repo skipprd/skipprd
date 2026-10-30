@@ -16,15 +16,11 @@ use zip::ZipArchive;
 
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::serdes::input_format::InputFormat;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use skippr_runtime_sdk::helpers::configuration::runtime_child_config;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
-use skippr_runtime_sdk::protocol::RuntimeOffsetPosition;
-use skippr_runtime_sdk::sdk::encode_record_batches;
 use skippr_runtime_sdk::source_compat::{
-    partition_already_closed, submit_arrow_ipc_batches, submit_payload_batch_groups, IngestBatch,
-    RuntimeIngestPartitionBatch, SourceSyncContext,
+    partition_already_closed, submit_payload_batch_groups, IngestBatch, SourceSyncContext,
 };
 
 type BatchSender = UnboundedSender<Vec<Vec<IngestBatch>>>;
@@ -91,8 +87,8 @@ fn emit_batch(tx: &BatchSender, batch: IngestBatch) {
 }
 
 fn read_whole_payload<R: Read>(mut reader: R, offset_key: &OffsetKey, tx: &BatchSender) {
-    let mut ingest_data = String::new();
-    if reader.read_to_string(&mut ingest_data).is_err() || ingest_data.is_empty() {
+    let mut ingest_data = Vec::new();
+    if reader.read_to_end(&mut ingest_data).is_err() || ingest_data.is_empty() {
         return;
     }
 
@@ -102,7 +98,7 @@ fn read_whole_payload<R: Read>(mut reader: R, offset_key: &OffsetKey, tx: &Batch
             offset_key: offset_key.clone(),
             bytes: ingest_data.len(),
             offset_pos: None,
-            data: ingest_data,
+            data: ingest_data.into(),
             source_uri: String::new(),
             namespace: None,
             cdc_rows: None,
@@ -134,7 +130,7 @@ fn read_line_chunks<R: Read>(reader: R, offset_key: &OffsetKey, tx: &BatchSender
                 tx,
                 IngestBatch {
                     offset_key: offset_key.clone(),
-                    data: std::mem::take(&mut ingest_data),
+                    data: std::mem::take(&mut ingest_data).into_bytes(),
                     bytes: batch_bytes as usize,
                     offset_pos: None,
                     source_uri: String::new(),
@@ -151,7 +147,7 @@ fn read_line_chunks<R: Read>(reader: R, offset_key: &OffsetKey, tx: &BatchSender
             tx,
             IngestBatch {
                 offset_key: offset_key.clone(),
-                data: ingest_data,
+                data: ingest_data.into_bytes(),
                 bytes: batch_bytes as usize,
                 offset_pos: None,
                 source_uri: String::new(),
@@ -176,40 +172,6 @@ fn process_reader<R: Read>(
     }
 }
 
-const PARQUET_ARROW_ROWS: usize = 16_384;
-
-fn for_each_parquet_ipc_batch(
-    path: &Path,
-    offset_key: &OffsetKey,
-    mut on_batch: impl FnMut(RuntimeIngestPartitionBatch) -> Result<(), std::io::Error>,
-) -> Result<(), std::io::Error> {
-    let file = File::open(path)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(std::io::Error::other)?
-        .with_batch_size(PARQUET_ARROW_ROWS);
-    let reader = builder.build().map_err(std::io::Error::other)?;
-    let mut offset_pos = 0u64;
-    for batch in reader {
-        let batch = batch.map_err(std::io::Error::other)?;
-        offset_pos = offset_pos.saturating_add(batch.num_rows() as u64);
-        on_batch(RuntimeIngestPartitionBatch {
-            sink_ref: String::new(),
-            namespace: offset_key.namespace.clone(),
-            partition: offset_key.partition.clone(),
-            time: None,
-            schema_fingerprint: String::new(),
-            offsets: vec![RuntimeOffsetPosition {
-                key: offset_key.clone(),
-                position: offset_pos,
-            }],
-            arrow_stream_bytes: encode_record_batches(&[batch])?,
-            cdc_rows: None,
-            checkpoint_update: None,
-        })?;
-    }
-    Ok(())
-}
-
 impl DataSourceLocalFilePlugin {
     pub fn with_runtime_config(config: DataSourceLocalFilePluginConfig, data_dir: &str) -> Self {
         let temp_dir = format!("{}/source", data_dir);
@@ -217,35 +179,10 @@ impl DataSourceLocalFilePlugin {
         DataSourceLocalFilePlugin { temp_dir, config }
     }
 
-    fn sync_parquet(&self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
-        let ingest_config = runtime_child_config();
-        let source_dir = self.config.path.clone();
-        for path in collect_source_files(Path::new(&source_dir)) {
-            let closed_key = IngestBatch::runtime_roundtrip_offset_key(
-                &ingest_config,
-                file_source_namespace(&source_dir),
-                path.to_str().unwrap().to_string(),
-            );
-            if partition_already_closed(ctx.as_ref(), &closed_key)? {
-                continue;
-            }
-            // Arrow ingest publishes offset keys as submitted; list-time Closed
-            // checks the twice-normalized key, so submit that key.
-            for_each_parquet_ipc_batch(&path, &closed_key, |batch| {
-                submit_arrow_ipc_batches(ctx.as_ref(), vec![batch]).map(|_| ())
-            })?;
-        }
-        Ok(())
-    }
-
     pub async fn run_sync(
         &mut self,
         ctx: Arc<dyn SourceSyncContext>,
     ) -> Result<(), std::io::Error> {
-        let input_format = InputFormat::from_option(self.config.format.as_deref());
-        if input_format == InputFormat::Parquet {
-            return self.sync_parquet(ctx);
-        }
         let mut data_batches_stream = Box::pin(self.prepare_data_for_processing(
             ctx.clone(),
             self.config.path.clone(),
@@ -266,11 +203,6 @@ impl DataSourceLocalFilePlugin {
     ) -> Result<impl futures::Stream<Item = Vec<Vec<IngestBatch>>>, std::io::Error> {
         let (tx, rx) = futures::channel::mpsc::unbounded();
         let input_format = InputFormat::from_option(self.config.format.as_deref());
-        if input_format == InputFormat::Parquet {
-            return Err(std::io::Error::other(
-                "parquet File ingest uses Arrow IPC, not text payloads",
-            ));
-        }
         let ingest_config = runtime_child_config();
         for path in collect_source_files(Path::new(&source_dir)) {
             let offset_key = OffsetKey {
@@ -393,13 +325,14 @@ impl DataSource for DataSourceLocalFilePlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_source_files, file_source_namespace, for_each_parquet_ipc_batch};
+    use super::{
+        collect_source_files, file_source_namespace, process_reader, IngestBatch, InputFormat,
+    };
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::arrow_writer::ArrowWriter;
     use skippr_runtime_sdk::progress::OffsetKey;
-    use skippr_runtime_sdk::sdk::decode_record_batch_stream;
     use std::fs;
     use std::fs::File;
     use std::sync::Arc;
@@ -433,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn parquet_files_become_arrow_ipc_ingest_batches() {
+    fn parquet_files_are_submitted_as_whole_ingest_batch_bytes() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -458,23 +391,20 @@ mod tests {
         writer.write(&batch).unwrap();
         writer.close().unwrap();
         let offset_key = OffsetKey::new("people", path.to_str().unwrap());
-        let mut batches = Vec::new();
-        for_each_parquet_ipc_batch(&path, &offset_key, |batch| {
-            batches.push(batch);
-            Ok(())
-        })
-        .unwrap();
-        let _ = fs::remove_dir_all(&dir);
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].sink_ref, "");
-        assert_eq!(batches[0].namespace, "people");
-        assert_eq!(batches[0].offsets[0].position, 2);
-        let decoded = decode_record_batch_stream(batches[0].arrow_stream_bytes.clone()).unwrap();
-        futures::executor::block_on(async {
+        let file = File::open(&path).unwrap();
+        let (tx, rx) = futures::channel::mpsc::unbounded::<Vec<Vec<IngestBatch>>>();
+        process_reader(file, &offset_key, &tx, InputFormat::Parquet, 1_000_000);
+        drop(tx);
+        let groups: Vec<Vec<Vec<IngestBatch>>> = futures::executor::block_on(async {
             use futures::StreamExt;
-            let mut stream = decoded;
-            let got = stream.next().await.unwrap().unwrap();
-            assert_eq!(got.num_rows(), 2);
+            rx.collect().await
         });
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 1);
+        assert_eq!(groups[0][0].len(), 1);
+        let payload = &groups[0][0][0].data;
+        assert!(payload.starts_with(b"PAR1"), "parquet magic");
+        assert!(payload.len() > 4);
     }
 }

@@ -117,7 +117,7 @@ impl DataSourceGooglePageSpeedPlugin {
             ctx,
             vec![IngestBatch {
                 offset_key: OffsetKey::new(namespace, run_date.to_string()),
-                data: payload,
+                data: payload.into(),
                 bytes,
                 offset_pos: None,
                 source_uri: format!("google-pagespeed://{}", self.config.site),

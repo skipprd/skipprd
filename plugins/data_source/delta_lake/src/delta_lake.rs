@@ -133,7 +133,7 @@ impl DataSource for DataSourceDeltaLakePlugin {
                 let bytes = json_str.len();
                 current_batch.push(IngestBatch {
                     offset_key: offset_key.clone(),
-                    data: json_str,
+                    data: json_str.into(),
                     bytes,
                     offset_pos: None,
                     source_uri: format!("delta://{}", self.config.table_uri),

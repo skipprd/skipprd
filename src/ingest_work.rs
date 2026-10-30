@@ -8,7 +8,7 @@ use crate::helpers::{Helpers, IngestTransformSnapshot};
 use crate::ingest::ingest::ingest;
 use crate::runtime_plugins::protocol::{RuntimeExecutionMode, RuntimeRawIngestBatch};
 use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
-use crate::serdes::decode::decode_records;
+use crate::serdes::decode::{decode_ingest, DecodedIngest};
 use crate::serdes::input_format::InputFormat;
 use crate::serdes::ndjson_fast::NdjsonLineParser;
 use crate::{
@@ -262,6 +262,39 @@ fn apply_transform_inject_fields(config: &Config, record: &mut Value) {
         return;
     }
     merge_inject_fields(record, &fields);
+}
+
+fn inject_fields_into_record_batch(
+    batch: arrow::record_batch::RecordBatch,
+    fields: &std::collections::BTreeMap<String, Value>,
+) -> Result<arrow::record_batch::RecordBatch, String> {
+    if fields.is_empty() {
+        return Ok(batch);
+    }
+    let n = batch.num_rows();
+    let mut schema_fields: Vec<std::sync::Arc<arrow::datatypes::Field>> =
+        batch.schema().fields().iter().cloned().collect();
+    let mut columns = batch.columns().to_vec();
+    for (name, value) in fields {
+        if batch.schema().index_of(name).is_ok() {
+            continue;
+        }
+        let text = match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        schema_fields.push(std::sync::Arc::new(arrow::datatypes::Field::new(
+            name,
+            arrow::datatypes::DataType::Utf8,
+            true,
+        )));
+        columns.push(std::sync::Arc::new(arrow::array::StringArray::from(vec![
+            text;
+            n
+        ])));
+    }
+    let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(schema_fields));
+    arrow::record_batch::RecordBatch::try_new(schema, columns).map_err(|err| err.to_string())
 }
 
 const EMPTY_PARTITION: &str = "";
@@ -897,6 +930,109 @@ fn merge_dl_offset_for_key(
 
 /// Whether a record at `offset_pos` should be ingested given one offset snapshot.
 /// Immutable inputs rely on `Closed`; line positions apply only to CDC or explicit `offset_pos`.
+fn ingest_schema_arrow_batches(
+    config: &Config,
+    transform_snap: &IngestTransformSnapshot,
+    primary_sink_ref: &str,
+    ingest_batch: &IngestBatch,
+    batches: Vec<arrow::record_batch::RecordBatch>,
+    offset_snapshot: Option<&OffsetValue>,
+    is_cdc_batch: bool,
+    track_position: bool,
+    buf: &mut HashMap<IngestPartitionKey, IngestBufferBatch>,
+    schema_hash_cache: &mut HashMap<String, SchemaHash>,
+    i: &mut u64,
+    j: &mut i32,
+    latest_timestamp: &mut i64,
+) -> Result<(), String> {
+    let pipeline_name = config.get_pipeline_name();
+    let ns_override = ingest_batch
+        .namespace
+        .clone()
+        .unwrap_or_else(|| pipeline_name.clone());
+    let offset_pos = ingest_batch.offset_pos.unwrap_or_else(|| {
+        batches
+            .iter()
+            .map(|b| b.num_rows() as u64)
+            .sum::<u64>()
+            .max(1)
+    });
+    if !should_ingest_at_offset(offset_snapshot, is_cdc_batch, track_position, offset_pos) {
+        return Ok(());
+    }
+    for batch in batches {
+        let coerced = crate::ingest::schema_arrow::coerce_record_batch_to_skippr(
+            &batch,
+            crate::ingest::schema_arrow::skippr_schema_from_source(&batch.schema())
+                .map_err(|err| err.to_string())?,
+        )
+        .map_err(|err| err.to_string())?;
+        let coerced =
+            inject_fields_into_record_batch(coerced, &config.get_transform_inject_fields())?;
+        let skpr_namespace = storage_namespace(config, &ns_override);
+        let skpr_partition = if transform_snap.skip_partition_parse {
+            EMPTY_PARTITION.to_string()
+        } else {
+            let view = schema_arrow_json_row(&coerced, 0)?;
+            Helpers::parse_partition_field_with_fields(
+                config,
+                &view,
+                &PARTITION_ALLOWED_VALUES_CACHE.with(|cache| cache.read().unwrap().clone()),
+                &transform_snap.partition_fields,
+            )
+        };
+        let skpr_time = if transform_snap.skip_time_parse {
+            None
+        } else {
+            let view = schema_arrow_json_row(&coerced, 0)?;
+            Helpers::parse_time_field_with_fields(&view, &transform_snap.time_fields)
+        };
+        let skpr_time_bucket = skpr_time.map(|event_time| {
+            if event_time > *latest_timestamp {
+                *latest_timestamp = event_time;
+            }
+            crate::buffer::BufferChunker::event_time_bucket(config, event_time)
+        });
+        let schema_hash =
+            resolve_partition_schema(config, &skpr_namespace, false, schema_hash_cache);
+        let key = track_partition_offset_with_schema(
+            buf,
+            primary_sink_ref,
+            &schema_hash,
+            &skpr_namespace,
+            &skpr_partition,
+            &skpr_time_bucket,
+            &ingest_batch.offset_key,
+            offset_pos,
+            None,
+            &mut HashMap::new(),
+        );
+        if let crate::buffer::segment_file::WalPayload::Arrow(ref mut existing) =
+            buf.get_mut(&key).expect("tracked").payload
+        {
+            existing.push(coerced);
+        }
+        *i = i.saturating_add(batch.num_rows() as u64);
+        *j = j.saturating_add(batch.num_rows() as i32);
+    }
+    Ok(())
+}
+
+fn schema_arrow_json_row(
+    batch: &arrow::record_batch::RecordBatch,
+    row: usize,
+) -> Result<Value, String> {
+    if row >= batch.num_rows() {
+        return Ok(Value::Object(Default::default()));
+    }
+    let sliced = batch.slice(row, 1);
+    let mut values = crate::ingest::schema_arrow::record_batch_to_json_values(&sliced)
+        .map_err(|err| err.to_string())?;
+    Ok(values
+        .pop()
+        .unwrap_or_else(|| Value::Object(Default::default())))
+}
+
 fn should_ingest_at_offset(
     snapshot: Option<&OffsetValue>,
     is_cdc_batch: bool,
@@ -1141,7 +1277,7 @@ fn commit_deadletters(
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct IngestBatch {
     pub offset_key: OffsetKey,
-    pub data: String,
+    pub data: Vec<u8>,
     pub bytes: usize,
     pub offset_pos: Option<u64>,
     #[allow(dead_code)]
@@ -1193,7 +1329,7 @@ impl IngestBatch {
     pub fn new(
         config: &Config,
         offset_key: OffsetKey,
-        data: String,
+        data: impl Into<Vec<u8>>,
         bytes: usize,
         source_uri: String,
         namespace: Option<String>,
@@ -1203,7 +1339,7 @@ impl IngestBatch {
             Self::normalized_offset_key(config, offset_key.namespace, offset_key.partition);
         Self {
             offset_key,
-            data,
+            data: data.into(),
             bytes,
             offset_pos: None,
             source_uri,
@@ -1215,7 +1351,7 @@ impl IngestBatch {
     pub fn new_with_offset_pos(
         config: &Config,
         offset_key: OffsetKey,
-        data: String,
+        data: impl Into<Vec<u8>>,
         bytes: usize,
         offset_pos: u64,
         source_uri: String,
@@ -1233,7 +1369,7 @@ impl IngestBatch {
         &self.offset_key
     }
 
-    pub fn data(&self) -> &str {
+    pub fn data(&self) -> &[u8] {
         &self.data
     }
 
@@ -2466,6 +2602,10 @@ impl Ingest {
                     let pipeline_metadata_arc = METADATA.load();
                     let mut pipeline_metadata: PipelineMetadata =
                         pipeline_metadata_arc.as_ref().clone();
+                    let format = match config.get_pipeline_input_plugin_config() {
+                        Ok(plugin) => plugin.input_format(),
+                        Err(_) => Default::default(),
+                    };
 
                     let mut count: u64 = 0;
 
@@ -2479,13 +2619,33 @@ impl Ingest {
                                 None
                             }
                         };
-                        count += self.analyse_schema.infer_json_schema(
-                            config,
-                            &mut data.data.clone(),
-                            Some(max_records),
-                            &mut pipeline_metadata.metadata,
-                            batch_ns.as_deref(),
-                        );
+                        if format.is_schema_arrow() {
+                            if let Ok(DecodedIngest::Arrow(batches)) =
+                                decode_ingest(config, format, &data.data)
+                            {
+                                if let Some(batch) = batches.first() {
+                                    if let Ok(derived) =
+                                        crate::ingest::schema_arrow::metadata_for_arrow_schema(
+                                            &batch.schema(),
+                                        )
+                                    {
+                                        let ns = batch_ns
+                                            .clone()
+                                            .unwrap_or_else(|| config.get_pipeline_name());
+                                        pipeline_metadata.metadata.insert(ns, derived);
+                                        count = count.saturating_add(batch.num_rows() as u64);
+                                    }
+                                }
+                            }
+                        } else if let Ok(mut text) = String::from_utf8(data.data.clone()) {
+                            count += self.analyse_schema.infer_json_schema(
+                                config,
+                                &mut text,
+                                Some(max_records),
+                                &mut pipeline_metadata.metadata,
+                                batch_ns.as_deref(),
+                            );
+                        }
 
                         {
                             *NUM_ANALYSED_RECORDS.write() += count;
@@ -2798,31 +2958,38 @@ impl Ingest {
         let mut dl_offsets: HashMap<OffsetKey, u64> = HashMap::new();
 
         for ingest_batch in datas.iter() {
-            let records = match crate::serdes::copy::decode_copy(config, format, &ingest_batch.data)
-            {
-                Ok(records) => records,
-                Err(err) => {
-                    let decode_offset_pos = ingest_batch.data.lines().count().max(1) as u64;
-                    dl_records.push(DeadletterRecord {
-                        namespace: pipeline_name.clone(),
-                        record: ingest_batch.data.clone(),
-                        error: err.to_string(),
-                        failure_code: "INPUT_FORMAT".to_string(),
-                        event_time: None,
-                        source_uri: ingest_batch.source_uri.clone(),
-                        offset_key: format!(
-                            "{}:{}",
-                            ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition
-                        ),
-                        offset_pos: 1,
-                    });
-                    dl_offsets
-                        .entry(ingest_batch.offset_key.clone())
-                        .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
-                        .or_insert(decode_offset_pos);
-                    continue;
-                }
-            };
+            let records =
+                match crate::serdes::copy::decode_copy_bytes(config, format, &ingest_batch.data) {
+                    Ok(records) => records,
+                    Err(err) => {
+                        let decode_offset_pos = std::str::from_utf8(&ingest_batch.data)
+                            .map(|text| text.lines().count().max(1) as u64)
+                            .unwrap_or(1);
+                        dl_records.push(DeadletterRecord {
+                            namespace: pipeline_name.clone(),
+                            record: String::from_utf8(ingest_batch.data.clone()).unwrap_or_else(
+                                |_| {
+                                    format!("{} {} bytes", format.as_str(), ingest_batch.data.len())
+                                },
+                            ),
+                            error: err.to_string(),
+                            failure_code: "INPUT_FORMAT".to_string(),
+                            event_time: None,
+                            source_uri: ingest_batch.source_uri.clone(),
+                            offset_key: format!(
+                                "{}:{}",
+                                ingest_batch.offset_key.namespace,
+                                ingest_batch.offset_key.partition
+                            ),
+                            offset_pos: 1,
+                        });
+                        dl_offsets
+                            .entry(ingest_batch.offset_key.clone())
+                            .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
+                            .or_insert(decode_offset_pos);
+                        continue;
+                    }
+                };
             let offset_pos = ingest_batch
                 .offset_pos
                 .unwrap_or_else(|| records.len().max(1) as u64);
@@ -3102,30 +3269,118 @@ impl Ingest {
             let is_cdc_batch = ingest_batch.cdc_rows().is_some();
             let track_position = is_cdc_batch || ingest_batch.offset_pos.is_some();
 
-            let use_ndjson_stream = ndjson_object_stream_eligible(
-                config,
-                format,
-                &ingest_batch.data,
-                &entity_field_dot,
-                is_cdc_batch,
-            );
+            let payload_text = std::str::from_utf8(&ingest_batch.data).ok();
+            let use_ndjson_stream = payload_text
+                .map(|text| {
+                    ndjson_object_stream_eligible(
+                        config,
+                        format,
+                        text,
+                        &entity_field_dot,
+                        is_cdc_batch,
+                    )
+                })
+                .unwrap_or(false);
 
             let flatten_started = Instant::now();
             let flatten_iter = if use_ndjson_stream {
-                IngestFlattenIter::from_ndjson(&ingest_batch.data)
+                IngestFlattenIter::from_ndjson(payload_text.unwrap_or(""))
             } else {
                 let decode_started = Instant::now();
                 let mut records: Vec<Value> =
-                    match decode_records(config, format, &ingest_batch.data) {
-                        Ok(records) => records,
+                    match decode_ingest(config, format, &ingest_batch.data) {
+                        Ok(DecodedIngest::Rows(records)) => records,
+                        Ok(DecodedIngest::Arrow(batches)) => {
+                            ingest_profile::add_decode_ns(
+                                decode_started.elapsed().as_nanos() as u64
+                            );
+                            if ingest_batch.cdc_rows().is_some() {
+                                panic!(
+                                    "schema'd {} ingest for {}:{} cannot carry CDC row sidecars",
+                                    format.as_str(),
+                                    ingest_batch.offset_key.namespace,
+                                    ingest_batch.offset_key.partition
+                                );
+                            }
+                            if flatten {
+                                match crate::ingest::schema_arrow::coerced_batches_to_json_values(
+                                    &batches,
+                                ) {
+                                    Ok(records) => records,
+                                    Err(err) => {
+                                        dl_records.push(DeadletterRecord {
+                                            namespace: config.get_pipeline_name(),
+                                            record: format!(
+                                                "{} {} bytes",
+                                                format.as_str(),
+                                                ingest_batch.data.len()
+                                            ),
+                                            error: err.to_string(),
+                                            failure_code: "INPUT_FORMAT".to_string(),
+                                            event_time: None,
+                                            source_uri: ingest_batch.source_uri.clone(),
+                                            offset_key: format!(
+                                                "{}:{}",
+                                                ingest_batch.offset_key.namespace,
+                                                ingest_batch.offset_key.partition
+                                            ),
+                                            offset_pos: 1,
+                                        });
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                if let Err(err) = ingest_schema_arrow_batches(
+                                    config,
+                                    &transform_snap,
+                                    &primary_sink_ref,
+                                    ingest_batch,
+                                    batches,
+                                    offset_snapshot.as_ref(),
+                                    is_cdc_batch,
+                                    track_position,
+                                    &mut buf,
+                                    &mut schema_hash_cache,
+                                    &mut i,
+                                    &mut _j,
+                                    &mut latest_timestamp,
+                                ) {
+                                    dl_records.push(DeadletterRecord {
+                                        namespace: config.get_pipeline_name(),
+                                        record: format!(
+                                            "{} {} bytes",
+                                            format.as_str(),
+                                            ingest_batch.data.len()
+                                        ),
+                                        error: err,
+                                        failure_code: "INPUT_FORMAT".to_string(),
+                                        event_time: None,
+                                        source_uri: ingest_batch.source_uri.clone(),
+                                        offset_key: format!(
+                                            "{}:{}",
+                                            ingest_batch.offset_key.namespace,
+                                            ingest_batch.offset_key.partition
+                                        ),
+                                        offset_pos: 1,
+                                    });
+                                }
+                                continue;
+                            }
+                        }
                         Err(err) => {
                             ingest_profile::add_decode_ns(
                                 decode_started.elapsed().as_nanos() as u64
                             );
-                            let decode_offset_pos = ingest_batch.data.lines().count().max(1) as u64;
+                            let decode_offset_pos = payload_text
+                                .map(|text| text.lines().count().max(1) as u64)
+                                .unwrap_or(1);
                             dl_records.push(DeadletterRecord {
                                 namespace: config.get_pipeline_name(),
-                                record: ingest_batch.data.clone(),
+                                record: if format.is_text() {
+                                    payload_text.unwrap_or("").to_string()
+                                } else {
+                                    format!("{} {} bytes", format.as_str(), ingest_batch.data.len())
+                                },
                                 error: err.to_string(),
                                 failure_code: "INPUT_FORMAT".to_string(),
                                 event_time: None,
@@ -3245,10 +3500,11 @@ impl Ingest {
                             || (record.is_object() && record.as_object().unwrap().is_empty())
                             || (record.is_array() && record.as_array().unwrap().is_empty())
                         {
-                            let line_str = match ingest_batch.data.lines().nth(line as usize - 1) {
-                                Some(line) => line,
-                                None => "",
-                            };
+                            let line_str =
+                                match payload_text.unwrap_or("").lines().nth(line as usize - 1) {
+                                    Some(line) => line,
+                                    None => "",
+                                };
 
                             let empty_offset_pos = ingest_batch.offset_pos_for_line(line);
                             dl_records.push(DeadletterRecord {
@@ -3582,6 +3838,12 @@ impl Ingest {
         let arrow_started = Instant::now();
         for (k, entry) in buf.iter_mut() {
             let mut batches: Vec<RecordBatch> = Vec::new();
+            if let crate::buffer::segment_file::WalPayload::Arrow(existing) = std::mem::replace(
+                &mut entry.payload,
+                crate::buffer::segment_file::WalPayload::Arrow(Vec::new()),
+            ) {
+                batches.extend(existing);
+            }
             if let Some(exact) = exact_partitions.remove(k) {
                 if !exact.builders.is_empty() {
                     let finish_started = Instant::now();
@@ -4299,6 +4561,53 @@ mod offset_gate_tests {
 mod transform_inject_fields_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn inject_fields_into_record_batch_adds_missing_utf8_column() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        let schema =
+            std::sync::Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![std::sync::Arc::new(Int64Array::from(vec![1i64, 2]))],
+        )
+        .unwrap();
+        let fields = std::collections::BTreeMap::from([("tenant_id".to_string(), json!("acme"))]);
+        let out = inject_fields_into_record_batch(batch, &fields).unwrap();
+        assert_eq!(out.schema().index_of("tenant_id").unwrap(), 1);
+        let col = out
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(col.value(0), "acme");
+        assert_eq!(col.value(1), "acme");
+    }
+
+    #[test]
+    fn inject_fields_into_record_batch_preserves_existing_column() {
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+        let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+            "tenant_id",
+            DataType::Utf8,
+            true,
+        )]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![std::sync::Arc::new(StringArray::from(vec!["existing"]))],
+        )
+        .unwrap();
+        let fields = std::collections::BTreeMap::from([("tenant_id".to_string(), json!("acme"))]);
+        let out = inject_fields_into_record_batch(batch, &fields).unwrap();
+        let col = out
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(col.value(0), "existing");
+    }
 
     #[test]
     fn merge_inject_fields_adds_configured_values() {

@@ -12,6 +12,7 @@ use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 
 use crate::helpers::plugin_config::PluginConfigEntry;
+use crate::serdes::input_format::InputFormat;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
 use skippr_runtime_sdk::progress::OffsetKey;
@@ -125,18 +126,18 @@ impl DataSourceHttpClientPlugin {
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        let text = if self.config.url.contains(".gz") {
+        let payload = if self.config.url.contains(".gz") {
             let mut decoder = GzDecoder::new(Cursor::new(body_bytes.to_vec()));
-            let mut decompressed = String::new();
+            let mut decompressed = Vec::new();
             decoder
-                .read_to_string(&mut decompressed)
+                .read_to_end(&mut decompressed)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             decompressed
         } else {
-            String::from_utf8_lossy(&body_bytes).into_owned()
+            body_bytes.to_vec()
         };
 
-        if text.is_empty() {
+        if payload.is_empty() {
             return Ok(());
         }
 
@@ -144,43 +145,57 @@ impl DataSourceHttpClientPlugin {
             namespace: self.config.url.clone(),
             partition: String::new(),
         };
-
-        let chunk_bytes = self.config.batch_size_bytes.unwrap_or(1_024_000) as usize;
         let source_uri = self.config.url.clone();
+        let format = InputFormat::from_option(self.config.format.as_deref());
         let mut groups: Vec<Vec<IngestBatch>> = Vec::new();
-        let mut buf = String::new();
-
-        for line in text.lines() {
-            if !buf.is_empty() {
-                buf.push('\n');
+        if format.requires_whole_payload() {
+            let bytes = payload.len();
+            groups.push(vec![IngestBatch {
+                offset_key,
+                data: payload,
+                bytes,
+                offset_pos: None,
+                source_uri,
+                namespace: Some("http".to_string()),
+                cdc_rows: None,
+            }]);
+        } else {
+            let text = std::str::from_utf8(&payload).map_err(|err| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
+            })?;
+            let chunk_bytes = self.config.batch_size_bytes.unwrap_or(1_024_000) as usize;
+            let mut buf = String::new();
+            for line in text.lines() {
+                if !buf.is_empty() {
+                    buf.push('\n');
+                }
+                buf.push_str(line);
+                if buf.len() >= chunk_bytes {
+                    let data = std::mem::take(&mut buf);
+                    let bytes = data.len();
+                    groups.push(vec![IngestBatch {
+                        offset_key: offset_key.clone(),
+                        data: data.into(),
+                        bytes,
+                        offset_pos: None,
+                        source_uri: source_uri.clone(),
+                        namespace: Some("http".to_string()),
+                        cdc_rows: None,
+                    }]);
+                }
             }
-            buf.push_str(line);
-            if buf.len() >= chunk_bytes {
-                let data = std::mem::take(&mut buf);
-                let bytes = data.len();
+            if !buf.is_empty() {
+                let bytes = buf.len();
                 groups.push(vec![IngestBatch {
-                    offset_key: offset_key.clone(),
-                    data,
+                    offset_key,
+                    data: buf.into(),
                     bytes,
                     offset_pos: None,
-                    source_uri: source_uri.clone(),
+                    source_uri,
                     namespace: Some("http".to_string()),
                     cdc_rows: None,
                 }]);
             }
-        }
-
-        if !buf.is_empty() {
-            let bytes = buf.len();
-            groups.push(vec![IngestBatch {
-                offset_key: offset_key.clone(),
-                data: buf,
-                bytes,
-                offset_pos: None,
-                source_uri: source_uri.clone(),
-                namespace: Some("http".to_string()),
-                cdc_rows: None,
-            }]);
         }
 
         if !groups.is_empty() {

@@ -58,11 +58,11 @@ class TpcContractTests(unittest.TestCase):
         file_src = (ROOT / "plugins" / "data_source" / "file" / "src" / "file.rs").read_text(
             encoding="utf-8"
         )
-        self.assertIn("for_each_parquet_ipc_batch", file_src)
-        self.assertIn("with_batch_size", file_src)
+        self.assertNotIn("for_each_parquet_ipc_batch", file_src)
+        self.assertNotIn("submit_arrow_ipc_batches", file_src)
         self.assertIn("InputFormat::Parquet", file_src)
-        self.assertIn("submit_arrow_ipc_batches", file_src)
-        self.assertIn('sink_ref: String::new()', file_src)
+        self.assertIn("submit_payload_batch_groups", file_src)
+        self.assertIn("read_to_end", file_src)
         contracts = WORKFLOW.split("\n  tpc_h_sf10:", 1)[0]
         self.assertIn("test_local_runtime_plugins.py", contracts)
         self.assertIn("test_release_sha_batteries.py", contracts)

@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_derive::Deserialize;
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::time::Duration;
 use tracing::{error, info};
 
 use crate::helpers::plugin_config::PluginConfigEntry;
+use crate::serdes::input_format::InputFormat;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
@@ -81,6 +82,10 @@ impl DataSourceSocketPlugin {
         self.config.batch_size_bytes.unwrap_or(1).max(1) as usize
     }
 
+    fn whole_payload(&self) -> bool {
+        InputFormat::from_option(self.config.format.as_deref()).requires_whole_payload()
+    }
+
     fn dispatch_batch(
         &self,
         buffer: Vec<u8>,
@@ -91,8 +96,7 @@ impl DataSourceSocketPlugin {
             return Ok(());
         }
         *counter += 1;
-        let data = String::from_utf8_lossy(&buffer).into_owned();
-        let bytes = data.len();
+        let bytes = buffer.len();
         let namespace = format!("socket.{}.{}", self.config.mode, self.config.address);
         let offset_key = OffsetKey {
             namespace: namespace.clone(),
@@ -102,7 +106,7 @@ impl DataSourceSocketPlugin {
             ctx,
             vec![IngestBatch {
                 offset_key,
-                data,
+                data: buffer,
                 bytes,
                 offset_pos: None,
                 source_uri: format!("socket://{}:{}", self.config.mode, self.config.address),
@@ -151,16 +155,28 @@ impl DataSource for DataSourceSocketPlugin {
                 while RUNNING.read().load(Ordering::SeqCst) {
                     match tokio::time::timeout(Duration::from_secs(1), listener.accept()).await {
                         Ok(Ok((stream, _addr))) => {
-                            let reader = tokio::io::BufReader::new(stream);
-                            let mut lines = reader.lines();
-                            let mut batcher = LineBatcher::new(self.batch_limit());
-                            while let Ok(Some(line)) = lines.next_line().await {
-                                self.ingest_line(&mut batcher, line, &mut counter, ctx.as_ref())?;
-                                if !RUNNING.read().load(Ordering::SeqCst) {
-                                    break;
+                            if self.whole_payload() {
+                                let mut reader = tokio::io::BufReader::new(stream);
+                                let mut buffer = Vec::new();
+                                reader.read_to_end(&mut buffer).await?;
+                                self.dispatch_batch(buffer, &mut counter, ctx.as_ref())?;
+                            } else {
+                                let reader = tokio::io::BufReader::new(stream);
+                                let mut lines = reader.lines();
+                                let mut batcher = LineBatcher::new(self.batch_limit());
+                                while let Ok(Some(line)) = lines.next_line().await {
+                                    self.ingest_line(
+                                        &mut batcher,
+                                        line,
+                                        &mut counter,
+                                        ctx.as_ref(),
+                                    )?;
+                                    if !RUNNING.read().load(Ordering::SeqCst) {
+                                        break;
+                                    }
                                 }
+                                self.flush_batcher(&mut batcher, &mut counter, ctx.as_ref())?;
                             }
-                            self.flush_batcher(&mut batcher, &mut counter, ctx.as_ref())?;
                         }
                         Ok(Err(e)) => error!("TCP accept error: {}", e),
                         Err(_) => continue,
@@ -177,16 +193,24 @@ impl DataSource for DataSourceSocketPlugin {
                         .await
                     {
                         Ok(Ok((len, _addr))) => {
-                            let data = String::from_utf8_lossy(&buf[..len]).into_owned();
-                            for line in data.lines() {
-                                self.ingest_line(
-                                    &mut batcher,
-                                    line.to_string(),
+                            if self.whole_payload() {
+                                self.dispatch_batch(
+                                    buf[..len].to_vec(),
                                     &mut counter,
                                     ctx.as_ref(),
                                 )?;
+                            } else {
+                                let data = String::from_utf8_lossy(&buf[..len]).into_owned();
+                                for line in data.lines() {
+                                    self.ingest_line(
+                                        &mut batcher,
+                                        line.to_string(),
+                                        &mut counter,
+                                        ctx.as_ref(),
+                                    )?;
+                                }
+                                self.flush_batcher(&mut batcher, &mut counter, ctx.as_ref())?;
                             }
-                            self.flush_batcher(&mut batcher, &mut counter, ctx.as_ref())?;
                         }
                         Ok(Err(e)) => error!("UDP recv error: {}", e),
                         Err(_) => continue,
@@ -201,16 +225,28 @@ impl DataSource for DataSourceSocketPlugin {
                 while RUNNING.read().load(Ordering::SeqCst) {
                     match tokio::time::timeout(Duration::from_secs(1), listener.accept()).await {
                         Ok(Ok((stream, _addr))) => {
-                            let reader = tokio::io::BufReader::new(stream);
-                            let mut lines = reader.lines();
-                            let mut batcher = LineBatcher::new(self.batch_limit());
-                            while let Ok(Some(line)) = lines.next_line().await {
-                                self.ingest_line(&mut batcher, line, &mut counter, ctx.as_ref())?;
-                                if !RUNNING.read().load(Ordering::SeqCst) {
-                                    break;
+                            if self.whole_payload() {
+                                let mut reader = tokio::io::BufReader::new(stream);
+                                let mut buffer = Vec::new();
+                                reader.read_to_end(&mut buffer).await?;
+                                self.dispatch_batch(buffer, &mut counter, ctx.as_ref())?;
+                            } else {
+                                let reader = tokio::io::BufReader::new(stream);
+                                let mut lines = reader.lines();
+                                let mut batcher = LineBatcher::new(self.batch_limit());
+                                while let Ok(Some(line)) = lines.next_line().await {
+                                    self.ingest_line(
+                                        &mut batcher,
+                                        line,
+                                        &mut counter,
+                                        ctx.as_ref(),
+                                    )?;
+                                    if !RUNNING.read().load(Ordering::SeqCst) {
+                                        break;
+                                    }
                                 }
+                                self.flush_batcher(&mut batcher, &mut counter, ctx.as_ref())?;
                             }
-                            self.flush_batcher(&mut batcher, &mut counter, ctx.as_ref())?;
                         }
                         Ok(Err(e)) => error!("Unix accept error: {}", e),
                         Err(_) => continue,

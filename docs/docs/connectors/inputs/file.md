@@ -1,6 +1,6 @@
 ---
 title: Local file source
-description: Read JSON, CSV, or Parquet from a path on disk.
+description: Read JSON, CSV, Parquet, Avro, or XML from a path on disk.
 ---
 
 # Local file
@@ -10,7 +10,7 @@ Reads files from `path`. Use it for a laptop sample, a nightly drop directory, o
 ## Before you begin
 
 - A file or directory Skipprd can read.
-- Format is inferred from the extension when you omit `format`.
+- Set `format` to `parquet`, `avro`, or `arrow_ipc` for binary files. Omitted `format` is JSON.
 
 ## Configure
 
@@ -48,7 +48,7 @@ data_sources:
 | Key | Type | Required/Default | Description |
 |---|---|---|---|
 | `path` | path | Required | File or directory |
-| `format` | string | Inferred | `json`, `csv`, or `parquet` |
+| `format` | string | `json` | `json`, `csv`, `xml`, `parquet`, `avro`, or `arrow_ipc` |
 | `batch_size_seconds` | integer | Not set | Max seconds per batch |
 | `batch_size_bytes` | integer | Not set | Max bytes per batch |
 
@@ -61,7 +61,7 @@ Each file becomes records. If `path` is a directory, Skipprd reads the files in 
 | Symptom | Fix |
 |---|---|
 | File not found | Use a path relative to the working directory, or an absolute path |
-| Parse errors | Set `format`, and check the file is UTF-8 |
+| Parse errors | Set `format`. JSON/CSV/XML must be UTF-8; Parquet/Avro/Arrow IPC are binary |
 | Permission denied | Grant read on `path` |
 
 ## Next steps

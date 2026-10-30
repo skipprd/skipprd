@@ -312,7 +312,7 @@ impl DataSourceMysqlPlugin {
 
                 current_batch.push(IngestBatch {
                     offset_key: offset_key.clone(),
-                    data: json_str,
+                    data: json_str.into(),
                     bytes,
                     offset_pos: None,
                     source_uri: format!("mysql://{}/{}", db_name, table_fq),
@@ -494,7 +494,7 @@ impl DataSourceMysqlPlugin {
 
                 let batch = IngestBatch {
                     offset_key: offset_key.clone(),
-                    data: json_str,
+                    data: json_str.into(),
                     bytes,
                     offset_pos: None,
                     source_uri: format!("mysql://{}/{}", db_name, fq_table),
@@ -616,7 +616,7 @@ impl DataSourceMysqlPlugin {
 
                 current_batch.push(IngestBatch {
                     offset_key: offset_key.clone(),
-                    data: json_str,
+                    data: json_str.into(),
                     bytes,
                     offset_pos: None,
                     source_uri: format!("mysql://{}/{}", db_name, table_fq),

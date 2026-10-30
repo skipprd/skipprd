@@ -113,7 +113,7 @@ impl DataSource for DataSourceSnsPlugin {
 
                 pending.push(IngestBatch {
                     offset_key,
-                    data: inner,
+                    data: inner.into(),
                     bytes,
                     offset_pos: None,
                     source_uri: format!("sns://{}", topic_name),

@@ -507,7 +507,7 @@ impl DataSourceHubspotCrmPlugin {
             ctx,
             vec![IngestBatch {
                 offset_key: OffsetKey::new(namespace, partition.to_string()),
-                data: payload,
+                data: payload.into(),
                 bytes,
                 offset_pos: None,
                 source_uri: format!("hubspot://{}/{}", self.hub_id, namespace),

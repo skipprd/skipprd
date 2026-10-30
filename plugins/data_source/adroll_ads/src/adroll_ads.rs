@@ -261,7 +261,7 @@ impl DataSourceAdRollAdsPlugin {
             ctx,
             vec![IngestBatch {
                 offset_key: OffsetKey::new(s.namespace, offset),
-                data: payload,
+                data: payload.into(),
                 bytes,
                 offset_pos: None,
                 source_uri: format!("adroll-ads://{}", self.advertiser_id),

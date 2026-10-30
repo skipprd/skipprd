@@ -145,7 +145,7 @@ impl DataSourceMongodbPlugin {
 
             current_batch.push(IngestBatch {
                 offset_key: offset_key.clone(),
-                data: json_str,
+                data: json_str.into(),
                 bytes,
                 offset_pos: None,
                 source_uri: source_uri.clone(),
@@ -325,7 +325,7 @@ impl DataSourceMongodbPlugin {
             let bytes = doc_json.len();
             let batch = IngestBatch {
                 offset_key: offset_key.clone(),
-                data: doc_json,
+                data: doc_json.into(),
                 bytes,
                 offset_pos: None,
                 source_uri: source_uri.clone(),

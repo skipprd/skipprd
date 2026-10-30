@@ -129,7 +129,7 @@ impl DataSource for DataSourceAmqpPlugin {
                 Ok(Some(Ok(delivery))) => {
                     last_msg = Instant::now();
                     counter += 1;
-                    let data = String::from_utf8_lossy(&delivery.data).into_owned();
+                    let data = delivery.data.clone();
                     let bytes = data.len();
                     let offset_key = OffsetKey {
                         namespace: namespace.clone(),

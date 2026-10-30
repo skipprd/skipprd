@@ -113,7 +113,7 @@ impl DataSource for DataSourceEventbridgePlugin {
 
                 pending.push(IngestBatch {
                     offset_key,
-                    data: detail,
+                    data: detail.into(),
                     bytes,
                     offset_pos: None,
                     source_uri: format!("eventbridge://{}", self.config.event_bus_name),

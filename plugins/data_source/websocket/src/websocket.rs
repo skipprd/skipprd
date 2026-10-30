@@ -72,8 +72,8 @@ impl DataSource for DataSourceWebsocketPlugin {
             match tokio::time::timeout(Duration::from_secs(1), read.next()).await {
                 Ok(Some(Ok(msg))) => {
                     let data = match msg {
-                        tungstenite::Message::Text(t) => t,
-                        tungstenite::Message::Binary(b) => String::from_utf8_lossy(&b).into_owned(),
+                        tungstenite::Message::Text(t) => t.into_bytes(),
+                        tungstenite::Message::Binary(b) => b,
                         tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_) => continue,
                         tungstenite::Message::Close(_) => break,
                         _ => continue,
@@ -92,7 +92,7 @@ impl DataSource for DataSourceWebsocketPlugin {
                         ctx.as_ref(),
                         vec![IngestBatch {
                             offset_key,
-                            data,
+                            data: data.into(),
                             bytes,
                             offset_pos: None,
                             source_uri: self.config.url.clone(),

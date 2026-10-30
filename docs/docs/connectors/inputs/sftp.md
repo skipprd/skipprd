@@ -75,7 +75,7 @@ data_sources:
 | `port` | integer | Not set | Port (default 22) |
 | `password` | secret | Not set | Password as `${ENV}` |
 | `private_key_path` | path | Not set | Private key file |
-| `format` | string | Inferred | `json`, `csv`, or `parquet` |
+| `format` | string | `json` | `json`, `csv`, `xml`, `parquet`, `avro`, or `arrow_ipc` |
 | `batch_size_bytes` | integer | Not set | Max bytes per batch |
 | `batch_size_seconds` | integer | Not set | Max seconds per batch |
 

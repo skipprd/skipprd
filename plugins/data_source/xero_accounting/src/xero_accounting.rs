@@ -377,7 +377,7 @@ impl DataSourceXeroAccountingPlugin {
             ctx,
             vec![IngestBatch {
                 offset_key,
-                data: payload,
+                data: payload.into(),
                 bytes,
                 offset_pos: None,
                 source_uri: format!("xero://{}/{}", self.tenant_id, namespace),

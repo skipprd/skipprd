@@ -215,7 +215,7 @@ impl DataSourceGoogleAdsPlugin {
             ctx,
             vec![IngestBatch {
                 offset_key: OffsetKey::new(stream.namespace, date.format("%Y-%m-%d").to_string()),
-                data: payload,
+                data: payload.into(),
                 bytes,
                 offset_pos: None,
                 source_uri: format!(

@@ -84,6 +84,14 @@ pub fn encode_record_batches(batches: &[RecordBatch]) -> Result<Vec<u8>, io::Err
     Ok(bytes)
 }
 
+pub fn decode_record_batches(bytes: Vec<u8>) -> Result<Vec<RecordBatch>, io::Error> {
+    let reader = StreamReader::try_new(Cursor::new(bytes), None)
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
 pub fn decode_record_batch_stream(bytes: Vec<u8>) -> Result<SendableRecordBatchStream, io::Error> {
     decode_record_batch_stream_with_stats(bytes).map(|decoded| decoded.stream)
 }
@@ -98,12 +106,11 @@ pub fn record_batches_to_stream(
 pub fn decode_record_batch_stream_with_stats(
     bytes: Vec<u8>,
 ) -> Result<DecodedRecordBatchStream, io::Error> {
-    let reader = StreamReader::try_new(Cursor::new(bytes), None)
-        .map_err(|err| io::Error::other(err.to_string()))?;
-    let schema = reader.schema();
-    let batches: Vec<RecordBatch> = reader
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| io::Error::other(err.to_string()))?;
+    let batches = decode_record_batches(bytes)?;
+    let schema = batches
+        .first()
+        .map(|batch| batch.schema())
+        .unwrap_or_else(|| Arc::new(arrow_schema::Schema::empty()));
     let rows = batches.iter().fold(0u64, |rows, batch| {
         rows.saturating_add(batch.num_rows() as u64)
     });

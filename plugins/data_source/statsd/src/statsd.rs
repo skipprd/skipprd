@@ -126,7 +126,7 @@ impl DataSource for DataSourceStatsdPlugin {
                                 ctx.as_ref(),
                                 vec![IngestBatch {
                                     offset_key,
-                                    data: json_str,
+                                    data: json_str.into(),
                                     bytes,
                                     offset_pos: None,
                                     source_uri: format!("statsd://{}", addr),

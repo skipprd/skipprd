@@ -42,7 +42,7 @@ impl TryFrom<PluginConfigEntry> for DataSourceHttpServerPluginConfig {
 
 #[derive(Clone)]
 struct AppState {
-    tx: mpsc::UnboundedSender<String>,
+    tx: mpsc::UnboundedSender<Vec<u8>>,
     auth_token: Option<String>,
 }
 
@@ -61,11 +61,10 @@ async fn ingest_handler(
             return StatusCode::UNAUTHORIZED;
         }
     }
-    let text = String::from_utf8_lossy(&body).into_owned();
-    if text.is_empty() {
+    if body.is_empty() {
         return StatusCode::BAD_REQUEST;
     }
-    let _ = state.tx.send(text);
+    let _ = state.tx.send(body.to_vec());
     StatusCode::OK
 }
 
@@ -89,7 +88,7 @@ impl DataSource for DataSourceHttpServerPlugin {
             .unwrap_or_else(|| "0.0.0.0:8080".to_string());
         let path = self.config.path.clone().unwrap_or_else(|| "/".to_string());
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
         let state = AppState {
             tx,
@@ -123,7 +122,7 @@ impl DataSource for DataSourceHttpServerPlugin {
                         ctx.as_ref(),
                         vec![IngestBatch {
                             offset_key,
-                            data,
+                            data: data.into(),
                             bytes,
                             offset_pos: None,
                             source_uri: format!("http_server://{}{}", addr, path),

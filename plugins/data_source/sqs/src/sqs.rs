@@ -158,7 +158,7 @@ impl DataSourceSqsPlugin {
 
                 pending.push(IngestBatch {
                     offset_key,
-                    data: body,
+                    data: body.into(),
                     bytes,
                     offset_pos: None,
                     source_uri: queue_url.clone(),

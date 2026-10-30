@@ -230,3 +230,80 @@ fn runtime_sdk_source_child_does_not_reload_host_yaml() {
         "plugin children must not bind a host yaml Config"
     );
 }
+
+#[test]
+fn ingest_submit_contract_is_ingest_batch_only() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let forbidden = [
+        "submit_arrow_ipc_batches",
+        "PluginDataFrame::IngestBatches",
+        "ingest_runtime_batches_into_core",
+        "for_each_parquet_ipc_batch",
+        "fn sync_parquet",
+        "RuntimeIngestPartitionBatch",
+        "RuntimeOffsetPosition",
+        "fn decode_copy(",
+    ];
+    let mut violations = Vec::new();
+    for relative in [
+        "src",
+        "crates/skippr-runtime-sdk/src",
+        "plugins/data_source",
+    ] {
+        let dir = root.join(relative);
+        if !dir.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&dir)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs")
+                && path.extension().and_then(|ext| ext.to_str()) != Some("py")
+            {
+                continue;
+            }
+            if path.file_name().and_then(|name| name.to_str())
+                == Some("runtime_plugin_global_guards.rs")
+            {
+                continue;
+            }
+            let contents = std::fs::read_to_string(path).unwrap_or_default();
+            for needle in forbidden {
+                if contents.contains(needle) {
+                    violations.push(format!("{} contains {needle}", path.display()));
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "IngestBatch is the only source submit contract:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn flatten_schema_arrow_uses_core_coerce_json() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/ingest_work.rs");
+    let src = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    let cdc = src
+        .find("cannot carry CDC row sidecars")
+        .expect("schema'd CDC sidecar panic must exist");
+    let window = &src[cdc..cdc.saturating_add(2500).min(src.len())];
+    assert!(
+        window.contains("if flatten {"),
+        "flatten arm must follow schema'd CDC guard: {window}"
+    );
+    assert!(
+        window.contains("coerced_batches_to_json_values"),
+        "flatten + schema'd must coerce then JSON: {window}"
+    );
+    assert!(
+        !window.contains("record_batch_to_json_values("),
+        "flatten must not skip coerce via record_batch_to_json_values: {window}"
+    );
+}

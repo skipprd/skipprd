@@ -6,8 +6,8 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
-use skippr_runtime_sdk::protocol::{RuntimeIngestPartitionBatch, RuntimeOffsetPosition};
 use skippr_runtime_sdk::sdk::encode_record_batches;
+use skippr_runtime_sdk::source_compat::IngestBatch;
 
 use crate::bronze::{
     ExponentialHistogramRecord, GaugeRecord, HistogramRecord, LogRecord, SpanEventRecord,
@@ -710,29 +710,25 @@ pub fn ipc_batch(
     partition: &str,
     batch: RecordBatch,
     offset_pos: u64,
-) -> Result<RuntimeIngestPartitionBatch, ArrowBuildError> {
+) -> Result<IngestBatch, ArrowBuildError> {
     let bytes =
         encode_record_batches(&[batch]).map_err(|e| ArrowBuildError::Schema(e.to_string()))?;
-    Ok(RuntimeIngestPartitionBatch {
-        sink_ref: namespace.to_string(),
-        namespace: namespace.to_string(),
-        partition: partition.to_string(),
-        time: None,
-        schema_fingerprint: String::new(),
-        offsets: vec![RuntimeOffsetPosition {
-            key: OffsetKey::new(namespace, partition),
-            position: offset_pos,
-        }],
-        arrow_stream_bytes: bytes,
+    let len = bytes.len();
+    Ok(IngestBatch {
+        offset_key: OffsetKey::new(namespace, partition),
+        data: bytes.into(),
+        bytes: len,
+        offset_pos: Some(offset_pos),
+        source_uri: String::new(),
+        namespace: Some(namespace.to_string()),
         cdc_rows: None,
-        checkpoint_update: None,
     })
 }
 
 pub fn batches_from_signal(
     signal: &DecodedSignal,
     offset_pos: u64,
-) -> Result<Vec<RuntimeIngestPartitionBatch>, ArrowBuildError> {
+) -> Result<Vec<IngestBatch>, ArrowBuildError> {
     let mut out = Vec::new();
     match signal {
         DecodedSignal::Traces(t) => {

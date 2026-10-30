@@ -20,7 +20,10 @@ impl PluginConfigEntry {
     }
 
     pub fn input_format(&self) -> InputFormat {
-        InputFormat::from_option(self.string_field("format").as_deref())
+        match self.string_field("format").as_deref() {
+            Some(value) => InputFormat::from(value),
+            None => InputFormat::default_for_source_plugin(&self.plugin_name),
+        }
     }
 
     pub fn resolved_output_format(
@@ -45,8 +48,7 @@ impl PluginConfigEntry {
                 .map(|format| format.to_string())
                 .unwrap_or_default();
         }
-        self.string_field("format")
-            .unwrap_or_else(|| InputFormat::default().as_str().to_string())
+        self.input_format().as_str().to_string()
     }
 
     pub fn batch_size_bytes(&self) -> Option<i64> {
@@ -197,6 +199,7 @@ fn plugin_entry_from_map(
 mod tests {
     use serde_json::json;
 
+    use crate::serdes::input_format::InputFormat;
     use crate::serdes::output_format::OutputFormat;
 
     use super::PluginConfigEntry;
@@ -224,6 +227,23 @@ mod tests {
         };
 
         assert_eq!(entry.version(), None);
+    }
+
+    #[test]
+    fn omitted_otlp_format_is_arrow_ipc() {
+        let entry = PluginConfigEntry {
+            plugin_name: "Otlp".to_string(),
+            config: serde_json::json!({
+                "listen_address_grpc": "0.0.0.0:4317",
+                "listen_address_http": "0.0.0.0:4318",
+                "signals": ["logs"]
+            }),
+        };
+        assert_eq!(entry.input_format(), InputFormat::ArrowIpc);
+        assert_eq!(
+            entry.format(crate::pipeline_type::PipelineType::Ingest),
+            "arrow_ipc"
+        );
     }
 
     #[test]

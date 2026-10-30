@@ -12,9 +12,9 @@ use skippr_core::plugins::source_sync::{
 };
 use skippr_core::runtime_plugins::protocol::{
     HostOffsetFrame, PluginDataFrame, PluginOffsetFrame, RuntimeCheckpointUpdate, RuntimeIngestAck,
-    RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint, RuntimeOffsetValidationEntry,
-    RuntimeRawIngestBatch, RuntimeSessionHello, RuntimeSourceIngestWindow,
-    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimeOffsetMaterializationHint, RuntimeOffsetValidationEntry, RuntimeRawIngestBatch,
+    RuntimeSessionHello, RuntimeSourceIngestWindow, RUNTIME_PROTOCOL_VERSION,
+    SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use skippr_core::runtime_plugins::wire::{read_frame, write_frame};
 use tokio::net::TcpStream;
@@ -58,39 +58,6 @@ fn chunk_source_payload_tasks(
     if !current.is_empty() {
         chunks.push(current);
     }
-    chunks
-}
-
-fn chunk_arrow_ipc_batches(
-    batches: Vec<RuntimeIngestPartitionBatch>,
-) -> Vec<Vec<RuntimeIngestPartitionBatch>> {
-    let limit = MAX_SOURCE_PAYLOAD_FRAME_BYTES.saturating_sub(SOURCE_PAYLOAD_FRAME_HEADROOM);
-    let mut chunks: Vec<Vec<RuntimeIngestPartitionBatch>> = Vec::new();
-    let mut current: Vec<RuntimeIngestPartitionBatch> = Vec::new();
-
-    for batch in batches {
-        current.push(batch);
-        let encoded_len = bincode::serialize(&PluginDataFrame::IngestBatches {
-            request_id: 0,
-            batches: current.clone(),
-        })
-        .map(|bytes| bytes.len())
-        .unwrap_or(limit.saturating_add(1));
-        if encoded_len > limit {
-            let overflow = current
-                .pop()
-                .expect("chunk probe always has at least one batch");
-            if !current.is_empty() {
-                chunks.push(std::mem::take(&mut current));
-            }
-            current.push(overflow);
-        }
-    }
-
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-
     chunks
 }
 
@@ -479,53 +446,6 @@ impl SourceSyncContext for RuntimeSourceSyncContext {
         })
     }
 
-    fn submit_arrow_ipc_batches_accepted(
-        &self,
-        batches: Vec<RuntimeIngestPartitionBatch>,
-    ) -> Result<PayloadSubmissionBatch, io::Error> {
-        if self.suppress_payloads || batches.is_empty() {
-            return Ok(PayloadSubmissionBatch::already_durable(self.last_metrics()));
-        }
-
-        let total_bytes = batches
-            .iter()
-            .map(|batch| batch.arrow_stream_bytes.len())
-            .sum::<usize>();
-        let mut request_ids = Vec::new();
-        for chunk in chunk_arrow_ipc_batches(batches) {
-            let request_id = self.ingest_ack_client.next_request_id();
-            let request_bytes = chunk
-                .iter()
-                .map(|batch| batch.arrow_stream_bytes.len())
-                .sum::<usize>();
-            self.ingest_ack_client.wait_for_capacity(request_bytes);
-            self.ingest_ack_client
-                .register_request(request_id, request_bytes);
-            if let Err(err) = block_on_handle(&self.control_writer.handle, async {
-                self.data_writer
-                    .write(&PluginDataFrame::IngestBatches {
-                        request_id,
-                        batches: chunk,
-                    })
-                    .await
-            }) {
-                self.ingest_ack_client.resolve_ack(RuntimeIngestAck {
-                    request_id,
-                    error: Some(format!("failed to submit runtime Arrow IPC payload: {err}")),
-                });
-                return Err(err);
-            }
-            request_ids.push(request_id);
-        }
-
-        self.note_source_data(total_bytes);
-        Ok(PayloadSubmissionBatch {
-            request_ids,
-            bytes: total_bytes,
-            metrics: self.last_metrics(),
-        })
-    }
-
     fn wait_payload_acks(&self, submissions: &[PayloadSubmissionBatch]) -> Result<(), io::Error> {
         let request_ids = submissions
             .iter()
@@ -637,24 +557,6 @@ pub fn submit_payload_batch_groups(
         .map(source_payload_task)
         .collect::<Vec<_>>();
     ctx.submit_payload_tasks_and_wait(tasks)
-}
-
-/// Submit already-normalized Arrow IPC partition batches and wait until WAL-durable.
-pub fn submit_arrow_ipc_batches(
-    ctx: &dyn SourceSyncContext,
-    batches: Vec<RuntimeIngestPartitionBatch>,
-) -> Result<ThroughputMetrics, io::Error> {
-    if batches.is_empty() {
-        return Ok(ThroughputMetrics {
-            bytes_per_second: 0,
-            active_cores: 0,
-            queue_length: 0,
-            optimal_chunk_size: 0,
-        });
-    }
-    let submission = ctx.submit_arrow_ipc_batches_accepted(batches)?;
-    ctx.wait_payload_acks(std::slice::from_ref(&submission))?;
-    Ok(submission.metrics)
 }
 
 /// Returns true when a Closed partition was already ingested and should be skipped.
@@ -894,30 +796,5 @@ mod tests {
             batch: Err(io::ErrorKind::Other),
         };
         assert!(partition_already_closed(&down, &key).is_err());
-    }
-
-    #[test]
-    fn submit_arrow_ipc_batches_empty_is_ok() {
-        let ctx = ClosedCheckCtx { batch: Ok(vec![]) };
-        let metrics = submit_arrow_ipc_batches(&ctx, vec![]).unwrap();
-        assert_eq!(metrics.bytes_per_second, 0);
-    }
-
-    #[test]
-    fn submit_arrow_ipc_batches_requires_runtime_context() {
-        let ctx = ClosedCheckCtx { batch: Ok(vec![]) };
-        let batch = RuntimeIngestPartitionBatch {
-            sink_ref: "spans".into(),
-            namespace: "spans".into(),
-            partition: "0".into(),
-            time: None,
-            schema_fingerprint: String::new(),
-            offsets: vec![],
-            arrow_stream_bytes: vec![1, 2, 3],
-            cdc_rows: None,
-            checkpoint_update: None,
-        };
-        let err = submit_arrow_ipc_batches(&ctx, vec![batch]).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
     }
 }

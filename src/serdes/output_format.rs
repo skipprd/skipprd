@@ -86,12 +86,14 @@ impl OutputFormat {
         supported.contains(&Self::Csv) && supported.contains(&Self::Xml)
     }
 
-    fn default_for_copy_source(source: InputFormat) -> Option<Self> {
+    fn default_for_copy_source(source: InputFormat) -> Self {
         match source {
-            InputFormat::Json => Some(Self::Jsonl),
-            InputFormat::Csv => Some(Self::Csv),
-            InputFormat::Xml => Some(Self::Xml),
-            InputFormat::ArrowIpc | InputFormat::Parquet => None,
+            InputFormat::Json
+            | InputFormat::ArrowIpc
+            | InputFormat::Parquet
+            | InputFormat::Avro => Self::Jsonl,
+            InputFormat::Csv => Self::Csv,
+            InputFormat::Xml => Self::Xml,
         }
     }
 }
@@ -171,9 +173,7 @@ pub fn resolve_output_format(
                     "type: copy requires an explicit sink format on '{plugin_name}' when the source format is unknown"
                 )
             })?;
-            let family = OutputFormat::default_for_copy_source(source).ok_or_else(|| {
-                format!("type: copy does not accept Arrow IPC input on '{plugin_name}'")
-            })?;
+            let family = OutputFormat::default_for_copy_source(source);
             if !supported.contains(&family) {
                 return Err(format!(
                     "type: copy default format '{family}' is not supported by '{plugin_name}'. Set format: to one of {}",
@@ -353,8 +353,8 @@ mod tests {
     }
 
     #[test]
-    fn copy_omitted_format_rejects_parquet_source() {
-        let err = resolve_output_format(
+    fn copy_omitted_format_parquet_source_defaults_to_jsonl() {
+        let resolved = resolve_output_format(
             "File",
             &[
                 OutputFormat::Parquet,
@@ -367,8 +367,8 @@ mod tests {
             PipelineType::Copy,
             Some(InputFormat::Parquet),
         )
-        .unwrap_err();
-        assert!(err.contains("does not accept Arrow IPC input"));
+        .unwrap();
+        assert_eq!(resolved, Some(OutputFormat::Jsonl));
     }
 
     #[test]

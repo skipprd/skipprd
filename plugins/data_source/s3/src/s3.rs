@@ -444,10 +444,8 @@ impl DataSourceS3Plugin {
                                 let res = tokio::task::spawn_blocking(move || {
                                     let c = Cursor::new(data_vec);
                                     let mut stream = GzDecoder::new(c);
-                                    let mut decompressed = String::new();
-                                    stream
-                                        .read_to_string(&mut decompressed)
-                                        .map(|_| decompressed)
+                                    let mut decompressed = Vec::new();
+                                    stream.read_to_end(&mut decompressed).map(|_| decompressed)
                                 })
                                 .await;
                                 match res {
@@ -481,12 +479,7 @@ impl DataSourceS3Plugin {
                                     ))),
                                 }
                             } else {
-                                String::from_utf8(data_vec).map_err(|err| {
-                                    std::io::Error::other(format!(
-                                        "failed to decode UTF-8 contents for S3 object '{}': {}",
-                                        key, err
-                                    ))
-                                })
+                                Ok(data_vec)
                             };
                             decoded.map(|s| Some((key, s)))
                         }

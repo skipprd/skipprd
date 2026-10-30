@@ -111,9 +111,9 @@ impl DataSource for DataSourceSftpPlugin {
             let mut remote_file = sftp
                 .open(std::path::Path::new(&file_path))
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let mut contents = String::new();
+            let mut contents = Vec::new();
             remote_file
-                .read_to_string(&mut contents)
+                .read_to_end(&mut contents)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
 
             if contents.is_empty() {
@@ -135,7 +135,7 @@ impl DataSource for DataSourceSftpPlugin {
                 ctx.as_ref(),
                 vec![IngestBatch {
                     offset_key,
-                    data: contents,
+                    data: contents.into(),
                     bytes,
                     offset_pos: None,
                     source_uri: format!("sftp://{}{}", self.config.host, file_path),

@@ -242,7 +242,7 @@ impl DataSourceStripePlugin {
             ctx,
             vec![IngestBatch {
                 offset_key,
-                data: payload,
+                data: payload.into(),
                 bytes,
                 offset_pos: None,
                 source_uri: format!("stripe://{}/{}", self.stripe_account_id, namespace),

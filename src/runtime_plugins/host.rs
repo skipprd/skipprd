@@ -6,9 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 
-use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, SchemaRef};
+use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
-use futures::StreamExt;
 use once_cell::sync::Lazy;
 use serde::de::DeserializeOwned;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -25,18 +24,16 @@ use {
     nix::unistd::Pid,
 };
 
-use crate::buffer::ingest_buffer::{flush_all_segments, IngestBufferBatch};
+use crate::buffer::ingest_buffer::flush_all_segments;
 use crate::catalog_coordinator::CatalogCoordinator;
-use crate::discover::{OutputMetadata, SkipprDataType};
+use crate::discover::OutputMetadata;
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetTypes, Offsets};
 #[cfg(test)]
 use crate::helpers::offsets::{
     RuntimeOffsetOperation, RuntimeOffsetRpcRequest, RuntimeOffsetRpcResponse, RuntimeOffsetValue,
 };
-use crate::ingest_work::{
-    storage_namespace, storage_partition, Ingest, IngestBatch, IngestTask, IngestTasks, INGEST_RT,
-};
+use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use crate::plugins::cdc;
 use crate::plugins::{DataSink, SchemaSink, SchemaSyncRequest, SinkWriteOutcome};
 use crate::runtime_plugins::artifact::resolve_plugin_executable;
@@ -45,11 +42,10 @@ use crate::runtime_plugins::offset_service::OffsetServiceEndpoint;
 use crate::runtime_plugins::protocol::{
     CommitReceipt, FinishSink, HandshakeRequest, HostDataFrame, HostFrame, PluginDataFrame,
     PluginFrame, PrepareAck, PrepareSink, PrepareSinkResult, RuntimeBinding,
-    RuntimeCheckpointUpdate, RuntimeExecutionContext, RuntimeExecutionMode, RuntimeIngestAck,
-    RuntimeOffsetMaterializationHint, RuntimeOutputLayout, RuntimePluginKind, RuntimeRequestAck,
-    RuntimeSchemaConfig, RuntimeSchemaInstallRequest, RuntimeSchemaState,
-    RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkError,
-    RuntimeSinkInstallRequest, RuntimeSinkPayloadMode, RuntimeSourceConfig,
+    RuntimeExecutionContext, RuntimeExecutionMode, RuntimeIngestAck, RuntimeOutputLayout,
+    RuntimePluginKind, RuntimeRequestAck, RuntimeSchemaConfig, RuntimeSchemaInstallRequest,
+    RuntimeSchemaState, RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkConfig,
+    RuntimeSinkError, RuntimeSinkInstallRequest, RuntimeSinkPayloadMode, RuntimeSourceConfig,
     RuntimeSourceIngestWindow, SchemaDelta, SchemaNamespaceDelta, SchemaRunRequest, SinkAck,
     SinkChunk, SinkRunRequest, SinkWriteStats, SourceEvent, SourceStartRequest,
     COMMIT_RECEIPT_VERSION, MAX_RUNTIME_SINK_CHUNK_BYTES, RUNTIME_PROTOCOL_VERSION,
@@ -61,8 +57,8 @@ use crate::runtime_plugins::schema_state::{
     runtime_schema_namespace_version,
 };
 use crate::runtime_plugins::sdk::{
-    decode_record_batch_stream, decode_record_batch_stream_with_stats,
-    encode_record_batch_stream_with_stats, encode_record_batches,
+    decode_record_batch_stream_with_stats, encode_record_batch_stream_with_stats,
+    encode_record_batches,
 };
 use crate::runtime_plugins::wire::{
     decode_payload, read_frame, write_frame, MAX_RUNTIME_FRAME_BYTES,
@@ -727,71 +723,6 @@ fn runtime_source_ingest_window() -> RuntimeSourceIngestWindow {
     }
 }
 
-fn skippr_type_for_arrow(data_type: &ArrowDataType) -> SkipprDataType {
-    match data_type {
-        ArrowDataType::Boolean => SkipprDataType::Boolean,
-        ArrowDataType::Int8 | ArrowDataType::UInt8 => SkipprDataType::Byte,
-        ArrowDataType::Int16 | ArrowDataType::UInt16 => SkipprDataType::Short,
-        ArrowDataType::Int32 | ArrowDataType::UInt32 => SkipprDataType::Integer,
-        ArrowDataType::Int64 | ArrowDataType::UInt64 => SkipprDataType::Long,
-        ArrowDataType::Float16 | ArrowDataType::Float32 => SkipprDataType::Float,
-        ArrowDataType::Float64 => SkipprDataType::Double,
-        ArrowDataType::Decimal128(_, _) | ArrowDataType::Decimal256(_, _) => {
-            SkipprDataType::Decimal
-        }
-        ArrowDataType::Date32 | ArrowDataType::Date64 => SkipprDataType::Date,
-        ArrowDataType::Timestamp(_, _) => SkipprDataType::Timestamp,
-        ArrowDataType::Time32(_) | ArrowDataType::Time64(_) => SkipprDataType::Time,
-        ArrowDataType::Binary
-        | ArrowDataType::LargeBinary
-        | ArrowDataType::FixedSizeBinary(_)
-        | ArrowDataType::BinaryView => SkipprDataType::Binary,
-        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
-            SkipprDataType::String
-        }
-        ArrowDataType::List(_)
-        | ArrowDataType::LargeList(_)
-        | ArrowDataType::FixedSizeList(_, _) => SkipprDataType::Array,
-        ArrowDataType::Map(_, _) => SkipprDataType::Map,
-        ArrowDataType::Struct(_) => SkipprDataType::Record,
-        ArrowDataType::Null => SkipprDataType::Null,
-        _ => SkipprDataType::String,
-    }
-}
-
-fn output_metadata_for_arrow_field(field: &ArrowField) -> OutputMetadata {
-    let mut metadata = OutputMetadata::new();
-    metadata.out_field_name = field.name().clone();
-    metadata.source_field_name = field.name().clone();
-    metadata.determined_type = skippr_type_for_arrow(field.data_type());
-    // Arrow IPC / parquet "required" is not a lake write contract: WAL compact
-    // and Iceberg files can contain nulls. Copying required=true makes
-    // `skipprd query` fail with "non-nullable but contains null values".
-    metadata.nullable = true;
-    if let ArrowDataType::Struct(fields) = field.data_type() {
-        metadata.fields = Box::new(
-            fields
-                .iter()
-                .map(|child| (child.name().clone(), output_metadata_for_arrow_field(child)))
-                .collect::<HashMap<_, _>>(),
-        );
-    }
-    metadata
-}
-
-fn output_metadata_for_arrow_schema(schema: &SchemaRef) -> OutputMetadata {
-    let mut metadata = OutputMetadata::new();
-    metadata.determined_type = SkipprDataType::Record;
-    metadata.fields = Box::new(
-        schema
-            .fields()
-            .iter()
-            .map(|field| (field.name().clone(), output_metadata_for_arrow_field(field)))
-            .collect::<HashMap<_, _>>(),
-    );
-    metadata
-}
-
 fn query_value_from_runtime_filename(filename: &str, key: &str) -> Option<String> {
     filename.split('&').find_map(|part| {
         let (part_key, part_value) = part.split_once('=')?;
@@ -799,130 +730,30 @@ fn query_value_from_runtime_filename(filename: &str, key: &str) -> Option<String
     })
 }
 
-fn apply_derived_runtime_schema(config: &Config, namespace: String, schema: &SchemaRef) {
+fn apply_derived_runtime_schema(
+    config: &Config,
+    namespace: String,
+    schema: &SchemaRef,
+) -> io::Result<()> {
     if current_runtime_schema_state()
         .namespaces
         .contains_key(&namespace)
     {
-        return;
+        return Ok(());
     }
 
+    let metadata = crate::ingest::schema_arrow::output_metadata_for_arrow_schema(schema)
+        .map_err(|err| io::Error::other(err.to_string()))?;
     let version = bump_pipeline_schema_version();
     apply_runtime_source_schema_state(
         config,
         RuntimeSchemaState {
             version,
-            namespaces: BTreeMap::from([(
-                namespace.clone(),
-                output_metadata_for_arrow_schema(schema),
-            )]),
+            namespaces: BTreeMap::from([(namespace.clone(), metadata)]),
             namespace_versions: BTreeMap::from([(namespace, version)]),
         },
     );
-}
-
-async fn ingest_runtime_batches_into_core(
-    config: &Config,
-    request_id: u64,
-    batches: Vec<crate::runtime_plugins::protocol::RuntimeIngestPartitionBatch>,
-    offsets: Arc<Offsets>,
-    _shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-) -> io::Result<()> {
-    if batches.is_empty() {
-        return Ok(());
-    }
-
-    let mut buffer_batches = Vec::with_capacity(batches.len());
-    let mut derived_namespaces = BTreeMap::new();
-    let mut total_rows = 0u64;
-    let mut total_bytes = 0u64;
-    for batch in batches {
-        total_bytes = total_bytes.saturating_add(batch.arrow_stream_bytes.len() as u64);
-        let mut stream = decode_record_batch_stream(batch.arrow_stream_bytes)?;
-        let mut record_batches = Vec::new();
-        while let Some(next_batch) = stream.next().await {
-            let record_batch = next_batch.map_err(|err| io::Error::other(err.to_string()))?;
-            total_rows = total_rows.saturating_add(record_batch.num_rows() as u64);
-            record_batches.push(record_batch);
-        }
-        let ops = config.get_transform_ops();
-        let (record_batches, cdc_rows) =
-            crate::stream_transform::apply_configured_ops(&ops, record_batches, batch.cdc_rows)
-                .map_err(|err| {
-                    crate::metrics::counters::add_stream_transform_failure(1);
-                    io::Error::other(format!("transform.ops failed: {err}"))
-                })?;
-        let schema = record_batches
-            .first()
-            .map(|batch| batch.schema())
-            .unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty()));
-        let schema_fingerprint =
-            crate::converters::skippr_arrow::stable_schema_fingerprint(&schema);
-        let namespace = storage_namespace(config, &batch.namespace);
-        derived_namespaces.insert(namespace.clone(), output_metadata_for_arrow_schema(&schema));
-        let offsets_map = batch
-            .offsets
-            .into_iter()
-            .map(|offset| (offset.key, offset.position))
-            .collect();
-        buffer_batches.push(IngestBufferBatch {
-            offsets: offsets_map,
-            sink_ref: batch.sink_ref,
-            _namespace: namespace,
-            _partition: storage_partition(config, &batch.partition),
-            _time: batch.time,
-            _schema_fingerprint: schema_fingerprint,
-            schema,
-            payload: crate::buffer::segment_file::WalPayload::Arrow(record_batches),
-            cdc_rows,
-            checkpoint_update: batch
-                .checkpoint_update
-                .map(|update| (update.key, update.envelope)),
-        });
-    }
-    if !derived_namespaces.is_empty() {
-        let version = bump_pipeline_schema_version();
-        let namespace_versions = derived_namespaces
-            .keys()
-            .map(|namespace| (namespace.clone(), version))
-            .collect();
-        let changed_namespaces = apply_runtime_source_schema_state(
-            config,
-            RuntimeSchemaState {
-                version,
-                namespaces: derived_namespaces,
-                namespace_versions,
-            },
-        );
-        for namespace in changed_namespaces {
-            config
-                .sync_output_schema_namespace_blocking(&namespace)
-                .await
-                .map_err(io::Error::other)?;
-        }
-    }
-
-    let arrow_bytes = buffer_batches
-        .iter()
-        .map(|batch| batch.payload.estimated_bytes() as usize)
-        .sum::<usize>();
-    crate::metrics::counters::add_messages(total_rows);
-    crate::metrics::counters::add_source_bytes(total_bytes);
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-    crate::buffer::wal_writer::submit(crate::buffer::wal_writer::WalCommitUnit {
-        submit_id: request_id,
-        batches: buffer_batches,
-        offsets_db: offsets,
-        raw_bytes: total_bytes as usize,
-        arrow_bytes,
-        done: done_tx,
-    })
-    .await
-    .map_err(io::Error::other)?;
-    done_rx
-        .await
-        .map_err(|err| io::Error::other(format!("WAL writer response dropped: {err}")))?
-        .map_err(io::Error::other)
+    Ok(())
 }
 
 fn decode_plugin_data_frame(payload: Vec<u8>) -> io::Result<PluginDataFrame> {
@@ -1337,97 +1168,6 @@ pub async fn sync_runtime_input_plugin(
                         saw_unflushed_batches = true;
                     }
                 }
-                PluginDataFrame::IngestBatches {
-                    request_id,
-                    batches,
-                } => {
-                    if batches.is_empty() {
-                        let _ = ingest_ack_tx.send(RuntimeIngestAck {
-                            request_id,
-                            error: None,
-                        });
-                    } else {
-                        let ack_rx = crate::buffer::wal_writer::register_request_ack(request_id, 1);
-                        let ack_tx = ingest_ack_tx.clone();
-                        tokio::spawn(async move {
-                            let error = match ack_rx.await {
-                                Ok(Ok(())) => None,
-                                Ok(Err(err)) => Some(err.to_string()),
-                                Err(err) => {
-                                    Some(format!("runtime ingest ack channel dropped: {err}"))
-                                }
-                            };
-                            let _ = ack_tx.send(RuntimeIngestAck { request_id, error });
-                        });
-                        if Config::debug_enabled() || Config::log_wal_enabled() {
-                            let total_bytes: usize = batches
-                                .iter()
-                                .map(|batch| batch.arrow_stream_bytes.len())
-                                .sum();
-                            let offset_sample: Vec<String> = batches
-                                .iter()
-                                .take(3)
-                                .map(|batch| {
-                                    format!(
-                                        "{}/{}@{}",
-                                        batch.namespace,
-                                        batch.partition,
-                                        batch.arrow_stream_bytes.len()
-                                    )
-                                })
-                                .collect();
-                            info!(
-                                "runtime source host: received {} prepared partition batches ({} bytes) sample={:?}",
-                                batches.len(),
-                                total_bytes,
-                                offset_sample
-                            );
-                        }
-                        if let Err(err) =
-                            runtime_source_throttle_blocking_tasks(&mut pending_source_tasks).await
-                        {
-                            crate::buffer::wal_writer::fail_request(request_id, err.to_string());
-                            return Err(err);
-                        }
-                        let offsets = offsets.clone();
-                        let shared_output = shared_output.clone();
-                        let cfg = config.clone();
-                        pending_source_tasks.spawn_blocking(move || {
-                            let result =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    INGEST_RT
-                                        .handle()
-                                        .block_on(ingest_runtime_batches_into_core(
-                                            &cfg,
-                                            request_id,
-                                            batches,
-                                            offsets,
-                                            shared_output,
-                                        ))
-                                }));
-                            match result {
-                                Ok(Ok(())) => Ok(()),
-                                Ok(Err(err)) => {
-                                    crate::buffer::wal_writer::fail_request(
-                                        request_id,
-                                        err.to_string(),
-                                    );
-                                    Err(err)
-                                }
-                                Err(_) => {
-                                    let message =
-                                        "runtime prepared ingest task panicked".to_string();
-                                    crate::buffer::wal_writer::fail_request(
-                                        request_id,
-                                        message.clone(),
-                                    );
-                                    Err(io::Error::other(message))
-                                }
-                            }
-                        });
-                        saw_unflushed_batches = true;
-                    }
-                }
                 PluginDataFrame::SinkWrite(write) => {
                     let shared_output = shared_output.clone();
                     let cfg = config.clone();
@@ -1441,7 +1181,7 @@ pub async fn sync_runtime_input_plugin(
                         let namespace =
                             query_value_from_runtime_filename(&write.filename, "namespace");
                         if let Some(ref ns) = namespace {
-                            apply_derived_runtime_schema(&cfg, ns.clone(), &stream.schema());
+                            apply_derived_runtime_schema(&cfg, ns.clone(), &stream.schema())?;
                         }
                         let source_contract = write.source_contract.or_else(|| {
                             namespace.as_deref().and_then(
@@ -3825,7 +3565,7 @@ impl DataSink for RuntimeDataSinkPlugin {
         if let Some(namespace) = query_value_from_runtime_filename(&ctx.filename, "namespace") {
             let schema = stream.schema();
             if !schema.fields().is_empty() {
-                apply_derived_runtime_schema(&self.app_config, namespace, &schema);
+                apply_derived_runtime_schema(&self.app_config, namespace, &schema)?;
             }
         }
         let namespace =
@@ -3882,7 +3622,7 @@ impl DataSink for RuntimeDataSinkPlugin {
         if let Some(namespace) = query_value_from_runtime_filename(&ctx.filename, "namespace") {
             let schema = reader.schema();
             if !schema.fields().is_empty() {
-                apply_derived_runtime_schema(&self.app_config, namespace, &schema);
+                apply_derived_runtime_schema(&self.app_config, namespace, &schema)?;
             }
         }
         let namespace =
@@ -4459,17 +4199,6 @@ mod tests {
 
     fn env_lock() -> MutexGuard<'static, ()> {
         ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
-
-    #[test]
-    fn arrow_ipc_fields_are_nullable_so_iceberg_query_accepts_compact_nulls() {
-        let field =
-            arrow::datatypes::Field::new("l_quantity", arrow::datatypes::DataType::Float64, false);
-        let meta = super::output_metadata_for_arrow_field(&field);
-        assert!(
-            meta.nullable(),
-            "TPC-H parquet marks required columns; Iceberg scan must still accept nulls after compact"
-        );
     }
 
     #[test]

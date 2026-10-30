@@ -1,5 +1,5 @@
 use skippr_runtime_sdk::SkipprConfig;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
@@ -12,6 +12,7 @@ use tracing::error;
 
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::helpers::Helpers;
+use crate::serdes::input_format::InputFormat;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
 use skippr_runtime_sdk::progress::OffsetKey;
@@ -47,14 +48,14 @@ impl DataSourceStdinPlugin {
         ctx: &dyn SourceSyncContext,
         buffer: Vec<u8>,
     ) -> Result<(), io::Error> {
-        let data = String::from_utf8_lossy(&buffer).into_owned();
+        let bytes = buffer.len();
         let batch = IngestBatch {
             offset_key: OffsetKey {
                 namespace: "stdin".to_string(),
                 partition: Helpers::random_str(10),
             },
-            data: data.clone(),
-            bytes: data.len(),
+            data: buffer,
+            bytes,
             offset_pos: None,
             source_uri: String::new(),
             namespace: None,
@@ -72,9 +73,23 @@ impl DataSource for DataSourceStdinPlugin {
         let buffer_size = self.config.batch_size_bytes.unwrap_or(1) as usize;
         let buffer_timeout =
             Duration::from_secs(self.config.batch_size_seconds.unwrap_or(1).max(0) as u64);
+        let format = InputFormat::from_option(self.config.format.as_deref());
 
         thread::spawn(move || {
             let stdin = io::stdin();
+            if format.requires_whole_payload() {
+                let mut buffer = Vec::new();
+                if let Err(e) = stdin.lock().read_to_end(&mut buffer) {
+                    error!("Error reading from stdin: {}", e);
+                    return;
+                }
+                if !buffer.is_empty() {
+                    if let Err(e) = tx.send(buffer) {
+                        error!("Error sending to buffer channel: {}", e);
+                    }
+                }
+                return;
+            }
             let reader = BufReader::new(stdin.lock());
             let mut buffer = Vec::new();
             let mut last_flush = Instant::now();

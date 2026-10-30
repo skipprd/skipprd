@@ -349,7 +349,7 @@ impl DataSourceGoogleAnalyticsPlugin {
             let bytes = payload.len();
             batches.push(IngestBatch {
                 offset_key: OffsetKey::new(stream.namespace, date_key.clone()),
-                data: payload,
+                data: payload.into(),
                 bytes,
                 offset_pos: None,
                 source_uri: source_uri.clone(),

@@ -5,6 +5,7 @@ pub mod ingest;
 pub mod partition_time;
 pub mod record_types;
 pub mod scalar;
+pub mod schema_arrow;
 pub mod sequencer;
 pub mod tuner;
 
