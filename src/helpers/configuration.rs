@@ -3068,6 +3068,38 @@ impl Config {
         )
     }
 
+    /// Coalesce further schema-sync requests for `debounce`, but return
+    /// immediately when the channel closes so `--once` drain does not sit on
+    /// the 400ms default debounce after data and compaction have finished.
+    async fn schema_sync_debounce_or_closed(
+        rx: &mut UnboundedReceiver<SchemaPublicationRequest>,
+        dirty: &mut HashMap<String, SchemaPublicationRequest>,
+        debounce: std::time::Duration,
+    ) -> bool {
+        if debounce.is_zero() {
+            return false;
+        }
+        let sleep = tokio::time::sleep(debounce);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                _ = &mut sleep => return false,
+                maybe = rx.recv() => match maybe {
+                    Some(request) => {
+                        let key = request.dirty_key();
+                        match dirty.get(&key) {
+                            Some(existing) if existing.version >= request.version => {}
+                            _ => {
+                                dirty.insert(key, request);
+                            }
+                        }
+                    }
+                    None => return true,
+                },
+            }
+        }
+    }
+
     fn drain_available_schema_sync_requests(
         rx: &mut UnboundedReceiver<SchemaPublicationRequest>,
         dirty: &mut HashMap<String, SchemaPublicationRequest>,
@@ -3131,11 +3163,14 @@ impl Config {
                         .next()
                         .map(|request| request.config.schema_sync_debounce_duration())
                         .unwrap_or_default();
-                    if !debounce.is_zero() {
-                        tokio::time::sleep(debounce).await;
-                    }
-                    let channel_closed =
-                        Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
+                    let debounce_closed = if debounce.is_zero() {
+                        false
+                    } else {
+                        Config::schema_sync_debounce_or_closed(&mut rx, &mut dirty, debounce)
+                            .await
+                    };
+                    let channel_closed = debounce_closed
+                        || Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
                     let mut requests: Vec<SchemaPublicationRequest> =
                         dirty.drain().map(|(_, request)| request).collect();
                     requests.sort_by(|left, right| {
@@ -4997,6 +5032,25 @@ vector_sources:
             .find(|request| request.namespace == "events")
             .unwrap();
         assert_eq!(events.version, 1);
+    }
+
+    #[tokio::test]
+    async fn schema_sync_drain_skips_debounce_when_the_channel_closes() {
+        let (tx, mut rx) = unbounded_channel::<SchemaPublicationRequest>();
+        let mut dirty = HashMap::new();
+        drop(tx);
+        let closed = tokio::time::timeout(
+            std::time::Duration::from_millis(80),
+            Config::schema_sync_debounce_or_closed(
+                &mut rx,
+                &mut dirty,
+                std::time::Duration::from_millis(400),
+            ),
+        )
+        .await
+        .expect("closing the schema sync channel must skip the 400ms debounce");
+        assert!(closed);
+        assert!(dirty.is_empty());
     }
 
     #[test]
