@@ -159,6 +159,11 @@ class PerfCatalogTests(unittest.TestCase):
         for name in ("copy-b-json-json", "copy-stdin-file", "copy-socket-file"):
             self.assertTrue((catalog["scenarios"][name].get("asserts") or {}).get("identity"), name)
 
+    def test_socket_copy_caps_once_idle_timeout(self) -> None:
+        source = Path(HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        fn = source.split("def run_copy_socket", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("SKIPPR_RUNTIME_ONCE_IDLE_TIMEOUT_SECONDS", fn)
+
     def test_wrap_cells_require_sync_and_wal_persist_per_matrix(self) -> None:
         catalog = load_catalog()
         for name in ("copy-format-matrix", "copy-s3-file", "copy-file-s3", "copy-s3-s3"):

@@ -926,6 +926,7 @@ def run_copy_socket(scenario_id: str, scenario: dict[str, Any], scale: str, work
     )
     stage_plugins(config, PIPELINE, manifests)
     env = base_env(config, data_dir, manifests)
+    env["SKIPPR_RUNTIME_ONCE_IDLE_TIMEOUT_SECONDS"] = "2"
     skipprd = skipprd_bin()
     cmd = time_prefix() + wrap_profile(
         [
