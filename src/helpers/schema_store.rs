@@ -265,6 +265,24 @@ mod tests {
     }
 
     #[test]
+    fn load_schema_from_reader_pin_while_writer_holds_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let fence = CatalogFence::local();
+        let writer = skippr_wal_catalog::FjallSkipprStore::open(dir.path(), fence).unwrap();
+        let mut md = PipelineMetadata::new(&Config::new());
+        md.name = "orders".into();
+        persist_pipeline_schema(&writer, fence, &md).unwrap();
+        skippr_wal_catalog::SkipprStore::flush_durable(&writer).unwrap();
+        let reader = skippr_wal_catalog::FjallReadStore::open(dir.path()).unwrap();
+        let loaded = load_pipeline_schema(&reader, "orders").unwrap().unwrap();
+        assert_eq!(loaded.name, "orders");
+        assert!(
+            skippr_wal_catalog::FjallSkipprStore::open(dir.path(), fence).is_err(),
+            "schema reader pin must not drop the writer lock"
+        );
+    }
+
+    #[test]
     fn checksum_mismatch_fail_closed() {
         let fence = CatalogFence::local();
         let store = skippr_wal_catalog::MemorySkipprStore::open(fence);

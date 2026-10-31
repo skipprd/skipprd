@@ -54,11 +54,12 @@ pub fn open_wal_catalog_for_config(
 
 pub fn open_wal_catalog_reader_for_config(
     config: &Config,
-    offsets: Option<&Offsets>,
 ) -> Result<Arc<dyn WalCatalogRead>, String> {
-    let _ = config;
-    let offsets = offsets.ok_or_else(|| "WAL catalog requires an open Skippr Store".to_string())?;
-    Ok(offsets.open_wal_catalog_read())
+    let _ = configured_kind(config)?;
+    let dir = format!("{}/skippr-store", config.get_data_dir());
+    skippr_wal_catalog::FjallReadStore::open(&dir)
+        .map(|store| Arc::new(store) as Arc<dyn WalCatalogRead>)
+        .map_err(|err| err.to_string())
 }
 
 /// Discover reset: catalog rows (`wal#`) plus published offset/checkpoint items.
@@ -194,8 +195,8 @@ mod tests {
             .next()
             .expect("reader opener body");
         assert!(
-            body.contains("open_wal_catalog_read"),
-            "query open must use the reader facade"
+            body.contains("FjallReadStore::open"),
+            "query open must pin a reader snapshot without writer.lock"
         );
         assert!(
             !body.contains("CatalogFence"),

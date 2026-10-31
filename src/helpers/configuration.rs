@@ -2752,17 +2752,26 @@ impl Config {
         info!("get_metadata: pipeline='{pipeline}' schema=skippr-store:schema/{pipeline}");
         let leftover_json = self.pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
 
-        let (store, fence) = match crate::helpers::offsets::store_for_config(self) {
-            Ok(pair) => pair,
-            Err(e) => {
-                error!("Failed to open Skippr Store for schema: {e}");
-                std::process::exit(1);
+        let loaded = if let Some((store, _)) = crate::helpers::offsets::live_kv() {
+            crate::helpers::schema_store::load_pipeline_schema(store.as_ref(), &pipeline)
+        } else {
+            let store_dir = format!("{}/skippr-store", self.get_data_dir());
+            match skippr_wal_catalog::FjallReadStore::open(&store_dir) {
+                Ok(reader) => {
+                    crate::helpers::schema_store::load_pipeline_schema(&reader, &pipeline)
+                }
+                Err(e) => {
+                    error!("Failed to open Skippr Store for schema: {e}");
+                    std::process::exit(1);
+                }
             }
         };
-        match crate::helpers::schema_store::load_pipeline_schema(store.as_ref(), &pipeline) {
+        match loaded {
             Ok(Some(mut pipeline_metadata)) => {
                 self.inject_flatten_flag(&mut pipeline_metadata);
-                if pipeline_metadata.migrate_persisted_metadata() {
+                if crate::helpers::offsets::live_kv().is_some()
+                    && pipeline_metadata.migrate_persisted_metadata()
+                {
                     info!(
                         "Migrated persisted metadata to version {}",
                         pipeline_metadata.metadata_version
@@ -2777,6 +2786,14 @@ impl Config {
                 std::process::exit(1);
             }
         }
+
+        let (store, fence) = match crate::helpers::offsets::store_for_config(self) {
+            Ok(pair) => pair,
+            Err(e) => {
+                error!("Failed to open Skippr Store for schema: {e}");
+                std::process::exit(1);
+            }
+        };
 
         let local = crate::adapters::storage::LocalDiskStorageAdapter::new(&self.get_data_dir());
         let local_bytes = match local.get_bytes_opt(&leftover_json).await {
@@ -4822,6 +4839,24 @@ vector_sources:
         assert!(
             worker.contains("request.config"),
             "schema sync worker must apply the request's Config, not a spawn freeze"
+        );
+    }
+
+    #[test]
+    fn get_metadata_loads_schema_from_reader_pin() {
+        let src = include_str!("configuration.rs");
+        let start = src.find("pub async fn get_metadata").expect("get_metadata");
+        let body = src[start..]
+            .split("fn pipeline_metadata_object_path")
+            .next()
+            .expect("get_metadata body");
+        assert!(
+            body.contains("FjallReadStore::open"),
+            "query schema load must pin a reader snapshot without writer.lock"
+        );
+        assert!(
+            body.contains("live_kv()"),
+            "in-process ingest still loads schema from the live writer"
         );
     }
 

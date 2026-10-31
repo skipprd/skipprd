@@ -17,7 +17,7 @@ pub mod conformance;
 
 pub use apply::validate_put;
 pub use error::CatalogError;
-pub use fjall_kv::FjallSkipprStore;
+pub use fjall_kv::{FjallReadStore, FjallSkipprStore};
 pub use key::{CatalogKey, CatalogPrefix, CheckpointKey, CompactionId, OffsetHintKey};
 pub use kv::{family_rest, KvOp, SkipprStore, SkipprStoreRead, StoreFamily, STORE_FORMAT_VERSION};
 pub use memory_kv::{
@@ -135,6 +135,34 @@ mod tests {
         assert!(
             matches!(err, CatalogError::Io(ref msg) if msg.contains("already writing")),
             "second writer must fail closed, got {err}"
+        );
+    }
+
+    #[test]
+    fn fjall_reader_pins_committed_keys_while_writer_holds_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = fence();
+        let writer = FjallSkipprStore::open(dir.path(), f).unwrap();
+        SkipprStore::commit(
+            &writer,
+            &[KvOp::Put {
+                key: StoreFamily::Catalog.key(b"wal#seq"),
+                value: b"v1".to_vec(),
+            }],
+            f,
+        )
+        .unwrap();
+        SkipprStore::flush_durable(&writer).unwrap();
+        let reader = FjallReadStore::open(dir.path()).unwrap();
+        assert_eq!(
+            SkipprStoreRead::get(&reader, &StoreFamily::Catalog.key(b"wal#seq"))
+                .unwrap()
+                .as_deref(),
+            Some(b"v1".as_slice())
+        );
+        assert!(
+            FjallSkipprStore::open(dir.path(), f).is_err(),
+            "reader pin must not drop the writer lock"
         );
     }
 

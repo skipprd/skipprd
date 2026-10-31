@@ -61,9 +61,9 @@ Do not add a `leases` family, membership rows, or cluster ids. Single writer + `
 
 Those readers MUST share the trait (prefix scan + pin). They MUST NOT open a second store design, a replica Flight WAL leaf, or a central coordinator.
 
-This milestone: one OS process opens fjall; ingest and query multiplex in-process. A second OS process that wants to **write** the same `DATA_DIR` fail-closes.
+This milestone: one OS writer opens fjall (`writer.lock`). Extra reader processes pin a flushed copy of `fjall/` and MUST NOT take `writer.lock` or commit. A second OS process that wants to **write** the same `DATA_DIR` fail-closes.
 
-Log replication and extra reader processes are out of this ticket; the trait and key layout MUST NOT assume a single in-process reader, and MUST NOT grow write-side sharding to fake it.
+Log replication is out of this ticket; the trait and key layout MUST NOT assume a single in-process reader, and MUST NOT grow write-side sharding to fake it.
 
 ## Sled migration (keep sled, no write path)
 
@@ -127,7 +127,7 @@ Every family: fence/CAS/prefix; schema shred byte-size + reconstruct; stream_sta
 
 ## Out of this ticket
 
-Turning on extra reader processes; log replication; RocksDB; Dynamo as store; payloads in the KV; DataFusion over `stream_state` ([#32](https://github.com/skipprd/skipprd/issues/32)). Public customer docs (`docs/docs/configuration/skippr-store.md`) ship with this cutover.
+Log replication; RocksDB; Dynamo as store; payloads in the KV; DataFusion over `stream_state` ([#32](https://github.com/skipprd/skipprd/issues/32)). Public customer docs (`docs/docs/configuration/skippr-store.md`) ship with this cutover.
 
 ## Cutover
 

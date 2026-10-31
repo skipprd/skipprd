@@ -235,20 +235,6 @@ pub fn ensure_disk_wal_handle(
     Ok(handle)
 }
 
-fn query_catalog_open_error(pipeline: &str, err: impl std::fmt::Display) -> io::Error {
-    let text = err.to_string();
-    if text.contains("already ingesting")
-        || text.contains("could not acquire lock")
-        || text.contains("already writing")
-    {
-        io::Error::other(format!(
-            "WAL catalog for pipeline {pipeline} is locked by a running writer; a second writer must not open this DATA_DIR"
-        ))
-    } else {
-        io::Error::other(text)
-    }
-}
-
 /// Open the Skippr Store WAL index for query. Never opens a writer catalog.
 pub fn open_query_wal_reader(config: &Config) -> io::Result<WalCatalogReader> {
     let pipeline = config.get_pipeline_name();
@@ -266,11 +252,8 @@ pub fn open_query_wal_reader(config: &Config) -> io::Result<WalCatalogReader> {
     if let Some(reader) = wal_reader_for(&key) {
         return Ok(reader);
     }
-    let offsets = crate::helpers::offsets::Offsets::init(config)
-        .map_err(|err| query_catalog_open_error(&pipeline, err))?;
-    let catalog =
-        crate::pipeline_backend::open_wal_catalog_reader_for_config(config, Some(&offsets))
-            .map_err(|err| query_catalog_open_error(&pipeline, err))?;
+    let catalog = crate::pipeline_backend::open_wal_catalog_reader_for_config(config)
+        .map_err(io::Error::other)?;
     let reader = WalCatalogReader::new(key, catalog);
     install_query_reader(reader.clone())?;
     Ok(reader)
@@ -327,6 +310,10 @@ mod tests {
             !body.contains("install_wal_handle"),
             "query reader must not install a writer handle"
         );
+        assert!(
+            !body.contains("Offsets::init"),
+            "query reader must not open a writer Skippr Store"
+        );
     }
 
     #[test]
@@ -341,10 +328,12 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn open_query_wal_reader_reports_locked_writer() {
+    fn open_query_wal_reader_pins_while_writer_holds_lock() {
         use serde_json::json;
+        use skippr_wal_catalog::{KvOp, SkipprStore, StoreFamily};
 
         crate::helpers::offsets::reset_live_kv();
+        crate::buffer::wal_reader::clear_query_readers();
         let dir = tempfile::tempdir().unwrap();
         let config: Config = serde_json::from_value(json!({
             "skippr": { "workspace": "ws-lock", "tenant": "ten-lock" },
@@ -361,21 +350,24 @@ mod tests {
         .unwrap();
         let config = config.bind_pipeline("orders");
         let store_dir = format!("{}/skippr-store", config.get_data_dir());
-        let _holder = skippr_wal_catalog::FjallSkipprStore::open(
-            &store_dir,
-            skippr_wal_catalog::CatalogFence::local(),
+        let fence = skippr_wal_catalog::CatalogFence::local();
+        let holder = skippr_wal_catalog::FjallSkipprStore::open(&store_dir, fence).unwrap();
+        SkipprStore::commit(
+            &holder,
+            &[KvOp::Put {
+                key: StoreFamily::Catalog.key(b"pin"),
+                value: b"live".to_vec(),
+            }],
+            fence,
         )
         .unwrap();
-        let err = open_query_wal_reader(&config).unwrap_err();
-        let text = err.to_string();
+        SkipprStore::flush_durable(&holder).unwrap();
+        let reader = open_query_wal_reader(&config).unwrap();
         assert!(
-            text.contains("locked by a running writer"),
-            "second writer must fail closed, got {text}"
+            crate::buffer::wal_handle::wal_handle_for(reader.pipeline()).is_none(),
+            "query pin must not install a writer handle"
         );
-        assert!(
-            text.contains("orders"),
-            "locked-writer error must name the pipeline, got {text}"
-        );
+        crate::buffer::wal_reader::clear_query_readers();
     }
 
     #[test]
