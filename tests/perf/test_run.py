@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -151,6 +152,20 @@ class PerfCatalogTests(unittest.TestCase):
             spec = catalog["scenarios"][name]
             rows = int(spec.get("linux_rows", defaults["linux_rows"]))
             self.assertGreaterEqual(rows, 50000, name)
+
+    def test_file_once_batch_holds_linux_rows(self) -> None:
+        catalog = load_catalog()
+        linux_rows = int(catalog["defaults"]["linux_rows"])
+        source = Path(HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        marker = "source_kind == \"File\""
+        block = source.split(marker, 1)[1].split("elif source_kind", 1)[0]
+        match = re.search(r"batch_size_bytes:\s*(\d+)", block)
+        self.assertIsNotNone(match, "File source YAML must set batch_size_bytes")
+        self.assertGreaterEqual(
+            int(match.group(1)),
+            linux_rows * 200,
+            "File --once only emits one plugin batch; it must hold linux_rows",
+        )
 
     def test_ingest_a_requires_wal_and_exact_arrow_phases(self) -> None:
         catalog = load_catalog()

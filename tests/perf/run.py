@@ -301,7 +301,7 @@ def write_skippr_yml(
         source_block = f"""    File:
       path: {source_path}
       format: {file_format}
-      batch_size_bytes: 1048576
+      batch_size_bytes: 20000000
 """
     elif source_kind == "Stdin":
         source_block = """    Stdin:
