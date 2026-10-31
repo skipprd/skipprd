@@ -36,20 +36,12 @@ class S3Storage:
 Storage: TypeAlias = LocalStorage | S3Storage
 
 @final
-class SledStore:
-    """Local sled SkipprStore (`store.type: sled`)."""
+class FjallStore:
+    """Local fjall SkipprStore (`store.type: fjall`)."""
 
-    def __new__(cls) -> SledStore: ...
+    def __new__(cls) -> FjallStore: ...
 
-@final
-class DynamoDbStore:
-    """DynamoDB SkipprStore (`store.type: dynamodb`, `store.name`)."""
-
-    def __new__(cls, table: str) -> DynamoDbStore: ...
-    @property
-    def table(self) -> str: ...
-
-Store: TypeAlias = SledStore | DynamoDbStore
+Store: TypeAlias = FjallStore
 
 @final
 class DataSourceRef:
@@ -133,7 +125,7 @@ class Config:
         """Where engine state lives: `LocalStorage()` or `S3Storage(bucket)`."""
         ...
     def store(self, value: Store) -> Config:
-        """SkipprStore for offsets and leases: `SledStore()` or `DynamoDbStore(table)`."""
+        """SkipprStore for offsets, WAL catalog, stream state, and schema: `FjallStore()`."""
         ...
     def wal_s3_bucket(self, value: str) -> Config:
         """Dedicated S3 bucket for WAL segments. Falls back to the storage bucket."""

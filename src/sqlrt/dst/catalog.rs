@@ -191,7 +191,7 @@ fn c_legacy_slice_put_rejected() {
 
 #[test]
 fn c_import_leftover_once() {
-    use crate::helpers::offset_store::SledOffsetStore;
+    use crate::helpers::offset_store::{memory_offset_store, StoreOffsetStore};
     use skippr_wal_catalog::{CatalogKey, FormatPhase};
     use std::sync::Arc;
     let dir = tempfile::tempdir().unwrap();
@@ -199,9 +199,8 @@ fn c_import_leftover_once() {
     let paths = PipelinePaths::legacy_disk(dir.path());
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
-    let db = sled::open(dir.path().join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-        Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
+        crate::helpers::offset_store::memory_offset_store();
     let handle =
         crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     std::fs::create_dir_all(&handle.paths().durable).unwrap();
@@ -317,7 +316,7 @@ fn c_deletecond_version_mismatch() {
 
 #[test]
 fn c_format_imported_resume() {
-    use crate::helpers::offset_store::SledOffsetStore;
+    use crate::helpers::offset_store::{memory_offset_store, StoreOffsetStore};
     use skippr_wal_catalog::{
         CatalogKey, CatalogRow, CatalogTxn, FormatPhase, FormatRow, PutCond, FORMAT_VERSION,
     };
@@ -327,9 +326,8 @@ fn c_format_imported_resume() {
     let paths = PipelinePaths::legacy_disk(dir.path());
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
-    let db = sled::open(dir.path().join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-        Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
+        crate::helpers::offset_store::memory_offset_store();
     let handle =
         crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     let mut txn = CatalogTxn::new();
@@ -472,15 +470,14 @@ fn wal_handle(
     std::sync::Arc<crate::buffer::wal_handle::PipelineWalHandle>,
     CatalogFence,
 ) {
-    use crate::helpers::offset_store::SledOffsetStore;
+    use crate::helpers::offset_store::{memory_offset_store, StoreOffsetStore};
     use std::sync::Arc;
     let key = PipelineKey::new("t", "w", pipeline).unwrap();
     let paths = PipelinePaths::legacy_disk(dir);
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
-    let db = sled::open(dir.join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-        Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
+        crate::helpers::offset_store::memory_offset_store();
     let handle =
         crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     (handle, fence)

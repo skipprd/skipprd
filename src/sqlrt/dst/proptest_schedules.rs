@@ -55,7 +55,6 @@ fn arb_op() -> impl Strategy<Value = Op> {
         Just(Op::Failpoint(FailpointName::AfterCompactionSink)),
         Just(Op::Failpoint(FailpointName::BeforeCompactionSink)),
         Just(Op::Failpoint(FailpointName::HoldBeforeCompactionSink)),
-        Just(Op::Failpoint(FailpointName::AfterReplicaPayloadAck)),
         Just(Op::Reopen),
         Just(Op::HoldPin),
         Just(Op::ReleasePin),

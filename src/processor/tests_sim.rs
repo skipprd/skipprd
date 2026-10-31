@@ -50,7 +50,7 @@ fn scripts() -> Vec<Vec<SimEvent>> {
 }
 
 #[test]
-fn disk_sled_scripts_match_golden_model() {
+fn disk_store_scripts_match_golden_model() {
     for (i, script) in scripts().into_iter().enumerate() {
         let fixture = DiskFixture::new();
         assert!(

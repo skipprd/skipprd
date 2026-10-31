@@ -109,7 +109,7 @@ pub fn committed(log: &MigrationLog, apply: &MigrationApply) -> Result<bool, Jou
 }
 
 pub fn load(store: &dyn OffsetStore, key: &JournalKey) -> Result<MigrationLog, JournalError> {
-    match store.get_bytes(key.as_str()).map_err(JournalError::Store)? {
+    match store.get_journal(key).map_err(JournalError::Store)? {
         None => Ok(MigrationLog::default()),
         Some(bytes) => {
             bincode::deserialize(&bytes).map_err(|err| JournalError::Store(err.to_string()))
@@ -154,13 +154,11 @@ pub fn commit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helpers::offset_store::SledOffsetStore;
+    use crate::helpers::offset_store::{memory_offset_store, StoreOffsetStore};
 
     #[test]
     fn checksum_mismatch_is_fail_closed() {
-        let db = sled::Config::new().temporary(true).open().unwrap();
-        let tree = db.open_tree("t").unwrap();
-        let store = SledOffsetStore::new(tree);
+        let store = crate::helpers::offset_store::memory_offset_store();
         let key = journal_key("ws", "p").unwrap();
         let first = MigrationApply {
             id: MigrationId::new("m1"),
@@ -179,9 +177,7 @@ mod tests {
 
     #[test]
     fn latest_phase_is_applied_truth_for_resume() {
-        let db = sled::Config::new().temporary(true).open().unwrap();
-        let tree = db.open_tree("t").unwrap();
-        let store = SledOffsetStore::new(tree);
+        let store = crate::helpers::offset_store::memory_offset_store();
         let key = journal_key("ws", "p").unwrap();
         let apply = MigrationApply {
             id: MigrationId::new("m1"),

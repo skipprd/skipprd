@@ -1009,8 +1009,8 @@ Additional functional tests written for this adapter:
 
 New workflow `.github/workflows/dbt-skipprlake.yml`:
 
-1. Build skipprd (`--features offset-store-dynamodb`).
-2. Start DynamoDB-local, create the catalog table.
+1. Build skipprd.
+2. Start DynamoDB-local for the **SkipprLake destination catalog** table (not Skippr Store).
 3. Start `skipprd serve --rest-bind 127.0.0.1:0 --flight-bind 127.0.0.1:0 --ready-file ready.json` with a File-source pipeline that lands rows in a `SkipprLake` sink.
 4. `pip install dbt-skipprlake[test]` (from the sibling repo at a pinned ref).
 5. Export `SKIPPRLAKE_TEST_*` from `ready.json` and run the functional suite.

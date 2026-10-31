@@ -12,7 +12,7 @@ from skippr import (
     DataSinkPostgres,
     DataSourcePostgres,
     DataSourceS3,
-    DynamoDbStore,
+    FjallStore,
     EnvRef,
     LocalStorage,
     Migration,
@@ -24,7 +24,7 @@ from skippr import (
 
 
 def build() -> PipelineRef:
-    cfg = Config().workspace("demo").storage(LocalStorage()).store(DynamoDbStore("state"))
+    cfg = Config().workspace("demo").storage(LocalStorage()).store(FjallStore())
     src = cfg.data_source("events", DataSourceS3(s3_bucket="b", s3_prefix="p"))
     lake = cfg.data_sink(
         "lake",

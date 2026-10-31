@@ -249,8 +249,7 @@ async fn cleanup_discover_ingest_artifacts(
     }
 
     match crate::pipeline_backend::configured_kind(config) {
-        Ok(crate::helpers::wal_storage::SkipprStoreKind::Sled)
-        | Ok(crate::helpers::wal_storage::SkipprStoreKind::DynamoDb) => {
+        Ok(_) => {
             crate::pipeline_backend::reset_pipeline_state(
                 config,
                 offsets,
@@ -372,7 +371,7 @@ fn metadata_from_runtime_output(output: &OutputMetadata) -> Metadata {
 }
 
 /// Arrow IPC / runtime-plugin ingest keeps schema in `current_runtime_schema_state`
-/// (and often writes an empty `metadata.json` before the first JSON analyse).
+/// (and persists the shredded `schema` family before the first JSON analyse).
 /// Discover and sync both persist those namespaces so `skipprd query` can
 /// register `pipeline.namespace` after WAL reclaim.
 fn pipeline_metadata_with_runtime_schema(
@@ -1818,7 +1817,7 @@ mod discover_cleanup_tests {
             "skippr": {
                 "workspace": "ws",
                 "tenant": "t",
-                "store": { "type": "dynamodb", "name": "offsets" }
+                "store": { "type": "fjall" }
             },
             "pipelines": {
                 "orders": {
@@ -1838,7 +1837,8 @@ mod discover_cleanup_tests {
             .join("keep.seg");
         std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
         std::fs::write(&payload, b"owned").unwrap();
-        let offsets = Offsets::from_local_db_for_test(sled::open(dir.path().join("db")).unwrap());
+        let offsets =
+            Offsets::from_store_for_test(crate::helpers::offset_store::memory_offset_store());
         let result = cleanup_discover_ingest_artifacts(&bound, &offsets).await;
         if let Some(value) = old_wal {
             Config::set_wal_storage(&value);
@@ -1848,7 +1848,7 @@ mod discover_cleanup_tests {
         }
         let err = result.expect_err("reset failure must fail closed");
         assert!(
-            err.contains("dynamodb") || err.contains("lease") || err.contains("feature"),
+            err.contains("Skippr Store") || err.contains("WAL catalog"),
             "{err}"
         );
         assert!(

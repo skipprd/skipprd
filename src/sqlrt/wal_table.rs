@@ -578,7 +578,7 @@ mod tests {
         use crate::buffer::wal_handle::{
             install_wal_handle, memory_catalog_for_test, remove_wal_handle, PipelineWalHandle,
         };
-        use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
+        use crate::helpers::offset_store::{memory_offset_store, OffsetStore};
         use arrow::array::StringArray;
         use std::collections::HashMap;
         use std::sync::Arc as StdArc;
@@ -589,9 +589,8 @@ mod tests {
         let paths = PipelinePaths::legacy_disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
-        let db = sled::open(dir.path().join("offsets")).unwrap();
-        let tree = db.open_tree("offsets").unwrap();
-        let offsets: StdArc<dyn OffsetStore> = StdArc::new(SledOffsetStore::new(tree));
+        let offsets: StdArc<dyn OffsetStore> =
+            StdArc::new(crate::helpers::offset_store::memory_offset_store());
         let handle = PipelineWalHandle::new(key.clone(), paths.clone(), catalog, offsets, fence);
         install_wal_handle(handle.clone());
         let part = PartitionKey {
@@ -676,7 +675,7 @@ mod tests {
         use crate::buffer::wal_handle::{
             install_wal_handle, memory_catalog_for_test, remove_wal_handle, PipelineWalHandle,
         };
-        use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
+        use crate::helpers::offset_store::{memory_offset_store, OffsetStore};
         use arrow::array::StringArray;
         use std::collections::HashMap;
         use std::sync::Arc as StdArc;
@@ -687,9 +686,8 @@ mod tests {
         let paths = PipelinePaths::legacy_disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
-        let db = sled::open(dir.path().join("offsets")).unwrap();
-        let tree = db.open_tree("offsets").unwrap();
-        let offsets: StdArc<dyn OffsetStore> = StdArc::new(SledOffsetStore::new(tree));
+        let offsets: StdArc<dyn OffsetStore> =
+            StdArc::new(crate::helpers::offset_store::memory_offset_store());
         let handle = PipelineWalHandle::new(key.clone(), paths.clone(), catalog, offsets, fence);
         install_wal_handle(handle.clone());
         let mut batches = HashMap::new();
@@ -866,15 +864,14 @@ mod tests {
         key: &PipelineKey,
     ) -> Arc<crate::buffer::wal_handle::PipelineWalHandle> {
         use crate::buffer::wal_handle::{memory_catalog_for_test, PipelineWalHandle};
-        use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
+        use crate::helpers::offset_store::{memory_offset_store, OffsetStore};
         use std::sync::Arc as StdArc;
 
         let paths = PipelinePaths::legacy_disk(dir);
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
-        let db = sled::open(dir.join("offsets")).unwrap();
-        let tree = db.open_tree("offsets").unwrap();
-        let offsets: StdArc<dyn OffsetStore> = StdArc::new(SledOffsetStore::new(tree));
+        let offsets: StdArc<dyn OffsetStore> =
+            StdArc::new(crate::helpers::offset_store::memory_offset_store());
         PipelineWalHandle::new(key.clone(), paths, catalog, offsets, fence)
     }
 

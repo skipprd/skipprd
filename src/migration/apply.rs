@@ -235,7 +235,7 @@ mod tests {
     use crate::discover::schema_alter::SchemaAlterOp;
     use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
     use crate::helpers::configuration::{Pipeline, Skippr};
-    use crate::helpers::offset_store::SledOffsetStore;
+    use crate::helpers::offset_store::{memory_offset_store, StoreOffsetStore};
     use crate::helpers::wal_storage::ElStorageMode;
     use crate::migration::file::load_sql_file;
     use crate::migration::journal;
@@ -334,9 +334,8 @@ mod tests {
         config
     }
 
-    fn store() -> SledOffsetStore {
-        let db = sled::Config::new().temporary(true).open().unwrap();
-        SledOffsetStore::new(db.open_tree("migration").unwrap())
+    fn store() -> Arc<dyn crate::helpers::offset_store::OffsetStore> {
+        crate::helpers::offset_store::memory_offset_store()
     }
 
     fn rename_apply() -> (MigrationApply, Vec<AlterStmt>) {
@@ -404,11 +403,8 @@ mod tests {
             skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(&config.get_data_dir()));
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
-        let db =
-            sled::open(std::path::Path::new(&config.get_data_dir()).join("mig-offsets")).unwrap();
-        let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> = Arc::new(
-            crate::helpers::offset_store::SledOffsetStore::new(db.open_tree("o").unwrap()),
-        );
+        let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
+            crate::helpers::offset_store::memory_offset_store();
         let handle =
             crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
         let seq = skippr_wal_catalog::CatalogSeq::new(1);

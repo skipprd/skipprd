@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::error::CatalogError;
 use crate::key::{CatalogKey, CatalogPrefix};
 use crate::row::{CatalogFence, CatalogRow};
@@ -21,6 +23,39 @@ pub trait WalCatalogStore: WalCatalogRead {
     fn commit_durable(&self, txn: &CatalogTxn, fence: CatalogFence) -> Result<(), CatalogError> {
         self.commit(txn, fence)?;
         self.flush_durable()
+    }
+}
+
+impl<T: WalCatalogRead + ?Sized> WalCatalogRead for Arc<T> {
+    fn get(&self, key: &CatalogKey) -> Result<Option<CatalogRow>, CatalogError> {
+        (**self).get(key)
+    }
+
+    fn query_prefix(
+        &self,
+        prefix: CatalogPrefix,
+        after: Option<&CatalogKey>,
+        limit: usize,
+    ) -> Result<Vec<(CatalogKey, CatalogRow)>, CatalogError> {
+        (**self).query_prefix(prefix, after, limit)
+    }
+}
+
+impl<T: WalCatalogStore + ?Sized> WalCatalogStore for Arc<T> {
+    fn commit(&self, txn: &CatalogTxn, fence: CatalogFence) -> Result<(), CatalogError> {
+        (**self).commit(txn, fence)
+    }
+
+    fn delete_prefix(
+        &self,
+        prefix: CatalogPrefix,
+        fence: CatalogFence,
+    ) -> Result<(), CatalogError> {
+        (**self).delete_prefix(prefix, fence)
+    }
+
+    fn flush_durable(&self) -> Result<(), CatalogError> {
+        (**self).flush_durable()
     }
 }
 

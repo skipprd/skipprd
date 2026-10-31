@@ -57,7 +57,7 @@ FORBIDDEN_PACKAGES = {
 EDGE_KINDS = "normal,build,dev"
 
 # Widest routine host build for CI (not `cargo tree --all-features`). Release-only
-# features such as `offset-store-dynamodb` intentionally pull connector SDKs and
+# features such as `iceberg-catalog-dynamodb` intentionally pull connector SDKs and
 # are enabled only in published skipprd binaries.
 HOST_WIDEST_FEATURES = ["stats_integration"]
 

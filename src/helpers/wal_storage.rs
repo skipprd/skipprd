@@ -83,43 +83,33 @@ impl FromStr for ElStorageMode {
     }
 }
 
-/// SkipprStore backend selected by `skippr.store.type` / `SKIPPR_STORE_TYPE`.
+/// SkipprStore kind. Live engine is always fjall; leftover YAML `sled` maps here.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize, Serialize)]
 pub enum SkipprStoreKind {
     #[default]
-    #[serde(rename = "sled")]
-    #[value(name = "sled")]
-    Sled,
-    #[serde(rename = "dynamodb")]
-    #[value(name = "dynamodb")]
-    DynamoDb,
+    #[serde(rename = "fjall", alias = "sled")]
+    #[value(name = "fjall", alias = "sled")]
+    Fjall,
 }
 
-/// Durable Skippr KV store: offsets, checkpoints, leases, and SkipprLake
-/// catalog pointers share one table via non-colliding PK/SK prefixes.
+/// Durable Skippr KV store. Lock: `docs/docs/maintainers/skippr-store-kv.md`.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkipprStore {
     #[serde(rename = "type")]
     pub kind: SkipprStoreKind,
-    /// Table name for DynamoDB. Unused for sled.
+    /// Leftover YAML; ignored. Not a remote table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
 impl SkipprStoreKind {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Sled => "sled",
-            Self::DynamoDb => "dynamodb",
-        }
+        "fjall"
     }
 
-    /// Disk and S3 default to sled.
-    pub fn default_for_wal(storage: WalStorage) -> Self {
-        match storage {
-            WalStorage::Disk | WalStorage::S3 => Self::Sled,
-        }
+    pub fn default_for_wal(_storage: WalStorage) -> Self {
+        Self::Fjall
     }
 }
 
@@ -128,8 +118,7 @@ impl FromStr for SkipprStoreKind {
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "" | "sled" => Ok(Self::Sled),
-            "dynamodb" => Ok(Self::DynamoDb),
+            "" | "sled" | "fjall" => Ok(Self::Fjall),
             other => Err(ConfigError::InvalidSkipprStore(other.to_owned())),
         }
     }
@@ -141,7 +130,7 @@ pub enum ConfigError {
     InvalidWalStorage(String),
     #[error("invalid skipprd_el_storage_mode value '{0}'; expected local or s3")]
     InvalidElStorageMode(String),
-    #[error("invalid skippr.store.type value '{0}'; expected sled or dynamodb")]
+    #[error("invalid skippr.store.type value '{0}'; dynamodb is not Skippr Store (local fjall on DATA_DIR)")]
     InvalidSkipprStore(String),
     #[error("Iceberg sink config is invalid: {0}")]
     IcebergConfigInvalid(String),
@@ -210,11 +199,11 @@ mod tests {
     fn default_for_wal_is_the_store_kind_resolver() {
         assert_eq!(
             SkipprStoreKind::default_for_wal(WalStorage::Disk),
-            SkipprStoreKind::Sled
+            SkipprStoreKind::Fjall
         );
         assert_eq!(
             SkipprStoreKind::default_for_wal(WalStorage::S3),
-            SkipprStoreKind::Sled
+            SkipprStoreKind::Fjall
         );
     }
 
@@ -228,21 +217,22 @@ mod tests {
                 other => panic!("{raw} should be invalid, got {other:?}"),
             }
         }
-        assert_eq!(
-            "dynamodb".parse::<SkipprStoreKind>().unwrap(),
-            SkipprStoreKind::DynamoDb
-        );
+        assert!("dynamodb".parse::<SkipprStoreKind>().is_err());
         assert_eq!(
             "sled".parse::<SkipprStoreKind>().unwrap(),
-            SkipprStoreKind::Sled
+            SkipprStoreKind::Fjall
+        );
+        assert_eq!(
+            "fjall".parse::<SkipprStoreKind>().unwrap(),
+            SkipprStoreKind::Fjall
         );
     }
 
     #[test]
-    fn skippr_store_yaml_is_type_and_name() {
-        let store: SkipprStore = serde_yaml::from_str("type: dynamodb\nname: offsets\n").unwrap();
-        assert_eq!(store.kind, SkipprStoreKind::DynamoDb);
-        assert_eq!(store.name.as_deref(), Some("offsets"));
+    fn skippr_store_yaml_sled_maps_to_fjall() {
+        let store: SkipprStore = serde_yaml::from_str("type: sled\n").unwrap();
+        assert_eq!(store.kind, SkipprStoreKind::Fjall);
+        assert!(serde_yaml::from_str::<SkipprStore>("type: dynamodb\nname: offsets\n").is_err());
     }
 
     #[test]
@@ -257,5 +247,241 @@ mod tests {
                 "{raw} must not deserialize as SkipprStore"
             );
         }
+    }
+
+    #[test]
+    fn skippr_store_kv_lock_is_the_only_store_authority() {
+        let lock = include_str!("../../docs/docs/maintainers/skippr-store-kv.md");
+        assert!(lock.contains("This file is the authority for Skippr Store"));
+        assert!(
+            lock.contains("No sharding."),
+            "lock must forbid sharding rather than encode a zero shard id"
+        );
+        assert!(
+            !lock.contains("always `0`"),
+            "lock must not keep a dormant ShardId"
+        );
+        assert!(
+            lock.contains("not a Store trait implementation"),
+            "sled is a migrate reader, not a third trait impl"
+        );
+        assert!(
+            lock.contains("skippr.store.type=sled after cutover maps to fjall"),
+            "leftover YAML sled is not a live engine choice"
+        );
+        assert!(
+            lock.contains("checksums differ, fail closed"),
+            "local vs S3 metadata.json conflict must be fail-closed"
+        );
+        assert!(lock
+            .contains("Ephemeral hosts without a durable DATA_DIR are unsupported this milestone"));
+        assert!(lock.contains("MUST NOT select an Iceberg catalog backend via skippr.store.type"));
+        assert!(
+            lock.contains("Writer OCC is CatalogFence on trait commit"),
+            "fence is CatalogFence, not a leases family"
+        );
+        assert!(
+            !lock.to_ascii_lowercase().contains("future clustered query"),
+            "do not name extra readers as clustered query"
+        );
+
+        let changelog = include_str!("../../CHANGELOG.md");
+        assert!(
+            !changelog.contains("Skippr Store is sled (local) or DynamoDB (remote)"),
+            "CHANGELOG must not lock DynamoDB as Skippr Store"
+        );
+        assert!(
+            !changelog.contains("Catalog pointers MAY share that table"),
+            "CHANGELOG must not keep lake catalog as Skippr Store"
+        );
+
+        let readme = include_str!("../../README.md");
+        assert!(
+            !readme.contains("`clustered`"),
+            "README must not list clustered WAL as a live option"
+        );
+        assert!(
+            !readme.contains("writer lease unavailable"),
+            "README must not document writer leases"
+        );
+        assert!(
+            !readme.contains("SKIPPR_STORE_TYPE=dynamodb"),
+            "README must not teach DynamoDB Skippr Store"
+        );
+        assert!(
+            !readme.contains("type: dynamodb"),
+            "README must not teach skippr.store.type dynamodb"
+        );
+        assert!(
+            !readme.contains("DynamoDbStore"),
+            "README must not teach Python DynamoDbStore"
+        );
+        assert!(
+            !readme.contains("offsets & leases"),
+            "README must not describe Skippr Store as leases"
+        );
+        assert!(
+            !readme.contains("clustered quorum"),
+            "README must not list clustered WAL quorum"
+        );
+
+        let cutover = include_str!("../../docs/docs/maintainers/warehouse-sinks-cutover.md");
+        assert!(
+            cutover.contains("skippr-store-kv.md"),
+            "warehouse cutover must defer Skippr Store to skippr-store-kv.md"
+        );
+        assert!(
+            !cutover.contains("from_store_type"),
+            "lake catalog must not be selected via skippr.store.type"
+        );
+        assert!(
+            !cutover.contains("MAY be the SkipprStore table"),
+            "lake catalog_table is not Skippr Store"
+        );
+
+        let lake = include_str!("../../docs/docs/maintainers/skipprlake-dbt-rest.md");
+        assert!(
+            !lake.contains("offset-store-dynamodb"),
+            "lake e2e must not require the Skippr Store DynamoDB feature"
+        );
+
+        let runtime_plugins = include_str!("../../docs/docs/maintainers/runtime-plugins.md");
+        assert!(
+            runtime_plugins.contains("skippr-store-kv.md"),
+            "runtime-plugins must defer Skippr Store to the lock"
+        );
+        assert!(
+            !runtime_plugins.contains("backed by `sled`"),
+            "runtime-plugins must not name sled as the live offsets engine"
+        );
+
+        let plugin_contract =
+            include_str!("../../docs/docs/maintainers/runtime-plugin-contract.md");
+        assert!(
+            plugin_contract.contains("skippr-store-kv.md"),
+            "runtime-plugin-contract must defer Skippr Store to the lock"
+        );
+
+        let transforms = include_str!("../../docs/docs/maintainers/stream-transforms.md");
+        assert!(
+            !transforms.contains("distributed key ownership"),
+            "MV must not plan sharding"
+        );
+
+        let e2e_ymls = [
+            include_str!("../../.github/actions/e2e/postgres_skipprlake_cdc/skippr.yml"),
+            include_str!("../../.github/actions/e2e/s3_skipprlake_alter/skippr.yml"),
+            include_str!("../../.github/actions/e2e/bike_hire_many/skippr.yml"),
+            include_str!("../../.github/actions/e2e/s3_skipprlake_evolve/skippr.yml"),
+        ];
+        for yml in e2e_ymls {
+            assert!(
+                !yml.contains("type: dynamodb"),
+                "e2e skippr.yml must not select Skippr Store or lake catalog via store.type dynamodb"
+            );
+        }
+        assert!(
+            !include_str!("../../tests/skipprlake_e2e/run.py").contains("type: dynamodb"),
+            "skipprlake e2e must not write skippr.store.type dynamodb"
+        );
+        assert!(
+            !include_str!("../../tests/perf/run.py").contains("type: dynamodb"),
+            "perf harness must not write skippr.store.type dynamodb"
+        );
+        assert!(
+            !include_str!("../../tests/perf_db/run.py").contains("type: dynamodb"),
+            "perf-db harness must not write skippr.store.type dynamodb"
+        );
+        assert!(
+            !include_str!("../../skippr.pyi").contains("class SledStore"),
+            "Python stub must not export SledStore"
+        );
+        assert!(
+            !include_str!("../../skippr.pyi").contains("class DynamoDbStore"),
+            "Python stub must not export DynamoDbStore"
+        );
+        assert!(
+            include_str!("../../skippr.pyi").contains("class FjallStore"),
+            "Python stub must export FjallStore"
+        );
+        assert!(
+            !include_str!("../../src/helpers/offsets.rs").contains("fn vacuum("),
+            "sled vacuum is not Skippr Store"
+        );
+        assert!(
+            !include_str!("../../src/sqlrt/query.rs").contains("metadata/metadata.json"),
+            "SHOW PIPELINE must not advertise leftover metadata.json as authority"
+        );
+        assert!(
+            !include_str!("../../plugins/data_source/kinesis/src/kinesis.rs")
+                .contains("kinesis_checkpoints"),
+            "Kinesis resume must not be plugin-local seq files"
+        );
+        assert!(
+            include_str!("../../plugins/data_source/kinesis/src/kinesis.rs")
+                .contains("store_checkpoint_payload"),
+            "Kinesis resume must use host Skippr Store checkpoints"
+        );
+        assert!(
+            !include_str!("../../src/failpoint.rs").contains("clustered failpoint"),
+            "catalog failpoints must not keep clustered WAL wording"
+        );
+        assert!(
+            !include_str!("../../src/failpoint.rs").contains("AfterReplicaPayloadAck"),
+            "replica payload-ack failpoint is clustered WAL"
+        );
+        assert!(
+            !include_str!("../../crates/skippr-iceberg-catalog/src/lib.rs")
+                .contains("MAY share the SkipprStore table"),
+            "lake catalog rustdoc must not share Skippr Store"
+        );
+        assert!(
+            !include_str!("../../docs/docs/connectors/outputs/skipprlake.md")
+                .contains("May be the SkipprStore table"),
+            "public SkipprLake docs must not share Skippr Store"
+        );
+        assert!(
+            !include_str!("../../skippr.pyi").contains("MAY share the SkipprStore table"),
+            "Python stub must not share Skippr Store with the lake catalog"
+        );
+        assert!(
+            !include_str!("../../updates.md").contains("\"metadata_location\""),
+            "updates.md must not advertise leftover metadata.json as SHOW PIPELINE authority"
+        );
+        assert!(
+            !include_str!("../../todo.md").contains("\"metadata_location\""),
+            "todo.md must not advertise leftover metadata.json as SHOW PIPELINE authority"
+        );
+        assert!(
+            !include_str!("../../todo.md").contains("sled-based"),
+            "todo.md must not name sled as the live offsets engine"
+        );
+        assert!(
+            !include_str!("../../src/sqlrt/query.rs").contains("offset database"),
+            "RESET PIPELINE must not say offset database"
+        );
+        assert!(
+            !include_str!("../../src/sqlrt/docs.rs")
+                .contains("namespaces (name, enabled, fields), offsets, and schema"),
+            "SHOW PIPELINE docs must not claim a live offsets dump"
+        );
+        assert!(
+            !include_str!("../../.cursor/skills/skippr-perf-db/SKILL.md")
+                .contains("DynamoDB Local Skippr Store"),
+            "perf-db skill must not use DynamoDB as Skippr Store"
+        );
+        assert!(
+            !include_str!("../../src/helpers/configuration.rs").contains("in Sled"),
+            "stream aggregates live in Skippr Store, not Sled"
+        );
+        assert!(
+            !include_str!("../../src/helpers/offsets.rs").contains("sled::IVec"),
+            "offset API must not be typed as sled IVec"
+        );
+        assert!(
+            !include_str!("../../docs/docs/configuration/overview.md")
+                .contains("--store-type <fjall|sled>"),
+            "public docs must not list sled as a live --store-type peer"
+        );
     }
 }

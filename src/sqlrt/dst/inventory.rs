@@ -1,7 +1,7 @@
 use crate::buffer::compaction_progress::GroupedCompactionPhase;
 use crate::buffer::wal_catalog_import::gc_orphan_payloads;
 use crate::buffer::wal_handle::memory_catalog_for_test;
-use crate::helpers::offset_store::SledOffsetStore;
+use crate::helpers::offset_store::{memory_offset_store, StoreOffsetStore};
 use crate::helpers::offsets::{
     OffsetKey, OffsetTypes, RuntimeOffsetOperation, RuntimeOffsetRpcRequest,
 };
@@ -22,9 +22,8 @@ fn a_orphan_gc() {
     let paths = PipelinePaths::legacy_disk(dir.path());
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
-    let db = sled::open(dir.path().join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-        Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
+        crate::helpers::offset_store::memory_offset_store();
     let handle =
         crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     std::fs::create_dir_all(handle.paths().segs.as_path()).unwrap();
@@ -41,9 +40,8 @@ fn a_quarantine_dir_without_handle() {
     let paths = PipelinePaths::legacy_disk(dir.path());
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
-    let db = sled::open(dir.path().join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-        Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
+        crate::helpers::offset_store::memory_offset_store();
     let handle =
         crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     let qdir = handle.paths().root.join("segment_buffer/quarantine");
@@ -211,9 +209,8 @@ fn wal_handle(
     let paths = PipelinePaths::legacy_disk(dir);
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
-    let db = sled::open(dir.join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-        Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
+        crate::helpers::offset_store::memory_offset_store();
     let handle =
         crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     (handle, fence)

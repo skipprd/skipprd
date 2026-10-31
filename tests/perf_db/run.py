@@ -235,7 +235,6 @@ def run_query_after_ingest(
         sink=sink,
         warehouse=warehouse,
         flatten=False,
-        dynamodb_store=True,
     )
     perf_run.start_ddb()
     tail_proc = None
@@ -419,9 +418,6 @@ def write_cdc_skippr_yml(path: Path, warehouse: Path) -> None:
         f"""skippr:
   workspace: test
   skipprd_el_storage_mode: local
-  store:
-    type: dynamodb
-    name: {CDC_DDB_TABLE}
 
 pipelines:
   {PG_CDC_PIPELINE}:

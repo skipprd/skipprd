@@ -3,6 +3,8 @@
 Status: draft for implementation. Companion: [Spec 2: SkipprLake dbt + REST](./skipprlake-dbt-rest.md).
 Repos touched: `skipprd` (primary), `sde`, `cloud` (docs and decisions only), `skippr-web` (docs only).
 
+**Skippr Store** is not this page. Authority: [skippr-store-kv.md](./skippr-store-kv.md). Do not select an Iceberg catalog backend via `skippr.store.type`. Lake Dynamo (if any) is destination catalog config, not Skippr Store.
+
 This spec fixes the existing DuckDB, Athena, Iceberg and `skipprd query` wiring. Spec 2 (`dbt-skipprlake`, REST, Flight, LocalSidecar) has landed on this shape.
 
 ## 1. Goals and non-goals
@@ -519,8 +521,8 @@ Flat, encapsulated, `deny_unknown_fields`. Lives in `crates/skippr-iceberg-catal
 pub struct SkipprLakeConfig {
     /// Iceberg warehouse root: `s3://bucket/path`, `file:///abs/path`.
     pub warehouse: String,
-    /// DynamoDB table that holds catalog pointers.
-    /// MAY be the SkipprStore table (`SKIPPR_STORE_NAME`).
+    /// Destination Iceberg catalog table. Not Skippr Store.
+    /// MUST NOT be selected via skippr.store.type / SKIPPR_STORE_NAME.
     pub catalog_table: String,
     #[serde(default)]
     pub region: Option<String>,
@@ -632,10 +634,8 @@ use skippr_iceberg_catalog::{SkipprCatalogBackend, SkipprLakeConfig};
 use skippr_iceberg_writer::{IcebergWriter, IcebergWriterConfig};
 
 pub async fn open_catalog(cfg: &SkipprLakeConfig) -> io::Result<Arc<dyn Catalog>> {
-    match SkipprCatalogBackend::from_store_type(&skippr_iceberg_catalog::store_type_from_env()) {
-        SkipprCatalogBackend::CloudTables => { /* CloudTablesCatalog::new */ }
-        SkipprCatalogBackend::DynamoDb => { /* DynamoDbCatalog::new */ }
-    }
+    // Destination Iceberg catalog from SkipprLakeConfig, not skippr.store.type.
+    DynamoDbCatalog::new(&cfg.catalog_table, cfg.region.as_deref()).await
 }
 
 pub fn writer_config(cfg: &SkipprLakeConfig) -> IcebergWriterConfig {
@@ -647,7 +647,7 @@ pub fn writer_config(cfg: &SkipprLakeConfig) -> IcebergWriterConfig {
 }
 ```
 
-The host is the one Config authority: `configured_skippr_store` → `skippr_store_type_value`. Runtime plugin spawn injects that string as `SKIPPR_STORE_TYPE` (and the table as `SKIPPR_STORE_NAME`). Query (`catalog_backend`) and the plugin (`open_catalog`) both call `SkipprCatalogBackend::from_store_type` on that same string. YAML `skippr.store.type` without a process env var MUST still reach the plugin.
+Lake catalog open uses `SkipprLakeConfig` (warehouse + `catalog_table`), not `skippr.store.type`. See [skippr-store-kv.md](./skippr-store-kv.md).
 
 `main.rs` builds the writer inside the install closure:
 

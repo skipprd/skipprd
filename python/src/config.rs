@@ -391,30 +391,14 @@ impl PyS3Storage {
     }
 }
 
-#[pyclass(frozen, name = "SledStore", module = "skippr")]
-pub struct PySledStore;
+#[pyclass(frozen, name = "FjallStore", module = "skippr")]
+pub struct PyFjallStore;
 
 #[pymethods]
-impl PySledStore {
+impl PyFjallStore {
     #[new]
     fn new() -> Self {
         Self
-    }
-}
-
-#[pyclass(frozen, name = "DynamoDbStore", module = "skippr")]
-pub struct PyDynamoDbStore {
-    #[pyo3(get)]
-    table: String,
-}
-
-#[pymethods]
-impl PyDynamoDbStore {
-    #[new]
-    fn new(table: String) -> PyResult<Self> {
-        Ok(Self {
-            table: non_empty("DynamoDbStore table", table)?,
-        })
     }
 }
 
@@ -658,19 +642,14 @@ impl PyConfig {
     }
 
     fn store<'py>(slf: Bound<'py, Self>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Self>> {
-        let store = if value.cast::<PySledStore>().is_ok() {
+        let store = if value.cast::<PyFjallStore>().is_ok() {
             SkipprStore {
-                kind: SkipprStoreKind::Sled,
+                kind: SkipprStoreKind::Fjall,
                 name: None,
-            }
-        } else if let Ok(dynamo) = value.cast::<PyDynamoDbStore>() {
-            SkipprStore {
-                kind: SkipprStoreKind::DynamoDb,
-                name: Some(dynamo.get().table.clone()),
             }
         } else {
             return Err(PyTypeError::new_err(format!(
-                "expected skippr.SledStore or skippr.DynamoDbStore, got {}",
+                "expected skippr.FjallStore, got {}",
                 type_name(value)
             )));
         };
@@ -812,8 +791,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEnvRef>()?;
     m.add_class::<PyLocalStorage>()?;
     m.add_class::<PyS3Storage>()?;
-    m.add_class::<PySledStore>()?;
-    m.add_class::<PyDynamoDbStore>()?;
+    m.add_class::<PyFjallStore>()?;
     m.add_class::<PyDataSourceRef>()?;
     m.add_class::<PyDataSinkRef>()?;
     m.add_class::<PyDeadletterSinkRef>()?;
@@ -827,12 +805,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
             py.get_type::<PyS3Storage>().into_any(),
         ])?,
     )?;
-    m.add(
-        "Store",
-        union_alias([
-            py.get_type::<PySledStore>().into_any(),
-            py.get_type::<PyDynamoDbStore>().into_any(),
-        ])?,
-    )?;
+    m.add("Store", py.get_type::<PyFjallStore>().into_any())?;
     register_generated_classes(m)
 }

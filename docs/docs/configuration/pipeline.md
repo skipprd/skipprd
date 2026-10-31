@@ -122,12 +122,12 @@ skipprd sync --pipeline events --once
 | `data_sink` | none | Where good records go, as `data_sinks.<name>`. Without it, records stay in the write-ahead log (WAL), where you can still query them with `skipprd query`. |
 | `deadletter_sink` | none | Where records that fail to transform or load go, as `deadletter_sinks.<name>`. Without it, those records are discarded and counted in the log. See [Deadletters](/concepts/deadletters). |
 | `type` | `ingest` | How the pipeline moves records: `ingest` (Arrow warehouse path), `copy` (decode × encode Identity PUT to File, S3, GCS, Azure Blob, or SFTP), or `cdc`. Copy fails closed on AMQP, Stdout, warehouses, Iceberg lakes, and Athena Parquet. Copy deadletters stay Arrow (`jsonl` or `parquet`), not copy csv/xml. Copy CSV: top-level scalars are columns; nested objects and arrays are compact JSON strings. Omit it for ingest. Python: `PipelineType.INGEST`, `COPY`, or `CDC`. Logs and metrics label `pipeline_type` from this key (`ingest` / `copy` / `cdc`); `PIPELINE_TYPE` is not read. |
-| `transform` | none | Split records into tables, partition, flatten, and sort. Optional `ops` (in-memory Arrow filter/project/derive) run before WAL commit; optional `aggregates` keep keyed running totals in local Sled. See [Transforms](/configuration/transforms). `type: copy` cannot set `flatten_events`, `inject_fields`, `batch_order_fields`, `ops`, or `aggregates`. |
+| `transform` | none | Split records into tables, partition, flatten, and sort. Optional `ops` (in-memory Arrow filter/project/derive) run before WAL commit; optional `aggregates` keep keyed running totals in Skippr Store. See [Transforms](/configuration/transforms). `type: copy` cannot set `flatten_events`, `inject_fields`, `batch_order_fields`, `ops`, or `aggregates`. |
 | `cdc` | none | CDC settings (contracts and business keys). It is not the mode — set `type: cdc`. A `cdc:` block with no `type` still infers CDC and logs once. `type: ingest` or `type: copy` plus `cdc:` fails closed. See [Change data capture](/cdc/). |
 | `buffer_threshold_bytes` | `10485760` (10 MiB) | Flush buffered records to the WAL at this size. Env fallback `BUFFER_THRESHOLD_BYTES`. See [WAL and buffering](/configuration/buffering). These limits are **per slice** (one namespace / partition / time bucket), not for the whole `--once` run. |
 | `buffer_threshold_seconds` | `60` | Flush buffered records to the WAL after this many seconds. Env fallback `BUFFER_THRESHOLD_SECONDS`. For a long historical `type: copy`, raise this (for example `86400`) so slices grow instead of flushing a tiny object every minute. |
 | `sync_frequency_seconds` | `900` | Minimum gap between runs of this pipeline when `skipprd sync` runs every pipeline in a loop. Env fallback `SYNC_FREQUENCY`. |
-| `data_dir` | `./data` | Local directory for this pipeline's WAL payloads and, with sled, the WAL catalog. Env fallback `DATA_DIR`. |
+| `data_dir` | `./data` | Local directory for this pipeline's WAL payloads and Skippr Store. Env fallback `DATA_DIR`. |
 | `chaos_mode` | `false` | Kills Skipprd partway through a run to test recovery. Never enable in production. See [Advanced settings](/configuration/advanced). |
 
 A value set here beats the environment variable, which beats the default.
@@ -137,7 +137,7 @@ A value set here beats the environment variable, which beats the default.
 Skipprd saves each pipeline's progress under its workspace and pipeline name (`skippr.workspace` and the `pipelines:` key). That has two consequences:
 
 - **Renaming starts over.** Change either name and Skipprd treats it as a new pipeline: it reads the source from the beginning and writes the data again. Point the destination at a new schema or prefix first if you do not want duplicates.
-- **One writer at a time.** Two `skipprd sync` processes for the same workspace and pipeline cannot write at once. The second fails closed (sled lock, or a fenced catalog commit).
+- **One writer at a time.** Two `skipprd sync` processes for the same workspace and pipeline cannot write at once. The second fails closed (`writer.lock`, or a fenced catalog commit).
 
 Reserved pipeline names: `deadletters`, `wal`, `_skippr`, `skippr`, `metadata`.
 

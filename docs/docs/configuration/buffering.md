@@ -33,12 +33,11 @@ Reuse the same `DATA_DIR` on every run. If you start on a fresh disk, Skipprd ha
 ```bash
 export WAL_STORAGE=s3
 export SKIPPR_WAL_S3_BUCKET=acme-skipprd-wal
-export SKIPPR_STORE_TYPE=dynamodb
-export SKIPPR_STORE_NAME=acme-skipprd-offsets
+export DATA_DIR=/var/lib/skipprd
 skipprd sync --pipeline payments --once
 ```
 
-Give the WAL its own bucket so pipeline state is not mixed with lake files. Pair S3 WAL with DynamoDB so resume positions survive when the machine is gone. See [State store](/configuration/skippr-store).
+Give the WAL its own bucket so payload objects are not mixed with lake files. Skippr Store stays on `DATA_DIR`. Hosts without a durable `DATA_DIR` are unsupported. See [Skippr Store](/configuration/skippr-store).
 
 ## How large a batch is
 
@@ -66,8 +65,8 @@ These optional overrides rarely need a change:
 
 | Mode | Back up |
 |---|---|
-| `disk` | `DATA_DIR` (payloads and, with sled, the WAL catalog) and `skippr.yml` |
-| `s3` | The WAL bucket and the SkipprStore table |
+| `disk` | `DATA_DIR` (WAL payloads and Skippr Store) and `skippr.yml` |
+| `s3` | The WAL bucket, plus `DATA_DIR` (Skippr Store) |
 
 If the WAL is gone, Skipprd re-reads the source. Append-only destinations can then duplicate rows.
 

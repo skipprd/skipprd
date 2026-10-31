@@ -89,7 +89,7 @@ The dot-separated namespace preserves the full source lineage and avoids collisi
 
 ### Offset Tracking
 
-Use skippr's existing `Offsets` (sled-based) with `OffsetKey` set to `mssql:{database}.{schema}.{table}`. For initial implementation, each sync run re-reads the full table. Incremental support (via a configured cursor column) is a follow-up.
+Use Skippr Store `offsets` with `OffsetKey` set to `mssql:{database}.{schema}.{table}`. For initial implementation, each sync run re-reads the full table. Incremental support (via a configured cursor column) is a follow-up.
 
 ### Dependencies
 
@@ -329,18 +329,15 @@ Return a structured JSON result containing:
       "last_schema_md5": "def456..."
     }
   ],
-  "offsets": {
-    "mssql:MyDatabase.dbo.customers": "2024-03-18T10:30:00Z",
-    "mssql:MyDatabase.dbo.orders": "2024-03-18T10:30:00Z"
-  },
-  "metadata_location": "s3://bucket/tenant/workspace/pipeline/metadata/metadata.json"
+  "offsets": {},
+  "schema": "skippr-store:schema/my_pipeline"
 }
 ```
 
 ### Implementation
 
-1. Load `PipelineMetadata` via `Config::get_metadata()`
-2. Load offset state from the sled-based `Offsets` store
+1. Load `PipelineMetadata` via `Config::get_metadata()` (schema family; leftover `metadata.json` is import-only)
+2. Emit `"offsets": {}` (resume stays in Skippr Store; SHOW PIPELINE does not dump it)
 3. Assemble the response JSON
 4. When `--plain` flag is set on the `query` command, output as raw JSON to stdout (parseable by skippr-dbt)
 
@@ -459,72 +456,7 @@ This is a minimal change to the existing sync loop — just break after the firs
 
 ## 7. Local Metadata Persistence
 
-**Priority:** Hard requirement for skippr-dbt integration
-**Location:** `src/helpers/configuration.rs`
-
-### Summary
-
-`Config::get_metadata()` and `Config::set_metadata()` currently always use S3 as the source of truth. skippr-dbt runs skippr in local disk mode with no S3 bucket configured. Metadata must be readable and writable on local disk.
-
-### Current Behavior
-
-```rust
-pub async fn get_metadata() -> Result<PipelineMetadata, bool> {
-    let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
-    match s3::get_json(&s3_key).await { ... }
-}
-
-pub async fn set_metadata(pipeline_metadata: &PipelineMetadata, evolved: bool) {
-    let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
-    match s3::put_json(&s3_key, &json_value).await { ... }
-}
-```
-
-Both are S3-only. When `skippr_s3_bucket` is empty (local disk mode), these fail or no-op.
-
-### Desired Behavior
-
-When `skippr_s3_bucket` is not configured (empty string), fall back to local disk:
-
-- **Read**: `{data_dir}/metadata.json` (where `data_dir` = `Config::get_data_dir()`)
-- **Write**: same path, atomic write (write to temp + rename)
-- **S3 mode unchanged**: when `skippr_s3_bucket` is set, behavior is identical to today
-
-### Implementation
-
-Add a local branch to both `get_metadata` and `set_metadata`:
-
-```rust
-pub async fn get_metadata() -> Result<PipelineMetadata, bool> {
-    let bucket = Self::get_skippr_s3_bucket();
-    if bucket.is_empty() {
-        // Local disk mode
-        let path = format!("{}/metadata.json", Self::get_data_dir());
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => {
-                match serde_json::from_str::<PipelineMetadata>(&contents) {
-                    Ok(md) => Ok(md),
-                    Err(e) => { error!("Failed to parse local metadata: {}", e); Err(false) }
-                }
-            }
-            Err(_) => Err(false) // no metadata yet
-        }
-    } else {
-        // existing S3 path
-        ...
-    }
-}
-```
-
-Same pattern for `set_metadata`: check bucket, write to local JSON file if empty.
-
-### Affected Code Paths
-
-- `Config::get_metadata()` — read
-- `Config::set_metadata()` — write
-- `Config::delete_metadata()` — delete
-- `SHOW PIPELINE` (item 4) must also use the same local/S3 resolution
-- Stats persistence (`write_namespace_stats_async`) — should also fall back to local disk when no S3 bucket is configured, or skip gracefully
+Done. Schema authority is Skippr Store (`schema` family on `DATA_DIR`). Leftover `metadata.json` is import-only. See [skippr-store-kv.md](docs/docs/maintainers/skippr-store-kv.md).
 
 ---
 
@@ -539,14 +471,14 @@ skippr-dbt delegates all source schema discovery to skippr via `skippr discover`
 
 ### Current State of `skippr discover`
 
-The `discover()` function in `src/main.rs` (line 507):
+Schema and resume live in Skippr Store (`schema` / `offsets` families). See [skippr-store-kv.md](docs/docs/maintainers/skippr-store-kv.md). `discover` must not treat S3 JSON or sled as authority.
 
-1. Loads/creates `PipelineMetadata` from S3
-2. Initializes offsets (sled, local disk)
+1. Loads/creates `PipelineMetadata` via `Config::get_metadata()`
+2. Opens Skippr Store offsets
 3. **Initializes an output plugin** (design mistake — discover should not touch output)
 4. Runs `sync_input_plugin()` which ingests data, triggering schema discovery via type inference
 5. **Syncs discovered schemas to the output plugin** (writes Parquet + Glue updates — should not happen in discover)
-6. Persists metadata to S3
+6. Persists metadata via `persist_pipeline_metadata`
 7. Generates LLM summaries
 
 ### Changes Needed
@@ -562,8 +494,8 @@ Remove from `discover()`:
 - Stats persistence
 
 After the fix, `discover()` should:
-1. Load/create `PipelineMetadata` (local disk per item 7, or S3)
-2. Initialize offsets
+1. Load/create `PipelineMetadata` from Skippr Store (`schema` family)
+2. Initialize Skippr Store offsets
 3. Run the input plugin to sample data and trigger type inference
 4. Persist the updated `PipelineMetadata`
 5. Exit
@@ -620,7 +552,7 @@ Extend the `SHOW PIPELINE` output (item 4) to include field details per namespac
       ]
     }
   ],
-  "offsets": { ... }
+  "offsets": {}
 }
 ```
 

@@ -116,7 +116,7 @@ There is no stdio fallback path.
 
 ## Host-owned offsets
 
-The durable offsets database is backed by `sled`, but only the host process opens it.
+Host-owned offsets live in Skippr Store. Only the host process opens the store. Lock: [skippr-store-kv.md](skippr-store-kv.md).
 
 Current behavior:
 

@@ -73,9 +73,10 @@ test('required sections follow page type', () => {
   assert.ok(problems.some((p) => p.includes('"## Options"')))
 })
 
-test('internal wording is rejected; `sled` as a config value is allowed', () => {
+test('internal wording is rejected; leftover `sled` and live `fjall` as config values are allowed', () => {
   const base = '---\ntitle: t\ndescription: d\n---\n\n# Store\n\n## Next steps\n\n'
-  assert.deepEqual(checkPage('configuration/skippr-store.md', `${base}Set \`store.type\` to \`sled\`.\n`), [])
+  assert.deepEqual(checkPage('configuration/skippr-store.md', `${base}Set \`store.type\` to \`fjall\`.\n`), [])
+  assert.deepEqual(checkPage('configuration/skippr-store.md', `${base}Leftover \`store.type: sled\` maps to fjall.\n`), [])
   for (const text of [
     'The host opens sled on startup.',
     'Plugins talk over TCP.',

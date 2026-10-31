@@ -5,7 +5,7 @@ This is the hard contract for Skippr's runtime plugin boundary after the TCP cut
 ## Core rules
 
 1. **WAL commit is the only durable boundary.** A batch becomes durable when the host makes the committed WAL segment visible.
-2. **The offsets DB is host-owned materialized state.** It reflects visible WAL commits. It is not the source of truth and it is not owned by plugins.
+2. **Offsets are a Skippr Store family, host-owned materialized state.** They reflect visible WAL commits. They are not the source of truth and are not owned by plugins. Lock: [skippr-store-kv.md](skippr-store-kv.md).
 3. **Runtime transport is TCP only.** Every runtime plugin opens one control channel and one data channel, then authenticates both with `RuntimeSessionHello`.
 4. **Source plugins never mutate host durability state.** They read resume state from the host, emit batches, emit offset hints, and emit checkpoints. The host owns WAL writes and offset materialization.
 5. **Sink and schema work must be replay-safe.** The host may replay the same logical compaction after reconnect, restart, or crash. `compaction_id` is the stable idempotency key for that work.

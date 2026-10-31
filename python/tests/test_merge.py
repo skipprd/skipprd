@@ -362,7 +362,6 @@ def test_two_sinks_cannot_share_a_duckdb_namespace(tmp_path):
     "build",
     [
         lambda: S3Storage(""),
-        lambda: skippr.DynamoDbStore(" "),
         lambda: Config().workspace(""),
         lambda: Config().tenant(" "),
         lambda: Config().wal_s3_bucket(""),
@@ -375,3 +374,5 @@ def test_empty_names_are_rejected_where_they_are_set(build):
 
 def test_cloud_tables_store_is_not_exported():
     assert not hasattr(skippr, "CloudTablesStore")
+    assert not hasattr(skippr, "DynamoDbStore")
+    assert not hasattr(skippr, "SledStore")

@@ -3,10 +3,11 @@ name = "skippr-wal-catalog"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "WAL catalog rows, keys, and store trait (sled / memory; DynamoDB impl lives with that offset store)"
+description = "Skippr Store KV (memory + fjall) and WAL catalog rows"
 
 [dependencies]
 bincode = "1.3"
+fjall = "3.1"
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 skippr-lease = { path = "../skippr-lease" }

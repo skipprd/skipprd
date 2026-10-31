@@ -1691,16 +1691,15 @@ pub fn memory_catalog_for_test(fence: CatalogFence) -> Arc<MemoryWalCatalog> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helpers::offset_store::SledOffsetStore;
+    use crate::helpers::offset_store::{memory_offset_store, StoreOffsetStore};
 
     fn leased_handle(dir: &std::path::Path) -> Arc<PipelineWalHandle> {
         let key = PipelineKey::new("t", "w", "p").unwrap();
         let paths = PipelinePaths::legacy_disk(dir);
         let fence = CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
-        let db = sled::open(dir.join("offsets")).unwrap();
-        let tree = db.open_tree("offsets").unwrap();
-        let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
+        let offsets: Arc<dyn OffsetStore> =
+            Arc::new(crate::helpers::offset_store::memory_offset_store());
         PipelineWalHandle::new(key, paths, catalog, offsets, fence)
     }
 
@@ -1997,7 +1996,7 @@ mod tests {
         assert!(src.contains("fn commit_durable"));
         assert!(
             !src.contains("self.catalog\n            .commit("),
-            "handle mutations must commit through commit_durable so sled flushes before payload delete/PUT"
+            "handle mutations must commit through commit_durable so Skippr Store flushes before payload delete/PUT"
         );
     }
 
@@ -2526,9 +2525,7 @@ mod tests {
             inner,
             remaining: std::sync::atomic::AtomicUsize::new(0),
         });
-        let db = sled::open(dir.path().join("offsets")).unwrap();
-        let offsets: Arc<dyn OffsetStore> =
-            Arc::new(SledOffsetStore::new(db.open_tree("offsets").unwrap()));
+        let offsets: Arc<dyn OffsetStore> = crate::helpers::offset_store::memory_offset_store();
         let handle = PipelineWalHandle::new(key, paths, failing.clone(), offsets, fence);
         let batches = two_arrow_parts();
         handle

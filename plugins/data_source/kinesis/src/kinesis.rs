@@ -1,6 +1,5 @@
 use skippr_runtime_sdk::SkipprConfig;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -8,7 +7,7 @@ use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_kinesis::types::ShardIteratorType;
 use aws_sdk_kinesis::Client;
-use serde_derive::Deserialize;
+use serde_derive::{Deserialize, Serialize};
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 
@@ -16,7 +15,15 @@ use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
 use skippr_runtime_sdk::progress::OffsetKey;
-use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
+use skippr_runtime_sdk::source_compat::{
+    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches, IngestBatch,
+    SourceSyncContext,
+};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct KinesisShardCheckpoint {
+    seq: String,
+}
 
 #[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceKinesisPluginConfig {
@@ -32,7 +39,6 @@ pub struct DataSourceKinesisPluginConfig {
 pub struct DataSourceKinesisPlugin {
     pub(crate) config: DataSourceKinesisPluginConfig,
     client: Client,
-    data_dir: String,
 }
 
 impl TryFrom<PluginConfigEntry> for DataSourceKinesisPluginConfig {
@@ -44,36 +50,38 @@ impl TryFrom<PluginConfigEntry> for DataSourceKinesisPluginConfig {
 }
 
 impl DataSourceKinesisPlugin {
-    fn checkpoint_path(&self, stream: &str, shard_id: &str) -> PathBuf {
-        let safe_stream = stream.replace(['/', '\\'], "_");
-        let safe_shard = shard_id.replace(['/', '\\'], "_");
-        PathBuf::from(&self.data_dir)
-            .join("kinesis_checkpoints")
-            .join(safe_stream)
-            .join(format!("{safe_shard}.seq"))
+    fn checkpoint_key(stream: &str, shard_id: &str) -> String {
+        format!("kinesis:{stream}:{shard_id}")
     }
 
-    async fn read_checkpoint(&self, stream: &str, shard_id: &str) -> Option<String> {
-        let p = self.checkpoint_path(stream, shard_id);
-        tokio::fs::read_to_string(p)
-            .await
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+    fn read_checkpoint(
+        ctx: &dyn SourceSyncContext,
+        stream: &str,
+        shard_id: &str,
+    ) -> Option<String> {
+        load_checkpoint_payload::<KinesisShardCheckpoint>(
+            ctx,
+            &Self::checkpoint_key(stream, shard_id),
+        )
+        .ok()
+        .flatten()
+        .map(|p| p.seq)
+        .filter(|s| !s.is_empty())
     }
 
-    async fn write_checkpoint(
-        &self,
+    fn write_checkpoint(
+        ctx: &dyn SourceSyncContext,
         stream: &str,
         shard_id: &str,
         seq: &str,
     ) -> std::io::Result<()> {
-        let p = self.checkpoint_path(stream, shard_id);
-        if let Some(parent) = p.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(p, seq.as_bytes()).await?;
-        Ok(())
+        store_checkpoint_payload(
+            ctx,
+            &Self::checkpoint_key(stream, shard_id),
+            &KinesisShardCheckpoint {
+                seq: seq.to_string(),
+            },
+        )
     }
 
     async fn new_shard_iterator(
@@ -106,7 +114,7 @@ impl DataSourceKinesisPlugin {
             .ok_or_else(|| std::io::Error::other("missing shard_iterator"))
     }
 
-    async fn from_config(config: DataSourceKinesisPluginConfig, data_dir: String) -> Self {
+    async fn from_config(config: DataSourceKinesisPluginConfig) -> Self {
         let mut loader = aws_config::defaults(BehaviorVersion::latest());
         if let Some(ref region) = config.region {
             loader = loader.region(aws_types::region::Region::new(region.clone()));
@@ -118,18 +126,11 @@ impl DataSourceKinesisPlugin {
         }
         let client = Client::from_conf(client_config.build());
 
-        DataSourceKinesisPlugin {
-            config,
-            client,
-            data_dir,
-        }
+        DataSourceKinesisPlugin { config, client }
     }
 
-    pub async fn with_runtime_config(
-        config: DataSourceKinesisPluginConfig,
-        data_dir: &str,
-    ) -> Self {
-        Self::from_config(config, data_dir.to_string()).await
+    pub async fn with_runtime_config(config: DataSourceKinesisPluginConfig) -> Self {
+        Self::from_config(config).await
     }
 
     fn flush_shard_buffer(
@@ -155,13 +156,9 @@ impl DataSourceKinesisPlugin {
             *last_seq = Some(last);
         }
         submit_payload_batches(ctx, batch)?;
-        let sid = shard_id.to_string();
         let seq = last_seq.clone().unwrap_or_default();
         if !seq.is_empty() {
-            let h = tokio::runtime::Handle::try_current();
-            if let Ok(handle) = h {
-                let _ = handle.block_on(self.write_checkpoint(stream_name, &sid, &seq));
-            }
+            Self::write_checkpoint(ctx, stream_name, shard_id, &seq)?;
         }
         Ok(())
     }
@@ -217,7 +214,7 @@ impl DataSourceKinesisPlugin {
 
         let mut iterators: HashMap<String, String> = HashMap::new();
         for sid in &shard_ids {
-            let ckpt = self.read_checkpoint(&stream_name, sid).await;
+            let ckpt = Self::read_checkpoint(ctx.as_ref(), &stream_name, sid);
             match Self::new_shard_iterator(&self.client, &stream_name, sid, ckpt.as_deref()).await {
                 Ok(it) => {
                     iterators.insert(sid.clone(), it);
@@ -256,7 +253,7 @@ impl DataSourceKinesisPlugin {
                     Ok(r) => r,
                     Err(e) => {
                         error!("Kinesis get_records {}: {}", sid, e);
-                        let ckpt = self.read_checkpoint(&stream_name, sid).await;
+                        let ckpt = Self::read_checkpoint(ctx.as_ref(), &stream_name, sid);
                         match Self::new_shard_iterator(
                             &self.client,
                             &stream_name,
@@ -379,5 +376,98 @@ impl DataSource for DataSourceKinesisPlugin {
         } else {
             SourceExecutionContract::finite()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skippr_runtime_sdk::plugins::cdc::CheckpointEnvelope;
+    use skippr_runtime_sdk::plugins::{OffsetValidationEntry, SourcePayloadTask};
+    use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
+    use skippr_runtime_sdk::source_compat::ThroughputMetrics;
+    use std::sync::Mutex;
+
+    struct MemoryCheckpointCtx {
+        checkpoints: Mutex<HashMap<String, CheckpointEnvelope>>,
+    }
+
+    impl SourceSyncContext for MemoryCheckpointCtx {
+        fn submit_payload_tasks(
+            &self,
+            _tasks: Vec<SourcePayloadTask>,
+        ) -> Result<ThroughputMetrics, std::io::Error> {
+            Ok(ThroughputMetrics {
+                bytes_per_second: 0,
+                active_cores: 0,
+                queue_length: 0,
+                optimal_chunk_size: 0,
+            })
+        }
+
+        fn validate_offset_batch(
+            &self,
+            entries: &[OffsetValidationEntry],
+        ) -> Result<Vec<bool>, std::io::Error> {
+            Ok(vec![false; entries.len()])
+        }
+
+        fn relay_offset_hints(
+            &self,
+            _hints: Vec<RuntimeOffsetMaterializationHint>,
+        ) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String> {
+            self.checkpoints
+                .lock()
+                .expect("checkpoint map")
+                .insert(key.to_string(), envelope.clone());
+            Ok(())
+        }
+
+        fn load_checkpoint_envelope(
+            &self,
+            key: &str,
+        ) -> Result<Option<CheckpointEnvelope>, String> {
+            Ok(self
+                .checkpoints
+                .lock()
+                .expect("checkpoint map")
+                .get(key)
+                .cloned())
+        }
+    }
+
+    #[test]
+    fn checkpoint_key_is_host_store_not_seq_file() {
+        assert_eq!(
+            DataSourceKinesisPlugin::checkpoint_key("orders", "shardId-000000000001"),
+            "kinesis:orders:shardId-000000000001"
+        );
+    }
+
+    #[test]
+    fn shard_seq_round_trips_through_host_checkpoint() {
+        let ctx = MemoryCheckpointCtx {
+            checkpoints: Mutex::new(HashMap::new()),
+        };
+        DataSourceKinesisPlugin::write_checkpoint(
+            &ctx,
+            "orders",
+            "shardId-000000000001",
+            "4960000000000000000001",
+        )
+        .expect("store");
+        assert_eq!(
+            DataSourceKinesisPlugin::read_checkpoint(&ctx, "orders", "shardId-000000000001")
+                .as_deref(),
+            Some("4960000000000000000001")
+        );
+        assert!(
+            DataSourceKinesisPlugin::read_checkpoint(&ctx, "orders", "shardId-000000000002")
+                .is_none()
+        );
     }
 }

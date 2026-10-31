@@ -50,8 +50,7 @@ Global flags work with every command. You can put them before or after the comma
 | `--log [LEVEL]` | Off | Print logs to stderr. `LEVEL` is `trace`, `debug`, `info`, `warn`, or `error`; `--log` on its own means `info`. Logs are always written to `logs/skipprd.<date>.log`, with or without this flag. |
 | `--wal-storage <MODE>` | `disk` | Where the WAL keeps buffered batches: `disk` or `s3`. Same as `WAL_STORAGE`. See [WAL and buffering](/configuration/buffering). |
 | `--wal-s3-bucket <BUCKET>` | State bucket | S3 bucket for WAL segments when `--wal-storage s3`. Same as `SKIPPR_WAL_S3_BUCKET`. A `skippr.wal_s3_bucket` value in `skippr.yml` takes precedence. |
-| `--store-type <TYPE>` | `sled` | State store for offsets and run leases: `sled` (the local on-disk state store) or `dynamodb`. Same as `SKIPPR_STORE_TYPE`. A `skippr.store.type` value in `skippr.yml` takes precedence. See [State store](/configuration/skippr-store). |
-| `--store-name <NAME>` | None | Table name for the `dynamodb` state store. Same as `SKIPPR_STORE_NAME`. Requires `--store-type` when used with `connect`. |
+| `--store-type <TYPE>` | `fjall` | Skippr Store engine is `fjall`. Leftover `sled` maps to `fjall` and is not a live engine choice. Same as `SKIPPR_STORE_TYPE`. A `skippr.store.type` value in `skippr.yml` takes precedence. `dynamodb` is an error. See [Skippr Store](/configuration/skippr-store). |
 | `--workspace <NAME>` | None | Written to `skippr.workspace` by `skipprd connect`. Other commands ignore it and read `skippr.yml`. |
 | `--storage-mode <MODE>` | None | `local` or `s3`. Written to `skippr.skipprd_el_storage_mode` by `skipprd connect`. Other commands ignore it. |
 | `--skippr-s3-bucket <BUCKET>` | None | Written to `skippr.skippr_s3_bucket` by `skipprd connect`. Other commands ignore it. |

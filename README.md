@@ -21,7 +21,7 @@ Because storage is standard Apache Iceberg and Parquet in a bucket you control (
                 │        │                     │                   │          │        │
                 │        ▼                     ▼                   ▼          │        ▼
                 │  in-stream schema     SkipprStore         deadletter sink   │  Athena, Snowflake,
-                │  evolution & DDL   (offsets & leases)     (_dl_<pipeline>)  │  DuckDB, Spark, dbt
+                │  evolution & DDL   (offsets & catalog)    (_dl_<pipeline>)  │  DuckDB, Spark, dbt
                 └──────────────────────────────┬──────────────────────────────┘        │
                                                └───────────────┬───────────────────────┘
                                                                ▼
@@ -31,7 +31,7 @@ Because storage is standard Apache Iceberg and Parquet in a bucket you control (
 
 - **Zero vendor lock-in:** Pipelines land as standard Apache Iceberg tables (`SkipprLake`, `AthenaIceberg`, `Duckdb`) in your bucket, or load directly into `Snowflake`, `Bigquery`, `Postgres`, `Redshift`, `Databricks`, `Synapse`, `Clickhouse`, and `Motherduck`.
 - **Dual query path:** `skipprd query` and `Session.query()` execute SQL across committed Iceberg tables unioned with uncommitted batches still in the Write-Ahead Log (WAL). External engines read ACID-committed snapshots directly or through `skipprd serve` (Iceberg REST Catalog + Arrow Flight SQL).
-- **Crash-safe WAL & exactly-once delivery:** Every batch is committed to the WAL (local disk, S3, or a multi-node clustered quorum) before source offsets advance. After a crash—even `kill -9`—the next run recovers uncommitted batches from the WAL without losing or duplicating committed rows.
+- **Crash-safe WAL & exactly-once delivery:** Every batch is committed to the WAL (local disk or S3) before source offsets advance. After a crash—even `kill -9`—the next run recovers uncommitted batches from the WAL without losing or duplicating committed rows.
 - **In-stream schema evolution & online DDL:** `skipprd discover` infers nested structs, arrays, and scalar types. During `skipprd sync`, new fields are added automatically and incompatible type changes route into non-breaking sibling columns (`<field>_<type>`). `ALTER TABLE` and `skipprd migrate` rename, merge, widen, or drop columns in-stream without stopping the pipeline.
 - **Contract-enforced landing:** Sources declare their write policy (`append`, `merge_by_key`, `replace_partition`, or `replace_table`). If a destination cannot honor the source's contract (such as a mutable GA4 lookback window pointed at an append-only sink), Skippr fails closed at startup.
 - **One engine, three interfaces:** Configure and run pipelines via `skippr.yml`, the `skipprd` CLI, or the typed Python SDK (`import skippr`). All three run the same Rust engine and merge into the same configuration file.
@@ -223,13 +223,13 @@ data_sinks:
     schema_sink: schema_sinks.lake_schema
     SkipprLake:
       warehouse: s3://acme-iceberg-lake/warehouse/
-      catalog_table: acme-skippr-store
+      catalog_table: acme-skippr-lake-catalog
 
 schema_sinks:
   lake_schema:
     SkipprLake:
       warehouse: s3://acme-iceberg-lake/warehouse/
-      catalog_table: acme-skippr-store
+      catalog_table: acme-skippr-lake-catalog
 ```
 
 Same transform via Python:
@@ -356,9 +356,6 @@ skippr:
   workspace: commerce
   skipprd_el_storage_mode: s3
   skippr_s3_bucket: acme-skippr-metadata
-  store:
-    type: dynamodb
-    name: acme-skippr-store
 
 pipelines:
   orders_cdc:
@@ -392,7 +389,7 @@ data_sinks:
     schema_sink: schema_sinks.lake_schema
     SkipprLake:
       warehouse: s3://acme-iceberg-lake/commerce/
-      catalog_table: acme-skippr-store
+      catalog_table: acme-skippr-lake-catalog
       region: us-east-1
       table_namespace: replica
 
@@ -400,7 +397,7 @@ schema_sinks:
   lake_schema:
     SkipprLake:
       warehouse: s3://acme-iceberg-lake/commerce/
-      catalog_table: acme-skippr-store
+      catalog_table: acme-skippr-lake-catalog
       region: us-east-1
       table_namespace: replica
 ```
@@ -415,7 +412,6 @@ from skippr import (
     DataSinkSkipprLake,
     DataSourcePostgres,
     DataSourcePostgresSourceCdcMode,
-    DynamoDbStore,
     EnvRef,
     Pipeline,
     PipelineType,
@@ -426,7 +422,6 @@ cfg = (
     Config()
     .workspace("commerce")
     .storage(S3Storage("acme-skippr-metadata"))
-    .store(DynamoDbStore("acme-skippr-store"))
 )
 prod_pg = cfg.data_source(
     "prod_pg",
@@ -445,7 +440,7 @@ lake = cfg.data_sink(
     "lake",
     DataSinkSkipprLake(
         warehouse="s3://acme-iceberg-lake/commerce/",
-        catalog_table="acme-skippr-store",
+        catalog_table="acme-skippr-lake-catalog",
         region="us-east-1",
         table_namespace="replica",
     ),
@@ -483,21 +478,21 @@ Skippr commits each transaction batch to the WAL before recording the PostgreSQL
 
 ### 7. Operationalize in Production (Domain Configs, Storage, WAL & SkipprStore)
 
-Moving from a laptop to stateless containers or a multi-node cluster requires no pipeline changes—only operational domain settings.
+Moving from a laptop to production requires no pipeline changes—only operational domain settings.
 
-#### Workspaces & Single-Writer Leases (`skippr.workspace`)
+#### Workspaces (`skippr.workspace`)
 
-Progress, schemas, and writer locks are keyed by `(skippr.workspace, pipeline_name)`:
+Progress and schemas are keyed by `(skippr.workspace, pipeline_name)`:
 - **Isolation & backfills:** Separate environments (`dev`, `staging`, `prod`) or domains with `workspace`. Renaming a workspace or pipeline starts a clean backfill from the beginning.
-- **Concurrency safety:** Only one `skipprd sync` process can hold the writer lease for a `(workspace, pipeline_name)` at a time; a second writer waits ~30s and exits safely with `pipeline writer lease unavailable`.
+- **One writer:** One process writes the Skippr Store for a `DATA_DIR`. A second writer fail-closes. See [Skippr Store KV](docs/docs/maintainers/skippr-store-kv.md).
 
 #### Metadata Storage, WAL Backends & SkipprStore
 
 | Layer | Setting | Options | Production Guidance |
 |---|---|---|---|
 | **Metadata Storage** | `skippr.skipprd_el_storage_mode` / `SKIPPRD_EL_STORAGE_MODE` | `local` (`LocalStorage()`), `s3` (`S3Storage("bucket")`) | Where discovered schemas and HyperLogLog/histogram field stats live. Use `local` (under `DATA_DIR`) on laptops; use `s3` with `skippr_s3_bucket` in production. |
-| **WAL Storage** | `WAL_STORAGE` / `--wal-storage` | `disk` *(default)*, `s3`, `clustered` | **`disk`**: local `DATA_DIR` (auto-pauses ingest if free space <5 GB or >90% full, resumes at 80%).<br>**`s3`**: writes WAL segments to `wal_s3_bucket` (`SKIPPR_WAL_S3_BUCKET`) for stateless containers.<br>**`clustered`**: synchronous 2-copy quorum across 3 live nodes for zero-data-loss HA. |
-| **SkipprStore** | `skippr.store.type` / `SKIPPR_STORE_TYPE` | `sled` *(default)*, `dynamodb` | Durable KV authority for source offsets, live WAL segment catalog, writer leases, and `SkipprLake` catalog pointers. Pair `WAL_STORAGE=s3` or `clustered` with `dynamodb` (`SKIPPR_STORE_NAME`). |
+| **WAL Storage** | `WAL_STORAGE` / `--wal-storage` | `disk` *(default)*, `s3` | **`disk`**: local `DATA_DIR` (auto-pauses ingest if free space <5 GB or >90% full, resumes at 80%).<br>**`s3`**: writes WAL segments to `wal_s3_bucket` (`SKIPPR_WAL_S3_BUCKET`). `WAL_STORAGE=clustered` fails closed. |
+| **SkipprStore** | local KV on `DATA_DIR` | see lock | [skippr-store-kv.md](docs/docs/maintainers/skippr-store-kv.md) |
 | **Slice Buffering** | `buffer_threshold_bytes` / `buffer_threshold_seconds` | Default `10485760` (10 MiB) / `60`s | Per-slice (namespace + partition + time bucket) memory flush limits before writing to the WAL. |
 
 #### Warehouse Object Stores (`s3`, Cloudflare `r2`, Local `file`)
@@ -510,7 +505,7 @@ data_sinks:
     schema_sink: schema_sinks.r2_lake_schema
     SkipprLake:
       warehouse: s3://acme-r2-lake/warehouse/
-      catalog_table: acme-skippr-store
+      catalog_table: acme-skippr-lake-catalog
       table_namespace: bronze
       object_store:
         type: r2
@@ -524,7 +519,7 @@ schema_sinks:
   r2_lake_schema:
     SkipprLake:
       warehouse: s3://acme-r2-lake/warehouse/
-      catalog_table: acme-skippr-store
+      catalog_table: acme-skippr-lake-catalog
       table_namespace: bronze
       object_store:
         type: r2
@@ -540,17 +535,15 @@ schema_sinks:
 Leave `store` and `wal_s3_bucket` unset in `skippr.yml` so environment variables control the runtime topology:
 
 ```bash
-# Laptop: local WAL and sled store in ./data
+# Laptop: local WAL and Skippr Store in ./data
 export POSTGRES_PASSWORD="dev-password"
 skipprd sync --pipeline orders --once
 
-# Stateless container (ECS / Kubernetes / Spot): S3 WAL + DynamoDB SkipprStore
+# S3 WAL payloads; Skippr Store stays on durable DATA_DIR (no remote store)
 export POSTGRES_PASSWORD="prod-password"
 export WAL_STORAGE=s3
-export SKIPPR_S3_BUCKET=acme-skippr-metadata
 export SKIPPR_WAL_S3_BUCKET=acme-skippr-wal
-export SKIPPR_STORE_TYPE=dynamodb
-export SKIPPR_STORE_NAME=acme-skippr-store
+export DATA_DIR=/var/lib/skipprd
 skipprd sync --pipeline orders --log
 ```
 
@@ -597,7 +590,7 @@ Full configuration guides for every connector are in the [Connector Catalog](htt
 **Management SQL (`skipprd query --sql "..."`):**
 
 ```sql
-SHOW PIPELINE bikehire;                                            -- Pipeline status, namespaces, offsets, metadata URI
+SHOW PIPELINE bikehire;                                            -- Pipeline status, namespaces, Skippr Store schema family
 SHOW STATS FOR bikehire.rides;                                     -- HyperLogLog cardinality & histogram stats
 SHOW CATALOG FOR bikehire.rides;                                   -- Catalog field definitions
 SCHEMA DUMP bikehire TO 'schema.json';                             -- Export schema to JSON file

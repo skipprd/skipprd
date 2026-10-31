@@ -99,16 +99,16 @@ Skipprd keeps four kinds of state. Know where each one lives before you run a pi
 |---|---|---|
 | `skippr.yml` | Your project directory | Keep it in version control. Secrets stay in the environment as `${NAME}` references. |
 | WAL and resume positions | `DATA_DIR` (default `./data`), one subdirectory per pipeline | Put `DATA_DIR` on a persistent disk and reuse the same path on every run. |
-| Pipeline schema | The S3 bucket in `skippr.skippr_s3_bucket`, or under `DATA_DIR` with `skipprd_el_storage_mode: local` | Keep the bucket. Losing it means running discover again. |
+| Pipeline schema | Skippr Store under `DATA_DIR` | Keep `DATA_DIR`. Losing it means running discover again. |
 | Connector cache | `~/.skippr/runtime_plugins` | Nothing. Skipprd downloads a connector again if the cache is empty. |
 
 Set the data directory with the `DATA_DIR` environment variable or per pipeline with `data_dir` in `skippr.yml`.
 
 ::: warning Keep DATA_DIR
-With the default local WAL, `DATA_DIR` holds payloads that may not have reached your destination yet, the sled WAL catalog, and the position Skipprd resumes from. If you delete it or start on a fresh disk, Skipprd loses those batches and reads the source again from the beginning, which can duplicate rows in append-only destinations.
+With the default local WAL, `DATA_DIR` holds payloads that may not have reached your destination yet, Skippr Store, and the position Skipprd resumes from. If you delete it or start on a fresh disk, Skipprd loses those batches and reads the source again from the beginning, which can duplicate rows in append-only destinations.
 :::
 
-If your compute is ephemeral (containers, Lambda, autoscaled hosts), move the WAL to S3 with `WAL_STORAGE=s3` and the state store to DynamoDB. Then no state lives on the machine. See [WAL and buffering](/configuration/buffering) and [State store](/configuration/skippr-store).
+WAL payloads MAY live in S3 (`WAL_STORAGE=s3`). Skippr Store stays on a durable `DATA_DIR`. Hosts without that directory are unsupported. See [WAL and buffering](/configuration/buffering) and [Skippr Store](/configuration/skippr-store).
 
 Skipprd pauses reading when the disk holding `DATA_DIR` has less than 5 GB free or is 90% full, and resumes once usage drops back to 80%. If the 5 GB floor is larger than the free space at 90% full (a 20 GB volume leaves only 2 GB), Skipprd tunes the floor down and warns so pause/resume cannot lock on that remaining-disk limit. A pipeline that stalls on a busy host is often waiting for disk space.
 

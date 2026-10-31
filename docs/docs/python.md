@@ -123,7 +123,7 @@ Where Skipprd keeps its own state is a class too:
 - `LocalStorage()` keeps state in the local data directory (`./data` by default). Good for trying things out and single-machine runs.
 - `S3Storage("your-state-bucket")` keeps state in an S3 bucket instead of on local disk.
 
-`cfg.store(...)` chooses where read progress is tracked: `SledStore()` (the local on-disk state store, the default) or `DynamoDbStore("table")`. See [State store](/configuration/skippr-store).
+`cfg.store(...)` chooses the local Skippr Store: `FjallStore()` (the default). See [Skippr Store](/configuration/skippr-store).
 
 `cfg.to_yaml()` shows the config as YAML without writing it. `cfg.save()` writes back to the file the config was loaded from; `cfg.save(path)` writes somewhere else. `save` writes YAML only and refuses `.json` and `.toml` paths.
 

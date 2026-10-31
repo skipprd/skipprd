@@ -1,4 +1,4 @@
-//! Shared local-FS Sled fixture, golden model, and CDC event helpers.
+//! Shared local-FS Skippr Store fixture, golden model, and CDC event helpers.
 
 use super::*;
 use arrow::array::{Int64Array, RecordBatch, StringArray};
@@ -199,7 +199,7 @@ impl Model {
 pub struct DiskFixture {
     pub dir: tempfile::TempDir,
     pub db_path: PathBuf,
-    db: Option<sled::Db>,
+    kv: Option<Arc<dyn skippr_wal_catalog::SkipprStore>>,
     state: Option<StreamState>,
     pub spec: TransformAggregate,
 }
@@ -212,16 +212,16 @@ impl DiskFixture {
     pub fn with_spec(spec: TransformAggregate) -> Self {
         let dir = tempfile::tempdir().expect("local tempdir");
         let db_path = dir.path().join("db");
-        let (db, state) = open_db(&db_path, spec.clone());
+        let (kv, state) = open_db(&db_path, spec.clone());
         assert!(
             db_path.exists(),
-            "sled must persist on the local filesystem at {}",
+            "Skippr Store must persist on the local filesystem at {}",
             db_path.display()
         );
         Self {
             dir,
             db_path,
-            db: Some(db),
+            kv: Some(kv),
             state: Some(state),
             spec,
         }
@@ -249,9 +249,9 @@ impl DiskFixture {
         let spec = self.spec.clone();
         let db_path = self.db_path.clone();
         drop(self.state.take());
-        drop(self.db.take());
-        let (db, state) = open_db(&db_path, spec);
-        self.db = Some(db);
+        drop(self.kv.take());
+        let (kv, state) = open_db(&db_path, spec);
+        self.kv = Some(kv);
         self.state = Some(state);
         self
     }
@@ -259,7 +259,7 @@ impl DiskFixture {
     pub fn release(mut self) -> (tempfile::TempDir, PathBuf) {
         let db_path = self.db_path.clone();
         drop(self.state.take());
-        drop(self.db.take());
+        drop(self.kv.take());
         let dir = std::mem::replace(&mut self.dir, tempfile::tempdir().unwrap());
         (dir, db_path)
     }
@@ -306,7 +306,7 @@ impl DiskFixture {
                 let expected = model.total(&key, measure);
                 assert!(
                     (actual - expected).abs() < 1e-9,
-                    "measure {key}.{measure}: sled={actual} model={expected}"
+                    "measure {key}.{measure}: store={actual} model={expected}"
                 );
             }
         }
@@ -327,25 +327,17 @@ impl std::ops::Deref for DiskFixture {
     }
 }
 
-pub fn open_db(path: &Path, spec: TransformAggregate) -> (sled::Db, StreamState) {
-    let db = open_sled_with_retry(path);
-    let tree = db.open_tree(STREAM_STATE_TREE).unwrap();
-    let state = StreamState::open(tree, "events", vec![spec]).unwrap();
-    (db, state)
-}
-
-fn open_sled_with_retry(path: &Path) -> sled::Db {
-    let mut last = None;
-    for delay_ms in [0u64, 5, 10, 20, 40, 80, 160, 320] {
-        if delay_ms > 0 {
-            std::thread::sleep(Duration::from_millis(delay_ms));
-        }
-        match sled::Config::new().path(path).flush_every_ms(None).open() {
-            Ok(db) => return db,
-            Err(err) => last = Some(err),
-        }
-    }
-    panic!("open local sled at {}: {:?}", path.display(), last);
+pub fn open_db(
+    path: &Path,
+    spec: TransformAggregate,
+) -> (Arc<dyn skippr_wal_catalog::SkipprStore>, StreamState) {
+    let fence = skippr_wal_catalog::CatalogFence::local();
+    let kv: Arc<dyn skippr_wal_catalog::SkipprStore> = Arc::new(
+        skippr_wal_catalog::FjallSkipprStore::open(path, fence)
+            .unwrap_or_else(|err| panic!("open Skippr Store at {}: {err}", path.display())),
+    );
+    let state = StreamState::open(Arc::clone(&kv), fence, "events", vec![spec]).unwrap();
+    (kv, state)
 }
 
 pub fn crash_points() -> &'static [CrashPoint] {

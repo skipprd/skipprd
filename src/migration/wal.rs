@@ -357,10 +357,8 @@ mod tests {
         let paths = skippr_lease::PipelinePaths::legacy_disk(&dir);
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
-        let db = sled::open(dir.join("offsets")).unwrap();
-        let tree = db.open_tree("offsets").unwrap();
         let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-            Arc::new(crate::helpers::offset_store::SledOffsetStore::new(tree));
+            crate::helpers::offset_store::memory_offset_store();
         let handle = crate::buffer::wal_handle::PipelineWalHandle::new(
             pipeline_key.clone(),
             paths,
@@ -461,10 +459,8 @@ mod tests {
         let paths = skippr_lease::PipelinePaths::legacy_disk(&dir);
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
-        let db = sled::open(dir.join("offsets")).unwrap();
-        let tree = db.open_tree("offsets").unwrap();
         let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-            Arc::new(crate::helpers::offset_store::SledOffsetStore::new(tree));
+            crate::helpers::offset_store::memory_offset_store();
         let handle = crate::buffer::wal_handle::PipelineWalHandle::new(
             pipeline_key.clone(),
             paths,

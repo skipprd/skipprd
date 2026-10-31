@@ -68,7 +68,7 @@ pipelines:
 | `enable_single_quote_parsing` | none | `false` | Accept JSON that wraps strings in single quotes. |
 | `enable_unicode_parsing` | none | `false` | Accept JSON with unescaped Unicode. |
 | `ops` | none | none | Ordered in-memory Arrow ops (`filter`, `project`, `derive`, `rename`, `cast`) applied after schema mapping and before WAL commit. DataFusion SQL expressions. See [Filter, project, and derive](#filter-project-and-derive). |
-| `aggregates` | none | none | Keyed running aggregates maintained from committed WAL data in local Sled. See [Running aggregates](#running-aggregates). |
+| `aggregates` | none | none | Keyed running aggregates maintained from committed WAL data in Skippr Store. See [Running aggregates](#running-aggregates). |
 
 A key in `skippr.yml` beats its environment fallback. Flags accept `true`/`false`, `yes`/`no`, or `1`/`0`.
 
@@ -154,7 +154,7 @@ transform:
 
 ## Running aggregates
 
-`aggregates` maintains keyed running totals from committed WAL records in the local Sled `stream_state` tree. CDC inserts add, updates apply the delta from the previous row for that key, and deletes subtract. This is independent of source offsets: compaction does not drop a WAL segment until the processor has passed it.
+`aggregates` maintains keyed running totals from committed WAL records in the Skippr Store `stream_state` family. CDC inserts add, updates apply the delta from the previous row for that key, and deletes subtract. This is independent of source offsets: compaction does not drop a WAL segment until the processor has passed it.
 
 ```yaml
 transform:

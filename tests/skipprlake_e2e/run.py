@@ -95,9 +95,6 @@ def write_skippr_yml(path: Path, source_dir: Path, warehouse: Path) -> None:
   workspace: smoke
   tenant: smoke
   skipprd_el_storage_mode: local
-  store:
-    type: dynamodb
-    name: {STORE_TABLE}
 
 pipelines:
   {PIPELINE}:
@@ -225,9 +222,9 @@ def build_skipprd() -> Path:
     if pinned:
         log(f"using SKIPPRD_BIN={pinned}")
         return skipprd_bin()
-    log("building skipprd --features offset-store-dynamodb")
+    log("building skipprd --features iceberg-catalog-dynamodb")
     subprocess.run(
-        ["cargo", "build", "-p", "skipprd", "--features", "offset-store-dynamodb"],
+        ["cargo", "build", "-p", "skipprd", "--features", "iceberg-catalog-dynamodb"],
         cwd=REPO_ROOT,
         check=True,
     )

@@ -237,9 +237,12 @@ pub fn ensure_disk_wal_handle(
 
 fn query_catalog_open_error(pipeline: &str, err: impl std::fmt::Display) -> io::Error {
     let text = err.to_string();
-    if text.contains("already ingesting") || text.contains("could not acquire lock") {
+    if text.contains("already ingesting")
+        || text.contains("could not acquire lock")
+        || text.contains("already writing")
+    {
         io::Error::other(format!(
-            "WAL catalog for pipeline {pipeline} is locked by a running ingest; use a shared catalog backend"
+            "WAL catalog for pipeline {pipeline} is locked by a running writer; a second writer must not open this DATA_DIR"
         ))
     } else {
         io::Error::other(text)
@@ -338,10 +341,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn open_query_wal_reader_reports_locked_sled() {
-        use crate::helpers::offsets::SLED_NAME;
+    fn open_query_wal_reader_reports_locked_writer() {
         use serde_json::json;
 
+        crate::helpers::offsets::reset_live_kv();
         let dir = tempfile::tempdir().unwrap();
         let config: Config = serde_json::from_value(json!({
             "skippr": { "workspace": "ws-lock", "tenant": "ten-lock" },
@@ -357,17 +360,21 @@ mod tests {
         }))
         .unwrap();
         let config = config.bind_pipeline("orders");
-        let data_dir = config.get_data_dir();
-        let _holder = sled::open(format!("{data_dir}/{SLED_NAME}")).unwrap();
+        let store_dir = format!("{}/skippr-store", config.get_data_dir());
+        let _holder = skippr_wal_catalog::FjallSkipprStore::open(
+            &store_dir,
+            skippr_wal_catalog::CatalogFence::local(),
+        )
+        .unwrap();
         let err = open_query_wal_reader(&config).unwrap_err();
         let text = err.to_string();
         assert!(
-            text.contains("locked by a running ingest"),
-            "sled file lock must fail closed with the shared-catalog message, got {text}"
+            text.contains("locked by a running writer"),
+            "second writer must fail closed, got {text}"
         );
         assert!(
             text.contains("orders"),
-            "locked-ingest error must name the pipeline, got {text}"
+            "locked-writer error must name the pipeline, got {text}"
         );
     }
 
@@ -411,7 +418,7 @@ mod tests {
             PipelineWalHandle,
         };
         use crate::buffer::wal_reader::{clear_query_readers, wal_reader_for};
-        use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
+        use crate::helpers::offset_store::{memory_offset_store, OffsetStore};
         use serde_json::json;
         use skippr_lease::{PipelineKey, PipelinePaths};
 
@@ -422,9 +429,8 @@ mod tests {
         let paths = PipelinePaths::legacy_disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
-        let db = sled::open(dir.path().join("offsets")).unwrap();
-        let tree = db.open_tree("offsets").unwrap();
-        let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
+        let offsets: Arc<dyn OffsetStore> =
+            Arc::new(crate::helpers::offset_store::memory_offset_store());
         let handle = PipelineWalHandle::new(key.clone(), paths, catalog, offsets, fence);
         install_wal_handle(handle);
         let config: Config = serde_json::from_value(json!({

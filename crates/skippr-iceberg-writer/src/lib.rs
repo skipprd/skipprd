@@ -213,7 +213,7 @@ struct IcebergGroupedPending {
     manifest: ObjectWriteManifest,
     namespace: String,
     /// Producing process clock. Kept on the receipt for replay identity; apply
-    /// uses currently installed namespace metadata from `metadata.json`.
+    /// uses currently installed namespace metadata from the schema family.
     schema_version: u64,
     transport_chunk_count: u32,
     rows: u64,

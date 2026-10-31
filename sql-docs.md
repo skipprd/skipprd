@@ -164,7 +164,7 @@ RESET PIPELINE <pipeline_name>
 ```
 
 **Description:**
-Resets the offset database and purges WAL files for a pipeline. Removes the pipeline data directory immediately so the next sync re-ingests.
+Resets Skippr Store and purges WAL files for a pipeline. Removes the pipeline data directory immediately so the next sync re-ingests.
 
 **Example:**
 ```sql
@@ -179,7 +179,7 @@ SHOW PIPELINE <pipeline_name>
 ```
 
 **Description:**
-Show pipeline status as JSON: namespaces (name, enabled, fields), offsets, and metadata_location (S3 URI, or a local path when SKIPPRD_EL_STORAGE_MODE=local).
+Show pipeline status as JSON: namespaces (name, enabled, fields), an empty offsets object, and schema (Skippr Store family `skippr-store:schema/<pipeline>`). Resume positions stay in Skippr Store; this statement does not dump them.
 
 **Example:**
 ```sql

@@ -46,17 +46,17 @@ fn i_apply_pending_then_persist() {
 }
 
 #[test]
-fn i_exclusive_sled_open_fail_closed() {
+fn i_exclusive_writer_open_fail_closed() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("offsets");
-    let _first = sled::open(&path).unwrap();
-    let err = sled::open(&path).expect_err("second process must not open the same sled");
+    let path = dir.path().join("skippr-store");
+    let fence = skippr_wal_catalog::CatalogFence::local();
+    let _first = skippr_wal_catalog::FjallSkipprStore::open(&path, fence).unwrap();
+    let err = skippr_wal_catalog::FjallSkipprStore::open(&path, fence)
+        .err()
+        .expect("second writer must not open the same Skippr Store");
     let msg = err.to_string();
     assert!(
-        msg.contains("could not acquire lock")
-            || msg.contains("already")
-            || msg.contains("lock")
-            || msg.contains("Io"),
+        msg.contains("already writing") || msg.contains("lock"),
         "{msg}"
     );
 }

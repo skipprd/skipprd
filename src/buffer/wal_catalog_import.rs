@@ -1044,7 +1044,7 @@ fn gc_orphan_s3_payloads(
 mod tests {
     use super::*;
     use crate::buffer::wal_handle::memory_catalog_for_test;
-    use crate::helpers::offset_store::SledOffsetStore;
+    use crate::helpers::offset_store::{memory_offset_store, StoreOffsetStore};
     use std::sync::Arc;
 
     use crate::buffer::segment_file::{PartitionKey, WalPayload};
@@ -1070,9 +1070,8 @@ mod tests {
         let paths = PipelinePaths::legacy_disk(dir);
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
-        let db = sled::open(dir.join("offsets")).unwrap();
         let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-            Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
+            crate::helpers::offset_store::memory_offset_store();
         (
             PipelineWalHandle::new(key, paths, catalog.clone(), offsets, fence),
             catalog,

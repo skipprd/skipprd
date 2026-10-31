@@ -75,7 +75,7 @@ You do not run a special recover command.
 2. Resume positions say how far the source got.
 3. The next `skipprd sync` writes remaining batches and continues the source.
 
-Use the same `DATA_DIR` (or the same S3 WAL and state store). With sled, deleting `DATA_DIR` deletes the WAL catalog. If you deleted them, Skipprd re-reads the source and append-only destinations can duplicate rows. See [WAL and buffering](/configuration/buffering).
+Use the same `DATA_DIR` (and the same S3 WAL bucket when `WAL_STORAGE=s3`). Deleting `DATA_DIR` deletes Skippr Store. If you deleted them, Skipprd re-reads the source and append-only destinations can duplicate rows. See [WAL and buffering](/configuration/buffering).
 
 ## Next steps
 

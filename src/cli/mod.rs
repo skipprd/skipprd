@@ -28,12 +28,9 @@ pub struct Cli {
     /// Dedicated S3 bucket for WAL segments (also SKIPPR_WAL_S3_BUCKET env)
     #[arg(long, global = true)]
     pub wal_s3_bucket: Option<String>,
-    /// SkipprStore backend: sled (default) or dynamodb (also SKIPPR_STORE_TYPE)
+    /// SkipprStore backend: fjall (default). Leftover `sled` maps to fjall. `dynamodb` is not Skippr Store (also SKIPPR_STORE_TYPE)
     #[arg(long, global = true, value_enum)]
     pub store_type: Option<SkipprStoreKind>,
-    /// SkipprStore table name (also SKIPPR_STORE_NAME)
-    #[arg(long, global = true)]
-    pub store_name: Option<String>,
     /// skippr.workspace
     #[arg(long, global = true)]
     pub workspace: Option<String>,

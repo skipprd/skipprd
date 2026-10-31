@@ -267,11 +267,10 @@ def write_skippr_yml(
     warehouse: Path | None,
     flatten: bool,
     extra_source: dict[str, str] | None = None,
-    dynamodb_store: bool = False,
     ops: bool = False,
     aggregates: bool = False,
 ) -> None:
-    """SkipprLake always needs the DynamoDB Skippr Store; other sinks opt in with `dynamodb_store`."""
+    """SkipprLake Iceberg catalog is `catalog_table`, never `skippr.store.type`."""
     if kind.startswith("copy"):
         flatten_yaml = ""
         transform_yaml = ""
@@ -392,17 +391,10 @@ schema_sinks:
 """
     else:
         raise PerfError(sink)
-    store = ""
-    if sink == "skipprlake" or dynamodb_store:
-        store = f"""  store:
-    type: dynamodb
-    name: {STORE_TABLE}
-"""
     path.write_text(
         f"""skippr:
   workspace: perf
   skipprd_el_storage_mode: local
-{store}
 pipelines:
   {PIPELINE}:
     auto_approve: yes

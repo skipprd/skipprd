@@ -346,18 +346,10 @@ pub fn skippr_keys(
     storage_mode: Option<ElStorageMode>,
     wal_s3_bucket: Option<&str>,
     store_type: Option<SkipprStoreKind>,
-    store_name: Option<&str>,
     skippr_s3_bucket: Option<&str>,
     tenant: Option<&str>,
 ) -> Result<Option<Skippr>, String> {
-    let store = match (store_type, store_name) {
-        (Some(kind), name) => Some(SkipprStore {
-            kind,
-            name: name.map(str::to_string),
-        }),
-        (None, None) => None,
-        (None, Some(_)) => return Err("--store-name requires --store-type".into()),
-    };
+    let store = store_type.map(|kind| SkipprStore { kind, name: None });
     let skippr = Skippr {
         workspace: workspace.map(str::to_string),
         tenant: tenant.map(str::to_string),
@@ -1160,7 +1152,6 @@ data_sources:
                     None,
                     None,
                     None,
-                    None,
                 )
                 .unwrap(),
                 ..Config::default()
@@ -1179,23 +1170,15 @@ data_sources:
         save_config(
             &path,
             &Config {
-                skippr: skippr_keys(
-                    None,
-                    None,
-                    None,
-                    Some(SkipprStoreKind::DynamoDb),
-                    Some("console-skipprd-offsets-prod"),
-                    None,
-                    None,
-                )
-                .unwrap(),
+                skippr: skippr_keys(None, None, None, Some(SkipprStoreKind::Fjall), None, None)
+                    .unwrap(),
                 ..Config::default()
             },
         )
         .unwrap();
         let raw = fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("type: dynamodb"));
-        assert!(raw.contains("name: console-skipprd-offsets-prod"));
+        assert!(raw.contains("type: fjall"));
+        assert!(!raw.contains("type: dynamodb"));
         assert!(!raw.contains("offset_store:"));
         assert!(!raw.contains("offset_dynamodb_table:"));
     }
@@ -1476,8 +1459,7 @@ skippr:
   workspace: demo
   skippr_s3_bucket: old-lake
   store:
-    type: dynamodb
-    name: old-table
+    type: sled
 pipelines:
   b:
     data_source: data_sources.src_b
@@ -1532,7 +1514,7 @@ data_sinks:
             serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(doc["skippr"]["workspace"].as_str(), Some("demo"));
         assert!(doc["skippr"].get("skippr_s3_bucket").is_none());
-        assert_eq!(doc["skippr"]["store"]["type"].as_str(), Some("sled"));
+        assert_eq!(doc["skippr"]["store"]["type"].as_str(), Some("fjall"));
         assert!(doc["skippr"]["store"].get("name").is_none());
         assert_eq!(
             doc["pipelines"]["b"]["data_source"].as_str(),
@@ -1593,7 +1575,7 @@ data_sinks:
         let path = dir.path().join("skippr.yml");
         fs::write(
             &path,
-            "skippr:\n  skippr_s3_bucket: lake\n  store:\n    type: dynamodb\n    name: old\n",
+            "skippr:\n  skippr_s3_bucket: lake\n  store:\n    type: sled\n",
         )
         .unwrap();
         save_config(
@@ -1603,8 +1585,7 @@ data_sinks:
                     None,
                     Some(ElStorageMode::Local),
                     None,
-                    Some(SkipprStoreKind::Sled),
-                    None,
+                    Some(SkipprStoreKind::Fjall),
                     None,
                     None,
                 )
@@ -1616,10 +1597,8 @@ data_sinks:
         let doc: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert!(doc["skippr"].get("skippr_s3_bucket").is_none());
-        assert_eq!(doc["skippr"]["store"]["type"].as_str(), Some("sled"));
+        assert_eq!(doc["skippr"]["store"]["type"].as_str(), Some("fjall"));
         assert!(doc["skippr"]["store"].get("name").is_none());
-        let err = skippr_keys(None, None, None, None, Some("t"), None, None).unwrap_err();
-        assert!(err.contains("--store-type"), "{err}");
     }
 
     #[test]
@@ -1882,7 +1861,7 @@ data_sinks:
     fn a_refused_connect_writes_nothing_including_root_flags() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("skippr.yml");
-        let root = skippr_keys(Some("newws"), None, None, None, None, None, None).unwrap();
+        let root = skippr_keys(Some("newws"), None, None, None, None, None).unwrap();
         let connect = |password: &str| {
             persist_plugin(
                 &path,
@@ -1904,7 +1883,7 @@ data_sinks:
             Some("${PG_PASSWORD}")
         );
         assert_eq!(
-            skippr_keys(None, None, None, None, None, None, None).unwrap(),
+            skippr_keys(None, None, None, None, None, None).unwrap(),
             None
         );
     }

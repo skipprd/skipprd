@@ -19,8 +19,8 @@ Opt-in ingest→query matrix. **Correctness first**, then timings, `--log perf` 
 Comparison is **file parquet Iceberg** (SkipprLake `object_store: type: file`)
 against **DuckDB Iceberg**. The WAL profile target is skipprd `query` over
 **WAL ∪ file Iceberg UNION** after `sync --once` (compact + reclaim). Every
-query cell uses the DynamoDB Local Skippr Store, so a query process can pin
-WAL while a held ingest owns the writer lease. `query_pin` reports the frozen
+query cell uses local fjall Skippr Store, so a query process can pin
+WAL while ingest holds the local `CatalogFence`. `query_pin` reports the frozen
 `(S, E, W)`: `wal_pin: drained` cells assert `W \ E` was empty (lake only);
 `wal_pin: live` cells (STREAM tail, overlap) assert the query read held WAL.
 
@@ -93,7 +93,7 @@ SkipprLake cells need DynamoDB Local (Docker). DuckDB cells need the DuckDB CLI.
 Release host + only the plugins the cell needs (`USE_LOCAL_PLUGIN_CODE=1`):
 
 ```bash
-cargo build --release -p skipprd --bin skipprd --features offset-store-dynamodb
+cargo build --release -p skipprd --bin skipprd --features iceberg-catalog-dynamodb
 cargo build --release \
   -p skippr-plugin-data-source-file \
   -p skippr-plugin-data-sink-duckdb \

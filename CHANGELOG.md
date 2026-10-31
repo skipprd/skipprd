@@ -14,18 +14,15 @@ All notable changes to this project will be documented in this file.
 ### Breaking
 
 - Clustered WAL, replica fencing, gossip membership, writer leases, and the DynamoDB pipeline lease store are removed. `WAL_STORAGE` is `disk` or `s3` only. `WAL_STORAGE=clustered` fails closed. Catalog OCC is a local `CatalogFence`, not a writer lease. HLA cluster work lives on the untested `poc/clustered-ha` branch.
+- Skippr Store live impls are memory (tests) and fjall on `DATA_DIR`. Leftover `type: sled` maps to fjall; leftover `{DATA_DIR}/db` migrates without a sled write path. `skippr.store.type=dynamodb`, Python `DynamoDbStore` / `SledStore`, and `--features offset-store-dynamodb` as a store are gone. Lake Iceberg Dynamo catalog is `--features iceberg-catalog-dynamodb`. Schema is the shredded `schema` family; `metadata.json` is import-only. Kinesis resume is host Skippr Store checkpoints, not `{DATA_DIR}/kinesis_checkpoints/*.seq`. Deleting `DATA_DIR` deletes Skippr Store.
+- WAL metadata lives in Skippr Store. `mutation.log`, completion bitmaps, and `.seg.commit` are gone. First start imports existing installs once and archives leftover files.
+- Experimental `skippr.store.type=cloud-tables`, Python `CloudTablesStore`, and `--features offset-store-cloud-tables` are removed.
 
 ## [18.1.0]
 
 ### Added
 
 - `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
-## [Unreleased]
-
-### Breaking
-
-- WAL metadata lives in the skipprd store catalog (sled / DynamoDB). `mutation.log`, completion bitmaps, and `.seg.commit` are gone. First start imports existing installs once and archives leftover files. Deleting `DATA_DIR` with sled deletes the catalog.
-- Experimental `skippr.store.type=cloud-tables`, Python `CloudTablesStore`, and `--features offset-store-cloud-tables` are removed. Skippr Store is sled (local) or DynamoDB (remote). SkipprLake catalog pointers use DynamoDB.
 
 ## [18.3.8]
 
@@ -172,7 +169,7 @@ All notable changes to this project will be documented in this file.
 - SDE skipprd-binary env is **`SKIPPRD_BIN`** only.
 - Plugin identity in `by_name` is generated `DataSource`/`DataSink`/`SchemaSink::parse` (case-insensitive). `Azure` is not `AzureBlob`.
 - `skipprd query` / `SHOW DOCS` / `sql-help` statement copy comes from `sqlrt::docs::get_sql_docs()`. Checked-in `sql-docs.md` must match `get_sql_docs_formatted()`. Glue/Athena are not the engine query catalog.
-- SkipprStore (`skippr.store.type` + `skippr.store.name`) replaces `offset_store` / `offset_dynamodb_table`. Catalog pointers MAY share that table. Old YAML/env keys still parse and log a deprecation warning.
+- SkipprStore (`skippr.store.type` + `skippr.store.name`) replaced `offset_store` / `offset_dynamodb_table`. Current Skippr Store lock: [skippr-store-kv.md](docs/docs/maintainers/skippr-store-kv.md) (lake catalog is not Skippr Store).
 
 ## [5.7.2] - 2024-03-23
 

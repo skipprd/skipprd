@@ -9,7 +9,6 @@ resolver = "2"
 members = [
     "crates/skippr-core",
     "crates/skippr-object-writer",
-    "crates/skippr-offset-store-dynamodb",
     "crates/skippr-lease",
     "crates/skippr-wal-catalog",
     "crates/skippr-iceberg-catalog",
@@ -94,7 +93,6 @@ envy = "0.4.2"
 aws-config = "1.5.1"
 aws-sdk-s3 = "1.32.0"
 aws-types = "1.3.1"
-skippr-offset-store-dynamodb = { path = "crates/skippr-offset-store-dynamodb", optional = true }
 skippr-lease = { path = "crates/skippr-lease" }
 skippr-wal-catalog = { path = "crates/skippr-wal-catalog" }
 skippr-iceberg-catalog = { path = "crates/skippr-iceberg-catalog" }
@@ -187,12 +185,8 @@ rustls-pemfile = "2"
 stats_integration = []
 # Used only by crates/skipprd-dfs-hub-compat-tests (keeps plugin out of host dev-deps).
 dfs-hub-compat-tests = []
-# Release tarballs enable this so published skipprd can use SKIPPR_STORE_TYPE=dynamodb
-# without pulling DynamoDB into the default host dependency closure (CI boundary check).
-offset-store-dynamodb = [
-    "dep:skippr-offset-store-dynamodb",
-    "dep:skippr-iceberg-catalog-dynamodb",
-]
+# Lake Iceberg Dynamo catalog. Not Skippr Store.
+iceberg-catalog-dynamodb = ["dep:skippr-iceberg-catalog-dynamodb"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

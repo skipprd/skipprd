@@ -149,7 +149,7 @@ class PerfDbSkillTests(unittest.TestCase):
         self.assertIn("heaptrack", text)
         self.assertIn("--warmup", text)
         self.assertIn("query time", text.lower())
-        self.assertIn("offset-store-dynamodb", text)
+        self.assertIn("iceberg-catalog-dynamodb", text)
         self.assertIn("tests/perf/download.py", text)
         self.assertIn("tests/perf/analyze.py", text)
         self.assertIn("tests/perf/memo.py", text)
@@ -271,10 +271,11 @@ class PerfDbRunnerContractTests(unittest.TestCase):
             run.assert_wal_pin("cell", live, [{"phase": "query_collect"}])
         run.assert_wal_pin("cell", {"asserts": {}}, [])
 
-    def test_every_query_cell_uses_the_shared_dynamodb_store(self) -> None:
+    def test_every_query_cell_does_not_select_skippr_store_dynamodb(self) -> None:
         text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
         ingest = text.split("def run_query_after_ingest")[1].split("def write_cdc")[0]
-        self.assertIn("dynamodb_store=True", ingest)
+        self.assertNotIn("dynamodb_store=True", ingest)
+        self.assertNotIn("type: dynamodb", ingest)
         self.assertNotIn('if sink == "skipprlake"', ingest)
 
     def test_hold_that_never_engaged_fails_the_cell(self) -> None:

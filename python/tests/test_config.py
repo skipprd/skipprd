@@ -17,7 +17,7 @@ from skippr import (
     DataSourceOtlp,
     DataSourcePostgres,
     DataSourceS3,
-    DynamoDbStore,
+    FjallStore,
     EnvRef,
     LocalStorage,
     Pipeline,
@@ -161,16 +161,16 @@ def test_local_storage_removes_bucket(tmp_path):
 
 
 def test_store_writes_type_and_name():
-    raw = Config().store(DynamoDbStore("offsets")).to_yaml()
-    assert "type: dynamodb" in raw
-    assert "name: offsets" in raw
+    raw = Config().store(FjallStore()).to_yaml()
+    assert "type: fjall" in raw
+    assert "dynamodb" not in raw
     assert "offset_store" not in raw
 
 
 def test_storage_and_store_reject_wrong_types():
     with pytest.raises(TypeError, match="LocalStorage"):
         Config().storage("local")  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="SledStore"):
+    with pytest.raises(TypeError, match="FjallStore"):
         Config().store(LocalStorage())  # type: ignore[arg-type]
 
 

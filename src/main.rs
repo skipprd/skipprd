@@ -133,9 +133,6 @@ async fn async_main() {
     if let Some(store) = cli.store_type.as_ref() {
         Config::set_skippr_store_type(store.as_str());
     }
-    if let Some(table) = cli.store_name.as_deref() {
-        Config::set_skippr_store_name(table);
-    }
 
     // Initialize logging if --log is provided; default level is 'info', '--log debug' enables debug
     init_logging(cli.log.clone());
@@ -500,7 +497,6 @@ async fn async_main() {
                 cli.storage_mode,
                 cli.wal_s3_bucket.as_deref(),
                 cli.store_type,
-                cli.store_name.as_deref(),
                 cli.skippr_s3_bucket.as_deref(),
                 cli.tenant.as_deref(),
             ) {

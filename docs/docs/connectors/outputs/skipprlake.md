@@ -5,7 +5,7 @@ description: Land Skipprd pipelines as Iceberg tables in your object store, with
 
 # SkipprLake
 
-SkipprLake is Skipprd's Iceberg destination. Files go to a warehouse URI you name. Catalog pointers live in a DynamoDB table you name (`catalog_table`). That table may be the same one you use as the [state store](/configuration/skippr-store).
+SkipprLake is Skipprd's Iceberg destination. Files go to a warehouse URI you name. Catalog pointers live in a DynamoDB table you name (`catalog_table`). That lake catalog is not [Skippr Store](/configuration/skippr-store): never set `skippr.store.type` to select it.
 
 Pair it with the [SkipprLake schema sink](/connectors/schema_sinks/skipprlake).
 
@@ -103,7 +103,7 @@ object_store:
 | Key | Type | Required/Default | Description |
 |---|---|---|---|
 | `warehouse` | URI | Required | Iceberg root (`s3://…` or `file:///…`) |
-| `catalog_table` | string | Required | Catalog pointer table. May be the SkipprStore table. |
+| `catalog_table` | string | Required | DynamoDB table for Iceberg catalog pointers. Not Skippr Store. |
 | `region` | string | Not set | Region for the catalog backend |
 | `object_store` | object | `s3` | File store: `file`, `s3`, or `r2` |
 | `table_namespace` | string | `default` | Iceberg namespace |

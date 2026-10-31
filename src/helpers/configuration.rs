@@ -22,6 +22,7 @@ use serde_derive::{Deserialize, Serialize};
 
 use serde_json::Value;
 
+use crate::adapters::storage::StorageAdapter;
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::helpers::plugin_config::{DataSinkEntry, PluginConfigEntry};
 use crate::helpers::wal_storage::{ElStorageMode, SkipprStore, SkipprStoreKind};
@@ -129,7 +130,7 @@ pub struct Skippr {
     /// Dedicated S3 bucket for WAL segments (falls back to skippr_s3_bucket).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_s3_bucket: Option<String>,
-    /// SkipprStore: KV backend for offsets, checkpoints, leases, and catalog pointers.
+    /// Live Skippr Store block. Lock: `docs/docs/maintainers/skippr-store-kv.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<SkipprStore>,
 }
@@ -410,7 +411,7 @@ pub struct Transform {
     /// Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ops: Option<Vec<TransformOp>>,
-    /// Keyed running aggregates maintained from committed WAL data in Sled.
+    /// Keyed running aggregates maintained from committed WAL data in Skippr Store (`stream_state`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregates: Option<Vec<TransformAggregate>>,
 }
@@ -473,7 +474,7 @@ impl TransformOp {
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TransformAggregate {
-    /// Stable processor id used in Sled key namespaces.
+    /// Stable processor id used in Skippr Store `stream_state` key namespaces.
     pub id: String,
     /// Columns that form the aggregate key, in order.
     pub key_fields: Vec<String>,
@@ -1645,34 +1646,6 @@ impl Config {
         Config::set_evncache("SKIPPR_STORE_TYPE", value);
     }
 
-    pub fn get_skippr_store_name(&self) -> String {
-        if let Some(name) = self
-            .skippr
-            .as_ref()
-            .and_then(|skippr| skippr.store.as_ref())
-            .and_then(|store| store.name.as_ref())
-            .filter(|name| !name.is_empty())
-        {
-            return name.clone();
-        }
-        Config::getenv("SKIPPR_STORE_NAME", "")
-    }
-
-    pub fn set_skippr_store_name(value: &str) {
-        Config::setenv("SKIPPR_STORE_NAME", value);
-        Config::set_evncache("SKIPPR_STORE_NAME", value);
-    }
-
-    /// Derived identity for DynamoDB offset rows: tenant#workspace#pipeline.
-    pub fn offset_store_partition_key(&self) -> String {
-        format!(
-            "{}#{}#{}",
-            self.get_tenant(),
-            self.get_workspace_name(),
-            self.get_pipeline_name()
-        )
-    }
-
     // WAL prefix (default derived: {tenant}/{workspace}/{pipeline}/segments)
     pub fn get_wal_s3_prefix(&self) -> String {
         let default_prefix = format!(
@@ -2195,7 +2168,7 @@ impl Config {
         for removed in ["SKIPPR_OFFSET_STORE", "SKIPPR_OFFSET_DYNAMODB_TABLE"] {
             if !std::env::var(removed).unwrap_or_default().is_empty() {
                 violations.push(format!(
-                    "{removed} was removed; set SKIPPR_STORE_TYPE and SKIPPR_STORE_NAME (or skippr.store) instead."
+                    "{removed} was removed; set SKIPPR_STORE_TYPE (or skippr.store) instead."
                 ));
             }
         }
@@ -2776,40 +2749,72 @@ impl Config {
         let tenant = self.get_tenant();
         let workspace = self.get_workspace_name();
         let pipeline = self.get_pipeline_name();
-        let key = self.pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
-        info!("get_metadata: pipeline='{}' key='{}'", pipeline, key);
+        info!("get_metadata: pipeline='{pipeline}' schema=skippr-store:schema/{pipeline}");
+        let leftover_json = self.pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
 
-        match self.load_pipeline_metadata_json(&key).await {
-            Ok(Some(json_value)) => match serde_json::from_value::<PipelineMetadata>(json_value) {
-                Ok(mut pipeline_metadata) => {
-                    let num_entries = pipeline_metadata.metadata.len();
-                    let keys: Vec<String> = pipeline_metadata.metadata.keys().cloned().collect();
-                    info!("Loaded metadata (entries={}, keys={:?})", num_entries, keys);
-                    self.inject_flatten_flag(&mut pipeline_metadata);
-                    if pipeline_metadata.migrate_persisted_metadata() {
-                        info!(
-                            "Migrated persisted metadata to version {}",
-                            pipeline_metadata.metadata_version
-                        );
-                        self.set_metadata(&pipeline_metadata, false).await;
-                    }
-                    Ok(pipeline_metadata)
-                }
-                Err(e) => {
-                    error!("Failed to parse metadata: {}", e);
-                    std::process::exit(1);
-                }
-            },
-            Ok(None) => Err(false),
+        let (store, fence) = match crate::helpers::offsets::store_for_config(self) {
+            Ok(pair) => pair,
             Err(e) => {
-                error!("Failed to fetch metadata: {}", e);
+                error!("Failed to open Skippr Store for schema: {e}");
+                std::process::exit(1);
+            }
+        };
+        match crate::helpers::schema_store::load_pipeline_schema(store.as_ref(), &pipeline) {
+            Ok(Some(mut pipeline_metadata)) => {
+                self.inject_flatten_flag(&mut pipeline_metadata);
+                if pipeline_metadata.migrate_persisted_metadata() {
+                    info!(
+                        "Migrated persisted metadata to version {}",
+                        pipeline_metadata.metadata_version
+                    );
+                    self.set_metadata(&pipeline_metadata, false).await;
+                }
+                return Ok(pipeline_metadata);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                error!("Failed to load schema family: {e}");
                 std::process::exit(1);
             }
         }
-    }
 
-    pub fn pipeline_metadata_object_key(&self, key: &skippr_lease::PipelineKey) -> String {
-        self.pipeline_metadata_object_path(key.tenant(), key.workspace(), key.pipeline())
+        let local = crate::adapters::storage::LocalDiskStorageAdapter::new(&self.get_data_dir());
+        let local_bytes = match local.get_bytes_opt(&leftover_json).await {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Failed to fetch local metadata.json: {e}");
+                std::process::exit(1);
+            }
+        };
+        let remote_bytes = if self.get_skippr_s3_bucket().trim().is_empty() {
+            None
+        } else {
+            let s3 = crate::adapters::storage::S3StorageAdapter::new(self.get_skippr_s3_bucket());
+            match s3.get_bytes_opt(&leftover_json).await {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Failed to fetch S3 metadata.json: {e}");
+                    std::process::exit(1);
+                }
+            }
+        };
+        match crate::helpers::schema_store::import_metadata_json_if_needed(
+            store.as_ref(),
+            fence,
+            &pipeline,
+            local_bytes.as_deref(),
+            remote_bytes.as_deref(),
+        ) {
+            Ok(Some(mut pipeline_metadata)) => {
+                self.inject_flatten_flag(&mut pipeline_metadata);
+                Ok(pipeline_metadata)
+            }
+            Ok(None) => Err(false),
+            Err(e) => {
+                error!("Failed to import metadata.json: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     fn pipeline_metadata_object_path(
@@ -2819,34 +2824,6 @@ impl Config {
         pipeline: &str,
     ) -> String {
         format!("{tenant}/{workspace}/{pipeline}/metadata/metadata.json")
-    }
-
-    pub async fn load_pipeline_metadata(
-        &self,
-        key: &skippr_lease::PipelineKey,
-    ) -> Result<Option<crate::discover::PipelineMetadata>, String> {
-        let object_key = self.pipeline_metadata_object_key(key);
-        info!("load_pipeline_metadata: key='{}'", object_key);
-        match self.load_pipeline_metadata_json(&object_key).await {
-            Ok(None) => Ok(None),
-            Ok(Some(json_value)) => serde_json::from_value(json_value)
-                .map(Some)
-                .map_err(|err| format!("failed to parse pipeline metadata {object_key}: {err}")),
-            Err(err) => Err(format!(
-                "failed to fetch pipeline metadata {object_key}: {err}"
-            )),
-        }
-    }
-
-    async fn load_pipeline_metadata_json(
-        &self,
-        object_key: &str,
-    ) -> Result<Option<serde_json::Value>, String> {
-        let storage = crate::adapters::storage::get_storage(self);
-        storage
-            .get_json_opt(object_key)
-            .await
-            .map_err(|err| err.to_string())
     }
 
     pub async fn delete_metadata(&self) {
@@ -2886,23 +2863,16 @@ impl Config {
         &self,
         pipeline_metadata: &PipelineMetadata,
     ) -> Result<(), String> {
-        use once_cell::sync::Lazy as OnceLazy;
-        static UPLOAD_LOCK: OnceLazy<tokio::sync::Mutex<()>> =
-            OnceLazy::new(|| tokio::sync::Mutex::new(()));
-
-        let tenant = self.get_tenant();
-        let workspace = self.get_workspace_name();
-        let pipeline = self.get_pipeline_name();
-        let key = self.pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
-        let json_value = serde_json::to_value(pipeline_metadata)
-            .map_err(|e| format!("Failed to serialize metadata: {e}"))?;
-        let storage = crate::adapters::storage::get_storage(self);
-        let _guard = UPLOAD_LOCK.lock().await;
-        storage
-            .put_json(&key, &json_value)
-            .await
-            .map_err(|e| format!("Failed to persist metadata: {e}"))?;
-        info!("Updated pipeline metadata: {}", key);
+        let (store, fence) = crate::helpers::offsets::store_for_config(self)?;
+        crate::helpers::schema_store::persist_pipeline_schema(
+            store.as_ref(),
+            fence,
+            pipeline_metadata,
+        )?;
+        info!(
+            pipeline = %pipeline_metadata.name,
+            "Updated pipeline schema family"
+        );
         Ok(())
     }
 
@@ -3737,8 +3707,7 @@ skippr:
   skipprd_el_storage_mode: s3
   skippr_s3_bucket: lake-bucket
   store:
-    type: dynamodb
-    name: offsets
+    type: fjall
 data_sources:
   firehose:
     S3:
@@ -5205,41 +5174,31 @@ data_sinks:
     }
 
     #[test]
-    #[serial]
-    fn offset_store_partition_key_is_derived() {
-        ENV_CACHE.write().clear();
-        std::env::set_var("TENANT", "tenant-a");
-        std::env::set_var("WORKSPACE_NAME", "workspace-b");
-        let config = Config::new().bind_pipeline("google_analytics");
-        assert_eq!(
-            config.offset_store_partition_key(),
-            "tenant-a#workspace-b#google_analytics"
-        );
-        std::env::remove_var("TENANT");
-        std::env::remove_var("WORKSPACE_NAME");
-    }
-
-    #[test]
     fn skippr_store_yaml_type_and_name() {
         let config: Config = serde_yaml::from_str(
             r#"
 skippr:
   workspace: ws
   store:
-    type: dynamodb
-    name: console-skipprd-offsets-prod
+    type: sled
 pipelines: {}
 "#,
         )
         .unwrap();
         assert_eq!(
             config.configured_skippr_store().unwrap(),
-            Some(SkipprStoreKind::DynamoDb)
+            Some(SkipprStoreKind::Fjall)
         );
-        assert_eq!(
-            config.get_skippr_store_name(),
-            "console-skipprd-offsets-prod"
-        );
+        assert!(serde_yaml::from_str::<Config>(
+            r#"
+skippr:
+  store:
+    type: dynamodb
+    name: offsets
+pipelines: {}
+"#
+        )
+        .is_err());
     }
 
     #[test]

@@ -99,14 +99,14 @@ fn default_lake_namespace() -> String {
 /// Query and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)
 /// inside `IcebergCatalogSpec`, not as a standalone query backend.
 /// The Skippr catalog is the only catalog: pointers live in `catalog_table`
-/// (DynamoDB). Catalog rows MAY share the SkipprStore table; PK/SK prefixes
-/// do not collide with offsets.
+/// (a DynamoDB Iceberg catalog table). That table is not Skippr Store and
+/// MUST NOT be selected via `skippr.store.type`.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, SkipprConfig)]
 #[serde(deny_unknown_fields)]
 pub struct SkipprLakeConfig {
     /// Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.
     pub warehouse: String,
-    /// Catalog pointer table. MAY be the SkipprStore table.
+    /// DynamoDB table for Iceberg catalog pointers. Not Skippr Store.
     pub catalog_table: String,
     #[serde(default)]
     pub region: Option<String>,

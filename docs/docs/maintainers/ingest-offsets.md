@@ -10,7 +10,7 @@ Skipprd treats each source partition as an **immutable whole object** (S3 key, l
 
 ## Where offsets live
 
-Every backend publishes `Closed=1` / `Position` through `publish_wal_commit` after the catalog row is durable. Disk uses sled; S3 uses the configured SkipprStore when `skippr.store.type=dynamodb`. Offsets are not a second WAL authority.
+Every backend publishes `Closed=1` / `Position` through `publish_wal_commit` after the catalog row is durable. Offsets are a Skippr Store family, not a second WAL authority. Lock: [Skippr Store KV](skippr-store-kv.md).
 
 ## When `Position` matters
 
@@ -29,7 +29,7 @@ For each batch, ingest loads one offset snapshot per `offset_key` and decides pe
 3. `Closed != 0` → skip (immutable object already done).
 4. When tracking position (CDC or explicit `offset_pos`) → skip records at or before the stored line/LSN.
 
-This avoids per-record `Offsets::validate` sled lookups on the hot path.
+This avoids per-record `Offsets::validate` Skippr Store lookups on the hot path.
 
 ## Operational notes
 

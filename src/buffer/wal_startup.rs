@@ -53,7 +53,7 @@ mod tests {
     };
     use crate::buffer::segment_file::{PartitionKey, WalPayload};
     use crate::buffer::wal_handle::memory_catalog_for_test;
-    use crate::helpers::offset_store::SledOffsetStore;
+    use crate::helpers::offset_store::{memory_offset_store, StoreOffsetStore};
     use crate::plugins::source_contract::WritePolicy;
     use arrow::array::Int32Array;
     use arrow::record_batch::RecordBatch;
@@ -70,9 +70,8 @@ mod tests {
         let paths = PipelinePaths::legacy_disk(dir);
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
-        let db = sled::open(dir.join("offsets")).unwrap();
         let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-            Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
+            crate::helpers::offset_store::memory_offset_store();
         PipelineWalHandle::new(key, paths, catalog, offsets, fence)
     }
 

@@ -1,24 +1,16 @@
-use sled;
 use std::sync::Arc;
-use std::thread::sleep;
-use std::time::Duration;
 use Result;
 
 use crate::helpers::configuration::Config;
-use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
-use crate::helpers::offsets::OffsetsError::VacuumError;
-use crate::helpers::Helpers;
-use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
-use crate::METRICS;
+use crate::helpers::offset_store::{OffsetStore, StoreOffsetStore};
+use crate::plugins::cdc::CheckpointEnvelope;
 use serde_derive::{Deserialize, Serialize};
-#[cfg(feature = "offset-store-dynamodb")]
-use skippr_offset_store_dynamodb::DynamoDbOffsetStore;
-use sled::{IVec, Mode};
+use skippr_wal_catalog::SkipprStoreRead;
 use thiserror::Error;
-use tracing::{error, info};
+use tracing::info;
 use {
-    byteorder::{BigEndian, LittleEndian},
-    zerocopy::{byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned, U16},
+    byteorder::LittleEndian,
+    zerocopy::{byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned},
 };
 
 pub const SLED_NAME: &str = "db";
@@ -119,15 +111,9 @@ pub trait CheckpointTransport: Send + Sync {
 }
 
 #[derive(Clone)]
-struct LocalOffsets {
-    #[allow(dead_code)]
-    db: sled::Db,
-    tree: sled::Tree,
-}
-
-#[derive(Clone)]
 pub struct Offsets {
-    local: Option<LocalOffsets>,
+    kv: Option<Arc<dyn skippr_wal_catalog::SkipprStore>>,
+    fence: Option<skippr_wal_catalog::CatalogFence>,
     store: Option<Arc<dyn OffsetStore>>,
     transport: Option<Arc<dyn OffsetTransport>>,
 }
@@ -140,8 +126,6 @@ pub struct Offsets {
 pub enum OffsetsError {
     #[error("Failed opening offset DB at this location: {0}. Is another instance of Skippr already ingesting this pipeline?")]
     AlreadyOpenError(String),
-    #[error("Failed vacuuming offsets database, Error: {0}")]
-    VacuumError(sled::Error),
     #[error("Offset store read failed: {0}")]
     Store(String),
 }
@@ -152,21 +136,84 @@ impl From<OffsetsError> for std::io::Error {
     }
 }
 
-impl Offsets {
-    fn checkpoint_storage_key(key: &str) -> String {
-        format!("cdc_checkpoint:{}", key)
-    }
+#[cfg(test)]
+thread_local! {
+    static LIVE_KV: std::cell::RefCell<
+        Option<(
+            Arc<dyn skippr_wal_catalog::SkipprStore>,
+            skippr_wal_catalog::CatalogFence,
+        )>,
+    > = const { std::cell::RefCell::new(None) };
+}
 
+#[cfg(not(test))]
+static LIVE_KV: std::sync::Mutex<
+    Option<(
+        Arc<dyn skippr_wal_catalog::SkipprStore>,
+        skippr_wal_catalog::CatalogFence,
+    )>,
+> = std::sync::Mutex::new(None);
+
+pub fn install_live_kv(
+    kv: Arc<dyn skippr_wal_catalog::SkipprStore>,
+    fence: skippr_wal_catalog::CatalogFence,
+) {
+    #[cfg(test)]
+    LIVE_KV.with(|slot| *slot.borrow_mut() = Some((kv, fence)));
+    #[cfg(not(test))]
+    {
+        *LIVE_KV.lock().expect("live skippr store") = Some((kv, fence));
+    }
+}
+
+#[cfg(test)]
+pub fn reset_live_kv() {
+    LIVE_KV.with(|slot| *slot.borrow_mut() = None);
+}
+
+pub fn live_kv() -> Option<(
+    Arc<dyn skippr_wal_catalog::SkipprStore>,
+    skippr_wal_catalog::CatalogFence,
+)> {
+    #[cfg(test)]
+    {
+        LIVE_KV.with(|slot| slot.borrow().clone())
+    }
+    #[cfg(not(test))]
+    {
+        LIVE_KV.lock().expect("live skippr store").clone()
+    }
+}
+
+pub fn store_for_config(
+    config: &Config,
+) -> Result<
+    (
+        Arc<dyn skippr_wal_catalog::SkipprStore>,
+        skippr_wal_catalog::CatalogFence,
+    ),
+    String,
+> {
+    if let Some(live) = live_kv() {
+        return Ok(live);
+    }
+    let fence = skippr_wal_catalog::CatalogFence::local();
+    let dir = format!("{}/skippr-store", config.get_data_dir());
+    let kv =
+        skippr_wal_catalog::FjallSkipprStore::open(&dir, fence).map_err(|err| err.to_string())?;
+    let kv: Arc<dyn skippr_wal_catalog::SkipprStore> = Arc::new(kv);
+    install_live_kv(Arc::clone(&kv), fence);
+    Ok((kv, fence))
+}
+
+impl Offsets {
     pub fn from_transport(transport: Arc<dyn OffsetTransport>) -> Self {
         Self {
-            local: None,
+            kv: None,
+            fence: None,
             store: None,
             transport: Some(transport),
         }
-    }
-
-    fn local_tree(&self) -> Option<&sled::Tree> {
-        self.local.as_ref().map(|local| &local.tree)
     }
 
     fn offset_backend(&self) -> Option<&Arc<dyn OffsetStore>> {
@@ -177,12 +224,8 @@ impl Offsets {
         self.store.as_ref()
     }
 
-    fn uses_remote_store(&self) -> bool {
-        self.store.is_some() && self.local.is_none()
-    }
-
     fn has_materialized_store(&self) -> bool {
-        self.local_tree().is_some() || self.uses_remote_store()
+        self.store.is_some()
     }
 
     fn transport(&self) -> Option<&Arc<dyn OffsetTransport>> {
@@ -195,361 +238,55 @@ impl Offsets {
 
     #[cfg(test)]
     pub(crate) fn clear_for_test(&self) {
-        if let Some(tree) = self.local_tree() {
-            tree.clear().unwrap();
+        if let Some(store) = &self.store {
+            let _ = store.reset_published_ingest();
         }
     }
 
     #[cfg(test)]
     pub(crate) fn flush_for_test(&self) {
-        if let Some(tree) = self.local_tree() {
-            tree.flush().unwrap();
+        if let Some(store) = &self.store {
+            store.flush().unwrap();
         }
     }
 
     pub fn init(config: &Config) -> Result<Offsets, OffsetsError> {
-        let remote_kind = crate::pipeline_backend::configured_kind(config)
-            .map_err(OffsetsError::AlreadyOpenError)?;
-        let use_remote = matches!(
-            remote_kind,
-            crate::helpers::wal_storage::SkipprStoreKind::DynamoDb
-        );
-        if use_remote {
-            #[cfg(feature = "offset-store-dynamodb")]
-            {
-                let warn_without_s3_wal = match config.get_wal_storage() {
-                    crate::helpers::wal_storage::WalStorage::S3 => false,
-                    crate::helpers::wal_storage::WalStorage::Disk => true,
-                };
-                let remote: Arc<dyn OffsetStore> = match remote_kind {
-                    crate::helpers::wal_storage::SkipprStoreKind::DynamoDb => Arc::new(
-                        DynamoDbOffsetStore::open(
-                            config.get_skippr_store_name(),
-                            config.offset_store_partition_key(),
-                            warn_without_s3_wal,
-                        )
-                        .map_err(OffsetsError::AlreadyOpenError)?,
-                    ),
-                    crate::helpers::wal_storage::SkipprStoreKind::Sled => {
-                        return Err(OffsetsError::AlreadyOpenError(
-                            "skippr.store.type=dynamodb is required for remote offsets".into(),
-                        ));
-                    }
-                };
-                return Ok(Offsets {
-                    local: None,
-                    store: Some(remote),
-                    transport: None,
-                });
-            }
-            #[cfg(not(feature = "offset-store-dynamodb"))]
-            {
-                return Err(OffsetsError::AlreadyOpenError(
-                    "skippr.store.type=dynamodb requires --features offset-store-dynamodb".into(),
-                ));
-            }
-        }
-
-        // match Self::vacuum() { // requires a full scan of table which is expensive on EFS since we're opting to keep all offsets to support replays
-        //     Ok(size) => {}
-        //     Err(err) => {
-        //         println!("Failed vacuuming offsets database, Error: {:?}", err);
-        //         unsafe { exit(1); }
-        //     }
-        // }
-
-        let db_path = format!("{}/{}", config.get_data_dir(), SLED_NAME);
-        let db = match sled::open(&db_path) {
-            // open in high-throughput mode
-            Ok(db) => db,
-            Err(_err) => {
-                return Err(OffsetsError::AlreadyOpenError(db_path));
-            }
-        };
-        let tree = db
-            .open_tree("offsets")
-            .map_err(|err| OffsetsError::Store(err.to_string()))?;
-
-        let total_size_bytes = db.size_on_disk().unwrap_or_else(|err| {
-            error!("Failed getting size of offsets DB, Error: {:?}", err);
-            0
-        });
-
-        info!(
-            "Offset DB size: {}",
-            Helpers::human_readable_size(total_size_bytes)
-        );
-
-        let mut metrics_lock = METRICS.write();
-        metrics_lock.offset_db_size = total_size_bytes;
-
-        // let names: Vec<String> = db
-        //     .tree_names()
-        //     .iter()
-        //     .filter_map(|name| match std::str::from_utf8(name) {
-        //         Ok(value) => Some(value.to_string()),
-        //         Err(e) => {
-        //             println!("Sled name={name:?} caused error: {e:?}");
-        //             None
-        //         }
-        //     })
-        //     .collect();
-        //
-        // println!("Tree names: {:?}", names);
-
-        // Iterate over all key-value pairs and print them
-        // for kv in tree.iter() {
-        //     let mut key = kv.unwrap().0;
-        //     let mut value = match tree.get(&key) {
-        //         Ok(val) => match val {
-        //             Some(val) => val,
-        //             None => IVec::from("none")
-        //         },
-        //         Err(err) => {
-        //             println!("Error: {}", err);
-        //             IVec::from("none")
-        //         }
-        //     };
-        //
-        //     // let key = std::str::from_utf8(&key);
-        //
-        //     let layout: LayoutVerified<&mut [u8], Value> =
-        //         LayoutVerified::new_unaligned(&mut *value)
-        //             .expect("bytes do not fit schema");
-        //     let value: &mut Value = layout.into_mut();
-        //
-        //     // let layout: LayoutVerified<&mut [u8], Key> =
-        //     //     LayoutVerified::new_unaligned(&mut *key)
-        //     //         .expect("bytes do not fit schema");
-        //     // let key: &mut Key = layout.into_mut();
-        //
-        //     // let key: Key = key.as_bytes();
-        //     // let key: &mut Key = layout.into_mut();
-        //
-        //     println!("Key: {:?}, Value: {:?}", key, value);
-        // }
-
-        let backend: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree.clone()));
-        let store = Offsets {
-            local: Some(LocalOffsets { db, tree }),
-            store: Some(backend),
-            transport: None,
-        };
-
-        Ok(store)
-    }
-
-    // Sled remove() currently sets the value to None, and maintains the key in the tree.
-    // Since the key is the largest part of the data, we need to purge keys with None values
-    // periodically to save space.
-    #[allow(dead_code)]
-    fn vacuum(config: &Config) -> Result<u64, OffsetsError> {
-        let db_path = format!("{}/{}", config.get_data_dir(), SLED_NAME);
-        // // Ensure database isn't already open before we start operating
-        // let db = match sled::Config::default()
-        //     .path(&db_path)
-        //     .mode(Mode::LowSpace)// open in low space mode to encourage GC
-        //     .open() {
-        //     Ok(db) => {db}
-        //     Err(_) => {
-        //         return Err(OffsetsError::AlreadyOpenError(db_path));
-        //     }
-        // };
-
-        // // rollback any previous vacuum that was interrupted
-        // match Self::rollback_vacuum() {
-        //     Ok(true) => {
-        //         println!("Rolled back previous interrupted offsets db vacuum");
-        //     },
-        //     Ok(false) => {},
-        //     Err(err) => {
-        //         println!("Failed rolling back previous interrupted offsets db vacuum, Error: {:?}", err);
-        //         unsafe { exit(1) }
-        //     }
-        // }
-
-        // drop(db);
-
-        // Rename database file to a temporary file
-        // let temp_db_path = format!("{}/{}.tmp", config.get_data_dir(), SLED_NAME);
-        //
-        // if std::fs::metadata(&db_path).is_err() {
-        //     return Ok(0);
-        // }
-        // std::fs::rename(&db_path, &temp_db_path).unwrap();
-        //
-        // // open old db
-        // let old_db = match sled::Config::default()
-        //     .path(&temp_db_path)
-        //     .mode(Mode::LowSpace)
-        //     .open() {
-        //     Ok(db) => {db}
-        //     Err(err) => {
-        //         return Err(OffsetsError::AlreadyOpenError(temp_db_path));
-        //     }
-        // };
-        // let old_tree = old_db.open_tree("offsets").expect("Could not open offset tree");
-        //
-        // println!("Vacuuming offsets database of size: {}", Helpers::human_readable_size(old_db.size_on_disk().unwrap()));
-
-        // write all keys with values to a new database
-        let db = match sled::Config::default()
-            .path(&db_path)
-            .mode(Mode::LowSpace) // open in low space mode to encourage GC
-            .open()
-        {
-            Ok(db) => db,
-            Err(_) => {
-                return Err(OffsetsError::AlreadyOpenError(db_path));
-            }
-        };
-        let tree = db
-            .open_tree("offsets")
-            .map_err(|err| OffsetsError::Store(err.to_string()))?;
-
-        println!(
-            "Vacuuming offsets database of size: {}",
-            Helpers::human_readable_size(db.size_on_disk().unwrap())
-        );
-        let key_count = db.len();
-
-        let mut i = 0;
-        let mut count = 0;
-
-        let pause_modus = key_count / 60; // 60 sec total pause for sled gc (plus insert time)
-        let pause_modus = pause_modus.max(1000);
-
-        for kv in db.iter() {
-            let key = kv.unwrap().0;
-            let op = match db.get(&key) {
-                Ok(val) => match val {
-                    Some(val) =>
-                    // Ok(Some(val)),
-                    {
-                        match tree.insert(&key, &val) {
-                            Ok(val) => Ok(val),
-                            Err(err) => Err(sled::Error::ReportableBug(format!(
-                                "Failed inserting key into new tree, Error: {:?}",
-                                err
-                            ))),
-                        }
-                    }
-                    None => {
-                        // println!("Removing key: {:?}", key);
-                        tree.remove(&key).unwrap_or_default();
-                        count += 1;
-                        Ok(None)
-                    }
-                },
-                Err(err) => Err(sled::Error::ReportableBug(format!(
-                    "Failed getting key from old tree, Error: {:?}",
-                    err
-                ))),
-            };
-
-            i += 1;
-
-            if i % pause_modus == 0 {
-                tree.flush().unwrap();
-                // after experimentation, sled does better job of GC with smaller writes. So we'll do it more often with shorter sleep
-                sleep(Duration::from_secs(1));
-
-                let new_size = db.size_on_disk().unwrap_or_else(|err| {
-                    println!("Failed getting size of new offsets DB, Error: {:?}", err);
-                    0
-                });
-
-                println!(
-                    "Vacuumed {} offsets from db, evaluated {}/{} keys, size {}",
-                    count,
-                    i,
-                    key_count,
-                    Helpers::human_readable_size(new_size)
-                );
-
-                count = 0;
-            }
-
-            if let Err(err) = op {
-                // rollback
-                drop(tree);
-                drop(db);
-                // drop(old_tree);
-                // drop(old_db);
-                // std::fs::remove_dir_all(&db_path).unwrap();
-                // std::fs::rename(&temp_db_path, &db_path).unwrap();
-
-                return Err(VacuumError(err));
-            }
-        }
-
-        sleep(Duration::from_secs(5));
-
-        let new_size = db.size_on_disk().unwrap_or_else(|err| {
-            println!("Failed getting size of new offsets DB, Error: {:?}", err);
-            0
-        });
-
-        println!(
-            "Vacuumed offsets database, size: {}",
-            Helpers::human_readable_size(new_size)
-        );
-
-        // delete old file
-        drop(tree);
-        drop(db);
-        // drop(old_tree);
-        // drop(old_db);
-
-        // std::fs::remove_dir_all(&temp_db_path).unwrap();
-
-        Ok(new_size)
-    }
-
-    #[allow(dead_code)]
-    fn rollback_vacuum(config: &Config) -> Result<bool, OffsetsError> {
-        let db_path = format!("{}/{}", config.get_data_dir(), SLED_NAME);
-        let temp_db_path = format!("{}/{}.tmp", config.get_data_dir(), SLED_NAME);
-
-        if std::fs::metadata(&temp_db_path).is_ok() {
-            match std::fs::remove_dir_all(&db_path) {
-                Ok(_) => {}
-                Err(_) => {}
-            }
-            match std::fs::rename(&temp_db_path, &db_path) {
-                Ok(_) => {}
+        crate::pipeline_backend::configured_kind(config).map_err(OffsetsError::AlreadyOpenError)?;
+        let data_dir = config.get_data_dir();
+        let (kv, fence) = store_for_config(config).map_err(OffsetsError::AlreadyOpenError)?;
+        let sled_path = std::path::PathBuf::from(format!("{data_dir}/{SLED_NAME}"));
+        loop {
+            match skippr_wal_catalog::migrate_sled_db(&kv, fence, &sled_path, 1) {
+                Ok(skippr_wal_catalog::MigrateStatus::InProgress {
+                    tree,
+                    remaining_hint,
+                }) => {
+                    info!(
+                        tree,
+                        remaining_hint, "sled → fjall migrate running under live store"
+                    );
+                }
+                Ok(skippr_wal_catalog::MigrateStatus::Complete { archived_to }) => {
+                    info!(archived = %archived_to.display(), "sled → fjall migrate complete");
+                    break;
+                }
+                Ok(skippr_wal_catalog::MigrateStatus::NoSled) => break,
                 Err(err) => {
-                    return Err(VacuumError(sled::Error::ReportableBug(format!(
-                        "Failed renaming offsets db, Error: {:?}",
-                        err
-                    ))));
+                    return Err(OffsetsError::AlreadyOpenError(err.to_string()));
                 }
             }
-            return Ok(true);
         }
-
-        Ok(false)
-    }
-
-    #[allow(dead_code)]
-    fn vec_8_to_u16(&self, bytes: &[u8]) -> Vec<U16<BigEndian>> {
-        // Ensure that the number of bytes is divisible by 2 (because each U16 takes 2 bytes)
-        assert_eq!(bytes.len() % 2, 0);
-
-        // Create a slice of U16 values from the byte slice
-        let u16_slice = unsafe {
-            // This is safe because we've already ensured that the byte slice is divisible by 2
-            std::slice::from_raw_parts(bytes.as_ptr() as *const U16<BigEndian>, bytes.len() / 2)
-        };
-        // Print the U16 values
-        // for u16_value in u16_slice {
-        //     println!("{}", u16_value.get());
-        //     foo.puu16_value.get()
-        // }
-
-        u16_slice.to_owned()
-        // let mut result = U16::<BigEndian>::new(0);
-        // result.extend_from_slice(u16_slice);
+        let mut offsets_backend = StoreOffsetStore::new(Arc::clone(&kv), fence);
+        if sled_path.exists() {
+            offsets_backend = offsets_backend.with_sled_fallback(&sled_path);
+        }
+        let backend: Arc<dyn OffsetStore> = Arc::new(offsets_backend);
+        Ok(Offsets {
+            kv: Some(kv),
+            fence: Some(fence),
+            store: Some(backend),
+            transport: None,
+        })
     }
 
     fn remote_value(
@@ -596,50 +333,49 @@ impl Offsets {
             "offset flush requires an installed store".into(),
         ))
     }
-    pub fn open_sled_wal_catalog(
+    pub fn open_wal_catalog(
         &self,
-        fence: skippr_wal_catalog::CatalogFence,
-    ) -> Result<skippr_wal_catalog::SledWalCatalog, String> {
-        Ok(skippr_wal_catalog::SledWalCatalog::open(
-            self.open_sled_wal_tree()?,
-            fence,
-        ))
+        _fence: skippr_wal_catalog::CatalogFence,
+    ) -> Result<Arc<dyn skippr_wal_catalog::WalCatalogStore>, String> {
+        let kv = self
+            .kv
+            .clone()
+            .ok_or_else(|| "WAL catalog requires an open Skippr Store".to_string())?;
+        Ok(Arc::new(skippr_wal_catalog::CatalogView::new(kv)))
     }
 
-    pub fn open_sled_wal_catalog_read(&self) -> Result<skippr_wal_catalog::SledWalCatalog, String> {
-        Ok(skippr_wal_catalog::SledWalCatalog::open_read(
-            self.open_sled_wal_tree()?,
-        ))
+    pub fn open_wal_catalog_read(&self) -> Arc<dyn skippr_wal_catalog::WalCatalogRead> {
+        let kv = self
+            .kv
+            .clone()
+            .expect("WAL catalog requires an open Skippr Store");
+        Arc::new(skippr_wal_catalog::CatalogView::new(kv))
     }
 
-    fn open_sled_wal_tree(&self) -> Result<sled::Tree, String> {
-        let local = self
-            .local
-            .as_ref()
-            .ok_or_else(|| "sled WAL catalog requires a local offset database".to_string())?;
-        local
-            .db
-            .open_tree("wal_catalog")
-            .map_err(|err| format!("open wal_catalog tree: {err}"))
+    pub fn skippr_kv(&self) -> Option<Arc<dyn skippr_wal_catalog::SkipprStore>> {
+        self.kv.clone()
     }
 
-    pub fn open_sled_stream_state(&self) -> Result<sled::Tree, String> {
-        let local = self
-            .local
-            .as_ref()
-            .ok_or_else(|| "stream processor requires a local offset database".to_string())?;
-        local
-            .db
-            .open_tree(crate::processor::STREAM_STATE_TREE)
-            .map_err(|err| format!("open stream_state tree: {err}"))
+    pub fn writer_fence(&self) -> Option<skippr_wal_catalog::CatalogFence> {
+        self.fence
+    }
+
+    pub fn open_stream_state(&self) -> Result<Arc<dyn skippr_wal_catalog::SkipprStore>, String> {
+        self.kv
+            .clone()
+            .ok_or_else(|| "stream processor requires an open Skippr Store".into())
     }
 
     #[cfg(test)]
-    pub(crate) fn from_local_db_for_test(db: sled::Db) -> Self {
-        let tree = db.open_tree("offsets").expect("Could not open offset tree");
-        let backend: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree.clone()));
+    pub(crate) fn from_memory_for_test() -> Self {
+        let fence = skippr_wal_catalog::CatalogFence::local();
+        let kv: Arc<dyn skippr_wal_catalog::SkipprStore> =
+            Arc::new(skippr_wal_catalog::MemorySkipprStore::open(fence));
+        let backend: Arc<dyn OffsetStore> = Arc::new(StoreOffsetStore::new(Arc::clone(&kv), fence));
+        install_live_kv(Arc::clone(&kv), fence);
         Self {
-            local: Some(LocalOffsets { db, tree }),
+            kv: Some(kv),
+            fence: Some(fence),
             store: Some(backend),
             transport: None,
         }
@@ -648,7 +384,8 @@ impl Offsets {
     #[cfg(test)]
     pub(crate) fn from_store_for_test(store: Arc<dyn OffsetStore>) -> Self {
         Self {
-            local: None,
+            kv: None,
+            fence: None,
             store: Some(store),
             transport: None,
         }
@@ -714,13 +451,24 @@ impl Offsets {
     }
 
     pub fn iter_local_offsets(&self) -> Vec<(OffsetKey, OffsetValue)> {
-        let Some(tree) = self.local_tree() else {
+        let Some(kv) = &self.kv else {
+            return Vec::new();
+        };
+        let Ok(page) = kv.query_prefix(
+            skippr_wal_catalog::StoreFamily::Offsets.prefix(),
+            None,
+            usize::MAX,
+        ) else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for kv in tree.iter() {
-            let Ok((key, value)) = kv else { continue };
-            let Ok(key) = std::str::from_utf8(&key) else {
+        for (key, value) in page {
+            let Some(rest) =
+                skippr_wal_catalog::family_rest(skippr_wal_catalog::StoreFamily::Offsets, &key)
+            else {
+                continue;
+            };
+            let Ok(key) = std::str::from_utf8(rest) else {
                 continue;
             };
             if key.starts_with("cdc_checkpoint:") || key.ends_with("-latest") {
@@ -752,57 +500,53 @@ impl Offsets {
     }
 
     pub fn iter_local_checkpoints(&self) -> Vec<(String, Vec<u8>)> {
-        let Some(tree) = self.local_tree() else {
+        let Some(kv) = &self.kv else {
+            return Vec::new();
+        };
+        let Ok(page) = kv.query_prefix(
+            skippr_wal_catalog::StoreFamily::Offsets.prefix(),
+            None,
+            usize::MAX,
+        ) else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for kv in tree.iter() {
-            let Ok((key, value)) = kv else { continue };
-            let Ok(key) = std::str::from_utf8(&key) else {
+        for (key, value) in page {
+            let Some(rest) =
+                skippr_wal_catalog::family_rest(skippr_wal_catalog::StoreFamily::Offsets, &key)
+            else {
+                continue;
+            };
+            let Ok(key) = std::str::from_utf8(rest) else {
                 continue;
             };
             let Some(logical) = key.strip_prefix("cdc_checkpoint:") else {
                 continue;
             };
-            out.push((logical.to_string(), value.to_vec()));
+            out.push((logical.to_string(), value));
         }
         out
     }
 
-    pub fn try_get(&self, key: &OffsetKey) -> Result<Option<IVec>, OffsetsError> {
+    pub fn try_get(&self, key: &OffsetKey) -> Result<Option<Vec<u8>>, OffsetsError> {
         if let Some(store) = self.offset_backend() {
             return store
                 .get_offset(&key.namespace, &key.partition)
-                .map(|bytes| bytes.map(IVec::from))
                 .map_err(OffsetsError::Store);
         }
         Ok(None)
     }
 
-    pub fn get(&self, key: &OffsetKey) -> Result<Option<IVec>, OffsetsError> {
+    pub fn get(&self, key: &OffsetKey) -> Result<Option<Vec<u8>>, OffsetsError> {
         self.try_get(key)
     }
-
-    #[allow(dead_code)]
-    unsafe fn any_as_u8_slice<T: Sized>(&self, p: &T) -> &[u8] {
-        ::core::slice::from_raw_parts((p as *const T) as *const u8, ::core::mem::size_of::<T>())
-    }
-
-    #[allow(dead_code)]
-    fn u64_to_ivec(number: u64) -> IVec {
-        IVec::from(number.to_be_bytes().to_vec())
-    }
-
-    // fn ivec_to_u64(ivec: IVec) -> u64 {
-    //     U64::from(ivec).into()
-    // }
     pub fn validate(
         &self,
         key: &OffsetKey,
         offset_type: OffsetTypes,
         offset_value: u64,
     ) -> Result<Option<bool>, OffsetsError> {
-        if self.local_tree().is_none() && !self.uses_remote_store() {
+        if !self.has_materialized_store() {
             return match self.remote_value(RuntimeOffsetOperation::Validate {
                 key: key.clone(),
                 offset_type,
@@ -872,33 +616,14 @@ impl Offsets {
                     ))
                 });
         }
-        if self.local_tree().is_none() {
-            return match self.remote_value(RuntimeOffsetOperation::LoadCheckpointEnvelope {
-                key: key.to_string(),
-            })? {
-                RuntimeOffsetValue::LoadCheckpointEnvelope(value) => Ok(value),
-                other => Err(OffsetsError::Store(format!(
-                    "Remote load_checkpoint_envelope returned unexpected response: {other:?}"
-                ))),
-            };
+        match self.remote_value(RuntimeOffsetOperation::LoadCheckpointEnvelope {
+            key: key.to_string(),
+        })? {
+            RuntimeOffsetValue::LoadCheckpointEnvelope(value) => Ok(value),
+            other => Err(OffsetsError::Store(format!(
+                "Remote load_checkpoint_envelope returned unexpected response: {other:?}"
+            ))),
         }
-        let Some(tree) = self.local_tree() else {
-            return Ok(None);
-        };
-        let sled_key = Self::checkpoint_storage_key(key);
-        let value = tree
-            .get(sled_key.as_bytes())
-            .map_err(|err| OffsetsError::Store(err.to_string()))?;
-        let Some(value) = value else {
-            return Ok(None);
-        };
-        bincode::deserialize::<CheckpointEnvelope>(&value)
-            .map(Some)
-            .map_err(|err| {
-                OffsetsError::Store(format!(
-                    "Failed to deserialize checkpoint envelope '{key}': {err}"
-                ))
-            })
     }
 
     pub fn load_checkpoint_payload<T: serde::de::DeserializeOwned>(
@@ -1037,6 +762,12 @@ mod tests {
 
     impl crate::helpers::offset_store::OffsetStore for FailingCheckpointStore {
         fn get_bytes(&self, _sk: &str) -> Result<Option<Vec<u8>>, String> {
+            Err("checkpoint store down".into())
+        }
+        fn get_journal(
+            &self,
+            _key: &crate::helpers::offset_store::JournalKey,
+        ) -> Result<Option<Vec<u8>>, String> {
             Err("checkpoint store down".into())
         }
         fn fetch_and_update_journal(

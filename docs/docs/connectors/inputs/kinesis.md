@@ -110,7 +110,7 @@ To load the data into a warehouse, add a destination to the pipeline. See [Desti
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `DATA_DIR` | string | `./data` | Pipeline data directory (the pipeline's `data_dir` in `skippr.yml` takes precedence). Skipprd keeps each shard's saved position here, next to the WAL. Put it on persistent storage. |
+| `DATA_DIR` | string | `./data` | Pipeline data directory (the pipeline's `data_dir` in `skippr.yml` takes precedence). Skippr Store (resume positions) lives here. Put it on persistent storage. |
 | `SKIPPR_RUNTIME_ONCE_IDLE_TIMEOUT_SECONDS` | integer | `60` | With `skipprd sync --once` in `stream` mode, seconds without a new record before the run finishes. |
 
 ## What gets synced
@@ -123,7 +123,7 @@ To load the data into a warehouse, add a destination to the pipeline. See [Desti
 
 **Ordering.** Records within a shard are read in sequence-number order. Skipprd reads all shards in turn, so records from different shards interleave. Include an event timestamp if order matters.
 
-**Restarts.** The first run starts at the oldest record the stream still retains (trim horizon). Later runs continue after each shard's saved position. The positions live in the pipeline data directory: if you delete it, or run on a new machine without it, Skipprd starts again from the oldest retained record. Skipprd lists shards when the run starts, so shards created by resharding are picked up on the next run.
+**Restarts.** The first run starts at the oldest record the stream still retains (trim horizon). Later runs continue after each shard's saved position in Skippr Store. If you delete `DATA_DIR`, or run on a new machine without it, Skipprd starts again from the oldest retained record. Skipprd lists shards when the run starts, so shards created by resharding are picked up on the next run.
 
 **Schema discovery.** The first time a pipeline runs, Skipprd discovers the schema by reading records from the stream. `skipprd sync` does this automatically if you haven't run `skipprd discover`. Discover saves shard positions for the records it reads but doesn't land them, so run it against a test stream or test records.
 

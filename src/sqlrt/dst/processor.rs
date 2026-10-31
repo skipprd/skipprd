@@ -159,7 +159,9 @@ fn g_filter_keeps_cdc_sidecar() {
 
 #[test]
 fn g_transform_error_does_not_advance_offsets() {
-    use crate::helpers::offset_store::{apply_offset_field, OffsetStore, SledOffsetStore};
+    use crate::helpers::offset_store::{
+        apply_offset_field, memory_offset_store, OffsetStore, StoreOffsetStore,
+    };
     use crate::helpers::offsets::OffsetTypes;
     use sha2::{Digest, Sha256};
     use skippr_lease::PublishMode;
@@ -168,10 +170,8 @@ fn g_transform_error_does_not_advance_offsets() {
         ..Default::default()
     }];
     let batch = invoice_batch(&["a"], &[1], &["i1"]);
-    let dir = tempfile::tempdir().unwrap();
-    let db = sled::open(dir.path()).unwrap();
-    let store = SledOffsetStore::new(db.open_tree("offsets").unwrap());
-    let sk = SledOffsetStore::offset_key("ns", "p");
+    let store = crate::helpers::offset_store::memory_offset_store();
+    let sk = StoreOffsetStore::offset_key("ns", "p");
     let before = apply_offset_field(None, OffsetTypes::Position, 9, false).unwrap();
     let sha = hex::encode(Sha256::digest(&before));
     store

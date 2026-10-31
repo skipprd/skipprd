@@ -35,8 +35,7 @@ skipprd sync [--pipeline <name>] [--once] [--output progress|text|json] [--log [
 | `--log [LEVEL]` | Off | Print logs to stderr. `--log` alone means `info`. Turning on logs hides the progress display. |
 | `--wal-storage <MODE>` | `disk` | WAL backend: `disk` or `s3`. Same as `WAL_STORAGE`. See [WAL and buffering](/configuration/buffering). |
 | `--wal-s3-bucket <BUCKET>` | State bucket | WAL bucket for `--wal-storage s3`, when `skippr.yml` does not set `skippr.wal_s3_bucket`. |
-| `--store-type <TYPE>` | `sled` | State store for offsets and leases, when `skippr.yml` does not set `skippr.store.type`. See [State store](/configuration/skippr-store). |
-| `--store-name <NAME>` | None | Table name for the `dynamodb` state store. |
+| `--store-type <TYPE>` | `fjall` | Skippr Store engine (`fjall`) when `skippr.yml` does not set `skippr.store.type`. Leftover `sled` maps to `fjall` and is not a live engine. See [Skippr Store](/configuration/skippr-store). |
 
 See [CLI overview](/cli/overview) for the other global flags.
 

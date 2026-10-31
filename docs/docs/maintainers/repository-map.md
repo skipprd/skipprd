@@ -25,9 +25,9 @@ This repository is a Cargo workspace with a single host binary and many separate
 
 The important architectural split is:
 
-- `skipprd` owns orchestration, WAL indexing, schema state, and the durable offsets database.
+- `skipprd` owns orchestration, WAL indexing, schema state, and Skippr Store (lock: [skippr-store-kv.md](skippr-store-kv.md)).
 - Runtime plugins are child processes discovered from published manifests or explicit local manifest overrides.
-- Runtime plugins talk to the host over TCP control/data channels, and runtime source plugins never open the durable offsets database directly.
+- Runtime plugins talk to the host over TCP control/data channels, and runtime source plugins never open Skippr Store directly.
 - Plugin crates own connector-specific code; the host must not take direct dependencies on connector implementation crates.
 
 ## Current plugin source of truth

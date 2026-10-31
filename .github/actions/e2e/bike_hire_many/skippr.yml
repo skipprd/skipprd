@@ -1,9 +1,6 @@
 skippr:
   workspace: test
   skipprd_el_storage_mode: local
-  store:
-    type: dynamodb
-    name: skippr-chaos-catalog
 
 pipelines:
 

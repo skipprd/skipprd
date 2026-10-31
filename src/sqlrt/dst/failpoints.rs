@@ -11,7 +11,7 @@ fn known_failpoint_names_parse() {
 fn unknown_failpoint_fails_closed() {
     let err = FailpointName::parse("not_a_failpoint").unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("unknown clustered failpoint"), "{msg}");
+    assert!(msg.contains("unknown failpoint"), "{msg}");
 }
 
 #[test]

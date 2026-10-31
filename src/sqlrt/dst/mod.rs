@@ -35,6 +35,8 @@ mod regressions;
 mod s3_list;
 #[cfg(test)]
 mod scripts;
+#[cfg(test)]
+mod store;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -357,8 +359,7 @@ fn apply_failpoint(world: &mut World, name: FailpointName) {
         FailpointName::AfterOffsetsPublished => {
             world.offsets = world.payloads.len() as u64;
         }
-        FailpointName::AfterReplicaPayloadAck
-        | FailpointName::BeforeCompactionSink
+        FailpointName::BeforeCompactionSink
         | FailpointName::AfterCompactionSink
         | FailpointName::HoldBeforeCompactionSink => {}
     }

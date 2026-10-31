@@ -10,17 +10,17 @@ async fn open_skippr_catalog_backend(
 ) -> Result<Arc<dyn iceberg::Catalog>, String> {
     match backend {
         skippr_iceberg_catalog::SkipprCatalogBackend::DynamoDb => {
-            #[cfg(feature = "offset-store-dynamodb")]
+            #[cfg(feature = "iceberg-catalog-dynamodb")]
             {
                 let catalog = skippr_iceberg_catalog_dynamodb::DynamoDbCatalog::new(cfg)
                     .await
                     .map_err(|err| err.to_string())?;
                 Ok(Arc::new(catalog))
             }
-            #[cfg(not(feature = "offset-store-dynamodb"))]
+            #[cfg(not(feature = "iceberg-catalog-dynamodb"))]
             {
                 let _ = cfg;
-                Err("SkipprLake catalog requires --features offset-store-dynamodb".into())
+                Err("SkipprLake catalog requires --features iceberg-catalog-dynamodb".into())
             }
         }
     }

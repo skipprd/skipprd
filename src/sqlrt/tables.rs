@@ -526,7 +526,7 @@ fn iceberg_lake(
     }
 }
 
-#[cfg_attr(not(feature = "offset-store-dynamodb"), allow(dead_code))]
+#[cfg_attr(not(feature = "iceberg-catalog-dynamodb"), allow(dead_code))]
 pub(crate) fn catalog_table_to_namespace(name: &str) -> String {
     name.to_string()
 }

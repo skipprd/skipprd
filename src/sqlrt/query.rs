@@ -827,7 +827,7 @@ pub async fn query_with_options(
             let pipeline_name = config.get_pipeline_name();
 
             println!(
-                "Resetting offset database and purging WAL files for pipeline: {}, dir: {}",
+                "Resetting Skippr Store and purging WAL files for pipeline: {}, dir: {}",
                 pipeline_name, data_dir
             );
 
@@ -1779,6 +1779,7 @@ async fn show_pipeline(config: &Config, pipeline_name: &str) {
                 "status": "not_found",
                 "namespaces": [],
                 "offsets": {},
+                "schema": format!("skippr-store:schema/{pipeline_name}"),
             });
             println!("{}", serde_json::to_string_pretty(&result).unwrap());
             return;
@@ -1831,31 +1832,12 @@ async fn show_pipeline(config: &Config, pipeline_name: &str) {
         }));
     }
 
-    let metadata_location =
-        if config.get_storage_mode() == crate::helpers::wal_storage::ElStorageMode::Local {
-            format!(
-                "{}/{}/{}/{}/metadata/metadata.json",
-                config.get_data_dir(),
-                config.get_tenant(),
-                config.get_workspace_name(),
-                pipeline_name,
-            )
-        } else {
-            format!(
-                "s3://{}/{}/{}/{}/metadata/metadata.json",
-                config.get_skippr_s3_bucket(),
-                config.get_tenant(),
-                config.get_workspace_name(),
-                pipeline_name,
-            )
-        };
-
     let result = serde_json::json!({
         "pipeline": pipeline_name,
         "status": status,
         "namespaces": namespaces,
         "offsets": {},
-        "metadata_location": metadata_location,
+        "schema": format!("skippr-store:schema/{pipeline_name}"),
     });
 
     println!("{}", serde_json::to_string_pretty(&result).unwrap());

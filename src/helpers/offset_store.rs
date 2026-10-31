@@ -1,9 +1,13 @@
-//! Object-safe offset/checkpoint store. Sled and DynamoDB implement this
-//! contract; core WAL code does not branch on backend.
+//! Offset/checkpoint/journal families on Skippr Store.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::helpers::offsets::{OffsetTypes, OffsetValue};
 use skippr_lease::{decide_wal_publish, OffsetPublishError, PublishAction, PublishMode};
-use sled::IVec;
+use skippr_wal_catalog::{
+    lookup_miss_in_sled, CatalogFence, KvOp, SkipprStore, SkipprStoreRead, StoreFamily,
+};
 use zerocopy::{byteorder::U64, AsBytes, LayoutVerified};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -27,6 +31,7 @@ impl JournalKey {
 
 pub trait OffsetStore: Send + Sync {
     fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String>;
+    fn get_journal(&self, key: &JournalKey) -> Result<Option<Vec<u8>>, String>;
     fn fetch_and_update_journal(
         &self,
         key: &JournalKey,
@@ -80,13 +85,32 @@ pub fn publish_committed(
     Ok(())
 }
 
-pub struct SledOffsetStore {
-    tree: sled::Tree,
+pub struct StoreOffsetStore {
+    store: Arc<dyn SkipprStore>,
+    fence: CatalogFence,
+    sled_fallback: Option<PathBuf>,
 }
 
-impl SledOffsetStore {
-    pub fn new(tree: sled::Tree) -> Self {
-        Self { tree }
+impl StoreOffsetStore {
+    pub fn new(store: Arc<dyn SkipprStore>, fence: CatalogFence) -> Self {
+        Self {
+            store,
+            fence,
+            sled_fallback: None,
+        }
+    }
+
+    pub fn with_sled_fallback(mut self, path: impl AsRef<Path>) -> Self {
+        self.sled_fallback = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn kv(&self) -> Arc<dyn SkipprStore> {
+        Arc::clone(&self.store)
+    }
+
+    pub fn fence(&self) -> CatalogFence {
+        self.fence
     }
 
     pub(crate) fn offset_key(namespace: &str, partition: &str) -> String {
@@ -118,14 +142,26 @@ impl SledOffsetStore {
         let hash = std::str::from_utf8(&bytes[16..]).ok()?.to_string();
         Some((epoch, seq, hash))
     }
+
+    fn family_get(&self, family: StoreFamily, rest: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let key = family.key(rest);
+        if let Some(bytes) = self.store.get(&key).map_err(|err| err.to_string())? {
+            return Ok(Some(bytes));
+        }
+        let Some(sled_path) = self.sled_fallback.as_deref() else {
+            return Ok(None);
+        };
+        lookup_miss_in_sled(sled_path, family, rest).map_err(|err| err.to_string())
+    }
 }
 
-impl OffsetStore for SledOffsetStore {
+impl OffsetStore for StoreOffsetStore {
     fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String> {
-        self.tree
-            .get(sk.as_bytes())
-            .map(|v| v.map(|bytes| bytes.to_vec()))
-            .map_err(|err| err.to_string())
+        self.family_get(StoreFamily::Offsets, sk.as_bytes())
+    }
+
+    fn get_journal(&self, key: &JournalKey) -> Result<Option<Vec<u8>>, String> {
+        self.family_get(StoreFamily::Journal, key.as_str().as_bytes())
     }
 
     fn fetch_and_update_journal(
@@ -133,16 +169,36 @@ impl OffsetStore for SledOffsetStore {
         key: &JournalKey,
         update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
     ) -> Result<Option<Vec<u8>>, String> {
-        let mut update = Some(update);
-        self.tree
-            .fetch_and_update(key.as_str().as_bytes(), |current| {
-                update
-                    .take()
-                    .and_then(|f| f(current.map(|v| v.to_vec())))
-                    .map(IVec::from)
-            })
-            .map(|v| v.map(|bytes| bytes.to_vec()))
-            .map_err(|err| err.to_string())
+        let rest = key.as_str().as_bytes();
+        let current = self.family_get(StoreFamily::Journal, rest)?;
+        let next = update(current.clone());
+        match next {
+            Some(bytes) => {
+                self.store
+                    .commit(
+                        &[KvOp::Put {
+                            key: StoreFamily::Journal.key(rest),
+                            value: bytes.clone(),
+                        }],
+                        self.fence,
+                    )
+                    .map_err(|err| err.to_string())?;
+                Ok(Some(bytes))
+            }
+            None => {
+                if current.is_some() {
+                    self.store
+                        .commit(
+                            &[KvOp::Delete {
+                                key: StoreFamily::Journal.key(rest),
+                            }],
+                            self.fence,
+                        )
+                        .map_err(|err| err.to_string())?;
+                }
+                Ok(None)
+            }
+        }
     }
 
     fn get_offset(&self, namespace: &str, partition: &str) -> Result<Option<Vec<u8>>, String> {
@@ -154,7 +210,7 @@ impl OffsetStore for SledOffsetStore {
     }
 
     fn flush(&self) -> Result<(), String> {
-        self.tree.flush().map(|_| ()).map_err(|err| err.to_string())
+        self.store.flush_durable().map_err(|err| err.to_string())
     }
 
     fn publish_wal_commit(
@@ -168,9 +224,8 @@ impl OffsetStore for SledOffsetStore {
     ) -> Result<(), OffsetPublishError> {
         let fence_sk = Self::fence_key(sk);
         let stored = self
-            .tree
-            .get(fence_sk.as_bytes())
-            .map_err(|err| OffsetPublishError::Transient(err.to_string()))?
+            .family_get(StoreFamily::Offsets, fence_sk.as_bytes())
+            .map_err(OffsetPublishError::Transient)?
             .and_then(|v| Self::decode_fence(&v));
         let stored_ref = stored.as_ref().map(|(e, s, h)| (*e, *s, h.as_str()));
         match decide_wal_publish(stored_ref, epoch, seq, payload_sha256, mode)? {
@@ -178,16 +233,21 @@ impl OffsetStore for SledOffsetStore {
             PublishAction::Commit => {}
         }
         let fence_bytes = Self::encode_fence(epoch, seq, payload_sha256);
-        let value = bytes.to_vec();
-        self.tree
-            .transaction(|tx| {
-                tx.insert(sk.as_bytes(), value.as_slice())?;
-                tx.insert(fence_sk.as_bytes(), fence_bytes.as_slice())?;
-                Ok(())
-            })
-            .map_err(|err: sled::transaction::TransactionError| {
-                OffsetPublishError::Transient(err.to_string())
-            })?;
+        self.store
+            .commit(
+                &[
+                    KvOp::Put {
+                        key: StoreFamily::Offsets.key(sk.as_bytes()),
+                        value: bytes.to_vec(),
+                    },
+                    KvOp::Put {
+                        key: StoreFamily::Offsets.key(fence_sk.as_bytes()),
+                        value: fence_bytes,
+                    },
+                ],
+                self.fence,
+            )
+            .map_err(|err| OffsetPublishError::Transient(err.to_string()))?;
         Ok(())
     }
 
@@ -200,51 +260,46 @@ impl OffsetStore for SledOffsetStore {
     }
 
     fn reset_published_ingest(&self) -> Result<(), String> {
-        let mut batch = sled::Batch::default();
-        for item in self.tree.iter() {
-            let (key, _) = item.map_err(|err| err.to_string())?;
-            if key.starts_with(b"migration#") {
-                continue;
-            }
-            batch.remove(key);
-        }
-        self.tree
-            .apply_batch(batch)
+        let page = self
+            .store
+            .query_prefix(StoreFamily::Offsets.prefix(), None, usize::MAX)
             .map_err(|err| err.to_string())?;
+        let mut ops = Vec::new();
+        for (key, _) in page {
+            ops.push(KvOp::Delete { key });
+        }
+        if !ops.is_empty() {
+            self.store
+                .commit(&ops, self.fence)
+                .map_err(|err| err.to_string())?;
+        }
         self.flush()
     }
 }
 
-#[cfg(feature = "offset-store-dynamodb")]
-impl OffsetStore for skippr_offset_store_dynamodb::DynamoDbOffsetStore {
+impl OffsetStore for Arc<dyn OffsetStore> {
     fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String> {
-        skippr_offset_store_dynamodb::DynamoDbOffsetStore::get_bytes(self, sk)
+        (**self).get_bytes(sk)
     }
-
+    fn get_journal(&self, key: &JournalKey) -> Result<Option<Vec<u8>>, String> {
+        (**self).get_journal(key)
+    }
     fn fetch_and_update_journal(
         &self,
         key: &JournalKey,
         update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
     ) -> Result<Option<Vec<u8>>, String> {
-        skippr_offset_store_dynamodb::DynamoDbOffsetStore::fetch_and_update_journal(
-            self,
-            key.as_str(),
-            update,
-        )
+        (**self).fetch_and_update_journal(key, update)
     }
-
     fn get_offset(&self, namespace: &str, partition: &str) -> Result<Option<Vec<u8>>, String> {
-        skippr_offset_store_dynamodb::DynamoDbOffsetStore::get_offset(self, namespace, partition)
+        (**self).get_offset(namespace, partition)
     }
-
     fn get_checkpoint(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        skippr_offset_store_dynamodb::DynamoDbOffsetStore::get_checkpoint(self, key)
+        (**self).get_checkpoint(key)
     }
-
     fn flush(&self) -> Result<(), String> {
-        Ok(())
+        (**self).flush()
     }
-
     fn publish_wal_commit(
         &self,
         sk: &str,
@@ -254,27 +309,16 @@ impl OffsetStore for skippr_offset_store_dynamodb::DynamoDbOffsetStore {
         payload_sha256: &str,
         mode: PublishMode,
     ) -> Result<(), OffsetPublishError> {
-        skippr_offset_store_dynamodb::DynamoDbOffsetStore::publish_wal_commit(
-            self,
-            sk,
-            bytes,
-            epoch,
-            seq,
-            payload_sha256,
-            mode,
-        )
+        (**self).publish_wal_commit(sk, bytes, epoch, seq, payload_sha256, mode)
     }
-
     fn offset_publish_sk(&self, namespace: &str, partition: &str) -> String {
-        skippr_offset_store_dynamodb::DynamoDbOffsetStore::offset_sk(namespace, partition)
+        (**self).offset_publish_sk(namespace, partition)
     }
-
     fn checkpoint_publish_sk(&self, key: &str) -> String {
-        skippr_offset_store_dynamodb::DynamoDbOffsetStore::checkpoint_sk(key)
+        (**self).checkpoint_publish_sk(key)
     }
-
     fn reset_published_ingest(&self) -> Result<(), String> {
-        skippr_offset_store_dynamodb::DynamoDbOffsetStore::reset_published_ingest(self)
+        (**self).reset_published_ingest()
     }
 }
 
@@ -313,16 +357,31 @@ pub fn apply_offset_field(
 }
 
 #[cfg(test)]
+pub fn memory_offset_store() -> Arc<dyn OffsetStore> {
+    let fence = skippr_wal_catalog::CatalogFence::local();
+    Arc::new(StoreOffsetStore::new(
+        Arc::new(skippr_wal_catalog::MemorySkipprStore::open(fence)),
+        fence,
+    ))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::helpers::offsets::OffsetKey;
 
+    fn mem_offsets() -> StoreOffsetStore {
+        let fence = skippr_wal_catalog::CatalogFence::local();
+        StoreOffsetStore::new(
+            Arc::new(skippr_wal_catalog::MemorySkipprStore::open(fence)),
+            fence,
+        )
+    }
+
     #[test]
-    fn sled_offset_store_returns_errors_instead_of_swallowing() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = sled::open(dir.path()).unwrap();
-        let store = SledOffsetStore::new(db.open_tree("offsets").unwrap());
-        let sk = SledOffsetStore::offset_key("ns", "p");
+    fn store_offset_store_returns_errors_instead_of_swallowing() {
+        let store = mem_offsets();
+        let sk = StoreOffsetStore::offset_key("ns", "p");
         let bytes = apply_offset_field(None, OffsetTypes::Closed, 1, false).unwrap();
         let sha = {
             use sha2::{Digest, Sha256};
@@ -344,11 +403,34 @@ mod tests {
     }
 
     #[test]
-    fn sled_publish_fresh_errors_on_newer_tuple_and_does_not_move_value() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = sled::open(dir.path()).unwrap();
-        let store = SledOffsetStore::new(db.open_tree("offsets").unwrap());
-        let sk = SledOffsetStore::offset_key("ns", "p");
+    fn journal_commit_is_not_an_offset_key() {
+        let store = mem_offsets();
+        let key = JournalKey::migration("ws", "p").unwrap();
+        store
+            .fetch_and_update_journal(&key, Box::new(|_| Some(b"log".to_vec())))
+            .unwrap();
+        assert_eq!(
+            store.get_journal(&key).unwrap().as_deref(),
+            Some(b"log".as_slice())
+        );
+        assert_eq!(store.get_bytes(key.as_str()).unwrap(), None);
+        let sk = StoreOffsetStore::offset_key("ns", "part");
+        store
+            .publish_wal_commit(&sk, b"off", 1, 1, "h", PublishMode::Fresh)
+            .unwrap();
+        store.reset_published_ingest().unwrap();
+        assert_eq!(store.get_bytes(&sk).unwrap(), None);
+        assert_eq!(
+            store.get_journal(&key).unwrap().as_deref(),
+            Some(b"log".as_slice()),
+            "RESET ingest must not delete the journal family"
+        );
+    }
+
+    #[test]
+    fn store_publish_fresh_errors_on_newer_tuple_and_does_not_move_value() {
+        let store = mem_offsets();
+        let sk = StoreOffsetStore::offset_key("ns", "p");
         store
             .publish_wal_commit(&sk, b"newer", 2, 10, "h2", PublishMode::Fresh)
             .unwrap();
@@ -370,11 +452,9 @@ mod tests {
     }
 
     #[test]
-    fn sled_publish_same_tuple_same_hash_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = sled::open(dir.path()).unwrap();
-        let store = SledOffsetStore::new(db.open_tree("offsets").unwrap());
-        let sk = SledOffsetStore::offset_key("ns", "p");
+    fn store_publish_same_tuple_same_hash_is_idempotent() {
+        let store = mem_offsets();
+        let sk = StoreOffsetStore::offset_key("ns", "p");
         store
             .publish_wal_commit(&sk, b"v", 1, 4, "abc", PublishMode::Fresh)
             .unwrap();
@@ -401,20 +481,15 @@ mod tests {
     }
 
     #[test]
-    fn reset_published_ingest_flushes_sled() {
+    fn reset_published_ingest_flushes_store() {
         let src = include_str!("offset_store.rs");
-        let sled_reset = src
-            .split("fn reset_published_ingest")
-            .nth(2)
-            .expect("SledOffsetStore::reset_published_ingest");
-        let body = sled_reset.split("fn ").next().unwrap();
         assert!(
-            body.contains("apply_batch"),
-            "sled reset must batch-delete published ingest keys"
+            src.contains("query_prefix(StoreFamily::Offsets.prefix()"),
+            "reset must prefix-scan offsets family"
         );
         assert!(
-            body.contains("flush("),
-            "sled reset must flush before discover may delete payloads"
+            src.contains("self.flush()"),
+            "reset must flush before discover may delete payloads"
         );
     }
 }

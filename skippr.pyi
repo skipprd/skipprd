@@ -37,20 +37,12 @@ class S3Storage:
 Storage: TypeAlias = LocalStorage | S3Storage
 
 @final
-class SledStore:
-    """Local sled SkipprStore (`store.type: sled`)."""
+class FjallStore:
+    """Local fjall SkipprStore (`store.type: fjall`)."""
 
-    def __new__(cls) -> SledStore: ...
+    def __new__(cls) -> FjallStore: ...
 
-@final
-class DynamoDbStore:
-    """DynamoDB SkipprStore (`store.type: dynamodb`, `store.name`)."""
-
-    def __new__(cls, table: str) -> DynamoDbStore: ...
-    @property
-    def table(self) -> str: ...
-
-Store: TypeAlias = SledStore | DynamoDbStore
+Store: TypeAlias = FjallStore
 
 @final
 class DataSourceRef:
@@ -134,7 +126,7 @@ class Config:
         """Where engine state lives: `LocalStorage()` or `S3Storage(bucket)`."""
         ...
     def store(self, value: Store) -> Config:
-        """SkipprStore for offsets and leases: `SledStore()` or `DynamoDbStore(table)`."""
+        """SkipprStore for offsets, WAL catalog, stream state, and schema: `FjallStore()`."""
         ...
     def wal_s3_bucket(self, value: str) -> Config:
         """Dedicated S3 bucket for WAL segments. Falls back to the storage bucket."""
@@ -1256,13 +1248,13 @@ class TransformAggregate:
         """One keyed running aggregate maintained from committed WAL records.
 
         Args:
-            id: Stable processor id used in Sled key namespaces.
+            id: Stable processor id used in Skippr Store `stream_state` key namespaces.
             key_fields: Columns that form the aggregate key, in order.
             measures: Named measures. Each value is `{ sum: column }` or `{ count: "*" }`."""
         ...
     @property
     def id(self) -> str:
-        """Stable processor id used in Sled key namespaces.
+        """Stable processor id used in Skippr Store `stream_state` key namespaces.
 
         YAML key `id`."""
         ...
@@ -1316,7 +1308,7 @@ class Transform:
             batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.
             inject_fields: Static field names and JSON values merged onto each source record before ingest.
             ops: Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.
-            aggregates: Keyed running aggregates maintained from committed WAL data in Sled."""
+            aggregates: Keyed running aggregates maintained from committed WAL data in Skippr Store (`stream_state`)."""
         ...
     @property
     def batch_time_fields(self) -> str | None:
@@ -1398,7 +1390,7 @@ class Transform:
         ...
     @property
     def aggregates(self) -> Sequence[TransformAggregate] | None:
-        """Keyed running aggregates maintained from committed WAL data in Sled.
+        """Keyed running aggregates maintained from committed WAL data in Skippr Store (`stream_state`).
 
         YAML key `aggregates`."""
         ...
@@ -4447,8 +4439,8 @@ class DataSinkSkipprLake:
     Query and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)
     inside `IcebergCatalogSpec`, not as a standalone query backend.
     The Skippr catalog is the only catalog: pointers live in `catalog_table`
-    (DynamoDB). Catalog rows MAY share the SkipprStore table; PK/SK prefixes
-    do not collide with offsets."""
+    (a DynamoDB Iceberg catalog table). That table is not Skippr Store and
+    MUST NOT be selected via `skippr.store.type`."""
     def __new__(
         cls,
         *,
@@ -4462,12 +4454,12 @@ class DataSinkSkipprLake:
         Query and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)
         inside `IcebergCatalogSpec`, not as a standalone query backend.
         The Skippr catalog is the only catalog: pointers live in `catalog_table`
-        (DynamoDB). Catalog rows MAY share the SkipprStore table; PK/SK prefixes
-        do not collide with offsets.
+        (a DynamoDB Iceberg catalog table). That table is not Skippr Store and
+        MUST NOT be selected via `skippr.store.type`.
 
         Args:
             warehouse: Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.
-            catalog_table: Catalog pointer table. MAY be the SkipprStore table.
+            catalog_table: DynamoDB table for Iceberg catalog pointers. Not Skippr Store.
             region: YAML key `region`.
             object_store: YAML key `object_store`.
             table_namespace: Iceberg namespace for sink-managed tables. Unique per `(catalog_table, table_namespace)`."""
@@ -4477,7 +4469,7 @@ class DataSinkSkipprLake:
 
     YAML key `warehouse`."""
     catalog_table: str
-    """Catalog pointer table. MAY be the SkipprStore table.
+    """DynamoDB table for Iceberg catalog pointers. Not Skippr Store.
 
     YAML key `catalog_table`."""
     region: str | None

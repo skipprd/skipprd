@@ -69,7 +69,7 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "RESET PIPELINE".to_string(),
             syntax: "RESET PIPELINE <pipeline_name>".to_string(),
-            description: "Resets the offset database and purges WAL files for a pipeline. Removes the pipeline data directory immediately so the next sync re-ingests.".to_string(),
+            description: "Resets Skippr Store and purges WAL files for a pipeline. Removes the pipeline data directory immediately so the next sync re-ingests.".to_string(),
             example: "RESET PIPELINE analytics".to_string(),
         },
     );
@@ -246,7 +246,7 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "SHOW PIPELINE".to_string(),
             syntax: "SHOW PIPELINE <pipeline_name>".to_string(),
-            description: "Show pipeline status as JSON: namespaces (name, enabled, fields), offsets, and metadata_location (S3 URI, or a local path when SKIPPRD_EL_STORAGE_MODE=local).".to_string(),
+            description: "Show pipeline status as JSON: namespaces (name, enabled, fields), an empty offsets object, and schema (Skippr Store family `skippr-store:schema/<pipeline>`). Resume positions stay in Skippr Store; this statement does not dump them.".to_string(),
             example: "SHOW PIPELINE el_mssql".to_string(),
         },
     );

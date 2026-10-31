@@ -11,7 +11,7 @@ Connector options stay on the connector pages. This page is process-wide.
 
 ## Data directory
 
-`DATA_DIR` (default `./data`) holds local WAL payloads when `WAL_STORAGE=disk`, plus the sled WAL catalog and resume state. Deleting it deletes the catalog. Skipprd creates it if it is missing.
+`DATA_DIR` (default `./data`) holds local WAL payloads when `WAL_STORAGE=disk`, plus Skippr Store (WAL catalog, resume positions, stream state, and shredded schema). Deleting it deletes that store. Skipprd creates it if it is missing.
 
 ```bash
 export DATA_DIR=/var/lib/skipprd

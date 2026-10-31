@@ -217,11 +217,11 @@ The output now includes full field details per namespace (field name, inferred t
     }
   ],
   "offsets": {},
-  "metadata_location": "s3://bucket/tenant/workspace/el_mssql/metadata/metadata.json"
+  "schema": "skippr-store:schema/el_mssql"
 }
 ```
 
-When `SKIPPRD_EL_STORAGE_MODE=local`, the `metadata_location` field shows the local disk path.
+`schema` is the Skippr Store family prefix. Leftover `metadata.json` is import-only and is not advertised.
 
 ### Usage from skippr-dbt
 
@@ -330,22 +330,24 @@ A new config option `SKIPPRD_EL_STORAGE_MODE` controls where skipprd EL metadata
 
 ### When `skipprd_el_storage_mode=local`
 
-- **Metadata**: read from / written to `{DATA_DIR}/metadata.json` (atomic write via temp + rename)
-- **Stats**: read from / written to `{DATA_DIR}/stats/{namespace}.json`
-- **SHOW PIPELINE**: `metadata_location` returns the local disk path
+Skippr Store (fjall on `DATA_DIR`) is the metadata authority. See [skippr-store-kv.md](docs/docs/maintainers/skippr-store-kv.md).
 
-Storage mode only controls where skipprd EL internal state is persisted. All destination operations (schema sync, Glue catalog updates, output writes) continue to work regardless of storage mode.
+- **Schema**: shredded `schema` family via `Config::get_metadata()` / `persist_pipeline_metadata`. Leftover `{DATA_DIR}` / S3 `metadata.json` is import-only.
+- **Stats**: read from / written to `{DATA_DIR}/stats/{namespace}.json`
+- **SHOW PIPELINE**: `schema` is `skippr-store:schema/{pipeline}`, not a JSON path
+
+Storage mode only controls leftover JSON object location for import. All destination operations (schema sync, Glue catalog updates, output writes) continue to work regardless of storage mode.
 
 ### Affected code paths
 
 | Function | File | Behavior |
 |---|---|---|
-| `Config::get_metadata()` | `src/helpers/configuration.rs` | Reads local JSON file |
-| `Config::set_metadata()` | `src/helpers/configuration.rs` | Atomic write to local JSON |
-| `Config::delete_metadata()` | `src/helpers/configuration.rs` | Removes local JSON file |
+| `Config::get_metadata()` | `src/helpers/configuration.rs` | Loads `schema` family; imports leftover `metadata.json` if `head` is missing |
+| `Config::set_metadata()` | `src/helpers/configuration.rs` | Persists shredded `schema` family |
+| `Config::delete_metadata()` | `src/helpers/configuration.rs` | Removes leftover JSON object |
 | `Config::write_namespace_stats_async()` | `src/helpers/configuration.rs` | Writes to `stats/` subdirectory |
 | `Config::read_namespace_stats_async()` | `src/helpers/configuration.rs` | Reads from `stats/` subdirectory |
-| `show_pipeline()` | `src/sqlrt/query.rs` | Returns local path for `metadata_location` |
+| `show_pipeline()` | `src/sqlrt/query.rs` | Advertises `skippr-store:schema/{pipeline}` |
 
 ### skippr-dbt usage
 

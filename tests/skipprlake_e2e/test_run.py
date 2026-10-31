@@ -37,6 +37,8 @@ class SkipprLakeE2eHarnessTests(unittest.TestCase):
             self.assertIn("table_namespace: bronze", text)
             self.assertIn(f"file://{warehouse}", text)
             self.assertIn("object_store:\n        type: file", text)
+            self.assertIn(f"catalog_table: {harness.STORE_TABLE}", text)
+            self.assertNotIn("store:\n    type: dynamodb", text)
             self.assertNotIn("s3://", text)
 
     def test_dbt_fixture_is_table_materialized_without_snowflake_hooks(self) -> None:

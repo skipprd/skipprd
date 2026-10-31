@@ -96,7 +96,7 @@ mod tests {
     use crate::buffer::wal_handle::{
         install_wal_handle, memory_catalog_for_test, remove_wal_handle, PipelineWalHandle,
     };
-    use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
+    use crate::helpers::offset_store::{memory_offset_store, OffsetStore};
     use crate::wal_slice_ref::WalSliceRef;
     use arrow::array::{RecordBatch, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -161,9 +161,8 @@ mod tests {
         let paths = PipelinePaths::legacy_disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
-        let db = sled::open(dir.path().join("offsets")).unwrap();
-        let tree = db.open_tree("offsets").unwrap();
-        let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
+        let offsets: Arc<dyn OffsetStore> =
+            Arc::new(crate::helpers::offset_store::memory_offset_store());
         let handle = PipelineWalHandle::new(key.clone(), paths, catalog, offsets, fence);
         install_wal_handle(handle.clone());
         persist(&handle, "live-seg", "a").await;
@@ -194,9 +193,8 @@ mod tests {
         let paths = PipelinePaths::legacy_disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
-        let db = sled::open(dir.path().join("offsets")).unwrap();
-        let tree = db.open_tree("offsets").unwrap();
-        let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
+        let offsets: Arc<dyn OffsetStore> =
+            Arc::new(crate::helpers::offset_store::memory_offset_store());
         let handle = PipelineWalHandle::new(key.clone(), paths, catalog, offsets, fence);
         install_wal_handle(handle.clone());
         persist(&handle, "live-seg", "a").await;
@@ -215,9 +213,8 @@ mod tests {
         let paths = PipelinePaths::legacy_disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
-        let db = sled::open(dir.path().join("offsets")).unwrap();
-        let tree = db.open_tree("offsets").unwrap();
-        let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
+        let offsets: Arc<dyn OffsetStore> =
+            Arc::new(crate::helpers::offset_store::memory_offset_store());
         let handle = PipelineWalHandle::new(key.clone(), paths, catalog, offsets, fence);
         install_wal_handle(handle.clone());
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
@@ -272,9 +269,8 @@ mod tests {
         let paths = PipelinePaths::legacy_disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
-        let db = sled::open(dir.path().join("offsets")).unwrap();
-        let tree = db.open_tree("offsets").unwrap();
-        let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
+        let offsets: Arc<dyn OffsetStore> =
+            Arc::new(crate::helpers::offset_store::memory_offset_store());
         let handle = PipelineWalHandle::new(key.clone(), paths, catalog, offsets, fence);
         install_wal_handle(handle.clone());
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));

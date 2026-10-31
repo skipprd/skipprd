@@ -13,7 +13,6 @@ use skippr_lease::DurableError;
 
 pub const BEFORE_CATALOG_COMMIT: &str = "before_catalog_commit";
 pub const AFTER_CATALOG_COMMIT: &str = "after_catalog_commit";
-pub const AFTER_REPLICA_PAYLOAD_ACK: &str = "after_replica_payload_ack";
 pub const AFTER_OFFSETS_PUBLISHED: &str = "after_offsets_published";
 pub const BEFORE_COMPACTION_SINK: &str = "before_compaction_sink";
 pub const AFTER_COMPACTION_SINK: &str = "after_compaction_sink";
@@ -23,7 +22,6 @@ pub const HOLD_BEFORE_COMPACTION_SINK: &str = "hold_before_compaction_sink";
 pub enum FailpointName {
     BeforeCatalogCommit,
     AfterCatalogCommit,
-    AfterReplicaPayloadAck,
     AfterOffsetsPublished,
     BeforeCompactionSink,
     AfterCompactionSink,
@@ -31,10 +29,9 @@ pub enum FailpointName {
 }
 
 impl FailpointName {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::BeforeCatalogCommit,
         Self::AfterCatalogCommit,
-        Self::AfterReplicaPayloadAck,
         Self::AfterOffsetsPublished,
         Self::BeforeCompactionSink,
         Self::AfterCompactionSink,
@@ -45,7 +42,6 @@ impl FailpointName {
         match self {
             Self::BeforeCatalogCommit => BEFORE_CATALOG_COMMIT,
             Self::AfterCatalogCommit => AFTER_CATALOG_COMMIT,
-            Self::AfterReplicaPayloadAck => AFTER_REPLICA_PAYLOAD_ACK,
             Self::AfterOffsetsPublished => AFTER_OFFSETS_PUBLISHED,
             Self::BeforeCompactionSink => BEFORE_COMPACTION_SINK,
             Self::AfterCompactionSink => AFTER_COMPACTION_SINK,
@@ -57,13 +53,12 @@ impl FailpointName {
         match raw.trim() {
             BEFORE_CATALOG_COMMIT => Ok(Self::BeforeCatalogCommit),
             AFTER_CATALOG_COMMIT => Ok(Self::AfterCatalogCommit),
-            AFTER_REPLICA_PAYLOAD_ACK => Ok(Self::AfterReplicaPayloadAck),
             AFTER_OFFSETS_PUBLISHED => Ok(Self::AfterOffsetsPublished),
             BEFORE_COMPACTION_SINK => Ok(Self::BeforeCompactionSink),
             AFTER_COMPACTION_SINK => Ok(Self::AfterCompactionSink),
             HOLD_BEFORE_COMPACTION_SINK => Ok(Self::HoldBeforeCompactionSink),
             other => Err(DurableError::ProtocolMismatch(format!(
-                "unknown clustered failpoint '{other}'"
+                "unknown failpoint '{other}'"
             ))),
         }
     }
@@ -179,7 +174,7 @@ pub fn hit(name: FailpointName, dir: &Path) -> Result<(), DurableError> {
             }
             #[cfg(not(test))]
             {
-                tracing::error!(name = label, "clustered failpoint abort");
+                tracing::error!(name = label, "failpoint abort");
                 std::process::abort();
             }
         }
@@ -190,7 +185,7 @@ pub fn hit(name: FailpointName, dir: &Path) -> Result<(), DurableError> {
             }
             #[cfg(not(test))]
             {
-                tracing::error!(error = %err, "invalid clustered failpoint file");
+                tracing::error!(error = %err, "invalid failpoint file");
                 std::process::abort();
             }
         }
@@ -208,13 +203,11 @@ fn wait_hold_file(dir: &Path, name: FailpointName) -> Result<(), DurableError> {
         match FailpointName::parse(&raw) {
             Ok(parsed) if parsed == name => {
                 if !logged {
-                    tracing::info!("clustered failpoint hold");
+                    tracing::info!("failpoint hold");
                     logged = true;
                 }
                 if std::time::Instant::now() >= deadline {
-                    return Err(DurableError::Io(
-                        "clustered failpoint hold timed out".into(),
-                    ));
+                    return Err(DurableError::Io("failpoint hold timed out".into()));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -259,7 +252,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(failpoint_file(dir.path()), "not-a-point").unwrap();
         let err = hit(FailpointName::BeforeCatalogCommit, dir.path()).unwrap_err();
-        assert!(err.to_string().contains("unknown clustered failpoint"));
+        assert!(err.to_string().contains("unknown failpoint"));
         assert!(!failpoint_file(dir.path()).exists());
     }
 
@@ -278,6 +271,7 @@ mod tests {
             FailpointName::HoldBeforeCompactionSink
         );
         assert!(FailpointName::parse("lease_timeout").is_err());
+        assert!(FailpointName::parse("after_replica_payload_ack").is_err());
     }
 
     #[test]
@@ -286,7 +280,6 @@ mod tests {
         let names = [
             FailpointName::BeforeCatalogCommit,
             FailpointName::AfterCatalogCommit,
-            FailpointName::AfterReplicaPayloadAck,
             FailpointName::AfterOffsetsPublished,
             FailpointName::BeforeCompactionSink,
             FailpointName::AfterCompactionSink,

@@ -1694,7 +1694,6 @@ mod tests {
             "wal_storage",
             "wal_s3_bucket",
             "store_type",
-            "store_name",
             "skippr_s3_bucket",
             "tenant",
             "help",

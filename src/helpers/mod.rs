@@ -26,6 +26,7 @@ pub mod perf;
 pub mod plugin_config;
 pub mod progress;
 pub mod s3;
+pub mod schema_store;
 pub mod sync_reporter;
 pub mod timed_rwlock;
 pub mod wal_storage;

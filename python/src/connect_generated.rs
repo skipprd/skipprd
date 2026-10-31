@@ -952,7 +952,7 @@ impl PyAggregateMeasure {
 #[pyclass(frozen, from_py_object, name = "TransformAggregate", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyTransformAggregate {
-    #[doc = "Stable processor id used in Sled key namespaces.\n\nYAML key `id`."]
+    #[doc = "Stable processor id used in Skippr Store `stream_state` key namespaces.\n\nYAML key `id`."]
     #[pyo3(get)]
     pub id: String,
     #[doc = "Columns that form the aggregate key, in order.\n\nYAML key `key_fields`."]
@@ -966,7 +966,7 @@ pub struct PyTransformAggregate {
 #[pymethods]
 impl PyTransformAggregate {
     #[new]
-    #[doc = "One keyed running aggregate maintained from committed WAL records.\n\nArgs:\n    id: Stable processor id used in Sled key namespaces.\n    key_fields: Columns that form the aggregate key, in order.\n    measures: Named measures. Each value is `{ sum: column }` or `{ count: \"*\" }`."]
+    #[doc = "One keyed running aggregate maintained from committed WAL records.\n\nArgs:\n    id: Stable processor id used in Skippr Store `stream_state` key namespaces.\n    key_fields: Columns that form the aggregate key, in order.\n    measures: Named measures. Each value is `{ sum: column }` or `{ count: \"*\" }`."]
     #[pyo3(signature = (*, id, key_fields, measures))]
     fn new(
         id: String,
@@ -1041,7 +1041,7 @@ pub struct PyTransform {
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ops: Option<Vec<PyTransformOp>>,
-    #[doc = "Keyed running aggregates maintained from committed WAL data in Sled.\n\nYAML key `aggregates`."]
+    #[doc = "Keyed running aggregates maintained from committed WAL data in Skippr Store (`stream_state`).\n\nYAML key `aggregates`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregates: Option<Vec<PyTransformAggregate>>,
@@ -1050,7 +1050,7 @@ pub struct PyTransform {
 #[pymethods]
 impl PyTransform {
     #[new]
-    #[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink.\n\nArgs:\n    batch_time_fields: Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.\n    batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n    flatten_events: Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n    record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.\n    batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).\n    partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.\n    namespace_fields: Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.\n    time_partition_prefix: Prefix for time-partition folder names (`p_` → `p_2026-10-08`).\n    enable_single_quote_parsing: Accept JSON that uses single quotes around strings.\n    enable_unicode_parsing: Accept JSON with unescaped Unicode.\n    batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.\n    inject_fields: Static field names and JSON values merged onto each source record before ingest.\n    ops: Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.\n    aggregates: Keyed running aggregates maintained from committed WAL data in Sled."]
+    #[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink.\n\nArgs:\n    batch_time_fields: Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.\n    batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n    flatten_events: Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n    record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.\n    batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).\n    partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.\n    namespace_fields: Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.\n    time_partition_prefix: Prefix for time-partition folder names (`p_` → `p_2026-10-08`).\n    enable_single_quote_parsing: Accept JSON that uses single quotes around strings.\n    enable_unicode_parsing: Accept JSON with unescaped Unicode.\n    batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.\n    inject_fields: Static field names and JSON values merged onto each source record before ingest.\n    ops: Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.\n    aggregates: Keyed running aggregates maintained from committed WAL data in Skippr Store (`stream_state`)."]
     #[pyo3(signature = (*, batch_time_fields = None, batch_time_unit = None, flatten_events = None, record_field_path = None, batch_partition_fields = None, partition_allowed_values = None, namespace_fields = None, time_partition_prefix = None, enable_single_quote_parsing = None, enable_unicode_parsing = None, batch_order_fields = None, inject_fields = None, ops = None, aggregates = None))]
     fn new(
         batch_time_fields: Option<String>,
@@ -5658,14 +5658,14 @@ impl PyDataSinkSftp {
     }
 }
 
-#[doc = "Config for the `SkipprLake` data sink and schema sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(DynamoDB). Catalog rows MAY share the SkipprStore table; PK/SK prefixes\ndo not collide with offsets."]
+#[doc = "Config for the `SkipprLake` data sink and schema sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(a DynamoDB Iceberg catalog table). That table is not Skippr Store and\nMUST NOT be selected via `skippr.store.type`."]
 #[pyclass(from_py_object, name = "DataSinkSkipprLake", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyDataSinkSkipprLake {
     #[doc = "Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.\n\nYAML key `warehouse`."]
     #[pyo3(get, set)]
     pub warehouse: String,
-    #[doc = "Catalog pointer table. MAY be the SkipprStore table.\n\nYAML key `catalog_table`."]
+    #[doc = "DynamoDB table for Iceberg catalog pointers. Not Skippr Store.\n\nYAML key `catalog_table`."]
     #[pyo3(get, set)]
     pub catalog_table: String,
     #[doc = "YAML key `region`."]
@@ -5685,7 +5685,7 @@ pub struct PyDataSinkSkipprLake {
 #[pymethods]
 impl PyDataSinkSkipprLake {
     #[new]
-    #[doc = "Config for the `SkipprLake` data sink and schema sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(DynamoDB). Catalog rows MAY share the SkipprStore table; PK/SK prefixes\ndo not collide with offsets.\n\nArgs:\n    warehouse: Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.\n    catalog_table: Catalog pointer table. MAY be the SkipprStore table.\n    region: YAML key `region`.\n    object_store: YAML key `object_store`.\n    table_namespace: Iceberg namespace for sink-managed tables. Unique per `(catalog_table, table_namespace)`."]
+    #[doc = "Config for the `SkipprLake` data sink and schema sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(a DynamoDB Iceberg catalog table). That table is not Skippr Store and\nMUST NOT be selected via `skippr.store.type`.\n\nArgs:\n    warehouse: Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.\n    catalog_table: DynamoDB table for Iceberg catalog pointers. Not Skippr Store.\n    region: YAML key `region`.\n    object_store: YAML key `object_store`.\n    table_namespace: Iceberg namespace for sink-managed tables. Unique per `(catalog_table, table_namespace)`."]
     #[pyo3(signature = (*, warehouse, catalog_table, region = None, object_store = None, table_namespace = None))]
     fn new(
         warehouse: String,

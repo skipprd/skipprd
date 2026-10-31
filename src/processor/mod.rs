@@ -1,4 +1,4 @@
-//! Sled-backed keyed aggregates over committed ingestion WAL data.
+//! Skippr Store `stream_state` family: keyed aggregates over committed WAL.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,9 +14,9 @@ use tracing::{debug, error, info, warn};
 use crate::buffer::segment_file::SegmentFile;
 use crate::helpers::configuration::{AggregateMeasure, Config, TransformAggregate};
 use crate::plugins::cdc::{MutationKind, WalRowMeta};
-use skippr_wal_catalog::SegmentRow;
-
-pub const STREAM_STATE_TREE: &str = "stream_state";
+use skippr_wal_catalog::{
+    CatalogFence, KvOp, SegmentRow, SkipprStore, SkipprStoreRead, StoreFamily,
+};
 
 /// Next unconsumed catalog seq. `u64::MAX` means no processor is holding reclaim.
 #[cfg(not(test))]
@@ -115,7 +115,8 @@ pub fn reset_reclaim_hold() {
 }
 
 pub struct StreamState {
-    tree: sled::Tree,
+    store: Arc<dyn SkipprStore>,
+    fence: CatalogFence,
     pipeline: String,
     aggregates: Vec<TransformAggregate>,
     config_hash: String,
@@ -123,20 +124,42 @@ pub struct StreamState {
 
 impl StreamState {
     pub fn open(
-        tree: sled::Tree,
+        store: Arc<dyn SkipprStore>,
+        fence: CatalogFence,
         pipeline: impl Into<String>,
         aggregates: Vec<TransformAggregate>,
     ) -> Result<Self, String> {
         let pipeline = pipeline.into();
         let config_hash = Config::aggregates_config_hash(&aggregates);
         let state = Self {
-            tree,
+            store,
+            fence,
             pipeline,
             aggregates,
             config_hash: config_hash.clone(),
         };
         state.ensure_config(&config_hash)?;
         Ok(state)
+    }
+
+    fn family_key(&self, rest: &[u8]) -> Vec<u8> {
+        StoreFamily::StreamState.key(rest)
+    }
+
+    fn get_raw(&self, rest: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        self.store
+            .get(&self.family_key(rest))
+            .map_err(|err| err.to_string())
+    }
+
+    fn commit_ops(&self, ops: Vec<KvOp>) -> Result<(), String> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        self.store
+            .commit(&ops, self.fence)
+            .map_err(|err| err.to_string())?;
+        self.store.flush_durable().map_err(|err| err.to_string())
     }
 
     fn meta_key(&self, id: &str) -> Vec<u8> {
@@ -166,7 +189,7 @@ impl StreamState {
     fn ensure_config(&self, hash: &str) -> Result<(), String> {
         for agg in &self.aggregates {
             let key = self.meta_key(&agg.id);
-            match self.tree.get(&key).map_err(|err| err.to_string())? {
+            match self.get_raw(&key)? {
                 Some(bytes) => {
                     let meta: ProcessorMeta =
                         serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
@@ -212,14 +235,15 @@ impl StreamState {
             self.prefix("dedup", id),
             self.prefix("ent", id),
         ] {
-            let keys: Vec<_> = self
-                .tree
-                .scan_prefix(&prefix)
-                .filter_map(|item| item.ok().map(|(k, _)| k))
+            let page = self
+                .store
+                .query_prefix(&self.family_key(&prefix), None, usize::MAX)
+                .map_err(|err| err.to_string())?;
+            let ops: Vec<KvOp> = page
+                .into_iter()
+                .map(|(key, _)| KvOp::Delete { key })
                 .collect();
-            for key in keys {
-                self.tree.remove(key).map_err(|err| err.to_string())?;
-            }
+            self.commit_ops(ops)?;
         }
         self.write_meta(
             id,
@@ -234,27 +258,21 @@ impl StreamState {
 
     fn write_meta(&self, id: &str, meta: &ProcessorMeta) -> Result<(), String> {
         let bytes = serde_json::to_vec(meta).map_err(|err| err.to_string())?;
-        self.tree
-            .insert(self.meta_key(id), bytes)
-            .map_err(|err| err.to_string())?;
-        Ok(())
+        self.commit_ops(vec![KvOp::Put {
+            key: self.family_key(&self.meta_key(id)),
+            value: bytes,
+        }])
     }
 
     pub(crate) fn load_meta(&self, id: &str) -> Result<Option<ProcessorMeta>, String> {
-        let bytes = self
-            .tree
-            .get(self.meta_key(id))
-            .map_err(|err| err.to_string())?;
+        let bytes = self.get_raw(&self.meta_key(id))?;
         bytes
             .map(|b| serde_json::from_slice(&b).map_err(|err| err.to_string()))
             .transpose()
     }
 
     pub fn measure(&self, id: &str, key: &str, measure: &str) -> Result<f64, String> {
-        let bytes = self
-            .tree
-            .get(self.agg_key(id, key))
-            .map_err(|err| err.to_string())?;
+        let bytes = self.get_raw(&self.agg_key(id, key))?;
         let Some(bytes) = bytes else {
             return Ok(0.0);
         };
@@ -287,13 +305,7 @@ impl StreamState {
             if let Some(meta) = meta {
                 if !meta.event_id.is_empty() {
                     let dkey = self.dedup_key(&agg.id, &meta.event_id);
-                    if self
-                        .tree
-                        .get(&dkey)
-                        .map_err(|err| err.to_string())?
-                        .is_some()
-                        || dedup.iter().any(|k| k == &dkey)
-                    {
+                    if self.get_raw(&dkey)?.is_some() || dedup.iter().any(|k| k == &dkey) {
                         next_cursor.row_index = (row as u64) + 1;
                         continue;
                     }
@@ -388,22 +400,17 @@ impl StreamState {
         }
 
         maybe_crash(CrashPoint::BeforeCommit);
-        let result: Result<(), sled::transaction::TransactionError<()>> =
-            self.tree.transaction(|tx| {
-                for (key, value) in &puts {
-                    tx.insert(key.as_slice(), value.as_slice())?;
-                }
-                maybe_crash(CrashPoint::DuringTxn);
-                Ok(())
-            });
-        match result {
-            Ok(()) => {
-                self.tree.flush().map_err(|err| err.to_string())?;
-            }
-            Err(err) => {
-                crate::metrics::counters::add_stream_processor_txn_failure(1);
-                return Err(format!("stream processor transaction failed: {err:?}"));
-            }
+        maybe_crash(CrashPoint::DuringTxn);
+        let ops: Vec<KvOp> = puts
+            .into_iter()
+            .map(|(key, value)| KvOp::Put {
+                key: self.family_key(&key),
+                value,
+            })
+            .collect();
+        if let Err(err) = self.commit_ops(ops) {
+            crate::metrics::counters::add_stream_processor_txn_failure(1);
+            return Err(format!("stream processor transaction failed: {err}"));
         }
         maybe_crash(CrashPoint::AfterTxn);
         set_min_unconsumed_seq(next_cursor.seq);
@@ -411,10 +418,7 @@ impl StreamState {
     }
 
     fn load_measures(&self, id: &str, key: &str) -> Result<BTreeMap<String, f64>, String> {
-        let bytes = self
-            .tree
-            .get(self.agg_key(id, key))
-            .map_err(|err| err.to_string())?;
+        let bytes = self.get_raw(&self.agg_key(id, key))?;
         match bytes {
             Some(bytes) => serde_json::from_slice(&bytes).map_err(|err| err.to_string()),
             None => Ok(BTreeMap::new()),
@@ -435,11 +439,7 @@ impl StreamState {
                     return Ok(Some(row));
                 }
             }
-            if let Some(bytes) = self
-                .tree
-                .get(self.entity_key_bytes(&agg.id, &entity))
-                .map_err(|err| err.to_string())?
-            {
+            if let Some(bytes) = self.get_raw(&self.entity_key_bytes(&agg.id, &entity))? {
                 let old_key = String::from_utf8_lossy(&bytes).into_owned();
                 if let Some(row) = pending.get(&old_key).cloned().filter(|row| !row.is_empty()) {
                     return Ok(Some(row));
@@ -457,10 +457,10 @@ impl StreamState {
 
     #[cfg(test)]
     pub(crate) fn snapshot_kv(&self) -> BTreeMap<Vec<u8>, Vec<u8>> {
-        self.tree
-            .iter()
-            .filter_map(|item| item.ok())
-            .map(|(k, v)| (k.to_vec(), v.to_vec()))
+        self.store
+            .query_prefix(StoreFamily::StreamState.prefix(), None, usize::MAX)
+            .unwrap_or_default()
+            .into_iter()
             .collect()
     }
 
@@ -469,10 +469,7 @@ impl StreamState {
         id: &str,
         key: &str,
     ) -> Result<Option<BTreeMap<String, Value>>, String> {
-        let bytes = self
-            .tree
-            .get(self.row_key(id, key))
-            .map_err(|err| err.to_string())?;
+        let bytes = self.get_raw(&self.row_key(id, key))?;
         match bytes {
             Some(bytes) => {
                 let map: BTreeMap<String, Value> =
@@ -812,9 +809,10 @@ async fn run_processor_loop(
     config: Config,
     offsets: Arc<crate::helpers::offsets::Offsets>,
 ) -> Result<(), String> {
-    let tree = offsets.open_sled_stream_state()?;
+    let store = offsets.open_stream_state()?;
+    let fence = offsets.writer_fence().unwrap_or_else(CatalogFence::local);
     let aggregates = config.get_transform_aggregates();
-    let state = StreamState::open(tree, config.get_pipeline_name(), aggregates)?;
+    let state = StreamState::open(store, fence, config.get_pipeline_name(), aggregates)?;
     info!(
         pipeline = %config.get_pipeline_name(),
         aggregates = state.aggregates.len(),
