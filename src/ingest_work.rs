@@ -1,19 +1,20 @@
 use crate::buffer::BufferChunker;
 use crate::discover::{
-    AnalyseSchema, Metadata, OutputMetadata, PipelineMetadata, NUM_ANALYSED_RECORDS,
+    AnalyseSchema, Metadata, NUM_ANALYSED_RECORDS, OutputMetadata, PipelineMetadata,
 };
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, OffsetValue, Offsets};
 use crate::helpers::{Helpers, IngestTransformSnapshot};
+use crate::ingest::deny::{ARRAY_MIXED_TYPES, failure_code_from_error};
 use crate::ingest::ingest::ingest;
 use crate::runtime_plugins::protocol::{RuntimeExecutionMode, RuntimeRawIngestBatch};
 use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
-use crate::serdes::decode::{decode_ingest, DecodedIngest};
+use crate::serdes::decode::{DecodedIngest, decode_ingest};
 use crate::serdes::input_format::InputFormat;
 use crate::serdes::ndjson_fast::NdjsonLineParser;
 use crate::{
-    data_dir_ingest_paused, record_data_dir_capacity_error, set_data_dir_ingest_paused,
-    ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING,
+    ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING, data_dir_ingest_paused,
+    record_data_dir_capacity_error, set_data_dir_ingest_paused,
 };
 use dashmap::DashMap;
 use std::sync::atomic::AtomicBool;
@@ -69,12 +70,12 @@ use std::sync::mpsc::Sender;
 // use dashmap::{DashMap};
 
 use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord};
-use crate::discover::evolution::{infer_specs_for_record, EvolutionProposal};
+use crate::discover::evolution::{EvolutionProposal, infer_specs_for_record};
 use crate::ingest::exact_arrow::{
-    append_row_to_exact_partition, resolve_cached_exact_plan, ExactArrowPartition, ExactArrowPlan,
+    ExactArrowPartition, ExactArrowPlan, append_row_to_exact_partition, resolve_cached_exact_plan,
 };
 use crate::ingest::fast_ingest::{
-    create_default_nested_message, fast_path_ingest, DEFAULT_NESTED_MESSAGE,
+    DEFAULT_NESTED_MESSAGE, create_default_nested_message, fast_path_ingest,
 };
 use crate::ingest::record_types::{NormalizedRecord, SourceRecord};
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
@@ -93,12 +94,24 @@ use tokio::sync::{mpsc, oneshot};
 // wal_accumulator removed
 
 // Single-threaded slow-ingest queue to serialize metadata evolution and value coercion
+#[derive(Debug, Clone)]
+struct SlowIngestError {
+    code: String,
+    message: String,
+}
+
+impl std::fmt::Display for SlowIngestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
 #[derive(Debug)]
 struct SlowIngestTask {
     namespace: String,
     record: SourceRecord,
     flatten: bool,
-    resp_tx: oneshot::Sender<Result<Value, String>>,
+    resp_tx: oneshot::Sender<Result<Value, SlowIngestError>>,
 }
 
 static SLOW_INGEST_TX: once_cell::sync::OnceCell<mpsc::Sender<SlowIngestTask>> =
@@ -168,16 +181,16 @@ fn ensure_slow_ingest_worker(config: &Config) {
                         &mut updated,
                         task.flatten,
                     )
-                    .map_err(|e| e.to_string())
                 } else {
-                    Err(format!("No metadata for namespace {}", task.namespace))
+                    Err(format!("No metadata for namespace {}", task.namespace).into())
                 }
             })) {
-                Ok(r) => r.map_err(|e| slow_ingest_failed_error(&task.namespace, &e)),
-                Err(payload) => Err(slow_ingest_panic_error(
-                    &task.namespace,
-                    &panic_payload(&payload),
-                )),
+                Ok(Ok(v)) => Ok(v),
+                Ok(Err(e)) => Err(slow_ingest_error_from_boxed(&task.namespace, e)),
+                Err(payload) => Err(SlowIngestError {
+                    code: "EVOLUTION_SLOW_PATH".to_string(),
+                    message: slow_ingest_panic_error(&task.namespace, &panic_payload(&payload)),
+                }),
             };
 
             let result = match ingest_result {
@@ -202,7 +215,7 @@ fn ensure_slow_ingest_worker(config: &Config) {
                                     .sync_output_schema_namespace_blocking(&task.namespace)
                                     .await
                                 {
-                                    Err(err)
+                                    Err(slow_ingest_evolution_error(&task.namespace, &err))
                                 } else {
                                     if let Ok(handle) = tokio::runtime::Handle::try_current() {
                                         let md_clone = md_local.clone();
@@ -221,7 +234,7 @@ fn ensure_slow_ingest_worker(config: &Config) {
                                     Ok(v)
                                 }
                             }
-                            Err(err) => Err(err),
+                            Err(err) => Err(slow_ingest_evolution_error(&task.namespace, &err)),
                         }
                     } else {
                         Ok(v)
@@ -469,7 +482,7 @@ fn slow_ingest_blocking(
     namespace: &str,
     record: &SourceRecord,
     flatten: bool,
-) -> Result<Value, String> {
+) -> Result<Value, SlowIngestError> {
     ensure_slow_ingest_worker(config);
     let tx = SLOW_INGEST_TX
         .get()
@@ -490,20 +503,46 @@ fn slow_ingest_blocking(
         .unwrap_or_else(|_| Err(slow_ingest_response_dropped_error(namespace)))
 }
 
-fn slow_ingest_channel_closed_error(ns: &str) -> String {
-    format!("Slow ingest: worker channel closed ns={ns} (worker exited); record not evolved")
+fn slow_ingest_channel_closed_error(ns: &str) -> SlowIngestError {
+    SlowIngestError {
+        code: "EVOLUTION_SLOW_PATH".to_string(),
+        message: format!(
+            "Slow ingest: worker channel closed ns={ns} (worker exited); record not evolved"
+        ),
+    }
 }
 
-fn slow_ingest_response_dropped_error(ns: &str) -> String {
-    format!("Slow ingest: worker dropped response ns={ns}")
+fn slow_ingest_response_dropped_error(ns: &str) -> SlowIngestError {
+    SlowIngestError {
+        code: "EVOLUTION_SLOW_PATH".to_string(),
+        message: format!("Slow ingest: worker dropped response ns={ns}"),
+    }
 }
 
 fn slow_ingest_panic_error(ns: &str, payload: &str) -> String {
     format!("Slow ingest: worker panicked ns={ns}: {payload}")
 }
 
-fn slow_ingest_failed_error(ns: &str, err: &str) -> String {
-    format!("Slow ingest ns={ns}: {err}")
+fn slow_ingest_evolution_error(ns: &str, err: &str) -> SlowIngestError {
+    SlowIngestError {
+        code: "EVOLUTION_SLOW_PATH".to_string(),
+        message: format!("Slow ingest ns={ns}: {err}"),
+    }
+}
+
+fn slow_ingest_error_from_boxed(ns: &str, err: Box<dyn std::error::Error>) -> SlowIngestError {
+    let (code, message) = failure_code_from_error(err.as_ref());
+    if code == ARRAY_MIXED_TYPES {
+        SlowIngestError {
+            code: code.to_string(),
+            message,
+        }
+    } else {
+        SlowIngestError {
+            code: code.to_string(),
+            message: format!("Slow ingest ns={ns}: {message}"),
+        }
+    }
 }
 
 fn panic_payload(payload: &Box<dyn std::any::Any + Send>) -> String {
@@ -1496,8 +1535,7 @@ mod ingest_batch_tests {
         assert_ne!(
             once.partition, roundtrip.partition,
             "production key shape must exercise non-idempotent storage_partition under flatten_events; once={:?} roundtrip={:?}",
-            once.partition,
-            roundtrip.partition
+            once.partition, roundtrip.partition
         );
 
         Helpers::reset_clean_field_cache_for_test();
@@ -1943,28 +1981,28 @@ impl Ingest {
                         crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot(config);
                     if below_min_free {
                         warn!(
-                        "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Force compaction will run with raised concurrency until resume thresholds are met. WAL state: pipeline={}, committed_segments={}, indexed_refs={}, schedulable_refs={}",
-                        Helpers::human_readable_size(avail_bytes),
-                        Helpers::human_readable_size(min_free_bytes),
-                        used_pct,
-                        Helpers::human_readable_size(total_bytes),
-                        progress.pipeline,
-                        progress.committed_segments,
-                        progress.indexed_refs,
-                        progress.schedulable_refs,
-                    );
+                            "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Force compaction will run with raised concurrency until resume thresholds are met. WAL state: pipeline={}, committed_segments={}, indexed_refs={}, schedulable_refs={}",
+                            Helpers::human_readable_size(avail_bytes),
+                            Helpers::human_readable_size(min_free_bytes),
+                            used_pct,
+                            Helpers::human_readable_size(total_bytes),
+                            progress.pipeline,
+                            progress.committed_segments,
+                            progress.indexed_refs,
+                            progress.schedulable_refs,
+                        );
                     } else {
                         warn!(
-                        "Pausing ingest: DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}). Force compaction will run with raised concurrency until resume thresholds are met. WAL state: pipeline={}, committed_segments={}, indexed_refs={}, schedulable_refs={}",
-                        used_pct,
-                        high_watermark,
-                        Helpers::human_readable_size(avail_bytes),
-                        Helpers::human_readable_size(total_bytes),
-                        progress.pipeline,
-                        progress.committed_segments,
-                        progress.indexed_refs,
-                        progress.schedulable_refs,
-                    );
+                            "Pausing ingest: DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}). Force compaction will run with raised concurrency until resume thresholds are met. WAL state: pipeline={}, committed_segments={}, indexed_refs={}, schedulable_refs={}",
+                            used_pct,
+                            high_watermark,
+                            Helpers::human_readable_size(avail_bytes),
+                            Helpers::human_readable_size(total_bytes),
+                            progress.pipeline,
+                            progress.committed_segments,
+                            progress.indexed_refs,
+                            progress.schedulable_refs,
+                        );
                     }
                 }
             }
@@ -2138,12 +2176,7 @@ impl Ingest {
         let active = self.active_count.load(Ordering::Acquire);
         info!(
             "ingest core WAL pressure: outstanding_bytes={} admission_budget_bytes={} queue_len={} active_threads={}/{} max_queue_len={}",
-            outstanding,
-            budget,
-            ql,
-            active,
-            self.num_cpus,
-            self.max_queue_length
+            outstanding, budget, ql, active, self.num_cpus, self.max_queue_length
         );
     }
 
@@ -2250,7 +2283,10 @@ impl Ingest {
                     .unwrap_or(0);
                 let hash = format!("{}", shard_version);
                 if iters > 0 {
-                    warn!("Schema for namespace {} changed during stable read, proceeding with latest version", skpr_namespace);
+                    warn!(
+                        "Schema for namespace {} changed during stable read, proceeding with latest version",
+                        skpr_namespace
+                    );
                 }
                 return SchemaHash { schema, hash };
             }
@@ -2273,11 +2309,7 @@ impl Ingest {
         let default_threads = match execution_mode {
             RuntimeExecutionMode::Sync => {
                 let cores = num_cpus::get();
-                if is_ci {
-                    cores.min(8)
-                } else {
-                    cores
-                }
+                if is_ci { cores.min(8) } else { cores }
             }
             RuntimeExecutionMode::Discover => 1,
         };
@@ -2906,7 +2938,8 @@ impl Ingest {
             crate::metrics::counters::set_active_threads(current_active_threads);
             crate::metrics::counters::set_queue_length(current_queue_length);
 
-            info!("Queueing {} ingest tasks of {} ({} tasks in queue, {}/{} active threads, {} tasks waiting)",
+            info!(
+                "Queueing {} ingest tasks of {} ({} tasks in queue, {}/{} active threads, {} tasks waiting)",
                 ingest_batches.tasks.len(),
                 Helpers::human_readable_size(batch_bytes as u64),
                 current_queue_length,
@@ -3141,7 +3174,9 @@ impl Ingest {
         let _guard = handle.enter();
 
         if offset_db_clone.is_remote() {
-            panic!("host ingest must use local offsets; runtime sources submit payloads through SourceSyncContext");
+            panic!(
+                "host ingest must use local offsets; runtime sources submit payloads through SourceSyncContext"
+            );
         }
 
         match config.pipeline_type() {
@@ -3743,8 +3778,8 @@ impl Ingest {
                                             dl_records.push(DeadletterRecord {
                                                 namespace: skpr_namespace.to_string(),
                                                 record: source.inner().to_string(),
-                                                error: e.to_string(),
-                                                failure_code: "EVOLUTION_SLOW_PATH".to_string(),
+                                                error: e.message.clone(),
+                                                failure_code: e.code.clone(),
                                                 event_time: skpr_time,
                                                 source_uri: ingest_batch.source_uri.clone(),
                                                 offset_key: format!(
@@ -4195,7 +4230,10 @@ impl Ingest {
                             );
                         }
                     } else if Config::debug_enabled() {
-                        warn!("Arrow schema change rejected (non-superset) for namespace {}: {} !-> {}", skpr_namespace, prev_hash, new_hash);
+                        warn!(
+                            "Arrow schema change rejected (non-superset) for namespace {}: {} !-> {}",
+                            skpr_namespace, prev_hash, new_hash
+                        );
                     }
                 } else if Config::debug_enabled() {
                     debug!(
@@ -4474,12 +4512,14 @@ mod schema_sync_skip_key_tests {
             a.schema_publication_identity("events"),
             b.schema_publication_identity("events")
         );
-        assert!(a
-            .schema_publication_identity("events")
-            .contains("/tmp/skipprd-schema-a"));
-        assert!(b
-            .schema_publication_identity("events")
-            .contains("/tmp/skipprd-schema-b"));
+        assert!(
+            a.schema_publication_identity("events")
+                .contains("/tmp/skipprd-schema-a")
+        );
+        assert!(
+            b.schema_publication_identity("events")
+                .contains("/tmp/skipprd-schema-b")
+        );
     }
 }
 
@@ -4659,12 +4699,12 @@ mod transform_inject_fields_tests {
     #[test]
     fn slow_ingest_errors_name_namespace_and_cause() {
         let closed = slow_ingest_channel_closed_error("cloudcycle_docket");
-        assert!(closed.contains("ns=cloudcycle_docket"));
-        assert!(closed.contains("channel closed"));
-        assert!(!closed.contains("unavailable"));
+        assert!(closed.message.contains("ns=cloudcycle_docket"));
+        assert!(closed.message.contains("channel closed"));
+        assert!(!closed.message.contains("unavailable"));
         let dropped = slow_ingest_response_dropped_error("cloudcycle_docket");
-        assert!(dropped.contains("ns=cloudcycle_docket"));
-        assert!(dropped.contains("dropped response"));
+        assert!(dropped.message.contains("ns=cloudcycle_docket"));
+        assert!(dropped.message.contains("dropped response"));
         let panicked = slow_ingest_panic_error("cloudcycle_docket", "boom");
         assert!(panicked.contains("ns=cloudcycle_docket"));
         assert!(panicked.contains("panicked"));

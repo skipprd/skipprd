@@ -151,7 +151,7 @@ skipprd connect schema-sink glue \
 | `namespace` | Source table that failed |
 | `record` | Original payload |
 | `error` | Human-readable failure |
-| `failure_code` | Error class |
+| `failure_code` | Error class (`INPUT_FORMAT`, `EMPTY_RECORD`, `EVOLUTION_SLOW_PATH`, `ARRAY_MIXED_TYPES`, `ARROW_SERIALIZE`) |
 | `event_time` | Source event time when the source provided one |
 | `processed_time` | When Skipprd emitted the deadletter |
 | `source_uri` | Source file or object path |
@@ -170,8 +170,9 @@ LIMIT 50;
 ## What to do with them
 
 1. Read the `error` and `failure_code`. Most failures are a type mismatch or a required field that is missing.
-2. Fix the source payload, or [review the schema](/concepts/schema) if Skipprd inferred the wrong type.
-3. Re-run sync. Skipprd does not automatically replay deadletters into the main table.
+2. `ARRAY_MIXED_TYPES` means a primitive array mixed scalars, or mixed leaf types across elements of an array of objects. Flatten those values out of the array or send a single type. See [Schema discovery and evolution](/concepts/schema).
+3. Fix the source payload, or [review the schema](/concepts/schema) if Skipprd inferred the wrong type.
+4. Re-run sync. Skipprd does not automatically replay deadletters into the main table.
 
 ## Next steps
 

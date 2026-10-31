@@ -1,8 +1,8 @@
-use crate::discover::schema_alter::is_iceberg_legal_promote;
 use crate::discover::SkipprDataType;
+use crate::discover::schema_alter::is_iceberg_legal_promote;
 use crate::helpers::Helpers;
 use crate::lineage::deterministic_field_id;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
 #[test]
@@ -31,10 +31,10 @@ fn a_flatten_on_vs_off_field_ids_stable() {
 #[test]
 fn e_schema_arrow_decimal_15_2_rescales_to_38_9() {
     use crate::ingest::schema_arrow::{
-        coerce_record_batch_to_skippr, skippr_schema_from_source, SKIPPR_DECIMAL_PRECISION,
-        SKIPPR_DECIMAL_SCALE,
+        SKIPPR_DECIMAL_PRECISION, SKIPPR_DECIMAL_SCALE, coerce_record_batch_to_skippr,
+        skippr_schema_from_source,
     };
-    use crate::serdes::decode::{decode_ingest, DecodedIngest};
+    use crate::serdes::decode::{DecodedIngest, decode_ingest};
     use crate::serdes::input_format::InputFormat;
     use crate::serdes::parquet::encode_parquet;
     use arrow::array::Decimal128Array;
@@ -262,9 +262,10 @@ fn e_nested_leaf_type_split_must_not_evolve_parent_record() {
 }
 
 #[test]
-fn e_array_of_records_leaf_type_split() {
+fn e_array_of_records_leaf_type_split_denied() {
     use crate::discover::SkipprDataType;
     use crate::helpers::configuration::Config;
+    use crate::ingest::deny::{ARRAY_MIXED_TYPES, IngestDenyError};
     use crate::ingest::ingest::set_value;
     use serde_json::json;
     use std::collections::HashMap;
@@ -285,7 +286,7 @@ fn e_array_of_records_leaf_type_split() {
     let mut metadata = HashMap::new();
     metadata.insert("aggregate".into(), arr);
     let mut updated = "no".to_string();
-    let resolved = set_value(
+    let err = set_value(
         &Config::new(),
         "array",
         "aggregate",
@@ -297,23 +298,29 @@ fn e_array_of_records_leaf_type_split() {
         true,
         false,
     )
-    .expect("DST: array-of-records leaf must type-split");
-    assert!(metadata
-        .get("aggregate")
-        .unwrap()
-        .fields
-        .get("0")
-        .unwrap()
-        .fields
-        .get("max_size_mm_string")
-        .is_some());
-    assert_eq!(resolved.value[0]["max_size_mm_string"], "20mm");
+    .expect_err("DST: array-of-records leaf must deny type-split");
+    let deny = err
+        .downcast_ref::<IngestDenyError>()
+        .expect("DST: ARRAY_MIXED_TYPES");
+    assert_eq!(deny.code, ARRAY_MIXED_TYPES);
+    assert!(
+        metadata
+            .get("aggregate")
+            .unwrap()
+            .fields
+            .get("0")
+            .unwrap()
+            .fields
+            .get("max_size_mm_string")
+            .is_none()
+    );
 }
 
 #[test]
-fn e_primitive_array_parent_type_split() {
+fn e_primitive_array_mixed_types_denied() {
     use crate::discover::SkipprDataType;
     use crate::helpers::configuration::Config;
+    use crate::ingest::deny::{ARRAY_MIXED_TYPES, IngestDenyError};
     use crate::ingest::ingest::ingest;
     use serde_json::json;
     use std::collections::HashMap;
@@ -326,7 +333,7 @@ fn e_primitive_array_parent_type_split() {
     let mut metadata = HashMap::new();
     metadata.insert("codes".into(), arr);
     let mut updated = "no".to_string();
-    let row = ingest(
+    let err = ingest(
         &Config::new(),
         &json!({"codes": [1234, "BWL"]}),
         &mut metadata,
@@ -334,15 +341,61 @@ fn e_primitive_array_parent_type_split() {
         &mut updated,
         false,
     )
-    .expect("DST: primitive mixed array must parent-evolve via ingest");
+    .expect_err("DST: primitive mixed array must deny");
+    let deny = err
+        .downcast_ref::<IngestDenyError>()
+        .expect("DST: ARRAY_MIXED_TYPES");
+    assert_eq!(deny.code, ARRAY_MIXED_TYPES);
     assert!(metadata.get("codes_0_string").is_none());
-    let obj = row.as_object().expect("row object");
-    assert!(
-        obj.keys().any(|k| k.contains("codes_array"))
-            || metadata.keys().any(|k| k.contains("codes_array")),
-        "DST: parent array sibling, keys={:?} row={row}",
-        metadata.keys().collect::<Vec<_>>(),
-    );
+    assert!(!metadata.keys().any(|k| k.contains("codes_array")));
+}
+
+#[test]
+fn e_flattened_array_index_mixed_leaf_denied() {
+    use crate::discover::SkipprDataType;
+    use crate::helpers::configuration::Config;
+    use crate::ingest::deny::{ARRAY_MIXED_TYPES, IngestDenyError};
+    use crate::ingest::ingest::ingest;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    let mut leaf = crate::discover::Metadata::new().unwrap();
+    leaf.determined_type = SkipprDataType::Integer;
+    leaf.out_field_name = "rpm_min".into();
+    leaf.enabled = true;
+    let mut elem = crate::discover::Metadata::new().unwrap();
+    elem.determined_type = SkipprDataType::Record;
+    elem.out_field_name = "0".into();
+    elem.enabled = true;
+    elem.fields.insert("rpm_min".into(), leaf);
+    let mut arr = crate::discover::Metadata::new().unwrap();
+    arr.determined_type = SkipprDataType::Array;
+    arr.determined_type_values = Some(SkipprDataType::Record);
+    arr.out_field_name = "speed_pattern_stages".into();
+    arr.enabled = true;
+    arr.fields.insert("0".into(), elem);
+    let mut children = HashMap::new();
+    children.insert("speed_pattern_stages".into(), arr);
+    let mut detail = crate::discover::Metadata::new().unwrap();
+    detail.determined_type = SkipprDataType::Record;
+    detail.out_field_name = "detail".into();
+    detail.fields = Box::new(children);
+    let mut metadata = HashMap::new();
+    metadata.insert("detail".into(), detail);
+    let mut updated = "no".to_string();
+    let err = ingest(
+        &Config::new(),
+        &json!({"detail":{"speed_pattern_stages":[{"rpm_min":8},{"rpm_min":1.5}]}}),
+        &mut metadata,
+        "default",
+        &mut updated,
+        true,
+    )
+    .expect_err("DST: flatten mixed rpm_min must deny");
+    let deny = err
+        .downcast_ref::<IngestDenyError>()
+        .expect("DST: ARRAY_MIXED_TYPES");
+    assert_eq!(deny.code, ARRAY_MIXED_TYPES);
 }
 
 #[test]

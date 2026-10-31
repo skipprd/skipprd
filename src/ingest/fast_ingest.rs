@@ -394,7 +394,7 @@ pub fn fast_set_date(
                     return Err(Box::new(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("Could not find field metadata for {}", field),
-                    )))
+                    )));
                 }
             };
 
@@ -404,7 +404,7 @@ pub fn fast_set_date(
                     return Err(Box::new(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("Could not find date candidate in metadata for {}", field),
-                    )))
+                    )));
                 }
             };
 
@@ -568,8 +568,10 @@ fn process_record_field(
                         if array_length > meta_field.repetition_count {
                             return Err(Box::new(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
-                                format!("Array field '{}.{}' has {} elements, but repetition_count is {}. Falling back to slow path.",
-                                        field, sub_field, array_length, meta_field.repetition_count)
+                                format!(
+                                    "Array field '{}.{}' has {} elements, but repetition_count is {}. Falling back to slow path.",
+                                    field, sub_field, array_length, meta_field.repetition_count
+                                ),
                             )));
                         }
                     }
@@ -649,8 +651,10 @@ fn process_map_field(
                     if array_length > meta_field.repetition_count {
                         return Err(Box::new(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
-                            format!("Array field '{}.{}' has {} elements, but repetition_count is {}. Falling back to slow path.",
-                                    field, key, array_length, meta_field.repetition_count)
+                            format!(
+                                "Array field '{}.{}' has {} elements, but repetition_count is {}. Falling back to slow path.",
+                                field, key, array_length, meta_field.repetition_count
+                            ),
                         )));
                     }
                 }
@@ -707,8 +711,10 @@ fn process_array_field(
                     // Reject the message if array has more elements than repetition_count
                     return Err(Box::new(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("Array field '{}' has {} elements, but repetition_count is {}. Falling back to slow path.",
-                                field, array_length, meta.repetition_count)
+                        format!(
+                            "Array field '{}' has {} elements, but repetition_count is {}. Falling back to slow path.",
+                            field, array_length, meta.repetition_count
+                        ),
                     )));
                 }
             }
@@ -729,7 +735,7 @@ fn process_array_field(
                         "Array field '{}' not found in metadata or it's disabled",
                         idx
                     )
-                    .into())
+                    .into());
                 }
             };
 
@@ -1938,12 +1944,14 @@ mod tests_process_record_field {
             true,
         )
         .expect_err("fast path must miss without has_evolution");
-        assert!(metadata
-            .get("detail")
-            .unwrap()
-            .fields
-            .get("docket_aggregate_size_code_string")
-            .is_none());
+        assert!(
+            metadata
+                .get("detail")
+                .unwrap()
+                .fields
+                .get("docket_aggregate_size_code_string")
+                .is_none()
+        );
         let mut updated = "no".to_string();
         crate::ingest::ingest::set_value(
             &Config::new(),
@@ -1970,7 +1978,7 @@ mod tests_process_record_field {
     }
 
     #[test]
-    fn mixed_primitive_array_fast_miss_slow_parent_split_then_fast_apply() {
+    fn mixed_primitive_array_fast_miss_slow_denies() {
         let mut arr = Metadata::new().unwrap();
         arr.determined_type = SkipprDataType::Array;
         arr.determined_type_values = Some(SkipprDataType::Integer);
@@ -1987,7 +1995,7 @@ mod tests_process_record_field {
         )
         .expect_err("fast path must miss mixed primitive arrays");
         let mut updated = "no".to_string();
-        crate::ingest::ingest::ingest(
+        let err = crate::ingest::ingest::ingest(
             &Config::new(),
             &json!({"codes": [1234, "BWL"]}),
             &mut metadata,
@@ -1995,9 +2003,13 @@ mod tests_process_record_field {
             &mut updated,
             false,
         )
-        .expect("slow path parent-splits the array");
-        assert!(metadata.keys().any(|k| k.contains("codes_array")));
-        let applied = fast_set_value(
+        .expect_err("slow path denies mixed primitive arrays");
+        let deny = err
+            .downcast_ref::<crate::ingest::deny::IngestDenyError>()
+            .expect("ARRAY_MIXED_TYPES");
+        assert_eq!(deny.code, crate::ingest::deny::ARRAY_MIXED_TYPES);
+        assert!(!metadata.keys().any(|k| k.contains("codes_array")));
+        fast_set_value(
             &Config::new(),
             &SkipprDataType::Array,
             "codes",
@@ -2006,13 +2018,7 @@ mod tests_process_record_field {
             Some(true),
             false,
         )
-        .expect("fast path applies published array evolution");
-        assert!(
-            applied.field.contains("array") || applied.value.is_array(),
-            "expected array sibling apply, field={} value={}",
-            applied.field,
-            applied.value
-        );
+        .expect_err("fast path must not apply a parent-split that was never published");
     }
 }
 
@@ -2464,7 +2470,7 @@ mod tests_data_loss_regression {
         let result = process_array_field(&Config::new(), "arr", &value, &metadata, false);
         assert!(
             result.is_err(),
-            "mixed primitive array must miss fast path so slow can parent-split"
+            "mixed primitive array must miss fast path so slow can deny"
         );
     }
 

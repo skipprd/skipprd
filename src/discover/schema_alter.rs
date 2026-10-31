@@ -18,7 +18,9 @@ pub enum SchemaAlterError {
     ColumnNotFound(String),
     #[error("column '{0}' already exists")]
     ColumnExists(String),
-    #[error("cannot promote {from} to {to}; Iceberg-legal promotions are byte/short/integer→long, byte/short→integer, float→double, timestamp_milli→timestamp (Iceberg timestamp is already µs); widen to string with MERGE COLUMN")]
+    #[error(
+        "cannot promote {from} to {to}; Iceberg-legal promotions are byte/short/integer→long, byte/short→integer, float→double, timestamp_milli→timestamp (Iceberg timestamp is already µs); widen to string with MERGE COLUMN"
+    )]
     IllegalPromote { from: String, to: String },
     #[error("{0}")]
     Failed(String),

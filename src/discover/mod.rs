@@ -662,6 +662,8 @@ impl Metadata {
         for (_key, val) in metadata.fields.iter() {
             // Special handling for array elements
             if val.determined_type == SkipprDataType::Array && val.fields.contains_key("0") {
+                // Positional columns copy types from index "0" only. Later
+                // indexes must not widen or type-split the published schema.
                 let array_template = val.fields.get("0").unwrap();
                 let repetition_count = val.repetition_count; // Use repetition_count instead of count
 
@@ -2509,7 +2511,7 @@ mod is_64_int_tests {
 #[cfg(test)]
 mod get_type_bool_tests {
 
-    use crate::discover::{get_type, SkipprDataType};
+    use crate::discover::{SkipprDataType, get_type};
 
     #[test]
     fn test_get_type_int() {
@@ -2648,7 +2650,7 @@ mod valid_timestamps_tests {
         let my_struct = AnalyseSchema { i: 0 };
         assert!(!my_struct.is_valid_timestamp(&mut "abc".to_string()));
         assert!(!my_struct.is_valid_timestamp(&mut "1970-01-01".to_string())); // Non-numeric
-                                                                               // Add more non-numeric or malformed cases here
+        // Add more non-numeric or malformed cases here
     }
 
     #[test]
@@ -2786,7 +2788,7 @@ mod tests {
     use serial_test::serial;
     use std::collections::HashMap;
     #[allow(unused_imports)]
-    use std::fs::{remove_file, File, OpenOptions};
+    use std::fs::{File, OpenOptions, remove_file};
     #[allow(unused_imports)]
     use std::io::{Seek, Write};
 

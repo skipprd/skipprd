@@ -1,7 +1,7 @@
 use crate::discover::date_formats::DateFormats::{
-    Asctime, Atom, AtomZ, Cookie, DateOnly, Iso8601, Iso8601SpaceOffset, Iso8601SpaceZ, Iso8601_2,
-    Iso8601_3, Iso8601_4, Iso8601_5, Mysql, Rfc1036, Rfc1123, Rfc2822, Rfc3339, Rfc3339_2, Rfc7231,
-    Rfc822, Rfc850, Rss, W3c,
+    Asctime, Atom, AtomZ, Cookie, DateOnly, Iso8601, Iso8601_2, Iso8601_3, Iso8601_4, Iso8601_5,
+    Iso8601SpaceOffset, Iso8601SpaceZ, Mysql, Rfc822, Rfc850, Rfc1036, Rfc1123, Rfc2822, Rfc3339,
+    Rfc3339_2, Rfc7231, Rss, W3c,
 };
 use std::slice::Iter;
 

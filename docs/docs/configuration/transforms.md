@@ -99,6 +99,8 @@ With `flatten_events: true`, a record like:
 
 lands with columns `id`, `contact.name`, and `contact.email` instead of an `id` column and a nested `contact` struct. Flatten when your destination or BI tool handles flat columns better than nested ones.
 
+Flattening does not type-split mixed values inside arrays. An array of objects still has one shared element type. If a later element’s leaf cannot coerce to that type, the row is deadlettered as `ARRAY_MIXED_TYPES`. See [Schema discovery and evolution](/concepts/schema).
+
 ## Read records nested in an array
 
 Some APIs and exports wrap records in an envelope:

@@ -60,10 +60,11 @@ You do not need to re-run discover when data changes. During sync:
 
 - **A new field** is added to the schema, and Skipprd adds the column to your destination table.
 - **A value that still fits the field's type** stays in the existing column. For example, a whole number or a numeric string written to a Double field lands in that field.
-- **A value of a different type** does not overwrite the existing column. Skipprd adds a sibling column named after the field and the new type, and writes the value there. If `price` is a Double and the text `"n/a"` arrives, that value lands in `price_string`.
+- **A value of a different type on a record or map leaf** does not overwrite the existing column. Skipprd adds a sibling column named after the field and the new type, and writes the value there. If `price` is a Double and the text `"n/a"` arrives, that value lands in `price_string`.
+- **Mixed types in an array are not type-split.** If an array of scalars already has a type (for example integer) and a later value does not coerce (`[1234, "BWL"]`, `[16, 1.5]`), or if leaves inside an array of objects disagree across elements (`stages[0].rpm_min` integer vs `stages[1].rpm_min` `1.5`), the row is [deadlettered](/concepts/deadletters) with `failure_code` `ARRAY_MIXED_TYPES`. Flatten the array into fields, or send a single type. Skipprd does not create `codes_array_string` siblings or per-index leaf siblings.
 - **A value Skipprd cannot type or convert** is sent to the [deadletter](/concepts/deadletters) path. Other records in the batch continue.
 
-Sibling columns keep every value without breaking existing queries. Watch for them in your warehouse: a new `<field>_<type>` column means a source started sending a different type.
+Sibling columns keep every value without breaking existing queries. Watch for them in your warehouse: a new `<field>_<type>` column means a source started sending a different type on a record or map leaf.
 
 ### Fold a sibling column back
 
@@ -104,6 +105,8 @@ pipelines:
 :::
 
 Flatten when your destination or BI tool handles flat columns better than structs. Decide before the first sync; changing it later produces different column names.
+
+`flatten_events` does not make mixed types inside arrays legal. Flattened array-of-object columns still share one element type (the first element). A later slot with a different leaf type is `ARRAY_MIXED_TYPES`, not a new sibling column.
 
 ## Split a source into tables
 

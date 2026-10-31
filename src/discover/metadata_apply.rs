@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::METADATA;
 use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
 use crate::helpers::configuration::Config;
-use crate::METADATA;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetadataFieldRow {

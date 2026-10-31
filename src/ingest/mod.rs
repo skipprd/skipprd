@@ -1,4 +1,5 @@
 pub mod deadletter;
+pub mod deny;
 pub mod exact_arrow;
 pub mod fast_ingest;
 pub mod ingest;

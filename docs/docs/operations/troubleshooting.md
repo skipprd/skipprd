@@ -65,6 +65,8 @@ The next run recovers from the WAL. Confirm `Pipeline sync complete` and that de
 
 `Deadletter id=… ns=… err=…` is one failed record. Query the deadletter destination and fix the payload or the schema.
 
+`failure_code = ARRAY_MIXED_TYPES` is a mixed primitive array (`[1234, "BWL"]`) or mixed leaves across array-of-object elements (for example integer `rpm_min` on stage 0 and `1.5` on stage 1). Flatten those values or send one type. Skipprd will not create per-element sibling columns. See [Schema](/concepts/schema).
+
 ## Recovery after a crash
 
 You do not run a special recover command.

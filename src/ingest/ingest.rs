@@ -18,6 +18,10 @@ thread_local! {
     static CURRENT_NAMESPACE: RefCell<String> = RefCell::new(String::new());
 }
 
+pub(crate) fn current_namespace() -> String {
+    CURRENT_NAMESPACE.with(|ns| ns.borrow().clone())
+}
+
 static PER_NAMESPACE_STATS: Lazy<Mutex<HashMap<String, (usize, Instant)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static SEEN_FIELDS_BY_NAMESPACE: Lazy<Mutex<HashMap<String, HashSet<String>>>> =
@@ -579,8 +583,6 @@ pub fn set_value(
                 //     }
                 // }
             } else if dt == SkipprDataType::Array {
-                let flatten = config.get_transform_flatten_events();
-
                 if !value.is_array() {
                     new_value = evolve_own_shape(
                         config,
@@ -597,28 +599,44 @@ pub fn set_value(
                     == Some(SkipprDataType::Record)
                 {
                     let mut arr_new_value: Vec<Value> = Vec::new();
+                    const TEMPLATE: &str = "0";
 
                     for (i, sub_value) in value.as_array().unwrap().iter().enumerate() {
-                        // let index = flatten ? &i.to_string() : &0.to_string();
-                        let index = match flatten {
-                            true => &i.to_string(),
-                            false => &0.to_string(),
-                        };
-
-                        match metadata.get(&field.to_string()).unwrap().fields.get(index) {
-                            Some(_t) => (),
-                            None => {
-                                // println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
-                                // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
-                                discover_ingest(
-                                    config,
-                                    index,
-                                    sub_value,
-                                    Some(field),
-                                    Some(data_type),
-                                    &mut metadata.get_mut(&field.to_string()).unwrap().fields,
-                                    updated_schema,
-                                );
+                        if metadata
+                            .get(&field.to_string())
+                            .unwrap()
+                            .fields
+                            .get(TEMPLATE)
+                            .is_none()
+                        {
+                            discover_ingest(
+                                config,
+                                TEMPLATE,
+                                sub_value,
+                                Some(field),
+                                Some(data_type),
+                                &mut metadata.get_mut(&field.to_string()).unwrap().fields,
+                                updated_schema,
+                            );
+                        }
+                        if i > 0 {
+                            let slot = i.to_string();
+                            let missing = metadata
+                                .get(&field.to_string())
+                                .unwrap()
+                                .fields
+                                .get(&slot)
+                                .is_none();
+                            if missing {
+                                if let Some(template) = metadata
+                                    .get(field)
+                                    .and_then(|m| m.fields.get(TEMPLATE))
+                                    .cloned()
+                                {
+                                    let mut copy = template;
+                                    copy.out_field_name = slot.clone();
+                                    metadata.get_mut(field).unwrap().fields.insert(slot, copy);
+                                }
                             }
                         }
 
@@ -630,34 +648,31 @@ pub fn set_value(
                         let foo = set_value(
                             config,
                             SkipprDataType::Record.as_str(),
-                            index,
+                            TEMPLATE,
                             sub_value,
                             Some(field),
                             parent_type,
                             &mut metadata.get_mut(field).unwrap().fields,
                             updated_schema,
-                            allow_evolve,
+                            false,
                             flatten,
                         );
 
-                        // println!("Array ingested field: {:?}", foo);
-
                         let val = match foo {
                             Ok(v) => v,
-                            Err(e) => evolve_or_err(
-                                config,
-                                index,
-                                sub_value,
-                                Some(field),
-                                parent_type,
-                                &mut metadata.get_mut(field).unwrap().fields,
-                                updated_schema,
-                                allow_evolve,
-                                flatten,
-                                e,
-                            )?,
+                            Err(e) => {
+                                return Err(crate::ingest::deny::wrap_array_mixed(e, field));
+                            }
                         };
                         arr_new_value.insert(i, val.value);
+                    }
+
+                    if let Some(meta) = metadata.get_mut(field) {
+                        let n = arr_new_value.len() as i32;
+                        if n > meta.repetition_count {
+                            meta.repetition_count = n;
+                            *updated_schema = "yes".to_string();
+                        }
                     }
 
                     // i += 1;
@@ -709,7 +724,11 @@ pub fn set_value(
                                     );
                                     let res = match foo {
                                         Ok(v) => v,
-                                        Err(e) => return Err(e),
+                                        Err(e) => {
+                                            return Err(crate::ingest::deny::wrap_array_mixed(
+                                                e, field,
+                                            ))
+                                        }
                                     };
                                     arr_new_value.insert(i, res.value);
                                 } else {
@@ -753,7 +772,11 @@ pub fn set_value(
 
                                     let res = match foo {
                                         Ok(v) => v,
-                                        Err(e) => return Err(e),
+                                        Err(e) => {
+                                            return Err(crate::ingest::deny::wrap_array_mixed(
+                                                e, field,
+                                            ))
+                                        }
                                     };
 
                                     arr_new_value.insert(i, res.value);
@@ -905,9 +928,8 @@ fn type_split_forbidden(metadata: &HashMap<String, Metadata>, field: &str) -> bo
     metadata.get(field).is_some_and(|m| {
         matches!(
             m.determined_type,
-            SkipprDataType::Record | SkipprDataType::Map
-        ) || (m.determined_type == SkipprDataType::Array
-            && m.determined_type_values == Some(SkipprDataType::Record))
+            SkipprDataType::Record | SkipprDataType::Map | SkipprDataType::Array
+        )
     })
 }
 
@@ -1545,8 +1567,21 @@ mod tests_nested_ingest_evolution {
         assert_eq!(resolved.value["nested"]["leaf_string"], "20mm");
     }
 
+    fn assert_array_mixed(err: Box<dyn std::error::Error>) {
+        let deny = err
+            .downcast_ref::<crate::ingest::deny::IngestDenyError>()
+            .unwrap_or_else(|| panic!("expected ARRAY_MIXED_TYPES, got {err}"));
+        assert_eq!(deny.code, crate::ingest::deny::ARRAY_MIXED_TYPES);
+        assert!(
+            deny.message
+                .contains("Mixed types in arrays are not type-split"),
+            "hint missing: {}",
+            deny.message
+        );
+    }
+
     #[test]
-    fn nested_primitive_array_evolves_array_parent_not_record() {
+    fn nested_primitive_array_denies_mixed_scalars() {
         let mut arr = Metadata::new().unwrap();
         arr.determined_type = SkipprDataType::Array;
         arr.determined_type_values = Some(SkipprDataType::Integer);
@@ -1557,7 +1592,7 @@ mod tests_nested_ingest_evolution {
         let mut metadata = root_with_record("detail", children);
         let mut updated_schema = "no".to_string();
 
-        let resolved = set_value(
+        let err = set_value(
             &Config::new(),
             "record",
             "detail",
@@ -1569,24 +1604,15 @@ mod tests_nested_ingest_evolution {
             true,
             false,
         )
-        .expect("nested primitive array must parent-evolve, not deadletter");
-
+        .expect_err("nested primitive array mixed scalars must deny");
+        assert_array_mixed(err);
         let detail = metadata.get("detail").unwrap();
         assert!(
             metadata.get("detail_record").is_none()
-                && detail.fields.get("codes_0_string").is_none(),
-            "must not evolve parent record or primitive indexes, fields={:?}",
+                && detail.fields.get("codes_0_string").is_none()
+                && !detail.fields.keys().any(|k| k.contains("codes_array")),
+            "must not parent-split or type-split indexes, fields={:?}",
             detail.fields.keys().collect::<Vec<_>>()
-        );
-        assert!(
-            detail.fields.keys().any(|k| k.contains("codes_array"))
-                || resolved
-                    .value
-                    .as_object()
-                    .is_some_and(|o| o.keys().any(|k| k.contains("codes_array"))),
-            "expected nested array parent sibling, fields={:?} value={}",
-            detail.fields.keys().collect::<Vec<_>>(),
-            resolved.value
         );
     }
 
@@ -1642,7 +1668,7 @@ mod tests_nested_ingest_evolution {
     }
 
     #[test]
-    fn array_of_records_evolves_object_element_leaf() {
+    fn array_of_records_denies_object_element_leaf_type_split() {
         let leaf = scalar("max_size_mm", SkipprDataType::Decimal);
         let mut elem = Metadata::new().unwrap();
         elem.determined_type = SkipprDataType::Record;
@@ -1656,7 +1682,7 @@ mod tests_nested_ingest_evolution {
         let mut metadata = HashMap::new();
         metadata.insert("aggregate".to_string(), arr);
         let mut updated_schema = "no".to_string();
-        let resolved = set_value(
+        let err = set_value(
             &Config::new(),
             "array",
             "aggregate",
@@ -1668,19 +1694,19 @@ mod tests_nested_ingest_evolution {
             true,
             false,
         )
-        .expect("array-of-records leaf must type-split");
+        .expect_err("array-of-records leaf must deny type-split");
+        assert_array_mixed(err);
         let elem = metadata.get("aggregate").unwrap().fields.get("0").unwrap();
         assert!(
-            elem.fields.get("max_size_mm_string").is_some(),
-            "expected object-element leaf sibling, fields={:?}",
+            elem.fields.get("max_size_mm_string").is_none(),
+            "must not CREATE element leaf sibling, fields={:?}",
             elem.fields.keys().collect::<Vec<_>>()
         );
         assert!(metadata.get("aggregate_record").is_none());
-        assert_eq!(resolved.value[0]["max_size_mm_string"], "20mm");
     }
 
     #[test]
-    fn primitive_array_mixed_types_evolve_parent_not_index() {
+    fn primitive_array_mixed_types_denied_not_parent_split() {
         let mut arr = Metadata::new().unwrap();
         arr.determined_type = SkipprDataType::Array;
         arr.determined_type_values = Some(SkipprDataType::Integer);
@@ -1689,7 +1715,7 @@ mod tests_nested_ingest_evolution {
         let mut metadata = HashMap::new();
         metadata.insert("codes".to_string(), arr);
         let mut updated_schema = "no".to_string();
-        let row = ingest(
+        let err = ingest(
             &Config::new(),
             &json!({"codes": [1234, "BWL"]}),
             &mut metadata,
@@ -1697,19 +1723,346 @@ mod tests_nested_ingest_evolution {
             &mut updated_schema,
             false,
         )
-        .expect("primitive mixed array must parent-evolve via ingest");
+        .expect_err("primitive mixed array must deny");
+        assert_array_mixed(err);
         assert!(
-            metadata.get("codes_0_string").is_none(),
-            "must not type-split primitive array indexes"
-        );
-        let obj = row.as_object().expect("row object");
-        assert!(
-            obj.keys()
-                .any(|k| k.contains("codes_array") || k == "codes")
-                || metadata.keys().any(|k| k.contains("codes_array")),
-            "expected parent array sibling, keys={:?} row={row}",
+            metadata.get("codes_0_string").is_none()
+                && !metadata.keys().any(|k| k.contains("codes_array")),
+            "must not type-split indexes or parent-split, keys={:?}",
             metadata.keys().collect::<Vec<_>>(),
         );
+    }
+
+    #[test]
+    fn primitive_array_fractional_float_denied() {
+        let mut arr = Metadata::new().unwrap();
+        arr.determined_type = SkipprDataType::Array;
+        arr.determined_type_values = Some(SkipprDataType::Integer);
+        arr.out_field_name = "codes".to_string();
+        arr.enabled = true;
+        let mut metadata = HashMap::new();
+        metadata.insert("codes".to_string(), arr);
+        let mut updated_schema = "no".to_string();
+        let err = ingest(
+            &Config::new(),
+            &json!({"codes": [16, 1.5]}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            false,
+        )
+        .expect_err("JSON 1.5 in an integer array must deny");
+        assert_array_mixed(err);
+        assert!(!metadata.keys().any(|k| k.contains("codes_array")));
+    }
+
+    fn speed_pattern_stages_metadata() -> HashMap<String, Metadata> {
+        let leaf = scalar("rpm_min", SkipprDataType::Integer);
+        let mut elem = Metadata::new().unwrap();
+        elem.determined_type = SkipprDataType::Record;
+        elem.out_field_name = "0".to_string();
+        elem.enabled = true;
+        elem.fields.insert("rpm_min".to_string(), leaf);
+        let mut arr = Metadata::new().unwrap();
+        arr.determined_type = SkipprDataType::Array;
+        arr.determined_type_values = Some(SkipprDataType::Record);
+        arr.out_field_name = "speed_pattern_stages".to_string();
+        arr.enabled = true;
+        arr.repetition_count = 1;
+        arr.fields.insert("0".to_string(), elem);
+        let mut children = HashMap::new();
+        children.insert("speed_pattern_stages".to_string(), arr);
+        root_with_record("detail", children)
+    }
+
+    #[test]
+    fn flattened_array_index_mixed_leaf_denied() {
+        let mut metadata = speed_pattern_stages_metadata();
+        let mut updated_schema = "no".to_string();
+        let err = ingest(
+            &Config::new(),
+            &json!({"detail":{"speed_pattern_stages":[{"rpm_min":8},{"rpm_min":1.5}]}}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            true,
+        )
+        .expect_err("flatten=true mixed rpm_min must deny");
+        assert_array_mixed(err);
+        let arr = metadata
+            .get("detail")
+            .unwrap()
+            .fields
+            .get("speed_pattern_stages")
+            .unwrap();
+        assert_eq!(
+            arr.fields
+                .get("0")
+                .unwrap()
+                .fields
+                .get("rpm_min")
+                .unwrap()
+                .determined_type,
+            SkipprDataType::Integer
+        );
+        if let Some(idx1) = arr.fields.get("1") {
+            assert_eq!(
+                idx1.fields.get("rpm_min").unwrap().determined_type,
+                SkipprDataType::Integer,
+                "index 1 must stay a clone of template 0, not decimal"
+            );
+        }
+        assert!(arr
+            .fields
+            .get("0")
+            .unwrap()
+            .fields
+            .get("rpm_min_decimal")
+            .is_none());
+    }
+
+    #[test]
+    fn array_of_records_mixed_leaf_denied_flatten_false() {
+        let mut metadata = speed_pattern_stages_metadata();
+        let mut updated_schema = "no".to_string();
+        let err = ingest(
+            &Config::new(),
+            &json!({"detail":{"speed_pattern_stages":[{"rpm_min":8},{"rpm_min":1.5}]}}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            false,
+        )
+        .expect_err("flatten=false mixed rpm_min must deny");
+        assert_array_mixed(err);
+        assert!(metadata
+            .get("detail")
+            .unwrap()
+            .fields
+            .get("speed_pattern_stages")
+            .unwrap()
+            .fields
+            .get("0")
+            .unwrap()
+            .fields
+            .get("rpm_min_decimal")
+            .is_none());
+    }
+
+    #[test]
+    fn flattened_array_whole_float_later_slot_kept() {
+        let mut metadata = speed_pattern_stages_metadata();
+        let mut updated_schema = "no".to_string();
+        ingest(
+            &Config::new(),
+            &json!({"detail":{"speed_pattern_stages":[{"rpm_min":8},{"rpm_min":16.0}]}}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            true,
+        )
+        .expect("JSON 16.0 still coerces to integer");
+    }
+
+    #[test]
+    fn flattened_array_new_key_on_later_element_discovers_on_template() {
+        let mut metadata = speed_pattern_stages_metadata();
+        let mut updated_schema = "no".to_string();
+        ingest(
+            &Config::new(),
+            &json!({"detail":{"speed_pattern_stages":[{"rpm_min":8},{"rpm_min":8,"status":"ok"}]}}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            true,
+        )
+        .expect("new object keys on later elements still discover");
+        let template = &metadata
+            .get("detail")
+            .unwrap()
+            .fields
+            .get("speed_pattern_stages")
+            .unwrap()
+            .fields
+            .get("0")
+            .unwrap()
+            .fields;
+        assert!(
+            template.get("status").is_some(),
+            "status must land on template 0, keys={:?}",
+            template.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn denied_mixed_row_does_not_poison_later_compatible_row() {
+        let mut metadata = speed_pattern_stages_metadata();
+        let mut updated_schema = "no".to_string();
+        let err = ingest(
+            &Config::new(),
+            &json!({"detail":{"speed_pattern_stages":[{"rpm_min":8},{"rpm_min":1.5}]}}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            true,
+        )
+        .expect_err("mixed row denied");
+        assert_array_mixed(err);
+        ingest(
+            &Config::new(),
+            &json!({"detail":{"speed_pattern_stages":[{"rpm_min":8},{"rpm_min":16}]}}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            true,
+        )
+        .expect("compatible row after deny must ingest");
+    }
+
+    #[test]
+    fn flatten_metadata_after_denied_mixed_row_stays_integer() {
+        let mut metadata = speed_pattern_stages_metadata();
+        let mut updated_schema = "no".to_string();
+        let _ = ingest(
+            &Config::new(),
+            &json!({"detail":{"speed_pattern_stages":[{"rpm_min":8},{"rpm_min":1.5}]}}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            true,
+        );
+        let mut root = Metadata::new().unwrap();
+        root.fields = Box::new(metadata);
+        let mut flattened = crate::discover::OutputMetadata::new();
+        Metadata::flatten_metadata(&root, &mut flattened);
+        for (name, col) in flattened.fields.iter() {
+            if name.contains("rpm_min") {
+                assert_eq!(
+                    col.determined_type,
+                    SkipprDataType::Integer,
+                    "{name} must stay integer, got {:?}",
+                    col.determined_type
+                );
+            }
+        }
+    }
+
+    fn try_serialize(
+        schema: std::sync::Arc<arrow::datatypes::Schema>,
+        value: &Value,
+    ) -> Result<(), String> {
+        let mut decoder = arrow::json::ReaderBuilder::new(schema)
+            .build_decoder()
+            .map_err(|e| format!("build_decoder: {e}"))?;
+        decoder
+            .serialize(&[value])
+            .map_err(|e| format!("serialize: {e}"))?;
+        match decoder.flush() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err("flush returned no batch".into()),
+            Err(e) => Err(format!("flush: {e}")),
+        }
+    }
+
+    #[test]
+    fn mixed_array_row_denied_before_arrow_serialize() {
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let mut metadata = speed_pattern_stages_metadata();
+        let mut updated_schema = "no".to_string();
+        let live = ingest(
+            &Config::new(),
+            &json!({"detail":{"speed_pattern_stages":[{"rpm_min":8},{"rpm_min":16}]}}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            true,
+        )
+        .expect("all-integer stages must live");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "detail_speed_pattern_stages_0_rpm_min",
+                DataType::Int32,
+                true,
+            ),
+            Field::new(
+                "detail_speed_pattern_stages_1_rpm_min",
+                DataType::Int32,
+                true,
+            ),
+        ]));
+        try_serialize(schema.clone(), &live).expect("live integer row must serialize");
+
+        let err = ingest(
+            &Config::new(),
+            &json!({"detail":{"speed_pattern_stages":[{"rpm_min":8},{"rpm_min":1.5}]}}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            true,
+        )
+        .expect_err("1.5 must deny before Arrow");
+        assert_array_mixed(err);
+
+        let again = ingest(
+            &Config::new(),
+            &json!({"detail":{"speed_pattern_stages":[{"rpm_min":8},{"rpm_min":4}]}}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            true,
+        )
+        .expect("later integer row still lives");
+        try_serialize(schema, &again).expect("later integer row must serialize");
+    }
+
+    #[test]
+    fn docket_leaf_split_still_serializes() {
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let mut children = HashMap::new();
+        children.insert(
+            "docket_aggregate_size_code".to_string(),
+            scalar("docket_aggregate_size_code", SkipprDataType::Decimal),
+        );
+        children.insert(
+            "docket_plant_code".to_string(),
+            scalar("docket_plant_code", SkipprDataType::Integer),
+        );
+        let mut metadata = root_with_record("detail", children);
+        let mut updated_schema = "no".to_string();
+        let live = ingest(
+            &Config::new(),
+            &json!({"detail":{"docket_aggregate_size_code":"20mm","docket_plant_code":"I312"}}),
+            &mut metadata,
+            "default",
+            &mut updated_schema,
+            true,
+        )
+        .expect("docket 20mm / I312 must stay live");
+        let obj = live.as_object().expect("flattened object");
+        assert!(
+            obj.keys()
+                .any(|k| k.ends_with("docket_aggregate_size_code_string")),
+            "expected size-code string sibling, keys={:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            obj.keys().any(|k| k.ends_with("docket_plant_code_string")),
+            "expected plant-code string sibling, keys={:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "detail_docket_aggregate_size_code_string",
+                DataType::Utf8,
+                true,
+            ),
+            Field::new("detail_docket_plant_code_string", DataType::Utf8, true),
+        ]));
+        try_serialize(schema, &live).expect("leaf-split siblings must serialize");
     }
 }
 
