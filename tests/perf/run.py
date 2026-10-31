@@ -73,7 +73,7 @@ def row_count(scenario: dict[str, Any], scale: str) -> int:
     if scale == "smoke":
         return int(scenario.get("smoke_rows", defaults.get("smoke_rows", 200)))
     if scale == "linux":
-        return int(scenario.get("linux_rows", defaults.get("linux_rows", 2000)))
+        return int(scenario.get("linux_rows", defaults.get("linux_rows", 50000)))
     return int(scenario.get("rows", defaults.get("rows", 10000)))
 
 

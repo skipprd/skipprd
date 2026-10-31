@@ -136,6 +136,22 @@ class PerfCatalogTests(unittest.TestCase):
             self.assertIn("sync", phases, name)
             self.assertTrue(phases, name)
 
+    def test_linux_profile_rows_outweigh_plugin_spawn(self) -> None:
+        catalog = load_catalog()
+        defaults = catalog["defaults"]
+        self.assertGreaterEqual(int(defaults["linux_rows"]), 50000)
+        for name in (
+            "ingest-a-duckdb",
+            "copy-b-json-json",
+            "ingest-json-parquet",
+            "ingest-ops-duckdb",
+            "ingest-aggregates-duckdb",
+            "ingest-slow-flatten-duckdb",
+        ):
+            spec = catalog["scenarios"][name]
+            rows = int(spec.get("linux_rows", defaults["linux_rows"]))
+            self.assertGreaterEqual(rows, 50000, name)
+
     def test_ingest_a_requires_wal_and_exact_arrow_phases(self) -> None:
         catalog = load_catalog()
         for name in ("ingest-a-duckdb", "ingest-a-skipprlake"):

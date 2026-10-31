@@ -3,7 +3,7 @@
 defaults:
   rows: 10000
   smoke_rows: 200
-  linux_rows: 2000
+  linux_rows: 50000
   required_perf: [sync]
 
 scenarios:
