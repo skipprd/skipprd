@@ -47,18 +47,6 @@ pub async fn apply_query_alter(
     bound.init().await;
     let offsets = Offsets::init(&bound).map_err(|err| err.to_string())?;
     let store = journal_store(&offsets)?;
-    let lease = match bound.get_wal_storage() {
-        crate::helpers::wal_storage::WalStorage::Disk
-        | crate::helpers::wal_storage::WalStorage::S3 => {
-            Some(crate::pipeline_backend::acquire_ingest_lease(&bound, &offsets).await?)
-        }
-        crate::helpers::wal_storage::WalStorage::Clustered => None,
-    };
-    if let Some(lease) = &lease {
-        lease
-            .activate()
-            .map_err(|err| format!("pipeline writer lease activate failed: {err}"))?;
-    }
     let loaded = crate::migration::file::load_sql_file(
         MigrationId::query(crate::migration::MigrationChecksum::of(sql)).as_str(),
         sql,
@@ -87,24 +75,12 @@ pub async fn apply_pending_files(
     Ok(applied)
 }
 
-pub async fn apply_pending_with_ingest_lease(
+pub async fn apply_pending(
     config: &Config,
     direction: MigrationDirection,
 ) -> Result<Vec<String>, String> {
     let offsets = Offsets::init(config).map_err(|err| err.to_string())?;
     let store = journal_store(&offsets)?;
-    let lease = match config.get_wal_storage() {
-        crate::helpers::wal_storage::WalStorage::Disk
-        | crate::helpers::wal_storage::WalStorage::S3 => {
-            Some(crate::pipeline_backend::acquire_ingest_lease(config, &offsets).await?)
-        }
-        crate::helpers::wal_storage::WalStorage::Clustered => None,
-    };
-    if let Some(lease) = &lease {
-        lease
-            .activate()
-            .map_err(|err| format!("pipeline writer lease activate failed: {err}"))?;
-    }
     apply_pending_files(config, store, direction).await
 }
 
@@ -426,11 +402,7 @@ mod tests {
         .unwrap();
         let paths =
             skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(&config.get_data_dir()));
-        let guard = skippr_lease::LeaseGuard::single_node(
-            key.clone(),
-            Arc::new(skippr_lease::SystemClock::new()),
-        );
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
         let db =
             sled::open(std::path::Path::new(&config.get_data_dir()).join("mig-offsets")).unwrap();
@@ -438,7 +410,7 @@ mod tests {
             crate::helpers::offset_store::SledOffsetStore::new(db.open_tree("o").unwrap()),
         );
         let handle =
-            crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, guard, catalog, offsets);
+            crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
         let seq = skippr_wal_catalog::CatalogSeq::new(1);
         let row = skippr_wal_catalog::SegmentRow {
             segment_id: skippr_lease::SegmentId::new("live1").unwrap(),
@@ -474,45 +446,6 @@ mod tests {
         seg.path.clone()
     }
 
-    #[test]
-    fn schema_rewrite_runs_after_lease_activate() {
-        let engine = include_str!("../engine.rs");
-        let activate = engine
-            .find("lease.activate()")
-            .expect("engine must activate the ingest lease");
-        let apply = engine
-            .find("apply_pending_files")
-            .expect("engine must apply pending migrations");
-        assert!(
-            activate < apply,
-            "rewrite_live_wal requires require_active_epoch; activate must precede apply_pending_files"
-        );
-        let cli = include_str!("apply.rs");
-        let cli_activate = cli
-            .find("lease\n            .activate()")
-            .or_else(|| cli.find(".activate()"))
-            .expect("CLI migrate must activate the ingest lease");
-        let cli_apply = cli
-            .rfind("apply_pending_files(config, store, direction)")
-            .expect("CLI migrate must apply after activate");
-        assert!(cli_activate < cli_apply);
-        let query_start = cli
-            .find("pub async fn apply_query_alter")
-            .expect("query ALTER entry");
-        let query_body = &cli[query_start
-            ..query_start
-                + cli[query_start..]
-                    .find("\npub async fn apply_pending_files")
-                    .expect("apply_pending_files follows query ALTER")];
-        let query_activate = query_body
-            .find(".activate()")
-            .expect("query ALTER must activate the ingest lease");
-        let query_persist = query_body
-            .find("apply_loaded")
-            .expect("query ALTER must persist after activate");
-        assert!(query_activate < query_persist);
-    }
-
     fn wal_field_name(path: &std::path::Path) -> String {
         let admitted = SegmentFile::read_index_path(path).unwrap();
         let mut file = std::fs::File::open(path).unwrap();
@@ -526,11 +459,11 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn apply_uses_the_open_lease_store_instead_of_reopening_sled() {
+    async fn apply_uses_the_open_store_instead_of_reopening_sled() {
         let root = tempfile::tempdir().unwrap();
         let config = fixture_config(root.path());
         seed_metadata(&config).await;
-        let offsets = Offsets::init(&config).expect("lease store");
+        let offsets = Offsets::init(&config).expect("offset store");
         let store = offsets.bytes_store().expect("journal store");
         let sink = RecordingSink::native();
         let (apply, stmts) = rename_apply();

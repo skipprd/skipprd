@@ -32,7 +32,7 @@ skipprd discover --pipeline <name> [--output progress|text|json] [--log [LEVEL]]
 | `--output <MODE>` | `progress` | `progress` shows a live progress display on a terminal. `text` prints one plain line per event. `json` prints one JSON object per line for scripts. |
 | `--config <PATH>` | `./skippr.yml` | Config file to read. |
 | `--log [LEVEL]` | Off | Print logs to stderr. `--log` alone means `info`. Turning on logs hides the progress display. |
-| `--wal-storage <MODE>` | `disk` | Must not be `clustered`; discover does not run in clustered mode. |
+| `--wal-storage <MODE>` | `disk` | WAL backend: `disk` or `s3`. Same as `WAL_STORAGE`. |
 
 See [CLI overview](/cli/overview) for the other global flags.
 
@@ -99,7 +99,6 @@ skipprd --config ./prod/skippr.yml discover --pipeline bikehire --log
 | Exits immediately with no output and code `0` | No pipeline was given. | Pass `--pipeline`, or set `PIPELINE_NAME`. |
 | Stops after `[start] Discovering` and exits `1` | The source failed (credentials, network, or a bad setting). The reason is written to the logs. | Rerun with `--log` to see the error on screen, or read `logs/skipprd.<date>.log`. |
 | `[skippr] config failed: ... references ${NAME} ... but that environment variable is not set` | A `${NAME}` reference in `skippr.yml` has no value. | `export NAME=...`, or add it to a `.env` file next to `skippr.yml`. |
-| `WAL_STORAGE=clustered does not support discover` | Discover runs only with `disk` or `s3` WAL storage. | Run discover without `--wal-storage clustered` (and unset `WAL_STORAGE`). |
 | `skipprd discover is not used with type: copy` | Copy pipelines have no schema to infer. | Run `skipprd sync` with `type: copy`. |
 | A field has the wrong type | Inference chose a type from the records it saw. | Correct it with [`skipprd metadata apply`](/cli/metadata). |
 

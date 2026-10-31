@@ -1,11 +1,10 @@
 use std::path::PathBuf;
 
-use crate::buffer::compaction_transaction::SinkRetrySemantics;
-use crate::cluster::iceberg_lake::{FsCatalogConfig, GlueCatalogConfig, IcebergLake};
 use crate::connect::DataSink;
 use crate::helpers::configuration::{Config, Pipeline, Registry};
 use crate::helpers::wal_storage::{ConfigError, WalStorage};
 use crate::plugins::cdc::SinkCapability;
+use crate::sqlrt::iceberg_lake::{FsCatalogConfig, GlueCatalogConfig, IcebergLake};
 use skippr_iceberg_catalog::SkipprLakeConfig;
 use skippr_lease::{PipelineKey, PipelinePaths};
 
@@ -14,7 +13,7 @@ use skippr_lease::{PipelineKey, PipelinePaths};
 pub enum QueryBackend {
     /// Iceberg data sink: Iceberg catalog ∪ live WAL.
     Iceberg(IcebergLake),
-    /// Non-Iceberg sink, or no sink: live WAL only (local query). Clustered: typed notice, not registered.
+    /// Non-Iceberg sink, or no sink: live WAL only.
     WalOnly,
 }
 
@@ -147,28 +146,6 @@ impl PipelineConfigView {
     pub fn sink_capability(&self) -> Option<&'static SinkCapability> {
         crate::plugins::cdc::sink_capabilities::by_name(&self.sink_plugin)
     }
-
-    pub fn validate_clustered_sink(&self) -> Result<(), ConfigError> {
-        let Some(capability) = self.sink_capability() else {
-            return Err(ConfigError::ClusteredSinkNotIdempotent {
-                plugin: self.sink_plugin.clone(),
-                semantics: "unknown".into(),
-            });
-        };
-        if !capability.retry_semantics.requires_idempotent_replay() {
-            return Err(ConfigError::ClusteredSinkNotIdempotent {
-                plugin: capability.name.to_string(),
-                semantics: format!("{:?}", capability.retry_semantics),
-            });
-        }
-        if capability.grouping_support.is_none() {
-            return Err(ConfigError::ClusteredSinkGroupingUnsupported {
-                plugin: capability.name.to_string(),
-            });
-        }
-        let _ = SinkRetrySemantics::equals(capability.retry_semantics, capability.retry_semantics);
-        Ok(())
-    }
 }
 
 fn tenant_from_config(config: &Config) -> String {
@@ -239,95 +216,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clustered_rejects_at_least_once_sink() {
-        let view = PipelineConfigView {
-            key: PipelineKey::new("t", "w", "p").unwrap(),
-            data_root: PathBuf::from("/tmp"),
-            source_plugin: "S3".into(),
-            sink_plugin: "Stdout".into(),
-            schema_plugin: None,
-            sink_ref: None,
-            backend: QueryBackend::WalOnly,
-            flatten_events: false,
-            wal_storage: WalStorage::Disk,
-        };
-        assert!(view.validate_clustered_sink().is_err());
-        assert_eq!(
-            crate::plugins::cdc::sink_capabilities::by_name("Stdout")
-                .unwrap()
-                .name,
-            "Stdout"
-        );
-    }
-
-    #[test]
-    fn clustered_accepts_skipprlake() {
-        let view = PipelineConfigView {
-            key: PipelineKey::new("t", "w", "p").unwrap(),
-            data_root: PathBuf::from("/tmp"),
-            source_plugin: "S3".into(),
-            sink_plugin: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME.into(),
-            schema_plugin: None,
-            sink_ref: None,
-            backend: QueryBackend::Iceberg(IcebergLake::skippr(
-                SkipprLakeConfig {
-                    warehouse: "file:///tmp/warehouse".into(),
-                    catalog_table: "cat".into(),
-                    region: None,
-                    object_store: skippr_iceberg_catalog::WarehouseObjectStore::File,
-                    table_namespace: "default".into(),
-                },
-                skippr_iceberg_catalog::SkipprCatalogBackend::DynamoDb,
-            )),
-            flatten_events: false,
-            wal_storage: WalStorage::Clustered,
-        };
-        assert!(view.validate_clustered_sink().is_ok());
-    }
-
-    #[test]
-    fn clustered_accepts_athena_iceberg() {
-        let view = PipelineConfigView {
-            key: PipelineKey::new("t", "w", "p").unwrap(),
-            data_root: PathBuf::from("/tmp"),
-            source_plugin: "S3".into(),
-            sink_plugin: crate::plugins::cdc::sink_capabilities::ATHENA_ICEBERG
-                .name
-                .into(),
-            schema_plugin: None,
-            sink_ref: None,
-            backend: QueryBackend::Iceberg(IcebergLake::glue(GlueCatalogConfig {
-                warehouse: "s3://wh/".into(),
-                glue_database_name: "db".into(),
+    fn iceberg_backends_are_query_iceberg() {
+        let skippr = QueryBackend::Iceberg(IcebergLake::skippr(
+            SkipprLakeConfig {
+                warehouse: "file:///tmp/warehouse".into(),
+                catalog_table: "cat".into(),
                 region: None,
-                catalog_id: None,
-                object_store: skippr_iceberg_catalog::S3CompatibleObjectStore::S3,
-            })),
-            flatten_events: false,
-            wal_storage: WalStorage::Clustered,
-        };
-        assert!(view.validate_clustered_sink().is_ok());
-        assert!(matches!(view.backend, QueryBackend::Iceberg(_)));
-    }
-
-    #[test]
-    fn clustered_accepts_duckdb() {
-        let view = PipelineConfigView {
-            key: PipelineKey::new("t", "w", "p").unwrap(),
-            data_root: PathBuf::from("/tmp"),
-            source_plugin: "File".into(),
-            sink_plugin: crate::plugins::cdc::sink_capabilities::DUCKDB.name.into(),
-            schema_plugin: None,
-            sink_ref: None,
-            backend: QueryBackend::Iceberg(IcebergLake::filesystem(FsCatalogConfig {
-                warehouse: "file:///tmp/lake".into(),
-                table_namespace: "bronze".into(),
-            })),
-            flatten_events: false,
-            wal_storage: WalStorage::Clustered,
-        };
-        assert!(view.validate_clustered_sink().is_ok());
-        assert!(matches!(view.backend, QueryBackend::Iceberg(_)));
+                object_store: skippr_iceberg_catalog::WarehouseObjectStore::File,
+                table_namespace: "default".into(),
+            },
+            skippr_iceberg_catalog::SkipprCatalogBackend::DynamoDb,
+        ));
+        let glue = QueryBackend::Iceberg(IcebergLake::glue(GlueCatalogConfig {
+            warehouse: "s3://wh/".into(),
+            glue_database_name: "db".into(),
+            region: None,
+            catalog_id: None,
+            object_store: skippr_iceberg_catalog::S3CompatibleObjectStore::S3,
+        }));
+        let duck = QueryBackend::Iceberg(IcebergLake::filesystem(FsCatalogConfig {
+            warehouse: "file:///tmp/lake".into(),
+            table_namespace: "bronze".into(),
+        }));
+        assert!(matches!(skippr, QueryBackend::Iceberg(_)));
+        assert!(matches!(glue, QueryBackend::Iceberg(_)));
+        assert!(matches!(duck, QueryBackend::Iceberg(_)));
     }
 
     #[test]
@@ -393,7 +306,7 @@ mod tests {
         ));
         match QueryBackend::for_pipeline(&cfg, "p").unwrap() {
             QueryBackend::Iceberg(lake) => match lake.catalog {
-                crate::cluster::IcebergCatalogSpec::Skippr(open) => {
+                crate::sqlrt::iceberg_lake::IcebergCatalogSpec::Skippr(open) => {
                     assert_eq!(
                         open.backend,
                         skippr_iceberg_catalog::SkipprCatalogBackend::DynamoDb

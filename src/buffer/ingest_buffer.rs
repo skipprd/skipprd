@@ -1150,8 +1150,7 @@ impl Buffers {
         {
             Ok(result) => result,
             Err(err) => {
-                // fsync/EIO fail-closed: do not ACK. Clustered does not catalog-commit
-                // without payload quorum (or fences); disk never publishes Closed.
+                // fsync/EIO fail-closed: do not ACK. Disk never publishes Closed.
                 error!(
                     "Segment write failed ({}): id={} err={}",
                     context, snapshot_id, err
@@ -1220,7 +1219,6 @@ impl Buffers {
             let location_kind = match &write_result.location {
                 crate::buffer::wal_store::SegmentWriteLocation::Disk { .. } => "disk",
                 crate::buffer::wal_store::SegmentWriteLocation::S3 { .. } => "s3",
-                crate::buffer::wal_store::SegmentWriteLocation::Clustered { .. } => "clustered",
             };
             info!(
                 "WAL persist committed id={} rows={} bytes={} location={}",
@@ -1903,10 +1901,6 @@ impl Buffers {
     fn segment_cache_register_from_write(config: &Config, result: &SegmentWriteResult) {
         let source = match &result.location {
             SegmentWriteLocation::Disk { path } => SegmentSource::Disk(path.clone()),
-            SegmentWriteLocation::Clustered { path, uri } => SegmentSource::Wal {
-                uri: uri.clone(),
-                path: path.clone(),
-            },
             SegmentWriteLocation::S3 { key, bucket } => SegmentSource::S3 {
                 key: key.clone(),
                 bucket: bucket.clone(),
@@ -2011,10 +2005,7 @@ impl Buffers {
         use crate::helpers::wal_storage::WalStorage;
         match (config.get_wal_storage(), location) {
             (WalStorage::S3, skippr_wal_catalog::PayloadLocation::S3 { .. }) => true,
-            (
-                WalStorage::Disk | WalStorage::Clustered,
-                skippr_wal_catalog::PayloadLocation::Disk { .. },
-            ) => true,
+            (WalStorage::Disk, skippr_wal_catalog::PayloadLocation::Disk { .. }) => true,
             _ => false,
         }
     }
@@ -3598,14 +3589,14 @@ impl Buffers {
         let sent_txn = work.txn.clone().mark_sent();
         Self::persist_compaction_row(config, &sent_txn).await?;
         if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
-            crate::cluster::failpoint::hit_async(
-                crate::cluster::failpoint::FailpointName::HoldBeforeCompactionSink,
+            crate::failpoint::hit_async(
+                crate::failpoint::FailpointName::HoldBeforeCompactionSink,
                 handle.paths().root.clone(),
             )
             .await
             .map_err(|err| io::Error::other(err.to_string()))?;
-            crate::cluster::failpoint::hit(
-                crate::cluster::failpoint::FailpointName::BeforeCompactionSink,
+            crate::failpoint::hit(
+                crate::failpoint::FailpointName::BeforeCompactionSink,
                 &handle.paths().root,
             )
             .map_err(|err| io::Error::other(err.to_string()))?;
@@ -3639,8 +3630,8 @@ impl Buffers {
         drop(sink_permit);
         metrics_hot::record_sink_apply(upload_started.elapsed());
         if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
-            crate::cluster::failpoint::hit(
-                crate::cluster::failpoint::FailpointName::AfterCompactionSink,
+            crate::failpoint::hit(
+                crate::failpoint::FailpointName::AfterCompactionSink,
                 &handle.paths().root,
             )
             .map_err(|err| io::Error::other(err.to_string()))?;
@@ -3901,18 +3892,16 @@ mod tests_wal_commit {
             install_wal_handle, memory_catalog_for_test, PipelineWalHandle,
         };
         use crate::helpers::offset_store::OffsetStore;
-        use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SystemClock};
-        use skippr_wal_catalog::CatalogFence;
+        use skippr_lease::{PipelineKey, PipelinePaths};
 
         let key = PipelineKey::new("t", "w", "wal-commit").unwrap();
         let root = PathBuf::from(config.get_data_dir());
         let paths = PipelinePaths::legacy_disk(&root);
-        let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let store: Arc<dyn OffsetStore> =
             offsets.bytes_store().cloned().expect("test offset store");
-        let handle = PipelineWalHandle::new(key.clone(), paths, guard, catalog, store);
+        let handle = PipelineWalHandle::new(key.clone(), paths, catalog, store, fence);
         install_wal_handle(handle);
         if let Some(dir) = crate::buffer::wal_store::ingest_segment_dir(&Config::new()) {
             let _ = fs::create_dir_all(dir);

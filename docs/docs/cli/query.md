@@ -42,7 +42,7 @@ skipprd query                      # interactive prompt
 | `--watch <SECONDS>` | Off | Re-run a `SELECT` every N seconds in the interactive table view. Ignored with `--plain`. |
 | `--config <PATH>` | `./skippr.yml` | Config file to read. |
 | `--log [LEVEL]` | Off | Print logs to stderr. |
-| `--wal-storage <MODE>` | `disk` | With `clustered`, `--sql` is required and `SELECT` results are always printed as JSON. |
+| `--wal-storage <MODE>` | `disk` | WAL backend: `disk` or `s3`. Same as `WAL_STORAGE`. |
 
 See [CLI overview](/cli/overview) for the other global flags.
 
@@ -130,7 +130,6 @@ Run [`skipprd sql-help`](/cli/sql-help) for the syntax of every statement, or `s
 | `query failed: ... table ... not found` with `--plain` | The table name is wrong, or the pipeline has not been discovered or synced yet. | Run `skipprd metadata show --pipeline <name>` to list namespaces. |
 | `Pipeline '<name>' not found` | The pipeline in a management statement has no saved schema yet. | Run `skipprd discover --pipeline <name>` first. |
 | Fewer rows than in your warehouse | Non-Iceberg destinations only expose data still in the WAL. | Query the warehouse directly for full history. |
-| `clustered query requires --sql` | The interactive prompt is not available in clustered mode. | Pass `--sql`. |
 
 In scripts, use `--plain`: a failing `SELECT` then prints `query failed: <reason>` to stderr and exits `1`. Without `--plain`, some errors are printed but the command still exits `0`.
 

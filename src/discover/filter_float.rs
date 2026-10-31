@@ -3,8 +3,8 @@ const FILTER_FLAG_ALLOW_THOUSAND: bool = false;
 
 #[cfg(test)]
 mod tests {
-    use crate::discover::SkipprDataType;
     use crate::discover::get_type;
+    use crate::discover::SkipprDataType;
     use serde_json::Value;
 
     #[test]

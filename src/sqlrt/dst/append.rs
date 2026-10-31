@@ -8,7 +8,9 @@ use crate::buffer::compaction_transaction::{
 use crate::buffer::segment_file::{
     PartitionKey, SegmentPartMetaSummary, SegmentPartitionIndexEntry,
 };
+use crate::buffer::wal_handle::memory_catalog_for_test;
 use crate::plugins::source_contract::WritePolicy;
+use skippr_lease::{PipelineKey, PipelinePaths};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -225,21 +227,18 @@ fn a_slice_bitmap_partial_done_blocks_reclaim() {
         "reclaim_fully_done_before skips unless all_done"
     );
 
-    use crate::buffer::wal_handle::{catalog_fence_from_guard, memory_catalog_for_test};
     use crate::helpers::offset_store::SledOffsetStore;
-    use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SystemClock};
     use std::sync::Arc;
     let dir = tempfile::tempdir().unwrap();
     let key = PipelineKey::new("t", "w", "partial-reclaim").unwrap();
     let paths = PipelinePaths::legacy_disk(dir.path());
-    let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-    let fence = catalog_fence_from_guard(&guard).unwrap();
+    let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let db = sled::open(dir.path().join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
         Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
     let handle =
-        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, guard, catalog, offsets);
+        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     let mut bits = SliceBitmap::new(2);
     bits.or_bits(&[0]);
     let id = SegmentId::new("live-partial").unwrap();

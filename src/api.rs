@@ -7,10 +7,8 @@ use std::io;
 use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 
-use crate::cluster::validation::CliModeKind;
 use crate::doctor::{self, DoctorResult};
 use crate::helpers::configuration::Config;
-use crate::helpers::wal_storage::WalStorage;
 use crate::sqlrt::session::{collect_user_sql, coordinating_query_context};
 use crate::sqlrt::tables::register_namespace_view;
 
@@ -63,7 +61,7 @@ impl Session {
         for name in self.pipeline_names() {
             let bound = self.bound(&name);
             bound.init().await;
-            let ids = crate::migration::apply_pending_with_ingest_lease(&bound, direction)
+            let ids = crate::migration::apply_pending(&bound, direction)
                 .await
                 .map_err(io::Error::other)?;
             applied.extend(ids);
@@ -72,25 +70,6 @@ impl Session {
     }
 
     pub async fn sync(&self, once: bool, output_mode: &str) -> io::Result<()> {
-        let config = self.config.clone();
-        if config.get_wal_storage() == WalStorage::Clustered {
-            for name in config.pipelines.keys() {
-                config
-                    .validate_pipeline_for_run(name)
-                    .map_err(io::Error::other)?;
-            }
-            let cluster = crate::cluster::validation::validate_clustered_mode(
-                &config,
-                WalStorage::Clustered,
-                CliModeKind::Sync { once },
-            )
-            .map_err(|e| io::Error::other(e.to_string()))?
-            .ok_or_else(|| io::Error::other("clustered mode produced no ClusterConfig"))?;
-            crate::cluster::scheduler::run_clustered(config, cluster)
-                .await
-                .map_err(|e| io::Error::other(e.to_string()))?;
-            return Ok(());
-        }
         for name in self.pipeline_names() {
             let bound = self.bound(&name);
             bound.init().await;
@@ -114,11 +93,6 @@ impl Session {
         let bound = self.query_config();
         if !crate::sqlrt::query::sql_uses_record_batch_collect(sql) {
             return crate::sqlrt::query::query_collect_warm(&bound, sql, warmup).await;
-        }
-        if bound.get_wal_storage() == WalStorage::Clustered {
-            return crate::cluster::scheduler::clustered_query_collect(&bound, sql)
-                .await
-                .map_err(|e| io::Error::other(e.to_string()));
         }
         crate::sqlrt::query::query_collect_warm(&bound, sql, warmup).await
     }
@@ -353,32 +327,20 @@ mod tests {
     }
 
     #[test]
-    fn session_owns_clustered_sync_and_query() {
+    fn session_has_no_clustered_sync_or_query() {
         let api = include_str!("api.rs");
         let session_impl = api.split("#[cfg(test)]").next().unwrap();
         assert!(
-            session_impl.contains("run_clustered("),
-            "Session.sync must dispatch clustered WAL through run_clustered"
-        );
-        let sync = &session_impl[session_impl.find("pub async fn sync(").unwrap()..];
-        assert!(
-            sync.find("validate_pipeline_for_run").unwrap()
-                < sync.find("validate_clustered_mode").unwrap(),
-            "Session.sync must check every pipeline before it starts a cluster"
+            !session_impl.contains("run_clustered("),
+            "clustered WAL sync is deleted from Session"
         );
         assert!(
-            session_impl.contains("clustered_query_collect"),
-            "Session.query must collect clustered WAL through clustered_query_collect"
+            !session_impl.contains("clustered_query_collect"),
+            "clustered WAL query is deleted from Session"
         );
         let main = include_str!("main.rs");
-        assert!(
-            !main.contains("run_clustered_from_config"),
-            "CLI must not reload Config for clustered sync"
-        );
-        assert!(
-            !main.contains("run_clustered_query"),
-            "CLI clustered query must go through Session.query"
-        );
+        assert!(!main.contains("run_clustered"));
+        assert!(!main.contains("validate_clustered"));
     }
 
     #[test]

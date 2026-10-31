@@ -448,28 +448,6 @@ fn resolve_authorization(explicit: &str) -> Result<String, DataFusionError> {
     session_authorization()
 }
 
-fn cluster_client_tls() -> Result<tonic::transport::ClientTlsConfig, DataFusionError> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let ca = std::env::var("SKIPPR_CLUSTER_TLS_CA").map_err(|_| {
-        DataFusionError::Execution("SKIPPR_CLUSTER_TLS_CA is required for cluster TLS".into())
-    })?;
-    let cert = std::env::var("SKIPPR_CLUSTER_TLS_CERT").map_err(|_| {
-        DataFusionError::Execution("SKIPPR_CLUSTER_TLS_CERT is required for cluster TLS".into())
-    })?;
-    let key = std::env::var("SKIPPR_CLUSTER_TLS_KEY").map_err(|_| {
-        DataFusionError::Execution("SKIPPR_CLUSTER_TLS_KEY is required for cluster TLS".into())
-    })?;
-    if ca.trim().is_empty() || cert.trim().is_empty() || key.trim().is_empty() {
-        return Err(DataFusionError::Execution(
-            "cluster TLS PEM env vars must not be empty".into(),
-        ));
-    }
-    Ok(tonic::transport::ClientTlsConfig::new()
-        .ca_certificate(tonic::transport::Certificate::from_pem(ca))
-        .identity(tonic::transport::Identity::from_pem(cert, key))
-        .domain_name("skippr-cluster"))
-}
-
 fn flight_channel_plain(endpoint: &str) -> Result<tonic::transport::Endpoint, DataFusionError> {
     validate_flight_endpoint(endpoint)?;
     let url = format!("http://{endpoint}");
@@ -535,12 +513,7 @@ pub async fn fetch_statement_batches_plain_unauthenticated(
 }
 
 fn flight_channel(endpoint: &str) -> Result<tonic::transport::Endpoint, DataFusionError> {
-    validate_flight_endpoint(endpoint)?;
-    let url = format!("https://{endpoint}");
-    tonic::transport::Endpoint::from_shared(url)
-        .map_err(|err| DataFusionError::Execution(err.to_string()))?
-        .tls_config(cluster_client_tls()?)
-        .map_err(|err| DataFusionError::Execution(err.to_string()))
+    flight_channel_plain(endpoint)
 }
 
 fn attach_session(
@@ -953,19 +926,20 @@ mod tests {
     }
 
     #[test]
-    fn clustered_flight_channel_is_always_https() {
+    fn flight_channel_is_local_plaintext() {
         let src = include_str!("lib.rs");
         let start = src
             .find("fn flight_channel(endpoint: &str)")
-            .expect("clustered flight_channel");
-        let clustered = src[start..]
+            .expect("flight_channel");
+        let body = src[start..]
             .split("\nfn attach_session")
             .next()
             .expect("attach_session follows flight_channel");
-        assert!(clustered.contains("https://{endpoint}"));
-        assert!(!clustered.contains("http://{endpoint}"));
-        assert!(clustered.contains("cluster_client_tls"));
-        assert!(src.contains("domain_name(\"skippr-cluster\")"));
+        assert!(body.contains("flight_channel_plain"));
+        assert!(!body.contains("https://{endpoint}"));
+        assert!(!src.contains("cluster_client_tls"));
+        assert!(!src.contains("skippr-cluster"));
+        assert!(!src.contains("SKIPPR_CLUSTER_TLS"));
     }
 
     #[test]

@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn missing_pipeline_is_typed_error() {
         let cfg = crate::helpers::configuration::Config::new();
-        let err = crate::cluster::PipelineConfigView::for_name(&cfg, "missing-otel-pipeline")
+        let err = crate::pipeline_view::PipelineConfigView::for_name(&cfg, "missing-otel-pipeline")
             .expect_err("missing pipeline must fail");
         let msg = err.to_string();
         assert!(

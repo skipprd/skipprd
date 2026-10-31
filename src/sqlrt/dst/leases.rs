@@ -26,11 +26,10 @@ fn dst_migrate_config(
 }
 
 #[test]
-fn i_activate_ingest_lease_then_persist() {
+fn i_apply_pending_then_persist() {
     use crate::migration::{apply_pending_files, MigrationDirection};
-    use crate::pipeline_backend::acquire_ingest_lease;
     let dir = tempfile::tempdir().unwrap();
-    let config = dst_migrate_config(dir.path(), "dst-lease-activate");
+    let config = dst_migrate_config(dir.path(), "dst-apply-pending");
     let offsets = crate::helpers::offsets::Offsets::init(&config).unwrap();
     let store = offsets.bytes_store().expect("journal store");
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -38,8 +37,6 @@ fn i_activate_ingest_lease_then_persist() {
         .build()
         .unwrap();
     rt.block_on(async {
-        let lease = acquire_ingest_lease(&config, &offsets).await.unwrap();
-        lease.activate().map_err(|err| err.to_string()).unwrap();
         let applied = apply_pending_files(&config, store.as_ref(), MigrationDirection::Up)
             .await
             .unwrap();
@@ -65,7 +62,7 @@ fn i_exclusive_sled_open_fail_closed() {
 }
 
 #[test]
-fn i_lease_epoch_stale_writer_rejected() {
+fn i_stale_catalog_fence_rejected() {
     use skippr_lease::{LeaseEpoch, NodeId};
     use skippr_wal_catalog::{
         CatalogFence, CatalogKey, CatalogRow, CatalogTxn, FormatPhase, FormatRow, MemoryWalCatalog,
@@ -73,7 +70,7 @@ fn i_lease_epoch_stale_writer_rejected() {
     };
     let store = MemoryWalCatalog::new();
     let owner = NodeId::generate();
-    store.install_lease(owner, LeaseEpoch::new(2));
+    store.set_writer_fence(owner, LeaseEpoch::new(2));
     let stale = CatalogFence {
         owner,
         epoch: LeaseEpoch::new(1),

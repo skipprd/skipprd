@@ -142,8 +142,7 @@ fn build_commit_header_bytes(parts_count: u32, total_bytes: u64, sha256: &[u8; 3
 }
 
 pub fn import_if_needed(handle: &PipelineWalHandle, config: &Config) -> Result<(), DurableError> {
-    let _ = handle.guard().require_recovery_epoch()?;
-    let fence = handle.fence()?;
+    let fence = handle.fence();
     let leftover = leftover_inventory(handle.paths());
     leftover.log();
     match handle
@@ -369,7 +368,7 @@ fn commit_imported_segment(
         done: SliceBitmap::new(slice_count),
         offsets: Vec::new(),
         checkpoints: Vec::new(),
-        epoch: handle.fence()?.epoch,
+        epoch: handle.fence().epoch,
         version: 0,
     };
     let mut txn = CatalogTxn::new();
@@ -1046,14 +1045,13 @@ mod tests {
     use super::*;
     use crate::buffer::wal_handle::memory_catalog_for_test;
     use crate::helpers::offset_store::SledOffsetStore;
-    use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SystemClock};
     use std::sync::Arc;
 
     use crate::buffer::segment_file::{PartitionKey, WalPayload};
     use arrow::array::Int32Array;
     use arrow::record_batch::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
-    use skippr_lease::SegmentId;
+    use skippr_lease::{PipelineKey, PipelinePaths, SegmentId};
     use std::collections::HashMap;
     use std::path::Path;
     use std::time::SystemTime;
@@ -1070,14 +1068,13 @@ mod tests {
     ) {
         let key = PipelineKey::new("t", "w", "p").unwrap();
         let paths = PipelinePaths::legacy_disk(dir);
-        let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let db = sled::open(dir.join("offsets")).unwrap();
         let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
             Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
         (
-            PipelineWalHandle::new(key, paths, guard, catalog.clone(), offsets),
+            PipelineWalHandle::new(key, paths, catalog.clone(), offsets, fence),
             catalog,
         )
     }
@@ -1118,7 +1115,7 @@ mod tests {
     fn import_is_noop_when_format_clean() {
         let dir = tempfile::tempdir().unwrap();
         let handle = test_handle(dir.path());
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(handle.guard()).unwrap();
+        let fence = handle.fence();
         crate::buffer::wal_handle::ensure_format_clean(handle.catalog(), fence).unwrap();
         import_if_needed(&handle, &crate::helpers::configuration::Config::new()).unwrap();
     }
@@ -1348,7 +1345,7 @@ mod tests {
     fn import_resumes_imported_phase_to_clean() {
         let dir = tempfile::tempdir().unwrap();
         let handle = test_handle(dir.path());
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(handle.guard()).unwrap();
+        let fence = handle.fence();
         let mut txn = CatalogTxn::new();
         txn.put(
             CatalogKey::Format,
@@ -1388,7 +1385,7 @@ mod tests {
         let commit =
             build_commit_header_bytes(meta.num_partitions, meta.total_bytes, &meta.body_sha256);
         let admitted = admit_owned_pair_bytes(&body, &commit).unwrap();
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(handle.guard()).unwrap();
+        let fence = handle.fence();
         let id = SegmentId::new("s3owned").unwrap();
         commit_imported_segment(
             &handle,
@@ -1500,7 +1497,7 @@ mod tests {
         let meta = write_seg(&handle.paths().segs, "v2-seg");
         let id = SegmentId::new("v2-seg").unwrap();
         let idx = &meta.index[0];
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(handle.guard()).unwrap();
+        let fence = handle.fence();
         let mut txn = CatalogTxn::new();
         txn.put(
             CatalogKey::Segment(id.clone()),

@@ -1,7 +1,6 @@
-use crate::cluster::identity::{ClusterIdentity, TenantScope};
-use crate::cluster::peer::ReplicaRegistry;
-use crate::cluster::{PipelineConfigView, QueryBackend};
 use crate::helpers::configuration::Config;
+use crate::pipeline_view::{PipelineConfigView, QueryBackend};
+use crate::query_flight::TenantScope;
 use aws_credential_types::provider::ProvideCredentials;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -20,7 +19,6 @@ use datafusion::prelude::SessionContext;
 use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{info, warn};
 use url::Url;
@@ -195,14 +193,14 @@ pub(crate) async fn register_user_namespaces(
         if !seen.insert(lake.catalog.physical_key()) {
             continue;
         }
-        let catalog = crate::cluster::backend::open_iceberg_catalog(&lake.catalog)
+        let catalog = crate::sqlrt::iceberg_catalog::open_iceberg_catalog(&lake.catalog)
             .await
             .map_err(DataFusionError::Plan)?;
         let listed = catalog
             .list_namespaces(None)
             .await
             .map_err(|err| DataFusionError::External(Box::new(err)))?;
-        let extra = crate::cluster::extra_namespace_names(
+        let extra = crate::sqlrt::iceberg_lake::extra_namespace_names(
             listed.iter().map(|ns| ns.to_string()),
             &pipeline_names,
         )
@@ -406,102 +404,6 @@ pub async fn register_dbt_models(
     Ok(())
 }
 
-pub struct ClusteredSelectPlan {
-    pub df: datafusion::dataframe::DataFrame,
-    /// Pipelines whose sink is not Iceberg. Not registered. Never silently omitted.
-    pub wal_only: Vec<String>,
-}
-
-pub struct ClusteredSelectOpts {
-    pub identity: ClusterIdentity,
-    pub scope: TenantScope,
-    pub local_flight: SocketAddr,
-    pub registry: Option<Arc<ReplicaRegistry>>,
-}
-
-pub(crate) fn process_clustered_select_opts(
-    scope: TenantScope,
-) -> Result<ClusteredSelectOpts, DataFusionError> {
-    let bind = crate::cluster::identity::process_query_bind().ok_or_else(|| {
-        DataFusionError::Execution("clustered query bind is not installed".into())
-    })?;
-    Ok(ClusteredSelectOpts {
-        identity: bind.identity,
-        scope,
-        local_flight: bind.flight,
-        registry: crate::cluster::peer::process_registry(),
-    })
-}
-
-pub async fn plan_clustered_select(
-    config: &Config,
-    sql: &str,
-    opts: &ClusteredSelectOpts,
-) -> Result<ClusteredSelectPlan, DataFusionError> {
-    config.init().await;
-    let cfg = config.clone();
-    crate::query_flight::runtime::ensure_started()
-        .await
-        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
-    let ctx = crate::query_flight::runtime::request_context()?;
-    let mut wal_only = Vec::new();
-    for name in cfg.pipelines.keys() {
-        let view = PipelineConfigView::for_name(&cfg, name)
-            .map_err(|err| DataFusionError::Plan(err.to_string()))?;
-        if !opts.scope.matches_pipeline(&view.key) {
-            continue;
-        }
-        match &view.backend {
-            QueryBackend::WalOnly => {
-                wal_only.push(name.clone());
-            }
-            QueryBackend::Iceberg(_) => {
-                let namespaces = list_iceberg_source_namespaces(&view).await?;
-                if namespaces.is_empty() {
-                    continue;
-                }
-                for namespace in namespaces {
-                    register_iceberg_union_view(&ctx, &namespace, &view, &cfg).await?;
-                }
-            }
-        }
-    }
-    register_user_namespaces(&ctx, config).await?;
-    wal_only.sort();
-    if !wal_only.is_empty() {
-        info!(
-            wal_only = ?wal_only,
-            "clustered query does not register WAL-only pipelines"
-        );
-    }
-    Ok(ClusteredSelectPlan {
-        df: ctx.sql(sql).await?,
-        wal_only,
-    })
-}
-
-pub async fn execute_clustered_select(
-    config: &Config,
-    sql: &str,
-    opts: &ClusteredSelectOpts,
-) -> Result<Vec<RecordBatch>, DataFusionError> {
-    plan_clustered_select(config, sql, opts)
-        .await?
-        .df
-        .collect()
-        .await
-}
-
-pub async fn schema_for_clustered_select(
-    config: &Config,
-    sql: &str,
-    opts: &ClusteredSelectOpts,
-) -> Result<SchemaRef, DataFusionError> {
-    let ClusteredSelectPlan { df, wal_only } = plan_clustered_select(config, sql, opts).await?;
-    let _ = wal_only;
-    Ok(df.schema().inner().clone())
-}
-
 pub async fn iceberg_schema_for_namespace(
     config: &Config,
     pipeline: &str,
@@ -563,14 +465,14 @@ pub async fn list_configured_iceberg_tables(
         if !seen.insert(lake.catalog.physical_key()) {
             continue;
         }
-        let catalog = crate::cluster::backend::open_iceberg_catalog(&lake.catalog)
+        let catalog = crate::sqlrt::iceberg_catalog::open_iceberg_catalog(&lake.catalog)
             .await
             .map_err(DataFusionError::Plan)?;
         let listed = catalog
             .list_namespaces(None)
             .await
             .map_err(|err| DataFusionError::External(Box::new(err)))?;
-        let extra = crate::cluster::extra_namespace_names(
+        let extra = crate::sqlrt::iceberg_lake::extra_namespace_names(
             listed.iter().map(|ns| ns.to_string()),
             &pipeline_names,
         )
@@ -614,7 +516,7 @@ pub async fn list_configured_iceberg_tables(
 
 fn iceberg_lake(
     view: &PipelineConfigView,
-) -> Result<&crate::cluster::IcebergLake, DataFusionError> {
+) -> Result<&crate::sqlrt::iceberg_lake::IcebergLake, DataFusionError> {
     match &view.backend {
         QueryBackend::Iceberg(lake) => Ok(lake),
         QueryBackend::WalOnly => Err(DataFusionError::Plan(format!(
@@ -627,24 +529,6 @@ fn iceberg_lake(
 #[cfg_attr(not(feature = "offset-store-dynamodb"), allow(dead_code))]
 pub(crate) fn catalog_table_to_namespace(name: &str) -> String {
     name.to_string()
-}
-
-async fn list_iceberg_source_namespaces(
-    view: &PipelineConfigView,
-) -> Result<Vec<String>, DataFusionError> {
-    let lake = iceberg_lake(view)?;
-    let catalog = crate::cluster::backend::open_iceberg_catalog(&lake.catalog)
-        .await
-        .map_err(DataFusionError::Plan)?;
-    let ns = iceberg::NamespaceIdent::from_strs([&lake.ingest_namespace])
-        .map_err(|err| DataFusionError::External(Box::new(err)))?;
-    let tables = iceberg::Catalog::list_tables(catalog.as_ref(), &ns)
-        .await
-        .map_err(|err| DataFusionError::External(Box::new(err)))?;
-    Ok(tables
-        .into_iter()
-        .map(|ident| catalog_table_to_namespace(ident.name()))
-        .collect())
 }
 
 struct LoadedIcebergScan {
@@ -694,60 +578,19 @@ async fn register_iceberg_union_view(
         catalog_ns: loaded.catalog_ns,
         table_name: loaded.table_name,
     };
-    let table = if crate::cluster::identity::process_query_bind().is_none() {
-        if crate::buffer::wal_reader::wal_reader_for(&view.key).is_none() {
-            return Err(DataFusionError::Plan(format!(
-                "WAL catalog for pipeline {} is not open",
-                view.key.pipeline()
-            )));
-        }
-        IcebergWalTableProvider::local(schema, business_key_columns, pin)
-    } else {
-        IcebergWalTableProvider::clustered(schema, business_key_columns, pin)
-    };
+    if crate::buffer::wal_reader::wal_reader_for(&view.key).is_none() {
+        return Err(DataFusionError::Plan(format!(
+            "WAL catalog for pipeline {} is not open",
+            view.key.pipeline()
+        )));
+    }
+    let table = IcebergWalTableProvider::local(schema, business_key_columns, pin);
     register_table_under_pipeline_schema(ctx, view.key.pipeline(), namespace, Arc::new(table))?;
     Ok(())
 }
 
-async fn pick_clustered_wal_endpoint(
-    pipeline: &skippr_lease::PipelineKey,
-    opts: &ClusteredSelectOpts,
-) -> Result<String, DataFusionError> {
-    let ads = match crate::cluster::gossip::gossip_directory() {
-        Some(gossip) => gossip.known_ads().await,
-        None => Vec::new(),
-    };
-    let local_committed =
-        crate::cluster::wal_head::local_catalog_seq_for(pipeline, opts.registry.as_deref()).await;
-    let identity = opts.identity.clone();
-    let pipeline = pipeline.clone();
-    let pick = crate::cluster::wal_head::pick_wal_endpoint(
-        &pipeline,
-        opts.local_flight,
-        opts.identity.node,
-        local_committed,
-        &ads,
-        |replica| {
-            let identity = identity.clone();
-            let pipeline = pipeline.clone();
-            async move {
-                crate::cluster::wal_head::confirm_replica_head(replica, &pipeline, &identity).await
-            }
-        },
-    )
-    .await;
-    match pick {
-        Some(endpoint) => Ok(endpoint.to_string()),
-        None => Err(DataFusionError::Plan(format!(
-            "no WAL head for pipeline {}",
-            pipeline.pipeline()
-        ))),
-    }
-}
-
 enum IcebergWalMode {
     Local(UnionPin),
-    Clustered(UnionPin),
 }
 
 pub(crate) struct IcebergWalTableProvider {
@@ -762,14 +605,6 @@ impl IcebergWalTableProvider {
             schema,
             business_key_columns,
             mode: IcebergWalMode::Local(pin),
-        }
-    }
-
-    fn clustered(schema: SchemaRef, business_key_columns: Vec<String>, pin: UnionPin) -> Self {
-        Self {
-            schema,
-            business_key_columns,
-            mode: IcebergWalMode::Clustered(pin),
         }
     }
 
@@ -798,77 +633,13 @@ impl IcebergWalTableProvider {
         } else {
             scan_schema
         };
-        let crate::sqlrt::read_boundary::PinnedWal::Local(live) = boundary.wal else {
-            return Err(DataFusionError::Internal(
-                "local Iceberg∪WAL pin must be PinnedWal::Local".into(),
-            ));
-        };
         let wal_plan = Arc::new(crate::sqlrt::wal_table::WalScanExec::new(
             wal_schema,
-            live,
+            boundary.wal,
             None,
             include_cdc,
             pin.namespace.clone(),
         )?) as Arc<dyn ExecutionPlan>;
-        Ok((iceberg_plan, wal_plan))
-    }
-
-    async fn pin_clustered_leaves(
-        &self,
-        pin: &UnionPin,
-        projection: Option<&Vec<usize>>,
-        projected: &SchemaRef,
-    ) -> datafusion::error::Result<(Arc<dyn ExecutionPlan>, Arc<dyn ExecutionPlan>)> {
-        let scope = crate::cluster::identity::TenantScope::new(
-            pin.pipeline.tenant(),
-            pin.pipeline.workspace(),
-        )
-        .map_err(|err| DataFusionError::Plan(err.to_string()))?;
-        let opts = process_clustered_select_opts(scope)?;
-        let endpoint = pick_clustered_wal_endpoint(&pin.pipeline, &opts).await?;
-        let request = skippr_query_plan::LiveWalPinRequest {
-            tenant: pin.pipeline.tenant().to_string(),
-            workspace: pin.pipeline.workspace().to_string(),
-            pipeline: pin.pipeline.pipeline().to_string(),
-            namespace: pin.namespace.clone(),
-        };
-        let live = skippr_query_plan::pin_live_wal_with_auth(
-            &endpoint,
-            &request,
-            &opts.scope.basic_authorization(),
-        )
-        .await?;
-        let (lake, excluded, iceberg_plan, scan_schema) =
-            self.load_iceberg_leaf(pin, projection, projected).await?;
-        let boundary = crate::sqlrt::read_boundary::ReadBoundary::for_clustered_ticket(
-            lake,
-            live.slices,
-            &excluded,
-        )
-        .map_err(|err| DataFusionError::Plan(err.to_string()))?;
-        boundary.emit_query_pin(&pin.namespace);
-        let crate::sqlrt::read_boundary::PinnedWal::Clustered(slices) = boundary.wal else {
-            return Err(DataFusionError::Internal(
-                "clustered Iceberg∪WAL pin must be PinnedWal::Clustered".into(),
-            ));
-        };
-        let include_cdc = !self.business_key_columns.is_empty();
-        let wal_schema = if include_cdc {
-            crate::sqlrt::cdc_reconcile::cdc_sidecar_schema(&scan_schema)
-        } else {
-            scan_schema
-        };
-        let ticket = skippr_query_plan::LiveWalTicket {
-            target: Some(request),
-            cdc_sidecar: include_cdc,
-            slices,
-        };
-        let wal_plan = Arc::new(skippr_query_plan::FlightSqlExec::live_wal(
-            endpoint,
-            ticket,
-            wal_schema,
-            opts.scope.basic_authorization(),
-        )) as Arc<dyn ExecutionPlan>;
         Ok((iceberg_plan, wal_plan))
     }
 
@@ -937,10 +708,8 @@ impl IcebergWalTableProvider {
 
 impl std::fmt::Debug for IcebergWalTableProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (mode, pin) = match &self.mode {
-            IcebergWalMode::Local(pin) => ("local", pin),
-            IcebergWalMode::Clustered(pin) => ("clustered", pin),
-        };
+        let IcebergWalMode::Local(pin) = &self.mode;
+        let mode = "local";
         f.debug_struct("IcebergWalTableProvider")
             .field("namespace", &pin.namespace)
             .field("mode", &mode)
@@ -967,12 +736,8 @@ impl TableProvider for IcebergWalTableProvider {
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let schema = crate::sqlrt::wal_table::projected_schema(&self.schema, projection)?;
-        let (iceberg_plan, wal_plan) = match &self.mode {
-            IcebergWalMode::Clustered(pin) => {
-                self.pin_clustered_leaves(pin, projection, &schema).await?
-            }
-            IcebergWalMode::Local(pin) => self.pin_union_leaves(pin, projection, &schema).await?,
-        };
+        let IcebergWalMode::Local(pin) = &self.mode;
+        let (iceberg_plan, wal_plan) = self.pin_union_leaves(pin, projection, &schema).await?;
         if self.business_key_columns.is_empty() {
             let union = UnionExec::try_new(vec![iceberg_plan, wal_plan])?;
             return crate::sqlrt::cdc_reconcile::wrap_limit(union, schema, limit);
@@ -996,7 +761,7 @@ async fn load_iceberg_scan_provider(
     let ident =
         iceberg::TableIdent::from_strs([lake.ingest_namespace.as_str(), table_name.as_str()])
             .map_err(|err| DataFusionError::External(Box::new(err)))?;
-    let catalog = crate::cluster::backend::open_iceberg_catalog(&lake.catalog)
+    let catalog = crate::sqlrt::iceberg_catalog::open_iceberg_catalog(&lake.catalog)
         .await
         .map_err(DataFusionError::Plan)?;
     let table = iceberg::Catalog::load_table(catalog.as_ref(), &ident)
@@ -1086,33 +851,6 @@ mod tests {
         assert!(
             !arm.contains("register_wal_namespace_view"),
             "Iceberg catalog/scan failure must not succeed as a WAL-only view"
-        );
-    }
-
-    #[test]
-    fn clustered_catalog_list_errors_fail_the_plan() {
-        let src = include_str!("tables.rs");
-        let prod = src.split("#[cfg(test)]").next().unwrap();
-        let start = prod
-            .find("pub async fn plan_clustered_select")
-            .expect("plan_clustered_select");
-        let body = prod[start..]
-            .split("pub async fn execute_clustered_select")
-            .next()
-            .unwrap();
-        assert!(
-            body.contains("list_iceberg_source_namespaces(&view).await?"),
-            "catalog-list errors must fail the clustered plan"
-        );
-        assert!(
-            !body.contains("skipping"),
-            "must not warn+continue past catalog-list failures"
-        );
-        assert!(body.contains("wal_only.push"));
-        assert!(body.contains("QueryBackend::WalOnly"));
-        assert!(
-            body.contains("register_user_namespaces(&ctx, config).await?"),
-            "clustered query must register extra Iceberg namespaces"
         );
     }
 
@@ -1317,32 +1055,6 @@ mod tests {
             scan.contains("excluded_slices"),
             "scan must walk E from the snapshot loaded after W"
         );
-        let clustered = scan
-            .split("async fn pin_clustered_leaves")
-            .nth(1)
-            .expect("pin_clustered_leaves");
-        let pick_remote = clustered
-            .find("pick_clustered_wal_endpoint")
-            .expect("clustered scan must pick flight_addr at IcebergWalTableProvider::scan");
-        let pin_remote = clustered
-            .find("pin_live_wal_with_auth")
-            .expect("clustered scan must pin W via skippr.live_wal_pin");
-        let load_remote = clustered
-            .find("load_iceberg_leaf")
-            .expect("clustered scan must load S after pinning W");
-        assert!(
-            pick_remote < pin_remote && pin_remote < load_remote,
-            "clustered pick-then-W-then-S: pick_clustered_wal_endpoint, then pin_live_wal_with_auth, then load_iceberg_leaf"
-        );
-        assert!(
-            clustered.contains("FlightSqlExec::live_wal"),
-            "clustered WAL leaf is FlightSqlExec carrying LiveWalTicket"
-        );
-        assert!(
-            clustered.contains("ReadBoundary::for_clustered_ticket")
-                && clustered.contains("PinnedWal::Clustered"),
-            "clustered W \\ E must live in ReadBoundary as PinnedWal::Clustered"
-        );
         assert!(
             prod.contains("enum IcebergWalMode") && !prod.contains("local_pin: Option"),
             "unpinned child-provider union must be unrepresentable"
@@ -1351,17 +1063,16 @@ mod tests {
             .split("async fn register_iceberg_union_view")
             .nth(1)
             .expect("register_iceberg_union_view")
-            .split("async fn pick_clustered_wal_endpoint")
+            .split("async fn load_iceberg_scan_provider")
             .next()
             .unwrap();
         assert!(
-            register.contains("IcebergWalTableProvider::local")
-                && register.contains("IcebergWalTableProvider::clustered"),
-            "local and clustered both pin at IcebergWalTableProvider::scan, not at registration"
+            register.contains("IcebergWalTableProvider::local"),
+            "local Iceberg ∪ WAL pins at IcebergWalTableProvider::scan, not at registration"
         );
         assert!(
-            !register.contains("pick_clustered_wal_endpoint"),
-            "clustered flight_addr must not be frozen at register_iceberg_union_view"
+            !register.contains("IcebergWalTableProvider::clustered"),
+            "clustered Iceberg ∪ WAL pin is deleted"
         );
         assert!(
             !prod.contains("struct ClusteredUnionPin"),
@@ -1416,72 +1127,14 @@ mod tests {
         assert!(!prod.contains("lake_only"));
         assert!(!prod.contains("SKIPPR_QUERY_LAKE_ONLY"));
         assert!(!prod.contains("None => loaded.provider"));
-        assert!(prod.contains("no WAL head for pipeline"));
-        assert!(prod.contains("FlightSqlExec::live_wal"));
-        assert!(prod.contains("pin_live_wal_with_auth"));
         assert!(!prod.contains("FlightSqlTableProvider"));
         assert!(!prod.contains("live_wal_scan"));
         assert!(!prod.contains("WalPick"));
         assert!(!prod.contains("has no local WAL copy"));
         assert!(!prod.contains("ClusteredWalPin"));
         assert!(!prod.contains("wal_endpoint: Option<SocketAddr>"));
-        assert!(prod.contains("clustered query bind is not installed"));
-    }
-
-    #[test]
-    fn clustered_select_opts_fail_closed_without_bind() {
-        crate::cluster::identity::clear_process_query_bind();
-        let err = match process_clustered_select_opts(
-            crate::cluster::identity::TenantScope::new("t", "w").unwrap(),
-        ) {
-            Err(err) => err,
-            Ok(_) => panic!("expected clustered query bind to be missing"),
-        };
-        assert!(err
-            .to_string()
-            .contains("clustered query bind is not installed"));
-    }
-
-    fn config_with_sink(plugin: &str, body: serde_json::Value) -> Config {
-        let mut sink = serde_json::Map::new();
-        sink.insert(plugin.to_string(), body);
-        serde_json::from_value(serde_json::json!({
-            "skippr": { "workspace": "ws", "tenant": "t" },
-            "pipelines": {
-                "p": {
-                    "data_source": "data_sources.sample",
-                    "data_sink": "data_sinks.out"
-                }
-            },
-            "data_sources": {
-                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
-            },
-            "data_sinks": {
-                "out": sink
-            }
-        }))
-        .unwrap()
-    }
-
-    fn local_select_opts() -> ClusteredSelectOpts {
-        ClusteredSelectOpts {
-            identity: ClusterIdentity::new(
-                skippr_lease::ClusterId::new("local").expect("static cluster id"),
-                skippr_lease::NodeId::from_uuid(uuid::Uuid::nil()),
-            ),
-            scope: TenantScope::new("t", "ws").unwrap(),
-            local_flight: "127.0.0.1:0".parse().unwrap(),
-            registry: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn clustered_select_notices_wal_only_pipelines() {
-        let cfg = config_with_sink("File", serde_json::json!({"path": "/tmp/out"}));
-        let plan = plan_clustered_select(&cfg, "SELECT 1", &local_select_opts())
-            .await
-            .unwrap();
-        assert_eq!(plan.wal_only, vec!["p".to_string()]);
+        assert!(!prod.contains("plan_clustered_select"));
+        assert!(!prod.contains("IcebergWalTableProvider::clustered"));
     }
 
     #[tokio::test]

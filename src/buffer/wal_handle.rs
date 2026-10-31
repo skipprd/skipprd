@@ -6,9 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Instant, SystemTime};
 
-use skippr_lease::{
-    DurableError, LeaseGuard, OffsetPublishError, PipelineKey, PipelinePaths, SegmentId,
-};
+use skippr_lease::{DurableError, OffsetPublishError, PipelineKey, PipelinePaths, SegmentId};
 use skippr_wal_catalog::{
     query_all, CatalogFence, CatalogKey, CatalogPrefix, CatalogRow, CatalogSeq, CatalogTxn,
     CheckpointKey, CommittedCheckpoint, CommittedOffset, ControlBody, ControlRow, FormatPhase,
@@ -18,7 +16,6 @@ use skippr_wal_catalog::{
 };
 use tokio::sync::Mutex;
 
-use crate::buffer::durable::replicate::ReplicationMode;
 use crate::buffer::segment_file::{encode_snapshot, PartitionKey, SegmentFile, WalPayload};
 use crate::buffer::wal_store::{SegmentWriteLocation, SegmentWriteResult};
 use crate::helpers::offset_store::{publish_committed, OffsetStore};
@@ -38,10 +35,9 @@ pub(crate) const RECLAIM_OCC_ATTEMPTS: usize = 8;
 pub struct PipelineWalHandle {
     key: PipelineKey,
     paths: PipelinePaths,
-    guard: Arc<LeaseGuard>,
+    fence: CatalogFence,
     catalog: Arc<dyn WalCatalogStore>,
     offsets: Arc<dyn OffsetStore>,
-    replicator: ReplicationMode,
     seq: Mutex<SeqState>,
     catalog_mutex: Mutex<()>,
     in_memory_done: std::sync::Mutex<HashMap<String, SliceBitmap>>,
@@ -95,35 +91,16 @@ impl PipelineWalHandle {
     pub fn new(
         key: PipelineKey,
         paths: PipelinePaths,
-        guard: Arc<LeaseGuard>,
         catalog: Arc<dyn WalCatalogStore>,
         offsets: Arc<dyn OffsetStore>,
-    ) -> Arc<Self> {
-        Self::with_replication(
-            key,
-            paths,
-            guard,
-            catalog,
-            offsets,
-            ReplicationMode::LocalOnly,
-        )
-    }
-
-    pub fn with_replication(
-        key: PipelineKey,
-        paths: PipelinePaths,
-        guard: Arc<LeaseGuard>,
-        catalog: Arc<dyn WalCatalogStore>,
-        offsets: Arc<dyn OffsetStore>,
-        replicator: ReplicationMode,
+        fence: CatalogFence,
     ) -> Arc<Self> {
         Arc::new(Self {
             key,
             paths,
-            guard,
+            fence,
             catalog,
             offsets,
-            replicator,
             seq: Mutex::new(SeqState {
                 max_committed: CatalogSeq::ZERO,
                 max_published: CatalogSeq::ZERO,
@@ -141,10 +118,6 @@ impl PipelineWalHandle {
         &self.paths
     }
 
-    pub fn guard(&self) -> &Arc<LeaseGuard> {
-        &self.guard
-    }
-
     pub fn catalog(&self) -> &dyn WalCatalogStore {
         self.catalog.as_ref()
     }
@@ -156,8 +129,8 @@ impl PipelineWalHandle {
         )
     }
 
-    pub fn fence(&self) -> Result<CatalogFence, DurableError> {
-        catalog_fence_from_guard(&self.guard)
+    pub fn fence(&self) -> CatalogFence {
+        self.fence
     }
 
     pub fn catalog_seq_seen(&self) -> Result<u64, DurableError> {
@@ -321,11 +294,8 @@ impl PipelineWalHandle {
         Ok(out)
     }
 
-    fn reclaim_epoch(&self) -> Result<skippr_lease::LeaseEpoch, DurableError> {
-        self.guard
-            .require_active_epoch()
-            .or_else(|_| self.guard.require_recovery_epoch())
-            .map_err(DurableError::from)
+    fn reclaim_epoch(&self) -> skippr_lease::LeaseEpoch {
+        self.fence.epoch
     }
 
     pub fn apply_acked_in_memory(&self) -> Result<Vec<String>, DurableError> {
@@ -356,7 +326,6 @@ impl PipelineWalHandle {
     }
 
     pub async fn redo_acked_compactions(&self) -> Result<(), DurableError> {
-        let _ = self.reclaim_epoch()?;
         let started = Instant::now();
         let acked = self.apply_acked_in_memory()?;
         let compactions = acked.len();
@@ -447,7 +416,7 @@ impl PipelineWalHandle {
         &self,
         batch: &[crate::buffer::compaction_transaction::CompactionTransaction],
     ) -> Result<u64, DurableError> {
-        let epoch = self.reclaim_epoch()?;
+        let epoch = self.reclaim_epoch();
         let mut grouped: HashMap<String, Vec<u32>> = HashMap::new();
         for txn in batch {
             for wal_ref in &txn.refs {
@@ -462,7 +431,7 @@ impl PipelineWalHandle {
         }
         let mut last_conflict = DurableError::CatalogConflict;
         for _ in 0..RECLAIM_OCC_ATTEMPTS {
-            let fence = self.fence()?;
+            let fence = self.fence();
             let mut catalog_txn = CatalogTxn::new();
             let mut reclaim_after: Vec<(String, PayloadLocation)> = Vec::new();
             let mut memory_bits: Vec<(String, Vec<u32>, u32)> = Vec::new();
@@ -635,7 +604,7 @@ impl PipelineWalHandle {
         {
             return Ok(());
         }
-        let fence = self.fence()?;
+        let fence = self.fence();
         let mut txn = CatalogTxn::new();
         put_slice_index(&mut txn, id, meta)?;
         if txn.ops().is_empty() {
@@ -686,8 +655,8 @@ impl PipelineWalHandle {
         checkpoint_updates: &HashMap<String, CheckpointEnvelope>,
         created_at: SystemTime,
     ) -> Result<SegmentWriteResult, DurableError> {
-        let epoch = self.guard.require_active_epoch()?;
-        let fence = self.fence()?;
+        let epoch = self.fence.epoch;
+        let fence = self.fence();
         let id = SegmentId::new(snapshot_id).map_err(|err| DurableError::Io(err.to_string()))?;
         let encoded = encode_snapshot(
             offsets,
@@ -725,22 +694,6 @@ impl PipelineWalHandle {
         let seg_file = SegmentFile::new(&self.paths.segs, snapshot_id)?;
         crate::buffer::segment_file::write_payload_atomically(&seg_file.path, &encoded.bytes)
             .map_err(DurableError::from)?;
-        if let ReplicationMode::Synchronous(replicator) = &self.replicator {
-            replicator
-                .commit_payload(
-                    snapshot_id,
-                    encoded.sha256,
-                    encoded.bytes.len() as u64,
-                    epoch.get(),
-                    &seg_file.path,
-                    self.guard.as_ref(),
-                )
-                .await?;
-            crate::cluster::failpoint::hit(
-                crate::cluster::failpoint::FailpointName::AfterReplicaPayloadAck,
-                &self.paths.root,
-            )?;
-        }
         let location = PayloadLocation::Disk {
             path: seg_file.path.to_string_lossy().into_owned(),
         };
@@ -808,8 +761,8 @@ impl PipelineWalHandle {
                 ));
             }
         }
-        crate::cluster::failpoint::hit(
-            crate::cluster::failpoint::FailpointName::BeforeCatalogCommit,
+        crate::failpoint::hit(
+            crate::failpoint::FailpointName::BeforeCatalogCommit,
             &self.paths.root,
         )?;
         let max_seq = match self
@@ -856,8 +809,8 @@ impl PipelineWalHandle {
         )
         .map_err(|err| DurableError::Io(err.to_string()))?;
         self.commit_durable(&txn, fence)?;
-        crate::cluster::failpoint::hit(
-            crate::cluster::failpoint::FailpointName::AfterCatalogCommit,
+        crate::failpoint::hit(
+            crate::failpoint::FailpointName::AfterCatalogCommit,
             &self.paths.root,
         )?;
         self.seq.lock().await.max_committed = seq;
@@ -877,9 +830,6 @@ impl PipelineWalHandle {
     ) -> Result<(), DurableError> {
         let mut delay = std::time::Duration::from_millis(50);
         loop {
-            if self.guard.require_same_offset_epoch(epoch).is_err() {
-                return Err(DurableError::FencedAfterCommit);
-            }
             match publish_committed(
                 self.offsets.as_ref(),
                 offsets,
@@ -890,8 +840,8 @@ impl PipelineWalHandle {
             ) {
                 Ok(()) => {
                     self.offsets.flush().map_err(|err| DurableError::Io(err))?;
-                    crate::cluster::failpoint::hit(
-                        crate::cluster::failpoint::FailpointName::AfterOffsetsPublished,
+                    crate::failpoint::hit(
+                        crate::failpoint::FailpointName::AfterOffsetsPublished,
                         &self.paths.root,
                     )?;
                     self.seq.lock().await.max_published = seq;
@@ -904,9 +854,7 @@ impl PipelineWalHandle {
                     return Err(DurableError::FencedAfterCommit);
                 }
                 Err(OffsetPublishError::Transient(_)) => {
-                    if self.guard.sleep_or_fence(delay).await.is_err() {
-                        return Err(DurableError::FencedAfterCommit);
-                    }
+                    tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(std::time::Duration::from_secs(2));
                 }
             }
@@ -922,8 +870,8 @@ impl PipelineWalHandle {
         offsets: &HashMap<OffsetKey, u64>,
         checkpoint_updates: &HashMap<String, CheckpointEnvelope>,
     ) -> Result<SegmentWriteResult, DurableError> {
-        let epoch = self.guard.require_active_epoch()?;
-        let fence = self.fence()?;
+        let epoch = self.fence.epoch;
+        let fence = self.fence();
         let id = SegmentId::new(snapshot_id).map_err(|err| DurableError::Io(err.to_string()))?;
         let location = PayloadLocation::S3 {
             bucket: bucket.to_string(),
@@ -1038,8 +986,8 @@ impl PipelineWalHandle {
         offsets: Vec<CommittedOffset>,
         checkpoints: Vec<CommittedCheckpoint>,
     ) -> Result<(), DurableError> {
-        let epoch = self.guard.require_active_epoch()?;
-        let fence = self.fence()?;
+        let epoch = self.fence.epoch;
+        let fence = self.fence();
         let existing = self
             .catalog
             .get(&key)
@@ -1131,8 +1079,7 @@ impl PipelineWalHandle {
         payload_len: u64,
         payload_sha256: [u8; 32],
     ) -> Result<(), DurableError> {
-        let _ = self.guard.require_active_epoch()?;
-        let fence = self.fence()?;
+        let fence = self.fence();
         let id = SegmentId::new(segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
         let Some(CatalogRow::Segment(mut row)) = self
             .catalog
@@ -1164,8 +1111,7 @@ impl PipelineWalHandle {
         state: skippr_wal_catalog::CompactionState,
         body: Vec<u8>,
     ) -> Result<(), DurableError> {
-        let _ = self.guard.require_active_epoch()?;
-        let fence = self.fence()?;
+        let fence = self.fence();
         let compaction_id = skippr_wal_catalog::CompactionId::new(id)
             .map_err(|err| DurableError::Io(err.to_string()))?;
         let existing = self
@@ -1201,11 +1147,11 @@ impl PipelineWalHandle {
         ordinals: &[u32],
     ) -> Result<bool, DurableError> {
         let started = Instant::now();
-        let epoch = self.reclaim_epoch()?;
+        let epoch = self.reclaim_epoch();
         let id = SegmentId::new(segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
         let mut last_conflict = DurableError::CatalogConflict;
         for _ in 0..RECLAIM_OCC_ATTEMPTS {
-            let fence = self.fence()?;
+            let fence = self.fence();
             let Some(mut row) = self.segment_row(&id)? else {
                 return Ok(true);
             };
@@ -1278,25 +1224,7 @@ impl PipelineWalHandle {
         epoch: skippr_lease::LeaseEpoch,
     ) -> Result<(), DurableError> {
         delete_payload(location)?;
-        if let ReplicationMode::Synchronous(replicator) = &self.replicator {
-            if let Err(err) = crate::cluster::peer::drop_payload_at(
-                replicator.snapshot_endpoint(),
-                &self.key,
-                segment_id,
-                epoch.get(),
-                &crate::cluster::identity::process_query_bind()
-                    .map(|bind| bind.identity)
-                    .ok_or_else(|| DurableError::Io("cluster identity missing".into()))?,
-            )
-            .await
-            {
-                tracing::warn!(
-                    segment = segment_id,
-                    error = %err,
-                    "replica payload drop failed; gc_orphan_payloads is the backstop"
-                );
-            }
-        }
+        let _ = epoch;
         self.forget_in_memory_segment(segment_id);
         crate::buffer::ingest_buffer::Buffers::forget_reclaimed_segment(segment_id);
         Ok(())
@@ -1324,8 +1252,7 @@ impl PipelineWalHandle {
     }
 
     pub async fn delete_compaction(&self, id: &str) -> Result<(), DurableError> {
-        let _ = self.reclaim_epoch()?;
-        let fence = self.fence()?;
+        let fence = self.fence();
         let compaction_id = skippr_wal_catalog::CompactionId::new(id)
             .map_err(|err| DurableError::Io(err.to_string()))?;
         let mut txn = CatalogTxn::new();
@@ -1339,7 +1266,7 @@ impl PipelineWalHandle {
 
     pub async fn republish_all(&self) -> Result<(), DurableError> {
         let started = Instant::now();
-        let epoch = self.guard.require_offset_epoch()?;
+        let epoch = self.fence.epoch;
         let rows = query_all(self.catalog.as_ref(), CatalogPrefix::Segment)
             .map_err(|err| DurableError::Io(err.to_string()))?;
         let mut ordered: Vec<SegmentRow> = rows
@@ -1755,25 +1682,9 @@ pub fn ensure_format_clean(
     }
 }
 
-pub fn catalog_fence_from_guard(guard: &LeaseGuard) -> Result<CatalogFence, DurableError> {
-    if let Some(session) = guard.leased_session() {
-        return Ok(CatalogFence {
-            owner: session.owner,
-            epoch: session.epoch,
-        });
-    }
-    let epoch = guard
-        .require_active_epoch()
-        .map_err(|_| DurableError::Fenced)?;
-    Ok(CatalogFence {
-        owner: skippr_lease::NodeId::single_node(),
-        epoch,
-    })
-}
-
 pub fn memory_catalog_for_test(fence: CatalogFence) -> Arc<MemoryWalCatalog> {
     let catalog = MemoryWalCatalog::new();
-    catalog.install_lease(fence.owner, fence.epoch);
+    catalog.set_writer_fence(fence.owner, fence.epoch);
     Arc::new(catalog)
 }
 
@@ -1781,19 +1692,16 @@ pub fn memory_catalog_for_test(fence: CatalogFence) -> Arc<MemoryWalCatalog> {
 mod tests {
     use super::*;
     use crate::helpers::offset_store::SledOffsetStore;
-    use skippr_lease::SystemClock;
 
     fn leased_handle(dir: &std::path::Path) -> Arc<PipelineWalHandle> {
         let key = PipelineKey::new("t", "w", "p").unwrap();
         let paths = PipelinePaths::legacy_disk(dir);
-        let clock = Arc::new(SystemClock::new());
-        let guard = LeaseGuard::single_node(key.clone(), clock);
-        let fence = catalog_fence_from_guard(&guard).unwrap();
+        let fence = CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let db = sled::open(dir.join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
         let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
-        PipelineWalHandle::new(key, paths, guard, catalog, offsets)
+        PipelineWalHandle::new(key, paths, catalog, offsets, fence)
     }
 
     #[tokio::test]
@@ -2032,7 +1940,7 @@ mod tests {
     async fn persist_before_catalog_commit_failpoint() {
         let dir = tempfile::tempdir().unwrap();
         let handle = leased_handle(dir.path());
-        crate::cluster::failpoint::arm(crate::cluster::failpoint::BEFORE_CATALOG_COMMIT);
+        crate::failpoint::arm(crate::failpoint::BEFORE_CATALOG_COMMIT);
         let err = match handle
             .persist_segment(
                 "seg-fp",
@@ -2048,7 +1956,7 @@ mod tests {
             Ok(_) => panic!("failpoint should reject catalog commit"),
             Err(err) => err,
         };
-        crate::cluster::failpoint::disarm();
+        crate::failpoint::disarm();
         assert!(err.to_string().contains("before_catalog_commit"));
         assert!(handle
             .catalog
@@ -2174,7 +2082,7 @@ mod tests {
             .await
             .unwrap();
         let id = SegmentId::new("rebuild-seg").unwrap();
-        let fence = handle.fence().unwrap();
+        let fence = handle.fence();
         let mut txn = CatalogTxn::new();
         txn.delete(
             CatalogKey::Index(id.clone()),
@@ -2612,8 +2520,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "p").unwrap();
         let paths = PipelinePaths::legacy_disk(dir.path());
-        let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-        let fence = catalog_fence_from_guard(&guard).unwrap();
+        let fence = CatalogFence::local();
         let inner = memory_catalog_for_test(fence);
         let failing = Arc::new(ConditionFailingCatalog {
             inner,
@@ -2622,7 +2529,7 @@ mod tests {
         let db = sled::open(dir.path().join("offsets")).unwrap();
         let offsets: Arc<dyn OffsetStore> =
             Arc::new(SledOffsetStore::new(db.open_tree("offsets").unwrap()));
-        let handle = PipelineWalHandle::new(key, paths, guard, failing.clone(), offsets);
+        let handle = PipelineWalHandle::new(key, paths, failing.clone(), offsets, fence);
         let batches = two_arrow_parts();
         handle
             .persist_segment(

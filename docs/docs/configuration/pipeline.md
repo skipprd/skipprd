@@ -137,7 +137,7 @@ A value set here beats the environment variable, which beats the default.
 Skipprd saves each pipeline's progress under its workspace and pipeline name (`skippr.workspace` and the `pipelines:` key). That has two consequences:
 
 - **Renaming starts over.** Change either name and Skipprd treats it as a new pipeline: it reads the source from the beginning and writes the data again. Point the destination at a new schema or prefix first if you do not want duplicates.
-- **One writer at a time.** Two `skipprd sync` processes for the same workspace and pipeline cannot write at once. The second waits about 30 seconds, then stops with `pipeline writer lease unavailable`.
+- **One writer at a time.** Two `skipprd sync` processes for the same workspace and pipeline cannot write at once. The second fails closed (sled lock, or a fenced catalog commit).
 
 Reserved pipeline names: `deadletters`, `wal`, `_skippr`, `skippr`, `metadata`.
 

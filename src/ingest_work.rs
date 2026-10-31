@@ -1,20 +1,20 @@
 use crate::buffer::BufferChunker;
 use crate::discover::{
-    AnalyseSchema, Metadata, NUM_ANALYSED_RECORDS, OutputMetadata, PipelineMetadata,
+    AnalyseSchema, Metadata, OutputMetadata, PipelineMetadata, NUM_ANALYSED_RECORDS,
 };
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, OffsetValue, Offsets};
 use crate::helpers::{Helpers, IngestTransformSnapshot};
-use crate::ingest::deny::{ARRAY_MIXED_TYPES, failure_code_from_error};
+use crate::ingest::deny::{failure_code_from_error, ARRAY_MIXED_TYPES};
 use crate::ingest::ingest::ingest;
 use crate::runtime_plugins::protocol::{RuntimeExecutionMode, RuntimeRawIngestBatch};
 use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
-use crate::serdes::decode::{DecodedIngest, decode_ingest};
+use crate::serdes::decode::{decode_ingest, DecodedIngest};
 use crate::serdes::input_format::InputFormat;
 use crate::serdes::ndjson_fast::NdjsonLineParser;
 use crate::{
-    ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING, data_dir_ingest_paused,
-    record_data_dir_capacity_error, set_data_dir_ingest_paused,
+    data_dir_ingest_paused, record_data_dir_capacity_error, set_data_dir_ingest_paused,
+    ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING,
 };
 use dashmap::DashMap;
 use std::sync::atomic::AtomicBool;
@@ -70,12 +70,12 @@ use std::sync::mpsc::Sender;
 // use dashmap::{DashMap};
 
 use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord};
-use crate::discover::evolution::{EvolutionProposal, infer_specs_for_record};
+use crate::discover::evolution::{infer_specs_for_record, EvolutionProposal};
 use crate::ingest::exact_arrow::{
-    ExactArrowPartition, ExactArrowPlan, append_row_to_exact_partition, resolve_cached_exact_plan,
+    append_row_to_exact_partition, resolve_cached_exact_plan, ExactArrowPartition, ExactArrowPlan,
 };
 use crate::ingest::fast_ingest::{
-    DEFAULT_NESTED_MESSAGE, create_default_nested_message, fast_path_ingest,
+    create_default_nested_message, fast_path_ingest, DEFAULT_NESTED_MESSAGE,
 };
 use crate::ingest::record_types::{NormalizedRecord, SourceRecord};
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
@@ -2309,7 +2309,11 @@ impl Ingest {
         let default_threads = match execution_mode {
             RuntimeExecutionMode::Sync => {
                 let cores = num_cpus::get();
-                if is_ci { cores.min(8) } else { cores }
+                if is_ci {
+                    cores.min(8)
+                } else {
+                    cores
+                }
             }
             RuntimeExecutionMode::Discover => 1,
         };
@@ -4512,14 +4516,12 @@ mod schema_sync_skip_key_tests {
             a.schema_publication_identity("events"),
             b.schema_publication_identity("events")
         );
-        assert!(
-            a.schema_publication_identity("events")
-                .contains("/tmp/skipprd-schema-a")
-        );
-        assert!(
-            b.schema_publication_identity("events")
-                .contains("/tmp/skipprd-schema-b")
-        );
+        assert!(a
+            .schema_publication_identity("events")
+            .contains("/tmp/skipprd-schema-a"));
+        assert!(b
+            .schema_publication_identity("events")
+            .contains("/tmp/skipprd-schema-b"));
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::cluster::failpoint::{failpoint_file, hit, FailpointName, BEFORE_CATALOG_COMMIT};
+use crate::failpoint::{failpoint_file, hit, FailpointName, BEFORE_CATALOG_COMMIT};
 
 #[test]
 fn known_failpoint_names_parse() {

@@ -33,7 +33,7 @@ There is no Python equivalent; Python clients connect to the running server, for
 | `--config <PATH>` | `./skippr.yml` | Config file to read. |
 | `--log [LEVEL]` | Off | Print logs to stderr, including the listening addresses. |
 
-See [CLI overview](/cli/overview) for the other global flags. `serve` does not run with `--wal-storage clustered`.
+See [CLI overview](/cli/overview) for the other global flags.
 
 ### What clients see
 

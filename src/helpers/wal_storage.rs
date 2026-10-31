@@ -11,7 +11,6 @@ pub enum WalStorage {
     #[default]
     Disk,
     S3,
-    Clustered,
 }
 
 impl WalStorage {
@@ -19,20 +18,12 @@ impl WalStorage {
         match self {
             Self::Disk => "disk",
             Self::S3 => "s3",
-            Self::Clustered => "clustered",
-        }
-    }
-
-    pub fn requires_cluster_services(self) -> bool {
-        match self {
-            Self::Clustered => true,
-            Self::Disk | Self::S3 => false,
         }
     }
 
     pub fn uses_local_disk_segments(self) -> bool {
         match self {
-            Self::Disk | Self::Clustered => true,
+            Self::Disk => true,
             Self::S3 => false,
         }
     }
@@ -51,7 +42,6 @@ impl FromStr for WalStorage {
         match raw.trim().to_ascii_lowercase().as_str() {
             "disk" => Ok(Self::Disk),
             "s3" => Ok(Self::S3),
-            "clustered" => Ok(Self::Clustered),
             other => Err(ConfigError::InvalidWalStorage(other.to_owned())),
         }
     }
@@ -105,8 +95,8 @@ pub enum SkipprStoreKind {
     DynamoDb,
 }
 
-/// Durable Skippr KV store: offsets, checkpoints, leases, membership, and
-/// SkipprLake catalog pointers share one table via non-colliding PK/SK prefixes.
+/// Durable Skippr KV store: offsets, checkpoints, leases, and SkipprLake
+/// catalog pointers share one table via non-colliding PK/SK prefixes.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkipprStore {
@@ -125,14 +115,9 @@ impl SkipprStoreKind {
         }
     }
 
-    pub fn is_clustered_control_plane(self) -> bool {
-        matches!(self, Self::DynamoDb)
-    }
-
-    /// Disk/S3 default to sled. Clustered defaults to DynamoDB.
+    /// Disk and S3 default to sled.
     pub fn default_for_wal(storage: WalStorage) -> Self {
         match storage {
-            WalStorage::Clustered => Self::DynamoDb,
             WalStorage::Disk | WalStorage::S3 => Self::Sled,
         }
     }
@@ -152,48 +137,18 @@ impl FromStr for SkipprStoreKind {
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ConfigError {
-    #[error("invalid WAL_STORAGE value '{0}'; expected disk, s3, or clustered")]
+    #[error("invalid WAL_STORAGE value '{0}'; expected disk or s3")]
     InvalidWalStorage(String),
     #[error("invalid skipprd_el_storage_mode value '{0}'; expected local or s3")]
     InvalidElStorageMode(String),
     #[error("invalid skippr.store.type value '{0}'; expected sled or dynamodb")]
     InvalidSkipprStore(String),
-    #[error("WAL_STORAGE=clustered requires skipprd built with --features offset-store-dynamodb")]
-    ClusteredFeatureMissing,
-    #[error("WAL_STORAGE=clustered requires skippr.store.name (or SKIPPR_STORE_NAME)")]
-    ClusteredTableMissing,
-    #[error("WAL_STORAGE=clustered requires SKIPPR_CLUSTER_ID")]
-    ClusterIdMissing,
-    #[error("WAL_STORAGE=clustered requires SKIPPR_CLUSTER_GOSSIP_KEY")]
-    GossipKeyMissing,
-    #[error("WAL_STORAGE=clustered requires SKIPPR_CLUSTER_TLS_CERT, SKIPPR_CLUSTER_TLS_KEY, and SKIPPR_CLUSTER_TLS_CA")]
-    ClusterTlsMissing,
     #[error("Iceberg sink config is invalid: {0}")]
     IcebergConfigInvalid(String),
-    #[error(
-        "WAL_STORAGE=clustered cannot be used with skippr.store.type={0}; clustered mode uses DynamoDB"
-    )]
-    ClusteredStoreConflict(String),
-    #[error(
-        "WAL_STORAGE=clustered does not support sync --once; a quorum member must remain available"
-    )]
-    ClusteredOnceRejected,
-    #[error("WAL_STORAGE=clustered does not support {0}")]
-    ClusteredModeRejected(String),
-    #[error(
-        "clustered sink '{plugin}' retry_semantics={semantics} does not support idempotent replay"
-    )]
-    ClusteredSinkNotIdempotent { plugin: String, semantics: String },
-    #[error("clustered sink '{plugin}' does not declare grouped idempotency/preflight support")]
-    ClusteredSinkGroupingUnsupported { plugin: String },
     #[error("pipeline '{0}' not found")]
     PipelineNotFound(String),
-    #[error("clustered process lock failed for DATA_DIR '{path}': {detail}")]
-    ClusteredDataDirLock { path: String, detail: String },
     #[error("{0}")]
     InvalidIdentity(String),
-    #[error("{0}")]
-    InvalidAdvertisedAddress(String),
 }
 
 #[cfg(test)]
@@ -204,10 +159,7 @@ mod tests {
     fn parses_each_wal_storage_value() {
         assert_eq!("disk".parse::<WalStorage>().unwrap(), WalStorage::Disk);
         assert_eq!("S3".parse::<WalStorage>().unwrap(), WalStorage::S3);
-        assert_eq!(
-            " clustered ".parse::<WalStorage>().unwrap(),
-            WalStorage::Clustered
-        );
+        assert!("clustered".parse::<WalStorage>().is_err());
     }
 
     #[test]
@@ -263,10 +215,6 @@ mod tests {
         assert_eq!(
             SkipprStoreKind::default_for_wal(WalStorage::S3),
             SkipprStoreKind::Sled
-        );
-        assert_eq!(
-            SkipprStoreKind::default_for_wal(WalStorage::Clustered),
-            SkipprStoreKind::DynamoDb
         );
     }
 

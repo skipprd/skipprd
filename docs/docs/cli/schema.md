@@ -22,7 +22,7 @@ There is no Python equivalent. In Python, run `session.query(...)` or `session.d
 | `-p`, `--pipeline <NAME>` | Required | Pipeline whose output to read. Unlike `discover` and `sync`, `schema` does not fall back to `PIPELINE_NAME`. |
 | `--config <PATH>` | `./skippr.yml` | Config file to read. |
 | `--log [LEVEL]` | Off | Print logs to stderr, including the folder being read. |
-| `--wal-storage <MODE>` | `disk` | Must not be `clustered`. |
+| `--wal-storage <MODE>` | `disk` | WAL backend: `disk` or `s3`. Same as `WAL_STORAGE`. |
 
 See [CLI overview](/cli/overview) for the other global flags.
 
@@ -67,7 +67,6 @@ skipprd metadata show --pipeline rides
 |---|---|---|
 | Panics with `listing table: Internal("No schema provided.")` and exits `101` | There are no Parquet files in the output folder. This is normal for destinations that write elsewhere (warehouses, S3, Iceberg). | Use `skipprd metadata show` to see the discovered schema, or query the data with `skipprd query`. |
 | `error: the following required arguments were not provided`, followed by `--pipeline <PIPELINE>` | `schema` needs `--pipeline` on the command line. | Pass `--pipeline <name>`. |
-| `WAL_STORAGE=clustered does not support schema` | `schema` does not run in clustered mode. | Run it without `--wal-storage clustered`. |
 
 ## Next steps
 

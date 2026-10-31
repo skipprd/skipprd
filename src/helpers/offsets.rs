@@ -208,19 +208,17 @@ impl Offsets {
     }
 
     pub fn init(config: &Config) -> Result<Offsets, OffsetsError> {
-        let clustered = matches!(
-            config.get_wal_storage(),
-            crate::helpers::wal_storage::WalStorage::Clustered
-        );
         let remote_kind = crate::pipeline_backend::configured_kind(config)
             .map_err(OffsetsError::AlreadyOpenError)?;
-        let use_remote = clustered || remote_kind.is_clustered_control_plane();
+        let use_remote = matches!(
+            remote_kind,
+            crate::helpers::wal_storage::SkipprStoreKind::DynamoDb
+        );
         if use_remote {
             #[cfg(feature = "offset-store-dynamodb")]
             {
                 let warn_without_s3_wal = match config.get_wal_storage() {
-                    crate::helpers::wal_storage::WalStorage::S3
-                    | crate::helpers::wal_storage::WalStorage::Clustered => false,
+                    crate::helpers::wal_storage::WalStorage::S3 => false,
                     crate::helpers::wal_storage::WalStorage::Disk => true,
                 };
                 let remote: Arc<dyn OffsetStore> = match remote_kind {
@@ -234,7 +232,7 @@ impl Offsets {
                     ),
                     crate::helpers::wal_storage::SkipprStoreKind::Sled => {
                         return Err(OffsetsError::AlreadyOpenError(
-                            "clustered offsets require dynamodb".into(),
+                            "skippr.store.type=dynamodb is required for remote offsets".into(),
                         ));
                     }
                 };
@@ -247,7 +245,7 @@ impl Offsets {
             #[cfg(not(feature = "offset-store-dynamodb"))]
             {
                 return Err(OffsetsError::AlreadyOpenError(
-                    "clustered offsets require --features offset-store-dynamodb".into(),
+                    "skippr.store.type=dynamodb requires --features offset-store-dynamodb".into(),
                 ));
             }
         }
@@ -598,14 +596,6 @@ impl Offsets {
             "offset flush requires an installed store".into(),
         ))
     }
-    pub fn open_sled_lease_store(&self) -> Result<crate::store::SledLeaseStore, String> {
-        let local = self
-            .local
-            .as_ref()
-            .ok_or_else(|| "sled pipeline lease requires a local offset database".to_string())?;
-        crate::store::SledLeaseStore::open(&local.db)
-    }
-
     pub fn open_sled_wal_catalog(
         &self,
         fence: skippr_wal_catalog::CatalogFence,

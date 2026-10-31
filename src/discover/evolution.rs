@@ -1,8 +1,8 @@
 use crate::discover::PipelineMetadata;
-use crate::discover::{AnalyseSchema, LAST_SUCCESSFUL_EVOLUTION, Metadata, SkipprDataType};
+use crate::discover::{AnalyseSchema, Metadata, SkipprDataType, LAST_SUCCESSFUL_EVOLUTION};
 use crate::helpers::configuration::Config;
 use crate::ingest::fast_ingest::fast_set_value;
-use crate::ingest::ingest::{ResolvedFieldValue, discover_ingest};
+use crate::ingest::ingest::{discover_ingest, ResolvedFieldValue};
 use arrow::error::ArrowError;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::value::Value;

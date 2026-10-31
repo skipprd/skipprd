@@ -1,4 +1,3 @@
-use crate::clock::MonoInstant;
 use crate::error::PathError;
 use crate::paths::validate_path_component;
 use std::fmt;
@@ -57,66 +56,6 @@ impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct HostId(String);
-
-impl HostId {
-    pub fn new(raw: impl Into<String>) -> Result<Self, PathError> {
-        let value = raw.into();
-        if value.trim().is_empty() {
-            return Err(PathError::InvalidComponent(
-                "host id must not be empty".into(),
-            ));
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ClusterId(String);
-
-impl ClusterId {
-    pub fn new(raw: impl Into<String>) -> Result<Self, PathError> {
-        let value = raw.into();
-        validate_path_component(&value)?;
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn membership_pk(&self) -> String {
-        format!("cluster#{}", self.0)
-    }
-
-    pub fn hash_hex(&self) -> String {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(self.0.as_bytes());
-        hex_lower(&digest)
-    }
-}
-
-impl fmt::Display for ClusterId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -209,55 +148,15 @@ impl SegmentId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LeaseObservation {
-    pub owner: NodeId,
-    pub epoch: LeaseEpoch,
-    pub heartbeat: u64,
-    pub released: bool,
-    pub initialized: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct LeaseSession {
-    pub owner: NodeId,
-    pub epoch: LeaseEpoch,
-    pub heartbeat: u64,
-    pub initialized: bool,
-    pub local_deadline: MonoInstant,
-}
-
-impl LeaseSession {
-    pub fn from_observation(observation: LeaseObservation, local_deadline: MonoInstant) -> Self {
-        Self {
-            owner: observation.owner,
-            epoch: observation.epoch,
-            heartbeat: observation.heartbeat,
-            initialized: observation.initialized,
-            local_deadline,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn cluster_id_membership_pk_is_not_tenant_scoped() {
-        let id = ClusterId::new("lake-a").unwrap();
-        assert_eq!(id.membership_pk(), "cluster#lake-a");
-        assert_ne!(id.hash_hex(), ClusterId::new("lake-b").unwrap().hash_hex());
-    }
-
-    #[test]
-    fn pipeline_key_does_not_encode_membership() {
+    fn pipeline_key_does_not_encode_cluster_membership() {
         let key = PipelineKey::new("acme", "prod", "events").unwrap();
         assert_eq!(key.dynamo_pk(), "acme#prod#events");
-        assert_ne!(
-            key.dynamo_pk(),
-            ClusterId::new("acme").unwrap().membership_pk()
-        );
+        assert!(!key.dynamo_pk().starts_with("cluster#"));
         assert!(!key.dynamo_pk().ends_with("#cluster"));
     }
 

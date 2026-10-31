@@ -13,7 +13,6 @@ pub async fn wal_startup(
     gc_orphans: bool,
 ) -> Result<(), DurableError> {
     let started = std::time::Instant::now();
-    let _ = handle.guard().require_recovery_epoch()?;
     import_if_needed(handle, config)?;
     crate::buffer::ingest_buffer::Buffers::hydrate_from_catalog(handle, config);
     let acked = handle.apply_acked_in_memory()?;
@@ -60,7 +59,7 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
     use serial_test::serial;
-    use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SegmentId, SystemClock};
+    use skippr_lease::{PipelineKey, PipelinePaths, SegmentId};
     use skippr_wal_catalog::{CatalogKey, CatalogRow, CompactionId, CompactionState};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -69,13 +68,12 @@ mod tests {
     fn test_handle(dir: &std::path::Path) -> Arc<PipelineWalHandle> {
         let key = PipelineKey::new("t", "w", "p").unwrap();
         let paths = PipelinePaths::legacy_disk(dir);
-        let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let db = sled::open(dir.join("offsets")).unwrap();
         let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
             Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
-        PipelineWalHandle::new(key, paths, guard, catalog, offsets)
+        PipelineWalHandle::new(key, paths, catalog, offsets, fence)
     }
 
     fn one_batch() -> (

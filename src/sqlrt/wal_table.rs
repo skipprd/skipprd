@@ -302,14 +302,7 @@ impl TableProvider for WalTableProvider {
         pinned.emit_query_pin(&self.namespace);
         Ok(Arc::new(WalScanExec::new(
             schema,
-            match pinned.wal {
-                crate::sqlrt::read_boundary::PinnedWal::Local(live) => live,
-                crate::sqlrt::read_boundary::PinnedWal::Clustered(_) => {
-                    return Err(DataFusionError::Plan(
-                        "WalTableProvider pin must be PinnedWal::Local".into(),
-                    ));
-                }
-            },
+            pinned.wal,
             limit,
             self.include_cdc_sidecar,
             self.namespace.clone(),
@@ -450,7 +443,7 @@ mod tests {
     use super::*;
     use crate::sqlrt::stream_plan::StreamingBatchesExec;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
-    use skippr_lease::{PipelineKey, SegmentId};
+    use skippr_lease::{PipelineKey, PipelinePaths, SegmentId};
 
     #[test]
     fn project_batch_empty_schema_keeps_row_count() {
@@ -587,7 +580,6 @@ mod tests {
         };
         use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
         use arrow::array::StringArray;
-        use skippr_lease::{LeaseGuard, PipelinePaths, SystemClock};
         use std::collections::HashMap;
         use std::sync::Arc as StdArc;
 
@@ -595,14 +587,12 @@ mod tests {
         let key = PipelineKey::new("t", "w", "wal-pin-plan").unwrap();
         let dir = tempfile::tempdir().unwrap();
         let paths = PipelinePaths::legacy_disk(dir.path());
-        let clock = StdArc::new(SystemClock::new());
-        let guard = LeaseGuard::single_node(key.clone(), clock);
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let db = sled::open(dir.path().join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
         let offsets: StdArc<dyn OffsetStore> = StdArc::new(SledOffsetStore::new(tree));
-        let handle = PipelineWalHandle::new(key.clone(), paths.clone(), guard, catalog, offsets);
+        let handle = PipelineWalHandle::new(key.clone(), paths.clone(), catalog, offsets, fence);
         install_wal_handle(handle.clone());
         let part = PartitionKey {
             sink_ref: "data_sinks.iceberg".into(),
@@ -688,7 +678,6 @@ mod tests {
         };
         use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
         use arrow::array::StringArray;
-        use skippr_lease::{LeaseGuard, PipelinePaths, SystemClock};
         use std::collections::HashMap;
         use std::sync::Arc as StdArc;
 
@@ -696,14 +685,12 @@ mod tests {
         let key = PipelineKey::new("t", "w", "wal-reclaim").unwrap();
         let dir = tempfile::tempdir().unwrap();
         let paths = PipelinePaths::legacy_disk(dir.path());
-        let clock = StdArc::new(SystemClock::new());
-        let guard = LeaseGuard::single_node(key.clone(), clock);
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let db = sled::open(dir.path().join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
         let offsets: StdArc<dyn OffsetStore> = StdArc::new(SledOffsetStore::new(tree));
-        let handle = PipelineWalHandle::new(key.clone(), paths.clone(), guard, catalog, offsets);
+        let handle = PipelineWalHandle::new(key.clone(), paths.clone(), catalog, offsets, fence);
         install_wal_handle(handle.clone());
         let mut batches = HashMap::new();
         let part = PartitionKey {
@@ -880,18 +867,15 @@ mod tests {
     ) -> Arc<crate::buffer::wal_handle::PipelineWalHandle> {
         use crate::buffer::wal_handle::{memory_catalog_for_test, PipelineWalHandle};
         use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
-        use skippr_lease::{LeaseGuard, PipelinePaths, SystemClock};
         use std::sync::Arc as StdArc;
 
         let paths = PipelinePaths::legacy_disk(dir);
-        let clock = StdArc::new(SystemClock::new());
-        let guard = LeaseGuard::single_node(key.clone(), clock);
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let db = sled::open(dir.join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
         let offsets: StdArc<dyn OffsetStore> = StdArc::new(SledOffsetStore::new(tree));
-        PipelineWalHandle::new(key.clone(), paths, guard, catalog, offsets)
+        PipelineWalHandle::new(key.clone(), paths, catalog, offsets, fence)
     }
 
     #[tokio::test]

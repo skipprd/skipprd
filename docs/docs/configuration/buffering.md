@@ -1,6 +1,6 @@
 ---
 title: WAL and buffering
-description: Keep synced data safe across crashes. Choose a local disk, S3, or a multi-node write-ahead log, and decide how large a batch Skipprd holds in memory.
+description: Keep synced data safe across crashes. Choose a local disk or S3 write-ahead log, and decide how large a batch Skipprd holds in memory.
 ---
 
 # WAL and buffering
@@ -17,7 +17,6 @@ Set `WAL_STORAGE`. There is no `skippr.yml` field for this — it is an environm
 |---|---|---|
 | `disk` (default) | `DATA_DIR` on this machine | A long-lived host with a persistent disk |
 | `s3` | `SKIPPR_WAL_S3_BUCKET`, or `SKIPPR_S3_BUCKET` if that is unset | Containers, Lambda, or any host you can throw away |
-| `clustered` | Local disk plus a second live process, with resume state in [SkipprStore](/configuration/skippr-store) | More than one machine must survive a node loss |
 
 ### Local disk
 
@@ -40,16 +39,6 @@ skipprd sync --pipeline payments --once
 ```
 
 Give the WAL its own bucket so pipeline state is not mixed with lake files. Pair S3 WAL with DynamoDB so resume positions survive when the machine is gone. See [State store](/configuration/skippr-store).
-
-### More than one node
-
-`WAL_STORAGE=clustered` keeps two durable copies and stores leases and resume positions in SkipprStore. You need three live `skipprd sync` processes to keep writing after one node fails. `sync --once` and `discover` are rejected in this mode — `sync` is the long-lived node. `skipprd query` never takes a write lock.
-
-```bash
-export WAL_STORAGE=clustered
-export SKIPPR_STORE_NAME=acme-skipprd-offsets
-skipprd sync --pipeline payments
-```
 
 ## How large a batch is
 
@@ -79,7 +68,6 @@ These optional overrides rarely need a change:
 |---|---|
 | `disk` | `DATA_DIR` (payloads and, with sled, the WAL catalog) and `skippr.yml` |
 | `s3` | The WAL bucket and the SkipprStore table |
-| `clustered` | The SkipprStore table and the disks on the live nodes |
 
 If the WAL is gone, Skipprd re-reads the source. Append-only destinations can then duplicate rows.
 

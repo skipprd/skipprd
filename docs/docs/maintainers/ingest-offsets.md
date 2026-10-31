@@ -8,9 +8,9 @@ Skipprd treats each source partition as an **immutable whole object** (S3 key, l
 - After a WAL segment for a partition is committed, ingest marks the offset **`Closed=1`** and sets **`Position`** to the highest line/LSN seen in that flush.
 - Re-running a pipeline against the same immutable object should be a no-op at the source and ingest gate.
 
-## Clustered mode (`WAL_STORAGE=clustered`)
+## Where offsets live
 
-Every backend publishes `Closed=1` / `Position` through `publish_wal_commit` after the catalog row is durable. Disk uses sled; clustered and S3 use the configured SkipprStore. Offsets are not a second WAL authority.
+Every backend publishes `Closed=1` / `Position` through `publish_wal_commit` after the catalog row is durable. Disk uses sled; S3 uses the configured SkipprStore when `skippr.store.type=dynamodb`. Offsets are not a second WAL authority.
 
 ## When `Position` matters
 

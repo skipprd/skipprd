@@ -282,7 +282,7 @@ pub(crate) fn reader_with_live_slice(
         owner: NodeId::generate(),
         epoch: LeaseEpoch::new(1),
     };
-    store.install_lease(fence.owner, fence.epoch);
+    store.set_writer_fence(fence.owner, fence.epoch);
     let segment_id = SegmentId::new(segment).unwrap();
     let mut txn = CatalogTxn::new();
     txn.put(
@@ -437,7 +437,7 @@ mod tests {
     fn live_slices_filters_namespace_and_orders_by_seq_ordinal() {
         let store = MemoryWalCatalog::new();
         let f = fence();
-        store.install_lease(f.owner, f.epoch);
+        store.set_writer_fence(f.owner, f.epoch);
         put_segment(
             &store,
             f,
@@ -459,7 +459,7 @@ mod tests {
     fn live_slices_skips_index_without_segment_row() {
         let store = MemoryWalCatalog::new();
         let f = fence();
-        store.install_lease(f.owner, f.epoch);
+        store.set_writer_fence(f.owner, f.epoch);
         put_segment(&store, f, "live", 1, vec![entry("ns", "p0", 0, 0)]);
         let gone = SegmentId::new("gone").unwrap();
         let mut txn = CatalogTxn::new();
@@ -497,7 +497,7 @@ mod tests {
     fn live_slices_rejects_wrong_typed_index_row() {
         let store = MemoryWalCatalog::new();
         let f = fence();
-        store.install_lease(f.owner, f.epoch);
+        store.set_writer_fence(f.owner, f.epoch);
         let segment_id = SegmentId::new("bad").unwrap();
         let mut txn = CatalogTxn::new();
         txn.put(
@@ -532,7 +532,7 @@ mod tests {
     fn live_namespaces_come_from_index_rows() {
         let store = MemoryWalCatalog::new();
         let f = fence();
-        store.install_lease(f.owner, f.epoch);
+        store.set_writer_fence(f.owner, f.epoch);
         put_segment(
             &store,
             f,
@@ -549,7 +549,7 @@ mod tests {
     fn live_slices_does_not_stat_payload() {
         let store = MemoryWalCatalog::new();
         let f = fence();
-        store.install_lease(f.owner, f.epoch);
+        store.set_writer_fence(f.owner, f.epoch);
         put_segment(&store, f, "ghost", 1, vec![entry("ns", "p0", 0, 0)]);
         let live = reader(store).live_slices("ns").unwrap();
         assert_eq!(live.len(), 1);
@@ -566,7 +566,7 @@ mod tests {
     fn pinned_slice_is_exact_index_and_segment_get() {
         let store = MemoryWalCatalog::new();
         let f = fence();
-        store.install_lease(f.owner, f.epoch);
+        store.set_writer_fence(f.owner, f.epoch);
         put_segment(&store, f, "seg-a", 4, vec![entry("ns", "p0", 0, 10)]);
         let reader = reader(store);
         let slice = reader.pinned_slice("seg-a", 10).unwrap();

@@ -9,8 +9,8 @@ This repository is a Cargo workspace with a single host binary and many separate
 | `python/` | PyO3 `skippr` module. Maturin crate wrapping `Session`. Own semver in `pyproject.toml` / `python/Cargo.toml`, not the skipprd git tag. CI always builds and tests the wheel via `scripts/test-python.sh` on Skippr Cloud runners. PyPI publish is GitHub OIDC, only when that Python semver is new. |
 | `crates/skippr-core/` | Shared core logic used by the host and plugin crates. |
 | `crates/skippr-query-plan/` | `FlightSqlExec` physical node and SkipprPhysicalCodec for datafusion-distributed. |
-| `src/cluster/` | Clustered WAL replica, lease scheduler, gossip, promotion, WAL head picker. |
-| `src/query_flight/` | Arrow Flight SQL 59.2 on `flight_addr`, live WAL selector, in-process QueryRuntime. |
+| `src/query_flight/` | Arrow Flight SQL 59.2, live WAL selector, in-process QueryRuntime. |
+| `src/sqlrt/` | Local Iceberg∪WAL query planner, Iceberg lake catalog, SkipprLake REST. |
 | `plugins/data_source/*/` | Runtime source plugin crates. Each crate owns its connector implementation and Cargo metadata. |
 | `plugins/data_sink/*/` | Runtime sink plugin crates. Each crate owns its connector implementation and Cargo metadata. |
 | `plugins/schema_sink/*/` | Runtime schema sink plugin crates. |
@@ -39,16 +39,6 @@ The plugin catalog is Cargo-driven:
 - generated manifests and binaries are published under versioned paths on `install.skippr.io`
 
 There are no committed runtime manifest templates, and there is no aggregate `skippr-plugin-runtime-link` crate anymore.
-
-## Multi-node HLA
-
-Normative clustered-query design:
-
-- [hla-distributed-query-iceberg-catalog.md](hla-distributed-query-iceberg-catalog.md) — architecture index
-- [hla-flight-sql-query-runtime.md](hla-flight-sql-query-runtime.md) — Arrow Flight SQL 59.2 and datafusion-distributed (shipped in tree)
-- [hla-implementation-wbs.md](hla-implementation-wbs.md) — work units including WU-7.3 / WU-7.5
-- [hla-observability-otel-console.md](hla-observability-otel-console.md) — OTel lakehouse + SQL/UDFs
-- [hla-observability-implementation-wbs.md](hla-observability-implementation-wbs.md) — observability work units
 
 ## Useful guard rails
 

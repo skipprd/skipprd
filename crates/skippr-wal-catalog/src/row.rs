@@ -36,6 +36,15 @@ pub struct CatalogFence {
     pub epoch: LeaseEpoch,
 }
 
+impl CatalogFence {
+    pub fn local() -> Self {
+        Self {
+            owner: NodeId::single_node(),
+            epoch: LeaseEpoch::SINGLE_NODE,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CommittedOffset {
     pub namespace: String,

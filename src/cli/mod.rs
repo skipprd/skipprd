@@ -22,7 +22,7 @@ pub struct Cli {
     /// Path to skippr.yml / skippr.yaml (also SKIPPR_CONFIG_FILE env)
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
-    /// WAL backend: disk, s3, or clustered (also WAL_STORAGE env)
+    /// WAL backend: disk or s3 (also WAL_STORAGE env)
     #[arg(long, global = true, value_enum)]
     pub wal_storage: Option<WalStorage>,
     /// Dedicated S3 bucket for WAL segments (also SKIPPR_WAL_S3_BUCKET env)

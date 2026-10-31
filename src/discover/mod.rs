@@ -2511,7 +2511,7 @@ mod is_64_int_tests {
 #[cfg(test)]
 mod get_type_bool_tests {
 
-    use crate::discover::{SkipprDataType, get_type};
+    use crate::discover::{get_type, SkipprDataType};
 
     #[test]
     fn test_get_type_int() {
@@ -2650,7 +2650,7 @@ mod valid_timestamps_tests {
         let my_struct = AnalyseSchema { i: 0 };
         assert!(!my_struct.is_valid_timestamp(&mut "abc".to_string()));
         assert!(!my_struct.is_valid_timestamp(&mut "1970-01-01".to_string())); // Non-numeric
-        // Add more non-numeric or malformed cases here
+                                                                               // Add more non-numeric or malformed cases here
     }
 
     #[test]
@@ -2788,7 +2788,7 @@ mod tests {
     use serial_test::serial;
     use std::collections::HashMap;
     #[allow(unused_imports)]
-    use std::fs::{File, OpenOptions, remove_file};
+    use std::fs::{remove_file, File, OpenOptions};
     #[allow(unused_imports)]
     use std::io::{Seek, Write};
 

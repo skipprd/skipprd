@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 
-use aws_sdk_dynamodb::types::{AttributeValue, ConditionCheck, Delete, Put, TransactWriteItem};
+use aws_sdk_dynamodb::types::{AttributeValue, Delete, Put, TransactWriteItem};
 use aws_sdk_dynamodb::Client;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use skippr_lease::{LEASE_ATTR_EPOCH, LEASE_ATTR_OWNER, LEASE_ATTR_RELEASED, LEASE_SK};
 use skippr_wal_catalog::{
     validate_put, CatalogError, CatalogFence, CatalogKey, CatalogOp, CatalogPrefix, CatalogRow,
     CatalogTxn, DeleteCond, PutCond, WalCatalogRead, WalCatalogStore, TXN_MAX_OPS,
@@ -163,12 +162,8 @@ async fn commit_txn(
     ops: &[CatalogOp],
     fence: CatalogFence,
 ) -> Result<(), CatalogError> {
-    let mut items = Vec::with_capacity(ops.len() + 1);
-    items.push(
-        TransactWriteItem::builder()
-            .condition_check(lease_check(table, pk, fence)?)
-            .build(),
-    );
+    let _ = fence;
+    let mut items = Vec::with_capacity(ops.len());
     for op in ops {
         items.push(op_to_item(table, pk, op)?);
     }
@@ -179,27 +174,6 @@ async fn commit_txn(
         .await
         .map_err(map_transact_err)?;
     Ok(())
-}
-
-fn lease_check(table: &str, pk: &str, fence: CatalogFence) -> Result<ConditionCheck, CatalogError> {
-    ConditionCheck::builder()
-        .table_name(table)
-        .key("PK", AttributeValue::S(pk.to_string()))
-        .key("SK", AttributeValue::S(LEASE_SK.to_string()))
-        .condition_expression(format!(
-            "{LEASE_ATTR_OWNER} = :owner AND {LEASE_ATTR_EPOCH} = :epoch AND {LEASE_ATTR_RELEASED} = :false"
-        ))
-        .expression_attribute_values(
-            ":owner",
-            AttributeValue::S(fence.owner.to_string()),
-        )
-        .expression_attribute_values(
-            ":epoch",
-            AttributeValue::N(fence.epoch.get().to_string()),
-        )
-        .expression_attribute_values(":false", AttributeValue::Bool(false))
-        .build()
-        .map_err(|err| CatalogError::Io(err.to_string()))
 }
 
 fn op_to_item(table: &str, pk: &str, op: &CatalogOp) -> Result<TransactWriteItem, CatalogError> {

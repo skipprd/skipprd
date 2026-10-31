@@ -16,5 +16,4 @@ futures.workspace = true
 prost = "0.14"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
-tonic = { version = "0.14.1", default-features = false, features = ["transport", "codegen", "tls-ring"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tonic = { version = "0.14.1", default-features = false, features = ["transport", "codegen"] }

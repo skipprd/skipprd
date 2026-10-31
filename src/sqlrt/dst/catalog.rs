@@ -1,4 +1,5 @@
-use skippr_lease::{LeaseEpoch, NodeId};
+use crate::buffer::wal_handle::memory_catalog_for_test;
+use skippr_lease::{LeaseEpoch, NodeId, PipelineKey, PipelinePaths};
 use skippr_wal_catalog::{
     CatalogError, CatalogFence, MemoryWalCatalog, WalCatalogRead, WalCatalogStore,
 };
@@ -17,7 +18,7 @@ fn c_putcond_not_exists_same_sha() {
     };
     let store = MemoryWalCatalog::new();
     let f = fence();
-    store.install_lease(f.owner, f.epoch);
+    store.set_writer_fence(f.owner, f.epoch);
     let key = CatalogKey::Segment(skippr_lease::SegmentId::new("seg-sha-once").unwrap());
     let row = occ_segment("seg-sha-once", 0);
     let mut create = CatalogTxn::new();
@@ -51,8 +52,8 @@ fn c_putcond_not_exists_same_sha() {
 fn c_stale_fence_rejected() {
     let store = MemoryWalCatalog::new();
     let f = fence();
-    store.install_lease(f.owner, f.epoch);
-    store.release_lease();
+    store.set_writer_fence(f.owner, f.epoch);
+    store.revoke_writer_fence();
     let mut txn = skippr_wal_catalog::CatalogTxn::new();
     txn.put(
         skippr_wal_catalog::CatalogKey::Format,
@@ -84,7 +85,7 @@ fn c_occ_concurrent_reclaim() {
     };
     let store = MemoryWalCatalog::new();
     let f = fence();
-    store.install_lease(f.owner, f.epoch);
+    store.set_writer_fence(f.owner, f.epoch);
     let key = CatalogKey::Segment(skippr_lease::SegmentId::new("seg-occ").unwrap());
     let mut create = CatalogTxn::new();
     create
@@ -126,7 +127,7 @@ fn c_pagination_and_delete_prefix() {
     };
     let store = MemoryWalCatalog::new();
     let f = fence();
-    store.install_lease(f.owner, f.epoch);
+    store.set_writer_fence(f.owner, f.epoch);
     for i in 0..12u32 {
         let id = CompactionId::new(format!("cmp-{i:02}")).unwrap();
         let mut txn = CatalogTxn::new();
@@ -159,7 +160,7 @@ fn c_legacy_slice_put_rejected() {
     use skippr_wal_catalog::{CatalogError, CatalogKey, CatalogTxn, LegacySliceRow, PutCond};
     let store = MemoryWalCatalog::new();
     let f = fence();
-    store.install_lease(f.owner, f.epoch);
+    store.set_writer_fence(f.owner, f.epoch);
     let key = CatalogKey::LegacySlice {
         segment_id: SegmentId::new("legacy-seg").unwrap(),
         ordinal: 0,
@@ -190,22 +191,19 @@ fn c_legacy_slice_put_rejected() {
 
 #[test]
 fn c_import_leftover_once() {
-    use crate::buffer::wal_handle::{catalog_fence_from_guard, memory_catalog_for_test};
     use crate::helpers::offset_store::SledOffsetStore;
-    use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SystemClock};
     use skippr_wal_catalog::{CatalogKey, FormatPhase};
     use std::sync::Arc;
     let dir = tempfile::tempdir().unwrap();
     let key = PipelineKey::new("t", "w", "p").unwrap();
     let paths = PipelinePaths::legacy_disk(dir.path());
-    let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-    let fence = catalog_fence_from_guard(&guard).unwrap();
+    let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let db = sled::open(dir.path().join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
         Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
     let handle =
-        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, guard, catalog, offsets);
+        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     std::fs::create_dir_all(&handle.paths().durable).unwrap();
     std::fs::write(handle.paths().durable.join("mutation.log"), b"legacy").unwrap();
     crate::buffer::wal_catalog_import::import_if_needed(
@@ -269,7 +267,7 @@ fn c_putcond_version_mismatch() {
     };
     let store = MemoryWalCatalog::new();
     let f = fence();
-    store.install_lease(f.owner, f.epoch);
+    store.set_writer_fence(f.owner, f.epoch);
     let key = CatalogKey::Segment(skippr_lease::SegmentId::new("seg-ver").unwrap());
     let mut create = CatalogTxn::new();
     create
@@ -298,7 +296,7 @@ fn c_deletecond_version_mismatch() {
     };
     let store = MemoryWalCatalog::new();
     let f = fence();
-    store.install_lease(f.owner, f.epoch);
+    store.set_writer_fence(f.owner, f.epoch);
     let key = CatalogKey::Segment(skippr_lease::SegmentId::new("seg-del").unwrap());
     let mut create = CatalogTxn::new();
     create
@@ -319,9 +317,7 @@ fn c_deletecond_version_mismatch() {
 
 #[test]
 fn c_format_imported_resume() {
-    use crate::buffer::wal_handle::{catalog_fence_from_guard, memory_catalog_for_test};
     use crate::helpers::offset_store::SledOffsetStore;
-    use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SystemClock};
     use skippr_wal_catalog::{
         CatalogKey, CatalogRow, CatalogTxn, FormatPhase, FormatRow, PutCond, FORMAT_VERSION,
     };
@@ -329,14 +325,13 @@ fn c_format_imported_resume() {
     let dir = tempfile::tempdir().unwrap();
     let key = PipelineKey::new("t", "w", "imported").unwrap();
     let paths = PipelinePaths::legacy_disk(dir.path());
-    let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-    let fence = catalog_fence_from_guard(&guard).unwrap();
+    let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let db = sled::open(dir.path().join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
         Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
     let handle =
-        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, guard, catalog, offsets);
+        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     let mut txn = CatalogTxn::new();
     txn.put(
         CatalogKey::Format,
@@ -368,7 +363,7 @@ fn c_pending_to_sent() {
     };
     let store = MemoryWalCatalog::new();
     let f = fence();
-    store.install_lease(f.owner, f.epoch);
+    store.set_writer_fence(f.owner, f.epoch);
     let id = CompactionId::new("c1").unwrap();
     let mut create = CatalogTxn::new();
     create
@@ -405,7 +400,7 @@ fn c_pending_to_sent() {
 
 #[test]
 fn c_sent_vs_acked() {
-    use crate::cluster::failpoint::FailpointName;
+    use crate::failpoint::FailpointName;
     use crate::plugins::cdc::MutationKind;
     use crate::sqlrt::dst::{compaction_state, run, Op, UserRow, WalEvent};
     use skippr_wal_catalog::CompactionState;
@@ -446,7 +441,7 @@ fn c_sent_vs_acked() {
 
 #[test]
 fn c_after_compaction_sink_leaves_sent() {
-    use crate::cluster::failpoint::FailpointName;
+    use crate::failpoint::FailpointName;
     use crate::plugins::cdc::MutationKind;
     use crate::sqlrt::dst::{compaction_state, run, Op, UserRow, WalEvent};
     use skippr_wal_catalog::CompactionState;
@@ -470,27 +465,24 @@ fn c_after_compaction_sink_leaves_sent() {
     assert_ne!(compaction_state(&world, 1), Some(CompactionState::Acked));
 }
 
-fn leased_pipeline(
+fn wal_handle(
     dir: &std::path::Path,
     pipeline: &str,
 ) -> (
     std::sync::Arc<crate::buffer::wal_handle::PipelineWalHandle>,
     CatalogFence,
 ) {
-    use crate::buffer::wal_handle::{catalog_fence_from_guard, memory_catalog_for_test};
     use crate::helpers::offset_store::SledOffsetStore;
-    use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SystemClock};
     use std::sync::Arc;
     let key = PipelineKey::new("t", "w", pipeline).unwrap();
     let paths = PipelinePaths::legacy_disk(dir);
-    let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-    let fence = catalog_fence_from_guard(&guard).unwrap();
+    let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let db = sled::open(dir.join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
         Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
     let handle =
-        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, guard, catalog, offsets);
+        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     (handle, fence)
 }
 
@@ -505,7 +497,7 @@ fn c_sent_hydrate() {
         CatalogKey, CatalogRow, CatalogTxn, CompactionId, CompactionRow, CompactionState, PutCond,
     };
     let dir = tempfile::tempdir().unwrap();
-    let (handle, fence) = leased_pipeline(dir.path(), "sent-hydrate");
+    let (handle, fence) = wal_handle(dir.path(), "sent-hydrate");
     let body = serde_json::to_vec(
         &CompactionTransaction::new(
             "sink.a".into(),
@@ -552,7 +544,7 @@ fn c_redo_acked() {
         CatalogKey, CatalogRow, CatalogTxn, CompactionId, CompactionRow, CompactionState, PutCond,
     };
     let dir = tempfile::tempdir().unwrap();
-    let (handle, fence) = leased_pipeline(dir.path(), "redo-acked");
+    let (handle, fence) = wal_handle(dir.path(), "redo-acked");
     let id = CompactionId::new("acked-1").unwrap();
     let mut txn = CatalogTxn::new();
     txn.put(
@@ -596,7 +588,7 @@ fn c_persist_matching_sha_skip() {
     };
     let store = MemoryWalCatalog::new();
     let f = fence();
-    store.install_lease(f.owner, f.epoch);
+    store.set_writer_fence(f.owner, f.epoch);
     let key = CatalogKey::Segment(skippr_lease::SegmentId::new("seg-sha").unwrap());
     let row = occ_segment("seg-sha", 0);
     let mut create = CatalogTxn::new();
@@ -637,7 +629,7 @@ fn c_hydrate_without_segf() {
     use crate::buffer::ingest_buffer::Buffers;
     use skippr_wal_catalog::{CatalogKey, CatalogRow, CatalogTxn, PutCond};
     let dir = tempfile::tempdir().unwrap();
-    let (handle, fence) = leased_pipeline(dir.path(), "hydrate-junk");
+    let (handle, fence) = wal_handle(dir.path(), "hydrate-junk");
     std::fs::create_dir_all(handle.paths().segs.as_path()).unwrap();
     let path = handle.paths().segs.join("junk.seg");
     std::fs::write(&path, b"not-segf").unwrap();

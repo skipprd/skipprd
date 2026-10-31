@@ -53,12 +53,6 @@ static WAL_WRITER_ACK_LATENCY_NS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static WAL_WRITER_ACK_COUNT: AtomicU64 = AtomicU64::new(0);
 static REQUEST_ACKS: Lazy<Mutex<HashMap<u64, RequestAckState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-fn ingest_lease_refuses_snapshots() -> bool {
-    crate::buffer::wal_store::ingest_wal_handle()
-        .map(|handle| handle.guard().require_active_epoch().is_err())
-        .unwrap_or(false)
-}
-
 const ACK_DELAY_MIN_MS: u64 = 100;
 const ACK_DELAY_COLD_START_MS: u64 = 250;
 const ACK_DELAY_MAX_MS: u64 = 500;
@@ -369,13 +363,6 @@ fn try_start_persist(
     let Some(offsets_db) = pending_offsets.clone() else {
         return;
     };
-    if ingest_lease_refuses_snapshots() {
-        fail_pending_acks(
-            pending_acks,
-            "ingest lease has no active epoch; refusing further snapshots",
-        );
-        return;
-    }
     let acked = std::mem::take(pending_acks);
     info!(
         pending = acked.len(),

@@ -43,7 +43,7 @@ mod tests {
     fn memory_conformance() {
         let store = MemoryWalCatalog::new();
         let f = fence();
-        store.install_lease(f.owner, f.epoch);
+        store.set_writer_fence(f.owner, f.epoch);
         conformance::assert_wal_catalog_conformance(&store, f);
     }
 
@@ -51,8 +51,8 @@ mod tests {
     fn memory_released_lease_is_fenced() {
         let store = MemoryWalCatalog::new();
         let f = fence();
-        store.install_lease(f.owner, f.epoch);
-        store.release_lease();
+        store.set_writer_fence(f.owner, f.epoch);
+        store.revoke_writer_fence();
         let mut txn = CatalogTxn::new();
         txn.put(
             CatalogKey::Format,
@@ -71,7 +71,7 @@ mod tests {
     fn reset_catalog_drops_seq_and_format() {
         let store = MemoryWalCatalog::new();
         let f = fence();
-        store.install_lease(f.owner, f.epoch);
+        store.set_writer_fence(f.owner, f.epoch);
         let mut txn = CatalogTxn::new();
         txn.put(
             CatalogKey::Format,

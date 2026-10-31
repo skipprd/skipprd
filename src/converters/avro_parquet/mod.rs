@@ -3,7 +3,6 @@ use std::collections::HashMap;
 pub struct AvroSchema {
 }
 
-
 impl AvroSchema {
 
     const INT_MIN_VALUE: i32 = -2147483648;
@@ -49,7 +48,6 @@ impl AvroSchema {
     pub fn is_valid_type(&self, type_string: &str) -> bool {
         self.is_primitive_type(type_string) || self.is_named_type(type_string)
     }
-
 
     pub fn parse(json: &str) -> Result<AvroSchema, AvroSchemaParseException> {
         let schemata = AvroNamedSchemata::new();

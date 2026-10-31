@@ -40,7 +40,7 @@ These flags work with any command:
 |---|---|---|
 | `--config <path>` | The config file to read | Same as `SKIPPR_CONFIG_FILE`. |
 | `--log [level]` | Log output to stderr | `trace`, `debug`, `info` (default), `warn`, or `error`. See [Logging](/operations/logging). |
-| `--wal-storage <disk\|s3\|clustered>` | WAL backend | Overrides `WAL_STORAGE`. See [WAL and buffering](/configuration/buffering). |
+| `--wal-storage <disk\|s3>` | WAL backend | Overrides `WAL_STORAGE`. See [WAL and buffering](/configuration/buffering). |
 | `--wal-s3-bucket <bucket>` | WAL bucket for `s3` | Overrides `SKIPPR_WAL_S3_BUCKET`. |
 | `--store-type <sled\|dynamodb>` | State store | Overrides `SKIPPR_STORE_TYPE`. See [State store](/configuration/skippr-store). |
 | `--store-name <table>` | State store table | Overrides `SKIPPR_STORE_NAME`. |
@@ -80,7 +80,7 @@ This works only if `skippr.yml` does not set `skippr.store` or `skippr.wal_s3_bu
 | Pick and wire a source | [Sources](/configuration/input) |
 | Pick and wire a destination, schema sink, or deadletter sink | [Destinations](/configuration/output) |
 | Split, partition, flatten, or sort records | [Transforms](/configuration/transforms) |
-| Choose disk, S3, or clustered WAL | [WAL and buffering](/configuration/buffering) |
+| Choose disk or S3 WAL | [WAL and buffering](/configuration/buffering) |
 | Keep sync progress in DynamoDB | [State store](/configuration/skippr-store) |
 | Look up every other engine setting | [Advanced settings](/configuration/advanced) |
 

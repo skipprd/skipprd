@@ -77,24 +77,10 @@ mod tests {
             "engine.rs must not construct a second SessionContext factory"
         );
         let tables = include_str!("tables.rs");
-        let clustered = tables
-            .split("pub async fn plan_clustered_select")
-            .nth(1)
-            .unwrap()
-            .split("pub async fn execute_clustered_select")
-            .next()
-            .unwrap();
+        let tables = tables.split("#[cfg(test)]").next().unwrap();
         assert!(
-            clustered.contains("ensure_started"),
-            "plan_clustered_select must start QueryRuntime"
-        );
-        assert!(
-            clustered.contains("request_context()"),
-            "plan_clustered_select must use a per-query request_context"
-        );
-        assert!(
-            !clustered.contains("deregister_table"),
-            "per-query request_context must not mutate the shared QueryRuntime catalog"
+            !tables.contains("plan_clustered_select"),
+            "clustered query planning is deleted"
         );
         let api = include_str!("../api.rs");
         let collect = api

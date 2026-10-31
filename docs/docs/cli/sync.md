@@ -33,7 +33,7 @@ skipprd sync [--pipeline <name>] [--once] [--output progress|text|json] [--log [
 | `--output <MODE>` | `progress` | `progress` shows a live progress display on a terminal. `text` prints one plain line per event. `json` prints one JSON object per line. |
 | `--config <PATH>` | `./skippr.yml` | Config file to read. |
 | `--log [LEVEL]` | Off | Print logs to stderr. `--log` alone means `info`. Turning on logs hides the progress display. |
-| `--wal-storage <MODE>` | `disk` | WAL backend: `disk`, `s3`, or `clustered`. `clustered` does not support `--once`. See [WAL and buffering](/configuration/buffering). |
+| `--wal-storage <MODE>` | `disk` | WAL backend: `disk` or `s3`. Same as `WAL_STORAGE`. See [WAL and buffering](/configuration/buffering). |
 | `--wal-s3-bucket <BUCKET>` | State bucket | WAL bucket for `--wal-storage s3`, when `skippr.yml` does not set `skippr.wal_s3_bucket`. |
 | `--store-type <TYPE>` | `sled` | State store for offsets and leases, when `skippr.yml` does not set `skippr.store.type`. See [State store](/configuration/skippr-store). |
 | `--store-name <NAME>` | None | Table name for the `dynamodb` state store. |
@@ -53,7 +53,7 @@ These live on the pipeline in `skippr.yml` (see [Pipelines](/configuration/pipel
 
 1. Loads the pipeline's saved schema. If there is none yet, it runs [discover](/cli/discover) first. Pipelines with `type: copy` skip this step: copy has no schema, and `skipprd discover` fails closed.
 2. Skips the pipeline if it was disabled with `DISABLE PIPELINE`.
-3. Takes the pipeline's writer lease, so only one `sync` writes a pipeline at a time.
+3. Opens the pipeline's Skippr Store catalog. A second `sync` of the same pipeline fails closed.
 4. Reads the source in batches and buffers each batch in the WAL.
 5. Writes buffered batches to the destination, if the pipeline has one, and publishes schema changes to the schema sink.
 6. With `--once`, drains everything still buffered, then exits.
@@ -138,8 +138,7 @@ skipprd --config /etc/skipprd/skippr.yml sync --pipeline bikehire --once
 | Exits `1` with little or no output | The error is written to the logs. | Rerun with `--log`, or read `logs/skipprd.<date>.log` (in `DATA_DIR` if set, otherwise the current directory). |
 | `sync --once` without `--pipeline` finishes but syncs nothing | Every pipeline ran within its `sync_frequency_seconds`. | Pass `--pipeline <name>` to run one pipeline now, or lower `sync_frequency_seconds`. |
 | `[skippr] config failed: ... that environment variable is not set` | A `${NAME}` secret reference has no value. | `export NAME=...`, or put it in a `.env` file next to `skippr.yml`. |
-| `pipeline writer lease unavailable` | Another `sync` is already writing this pipeline. | Let the other run finish, or stop it. Do not run two syncs of the same pipeline at once. |
-| `WAL_STORAGE=clustered does not support sync --once` | Clustered mode is for long-running syncs. | Drop `--once`, or use `--wal-storage disk`. |
+| Catalog locked / fenced | Another `sync` is already writing this pipeline. | Let the other run finish, or stop it. Do not run two syncs of the same pipeline at once. |
 | Logs show `Pipeline '<name>' disabled, skipping.` | The pipeline was disabled. | Run `skipprd query --sql "ENABLE PIPELINE <name>"`. |
 | No data in the destination after a successful run | The pipeline has no `data_sink`, so data stays in the WAL. | Add a destination with [`skipprd connect data-sink`](/cli/connect), or query the WAL with `skipprd query`. |
 

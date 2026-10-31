@@ -249,22 +249,13 @@ async fn cleanup_discover_ingest_artifacts(
     }
 
     match crate::pipeline_backend::configured_kind(config) {
-        Ok(crate::helpers::wal_storage::SkipprStoreKind::Sled) => {
-            let fence = skippr_wal_catalog::CatalogFence {
-                owner: skippr_lease::NodeId::single_node(),
-                epoch: skippr_lease::LeaseEpoch::SINGLE_NODE,
-            };
-            crate::pipeline_backend::reset_pipeline_state(config, offsets, fence)?;
-        }
-        Ok(crate::helpers::wal_storage::SkipprStoreKind::DynamoDb) => {
-            let lease = crate::pipeline_backend::acquire_ingest_lease(config, offsets).await?;
-            let fence = skippr_wal_catalog::CatalogFence {
-                owner: lease.session.owner,
-                epoch: lease.session.epoch,
-            };
-            let reset = crate::pipeline_backend::reset_pipeline_state(config, offsets, fence);
-            lease.release_after_quiesce(true).await;
-            reset?;
+        Ok(crate::helpers::wal_storage::SkipprStoreKind::Sled)
+        | Ok(crate::helpers::wal_storage::SkipprStoreKind::DynamoDb) => {
+            crate::pipeline_backend::reset_pipeline_state(
+                config,
+                offsets,
+                skippr_wal_catalog::CatalogFence::local(),
+            )?;
         }
         Err(err) => return Err(err),
     }
@@ -281,13 +272,12 @@ async fn cleanup_discover_ingest_artifacts(
                 );
             }
         }
-        crate::helpers::wal_storage::WalStorage::Disk
-        | crate::helpers::wal_storage::WalStorage::Clustered => {}
+        crate::helpers::wal_storage::WalStorage::Disk => {}
     }
 
-    // Do not `remove_dir_all(DATA_DIR)` or the sled `db` directory: pipeline metadata
-    // and the `pipeline_leases` tree live under DATA_DIR. Prefix-delete catalog and
-    // offset rows; only strip transient ingest/WAL/runtime-child paths.
+    // Do not `remove_dir_all(DATA_DIR)` or the sled `db` directory: pipeline
+    // metadata lives under DATA_DIR. Prefix-delete catalog and offset rows;
+    // only strip transient ingest/WAL/runtime-child paths.
     cleanup_discover_local_pipeline_artifacts(&config.get_data_dir());
     Ok(())
 }
@@ -901,7 +891,7 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
         }
         Err(false) => {
             let source_plugin =
-                crate::cluster::PipelineConfigView::for_name(&config.clone(), &pipeline_name)
+                crate::pipeline_view::PipelineConfigView::for_name(&config.clone(), &pipeline_name)
                     .map(|view| view.source_plugin)
                     .unwrap_or_default();
             let signals = otlp_signals_from_pipeline_config(config);
@@ -977,39 +967,15 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
 
     let offsets_db = Arc::new(offsets_db);
 
-    let pipeline_lease = match config.get_wal_storage() {
-        crate::helpers::wal_storage::WalStorage::Clustered => None,
-        crate::helpers::wal_storage::WalStorage::Disk
-        | crate::helpers::wal_storage::WalStorage::S3 => Some(
-            crate::pipeline_backend::acquire_ingest_lease(config, offsets_db.as_ref())
-                .await
-                .map_err(io::Error::other)?,
-        ),
-    };
-
     match config.get_wal_storage() {
         crate::helpers::wal_storage::WalStorage::Disk
         | crate::helpers::wal_storage::WalStorage::S3 => {
-            let guard = pipeline_lease
-                .as_ref()
-                .map(|lease| lease.guard.clone())
-                .ok_or_else(|| io::Error::other("pipeline writer lease is not installed"))?;
-            let handle = crate::buffer::wal_store::ensure_disk_wal_handle(
-                config,
-                offsets_db.clone(),
-                guard,
-            )?;
+            let handle =
+                crate::buffer::wal_store::ensure_disk_wal_handle(config, offsets_db.clone())?;
             crate::buffer::wal_startup::wal_startup(&handle, config, true)
                 .await
                 .map_err(|err| io::Error::other(format!("Failed to start WAL catalog: {err}")))?;
         }
-        crate::helpers::wal_storage::WalStorage::Clustered => {}
-    }
-
-    if let Some(lease) = &pipeline_lease {
-        lease.activate().map_err(|err| {
-            io::Error::other(format!("pipeline writer lease activate failed: {err}"))
-        })?;
     }
 
     let journal = offsets_db
@@ -1516,18 +1482,12 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
         if reporter.enabled() {
             reporter.finish();
         }
-        if let Some(lease) = pipeline_lease {
-            lease.release_after_quiesce(false).await;
-        }
         return Err(err);
     }
 
     if let Some(err) = finalization_error {
         if reporter.enabled() {
             reporter.finish();
-        }
-        if let Some(lease) = pipeline_lease {
-            lease.release_after_quiesce(false).await;
         }
         return Err(std::io::Error::other(err));
     }
@@ -1580,10 +1540,6 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
 
     if reporter.enabled() {
         reporter.finish();
-    }
-
-    if let Some(lease) = pipeline_lease {
-        lease.release_after_quiesce(true).await;
     }
 
     Ok(())

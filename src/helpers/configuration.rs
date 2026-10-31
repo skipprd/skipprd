@@ -129,7 +129,7 @@ pub struct Skippr {
     /// Dedicated S3 bucket for WAL segments (falls back to skippr_s3_bucket).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_s3_bucket: Option<String>,
-    /// SkipprStore: KV backend for offsets, checkpoints, leases, membership, catalog pointers.
+    /// SkipprStore: KV backend for offsets, checkpoints, leases, and catalog pointers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<SkipprStore>,
 }
@@ -2220,23 +2220,9 @@ impl Config {
         }
 
         violations.extend(self.whole_config_violations());
-        let clustered = matches!(
-            Self::parse_wal_storage(),
-            Ok(crate::helpers::wal_storage::WalStorage::Clustered)
-        );
         for (name, named_pipeline) in &self.pipelines {
             if let Some(transform) = named_pipeline.transform.as_ref() {
                 violations.extend(Self::transform_shape_violations(name, transform));
-                if clustered
-                    && transform
-                        .aggregates
-                        .as_ref()
-                        .is_some_and(|aggregates| !aggregates.is_empty())
-                {
-                    violations.push(format!(
-                        "pipeline '{name}' transform.aggregates requires local Sled and cannot be used with WAL_STORAGE=clustered"
-                    ));
-                }
             }
             if let Ok(crate::pipeline_type::PipelineType::Copy) =
                 crate::pipeline_type::resolve_pipeline_type(
@@ -3871,46 +3857,6 @@ aggregates:
                 .iter()
                 .any(|v| v.contains("type: copy cannot set transform.aggregates")),
             "{agg_violations:?}"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn clustered_wal_rejects_aggregates() {
-        ENV_CACHE.write().clear();
-        let original = std::env::var("WAL_STORAGE").ok();
-        std::env::set_var("WAL_STORAGE", "clustered");
-        Config::set_evncache("WAL_STORAGE", "clustered");
-        let mut config = Config::new();
-        let mut pipeline = Pipeline::default();
-        pipeline.transform = Some(Transform {
-            aggregates: Some(vec![TransformAggregate {
-                id: "customer_invoice_totals".into(),
-                key_fields: vec!["customer_id".into()],
-                measures: [(
-                    "invoice_count".into(),
-                    AggregateMeasure {
-                        count: Some("*".into()),
-                        ..Default::default()
-                    },
-                )]
-                .into_iter()
-                .collect(),
-            }]),
-            ..Default::default()
-        });
-        config.pipelines.insert("p".to_string(), pipeline);
-        let violations = config.bind_pipeline("p").get_config_dependency_violations();
-        match original {
-            Some(value) => std::env::set_var("WAL_STORAGE", value),
-            None => std::env::remove_var("WAL_STORAGE"),
-        }
-        ENV_CACHE.write().clear();
-        assert!(
-            violations
-                .iter()
-                .any(|v| v.contains("cannot be used with WAL_STORAGE=clustered")),
-            "{violations:?}"
         );
     }
 

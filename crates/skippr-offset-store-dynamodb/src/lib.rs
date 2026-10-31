@@ -278,7 +278,7 @@ impl DynamoDbOffsetStore {
         self.get_bytes(&Self::checkpoint_sk(logical_key))
     }
 
-    /// Clustered publication: conditional write of payload plus WAL epoch/index/hash.
+    /// Conditional write of payload plus WAL epoch/index/hash.
     pub fn publish_wal_commit(
         &self,
         sk: &str,

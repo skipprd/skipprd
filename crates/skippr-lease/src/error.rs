@@ -1,35 +1,4 @@
-use crate::identity::NodeId;
 use thiserror::Error;
-
-#[derive(Clone, Debug, Eq, PartialEq, Error)]
-pub enum LeaseError {
-    #[error("lease held by {0}")]
-    Held(NodeId),
-    #[error("lease lost")]
-    Lost,
-    #[error("conditional lease update raced")]
-    ConditionalRace,
-    #[error("lease store unavailable: {0}")]
-    StoreUnavailable(String),
-    #[error("protocol mismatch: {0}")]
-    ProtocolMismatch(String),
-    #[error("fenced")]
-    Fenced,
-    #[error("quorum lost: {0}")]
-    QuorumLost(String),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Error)]
-pub enum FenceError {
-    #[error("pipeline is not the active primary")]
-    NotActive,
-    #[error("lease epoch mismatch")]
-    EpochMismatch,
-    #[error("local lease deadline expired")]
-    DeadlineExpired,
-    #[error("pipeline fenced")]
-    Fenced,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum PathError {
@@ -60,8 +29,6 @@ pub enum DurableError {
     Fenced,
     #[error("fenced after commit")]
     FencedAfterCommit,
-    #[error("quorum lost: {display}", display = clip_error_detail(.0))]
-    QuorumLost(String),
     #[error("corrupt offset: {display}", display = clip_error_detail(.0))]
     CorruptOffset(String),
     #[error("io: {display}", display = clip_error_detail(.0))]
@@ -72,12 +39,8 @@ pub enum DurableError {
     CatalogConflict,
     #[error("stale epoch")]
     StaleEpoch,
-    #[error("not caught up")]
-    NotCaughtUp,
     #[error("disk full")]
     DiskFull,
-    #[error("replica RPC timeout")]
-    Timeout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,59 +93,6 @@ pub fn decide_wal_publish(
     Ok(PublishAction::Commit)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Error)]
-pub enum PromoteError {
-    #[error("lease error: {0}")]
-    Lease(LeaseError),
-    #[error("payload missing for segments: {segment_ids:?}")]
-    PayloadMissing { segment_ids: Vec<String> },
-    #[error("required schema missing: {0}")]
-    SchemaMissing(String),
-    #[error("replica assignment failed: {0}")]
-    Replica(String),
-    #[error("{0}")]
-    Other(String),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Error)]
-pub enum ReplicaNack {
-    #[error("stale epoch")]
-    StaleEpoch,
-    #[error("not assigned")]
-    NotAssigned,
-    #[error("not caught up")]
-    NotCaughtUp,
-    #[error("disk full")]
-    DiskFull,
-    #[error("payload hash mismatch")]
-    PayloadHashMismatch,
-    #[error("unknown pipeline")]
-    UnknownPipeline,
-    #[error("invalid primary endpoint")]
-    InvalidPrimaryEndpoint,
-}
-
-impl ReplicaNack {
-    pub fn into_durable(self) -> DurableError {
-        match self {
-            Self::StaleEpoch => DurableError::StaleEpoch,
-            Self::NotAssigned | Self::NotCaughtUp => DurableError::NotCaughtUp,
-            Self::DiskFull => DurableError::DiskFull,
-            Self::PayloadHashMismatch | Self::UnknownPipeline | Self::InvalidPrimaryEndpoint => {
-                DurableError::ProtocolMismatch(self.to_string())
-            }
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Error)]
-pub enum ShutdownError {
-    #[error("drain timed out")]
-    DrainTimeout,
-    #[error("{0}")]
-    Other(String),
-}
-
 impl From<std::io::Error> for DurableError {
     fn from(err: std::io::Error) -> Self {
         if is_enospc(&err) {
@@ -196,24 +106,6 @@ impl From<std::io::Error> for DurableError {
 pub fn is_enospc(err: &std::io::Error) -> bool {
     matches!(err.kind(), std::io::ErrorKind::StorageFull)
         || matches!(err.raw_os_error(), Some(28) | Some(112))
-}
-
-impl From<LeaseError> for PromoteError {
-    fn from(err: LeaseError) -> Self {
-        Self::Lease(err)
-    }
-}
-
-impl From<FenceError> for DurableError {
-    fn from(_: FenceError) -> Self {
-        Self::Fenced
-    }
-}
-
-impl From<FenceError> for PromoteError {
-    fn from(err: FenceError) -> Self {
-        Self::Other(err.to_string())
-    }
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ use skippr_iceberg_catalog::WarehouseObjectStore;
 use skippr_iceberg_catalog::{S3CompatibleObjectStore, SkipprCatalogBackend, SkipprLakeConfig};
 
 /// Serializable Iceberg catalog identity for query, DDL, QueryRuntime reload, and serve.
-/// Opened asynchronously via [`crate::cluster::backend::open_iceberg_catalog`].
+/// Opened asynchronously via [`crate::sqlrt::iceberg_catalog::open_iceberg_catalog`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IcebergCatalogSpec {

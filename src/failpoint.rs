@@ -1,9 +1,8 @@
-//! Deterministic crash injection for clustered durable commits.
+//! Deterministic crash injection for durable catalog commits.
 //!
-//! Named points are an enum. The e2e binary arms a point by writing that name
+//! Named points are an enum. Tests arm a point by writing that name
 //! to `{pipeline_paths.root}/failpoint`. Crash points consume the file on the
-//! first hit (single-shot). Unknown names
-//! fail closed. No cluster env knobs.
+//! first hit (single-shot). Unknown names fail closed.
 //!
 //! In-process tests use [`arm`] and get a `DurableError` instead of process abort.
 

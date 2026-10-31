@@ -123,12 +123,6 @@ impl DirectIoFile {
                     if is_direct_unsupported(&err)
                         || spurious_create_new_exists(&err, spec, path) =>
                 {
-                    if clustered_wal_requires_direct_io() && is_direct_unsupported(&err) {
-                        return Err(io::Error::new(
-                            err.kind(),
-                            format!("WAL Direct I/O is required on clustered volumes: {err}"),
-                        ));
-                    }
                     if !WARNED_FALLBACK.swap(true, Ordering::Relaxed) {
                         tracing::warn!(
                             path = %path.display(),
@@ -357,14 +351,6 @@ fn is_direct_unsupported(err: &io::Error) -> bool {
 #[cfg(not(windows))]
 fn spurious_create_new_exists(err: &io::Error, spec: OpenSpec, path: &Path) -> bool {
     spec.create_new && err.kind() == io::ErrorKind::AlreadyExists && !path.exists()
-}
-
-#[cfg(not(windows))]
-fn clustered_wal_requires_direct_io() -> bool {
-    crate::helpers::configuration::Config::wal_storage_raw()
-        .parse::<crate::helpers::wal_storage::WalStorage>()
-        .ok()
-        == Some(crate::helpers::wal_storage::WalStorage::Clustered)
 }
 
 impl Read for DirectIoFile {

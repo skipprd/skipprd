@@ -1,6 +1,7 @@
-use crate::cluster::{IcebergLake, PipelineConfigView, QueryBackend};
 use crate::discover::PipelineMetadata;
 use crate::helpers::configuration::Config;
+use crate::pipeline_view::{PipelineConfigView, QueryBackend};
+use crate::sqlrt::iceberg_lake::IcebergLake;
 use crate::sqlrt::parser::TableDropStatement;
 
 /// Removes a table from the metadata and drops the Iceberg table for Iceberg pipelines.
@@ -137,7 +138,7 @@ pub async fn drop_database(config: &Config, database: &str) -> Result<(), String
 }
 
 async fn drop_iceberg_table(lake: &IcebergLake, table: &str) -> Result<(), String> {
-    let catalog = crate::cluster::backend::open_iceberg_catalog(&lake.catalog).await?;
+    let catalog = crate::sqlrt::iceberg_catalog::open_iceberg_catalog(&lake.catalog).await?;
     let ident = iceberg::TableIdent::from_strs([lake.ingest_namespace.as_str(), table])
         .map_err(|err| err.to_string())?;
     iceberg::Catalog::drop_table(catalog.as_ref(), &ident)
@@ -146,7 +147,7 @@ async fn drop_iceberg_table(lake: &IcebergLake, table: &str) -> Result<(), Strin
 }
 
 async fn drop_iceberg_namespace(lake: &IcebergLake) -> Result<(), String> {
-    let catalog = crate::cluster::backend::open_iceberg_catalog(&lake.catalog).await?;
+    let catalog = crate::sqlrt::iceberg_catalog::open_iceberg_catalog(&lake.catalog).await?;
     let ns = iceberg::NamespaceIdent::from_strs([&lake.ingest_namespace])
         .map_err(|err| err.to_string())?;
     iceberg::Catalog::drop_namespace(catalog.as_ref(), &ns)

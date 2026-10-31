@@ -34,10 +34,9 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::cluster::identity::{ClusterIdentity, TenantScope};
-use crate::cluster::peer::ReplicaRegistry;
 use crate::helpers::configuration::Config;
 use crate::query_flight::sql::{matches_sql_like, reject_ddl};
+use crate::query_flight::TenantScope;
 use skippr_query_plan::{
     decode_live_wal_ticket, LiveWalPinRequest, LiveWalPinResponse, LiveWalTicket, PinnedSliceRef,
     LIVE_WAL_PIN_ACTION, LIVE_WAL_TICKET_TYPE_URL,
@@ -45,16 +44,8 @@ use skippr_query_plan::{
 
 #[derive(Clone)]
 pub enum FlightAuth {
-    ClusterBasic,
+    Basic,
     Bearer { token: Arc<str>, scope: TenantScope },
-}
-
-#[derive(Clone)]
-pub enum FlightEngine {
-    Clustered {
-        registry: Option<Arc<ReplicaRegistry>>,
-    },
-    Local,
 }
 
 pub struct QueryFlightServer {
@@ -72,33 +63,13 @@ impl Drop for InFlightGuard {
 }
 
 impl QueryFlightServer {
-    pub async fn start(bind: SocketAddr, identity: ClusterIdentity) -> Result<Self, DurableError> {
-        Self::start_with_registry(bind, identity, None, Config::new()).await
-    }
-
-    pub async fn start_with_registry(
-        bind: SocketAddr,
-        identity: ClusterIdentity,
-        registry: Option<Arc<ReplicaRegistry>>,
-        app_config: Config,
-    ) -> Result<Self, DurableError> {
-        let _ = identity;
-        let tls = crate::cluster::tls::tonic_server_tls()
-            .map_err(|err| DurableError::Io(err.to_string()))?;
-        Self::start_with(
-            bind,
-            FlightAuth::ClusterBasic,
-            FlightEngine::Clustered { registry },
-            app_config,
-            Some(tls),
-        )
-        .await
+    pub async fn start(bind: SocketAddr) -> Result<Self, DurableError> {
+        Self::start_with(bind, FlightAuth::Basic, Config::new(), None).await
     }
 
     pub async fn start_with(
         bind: SocketAddr,
         auth: FlightAuth,
-        engine: FlightEngine,
         app_config: Config,
         tls: Option<ServerTlsConfig>,
     ) -> Result<Self, DurableError> {
@@ -112,7 +83,6 @@ impl QueryFlightServer {
         let in_flight = Arc::new(AtomicUsize::new(0));
         let svc = SkipprFlightSql {
             auth,
-            engine,
             in_flight: in_flight.clone(),
             app_config,
         };
@@ -176,7 +146,6 @@ impl QueryFlightServer {
 #[derive(Clone)]
 struct SkipprFlightSql {
     auth: FlightAuth,
-    engine: FlightEngine,
     in_flight: Arc<AtomicUsize>,
     app_config: Config,
 }
@@ -226,7 +195,7 @@ impl SkipprFlightSql {
             .to_str()
             .map_err(|_| Status::unauthenticated("Flight SQL authorization is not valid UTF-8"))?;
         match &self.auth {
-            FlightAuth::ClusterBasic => Self::parse_handshake_authorization(value),
+            FlightAuth::Basic => Self::parse_handshake_authorization(value),
             FlightAuth::Bearer { token, scope } => {
                 let expected = format!("Bearer {}", token.as_ref());
                 if value == expected {
@@ -278,24 +247,15 @@ impl SkipprFlightSql {
         scope: &TenantScope,
     ) -> Result<SchemaRef, Status> {
         Self::check_sql(sql)?;
-        if matches!(self.engine, FlightEngine::Local) {
-            let ctx = crate::sqlrt::query::new_context_iceberg_namespaces(config)
-                .await
-                .map_err(|err| Status::internal(err.to_string()))?;
-            let df = ctx
-                .sql(sql)
-                .await
-                .map_err(|err| Status::internal(err.to_string()))?;
-            return Ok(df.schema().inner().clone());
-        }
-        crate::sqlrt::tables::schema_for_clustered_select(
-            config,
-            sql,
-            &crate::sqlrt::tables::process_clustered_select_opts(scope.clone())
-                .map_err(|err| Status::internal(err.to_string()))?,
-        )
-        .await
-        .map_err(|err| Status::internal(err.to_string()))
+        let _ = scope;
+        let ctx = crate::sqlrt::query::new_context_iceberg_namespaces(config)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
+        let df = ctx
+            .sql(sql)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
+        Ok(df.schema().inner().clone())
     }
 
     async fn execute_sql_stream(
@@ -309,11 +269,11 @@ impl SkipprFlightSql {
         ),
         Status,
     > {
-        crate::metrics::counters::add_cluster_flight_request(1);
+        crate::metrics::counters::add_flight_request(1);
         match self.execute_sql_stream_inner(sql, scope).await {
             Ok(out) => Ok(out),
             Err(err) => {
-                crate::metrics::counters::add_cluster_flight_fail(1);
+                crate::metrics::counters::add_flight_fail(1);
                 Err(err)
             }
         }
@@ -331,45 +291,20 @@ impl SkipprFlightSql {
         Status,
     > {
         Self::check_sql(sql)?;
-        if matches!(self.engine, FlightEngine::Local) {
-            let ctx = crate::sqlrt::query::new_context_iceberg_namespaces(&self.app_config)
-                .await
-                .map_err(|err| Status::internal(err.to_string()))?;
-            let df = ctx
-                .sql(sql)
-                .await
-                .map_err(|err| Status::internal(err.to_string()))?;
-            let schema = df.schema().inner().clone();
-            let stream = df
-                .execute_stream()
-                .await
-                .map_err(|err| Status::internal(err.to_string()))?
-                .map_err(|err| Status::internal(err.to_string()));
-            return Ok((schema, Box::pin(stream)));
-        }
-        crate::query_flight::runtime::query_context()
+        let _ = scope;
+        let ctx = crate::sqlrt::query::new_context_iceberg_namespaces(&self.app_config)
+            .await
             .map_err(|err| Status::internal(err.to_string()))?;
-        let plan = crate::sqlrt::tables::plan_clustered_select(
-            &self.app_config,
-            sql,
-            &crate::sqlrt::tables::process_clustered_select_opts(scope.clone())
-                .map_err(|err| Status::internal(err.to_string()))?,
-        )
-        .await
-        .map_err(|err| Status::internal(err.to_string()))?;
-        if !plan.wal_only.is_empty() {
-            tracing::info!(
-                wal_only = ?plan.wal_only,
-                "clustered query does not register WAL-only pipelines"
-            );
-        }
-        let df = plan.df;
+        let df = ctx
+            .sql(sql)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
         let schema = df.schema().inner().clone();
         let stream = df
             .execute_stream()
             .await
-            .map_err(datafusion_status)?
-            .map_err(datafusion_status);
+            .map_err(|err| Status::internal(err.to_string()))?
+            .map_err(|err| Status::internal(err.to_string()));
         Ok((schema, Box::pin(stream)))
     }
 }
@@ -862,20 +797,11 @@ async fn execute_live_wal_ticket(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skippr_lease::{NodeId, PipelineKey};
-
-    fn identity() -> ClusterIdentity {
-        std::env::set_var("SKIPPR_QUERY_TENANT", "t");
-        std::env::set_var("SKIPPR_QUERY_WORKSPACE", "w");
-        ClusterIdentity::new(
-            skippr_lease::ClusterId::new("test-cluster").unwrap(),
-            NodeId::generate(),
-        )
-    }
+    use skippr_lease::PipelineKey;
 
     #[tokio::test]
     async fn query_flight_server_binds_ephemeral() {
-        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity())
+        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
         assert_ne!(server.bind_addr().port(), 0);
@@ -884,12 +810,13 @@ mod tests {
 
     #[tokio::test]
     async fn ddl_is_rejected_on_get_flight_info() {
-        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity())
+        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
-        let err = skippr_query_plan::fetch_statement_batches(
+        let err = skippr_query_plan::fetch_statement_batches_plain(
             &server.bind_addr().to_string(),
             "INSERT INTO t VALUES (1)",
+            &skippr_query_plan::basic_authorization("t", "w"),
         )
         .await
         .unwrap_err();
@@ -902,16 +829,20 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_sql_is_rejected() {
-        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity())
+        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
         let sql = format!(
             "SELECT '{}'",
             "x".repeat(skippr_lease::CONTROL_FRAME_MAX_BYTES)
         );
-        let err = skippr_query_plan::fetch_statement_batches(&server.bind_addr().to_string(), &sql)
-            .await
-            .unwrap_err();
+        let err = skippr_query_plan::fetch_statement_batches_plain(
+            &server.bind_addr().to_string(),
+            &sql,
+            &skippr_query_plan::basic_authorization("t", "w"),
+        )
+        .await
+        .unwrap_err();
         assert!(
             err.to_string().to_ascii_lowercase().contains("too large")
                 || err.to_string().contains("invalid")
@@ -955,55 +886,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
-    async fn live_wal_pin_without_reader_fails_closed() {
-        crate::buffer::wal_handle::clear_wal_handles();
-        crate::buffer::wal_reader::clear_query_readers();
-        let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        let identity = identity();
-        let registry = ReplicaRegistry::new(identity.clone());
-        let guard = skippr_lease::LeaseGuard::replica(
-            key.clone(),
-            skippr_lease::LeaseEpoch::new(1),
-            Arc::new(skippr_lease::SystemClock::new()),
-        );
-        registry
-            .insert(crate::cluster::peer::ReplicaSession::new(key, paths, guard))
-            .await;
-        let server = QueryFlightServer::start_with_registry(
-            "127.0.0.1:0".parse().unwrap(),
-            identity,
-            Some(registry),
-            Config::new(),
-        )
-        .await
-        .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let err = skippr_query_plan::pin_live_wal_with_auth(
-            &server.bind_addr().to_string(),
-            &skippr_query_plan::LiveWalPinRequest {
-                tenant: "t".into(),
-                workspace: "w".into(),
-                pipeline: "p".into(),
-                namespace: "ns".into(),
-            },
-            &skippr_query_plan::basic_authorization("t", "w"),
-        )
-        .await
-        .unwrap_err();
-        let text = err.to_string().to_ascii_lowercase();
-        assert!(
-            text.contains("unknown") || text.contains("not found"),
-            "{err}"
-        );
-        server.drain().await;
-    }
-
-    #[tokio::test]
     async fn foreign_tenant_live_wal_ticket_fails() {
-        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity())
+        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1022,7 +906,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_pipeline_live_wal_ticket_fails_closed() {
-        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity())
+        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1048,10 +932,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "pinlost").unwrap();
         let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        let identity = identity();
-        let clock = Arc::new(skippr_lease::SystemClock::new());
-        let guard = skippr_lease::LeaseGuard::single_node(key.clone(), clock);
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
         let db = sled::open(dir.path().join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
@@ -1060,12 +941,12 @@ mod tests {
         let handle = crate::buffer::wal_handle::PipelineWalHandle::new(
             key.clone(),
             paths,
-            guard,
             catalog,
             offsets,
+            fence,
         );
         crate::buffer::wal_handle::install_wal_handle(handle);
-        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity)
+        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1095,7 +976,7 @@ mod tests {
             crate::buffer::wal_reader::reader_with_live_slice(key.clone(), "ns", "seg-a"),
         )
         .unwrap();
-        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity())
+        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1139,7 +1020,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_authorization_is_unauthenticated() {
-        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity())
+        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1160,29 +1041,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plaintext_http_cannot_query_clustered_flight() {
-        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity())
-            .await
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let url = format!("http://{}", server.bind_addr());
-        let result = async {
-            let channel = tonic::transport::Endpoint::from_shared(url)?
-                .connect()
-                .await?;
-            let mut client = arrow_flight::sql::client::FlightSqlServiceClient::new(channel);
-            client.execute("SELECT 1".into(), None).await?;
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
-        }
-        .await;
-        assert!(
-            result.is_err(),
-            "plaintext HTTP must not complete a Flight SQL query"
-        );
-        server.drain().await;
-    }
-
-    #[tokio::test]
     #[serial_test::serial]
     async fn flight_sql_exec_streams_from_live_server() {
         use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -1192,10 +1050,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "flightsqllive").unwrap();
         let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
-        let identity = identity();
-        let clock = Arc::new(skippr_lease::SystemClock::new());
-        let guard = skippr_lease::LeaseGuard::single_node(key.clone(), clock);
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
         let db = sled::open(dir.path().join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
@@ -1204,12 +1059,12 @@ mod tests {
         let handle = crate::buffer::wal_handle::PipelineWalHandle::new(
             key.clone(),
             paths,
-            guard,
             catalog,
             offsets,
+            fence,
         );
         crate::buffer::wal_handle::install_wal_handle(handle);
-        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap(), identity)
+        let server = QueryFlightServer::start("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1314,15 +1169,9 @@ mod tests {
     }
 
     async fn start_local_with(auth: FlightAuth, config: Config) -> QueryFlightServer {
-        QueryFlightServer::start_with(
-            "127.0.0.1:0".parse().unwrap(),
-            auth,
-            FlightEngine::Local,
-            config,
-            None,
-        )
-        .await
-        .unwrap()
+        QueryFlightServer::start_with("127.0.0.1:0".parse().unwrap(), auth, config, None)
+            .await
+            .unwrap()
     }
 
     fn wal_only_config() -> Config {

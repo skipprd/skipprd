@@ -5,7 +5,6 @@ use crate::buffer::wal_persist::{persist_error_from_io, persist_snapshot_pair};
 use crate::buffer::wal_reader::{install_query_reader, wal_reader_for, WalCatalogReader};
 use crate::helpers::configuration::Config;
 use crate::helpers::wal_storage::WalStorage;
-use skippr_lease::LeaseGuard;
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
@@ -16,7 +15,6 @@ use tokio::runtime::Handle;
 pub enum SegmentWriteLocation {
     Disk { path: PathBuf },
     S3 { key: String, bucket: String },
-    Clustered { path: PathBuf, uri: String },
 }
 
 pub struct SegmentWriteResult {
@@ -45,13 +43,6 @@ where
     }
 }
 
-fn ingest_writer_handle(handle: &PipelineWalHandle) -> bool {
-    !matches!(
-        handle.guard().role(),
-        skippr_lease::PipelineRole::Replica { .. }
-    )
-}
-
 fn ingest_primary_handle(config: &Config) -> Option<std::sync::Arc<PipelineWalHandle>> {
     let pipeline = config.get_pipeline_name();
     if pipeline.is_empty() {
@@ -60,7 +51,7 @@ fn ingest_primary_handle(config: &Config) -> Option<std::sync::Arc<PipelineWalHa
     let key =
         skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
             .ok()?;
-    wal_handle::wal_handle_for(&key).filter(|handle| ingest_writer_handle(handle))
+    wal_handle::wal_handle_for(&key)
 }
 
 pub(crate) async fn live_wal_segments(config: &Config) -> Option<crate::plugins::LiveWalSegments> {
@@ -78,11 +69,8 @@ pub(crate) async fn live_wal_segments(config: &Config) -> Option<crate::plugins:
 }
 
 pub fn ingest_wal_handle() -> Option<std::sync::Arc<PipelineWalHandle>> {
-    ingest_primary_handle(&Config::new()).or_else(|| {
-        wal_handle::all_wal_handles()
-            .into_iter()
-            .find(|handle| ingest_writer_handle(handle))
-    })
+    ingest_primary_handle(&Config::new())
+        .or_else(|| wal_handle::all_wal_handles().into_iter().next())
 }
 
 fn ingest_handle_for_paths(config: &Config) -> Option<std::sync::Arc<PipelineWalHandle>> {
@@ -118,7 +106,6 @@ pub async fn persist_snapshot(
         .ok_or_else(|| io::Error::other("WAL write requires an installed catalog handle"))?;
     match config.get_wal_storage() {
         WalStorage::S3 => {
-            let lease = Arc::clone(handle.guard());
             let encoded = crate::buffer::segment_file::encode_snapshot(
                 offsets,
                 batches,
@@ -175,7 +162,6 @@ pub async fn persist_snapshot(
                 batches,
                 partitions_meta,
                 part_meta_blobs,
-                lease.as_ref(),
                 created_at,
             )
             .await
@@ -203,7 +189,7 @@ pub async fn persist_snapshot(
                 .await
                 .map_err(|err| io::Error::other(err.to_string()))
         }
-        WalStorage::Disk | WalStorage::Clustered => handle
+        WalStorage::Disk => handle
             .persist_segment(
                 snapshot_id,
                 offsets,
@@ -218,16 +204,9 @@ pub async fn persist_snapshot(
     }
 }
 
-pub fn ingest_writer_lease() -> io::Result<Arc<LeaseGuard>> {
-    ingest_wal_handle()
-        .map(|handle| Arc::clone(handle.guard()))
-        .ok_or_else(|| io::Error::other("pipeline writer lease is not installed"))
-}
-
 pub fn ensure_disk_wal_handle(
     config: &Config,
     offsets: std::sync::Arc<crate::helpers::offsets::Offsets>,
-    guard: Arc<LeaseGuard>,
 ) -> io::Result<Arc<PipelineWalHandle>> {
     if let Some(handle) = ingest_primary_handle(config) {
         return Ok(handle);
@@ -241,20 +220,9 @@ pub fn ensure_disk_wal_handle(
     let key =
         skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
             .map_err(|err| io::Error::other(err.to_string()))?;
-    if guard.key() != &key {
-        return Err(io::Error::other(
-            "installed writer lease does not match this pipeline",
-        ));
-    }
     let paths =
         skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(&config.get_data_dir()));
-    let session = guard
-        .leased_session()
-        .ok_or_else(|| io::Error::other("pipeline writer lease has no session"))?;
-    let fence = skippr_wal_catalog::CatalogFence {
-        owner: session.owner,
-        epoch: session.epoch,
-    };
+    let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog =
         crate::pipeline_backend::open_wal_catalog_for_config(config, Some(offsets.as_ref()), fence)
             .map_err(io::Error::other)?;
@@ -262,7 +230,7 @@ pub fn ensure_disk_wal_handle(
         .bytes_store()
         .cloned()
         .ok_or_else(|| io::Error::other("WAL catalog requires an offset store"))?;
-    let handle = PipelineWalHandle::new(key, paths, guard, catalog, offset_store);
+    let handle = PipelineWalHandle::new(key, paths, catalog, offset_store, fence);
     wal_handle::install_wal_handle(handle.clone());
     Ok(handle)
 }
@@ -271,14 +239,14 @@ fn query_catalog_open_error(pipeline: &str, err: impl std::fmt::Display) -> io::
     let text = err.to_string();
     if text.contains("already ingesting") || text.contains("could not acquire lock") {
         io::Error::other(format!(
-            "WAL catalog for pipeline {pipeline} is locked by a running ingest; use a shared catalog backend or the cluster Flight endpoint"
+            "WAL catalog for pipeline {pipeline} is locked by a running ingest; use a shared catalog backend"
         ))
     } else {
         io::Error::other(text)
     }
 }
 
-/// Open the Skippr Store WAL index for query. Never takes a writer lease.
+/// Open the Skippr Store WAL index for query. Never opens a writer catalog.
 pub fn open_query_wal_reader(config: &Config) -> io::Result<WalCatalogReader> {
     let pipeline = config.get_pipeline_name();
     if pipeline.is_empty() {
@@ -316,7 +284,7 @@ mod tests {
             .find("pub async fn persist_snapshot")
             .expect("persist_snapshot");
         let body = src[start..]
-            .split("pub fn ingest_writer_lease")
+            .split("pub fn ensure_disk_wal_handle")
             .next()
             .expect("persist_snapshot body");
         let catalog_at = body.find("CatalogKey::Segment").expect("catalog get");
@@ -345,8 +313,8 @@ mod tests {
             "query reader must not install a commit fence"
         );
         assert!(
-            !body.contains("LeaseGuard"),
-            "query reader must not take a writer lease"
+            !body.contains("ensure_disk_wal_handle"),
+            "query reader must not open a writer handle"
         );
         assert!(
             !body.contains("PipelineWalHandle"),
@@ -445,21 +413,19 @@ mod tests {
         use crate::buffer::wal_reader::{clear_query_readers, wal_reader_for};
         use crate::helpers::offset_store::{OffsetStore, SledOffsetStore};
         use serde_json::json;
-        use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SystemClock};
+        use skippr_lease::{PipelineKey, PipelinePaths};
 
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("ten-reuse", "ws-reuse", "orders").unwrap();
         remove_wal_handle(&key);
         clear_query_readers();
         let paths = PipelinePaths::legacy_disk(dir.path());
-        let clock = Arc::new(SystemClock::new());
-        let guard = LeaseGuard::single_node(key.clone(), clock);
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let db = sled::open(dir.path().join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
         let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
-        let handle = PipelineWalHandle::new(key.clone(), paths, guard, catalog, offsets);
+        let handle = PipelineWalHandle::new(key.clone(), paths, catalog, offsets, fence);
         install_wal_handle(handle);
         let config: Config = serde_json::from_value(json!({
             "skippr": { "workspace": "ws-reuse", "tenant": "ten-reuse" },

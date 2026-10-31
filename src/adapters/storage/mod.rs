@@ -60,45 +60,11 @@ pub trait StorageAdapter: Send + Sync {
     }
 }
 
-/// Clustered WAL is per-node; extract/load objects (`metadata.json`) are cluster
-/// SoT, same as S3. Local clustered processes on one host share a sibling dir.
-pub(crate) fn clustered_local_storage_root(data_dir: &str) -> String {
-    std::path::Path::new(data_dir)
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(|parent| parent.join("el-storage").to_string_lossy().into_owned())
-        .unwrap_or_else(|| data_dir.to_string())
-}
-
 pub fn get_storage(config: &Config) -> Arc<dyn StorageAdapter> {
     let mode = config.get_storage_mode();
     if mode == crate::helpers::wal_storage::ElStorageMode::Local {
-        let data_dir = config.get_pipeline_data_dir();
-        let root = if config.get_wal_storage() == crate::helpers::wal_storage::WalStorage::Clustered
-        {
-            clustered_local_storage_root(&data_dir)
-        } else {
-            config.get_data_dir()
-        };
-        Arc::new(LocalDiskStorageAdapter::new(&root))
+        Arc::new(LocalDiskStorageAdapter::new(&config.get_data_dir()))
     } else {
         Arc::new(S3StorageAdapter::new(config.get_skippr_s3_bucket()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::clustered_local_storage_root;
-
-    #[test]
-    fn clustered_local_storage_is_shared_sibling_of_node_data_dir() {
-        assert_eq!(
-            clustered_local_storage_root("/tmp/skippr-hla-e2e/node1"),
-            "/tmp/skippr-hla-e2e/el-storage"
-        );
-        assert_eq!(
-            clustered_local_storage_root("/tmp/skippr-hla-e2e/node2"),
-            clustered_local_storage_root("/tmp/skippr-hla-e2e/query")
-        );
     }
 }

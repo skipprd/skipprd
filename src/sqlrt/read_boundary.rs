@@ -18,22 +18,15 @@ pub enum LakeSnapshot {
     At(i64),
 }
 
-/// Pinned WAL side of a query-local `(S, E, W)`.
-#[derive(Clone, Debug, PartialEq)]
-pub enum PinnedWal {
-    Local(Vec<PinnedSlice>),
-    Clustered(Vec<skippr_query_plan::PinnedSliceRef>),
-}
-
 /// Pinned Iceberg snapshot plus live WAL slices for one table scan.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReadBoundary {
     pub lake: LakeSnapshot,
-    pub wal: PinnedWal,
+    pub wal: Vec<PinnedSlice>,
     pub excluded: usize,
 }
 
-/// `W \ E`. Local pin and clustered ticket both subtract through this.
+/// `W \ E`.
 pub fn minus_excluded<T>(
     live: Vec<T>,
     excluded: &HashSet<WalSliceRef>,
@@ -53,31 +46,9 @@ impl ReadBoundary {
         let live = minus_excluded(live, excluded, |slice| slice.slice_ref());
         Self {
             lake,
-            wal: PinnedWal::Local(live),
+            wal: live,
             excluded: excluded.len(),
         }
-    }
-
-    pub fn for_clustered_ticket(
-        lake: LakeSnapshot,
-        live: Vec<skippr_query_plan::PinnedSliceRef>,
-        excluded: &HashSet<WalSliceRef>,
-    ) -> Result<Self, crate::wal_slice_ref::WalSliceRefError> {
-        let tagged = live
-            .into_iter()
-            .map(|slice| {
-                WalSliceRef::try_from_parts(&slice.segment_id, slice.start).map(|r| (r, slice))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let slices = minus_excluded(tagged, excluded, |(r, _)| r.clone())
-            .into_iter()
-            .map(|(_, slice)| slice)
-            .collect();
-        Ok(Self {
-            lake,
-            wal: PinnedWal::Clustered(slices),
-            excluded: excluded.len(),
-        })
     }
 
     pub fn pin_wal(
@@ -103,10 +74,7 @@ impl ReadBoundary {
             LakeSnapshot::Empty => serde_json::Value::Null,
             LakeSnapshot::At(id) => serde_json::json!(id),
         };
-        let wal_slices = match &self.wal {
-            PinnedWal::Local(slices) => slices.len(),
-            PinnedWal::Clustered(slices) => slices.len(),
-        };
+        let wal_slices = self.wal.len();
         serde_json::json!({
             "namespace": namespace,
             "snapshot": snapshot,
@@ -132,7 +100,7 @@ mod tests {
     use crate::wal_slice_ref::WalSliceRef;
     use arrow::array::{RecordBatch, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
-    use skippr_lease::{LeaseGuard, PipelinePaths, SystemClock};
+    use skippr_lease::PipelinePaths;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
@@ -168,13 +136,11 @@ mod tests {
     }
 
     fn live_ids(boundary: &ReadBoundary) -> Vec<(String, u32)> {
-        match &boundary.wal {
-            PinnedWal::Local(live) => live
-                .iter()
-                .map(|slice| (slice.segment_id.as_str().to_string(), slice.entry.ordinal))
-                .collect(),
-            PinnedWal::Clustered(_) => panic!("expected local pin"),
-        }
+        boundary
+            .wal
+            .iter()
+            .map(|slice| (slice.segment_id.as_str().to_string(), slice.entry.ordinal))
+            .collect()
     }
 
     fn exclude_segment(handle: &PipelineWalHandle, segment_id: &str) -> HashSet<WalSliceRef> {
@@ -193,14 +159,12 @@ mod tests {
         let key = PipelineKey::new("t", "w", "rb-pin-later").unwrap();
         let dir = tempfile::tempdir().unwrap();
         let paths = PipelinePaths::legacy_disk(dir.path());
-        let clock = Arc::new(SystemClock::new());
-        let guard = LeaseGuard::single_node(key.clone(), clock);
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let db = sled::open(dir.path().join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
         let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
-        let handle = PipelineWalHandle::new(key.clone(), paths, guard, catalog, offsets);
+        let handle = PipelineWalHandle::new(key.clone(), paths, catalog, offsets, fence);
         install_wal_handle(handle.clone());
         persist(&handle, "live-seg", "a").await;
         persist(&handle, "gone-seg", "b").await;
@@ -228,14 +192,12 @@ mod tests {
         let key = PipelineKey::new("t", "w", "rb-exclude").unwrap();
         let dir = tempfile::tempdir().unwrap();
         let paths = PipelinePaths::legacy_disk(dir.path());
-        let clock = Arc::new(SystemClock::new());
-        let guard = LeaseGuard::single_node(key.clone(), clock);
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let db = sled::open(dir.path().join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
         let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
-        let handle = PipelineWalHandle::new(key.clone(), paths, guard, catalog, offsets);
+        let handle = PipelineWalHandle::new(key.clone(), paths, catalog, offsets, fence);
         install_wal_handle(handle.clone());
         persist(&handle, "live-seg", "a").await;
         persist(&handle, "named-seg", "b").await;
@@ -251,14 +213,12 @@ mod tests {
         let key = PipelineKey::new("t", "w", "rb-slice-done").unwrap();
         let dir = tempfile::tempdir().unwrap();
         let paths = PipelinePaths::legacy_disk(dir.path());
-        let clock = Arc::new(SystemClock::new());
-        let guard = LeaseGuard::single_node(key.clone(), clock);
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let db = sled::open(dir.path().join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
         let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
-        let handle = PipelineWalHandle::new(key.clone(), paths, guard, catalog, offsets);
+        let handle = PipelineWalHandle::new(key.clone(), paths, catalog, offsets, fence);
         install_wal_handle(handle.clone());
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
         let mut batches = HashMap::new();
@@ -310,14 +270,12 @@ mod tests {
         let key = PipelineKey::new("t", "w", "rb-slice-exclude").unwrap();
         let dir = tempfile::tempdir().unwrap();
         let paths = PipelinePaths::legacy_disk(dir.path());
-        let clock = Arc::new(SystemClock::new());
-        let guard = LeaseGuard::single_node(key.clone(), clock);
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let db = sled::open(dir.path().join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
         let offsets: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree));
-        let handle = PipelineWalHandle::new(key.clone(), paths, guard, catalog, offsets);
+        let handle = PipelineWalHandle::new(key.clone(), paths, catalog, offsets, fence);
         install_wal_handle(handle.clone());
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
         let mut batches = HashMap::new();
@@ -399,62 +357,29 @@ mod tests {
     }
 
     #[test]
-    fn clustered_ticket_subtracts_e_through_read_boundary() {
-        let keep = skippr_query_plan::PinnedSliceRef {
-            segment_id: "seg-keep".into(),
-            start: 0,
-            seq: 1,
-            ordinal: 0,
-        };
-        let drop = skippr_query_plan::PinnedSliceRef {
-            segment_id: "seg-drop".into(),
-            start: 10,
-            seq: 2,
-            ordinal: 1,
-        };
-        let excluded = HashSet::from([WalSliceRef::try_from_parts("seg-drop", 10).unwrap()]);
-        let boundary = ReadBoundary::for_clustered_ticket(
-            LakeSnapshot::At(7),
-            vec![keep.clone(), drop],
-            &excluded,
-        )
-        .unwrap();
-        assert_eq!(boundary.lake, LakeSnapshot::At(7));
-        assert_eq!(boundary.excluded, 1);
-        match boundary.wal {
-            PinnedWal::Clustered(slices) => assert_eq!(slices, vec![keep]),
-            PinnedWal::Local(_) => panic!("clustered pin must live in ReadBoundary::wal"),
-        }
-    }
-
-    #[test]
     fn query_pin_fields_report_snapshot_and_w_minus_e() {
-        let keep = skippr_query_plan::PinnedSliceRef {
-            segment_id: "seg-keep".into(),
-            start: 0,
-            seq: 1,
-            ordinal: 0,
-        };
-        let excluded = HashSet::from([WalSliceRef::try_from_parts("seg-drop", 10).unwrap()]);
-        let boundary =
-            ReadBoundary::for_clustered_ticket(LakeSnapshot::At(7), vec![keep], &excluded).unwrap();
-        let fields = boundary.query_pin_fields("ns");
-        assert_eq!(fields["namespace"], "ns");
-        assert_eq!(fields["snapshot"], 7);
-        assert_eq!(fields["wal_slices"], 1);
-        assert_eq!(fields["excluded_slices"], 1);
-
         let empty = ReadBoundary::new(LakeSnapshot::Empty, Vec::new(), &HashSet::new());
         let fields = empty.query_pin_fields("ns");
+        assert_eq!(fields["namespace"], "ns");
         assert!(fields["snapshot"].is_null());
         assert_eq!(fields["wal_slices"], 0);
+        assert_eq!(fields["excluded_slices"], 0);
+
+        let at = ReadBoundary {
+            lake: LakeSnapshot::At(7),
+            wal: Vec::new(),
+            excluded: 1,
+        };
+        let fields = at.query_pin_fields("ns");
+        assert_eq!(fields["snapshot"], 7);
+        assert_eq!(fields["excluded_slices"], 1);
     }
 
     #[test]
     fn every_scan_pin_emits_query_pin() {
         let tables = include_str!("tables.rs");
         let tables = tables.split("#[cfg(test)]").next().unwrap();
-        assert_eq!(tables.matches(".emit_query_pin(").count(), 2);
+        assert_eq!(tables.matches(".emit_query_pin(").count(), 1);
         let wal = include_str!("wal_table.rs");
         let wal = wal.split("#[cfg(test)]").next().unwrap();
         assert_eq!(wal.matches(".emit_query_pin(").count(), 1);

@@ -76,7 +76,6 @@ impl PipelinePaths {
     }
 
     /// Legacy `WAL_STORAGE=disk` layout: `{DATA_DIR}/segment_buffer/...`.
-    /// Clustered mode must keep using [`PipelinePaths::new`].
     pub fn legacy_disk(data_root: &Path) -> Self {
         Self::from_pipeline_root(data_root.to_path_buf())
     }

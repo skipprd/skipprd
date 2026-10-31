@@ -68,7 +68,7 @@ pipelines:
 | `enable_single_quote_parsing` | none | `false` | Accept JSON that wraps strings in single quotes. |
 | `enable_unicode_parsing` | none | `false` | Accept JSON with unescaped Unicode. |
 | `ops` | none | none | Ordered in-memory Arrow ops (`filter`, `project`, `derive`, `rename`, `cast`) applied after schema mapping and before WAL commit. DataFusion SQL expressions. See [Filter, project, and derive](#filter-project-and-derive). |
-| `aggregates` | none | none | Keyed running aggregates maintained from committed WAL data in local Sled. Not available with `WAL_STORAGE=clustered`. See [Running aggregates](#running-aggregates). |
+| `aggregates` | none | none | Keyed running aggregates maintained from committed WAL data in local Sled. See [Running aggregates](#running-aggregates). |
 
 A key in `skippr.yml` beats its environment fallback. Flags accept `true`/`false`, `yes`/`no`, or `1`/`0`.
 
@@ -166,7 +166,7 @@ transform:
         invoice_count: { count: "*" }
 ```
 
-Changing an aggregate's id, keys, or measures rebuilds that aggregate by replaying the WAL. `WAL_STORAGE=clustered` cannot set `aggregates`. `type: copy` cannot set `aggregates`. Derived state is not published to sinks in this release.
+Changing an aggregate's id, keys, or measures rebuilds that aggregate by replaying the WAL. `type: copy` cannot set `aggregates`. Derived state is not published to sinks in this release.
 
 ## Next steps
 

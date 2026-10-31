@@ -1944,14 +1944,12 @@ mod tests_process_record_field {
             true,
         )
         .expect_err("fast path must miss without has_evolution");
-        assert!(
-            metadata
-                .get("detail")
-                .unwrap()
-                .fields
-                .get("docket_aggregate_size_code_string")
-                .is_none()
-        );
+        assert!(metadata
+            .get("detail")
+            .unwrap()
+            .fields
+            .get("docket_aggregate_size_code_string")
+            .is_none());
         let mut updated = "no".to_string();
         crate::ingest::ingest::set_value(
             &Config::new(),

@@ -3,7 +3,6 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{fs, process};
 
 use skipprd::cli::{Cli, Mode};
-use skipprd::cluster::validation::{validate_clustered_cli, CliModeKind};
 use skipprd::helpers::wal_storage::WalStorage;
 
 extern crate clap;
@@ -88,14 +87,6 @@ fn reject_invalid_wal_storage() -> WalStorage {
     }
 }
 
-fn reject_invalid_clustered_mode(config: &Config, storage: WalStorage, mode: CliModeKind) {
-    if let Err(err) = validate_clustered_cli(config, storage, mode) {
-        error!("{err}");
-        eprintln!("{err}");
-        process::exit(1);
-    }
-}
-
 fn main() {
     let stack_size = std::env::var("SKIPPR_MAIN_THREAD_STACK_BYTES")
         .ok()
@@ -152,23 +143,10 @@ async fn async_main() {
     match cli.mode.clone() {
         Mode::Sync(options) => {
             let loaded = Config::build_config();
-            let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(
-                &loaded,
-                storage,
-                CliModeKind::Sync { once: options.once },
-            );
+            let _storage = reject_invalid_wal_storage();
             let output_mode = options.output.clone();
             let run_once = options.once;
             let named = cli_named_pipeline(options.pipeline.as_deref());
-            if storage == WalStorage::Clustered {
-                let session = Session::from_config(loaded, named.as_deref());
-                if let Err(err) = session.sync(run_once, &output_mode).await {
-                    error!("clustered sync failed: {err}");
-                    process::exit(1);
-                }
-                return;
-            }
 
             Metrics::init_send_loop(&loaded);
 
@@ -221,8 +199,7 @@ async fn async_main() {
         }
         Mode::Discover(options) => {
             let loaded = Config::build_config();
-            let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Discover);
+            let _storage = reject_invalid_wal_storage();
 
             let output_mode = options.output.clone();
             let named = cli_named_pipeline(options.pipeline.as_deref());
@@ -239,8 +216,7 @@ async fn async_main() {
         }
         Mode::Metadata { action } => {
             let loaded = Config::build_config();
-            let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Metadata);
+            let _storage = reject_invalid_wal_storage();
             let pipeline = skipprd::cli::metadata::pipeline_for_action(&action);
             let bound = loaded.bind_pipeline(pipeline);
             bound.init().await;
@@ -255,13 +231,12 @@ async fn async_main() {
         }
         Mode::Query(options) => {
             let loaded = Config::build_config();
-            let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Query);
+            let _storage = reject_invalid_wal_storage();
             let session = Session::from_config(loaded, None);
             if let Some(sql) = options.sql {
                 let collect_plain = skipprd::sqlrt::query::sql_uses_record_batch_collect(&sql)
-                    && (storage == WalStorage::Clustered
-                        || (options.plain && options.watch.is_none()));
+                    && options.plain
+                    && options.watch.is_none();
                 let shared_extension =
                     skipprd::sqlrt::query::sql_uses_shared_extension_collect(&sql);
                 let now = Instant::now();
@@ -290,13 +265,9 @@ async fn async_main() {
                         .await;
                 }
                 let elapsed = now.elapsed();
-                if !options.plain && storage != WalStorage::Clustered {
+                if !options.plain {
                     eprintln!("Query time: {} seconds", elapsed.as_secs());
                 }
-            } else if storage == WalStorage::Clustered {
-                error!("clustered query requires --sql");
-                eprintln!("clustered query requires --sql");
-                process::exit(1);
             } else {
                 use std::io::{self, Write};
                 println!("Skippr SQL REPL. Type SQL and press Enter. Type :q to quit.");
@@ -333,8 +304,7 @@ async fn async_main() {
         }
         Mode::Schema(options) => {
             let loaded = Config::build_config();
-            let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Schema);
+            let _storage = reject_invalid_wal_storage();
             skipprd::engine::run_schema(&loaded, &options.pipeline).await;
         }
         Mode::Doctor(options) => {
@@ -353,8 +323,7 @@ async fn async_main() {
         Mode::Df(options) => {
             let named = cli_named_pipeline(options.pipeline.as_deref());
             let loaded = Config::build_config();
-            let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Query);
+            let _storage = reject_invalid_wal_storage();
             let session = Session::from_config(loaded, named.as_deref());
             match session.df(options.namespace.as_deref()).await {
                 Ok(batches) => {
@@ -433,8 +402,7 @@ async fn async_main() {
         }
         Mode::Benchmark(options) => {
             let loaded = Config::build_config();
-            let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Benchmark);
+            let _storage = reject_invalid_wal_storage();
             let bound = loaded.bind_pipeline("benchmark");
             bound.init().await;
 
@@ -483,8 +451,7 @@ async fn async_main() {
         }
         Mode::Migrate(options) => {
             let loaded = Config::build_config();
-            let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Migrate);
+            let _storage = reject_invalid_wal_storage();
             let named = cli_named_pipeline(options.pipeline.as_deref());
             let Some(pipeline) = named else {
                 error!("No pipeline name provided, you must provide a pipeline name to migrate");
@@ -497,7 +464,7 @@ async fn async_main() {
             } else {
                 skipprd::migration::MigrationDirection::Up
             };
-            match skipprd::migration::apply_pending_with_ingest_lease(&bound, direction).await {
+            match skipprd::migration::apply_pending(&bound, direction).await {
                 Ok(ids) => {
                     if ids.is_empty() {
                         println!("No pending migrations for {pipeline}");
@@ -516,8 +483,7 @@ async fn async_main() {
         }
         Mode::Serve(options) => {
             let loaded = Config::build_config();
-            let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Serve);
+            let _storage = reject_invalid_wal_storage();
             if let Err(err) = skipprd::serve::run(loaded, options).await {
                 error!("{err}");
                 eprintln!("{err}");

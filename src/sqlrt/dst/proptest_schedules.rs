@@ -40,7 +40,7 @@ fn arb_wal() -> impl Strategy<Value = WalEvent> {
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
-    use crate::cluster::failpoint::FailpointName;
+    use crate::failpoint::FailpointName;
     prop_oneof![
         (1i64..6, 0i64..40).prop_map(|(id, amount)| Op::IngestLake(UserRow {
             id,
@@ -181,7 +181,7 @@ proptest! {
         };
         let store = MemoryWalCatalog::new();
         let owner = NodeId::generate();
-        store.install_lease(owner, LeaseEpoch::new(1));
+        store.set_writer_fence(owner, LeaseEpoch::new(1));
         let fence = CatalogFence {
             owner,
             epoch: LeaseEpoch::new(1),

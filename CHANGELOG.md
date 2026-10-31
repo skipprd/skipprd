@@ -10,6 +10,11 @@ All notable changes to this project will be documented in this file.
 - Release CI matches current rust.yml: GitHub-hosted runners and Cloudflare R2. No Depot, ECR, CodeArtifact, or AWS S3.
 
 ## [Unreleased]
+
+### Breaking
+
+- Clustered WAL, replica fencing, gossip membership, writer leases, and the DynamoDB pipeline lease store are removed. `WAL_STORAGE` is `disk` or `s3` only. `WAL_STORAGE=clustered` fails closed. Catalog OCC is a local `CatalogFence`, not a writer lease. HLA cluster work lives on the untested `poc/clustered-ha` branch.
+
 ## [18.1.0]
 
 ### Added
@@ -19,8 +24,8 @@ All notable changes to this project will be documented in this file.
 
 ### Breaking
 
-- WAL metadata lives in the skipprd store catalog (sled / DynamoDB). `mutation.log`, completion bitmaps, `.seg.commit`, and clustered protocol v2 are gone. First start imports existing installs once and archives leftover files. Clustered peers must all run protocol v3; start the former primary first. Deleting `DATA_DIR` with sled deletes the catalog.
-- Experimental `skippr.store.type=cloud-tables`, Python `CloudTablesStore`, and `--features offset-store-cloud-tables` are removed. Skippr Store is sled (local) or DynamoDB (remote). Clustered WAL and SkipprLake catalog pointers use DynamoDB.
+- WAL metadata lives in the skipprd store catalog (sled / DynamoDB). `mutation.log`, completion bitmaps, and `.seg.commit` are gone. First start imports existing installs once and archives leftover files. Deleting `DATA_DIR` with sled deletes the catalog.
+- Experimental `skippr.store.type=cloud-tables`, Python `CloudTablesStore`, and `--features offset-store-cloud-tables` are removed. Skippr Store is sled (local) or DynamoDB (remote). SkipprLake catalog pointers use DynamoDB.
 
 ## [18.3.8]
 

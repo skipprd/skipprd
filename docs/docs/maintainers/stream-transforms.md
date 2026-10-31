@@ -15,7 +15,6 @@ source → schema map → Arrow batch → transform.ops → WAL catalog commit
 - Stateless `ops` run after schema mapping and before `WalCommitUnit` submit, on both the JSON ingest path and the Arrow IPC runtime path.
 - Stateful `aggregates` consume **immutable** committed SEGF segments. There is no second processing WAL.
 - `type: copy` cannot set `ops` or `aggregates`.
-- `WAL_STORAGE=clustered` cannot set `aggregates` (local Sled is not a distributed state store).
 
 ## Ops
 

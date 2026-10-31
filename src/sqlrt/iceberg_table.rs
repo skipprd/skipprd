@@ -560,7 +560,7 @@ pub(crate) async fn reload_iceberg_table(
             "IcebergScanExec is missing catalog reload state".into(),
         ));
     }
-    let catalog = crate::cluster::backend::reopen_iceberg_catalog(catalog_json)
+    let catalog = crate::sqlrt::iceberg_catalog::reopen_iceberg_catalog(catalog_json)
         .await
         .map_err(DataFusionError::Plan)?;
     let ident = iceberg::TableIdent::from_strs([catalog_ns, table_name])

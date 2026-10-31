@@ -35,7 +35,7 @@ impl MemoryWalCatalog {
         }
     }
 
-    pub fn install_lease(&self, owner: NodeId, epoch: LeaseEpoch) {
+    pub fn set_writer_fence(&self, owner: NodeId, epoch: LeaseEpoch) {
         let mut inner = self.inner.lock().expect("memory catalog poisoned");
         inner.lease = Some(LeaseSlot {
             owner,
@@ -44,10 +44,10 @@ impl MemoryWalCatalog {
         });
     }
 
-    pub fn release_lease(&self) {
+    pub fn revoke_writer_fence(&self) {
         let mut inner = self.inner.lock().expect("memory catalog poisoned");
-        if let Some(lease) = inner.lease.as_mut() {
-            lease.released = true;
+        if let Some(slot) = inner.lease.as_mut() {
+            slot.released = true;
         }
     }
 

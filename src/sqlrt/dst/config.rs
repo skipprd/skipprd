@@ -53,45 +53,6 @@ fn g_copy_cannot_set_ops_aggregates() {
 }
 
 #[test]
-fn g_clustered_wal_rejects_aggregates() {
-    use crate::helpers::configuration::{AggregateMeasure, TransformAggregate};
-    struct RestoreDisk;
-    impl Drop for RestoreDisk {
-        fn drop(&mut self) {
-            Config::set_evncache("WAL_STORAGE", "disk");
-        }
-    }
-    let _restore = RestoreDisk;
-    Config::set_evncache("WAL_STORAGE", "clustered");
-    let mut config = Config::new();
-    let mut pipeline = Pipeline::default();
-    pipeline.transform = Some(Transform {
-        aggregates: Some(vec![TransformAggregate {
-            id: "customer_invoice_totals".into(),
-            key_fields: vec!["customer_id".into()],
-            measures: [(
-                "invoice_count".into(),
-                AggregateMeasure {
-                    count: Some("*".into()),
-                    ..Default::default()
-                },
-            )]
-            .into_iter()
-            .collect(),
-        }]),
-        ..Default::default()
-    });
-    config.pipelines.insert("p".into(), pipeline);
-    let violations = config.bind_pipeline("p").get_config_dependency_violations();
-    assert!(
-        violations
-            .iter()
-            .any(|v| v.contains("cannot be used with WAL_STORAGE=clustered")),
-        "{violations:?}"
-    );
-}
-
-#[test]
 fn b_mixed_namespaces_yaml_cdc_keys() {
     let pipeline: Pipeline = serde_yaml::from_str(
         r#"

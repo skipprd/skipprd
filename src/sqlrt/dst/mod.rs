@@ -49,7 +49,7 @@ use skippr_wal_catalog::{
     SegmentRow, SeqRow, SliceBitmap, WalCatalogRead, WalCatalogStore,
 };
 
-use crate::cluster::failpoint::FailpointName;
+use crate::failpoint::FailpointName;
 use crate::plugins::cdc::MutationKind;
 use crate::sqlrt::read_boundary::LakeSnapshot;
 
@@ -186,7 +186,7 @@ impl World {
         let catalog = MemoryWalCatalog::new();
         let owner = NodeId::generate();
         let epoch = LeaseEpoch::new(1);
-        catalog.install_lease(owner, epoch);
+        catalog.set_writer_fence(owner, epoch);
         Self {
             catalog,
             fence: CatalogFence { owner, epoch },

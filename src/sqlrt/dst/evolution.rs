@@ -1,8 +1,8 @@
-use crate::discover::SkipprDataType;
 use crate::discover::schema_alter::is_iceberg_legal_promote;
+use crate::discover::SkipprDataType;
 use crate::helpers::Helpers;
 use crate::lineage::deterministic_field_id;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 #[test]
@@ -31,10 +31,10 @@ fn a_flatten_on_vs_off_field_ids_stable() {
 #[test]
 fn e_schema_arrow_decimal_15_2_rescales_to_38_9() {
     use crate::ingest::schema_arrow::{
-        SKIPPR_DECIMAL_PRECISION, SKIPPR_DECIMAL_SCALE, coerce_record_batch_to_skippr,
-        skippr_schema_from_source,
+        coerce_record_batch_to_skippr, skippr_schema_from_source, SKIPPR_DECIMAL_PRECISION,
+        SKIPPR_DECIMAL_SCALE,
     };
-    use crate::serdes::decode::{DecodedIngest, decode_ingest};
+    use crate::serdes::decode::{decode_ingest, DecodedIngest};
     use crate::serdes::input_format::InputFormat;
     use crate::serdes::parquet::encode_parquet;
     use arrow::array::Decimal128Array;
@@ -265,7 +265,7 @@ fn e_nested_leaf_type_split_must_not_evolve_parent_record() {
 fn e_array_of_records_leaf_type_split_denied() {
     use crate::discover::SkipprDataType;
     use crate::helpers::configuration::Config;
-    use crate::ingest::deny::{ARRAY_MIXED_TYPES, IngestDenyError};
+    use crate::ingest::deny::{IngestDenyError, ARRAY_MIXED_TYPES};
     use crate::ingest::ingest::set_value;
     use serde_json::json;
     use std::collections::HashMap;
@@ -303,24 +303,22 @@ fn e_array_of_records_leaf_type_split_denied() {
         .downcast_ref::<IngestDenyError>()
         .expect("DST: ARRAY_MIXED_TYPES");
     assert_eq!(deny.code, ARRAY_MIXED_TYPES);
-    assert!(
-        metadata
-            .get("aggregate")
-            .unwrap()
-            .fields
-            .get("0")
-            .unwrap()
-            .fields
-            .get("max_size_mm_string")
-            .is_none()
-    );
+    assert!(metadata
+        .get("aggregate")
+        .unwrap()
+        .fields
+        .get("0")
+        .unwrap()
+        .fields
+        .get("max_size_mm_string")
+        .is_none());
 }
 
 #[test]
 fn e_primitive_array_mixed_types_denied() {
     use crate::discover::SkipprDataType;
     use crate::helpers::configuration::Config;
-    use crate::ingest::deny::{ARRAY_MIXED_TYPES, IngestDenyError};
+    use crate::ingest::deny::{IngestDenyError, ARRAY_MIXED_TYPES};
     use crate::ingest::ingest::ingest;
     use serde_json::json;
     use std::collections::HashMap;
@@ -354,7 +352,7 @@ fn e_primitive_array_mixed_types_denied() {
 fn e_flattened_array_index_mixed_leaf_denied() {
     use crate::discover::SkipprDataType;
     use crate::helpers::configuration::Config;
-    use crate::ingest::deny::{ARRAY_MIXED_TYPES, IngestDenyError};
+    use crate::ingest::deny::{IngestDenyError, ARRAY_MIXED_TYPES};
     use crate::ingest::ingest::ingest;
     use serde_json::json;
     use std::collections::HashMap;

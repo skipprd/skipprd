@@ -3,4 +3,3 @@ pub fn register_lance_tables() {
     // No-op stub
 }
 
-

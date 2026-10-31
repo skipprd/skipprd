@@ -516,8 +516,8 @@ dependencies = [
  "bytes",
  "futures",
  "once_cell",
- "prost 0.14.4",
- "prost-types 0.14.4",
+ "prost",
+ "prost-types",
  "tonic",
  "tonic-prost",
 ]
@@ -2036,7 +2036,7 @@ checksum = "93833e97ac7c46ba97045afcf247238c27057538fcf2f06344662ddd5f567be6"
 dependencies = [
  "darling 0.24.1",
  "ident_case",
- "prettyplease 0.3.0",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "syn 3.0.9",
@@ -2328,24 +2328,6 @@ dependencies = [
  "cfg-if 1.0.5",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
-]
-
-[[package]]
-name = "chitchat"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eec87036b3e4d69e1cbdf3c7e7b9243612d3e5ea120a5099cd72f62354681ab6"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "itertools 0.12.1",
- "rand 0.8.8",
- "serde",
- "tokio",
- "tokio-stream",
- "tracing",
- "zstd 0.13.3",
 ]
 
 [[package]]
@@ -3668,7 +3650,7 @@ dependencies = [
  "num-traits",
  "object_store",
  "pin-project",
- "prost 0.14.4",
+ "prost",
  "rand 0.9.5",
  "sketches-ddsketch",
  "tokio",
@@ -4166,7 +4148,7 @@ dependencies = [
  "itertools 0.14.0",
  "parking_lot 0.12.5",
  "paste",
- "petgraph 0.8.3",
+ "petgraph",
  "recursive",
  "tokio",
 ]
@@ -4190,7 +4172,7 @@ dependencies = [
  "indexmap 2.14.2",
  "itertools 0.15.0",
  "parking_lot 0.12.5",
- "petgraph 0.8.3",
+ "petgraph",
  "recursive",
  "tokio",
 ]
@@ -4393,7 +4375,7 @@ dependencies = [
  "datafusion-physical-plan 53.1.0",
  "datafusion-proto-common 53.1.0",
  "object_store",
- "prost 0.14.4",
+ "prost",
  "rand 0.9.5",
 ]
 
@@ -4421,7 +4403,7 @@ dependencies = [
  "datafusion-proto-common 55.2.0",
  "datafusion-proto-models",
  "object_store",
- "prost 0.14.4",
+ "prost",
 ]
 
 [[package]]
@@ -4432,7 +4414,7 @@ checksum = "16e614c7c53a9c304c6a850b821010bb492e57300311835f1180613f9d2c63d9"
 dependencies = [
  "arrow 58.4.0",
  "datafusion-common 53.1.0",
- "prost 0.14.4",
+ "prost",
 ]
 
 [[package]]
@@ -4443,7 +4425,7 @@ checksum = "a95763d5fa64a88b658ba4ec7314d9c538e2aea749dc88d5ce2afaafbb4c69b8"
 dependencies = [
  "arrow 59.3.1",
  "datafusion-common 55.2.0",
- "prost 0.14.4",
+ "prost",
 ]
 
 [[package]]
@@ -4454,7 +4436,7 @@ checksum = "3c4982d05dee1e0b90b7f3b39845dca7eee5635c550db09158d385b8181bdc6a"
 dependencies = [
  "datafusion-common 55.2.0",
  "datafusion-proto-common 55.2.0",
- "prost 0.14.4",
+ "prost",
 ]
 
 [[package]]
@@ -7655,12 +7637,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "multimap"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
-
-[[package]]
 name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8176,7 +8152,7 @@ dependencies = [
  "const-hex",
  "opentelemetry",
  "opentelemetry_sdk",
- "prost 0.14.4",
+ "prost",
  "serde",
  "serde_json",
  "tonic",
@@ -8514,16 +8490,6 @@ name = "periodic"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078871d84bbf2d85e4a69527169df35df811aa86e1abf77af6be496888026aa"
-
-[[package]]
-name = "petgraph"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3672b37090dbd86368a4145bc067582552b29c27377cad4e0a306c97f9bd7772"
-dependencies = [
- "fixedbitset",
- "indexmap 2.14.2",
-]
 
 [[package]]
 name = "petgraph"
@@ -8918,16 +8884,6 @@ checksum = "c6fa0831dd7cc608c38a5e323422a0077678fa5744aa2be4ad91c4ece8eec8d5"
 
 [[package]]
 name = "prettyplease"
-version = "0.2.37"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
-dependencies = [
- "proc-macro2",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "prettyplease"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bfe0f4c752e450fc2faf62654f1c134747922825d5b04ca717b8874f41a40c0"
@@ -9034,55 +8990,12 @@ dependencies = [
 
 [[package]]
 name = "prost"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
-dependencies = [
- "bytes",
- "prost-derive 0.13.5",
-]
-
-[[package]]
-name = "prost"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
 dependencies = [
  "bytes",
- "prost-derive 0.14.4",
-]
-
-[[package]]
-name = "prost-build"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
-dependencies = [
- "heck 0.5.0",
- "itertools 0.14.0",
- "log",
- "multimap",
- "once_cell",
- "petgraph 0.7.1",
- "prettyplease 0.2.37",
- "prost 0.13.5",
- "prost-types 0.13.5",
- "regex",
- "syn 2.0.119",
- "tempfile",
-]
-
-[[package]]
-name = "prost-derive"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
-dependencies = [
- "anyhow",
- "itertools 0.14.0",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "prost-derive",
 ]
 
 [[package]]
@@ -9100,20 +9013,11 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
-dependencies = [
- "prost 0.13.5",
-]
-
-[[package]]
-name = "prost-types"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
 dependencies = [
- "prost 0.14.4",
+ "prost",
 ]
 
 [[package]]
@@ -10861,26 +10765,8 @@ dependencies = [
 name = "skippr-lease"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "serde",
- "sha2 0.10.9",
  "thiserror 1.0.69",
- "tokio",
- "uuid 1.29.0",
-]
-
-[[package]]
-name = "skippr-lease-store-dynamodb"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "aws-config",
- "aws-sdk-dynamodb",
- "chrono",
- "skippr-lease",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
  "uuid 1.29.0",
 ]
 
@@ -11808,8 +11694,8 @@ dependencies = [
  "http 1.5.0",
  "http-body-util",
  "opentelemetry-proto",
- "prost 0.14.4",
- "prost-types 0.14.4",
+ "prost",
+ "prost-types",
  "serde",
  "serde_derive",
  "serde_json",
@@ -12241,8 +12127,7 @@ dependencies = [
  "datafusion 55.2.0",
  "datafusion-proto 55.2.0",
  "futures",
- "prost 0.14.4",
- "rustls 0.23.46",
+ "prost",
  "thiserror 1.0.69",
  "tokio",
  "tonic",
@@ -12307,7 +12192,6 @@ dependencies = [
  "byteorder",
  "bytes",
  "cc",
- "chitchat",
  "chrono",
  "chrono-tz",
  "clap",
@@ -12325,7 +12209,6 @@ dependencies = [
  "futures",
  "glob",
  "hex",
- "hmac 0.12.1",
  "iceberg",
  "icu",
  "ini",
@@ -12345,8 +12228,6 @@ dependencies = [
  "phf 0.11.3",
  "predicates",
  "proptest",
- "prost 0.13.5",
- "prost-build",
  "quick-xml 0.39.4",
  "rand 0.8.8",
  "ratatui",
@@ -12375,7 +12256,6 @@ dependencies = [
  "skippr-iceberg-catalog-glue",
  "skippr-iceberg-rest",
  "skippr-lease",
- "skippr-lease-store-dynamodb",
  "skippr-object-writer",
  "skippr-offset-store-dynamodb",
  "skippr-query-plan",
@@ -13281,7 +13161,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
 dependencies = [
  "bytes",
- "prost 0.14.4",
+ "prost",
  "tonic",
 ]
 

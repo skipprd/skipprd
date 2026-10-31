@@ -8,6 +8,8 @@ pub mod cdc_reconcile;
 pub mod doc_parser;
 pub mod docs;
 pub mod dst;
+pub mod iceberg_catalog;
+pub mod iceberg_lake;
 pub mod iceberg_table;
 pub mod metadata;
 pub mod operators;

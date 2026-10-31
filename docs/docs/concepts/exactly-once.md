@@ -53,10 +53,6 @@ The guarantee depends on the WAL and the resume position surviving. Watch for th
 - **Running `RESET PIPELINE`.** It deliberately deletes the WAL and the resume position. The next sync starts from scratch, which duplicates rows in append-only tables unless you clear them too.
 - **Two copies of one pipeline.** Run one `skipprd sync` per pipeline at a time, always against the same `DATA_DIR`. Two copies with separate state each keep their own resume position and both write to the destination.
 
-### Clustered mode
-
-`WAL_STORAGE=clustered` keeps a synchronous second copy of the WAL on a peer, so a single machine failure loses no committed data. Clustered mode only accepts destinations whose retries cannot duplicate rows: the exactly-once and overwrite-on-retry destinations above. ClickHouse, AMQP, and Stdout are rejected at startup.
-
 ## Test recovery yourself
 
 Chaos mode kills the process with `SIGKILL` at random points during a sync, so you can prove recovery against your own pipeline before you rely on it. Use it in a test environment only.

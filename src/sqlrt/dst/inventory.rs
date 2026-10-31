@@ -1,6 +1,6 @@
 use crate::buffer::compaction_progress::GroupedCompactionPhase;
 use crate::buffer::wal_catalog_import::gc_orphan_payloads;
-use crate::buffer::wal_handle::{catalog_fence_from_guard, memory_catalog_for_test};
+use crate::buffer::wal_handle::memory_catalog_for_test;
 use crate::helpers::offset_store::SledOffsetStore;
 use crate::helpers::offsets::{
     OffsetKey, OffsetTypes, RuntimeOffsetOperation, RuntimeOffsetRpcRequest,
@@ -11,7 +11,7 @@ use crate::runtime_plugins::protocol::{
     RuntimeSchemaRefreshRequest, RuntimeSourceConfig, SchemaDelta, SourceStartRequest,
 };
 use crate::runtime_plugins::wire::decode_payload;
-use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SystemClock};
+use skippr_lease::{PipelineKey, PipelinePaths};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,14 +20,13 @@ fn a_orphan_gc() {
     let dir = tempfile::tempdir().unwrap();
     let key = PipelineKey::new("t", "w", "orphan").unwrap();
     let paths = PipelinePaths::legacy_disk(dir.path());
-    let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-    let fence = catalog_fence_from_guard(&guard).unwrap();
+    let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let db = sled::open(dir.path().join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
         Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
     let handle =
-        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, guard, catalog, offsets);
+        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     std::fs::create_dir_all(handle.paths().segs.as_path()).unwrap();
     let tmp = handle.paths().segs.join("crash.seg.tmp");
     std::fs::write(&tmp, b"partial").unwrap();
@@ -40,14 +39,13 @@ fn a_quarantine_dir_without_handle() {
     let dir = tempfile::tempdir().unwrap();
     let key = PipelineKey::new("t", "w", "quarantine").unwrap();
     let paths = PipelinePaths::legacy_disk(dir.path());
-    let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-    let fence = catalog_fence_from_guard(&guard).unwrap();
+    let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let db = sled::open(dir.path().join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
         Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
     let handle =
-        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, guard, catalog, offsets);
+        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     let qdir = handle.paths().root.join("segment_buffer/quarantine");
     std::fs::create_dir_all(&qdir).unwrap();
     assert!(qdir.ends_with("segment_buffer/quarantine"));
@@ -202,7 +200,7 @@ fn e_exact_arrow_nested_ineligible() {
     assert!(!is_exact_arrow_eligible(&fields, false));
 }
 
-fn leased(
+fn wal_handle(
     dir: &std::path::Path,
     pipeline: &str,
 ) -> (
@@ -211,14 +209,13 @@ fn leased(
 ) {
     let key = PipelineKey::new("t", "w", pipeline).unwrap();
     let paths = PipelinePaths::legacy_disk(dir);
-    let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
-    let fence = catalog_fence_from_guard(&guard).unwrap();
+    let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let db = sled::open(dir.join("offsets")).unwrap();
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
         Arc::new(SledOffsetStore::new(db.open_tree("o").unwrap()));
     let handle =
-        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, guard, catalog, offsets);
+        crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
     (handle, fence)
 }
 
@@ -226,7 +223,7 @@ fn leased(
 fn a_payload_unreadable() {
     use skippr_wal_catalog::{CatalogKey, CatalogRow, CatalogTxn, PutCond};
     let dir = tempfile::tempdir().unwrap();
-    let (handle, fence) = leased(dir.path(), "payload-unread");
+    let (handle, fence) = wal_handle(dir.path(), "payload-unread");
     std::fs::create_dir_all(handle.paths().segs.as_path()).unwrap();
     let path = handle.paths().segs.join("gone.seg");
     std::fs::write(&path, b"not-segf").unwrap();
@@ -259,7 +256,7 @@ fn c_complete_slices_and_reclaim() {
     use skippr_wal_catalog::{CatalogKey, CatalogRow, CatalogTxn, PutCond};
     crate::processor::set_min_unconsumed_seq(u64::MAX);
     let dir = tempfile::tempdir().unwrap();
-    let (handle, fence) = leased(dir.path(), "complete-reclaim");
+    let (handle, fence) = wal_handle(dir.path(), "complete-reclaim");
     let id = skippr_lease::SegmentId::new("done-seg").unwrap();
     let row = skippr_wal_catalog::SegmentRow {
         segment_id: id.clone(),

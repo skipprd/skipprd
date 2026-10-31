@@ -1,47 +1,14 @@
-//! Shared offset-store and pipeline-lease factory. Clustered and S3 consume
-//! the same trait objects; core WAL/engine code does not branch on backend.
+//! Shared SkipprStore factory. Disk and S3 consume the same trait objects;
+//! core WAL/engine code does not branch on backend.
 
 use std::sync::Arc;
 
-use skippr_lease::{
-    acquire_pipeline, renew_until_lost, FenceError, LeaseGuard, LeaseSession, NodeId, PipelineKey,
-    PipelineLeaseStore, SystemClock, TokioSleeper,
-};
+use skippr_lease::PipelineKey;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::Offsets;
 use crate::helpers::wal_storage::SkipprStoreKind;
 use skippr_wal_catalog::{CatalogFence, WalCatalogRead, WalCatalogStore};
-
-pub async fn open_pipeline_lease_store(
-    kind: SkipprStoreKind,
-    offsets: Option<&Offsets>,
-    table: String,
-) -> Result<Arc<dyn PipelineLeaseStore>, String> {
-    match kind {
-        SkipprStoreKind::Sled => {
-            let offsets = offsets.ok_or_else(|| {
-                "sled pipeline lease requires an open local offset database".to_string()
-            })?;
-            let store = offsets.open_sled_lease_store()?;
-            Ok(Arc::new(store))
-        }
-        SkipprStoreKind::DynamoDb => {
-            #[cfg(feature = "offset-store-dynamodb")]
-            {
-                let store = skippr_lease_store_dynamodb::DynamoDbLeaseStore::connect(table)
-                    .await
-                    .map_err(|err| err.to_string())?;
-                Ok(Arc::new(store))
-            }
-            #[cfg(not(feature = "offset-store-dynamodb"))]
-            {
-                let _ = table;
-                Err("skippr.store.type=dynamodb requires --features offset-store-dynamodb".into())
-            }
-        }
-    }
-}
 
 pub fn configured_kind(config: &Config) -> Result<SkipprStoreKind, String> {
     match config.configured_skippr_store() {
@@ -66,56 +33,6 @@ pub fn pipeline_key(config: &Config) -> Result<PipelineKey, String> {
         config.get_pipeline_name(),
     )
     .map_err(|err| err.to_string())
-}
-
-pub struct AcquiredPipelineLease {
-    pub store: Arc<dyn PipelineLeaseStore>,
-    pub key: PipelineKey,
-    pub guard: Arc<LeaseGuard>,
-    pub session: LeaseSession,
-}
-
-pub async fn acquire_ingest_lease(
-    config: &Config,
-    offsets: &Offsets,
-) -> Result<AcquiredPipelineLease, String> {
-    let kind = configured_kind(config)?;
-    let table = config.get_skippr_store_name();
-    let store = open_pipeline_lease_store(kind, Some(offsets), table).await?;
-    let key = pipeline_key(config)?;
-    let clock = Arc::new(SystemClock::new());
-    let sleeper = Arc::new(TokioSleeper::new(clock.clone()));
-    let node = NodeId::generate();
-    let session = acquire_pipeline(
-        store.as_ref(),
-        clock.as_ref(),
-        sleeper.as_ref(),
-        &key,
-        &node,
-    )
-    .await
-    .map_err(|err| format!("pipeline writer lease unavailable: {err}"))?;
-    let guard = LeaseGuard::owner_elect(key.clone(), session.clone(), clock.clone());
-    let renew_store = store.clone();
-    let renew_key = key.clone();
-    let renew_guard = guard.clone();
-    let renew_clock = clock.clone();
-    tokio::spawn(async move {
-        renew_until_lost(
-            renew_store.as_ref(),
-            renew_clock.as_ref(),
-            sleeper.as_ref(),
-            &renew_key,
-            renew_guard.as_ref(),
-        )
-        .await;
-    });
-    Ok(AcquiredPipelineLease {
-        store,
-        key,
-        guard,
-        session,
-    })
 }
 
 pub fn open_wal_catalog(
@@ -200,8 +117,7 @@ pub fn open_wal_catalog_reader_for_config(
     }
 }
 
-/// Discover reset: catalog rows (`wal#`) plus published offset/checkpoint
-/// items. The pipeline lease row is untouched.
+/// Discover reset: catalog rows (`wal#`) plus published offset/checkpoint items.
 pub fn reset_pipeline_state(
     config: &Config,
     offsets: &Offsets,
@@ -213,21 +129,6 @@ pub fn reset_pipeline_state(
         store.reset_published_ingest()?;
     }
     Ok(())
-}
-
-impl AcquiredPipelineLease {
-    pub fn activate(&self) -> Result<(), FenceError> {
-        self.guard.activate(self.session.clone())
-    }
-
-    pub async fn release_after_quiesce(&self, quiescent: bool) {
-        self.guard.begin_drain();
-        if quiescent {
-            if let Some(session) = self.guard.leased_session() {
-                let _ = self.store.release_after_drain(&self.key, &session).await;
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -309,16 +210,11 @@ mod tests {
     }
 
     #[test]
-    fn discover_reset_keeps_pipeline_leases_and_drops_catalog_and_offsets() {
+    fn discover_reset_drops_catalog_and_offsets() {
         let dir = tempfile::tempdir().unwrap();
         let db = sled::open(dir.path()).unwrap();
-        let lease = db.open_tree("pipeline_leases").unwrap();
-        lease.insert(b"lease-row", b"held").unwrap();
         let offsets = Offsets::from_local_db_for_test(db);
-        let fence = CatalogFence {
-            owner: skippr_lease::NodeId::single_node(),
-            epoch: skippr_lease::LeaseEpoch::SINGLE_NODE,
-        };
+        let fence = CatalogFence::local();
         let catalog = offsets.open_sled_wal_catalog(fence).unwrap();
         let mut txn = skippr_wal_catalog::CatalogTxn::new();
         txn.put(
@@ -355,10 +251,6 @@ mod tests {
             .get(&crate::helpers::offsets::OffsetKey::new("ns", "p"))
             .unwrap()
             .is_none());
-        assert_eq!(
-            lease.get(b"lease-row").unwrap().as_deref(),
-            Some(b"held".as_slice())
-        );
     }
 
     #[test]

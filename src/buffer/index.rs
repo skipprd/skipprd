@@ -67,7 +67,6 @@ impl DataIndexes {
     }
 }
 
-
 struct TrackedRead<R> {
     inner: R,
     bytes_read: usize,
@@ -92,8 +91,6 @@ impl<R: Read + Seek> Seek for TrackedRead<R> {
         self.inner.seek(pos)
     }
 }
-
-
 
 pub struct IndexBuilder {
     indexes: DataIndexes, // Holds all the indexes
@@ -187,15 +184,12 @@ impl IndexBuilder {
             // msgs.push(format!("last column, next column offset: {}", next_column_offset));
         }
 
-
-
         // let mut buffer: Vec<u8> = vec![0; tracked_reader.bytes_read + next_column_offset as usize -1];
         // tracked_reader.read_exact(&mut buffer)?;
         // let buffer_string = String::from_utf8_lossy(&buffer);
         // msgs.push(format!("read: {}, column index: {}, buffer: {}", tracked_reader.bytes_read, column_index, buffer_string));
 
         // panic!("{}", msgs.join("\n"));
-
 
                               Ok(())
     }
@@ -242,7 +236,6 @@ impl IndexBuilder {
                         panic!("{}", msgs.join("\n"));
                     }
 
-
                     self.col_index_offset(name, field, col_offset)?;
                     
                     self.byte_index_offset(name, i as i64, col_offset)?;
@@ -278,7 +271,6 @@ impl IndexBuilder {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {

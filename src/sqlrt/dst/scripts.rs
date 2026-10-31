@@ -1,5 +1,5 @@
 use super::*;
-use crate::cluster::failpoint::FailpointName;
+use crate::failpoint::FailpointName;
 use crate::plugins::cdc::MutationKind;
 use crate::sqlrt::read_boundary::LakeSnapshot;
 use skippr_wal_catalog::{CatalogPrefix, CatalogRow, CompactionState, WalCatalogRead};
@@ -955,7 +955,6 @@ pub const EXTRA_FIXTURES: &[&str] = &[
     "g_filter_keeps_cdc_sidecar",
     "g_transform_error_does_not_advance_offsets",
     "g_multi_row_batch_atomicity",
-    "g_clustered_wal_rejects_aggregates",
     "g_copy_cannot_set_ops_aggregates",
     "g_running_sum_count",
     "g_cdc_update_delta",
@@ -971,12 +970,12 @@ pub const EXTRA_FIXTURES: &[&str] = &[
     "h_query_pin_retry_ceiling",
     "h_foreign_tenant_ticket",
     "h_minus_excluded",
-    "h_clustered_pin_union",
+    "h_ticket_slices_minus_excluded",
     "h_illegal_sql",
     "h_lake_only_env_is_deleted",
-    "i_activate_ingest_lease_then_persist",
+    "i_apply_pending_then_persist",
     "i_exclusive_sled_open_fail_closed",
-    "i_lease_epoch_stale_writer_rejected",
+    "i_stale_catalog_fence_rejected",
     "i_checkpoint_offset_hint_roundtrip",
     "i_offset_position_filesize_closed",
     "i_offset_corrupt_schema",
@@ -1128,7 +1127,6 @@ pub const REQUIRED_PLAN_SCRIPTS: &[&str] = &[
     "g_config_hash_mismatch_rebuilds",
     "g_reclaim_hold_restore_from_disk_cursor",
     "g_multi_row_batch_atomicity",
-    "g_clustered_wal_rejects_aggregates",
     "g_copy_cannot_set_ops_aggregates",
     "g_filter_keeps_cdc_sidecar",
     "g_transform_error_does_not_advance_offsets",
@@ -1152,14 +1150,14 @@ pub const REQUIRED_PLAN_SCRIPTS: &[&str] = &[
     "h_query_pin_retry_ceiling",
     "h_foreign_tenant_ticket",
     "h_minus_excluded",
-    "h_clustered_pin_union",
+    "h_ticket_slices_minus_excluded",
     "h_illegal_sql",
     "h_lake_only_env_is_deleted",
     "h_release_pin_sees_post_compact_wal",
     "i_crash_before_commit_offset_unchanged",
-    "i_activate_ingest_lease_then_persist",
+    "i_apply_pending_then_persist",
     "i_exclusive_sled_open_fail_closed",
-    "i_lease_epoch_stale_writer_rejected",
+    "i_stale_catalog_fence_rejected",
     "i_checkpoint_offset_hint_roundtrip",
     "i_offset_position_filesize_closed",
     "i_offset_corrupt_schema",

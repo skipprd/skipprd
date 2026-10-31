@@ -9,7 +9,7 @@ pub(crate) mod journal;
 mod wal;
 
 pub use apply::{
-    apply_migration, apply_pending_files, apply_pending_with_ingest_lease, apply_query_alter,
+    apply_migration, apply_pending, apply_pending_files, apply_query_alter,
     require_native_alter_support, schema_barrier_held,
 };
 pub use file::{load_sql_file, write_sql_file, LoadedMigration, MigrationFileError};

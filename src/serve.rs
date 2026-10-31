@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::cli::ServeArgs;
-use crate::cluster::iceberg_lake::require_one_physical_catalog;
-use crate::cluster::pipeline_view::QueryBackend;
-use crate::cluster::IcebergCatalogSpec;
 use crate::helpers::configuration::Config;
-use crate::query_flight::service::{FlightAuth, FlightEngine, QueryFlightServer};
+use crate::pipeline_view::QueryBackend;
+use crate::query_flight::service::{FlightAuth, QueryFlightServer};
+use crate::sqlrt::iceberg_lake::require_one_physical_catalog;
+use crate::sqlrt::iceberg_lake::IcebergCatalogSpec;
 use skippr_iceberg_rest::RestState;
 use tonic::transport::{Identity, ServerTlsConfig};
 
@@ -89,7 +89,7 @@ pub async fn run(config: Config, options: ServeArgs) -> Result<(), String> {
         _ => None,
     };
     let plan = plan_serve(&config)?;
-    let catalog = crate::cluster::backend::open_iceberg_catalog(&plan.spec)
+    let catalog = crate::sqlrt::iceberg_catalog::open_iceberg_catalog(&plan.spec)
         .await
         .map_err(|err| err.to_string())?;
     let rest_listener = tokio::net::TcpListener::bind(options.rest_bind)
@@ -120,11 +120,9 @@ pub async fn run(config: Config, options: ServeArgs) -> Result<(), String> {
             }
         })
     };
-    let scope = crate::cluster::identity::TenantScope::new(
-        config.get_tenant(),
-        config.get_workspace_name(),
-    )
-    .map_err(|err| err.to_string())?;
+    let scope =
+        crate::query_flight::TenantScope::new(config.get_tenant(), config.get_workspace_name())
+            .map_err(|err| err.to_string())?;
     let flight_tls = tls_material
         .map(|(cert, key)| ServerTlsConfig::new().identity(Identity::from_pem(cert, key)));
     let flight = QueryFlightServer::start_with(
@@ -133,7 +131,6 @@ pub async fn run(config: Config, options: ServeArgs) -> Result<(), String> {
             token: Arc::from(token.as_str()),
             scope,
         },
-        FlightEngine::Local,
         config,
         flight_tls,
     )

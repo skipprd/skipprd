@@ -355,9 +355,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pipeline_key = skippr_lease::PipelineKey::new("t", "w", "p").unwrap();
         let paths = skippr_lease::PipelinePaths::legacy_disk(&dir);
-        let clock = Arc::new(skippr_lease::SystemClock::new());
-        let guard = skippr_lease::LeaseGuard::single_node(pipeline_key.clone(), clock);
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
         let db = sled::open(dir.join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
@@ -366,9 +364,9 @@ mod tests {
         let handle = crate::buffer::wal_handle::PipelineWalHandle::new(
             pipeline_key.clone(),
             paths,
-            guard,
             catalog,
             offsets,
+            fence,
         );
         crate::buffer::wal_handle::install_wal_handle(handle.clone());
         let mut field_meta = HashMap::new();
@@ -461,9 +459,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pipeline_key = skippr_lease::PipelineKey::new("t", "w", "p").unwrap();
         let paths = skippr_lease::PipelinePaths::legacy_disk(&dir);
-        let clock = Arc::new(skippr_lease::SystemClock::new());
-        let guard = skippr_lease::LeaseGuard::single_node(pipeline_key.clone(), clock);
-        let fence = crate::buffer::wal_handle::catalog_fence_from_guard(&guard).unwrap();
+        let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
         let db = sled::open(dir.join("offsets")).unwrap();
         let tree = db.open_tree("offsets").unwrap();
@@ -472,9 +468,9 @@ mod tests {
         let handle = crate::buffer::wal_handle::PipelineWalHandle::new(
             pipeline_key.clone(),
             paths,
-            guard,
             catalog,
             offsets,
+            fence,
         );
         crate::buffer::wal_handle::install_wal_handle(handle.clone());
         let seq = skippr_wal_catalog::CatalogSeq::new(1);

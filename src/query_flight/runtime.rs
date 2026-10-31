@@ -34,24 +34,14 @@ struct QueryRuntime {
 static RUNTIME: RwLock<Option<QueryRuntime>> = RwLock::new(None);
 
 /// Local `skipprd query` is in-process: plaintext Worker on localhost.
-/// Clustered skipprd fail-closes on cluster mTLS. Not an env knob.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkerTransport {
     LocalPlaintext,
-    ClusterMtls,
 }
 
 impl WorkerTransport {
-    fn tls(self) -> bool {
-        matches!(self, Self::ClusterMtls)
-    }
-
     fn scheme(self) -> &'static str {
-        if self.tls() {
-            "https"
-        } else {
-            "http"
-        }
+        "http"
     }
 }
 
@@ -62,34 +52,18 @@ struct SkipprWorkerResolver {
 
 impl WorkerResolver for SkipprWorkerResolver {
     fn get_urls(&self) -> Result<Vec<Url>, DataFusionError> {
-        let mut urls = vec![self.self_url.clone()];
-        if let Some(gossip) = crate::cluster::gossip::gossip_directory() {
-            for ad in gossip.known_ads_sync() {
-                let Some(addr) = ad.worker else {
-                    continue;
-                };
-                let scheme = self.self_url.scheme();
-                if let Ok(url) = Url::parse(&format!("{scheme}://{addr}")) {
-                    if url != self.self_url {
-                        urls.push(url);
-                    }
-                }
-            }
-        }
-        Ok(urls)
+        Ok(vec![self.self_url.clone()])
     }
 }
 
 struct SkipprChannelResolver {
     cache: Mutex<HashMap<String, BoxCloneSyncChannel>>,
-    transport: WorkerTransport,
 }
 
 impl SkipprChannelResolver {
-    fn new(transport: WorkerTransport) -> Self {
+    fn new() -> Self {
         Self {
             cache: Mutex::new(HashMap::new()),
-            transport,
         }
     }
 }
@@ -110,15 +84,8 @@ impl ChannelResolver for SkipprChannelResolver {
         {
             return Ok(create_worker_client(channel));
         }
-        let mut endpoint = Channel::from_shared(key.clone())
+        let endpoint = Channel::from_shared(key.clone())
             .map_err(|err| DataFusionError::External(Box::new(err)))?;
-        if self.transport.tls() {
-            let tls = crate::cluster::tls::tonic_client_tls()
-                .map_err(|err| DataFusionError::External(Box::new(err)))?;
-            endpoint = endpoint
-                .tls_config(tls)
-                .map_err(|err| DataFusionError::External(Box::new(err)))?;
-        }
         let channel = endpoint
             .connect()
             .await
@@ -165,7 +132,6 @@ fn coordinating_session_builder(
     resolver: impl WorkerResolver + 'static,
     worker: &Worker,
     self_url: Url,
-    transport: WorkerTransport,
 ) -> SessionStateBuilder {
     SessionStateBuilder::new()
         .with_config(SessionConfig::new())
@@ -173,7 +139,7 @@ fn coordinating_session_builder(
         .with_distributed_planner()
         .with_distributed_user_codec(SkipprHostCodec::default())
         .with_distributed_worker_resolver(resolver)
-        .with_distributed_channel_resolver(SkipprChannelResolver::new(transport))
+        .with_distributed_channel_resolver(SkipprChannelResolver::new())
         .with_distributed_local_worker_context(worker.to_local_worker_context(self_url))
 }
 
@@ -220,14 +186,8 @@ pub fn worker_bind() -> Option<SocketAddr> {
 }
 
 /// Bind an in-process df-dist Worker and install the coordinating SessionContext.
-/// Local `skipprd query` uses plaintext. Clustered skipprd uses [`start_clustered`].
 pub async fn start(advertised_ip: IpAddr) -> Result<(), DurableError> {
     bind_worker(advertised_ip, WorkerTransport::LocalPlaintext).await
-}
-
-/// Clustered QueryRuntime: Worker gRPC is cluster mTLS, fail-closed.
-pub async fn start_clustered(advertised_ip: IpAddr) -> Result<(), DurableError> {
-    bind_worker(advertised_ip, WorkerTransport::ClusterMtls).await
 }
 
 async fn bind_worker(
@@ -247,19 +207,11 @@ async fn bind_worker(
         self_url: self_url.clone(),
     };
     let worker = Worker::from_session_builder(build_worker_session);
-    let ctx = SessionContext::from(
-        coordinating_session_builder(resolver, &worker, self_url, transport).build(),
-    );
+    let ctx =
+        SessionContext::from(coordinating_session_builder(resolver, &worker, self_url).build());
     udfs::register_observability_udfs(&ctx);
     let (stop, stop_rx) = watch::channel(false);
     let mut server = tonic::transport::Server::builder();
-    if transport.tls() {
-        let tls = crate::cluster::tls::tonic_server_tls()
-            .map_err(|err| DurableError::Io(err.to_string()))?;
-        server = server
-            .tls_config(tls)
-            .map_err(|err| DurableError::Io(err.to_string()))?;
-    }
     let worker_svc = worker.into_worker_server();
     let worker_task = tokio::spawn(async move {
         let _ = server
@@ -389,24 +341,14 @@ mod tests {
         );
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(
-            prod.contains("tonic_client_tls"),
-            "worker gRPC clients must use cluster mTLS when TLS is required"
-        );
-        assert!(
             prod.contains("WorkerTransport::LocalPlaintext"),
-            "local skipprd query must start QueryRuntime without cluster mTLS"
+            "skipprd query must start QueryRuntime without cluster mTLS"
         );
-        assert!(
-            prod.contains("WorkerTransport::ClusterMtls"),
-            "clustered QueryRuntime must fail-closed on cluster mTLS"
-        );
+        assert!(!prod.contains("WorkerTransport::ClusterMtls"));
+        assert!(!prod.contains("start_clustered"));
         assert!(
             prod.contains("ensure_started") && prod.contains("LocalPlaintext"),
-            "ensure_started (skipprd query) is local plaintext, not cluster TLS"
-        );
-        assert!(
-            include_str!("../cluster/scheduler.rs").contains("start_clustered"),
-            "run_clustered must start QueryRuntime with cluster mTLS"
+            "ensure_started (skipprd query) is local plaintext"
         );
         assert!(!prod.contains("SessionContext::remote"));
         assert!(!prod.contains("elect_scheduler"));
@@ -504,15 +446,10 @@ mod tests {
         // Test-only estimator: tiny parquet must still fan out so the shared
         // coordinating planner inserts a network boundary. Production auto-tunes.
         let ctx = SessionContext::from(
-            coordinating_session_builder(
-                TwoWorkerResolver(urls.clone()),
-                &worker,
-                urls[0].clone(),
-                WorkerTransport::LocalPlaintext,
-            )
-            .with_distributed_file_scan_config_bytes_per_partition(1)
-            .unwrap()
-            .build(),
+            coordinating_session_builder(TwoWorkerResolver(urls.clone()), &worker, urls[0].clone())
+                .with_distributed_file_scan_config_bytes_per_partition(1)
+                .unwrap()
+                .build(),
         );
         ctx.register_parquet("t", path.to_str().unwrap(), Default::default())
             .await
@@ -542,7 +479,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(url.scheme(), "http");
-        SkipprChannelResolver::new(WorkerTransport::LocalPlaintext)
+        SkipprChannelResolver::new()
             .get_worker_client_for_url(&url)
             .await
             .expect("plaintext local worker channel");

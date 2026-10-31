@@ -42,7 +42,7 @@ There is no Python equivalent; call the CLI from Python with `subprocess` if you
 |---|---|---|
 | `--config <PATH>` | `./skippr.yml` | Config file to read. The schema is stored in the pipeline's state storage: local disk when `skipprd_el_storage_mode` is `local`, otherwise your state bucket. |
 | `--log [LEVEL]` | Off | Print logs to stderr. |
-| `--wal-storage <MODE>` | `disk` | Must not be `clustered`. |
+| `--wal-storage <MODE>` | `disk` | WAL backend: `disk` or `s3`. Same as `WAL_STORAGE`. |
 
 ### Schema file format
 

@@ -65,8 +65,8 @@ fn h_minus_excluded() {
 }
 
 #[test]
-fn h_clustered_pin_union() {
-    use crate::sqlrt::read_boundary::{LakeSnapshot, PinnedWal, ReadBoundary};
+fn h_ticket_slices_minus_excluded() {
+    use crate::sqlrt::read_boundary::minus_excluded;
     use crate::wal_slice_ref::WalSliceRef;
     use skippr_query_plan::PinnedSliceRef;
     use std::collections::HashSet;
@@ -91,10 +91,9 @@ fn h_clustered_pin_union() {
             ordinal: 0,
         },
     ];
-    let pin = ReadBoundary::for_clustered_ticket(LakeSnapshot::Empty, live, &excluded).unwrap();
-    let PinnedWal::Clustered(slices) = pin.wal else {
-        panic!("clustered pin");
-    };
+    let slices = minus_excluded(live, &excluded, |slice| {
+        WalSliceRef::try_from_parts(&slice.segment_id, slice.start).unwrap()
+    });
     assert_eq!(slices.len(), 2);
     assert_eq!(slices[0].segment_id, "keep");
     assert_eq!(slices[1].segment_id, "tail");
@@ -102,8 +101,8 @@ fn h_clustered_pin_union() {
 
 #[test]
 fn h_foreign_tenant_ticket() {
-    use crate::cluster::identity::TenantScope;
     use crate::query_flight::service::pin_live_wal;
+    use crate::query_flight::TenantScope;
     use skippr_query_plan::LiveWalPinRequest;
     let scope = TenantScope::new("t", "w").unwrap();
     let pin = LiveWalPinRequest {
