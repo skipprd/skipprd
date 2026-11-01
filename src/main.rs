@@ -238,7 +238,10 @@ async fn async_main() {
                     skipprd::sqlrt::query::sql_uses_shared_extension_collect(&sql);
                 let now = Instant::now();
                 if collect_plain || shared_extension {
-                    match session.query_warm(&sql, options.warmup).await {
+                    match session
+                        .query_warm(&sql, options.warmup, options.repeat)
+                        .await
+                    {
                         Ok(batches) => {
                             skipprd::sqlrt::query::print_query_plain_json(&batches);
                         }
@@ -257,6 +260,7 @@ async fn async_main() {
                                 plain: options.plain,
                                 watch: options.watch,
                                 warmup: options.warmup,
+                                repeat: options.repeat,
                             },
                         )
                         .await;
@@ -291,6 +295,7 @@ async fn async_main() {
                                 plain: options.plain,
                                 watch: options.watch,
                                 warmup: false,
+                                repeat: 1,
                             },
                         )
                         .await;

@@ -54,6 +54,7 @@ pub struct QueryExecutionOptions {
     pub plain: bool,
     pub watch: Option<u64>,
     pub warmup: bool,
+    pub repeat: u32,
 }
 
 async fn apply_pipeline_toggle(
@@ -106,6 +107,7 @@ impl Default for QueryExecutionOptions {
             plain: false,
             watch: None,
             warmup: false,
+            repeat: 1,
         }
     }
 }
@@ -323,6 +325,7 @@ async fn sql_collect_timed(
     ctx: &SessionContext,
     sql_str: &str,
     warmup: bool,
+    repeat: u32,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
     if warmup {
         let _ = sql_collect(ctx, sql_str).await?;
@@ -330,6 +333,10 @@ async fn sql_collect_timed(
     let started = Instant::now();
     let batches = sql_collect(ctx, sql_str).await?;
     emit_query_collect(started, &batches);
+    let extra = repeat.max(1).saturating_sub(1);
+    for _ in 0..extra {
+        let _ = sql_collect(ctx, sql_str).await?;
+    }
     Ok(batches)
 }
 
@@ -337,13 +344,14 @@ pub async fn query_collect(
     config: &Config,
     sql_str: &str,
 ) -> std::io::Result<Vec<arrow::array::RecordBatch>> {
-    query_collect_warm(config, sql_str, false).await
+    query_collect_warm(config, sql_str, false, 1).await
 }
 
 pub async fn query_collect_warm(
     config: &Config,
     sql_str: &str,
     warmup: bool,
+    repeat: u32,
 ) -> std::io::Result<Vec<arrow::array::RecordBatch>> {
     config.init().await;
     for name in config.get_pipelines() {
@@ -389,7 +397,7 @@ pub async fn query_collect_warm(
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let mut last_err = None;
     for attempt in 0..crate::sqlrt::wal_table::QUERY_PIN_RETRY_CEILING {
-        match sql_collect_timed(&ctx, sql_str, warmup && attempt == 0).await {
+        match sql_collect_timed(&ctx, sql_str, warmup && attempt == 0, repeat).await {
             Ok(batches) => return Ok(batches),
             Err(err)
                 if crate::sqlrt::wal_table::is_wal_pin_lost(&err)
@@ -459,6 +467,7 @@ async fn stream_plain_snapshot(
     pipeline_name: &str,
     run_sql: &str,
     warmup: bool,
+    repeat: u32,
 ) -> std::io::Result<Vec<RecordBatch>> {
     let Some(ctx) = stream_wal_session(config, pipeline_name)
         .await
@@ -466,7 +475,7 @@ async fn stream_plain_snapshot(
     else {
         return Ok(Vec::new());
     };
-    sql_collect_timed(&ctx, run_sql, warmup)
+    sql_collect_timed(&ctx, run_sql, warmup, repeat)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
@@ -643,8 +652,14 @@ pub async fn query_with_options(
         }
 
         if query_options.plain {
-            match stream_plain_snapshot(&mut config, &pipeline, &select_sql, query_options.warmup)
-                .await
+            match stream_plain_snapshot(
+                &mut config,
+                &pipeline,
+                &select_sql,
+                query_options.warmup,
+                query_options.repeat,
+            )
+            .await
             {
                 Ok(batches) => print_query_plain_json(&batches),
                 Err(err) => {
@@ -1999,6 +2014,16 @@ mod plain_query_document_tests {
         assert!(
             warmup < timer,
             "query_collect must open catalogs/connections before elapsed_ms starts"
+        );
+        let emit = timed
+            .find("emit_query_collect")
+            .expect("timed collect emits query_collect once");
+        let extra = timed
+            .find("for _ in 0..extra")
+            .expect("sql_collect_timed extra --repeat collects");
+        assert!(
+            extra > emit,
+            "extra --repeat collects must run after query_collect elapsed so the reported ms stays one collect"
         );
         assert!(
             body.contains("QUERY_PIN_RETRY_CEILING"),

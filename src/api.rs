@@ -86,15 +86,17 @@ impl Session {
     }
 
     pub async fn query(&self, sql: &str) -> io::Result<Vec<RecordBatch>> {
-        self.query_warm(sql, false).await
+        self.query_warm(sql, false, 1).await
     }
 
-    pub async fn query_warm(&self, sql: &str, warmup: bool) -> io::Result<Vec<RecordBatch>> {
+    pub async fn query_warm(
+        &self,
+        sql: &str,
+        warmup: bool,
+        repeat: u32,
+    ) -> io::Result<Vec<RecordBatch>> {
         let bound = self.query_config();
-        if !crate::sqlrt::query::sql_uses_record_batch_collect(sql) {
-            return crate::sqlrt::query::query_collect_warm(&bound, sql, warmup).await;
-        }
-        crate::sqlrt::query::query_collect_warm(&bound, sql, warmup).await
+        crate::sqlrt::query::query_collect_warm(&bound, sql, warmup, repeat).await
     }
 
     pub async fn query_with_options(
@@ -358,12 +360,28 @@ mod tests {
             "CLI Query must not pass session.config into sqlrt"
         );
         assert!(
-            query_arm.contains("session.query_warm("),
+            query_arm.contains("session") && query_arm.contains(".query_warm("),
             "CLI Query collect path must call Session.query_warm so --warmup can time a ready skipprd"
         );
         assert!(
             query_arm.contains("options.warmup"),
             "CLI Query must pass --warmup into the collect path"
+        );
+        assert!(
+            query_arm.contains("options.repeat"),
+            "CLI Query must pass --repeat into the collect path"
+        );
+        let cli = include_str!("cli/mod.rs");
+        let query_opts = cli
+            .split("pub struct QueryOptions")
+            .nth(1)
+            .unwrap()
+            .split("pub struct SchemaOptions")
+            .next()
+            .unwrap();
+        assert!(
+            query_opts.contains("pub repeat: u32"),
+            "skipprd query --repeat must be a QueryOptions flag"
         );
         assert!(
             query_arm.contains("sql_uses_record_batch_collect"),

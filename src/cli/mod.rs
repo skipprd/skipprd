@@ -126,6 +126,9 @@ pub struct QueryOptions {
     /// Open catalogs and run the statement once, then time the second collect.
     #[arg(long, default_value_t = false)]
     pub warmup: bool,
+    /// Extra untimed collects after the measured one (flamegraphs; default 1).
+    #[arg(long, default_value_t = 1)]
+    pub repeat: u32,
 }
 
 #[derive(Parser, Clone, PartialEq)]

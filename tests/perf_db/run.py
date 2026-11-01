@@ -41,6 +41,30 @@ CATALOG_PATH = HARNESS_DIR / "catalog.yaml"
 INGEST_WORKSPACE = "perf"
 CDC_WORKSPACE = "test"
 OVERLAP_WAIT_SECONDS = 480
+PROFILE_QUERY_REPEAT = 200
+
+
+def query_plain_args(
+    skipprd: Path,
+    config: Path,
+    env: dict[str, str],
+    sql: str,
+    profile: str,
+) -> list[str]:
+    cmd = [
+        str(skipprd),
+        *log_args(env),
+        "--config",
+        str(config),
+        "query",
+        "--sql",
+        sql,
+        "--plain",
+        "--warmup",
+    ]
+    if profile not in {"", "none"}:
+        cmd.extend(["--repeat", str(PROFILE_QUERY_REPEAT)])
+    return cmd
 
 
 def load_perf_db_catalog() -> dict[str, Any]:
@@ -330,17 +354,7 @@ def run_query_after_ingest(
                 )
         log(f"skipprd query --sql {sql!r} --plain --warmup")
         query_cmd = perf_run.time_prefix() + perf_run.wrap_profile(
-            [
-                str(skipprd),
-                *log_args(env),
-                "--config",
-                str(config),
-                "query",
-                "--sql",
-                sql,
-                "--plain",
-                "--warmup",
-            ],
+            query_plain_args(skipprd, config, env, sql, profile),
             profile,
             work,
         )
@@ -666,17 +680,7 @@ def run_query_after_cdc(
         else:
             logs += run_cdc_once(skipprd, config, env)
         query_cmd = perf_run.time_prefix() + perf_run.wrap_profile(
-            [
-                str(skipprd),
-                *log_args(env),
-                "--config",
-                str(config),
-                "query",
-                "--sql",
-                sql,
-                "--plain",
-                "--warmup",
-            ],
+            query_plain_args(skipprd, config, env, sql, profile),
             profile,
             work,
         )

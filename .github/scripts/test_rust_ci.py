@@ -560,6 +560,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("query_after_ingest", runner)
         self.assertIn("skipprd query", runner)
         self.assertIn("--warmup", runner)
+        self.assertIn("--repeat", runner)
+        self.assertIn("PROFILE_QUERY_REPEAT", runner)
         skill = ROOT / ".cursor" / "skills" / "skippr-perf-db" / "SKILL.md"
         skill_text = skill.read_text(encoding="utf-8")
         self.assertIn("name: skippr-perf-db", skill_text)

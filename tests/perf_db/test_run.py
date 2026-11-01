@@ -264,6 +264,23 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertNotIn("from tests.perf.run import", text)
         self.assertNotIn("copy_b-json-json", text)
 
+    def test_profile_query_repeats_collect_after_warmup(self) -> None:
+        run = perf_db_run()
+        self.assertGreaterEqual(run.PROFILE_QUERY_REPEAT, 100)
+        none_cmd = run.query_plain_args(Path("skipprd"), Path("c.yml"), {}, "SELECT 1", "none")
+        self.assertIn("--warmup", none_cmd)
+        self.assertNotIn("--repeat", none_cmd)
+        flame_cmd = run.query_plain_args(
+            Path("skipprd"), Path("c.yml"), {}, "SELECT 1", "flamegraph"
+        )
+        self.assertIn("--repeat", flame_cmd)
+        self.assertIn(str(run.PROFILE_QUERY_REPEAT), flame_cmd)
+        src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        ingest = src.split("def run_query_after_ingest")[1].split("def write_cdc")[0]
+        cdc = src.split("def run_query_after_cdc")[1]
+        self.assertIn("query_plain_args(", ingest)
+        self.assertIn("query_plain_args(", cdc)
+
     def test_compaction_hold_targets_local_pipeline_root(self) -> None:
         run = perf_db_run()
         with tempfile.TemporaryDirectory() as tmp:
