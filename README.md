@@ -9,6 +9,12 @@ Skippr (`skipprd` CLI and `import skippr` Python SDK) is an open **Streamhouse**
 
 Because storage is standard Apache Iceberg and Parquet in a bucket you control (`s3://`, Cloudflare R2, or `file:///`), **your data is never trapped**. Query live operational state in Skippr, or query committed history from Athena, Snowflake, DuckDB, Databricks, Spark, Trino, PyIceberg, and notebooks on the exact same files—with no second ETL copy and zero vendor lock-in.
 
+| **Any Source** | | **Stream Engine** | | **Open Data** |
+|:---|:---:|:---:|:---:|:---|
+| OLTP databases (CDC)<br>Event streams<br>Files<br>SaaS APIs | → | 🔍 Real-time, strongly consistent SQL and Transforms. ACID Iceberg snapshots + live stream<br>| → | Skippr SQL — live<br>Athena<br>Snowflake<br>DuckDB<br>Databricks / Spark<br>Trino<br>PyIceberg / notebooks |
+
+*One copy. No second ETL. Zero vendor lock-in.*
+
 **[Documentation](https://skippr.io)** · **[Install](https://skippr.io/getting-started/install)** · **[Connectors](https://skippr.io/connectors/)** · **[CLI Reference](https://skippr.io/cli/overview)** · **[Python API](https://skippr.io/python)** · **[Streamhouse Architecture](https://skippr.io/concepts/datalake)**
 
 ---

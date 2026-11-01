@@ -2,13 +2,6 @@
 
 All notable changes to this project will be documented in this file.
 
-## [15.12.1]
-
-### Fixed
-
-- Runtime plugin discovery uses `{skipprd-semver}/manifest-index.json`, not `/latest/`. Tagged 15.12.1 hosts stay on the protocol-17 plugin bundle published with this tag.
-- Release CI matches current rust.yml: GitHub-hosted runners and Cloudflare R2. No Depot, ECR, CodeArtifact, or AWS S3.
-
 ## [Unreleased]
 
 ### Breaking
@@ -17,136 +10,14 @@ All notable changes to this project will be documented in this file.
 - Skippr Store live impls are memory (tests) and fjall on `DATA_DIR`. Leftover `type: sled` maps to fjall; leftover `{DATA_DIR}/db` migrates without a sled write path. `skippr.store.type=dynamodb`, Python `DynamoDbStore` / `SledStore`, and `--features offset-store-dynamodb` as a store are gone. Lake Iceberg Dynamo catalog is `--features iceberg-catalog-dynamodb`. Schema is the shredded `schema` family; `metadata.json` is import-only. Kinesis resume is host Skippr Store checkpoints, not `{DATA_DIR}/kinesis_checkpoints/*.seq`. Deleting `DATA_DIR` deletes Skippr Store.
 - WAL metadata lives in Skippr Store. `mutation.log`, completion bitmaps, and `.seg.commit` are gone. First start imports existing installs once and archives leftover files.
 - Experimental `skippr.store.type=cloud-tables`, Python `CloudTablesStore`, and `--features offset-store-cloud-tables` are removed.
-
-## [18.1.0]
-
-### Added
-
-- `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
-
-## [18.3.8]
-
-### Breaking
-
-- Plugin crate patch versions are bumped so catalog paths stay immutable next to the 18.3.6 macOS artifacts. Protocol stays 23. Hosts must run skippr 18.3.8 with the matching plugin bundle.
-
-## [18.3.7]
-
-### Fixed
-
-- `skipprd query` after migrate uses the two-part Iceberg name (`s3_alter.s3_alter`). A one-part name resolved as `datafusion.public.*` and missed the table.
-- File-to-Postgres e2e keeps migration SQL inside the composite `run` block so GitHub Actions can load the action.
-
-## [18.3.6]
-
-### Added
-
-- `skipprd migrate` and Python `Migration` / `Session.migrate()` apply `migrations/*.sql` in-stream: skippr metadata, live WAL, and native destination DDL. The skippr store journals each file so a retry is idempotent. Iceberg (SkipprLake, Athena Iceberg, DuckDB) plus Snowflake, Postgres, BigQuery, Redshift, and MotherDuck. Glue/Hive and ClickHouse fail closed. `DISABLE PIPELINE` still freezes ingest; it is not the ALTER gate.
-
-### Breaking
-
-- Runtime protocol 23. SchemaSink handshake advertises `alter_support`; `HostFrame::ApplyAlter` is destination DDL. Hosts must run skippr 18.3.6 with the matching plugin bundle. Every runtime plugin crate patch is bumped so catalog paths stay immutable.
-
-### Fixed
-
-- DATA_DIR min-free (default 5 GB) is tuned down when it is larger than the free space left at the high watermark, so a small volume cannot pause at the floor and then fail to resume.
-- `skipprd query` maps Iceberg column names by field id after a `replace_schema` rename, so `SELECT` uses the evolved name.
-- `skipprd migrate` reuses the open skippr store instead of opening sled twice under the ingest lease.
-
-## [18.3.5]
-
-### Breaking
-
 - Runtime plugin discovery uses `{skipprd-semver}/manifest-index.json`, not `/latest/`. Unstamped `0.1.0` workspace builds fail closed (`USE_LOCAL_PLUGIN_CODE=1`). YAML `version:` still pins a crate.
 - Publishing a plugin crate version that already exists with a different protocol or sha256 is a hard failure. Protocol bumps must bump the plugin crate. `aws s3 sync --delete` is forbidden on the runtime-plugins prefix.
-
-## [18.3.4]
-
-### Fixed
-
-- Compaction treats `buffer_threshold_bytes` as group bytes (same sink / namespace / partition / time), not per-slice. Partitioned COPY leftover WAL can drain without waiting `buffer_threshold_seconds`.
-- WAL recover marks leftover committed slices ready once. Live ingest after recover still waits for group bytes or the time gate.
-- Acked compaction manifests are terminal: they do not fence leftover slices or get reserved as new work. Recover deletes leftover Acked files. COPY removes the manifest after tombstone, same as Arrow.
-- Dead Sent manifests whose segment files are gone are dropped instead of retrying forever.
-- COPY Identity PUT uses the grouped compaction timeout (default 900s) instead of waiting forever.
-- Runtime sink pool acquire no longer holds a `Notify` future across `maybe_grow_one()`.
-- Durable `mutation.log` replay logs start and finish so a multi-GB open is visible at `info`.
-
-## [18.3.3]
-
-### Changed
-
-- Per-request runtime IPC frame names (`control write` / `control read`) are `debug`, not `info`. Handshake, decode errors, and the 6-byte PrepareSink desync warn stay. EU Staging 18.3.1 with `SKIPPR_LOG_LEVEL=info` logged every PrepareSink/ack on the COPY hot path.
-
-## [18.3.2]
-
-### Fixed
-
-- Runtime short-frame warnings fire only on the 6-byte omitted-length-prefix signature (`PrepareSink` tag 6 used as the next frame length). `PluginFrame::Installed` is a 4-byte unit variant (`prefix=[01,00,00,00]`) and no longer logs as a COPY desync.
-
-## [18.3.1]
-
-### Fixed
-
-- Runtime control frames reject trailing bincode bytes so a 4-byte-too-long admin frame cannot steal the next length prefix. EU Staging 18.3.0 failed COPY Identity PUT with `integer 31, expected variant index 0 <= i < 11; prefix=[1f, 00, 00, 00, 00, 00]` — that 6-byte payload is `PrepareSink` tag `6` read as a length, then `request_id=31`. Writes now put length and payload in one buffer.
-- Host and sink plugins log control-frame names, request ids, and short-frame warnings. Python `Session` enables skipprd file/stderr logs (`SKIPPR_LOG_LEVEL`, default `info`) so CloudCycle Iceberg hosts no longer leave `skipprd.*.log` empty.
-- S3 → S3 COPY e2e adds a CloudCycle-shaped namespace burst (16 `detail-type` objects, then Identity PUT) and fails on the EU desync markers.
-
-### Changed
-
-- Plugin crate patch versions are bumped so catalog paths pick up the SDK wire/logging change. Protocol stays 22. S3 sink is `0.1.5`.
-
-## [18.3.0]
-
-### Breaking
-
+- Runtime protocol 23. SchemaSink handshake advertises `alter_support`; `HostFrame::ApplyAlter` is destination DDL. Hosts must run skipprd with the matching plugin bundle. Every runtime plugin crate patch is bumped so catalog paths stay immutable.
 - Runtime protocol 22. `PipelineType` on the plugin bincode wire is a `u32` discriminant (`0=ingest`, `1=copy`, `2=cdc`), not a length-prefixed string. Protocol 21 could decode a string length or `PrepareSink.request_id` as a `HostFrame` variant (`invalid value: integer 54, expected variant index 0 <= i < 11`). YAML/JSON `type: copy` is unchanged.
-- Every runtime plugin crate patch version is bumped so catalog paths are immutable next to 18.2.0 / protocol 21 artifacts. Hosts must run skippr 18.3.0 with the matching plugin bundle; S3 sink is `0.1.4`.
-
-### Fixed
-
-- Copy Identity-PUT S3 (and other object sinks) no longer fail after handshake when the next control frame is `PrepareSink` / `RawBytes`.
-- Runtime frame decode errors include the first payload bytes so a tag/layout mismatch is visible without a debugger.
-
-## [18.2.0]
-
-### Added
-
-- `pipelines.*.type` is a closed enum (`ingest` | `copy` | `cdc`). `type: copy` is decode × encode (json/csv/xml → jsonl/csv/xml) through format-agnostic WAL frames; compact encodes the sink `format`. Copy CSV columns are top-level scalars; nested objects and arrays are compact JSON strings.
 - Runtime protocol 21: `RuntimeExecutionContext.pipeline_type` (bincode string `ingest`/`copy`/`cdc`) and `RuntimeSinkPayloadMode::RawBytes` Identity PUT on File, S3, GCS, Azure Blob, and SFTP.
-- Logs, metrics envelopes, and config snapshots label `pipeline_type` (`ingest` | `copy` | `cdc`) from YAML `pipelines.*.type`. `PIPELINE_TYPE` does not override it.
-
-### Breaking
-
-- Python unit string enums (`PipelineType`, `OutputFormat`, `StreamProfile`, …) are frozen PyO3 classes, not `Literal[...]` strings. Pass `PipelineType.COPY`, not `"copy"`.
-- Runtime plugins must rebuild for protocol 21.
-
-## [18.1.2]
-
-### Added
-
-- Enumerated `ALTER TABLE` matrix in Rust (`rename` / `merge` / `drop` / `promote`, matching and sequential Iceberg ids, nested `TO` paths) and an S3 → SkipprLake e2e job that runs the same statements against a real lake table.
-
-### Fixed
-
-- `RENAME COLUMN region TO detail.region` moves the field into the nested record and writes the flattened Iceberg name `detail_region`.
-- Quoted hyphenated Iceberg namespaces (`s3_alter."skippr-e2e-sample-data"`) resolve for `ALTER TABLE`.
-
-## [18.1.1]
-
-### Fixed
-
-- `ALTER TABLE` matches Iceberg columns by name (including flattened `detail.truck_reg` → `detail_truck_reg`) when skippr's hashed `field_id` is not the Iceberg id. Glue tables created with sequential Iceberg ids can be renamed, promoted, merged, and dropped.
-- `discover` no longer force-enables a `DISABLED` pipeline. `DISABLE PIPELINE` is freeze-only; it is not the `ALTER TABLE` gate.
-
-## [18.1.0]
-
-## [18.0.0]
-
-### Breaking
-
-- Python `skippr` 18.0.0 builds configs with typed classes. `Config().workspace(...).storage(LocalStorage())`, then `cfg.data_source(name, DataSourceS3(...))`, `cfg.data_sink(...)`, `cfg.schema_sink(...)`, and `cfg.pipeline(name, Pipeline(data_source=ref, ...))`. Registration returns typed refs, and `Session(pipeline_ref)` is the only constructor. `Config.load` / `Config.discover` read YAML; `Config.save` merge-writes with the `skipprd connect` writer. Removed: `Session.connect()`, `Session(pipeline=..., config=..., config_file=...)`, `Session.config()`, `skippr.workspace()` / `tenant()` / `storage_mode()`, `SkipprRoot`, `StorageMode`, `OffsetStore`, `SkipprStore`, and the `DataSource` / `DataSink` / `SchemaSink` enums.
+- Python `skippr` builds configs with typed classes. `Config().workspace(...).storage(LocalStorage())`, then `cfg.data_source(name, DataSourceS3(...))`, `cfg.data_sink(...)`, `cfg.schema_sink(...)`, and `cfg.pipeline(name, Pipeline(data_source=ref, ...))`. Registration returns typed refs, and `Session(pipeline_ref)` is the only constructor. `Config.load` / `Config.discover` read YAML; `Config.save` merge-writes with the `skipprd connect` writer. Removed: `Session.connect()`, `Session(pipeline=..., config=..., config_file=...)`, `Session.config()`, `skippr.workspace()` / `tenant()` / `storage_mode()`, `SkipprRoot`, `StorageMode`, `OffsetStore`, `SkipprStore`, and the `DataSource` / `DataSink` / `SchemaSink` enums.
 - Python plugin classes are always role-prefixed (`DataSourceOtlp`, not `Otlp`). Secret fields take `skippr.EnvRef`; plaintext is a type error. String enums are `Literal` types. Tagged fields take one class per variant (`DataSinkSkipprLakeWarehouseObjectStoreR2`). The wheel ships `skippr/__init__.pyi` and `py.typed`, and Linux wheels are `manylinux_2_28`.
+- Python unit string enums (`PipelineType`, `OutputFormat`, `StreamProfile`, …) are frozen PyO3 classes, not `Literal[...]` strings. Pass `PipelineType.COPY`, not `"copy"`.
 - `pipelines.*.reset_offsets` / `reset_metadata` and the `RESET_OFFSETS` / `RESET_METADATA` env vars are removed. Nothing read them.
 - `skippr.yml` rejects unknown keys outside plugin blocks: root, `skippr`, `skippr.store`, pipelines, `transform`, `stats`, `semantic_layer`, and `dbt`. `schema_sink` belongs on the data sink entry, not the pipeline. In those engine blocks `${ENV}` references fill string fields only, so `sync_frequency_seconds: ${SYNC}` is a load error at runtime too; plugin blocks are read by their plugin. The aliases `input` / `output` / `deadletter(s)` on pipelines and `data_inputs` / `data_outputs` / `data_deadletters` / `schema_outputs` at the root are removed; use `data_source` / `data_sink` / `deadletter_sink` and `data_sources` / `data_sinks` / `deadletter_sinks` / `schema_sinks`.
 - One merge rule for `skipprd connect`, Python registration, and `Config.save`: each top-level key you set replaces that key; keys you don't set are kept. A flattened nested CLI flag (`--object-store-type file`) replaces the whole `object_store` block. A new file starts empty, so `connect` no longer writes `skipprd_el_storage_mode: local` unless you pass it. `--store-name` requires `--store-type`.
@@ -157,6 +28,51 @@ All notable changes to this project will be documented in this file.
 - Rust `skipprd::api::Session::from_config` returns `Session`, not `Result`.
 - `TRANSFORM_FLATTEN_EVENTS` applies wherever `transform.flatten_events` is read, including cluster pipeline views and discovered metadata.
 - The deprecated `offset_store` / `offset_dynamodb_table` keys are rejected at load, and `SKIPPR_OFFSET_STORE` / `SKIPPR_OFFSET_DYNAMODB_TABLE` are a startup error. Use `skippr.store` and `SKIPPR_STORE_TYPE` / `SKIPPR_STORE_NAME`.
+
+### Added
+
+- `ALTER TABLE` is the only schema DDL: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, and widening `ALTER COLUMN ... TYPE`. Iceberg and skippr metadata stay in sync. The pipeline must be `DISABLED`.
+- Enumerated `ALTER TABLE` matrix in Rust (`rename` / `merge` / `drop` / `promote`, matching and sequential Iceberg ids, nested `TO` paths) and an S3 → SkipprLake e2e job that runs the same statements against a real lake table.
+- `skipprd migrate` and Python `Migration` / `Session.migrate()` apply `migrations/*.sql` in-stream: skippr metadata, live WAL, and native destination DDL. The skippr store journals each file so a retry is idempotent. Iceberg (SkipprLake, Athena Iceberg, DuckDB) plus Snowflake, Postgres, BigQuery, Redshift, and MotherDuck. Glue/Hive and ClickHouse fail closed. `DISABLE PIPELINE` still freezes ingest; it is not the ALTER gate.
+- `pipelines.*.type` is a closed enum (`ingest` | `copy` | `cdc`). `type: copy` is decode × encode (json/csv/xml → jsonl/csv/xml) through format-agnostic WAL frames; compact encodes the sink `format`. Copy CSV columns are top-level scalars; nested objects and arrays are compact JSON strings.
+- Logs, metrics envelopes, and config snapshots label `pipeline_type` (`ingest` | `copy` | `cdc`) from YAML `pipelines.*.type`. `PIPELINE_TYPE` does not override it.
+
+### Fixed
+
+- `skipprd query` after migrate uses the two-part Iceberg name (`s3_alter.s3_alter`). A one-part name resolved as `datafusion.public.*` and missed the table.
+- File-to-Postgres e2e keeps migration SQL inside the composite `run` block so GitHub Actions can load the action.
+- DATA_DIR min-free (default 5 GB) is tuned down when it is larger than the free space left at the high watermark, so a small volume cannot pause at the floor and then fail to resume.
+- `skipprd query` maps Iceberg column names by field id after a `replace_schema` rename, so `SELECT` uses the evolved name.
+- `skipprd migrate` reuses the open skippr store instead of opening sled twice under the ingest lease.
+- Compaction treats `buffer_threshold_bytes` as group bytes (same sink / namespace / partition / time), not per-slice. Partitioned COPY leftover WAL can drain without waiting `buffer_threshold_seconds`.
+- WAL recover marks leftover committed slices ready once. Live ingest after recover still waits for group bytes or the time gate.
+- Acked compaction manifests are terminal: they do not fence leftover slices or get reserved as new work. Recover deletes leftover Acked files. COPY removes the manifest after tombstone, same as Arrow.
+- Dead Sent manifests whose segment files are gone are dropped instead of retrying forever.
+- COPY Identity PUT uses the grouped compaction timeout (default 900s) instead of waiting forever.
+- Runtime sink pool acquire no longer holds a `Notify` future across `maybe_grow_one()`.
+- Durable `mutation.log` replay logs start and finish so a multi-GB open is visible at `info`.
+- Runtime short-frame warnings fire only on the 6-byte omitted-length-prefix signature (`PrepareSink` tag 6 used as the next frame length). `PluginFrame::Installed` is a 4-byte unit variant (`prefix=[01,00,00,00]`) and no longer logs as a COPY desync.
+- Runtime control frames reject trailing bincode bytes so a 4-byte-too-long admin frame cannot steal the next length prefix. A 6-byte payload that is `PrepareSink` tag `6` was read as a length, then `request_id=31` (`integer 31, expected variant index 0 <= i < 11; prefix=[1f, 00, 00, 00, 00, 00]`). Writes now put length and payload in one buffer.
+- Host and sink plugins log control-frame names, request ids, and short-frame warnings. Python `Session` enables skipprd file/stderr logs (`SKIPPR_LOG_LEVEL`, default `info`) so Iceberg hosts no longer leave `skipprd.*.log` empty.
+- S3 → S3 COPY e2e adds a namespace burst (16 `detail-type` objects, then Identity PUT) and fails on the desync markers.
+- Copy Identity-PUT S3 (and other object sinks) no longer fail after handshake when the next control frame is `PrepareSink` / `RawBytes`.
+- Runtime frame decode errors include the first payload bytes so a tag/layout mismatch is visible without a debugger.
+- `RENAME COLUMN region TO detail.region` moves the field into the nested record and writes the flattened Iceberg name `detail_region`.
+- Quoted hyphenated Iceberg namespaces (`s3_alter."skippr-e2e-sample-data"`) resolve for `ALTER TABLE`.
+- `ALTER TABLE` matches Iceberg columns by name (including flattened `detail.truck_reg` → `detail_truck_reg`) when skippr's hashed `field_id` is not the Iceberg id. Glue tables created with sequential Iceberg ids can be renamed, promoted, merged, and dropped.
+- `discover` no longer force-enables a `DISABLED` pipeline. `DISABLE PIPELINE` is freeze-only; it is not the `ALTER TABLE` gate.
+
+### Changed
+
+- Per-request runtime IPC frame names (`control write` / `control read`) are `debug`, not `info`. Handshake, decode errors, and the 6-byte PrepareSink desync warn stay. Staging with `SKIPPR_LOG_LEVEL=info` logged every PrepareSink/ack on the COPY hot path.
+- Plugin crate patch versions are bumped so catalog paths pick up the SDK wire/logging change.
+
+## [15.12.1]
+
+### Fixed
+
+- Runtime plugin discovery uses `{skipprd-semver}/manifest-index.json`, not `/latest/`. Tagged 15.12.1 hosts stay on the protocol-17 plugin bundle published with this tag.
+- Release CI matches current rust.yml: GitHub-hosted runners and Cloudflare R2. No Depot, ECR, CodeArtifact, or AWS S3.
 
 ## 17.0.0 and earlier (not split by version)
 
@@ -195,4 +111,4 @@ All notable changes to this project will be documented in this file.
 - Build system enhancements
 
 ## [0.1.0] - 2024-03-23
-- Initial development version 
+- Initial development version
