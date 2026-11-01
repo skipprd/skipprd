@@ -11,6 +11,7 @@ This file is the authority for Skippr Store. If this page and the issue body, RE
 - **No clustered WAL, membership, writer leases, or write quorum.** Those left `main` for `poc/clustered-ha`. Do not put them back as a store family.
 - **No multi-writer.** One process writes the store for a `DATA_DIR`. Transforms, aggregations, materialized views, WAL catalog commits, and schema evolution share that writer.
 - **No sharding.** `PipelineKey` is identity. Do not add shard-scoped leases or entity-hash ownership “for later.” Multi-writer is not the plan, so sharding has no job.
+- **One live KV trait.** All live access (ingest, offsets, schema, stream_state, catalog, DDL migrate journal, extra readers, recovery reopen) is `SkipprStore` / `SkipprStoreRead`. Callers MUST NOT `sled::open`, `Database::builder`, or a second KV API. The only `sled::open` is leftover `{DATA_DIR}/db` inside `sled_migrate`. The only `Database::builder` is the fjall impl (`FjallSkipprStore` writer, `FjallReadStore` extra-reader pin). Recovery is drop+reopen that impl and replay **its** disk log — not a second access pattern.
 - **Reads may be many.** In-process today (ingest, instream transforms/aggs, client SQL). Extra reader processes later. Writes stay single-node.
 - **Ephemeral hosts without a durable DATA_DIR are unsupported this milestone.** Throwaway compute does not get a remote Skippr Store. WAL payloads MAY still be S3; the KV stays local.
 
@@ -45,13 +46,13 @@ Config after cutover: default is fjall on `DATA_DIR`. `skippr.store.type=dynamod
 | `offsets` / `checkpoints` | Source resume; CDC envelopes; rebuildable from catalog |
 | `stream_state` | MV / aggregate checkpoint; cursor in the same txn as measures |
 | `schema` | Shredded pipeline metadata (replaces `metadata.json`) |
-| `journal` | Existing migrate SQL journal; no second DB |
+| `journal` | DDL migrate SQL journal on `SkipprStore` (`StoreFamily::Journal`); not OffsetStore |
 
 Do not add a `leases` family, membership rows, or cluster ids. Single writer + `CatalogFence` is the write authority.
 
 ## Single writer, many readers
 
-**Writes** (one node, one process): ingest catalog commit, offset publish, schema evolution, stream-processor apply, compaction reclaim, migrate-journal.
+**Writes** (one node, one process): ingest catalog commit, offset publish, schema evolution, stream-processor apply, compaction reclaim, migrate-journal on `SkipprStore`.
 
 **Reads** (many, overlapping):
 
@@ -59,7 +60,7 @@ Do not add a `leases` family, membership rows, or cluster ids. Single writer + `
 - Client SQL (`skipprd query`, Flight SQL live-WAL tickets, Iceberg ∪ WAL)
 - Later: extra **reader processes** against the same catalog, MV, and other families (not writes)
 
-Those readers MUST share the trait (prefix scan + pin). They MUST NOT open a second store design, a replica Flight WAL leaf, or a central coordinator.
+Those readers MUST share the trait (prefix scan + pin). They MUST NOT open a second store design, a replica Flight WAL leaf, or a central coordinator. Extra reader processes implement `SkipprStoreRead` (`FjallReadStore` is that impl). Copying flushed `fjall/` is private to that impl, not a second KV API.
 
 This milestone: one OS writer opens fjall (`writer.lock`). Extra reader processes pin a flushed copy of `fjall/` and MUST NOT take `writer.lock` or commit. A second OS process that wants to **write** the same `DATA_DIR` fail-closes.
 
@@ -104,7 +105,7 @@ Same transparent info log as sled migrate. After cutover there is no shadow `met
 
 ## Recovery
 
-Keep SEGF as the ingest log. KV is a checkpoint. On crash: reopen fjall, replay **its** disk log. Do not recover the store from a snapshot.
+Keep SEGF as the ingest log. KV is a checkpoint. On crash: reopen the live `SkipprStore` impl, replay **its** disk log. MUST NOT recover via sled, a second fjall open outside the impl, OffsetStore journal methods, or a snapshot.
 
 ## Snapshots
 
@@ -139,6 +140,7 @@ This table is history of the cutover, not a second live design. The right column
 | `metadata.json` local / S3 whole document | `schema` family, shredded; one-way import on start; checksum mismatch fail-closed |
 | `SKIPPR_S3_BUCKET` schema + misc | snapshots only |
 | `stream_state` raw sled tree | family on the trait |
+| OffsetStore journal get/fetch_and_update | `StoreFamily::Journal` on `SkipprStore` |
 | clustered WAL / leases | already gone; do not restore |
 | second process | second **writer** fail-closes; extra **reader processes** allowed by the trait later |
 | Iceberg catalog via `skippr.store.type` | lake catalog has its own config |

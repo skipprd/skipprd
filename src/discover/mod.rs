@@ -646,12 +646,17 @@ impl Metadata {
     }
 
     fn infer_type_from_counters(types: &HashMap<SkipprDataType, u32>) -> String {
-        types
+        let filtered: HashMap<SkipprDataType, u32> = types
             .iter()
             .filter(|(dt, _)| **dt != SkipprDataType::Null)
-            .max_by_key(|(_, count)| *count)
-            .map(|(dt, _)| dt.as_str().to_string())
-            .unwrap_or_else(|| "string".to_string())
+            .map(|(dt, count)| (dt.clone(), *count))
+            .collect();
+        if filtered.is_empty() {
+            return "string".to_string();
+        }
+        AnalyseSchema::pick_determined_type(&filtered)
+            .as_str()
+            .to_string()
     }
 
     pub fn flatten_metadata(metadata: &Metadata, flattened: &mut OutputMetadata) {
@@ -2190,6 +2195,48 @@ impl AnalyseSchema {
         // }
     }
 
+    /// Higher wins a count tie. String outranks Boolean so array-of-record mixed
+    /// leaves (`"trip"` + `false`) coerce instead of denying ARRAY_MIXED_TYPES.
+    fn determined_type_tiebreak_rank(dt: &SkipprDataType) -> u8 {
+        match dt {
+            SkipprDataType::Record => 22,
+            SkipprDataType::Map => 21,
+            SkipprDataType::Array => 20,
+            SkipprDataType::Json => 19,
+            SkipprDataType::String => 18,
+            SkipprDataType::Binary => 17,
+            SkipprDataType::Fixed => 16,
+            SkipprDataType::Uuid => 15,
+            SkipprDataType::TimestampMilli => 14,
+            SkipprDataType::Timestamp => 13,
+            SkipprDataType::Date => 12,
+            SkipprDataType::Time => 11,
+            SkipprDataType::Decimal => 10,
+            SkipprDataType::Double => 9,
+            SkipprDataType::Float => 8,
+            SkipprDataType::Long => 7,
+            SkipprDataType::Integer => 6,
+            SkipprDataType::Short => 5,
+            SkipprDataType::Byte => 4,
+            SkipprDataType::Boolean => 3,
+            SkipprDataType::Null => 2,
+            SkipprDataType::Unknown => 1,
+        }
+    }
+
+    fn pick_determined_type(types: &HashMap<SkipprDataType, u32>) -> SkipprDataType {
+        types
+            .iter()
+            .max_by(|(a, ca), (b, cb)| {
+                ca.cmp(cb).then_with(|| {
+                    Self::determined_type_tiebreak_rank(a)
+                        .cmp(&Self::determined_type_tiebreak_rank(b))
+                })
+            })
+            .map(|(dt, _)| dt.clone())
+            .unwrap_or(SkipprDataType::Unknown)
+    }
+
     pub fn determine_field_types(
         config: &Config,
         metadata: &mut HashMap<String, Metadata>,
@@ -2210,9 +2257,6 @@ impl AnalyseSchema {
             field.out_field_name = Helpers::clean_field_name(config, field_name.to_string());
 
             if field.determined_type == SkipprDataType::Unknown {
-                let mut highest_type = SkipprDataType::Unknown;
-                let mut highest_count = 0;
-
                 if !field.types.is_empty() {
                     // Don't allow NULL type if we discovered any other types
                     if field.types.len() > 1 {
@@ -2223,38 +2267,7 @@ impl AnalyseSchema {
                     if field.types.contains_key(&SkipprDataType::Record) {
                         field.determined_type = SkipprDataType::Record;
                     } else {
-                        for (data_type, data_type_count) in field.types.iter() {
-                            // println!("eavluating type {} with count {}", data_type, data_type_count);
-
-                            if highest_count < *data_type_count {
-                                // Prefer primitive types to logical types or types
-                                // that cause frequent false positives (demoted types).
-                                // - if there's multiple discovered types
-                                // - and the most common type is a demoted type
-                                // - select the next most common, non-date type
-
-                                // hacky, support inference on they fly when we only infer on one record.
-                                // much more likely to be an integer than a boolean
-                                // if field.types.len() == 1
-                                //     && field.types.contains_key("boolean")
-                                //     && field.types.get("boolean").unwrap() == &1
-                                // {
-                                //     highest_type = "integer".to_string();
-                                //     highest_count = *data_type_count;
-                                //     break;
-                                // }
-
-                                // if field.types.len() == 1
-                                //     || (field.types.len() > 1
-                                //         && !demoted_types.contains(&data_type.as_str()))
-                                // {
-                                highest_type = data_type.clone();
-                                highest_count = *data_type_count;
-                                // }
-                            }
-                        }
-
-                        field.determined_type = highest_type;
+                        field.determined_type = Self::pick_determined_type(&field.types);
                     }
                 }
             }
@@ -2296,10 +2309,7 @@ impl AnalyseSchema {
                     let mut values_type: Option<SkipprDataType> = None;
 
                     if !type_count.is_empty() {
-                        values_type = type_count
-                            .iter()
-                            .max_by(|a, b| a.1.cmp(b.1))
-                            .map(|(k, _v)| k.clone());
+                        values_type = Some(Self::pick_determined_type(&type_count));
                     }
 
                     // println!("HIGHEST TYPE: {:?}", values_type);
@@ -2375,6 +2385,28 @@ impl AnalyseSchema {
                     }
                 })
                 .or_insert(value);
+        }
+    }
+}
+
+#[cfg(test)]
+mod determine_field_types_tiebreak_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_string_boolean_equal_counts_determines_string() {
+        for _ in 0..32 {
+            let mut field = Metadata::new().unwrap();
+            field.types.insert(SkipprDataType::Boolean, 1);
+            field.types.insert(SkipprDataType::String, 1);
+            let mut metadata = HashMap::new();
+            metadata.insert("value".to_string(), field);
+            AnalyseSchema::determine_field_types(&Config::new(), &mut metadata, None, false);
+            assert_eq!(
+                metadata.get("value").unwrap().determined_type,
+                SkipprDataType::String,
+                "array-of-record mixed leaves must not pick boolean on a count tie"
+            );
         }
     }
 }

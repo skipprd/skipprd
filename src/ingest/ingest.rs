@@ -2382,7 +2382,12 @@ mod test_smoke_tests {
             "foo",
             &mut updated_schema,
             false,
-        );
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "bike-hire tags.value is string+boolean; string must win the count tie so ingest succeeds, got {err}"
+            )
+        });
 
         let mut f: Vec<Value> = vec![];
         f.insert(0, Value::Number(Number::from(2)));
@@ -2396,7 +2401,7 @@ mod test_smoke_tests {
         f.insert(8, Value::Number(Number::from(19)));
         f.insert(9, Value::Number(Number::from(5)));
 
-        let value_clone = ingest_value.unwrap().clone();
+        let value_clone = ingest_value.clone();
 
         let v = value_clone
             .get("last_crank")

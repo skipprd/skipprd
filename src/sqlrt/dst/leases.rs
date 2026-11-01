@@ -31,17 +31,18 @@ fn i_apply_pending_then_persist() {
     let dir = tempfile::tempdir().unwrap();
     let config = dst_migrate_config(dir.path(), "dst-apply-pending");
     let offsets = crate::helpers::offsets::Offsets::init(&config).unwrap();
-    let store = offsets.bytes_store().expect("journal store");
+    let store = offsets.skippr_kv().expect("skippr store");
+    let fence = offsets.writer_fence().expect("writer fence");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     rt.block_on(async {
-        let applied = apply_pending_files(&config, store.as_ref(), MigrationDirection::Up)
+        let applied = apply_pending_files(&config, store.as_ref(), fence, MigrationDirection::Up)
             .await
             .unwrap();
         assert!(applied.is_empty(), "{applied:?}");
-        store.flush().unwrap();
+        store.flush_durable().unwrap();
     });
 }
 

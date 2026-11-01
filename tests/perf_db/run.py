@@ -47,6 +47,15 @@ def load_perf_db_catalog() -> dict[str, Any]:
     return load_catalog(CATALOG_PATH)
 
 
+def row_count(scenario: dict[str, Any], scale: str) -> int:
+    defaults = load_perf_db_catalog().get("defaults", {})
+    if scale == "smoke":
+        return int(scenario.get("smoke_rows", defaults.get("smoke_rows", 200)))
+    if scale == "linux":
+        return int(scenario.get("linux_rows", defaults.get("linux_rows", 2000)))
+    return int(scenario.get("rows", defaults.get("rows", 10000)))
+
+
 def log(message: str) -> None:
     print(f"[skippr-perf-db] {message}", flush=True)
 
@@ -216,7 +225,7 @@ def run_query_after_ingest(
     work: Path,
     profile: str,
 ) -> dict[str, Any]:
-    rows = perf_run.row_count(scenario, scale)
+    rows = row_count(scenario, scale)
     source = work / "source"
     warehouse = work / "warehouse"
     data_dir = work / "data"

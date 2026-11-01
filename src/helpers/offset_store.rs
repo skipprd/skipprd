@@ -1,4 +1,4 @@
-//! Offset/checkpoint/journal families on Skippr Store.
+//! Offset/checkpoint families on Skippr Store. DDL journal is not this trait.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,33 +10,8 @@ use skippr_wal_catalog::{
 };
 use zerocopy::{byteorder::U64, AsBytes, LayoutVerified};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JournalKey(String);
-
-impl JournalKey {
-    pub fn migration(workspace: &str, pipeline: &str) -> Result<Self, String> {
-        if workspace.is_empty() || pipeline.is_empty() {
-            return Err("journal identity must not be empty".into());
-        }
-        if workspace.contains('#') || pipeline.contains('#') {
-            return Err("journal identity must not contain '#'".into());
-        }
-        Ok(Self(format!("migration#{workspace}#{pipeline}")))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 pub trait OffsetStore: Send + Sync {
     fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String>;
-    fn get_journal(&self, key: &JournalKey) -> Result<Option<Vec<u8>>, String>;
-    fn fetch_and_update_journal(
-        &self,
-        key: &JournalKey,
-        update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
-    ) -> Result<Option<Vec<u8>>, String>;
     fn get_offset(&self, namespace: &str, partition: &str) -> Result<Option<Vec<u8>>, String>;
     fn get_checkpoint(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
     fn flush(&self) -> Result<(), String>;
@@ -160,47 +135,6 @@ impl OffsetStore for StoreOffsetStore {
         self.family_get(StoreFamily::Offsets, sk.as_bytes())
     }
 
-    fn get_journal(&self, key: &JournalKey) -> Result<Option<Vec<u8>>, String> {
-        self.family_get(StoreFamily::Journal, key.as_str().as_bytes())
-    }
-
-    fn fetch_and_update_journal(
-        &self,
-        key: &JournalKey,
-        update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let rest = key.as_str().as_bytes();
-        let current = self.family_get(StoreFamily::Journal, rest)?;
-        let next = update(current.clone());
-        match next {
-            Some(bytes) => {
-                self.store
-                    .commit(
-                        &[KvOp::Put {
-                            key: StoreFamily::Journal.key(rest),
-                            value: bytes.clone(),
-                        }],
-                        self.fence,
-                    )
-                    .map_err(|err| err.to_string())?;
-                Ok(Some(bytes))
-            }
-            None => {
-                if current.is_some() {
-                    self.store
-                        .commit(
-                            &[KvOp::Delete {
-                                key: StoreFamily::Journal.key(rest),
-                            }],
-                            self.fence,
-                        )
-                        .map_err(|err| err.to_string())?;
-                }
-                Ok(None)
-            }
-        }
-    }
-
     fn get_offset(&self, namespace: &str, partition: &str) -> Result<Option<Vec<u8>>, String> {
         self.get_bytes(&Self::offset_key(namespace, partition))
     }
@@ -280,16 +214,6 @@ impl OffsetStore for StoreOffsetStore {
 impl OffsetStore for Arc<dyn OffsetStore> {
     fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String> {
         (**self).get_bytes(sk)
-    }
-    fn get_journal(&self, key: &JournalKey) -> Result<Option<Vec<u8>>, String> {
-        (**self).get_journal(key)
-    }
-    fn fetch_and_update_journal(
-        &self,
-        key: &JournalKey,
-        update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
-    ) -> Result<Option<Vec<u8>>, String> {
-        (**self).fetch_and_update_journal(key, update)
     }
     fn get_offset(&self, namespace: &str, partition: &str) -> Result<Option<Vec<u8>>, String> {
         (**self).get_offset(namespace, partition)
@@ -403,17 +327,18 @@ mod tests {
     }
 
     #[test]
-    fn journal_commit_is_not_an_offset_key() {
-        let store = mem_offsets();
-        let key = JournalKey::migration("ws", "p").unwrap();
-        store
-            .fetch_and_update_journal(&key, Box::new(|_| Some(b"log".to_vec())))
-            .unwrap();
-        assert_eq!(
-            store.get_journal(&key).unwrap().as_deref(),
-            Some(b"log".as_slice())
-        );
-        assert_eq!(store.get_bytes(key.as_str()).unwrap(), None);
+    fn reset_published_ingest_does_not_delete_journal_family() {
+        let fence = CatalogFence::local();
+        let kv: Arc<dyn SkipprStore> = Arc::new(skippr_wal_catalog::MemorySkipprStore::open(fence));
+        let store = StoreOffsetStore::new(kv.clone(), fence);
+        kv.commit(
+            &[KvOp::Put {
+                key: StoreFamily::Journal.key(b"migration#ws#p"),
+                value: b"log".to_vec(),
+            }],
+            fence,
+        )
+        .unwrap();
         let sk = StoreOffsetStore::offset_key("ns", "part");
         store
             .publish_wal_commit(&sk, b"off", 1, 1, "h", PublishMode::Fresh)
@@ -421,10 +346,22 @@ mod tests {
         store.reset_published_ingest().unwrap();
         assert_eq!(store.get_bytes(&sk).unwrap(), None);
         assert_eq!(
-            store.get_journal(&key).unwrap().as_deref(),
+            kv.get(&StoreFamily::Journal.key(b"migration#ws#p"))
+                .unwrap()
+                .as_deref(),
             Some(b"log".as_slice()),
             "RESET ingest must not delete the journal family"
         );
+    }
+
+    #[test]
+    fn offset_store_has_no_journal_access() {
+        let src = include_str!("offset_store.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("get_journal"));
+        assert!(!prod.contains("fetch_and_update_journal"));
+        assert!(!prod.contains("JournalKey"));
+        assert!(!prod.contains("StoreFamily::Journal"));
     }
 
     #[test]

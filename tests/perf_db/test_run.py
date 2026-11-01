@@ -178,6 +178,30 @@ class PerfDbWorkflowContractTests(unittest.TestCase):
         self.assertIn("tests/perf/test_run.py", contracts)
         self.assertIn("test_release_sha_batteries.py", contracts)
 
+    def test_linux_matrix_uses_perf_db_linux_scale(self) -> None:
+        text = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(encoding="utf-8")
+        matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
+        self.assertIn("scale: linux", matrix)
+        self.assertNotIn("scale: ci", matrix)
+
+    def test_linux_profile_apt_does_not_pin_missing_kernel_tools(self) -> None:
+        text = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(encoding="utf-8")
+        profile = text.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0]
+        self.assertNotIn("linux-tools-$(uname -r)", profile)
+        self.assertIn("linux-tools-generic", profile)
+        self.assertIn("heaptrack", profile)
+
+    def test_row_count_linux_reads_perf_db_catalog(self) -> None:
+        run = perf_db_run()
+        catalog = db_catalog()
+        scenario = catalog["scenarios"]["q-wal-count-iceberg"]
+        linux_rows = int(catalog["defaults"]["linux_rows"])
+        self.assertGreaterEqual(linux_rows, 10000)
+        self.assertEqual(run.row_count(scenario, "linux"), linux_rows)
+        self.assertEqual(run.row_count(scenario, "smoke"), int(catalog["defaults"]["smoke_rows"]))
+        src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        self.assertNotIn("perf_run.row_count", src)
+
     def test_ci_does_not_skip_docker_cdc_cells(self) -> None:
         src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
         start = src.index("def run_query_after_cdc")

@@ -1,6 +1,5 @@
 use crate::discover::schema_alter;
 use crate::helpers::configuration::Config;
-use crate::helpers::offset_store::OffsetStore;
 use crate::helpers::offsets::Offsets;
 use crate::migration::file::{list_sql_files, AlterStmt, LoadedMigration};
 use crate::migration::journal::{
@@ -10,6 +9,7 @@ use crate::migration::migrations_dir;
 use crate::plugins::{AlterSupport, SchemaSink};
 use crate::sqlrt::parser::AlterTableStatement;
 use crate::METADATA;
+use skippr_wal_catalog::{CatalogFence, SkipprStore};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -46,19 +46,27 @@ pub async fn apply_query_alter(
     let bound = config.bind_pipeline(&pipeline);
     bound.init().await;
     let offsets = Offsets::init(&bound).map_err(|err| err.to_string())?;
-    let store = journal_store(&offsets)?;
+    let (store, fence) = journal_store(&offsets)?;
     let loaded = crate::migration::file::load_sql_file(
         MigrationId::query(crate::migration::MigrationChecksum::of(sql)).as_str(),
         sql,
     )
     .map_err(|err| err.to_string())?;
-    apply_loaded(&bound, store, &loaded, MigrationDirection::Up).await?;
+    apply_loaded(
+        &bound,
+        store.as_ref(),
+        fence,
+        &loaded,
+        MigrationDirection::Up,
+    )
+    .await?;
     Ok(format!("ALTER TABLE {pipeline}.{namespace} {:?}", stmt.op))
 }
 
 pub async fn apply_pending_files(
     config: &Config,
-    store: &dyn OffsetStore,
+    store: &dyn SkipprStore,
+    fence: CatalogFence,
     direction: MigrationDirection,
 ) -> Result<Vec<String>, String> {
     let dir = migrations_dir(config);
@@ -69,7 +77,7 @@ pub async fn apply_pending_files(
         if file.up.iter().all(|stmt| stmt.pipeline != pipeline) {
             continue;
         }
-        apply_loaded(config, store, &file, direction).await?;
+        apply_loaded(config, store, fence, &file, direction).await?;
         applied.push(file.id.as_str().to_string());
     }
     Ok(applied)
@@ -80,13 +88,14 @@ pub async fn apply_pending(
     direction: MigrationDirection,
 ) -> Result<Vec<String>, String> {
     let offsets = Offsets::init(config).map_err(|err| err.to_string())?;
-    let store = journal_store(&offsets)?;
-    apply_pending_files(config, store, direction).await
+    let (store, fence) = journal_store(&offsets)?;
+    apply_pending_files(config, store.as_ref(), fence, direction).await
 }
 
 pub async fn apply_migration(
     config: &Config,
-    store: &dyn OffsetStore,
+    store: &dyn SkipprStore,
+    fence: CatalogFence,
     apply: &MigrationApply,
     stmts: &[AlterStmt],
 ) -> Result<(), String> {
@@ -99,19 +108,23 @@ pub async fn apply_migration(
         return Ok(());
     }
     let plugin = config.primary_schema_sink().await?;
-    apply_with(config, store, plugin.as_ref(), apply, stmts).await
+    apply_with(config, store, fence, plugin.as_ref(), apply, stmts).await
 }
 
-fn journal_store(offsets: &Offsets) -> Result<&dyn OffsetStore, String> {
-    offsets
-        .bytes_store()
-        .map(|store| store.as_ref())
-        .ok_or_else(|| "migration journal requires a skippr store".to_string())
+fn journal_store(offsets: &Offsets) -> Result<(Arc<dyn SkipprStore>, CatalogFence), String> {
+    let store = offsets
+        .skippr_kv()
+        .ok_or_else(|| "migration journal requires a skippr store".to_string())?;
+    let fence = offsets
+        .writer_fence()
+        .ok_or_else(|| "migration journal requires a skippr store".to_string())?;
+    Ok((store, fence))
 }
 
 async fn apply_with(
     config: &Config,
-    store: &dyn crate::helpers::offset_store::OffsetStore,
+    store: &dyn SkipprStore,
+    fence: CatalogFence,
     plugin: &dyn SchemaSink,
     apply: &MigrationApply,
     stmts: &[AlterStmt],
@@ -166,7 +179,7 @@ async fn apply_with(
             ));
         }
         if phase != Some(MigrationPhase::WalRewritten) {
-            journal::commit(store, &key, apply, MigrationPhase::WalRewritten)
+            journal::commit(store, fence, &key, apply, MigrationPhase::WalRewritten)
                 .map_err(|err| err.to_string())?;
         }
         for (namespace, output, op, field_id) in dest_ops {
@@ -175,13 +188,13 @@ async fn apply_with(
                 .await
                 .map_err(|err| err.to_string())?;
         }
-        journal::commit(store, &key, apply, MigrationPhase::DestApplied)
+        journal::commit(store, fence, &key, apply, MigrationPhase::DestApplied)
             .map_err(|err| err.to_string())?;
     }
 
     METADATA.store(Arc::new(metadata.clone()));
     config.persist_pipeline_metadata(&metadata).await?;
-    journal::commit(store, &key, apply, MigrationPhase::Committed)
+    journal::commit(store, fence, &key, apply, MigrationPhase::Committed)
         .map_err(|err| err.to_string())?;
     Ok(())
 }
@@ -201,7 +214,8 @@ async fn wait_sink_idle() {
 
 async fn apply_loaded(
     config: &Config,
-    store: &dyn OffsetStore,
+    store: &dyn SkipprStore,
+    fence: CatalogFence,
     loaded: &LoadedMigration,
     direction: MigrationDirection,
 ) -> Result<(), String> {
@@ -217,7 +231,7 @@ async fn apply_loaded(
         checksum: loaded.checksum.clone(),
         direction,
     };
-    apply_migration(config, store, &apply, stmts).await
+    apply_migration(config, store, fence, &apply, stmts).await
 }
 
 struct SchemaBarrierGuard;
@@ -235,7 +249,6 @@ mod tests {
     use crate::discover::schema_alter::SchemaAlterOp;
     use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
     use crate::helpers::configuration::{Pipeline, Skippr};
-    use crate::helpers::offset_store::{memory_offset_store, StoreOffsetStore};
     use crate::helpers::wal_storage::ElStorageMode;
     use crate::migration::file::load_sql_file;
     use crate::migration::journal;
@@ -243,6 +256,7 @@ mod tests {
     use arrow::ipc::reader::StreamReader;
     use async_trait::async_trait;
     use serial_test::serial;
+    use skippr_wal_catalog::MemorySkipprStore;
     use std::collections::HashMap;
     use std::io::{Read, Seek};
     use std::sync::Mutex;
@@ -334,8 +348,9 @@ mod tests {
         config
     }
 
-    fn store() -> Arc<dyn crate::helpers::offset_store::OffsetStore> {
-        crate::helpers::offset_store::memory_offset_store()
+    fn memory_kv() -> (Arc<dyn SkipprStore>, CatalogFence) {
+        let fence = CatalogFence::local();
+        (Arc::new(MemorySkipprStore::open(fence)), fence)
     }
 
     fn rename_apply() -> (MigrationApply, Vec<AlterStmt>) {
@@ -460,10 +475,11 @@ mod tests {
         let config = fixture_config(root.path());
         seed_metadata(&config).await;
         let offsets = Offsets::init(&config).expect("offset store");
-        let store = offsets.bytes_store().expect("journal store");
+        let store = offsets.skippr_kv().expect("skippr store");
+        let fence = offsets.writer_fence().expect("writer fence");
         let sink = RecordingSink::native();
         let (apply, stmts) = rename_apply();
-        apply_with(&config, store.as_ref(), &sink, &apply, &stmts)
+        apply_with(&config, store.as_ref(), fence, &sink, &apply, &stmts)
             .await
             .unwrap();
         assert_eq!(sink.calls.lock().unwrap().len(), 1);
@@ -481,11 +497,11 @@ mod tests {
         let config = fixture_config(root.path());
         seed_metadata(&config).await;
         let wal = write_region_wal(&config);
-        let store = store();
+        let (store, fence) = memory_kv();
         let sink = RecordingSink::native();
         let (apply, stmts) = rename_apply();
 
-        apply_with(&config, &store, &sink, &apply, &stmts)
+        apply_with(&config, store.as_ref(), fence, &sink, &apply, &stmts)
             .await
             .unwrap();
 
@@ -526,7 +542,7 @@ mod tests {
 
         let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
         assert_eq!(
-            journal::latest_phase(&journal::load(&store, &key).unwrap(), &apply).unwrap(),
+            journal::latest_phase(&journal::load(store.as_ref(), &key).unwrap(), &apply).unwrap(),
             Some(MigrationPhase::Committed)
         );
         assert!(!schema_barrier_held());
@@ -538,13 +554,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let config = fixture_config(root.path());
         seed_metadata(&config).await;
-        let store = store();
+        let (store, fence) = memory_kv();
         let sink = RecordingSink::native();
         let (apply, stmts) = rename_apply();
-        apply_with(&config, &store, &sink, &apply, &stmts)
+        apply_with(&config, store.as_ref(), fence, &sink, &apply, &stmts)
             .await
             .unwrap();
-        apply_with(&config, &store, &sink, &apply, &stmts)
+        apply_with(&config, store.as_ref(), fence, &sink, &apply, &stmts)
             .await
             .unwrap();
         assert_eq!(sink.calls.lock().unwrap().len(), 1);
@@ -557,11 +573,11 @@ mod tests {
         let config = fixture_config(root.path());
         seed_metadata(&config).await;
         let wal = write_region_wal(&config);
-        let store = store();
+        let (store, fence) = memory_kv();
         let sink = RecordingSink::unsupported();
         let (apply, stmts) = rename_apply();
 
-        let err = apply_with(&config, &store, &sink, &apply, &stmts)
+        let err = apply_with(&config, store.as_ref(), fence, &sink, &apply, &stmts)
             .await
             .unwrap_err();
         assert!(err.contains("does not support migrations"), "{err}");
@@ -573,7 +589,7 @@ mod tests {
         assert!(persisted.metadata["trips"].fields.contains_key("region"));
         let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
         assert_eq!(
-            journal::latest_phase(&journal::load(&store, &key).unwrap(), &apply).unwrap(),
+            journal::latest_phase(&journal::load(store.as_ref(), &key).unwrap(), &apply).unwrap(),
             None
         );
     }
@@ -584,13 +600,20 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let config = fixture_config(root.path());
         seed_metadata(&config).await;
-        let store = store();
+        let (store, fence) = memory_kv();
         let sink = RecordingSink::native();
         let (apply, stmts) = rename_apply();
         let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
-        journal::commit(&store, &key, &apply, MigrationPhase::DestApplied).unwrap();
+        journal::commit(
+            store.as_ref(),
+            fence,
+            &key,
+            &apply,
+            MigrationPhase::DestApplied,
+        )
+        .unwrap();
 
-        apply_with(&config, &store, &sink, &apply, &stmts)
+        apply_with(&config, store.as_ref(), fence, &sink, &apply, &stmts)
             .await
             .unwrap();
 
@@ -599,10 +622,20 @@ mod tests {
             "DestApplied resume must not re-run dest DDL"
         );
         assert_eq!(
-            journal::latest_phase(&journal::load(&store, &key).unwrap(), &apply).unwrap(),
+            journal::latest_phase(&journal::load(store.as_ref(), &key).unwrap(), &apply).unwrap(),
             Some(MigrationPhase::Committed)
         );
         let persisted = config.get_metadata().await.unwrap();
         assert!(persisted.metadata["trips"].fields.contains_key("region"));
+    }
+
+    #[test]
+    fn apply_uses_skippr_store_not_offset_store() {
+        let src = include_str!("apply.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("SkipprStore"));
+        assert!(!prod.contains("OffsetStore"));
+        assert!(!prod.contains("bytes_store"));
+        assert!(!prod.contains("get_journal"));
     }
 }

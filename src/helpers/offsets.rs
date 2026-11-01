@@ -764,19 +764,6 @@ mod tests {
         fn get_bytes(&self, _sk: &str) -> Result<Option<Vec<u8>>, String> {
             Err("checkpoint store down".into())
         }
-        fn get_journal(
-            &self,
-            _key: &crate::helpers::offset_store::JournalKey,
-        ) -> Result<Option<Vec<u8>>, String> {
-            Err("checkpoint store down".into())
-        }
-        fn fetch_and_update_journal(
-            &self,
-            _key: &crate::helpers::offset_store::JournalKey,
-            _update: Box<dyn FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>> + Send>,
-        ) -> Result<Option<Vec<u8>>, String> {
-            Err("checkpoint store down".into())
-        }
         fn get_offset(
             &self,
             _namespace: &str,

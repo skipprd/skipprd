@@ -281,6 +281,18 @@ mod tests {
             "fence is CatalogFence, not a leases family"
         );
         assert!(
+            lock.contains("One live KV trait"),
+            "SkipprStore / SkipprStoreRead is the only live KV"
+        );
+        assert!(
+            lock.contains("The only `sled::open` is leftover"),
+            "sled open is migrate-only"
+        );
+        assert!(
+            lock.contains("StoreFamily::Journal"),
+            "DDL journal is a Skippr Store family"
+        );
+        assert!(
             !lock.to_ascii_lowercase().contains("future clustered query"),
             "do not name extra readers as clustered query"
         );
@@ -470,6 +482,71 @@ mod tests {
             !include_str!("../../docs/docs/configuration/overview.md")
                 .contains("--store-type <fjall|sled>"),
             "public docs must not list sled as a live --store-type peer"
+        );
+    }
+
+    #[test]
+    fn live_kv_access_is_skippr_store_except_sled_migrate() {
+        use std::path::{Path, PathBuf};
+
+        fn production_src(path: &Path) -> String {
+            let src = std::fs::read_to_string(path).unwrap();
+            src.split("#[cfg(test)]").next().unwrap().to_string()
+        }
+
+        fn visit(dir: &Path, files: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if matches!(name, "target" | "third_party" | "node_modules" | ".git") {
+                        continue;
+                    }
+                    visit(&path, files);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    files.push(path);
+                }
+            }
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        visit(&root.join("src"), &mut files);
+        visit(&root.join("crates"), &mut files);
+
+        let mut sled_opens = Vec::new();
+        let mut builders = Vec::new();
+        for path in &files {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            let prod = production_src(path);
+            if prod.contains("sled::open") {
+                sled_opens.push(rel.clone());
+            }
+            if prod.contains("Database::builder") {
+                builders.push(rel);
+            }
+        }
+        sled_opens.sort();
+        builders.sort();
+        assert_eq!(
+            sled_opens,
+            vec![
+                "crates/skippr-wal-catalog/src/sled_migrate.rs".to_string(),
+                "src/sqlrt/dst/store.rs".to_string(),
+            ],
+            "sled::open is migrate-only (sled_migrate + DST leftover fixture): {sled_opens:?}"
+        );
+        assert_eq!(
+            builders,
+            vec!["crates/skippr-wal-catalog/src/fjall_kv.rs".to_string()],
+            "Database::builder is the fjall impl only: {builders:?}"
         );
     }
 }

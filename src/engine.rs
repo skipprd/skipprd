@@ -978,11 +978,15 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
     }
 
     let journal = offsets_db
-        .bytes_store()
+        .skippr_kv()
+        .ok_or_else(|| io::Error::other("migration journal requires a skippr store"))?;
+    let fence = offsets_db
+        .writer_fence()
         .ok_or_else(|| io::Error::other("migration journal requires a skippr store"))?;
     crate::migration::apply_pending_files(
         config,
         journal.as_ref(),
+        fence,
         crate::migration::MigrationDirection::Up,
     )
     .await

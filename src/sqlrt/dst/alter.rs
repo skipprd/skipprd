@@ -308,7 +308,8 @@ fn f_migrate_reuses_open_store() {
     );
     let config = config.bind_pipeline("dst-migrate-reuse");
     let offsets = crate::helpers::offsets::Offsets::init(&config).unwrap();
-    let store = offsets.bytes_store().expect("journal store");
+    let store = offsets.skippr_kv().expect("skippr store");
+    let fence = offsets.writer_fence().expect("writer fence");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -317,6 +318,7 @@ fn f_migrate_reuses_open_store() {
         .block_on(apply_pending_files(
             &config,
             store.as_ref(),
+            fence,
             MigrationDirection::Up,
         ))
         .unwrap();
@@ -324,6 +326,7 @@ fn f_migrate_reuses_open_store() {
         .block_on(apply_pending_files(
             &config,
             store.as_ref(),
+            fence,
             MigrationDirection::Up,
         ))
         .unwrap();

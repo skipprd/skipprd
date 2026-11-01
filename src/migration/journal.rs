@@ -1,6 +1,25 @@
-use crate::helpers::offset_store::{JournalKey, OffsetStore};
 use serde::{Deserialize, Serialize};
+use skippr_wal_catalog::{CatalogFence, KvOp, SkipprStore, SkipprStoreRead, StoreFamily};
 use std::fmt::{Display, Formatter};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JournalKey(String);
+
+impl JournalKey {
+    pub fn migration(workspace: &str, pipeline: &str) -> Result<Self, String> {
+        if workspace.is_empty() || pipeline.is_empty() {
+            return Err("journal identity must not be empty".into());
+        }
+        if workspace.contains('#') || pipeline.contains('#') {
+            return Err("journal identity must not contain '#'".into());
+        }
+        Ok(Self(format!("migration#{workspace}#{pipeline}")))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MigrationId(String);
@@ -83,6 +102,10 @@ pub fn journal_key(workspace: &str, pipeline: &str) -> Result<JournalKey, Journa
     JournalKey::migration(workspace, pipeline).map_err(JournalError::Store)
 }
 
+fn journal_store_key(key: &JournalKey) -> Vec<u8> {
+    StoreFamily::Journal.key(key.as_str().as_bytes())
+}
+
 pub fn latest_phase(
     log: &MigrationLog,
     apply: &MigrationApply,
@@ -108,8 +131,11 @@ pub fn committed(log: &MigrationLog, apply: &MigrationApply) -> Result<bool, Jou
     Ok(latest_phase(log, apply)? == Some(MigrationPhase::Committed))
 }
 
-pub fn load(store: &dyn OffsetStore, key: &JournalKey) -> Result<MigrationLog, JournalError> {
-    match store.get_journal(key).map_err(JournalError::Store)? {
+pub fn load(store: &dyn SkipprStoreRead, key: &JournalKey) -> Result<MigrationLog, JournalError> {
+    match store
+        .get(&journal_store_key(key))
+        .map_err(|err| JournalError::Store(err.to_string()))?
+    {
         None => Ok(MigrationLog::default()),
         Some(bytes) => {
             bincode::deserialize(&bytes).map_err(|err| JournalError::Store(err.to_string()))
@@ -118,7 +144,8 @@ pub fn load(store: &dyn OffsetStore, key: &JournalKey) -> Result<MigrationLog, J
 }
 
 pub fn commit(
-    store: &dyn OffsetStore,
+    store: &dyn SkipprStore,
+    fence: CatalogFence,
     key: &JournalKey,
     apply: &MigrationApply,
     phase: MigrationPhase,
@@ -146,38 +173,61 @@ pub fn commit(
     });
     let bytes = bincode::serialize(&log).map_err(|err| JournalError::Store(err.to_string()))?;
     store
-        .fetch_and_update_journal(key, Box::new(move |_| Some(bytes.clone())))
-        .map_err(JournalError::Store)?;
+        .commit(
+            &[KvOp::Put {
+                key: journal_store_key(key),
+                value: bytes,
+            }],
+            fence,
+        )
+        .map_err(|err| JournalError::Store(err.to_string()))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helpers::offset_store::{memory_offset_store, StoreOffsetStore};
+    use skippr_wal_catalog::MemorySkipprStore;
+
+    fn mem() -> (MemorySkipprStore, CatalogFence) {
+        let fence = CatalogFence::local();
+        (MemorySkipprStore::open(fence), fence)
+    }
+
+    #[test]
+    fn journal_uses_skippr_store_not_offset_store() {
+        let src = include_str!("journal.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("SkipprStore"));
+        assert!(prod.contains("SkipprStoreRead"));
+        assert!(prod.contains("StoreFamily::Journal"));
+        assert!(!prod.contains("OffsetStore"));
+        assert!(!prod.contains("get_journal"));
+        assert!(!prod.contains("fetch_and_update_journal"));
+    }
 
     #[test]
     fn checksum_mismatch_is_fail_closed() {
-        let store = crate::helpers::offset_store::memory_offset_store();
+        let (store, fence) = mem();
         let key = journal_key("ws", "p").unwrap();
         let first = MigrationApply {
             id: MigrationId::new("m1"),
             checksum: MigrationChecksum::of("one"),
             direction: MigrationDirection::Up,
         };
-        commit(&store, &key, &first, MigrationPhase::Committed).unwrap();
+        commit(&store, fence, &key, &first, MigrationPhase::Committed).unwrap();
         let second = MigrationApply {
             id: MigrationId::new("m1"),
             checksum: MigrationChecksum::of("two"),
             direction: MigrationDirection::Up,
         };
-        let err = commit(&store, &key, &second, MigrationPhase::Committed).unwrap_err();
+        let err = commit(&store, fence, &key, &second, MigrationPhase::Committed).unwrap_err();
         assert!(matches!(err, JournalError::ChecksumMismatch { .. }));
     }
 
     #[test]
     fn latest_phase_is_applied_truth_for_resume() {
-        let store = crate::helpers::offset_store::memory_offset_store();
+        let (store, fence) = mem();
         let key = journal_key("ws", "p").unwrap();
         let apply = MigrationApply {
             id: MigrationId::new("m1"),
@@ -188,12 +238,12 @@ mod tests {
             latest_phase(&load(&store, &key).unwrap(), &apply).unwrap(),
             None
         );
-        commit(&store, &key, &apply, MigrationPhase::WalRewritten).unwrap();
+        commit(&store, fence, &key, &apply, MigrationPhase::WalRewritten).unwrap();
         assert_eq!(
             latest_phase(&load(&store, &key).unwrap(), &apply).unwrap(),
             Some(MigrationPhase::WalRewritten)
         );
-        commit(&store, &key, &apply, MigrationPhase::DestApplied).unwrap();
+        commit(&store, fence, &key, &apply, MigrationPhase::DestApplied).unwrap();
         assert_eq!(
             latest_phase(&load(&store, &key).unwrap(), &apply).unwrap(),
             Some(MigrationPhase::DestApplied)
