@@ -1,10 +1,7 @@
 ./.idea
 ./data
-./_files
 ./legacy
 ./target
 ./.dockerignore
 ./.gitignore
-./.gitlab-ci.yml
-./cli.md
 ./README.md

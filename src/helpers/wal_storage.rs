@@ -445,18 +445,6 @@ mod tests {
             "Python stub must not share Skippr Store with the lake catalog"
         );
         assert!(
-            !include_str!("../../updates.md").contains("\"metadata_location\""),
-            "updates.md must not advertise leftover metadata.json as SHOW PIPELINE authority"
-        );
-        assert!(
-            !include_str!("../../todo.md").contains("\"metadata_location\""),
-            "todo.md must not advertise leftover metadata.json as SHOW PIPELINE authority"
-        );
-        assert!(
-            !include_str!("../../todo.md").contains("sled-based"),
-            "todo.md must not name sled as the live offsets engine"
-        );
-        assert!(
             !include_str!("../../src/sqlrt/query.rs").contains("offset database"),
             "RESET PIPELINE must not say offset database"
         );

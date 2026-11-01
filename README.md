@@ -619,7 +619,7 @@ cargo fmt --all -- --check
 cargo clippy
 ```
 
-Contributor guidance is in [AGENTS.md](AGENTS.md). Profiling notes are in [PERFORMANCE.md](PERFORMANCE.md). SQL reference is in [sql-docs.md](sql-docs.md).
+Contributor guidance is in [AGENTS.md](AGENTS.md). SQL reference is in [sql-docs.md](sql-docs.md).
 
 ## License & Ecosystem
 

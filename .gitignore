@@ -1,6 +1,5 @@
 vendor
 /ioncube/
-docker-compose.yml
 debug.php
 test.sh
 .idea
@@ -55,3 +54,12 @@ __pycache__/
 !.cargo/config.toml
 .skippr
 scripts/bin/
+/skippr.yml
+/skippr-*.yml
+/ppd_skippr.yaml
+/react-snowflake.yaml
+/*.p8
+/profile.json
+/dynamodb-local-metadata.json
+/skippr-perf-memo.txt
+/bottlenecks-vs-parent.json
