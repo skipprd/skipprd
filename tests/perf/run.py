@@ -120,13 +120,7 @@ def stage_plugins(config: Path, pipeline: str, manifests: Path) -> None:
         cmd.append("--skip-cargo-build")
         binaries = os.environ.get("PLUGIN_BINARIES_DIR", "").strip()
         if binaries:
-            dest = REPO_ROOT / "target" / "release"
-            dest.mkdir(parents=True, exist_ok=True)
-            for path in Path(binaries).iterdir():
-                if path.name.startswith("skippr-plugin-"):
-                    target = dest / path.name
-                    shutil.copy2(path, target)
-                    target.chmod(target.stat().st_mode | 0o111)
+            cmd.extend(["--copy-from", binaries])
     subprocess.run(cmd, cwd=REPO_ROOT, check=True)
 
 

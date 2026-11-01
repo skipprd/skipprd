@@ -629,6 +629,14 @@ class MemoTests(unittest.TestCase):
 
 
 class WrapProfileTests(unittest.TestCase):
+    def test_stage_plugins_does_not_copy_every_plugin_binary(self) -> None:
+        src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        start = src.index("def stage_plugins")
+        chunk = src[start : src.index("\ndef ", start + 1)]
+        self.assertIn("--copy-from", chunk)
+        self.assertNotIn("shutil.copy2", chunk)
+        self.assertNotIn('startswith("skippr-plugin-")', chunk)
+
     def test_perf_stat_pins_portable_events(self) -> None:
         from run import PERF_STAT_EVENTS, wrap_profile
 

@@ -191,6 +191,13 @@ class PerfDbWorkflowContractTests(unittest.TestCase):
         self.assertIn("linux-tools-generic", profile)
         self.assertIn("heaptrack", profile)
 
+    def test_linux_analyze_runs_when_a_profile_cell_fails(self) -> None:
+        text = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(encoding="utf-8")
+        analyze = text.split("\n  linux_analyze:")[1]
+        self.assertNotIn("needs.linux_profile.result == 'success'", analyze)
+        self.assertIn("needs.linux_profile.result != 'skipped'", analyze)
+        self.assertIn("!cancelled()", analyze)
+
     def test_row_count_linux_reads_perf_db_catalog(self) -> None:
         run = perf_db_run()
         catalog = db_catalog()

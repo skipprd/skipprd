@@ -291,7 +291,7 @@ jobs:
     name: bottlenecks vs new code
     needs:
       - linux_profile
-    if: needs.linux_profile.result == 'success'
+    if: ${{ !cancelled() && needs.linux_profile.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

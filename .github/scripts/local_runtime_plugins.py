@@ -107,6 +107,24 @@ def ensure_executable(path: Path) -> None:
     path.chmod(mode | 0o111)
 
 
+def stage_plugin_binary(source: Path, dest: Path) -> None:
+    if not source.is_file():
+        raise LocalRuntimePluginError(f"expected plugin binary at {source}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        source_stat = source.stat()
+        dest_stat = dest.stat()
+        if dest_stat.st_ino == source_stat.st_ino and dest_stat.st_dev == source_stat.st_dev:
+            ensure_executable(dest)
+            return
+        dest.unlink()
+    try:
+        os.link(source, dest)
+    except OSError:
+        shutil.copy2(source, dest)
+    ensure_executable(dest)
+
+
 def strip_inline_comment(line: str) -> str:
     in_single = False
     in_double = False
@@ -253,6 +271,7 @@ def build_local_runtime_plugins(
     output_dir: Path,
     release: bool,
     skip_cargo_build: bool = False,
+    copy_from: Path | None = None,
 ) -> Path:
     if not skip_cargo_build:
         ensure_tool("cargo")
@@ -282,6 +301,11 @@ def build_local_runtime_plugins(
         target_dir = REPO_ROOT / target_dir
     profile = "release" if release else "debug"
     target_triple = current_rust_target_triple()
+    if copy_from is not None:
+        dest_dir = target_dir / profile
+        for entry in entries:
+            name = target_binary_name(entry["binary_name"], target_triple)
+            stage_plugin_binary(copy_from / name, dest_dir / name)
     protocol_version = workspace_runtime_protocol_version(REPO_ROOT)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -337,7 +361,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only write manifests for binaries already built in CARGO_TARGET_DIR",
     )
+    parser.add_argument(
+        "--copy-from",
+        default="",
+        help="Stage only the pipeline's plugin binaries from this directory into CARGO_TARGET_DIR",
+    )
     args = parser.parse_args(argv)
+    copy_from = Path(args.copy_from) if args.copy_from.strip() else None
 
     try:
         manifest_dir = build_local_runtime_plugins(
@@ -346,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=Path(args.output_dir),
             release=args.release,
             skip_cargo_build=args.skip_cargo_build,
+            copy_from=copy_from,
         )
     except (LocalRuntimePluginError, subprocess.CalledProcessError) as err:
         print(f"local runtime plugin setup failed: {err}", file=sys.stderr)

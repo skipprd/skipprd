@@ -411,6 +411,96 @@ data_sources:
             self.assertNotIn("sha256", artifact)
             self.assertNotIn("url", artifact)
 
+    def test_copy_from_hardlinks_only_selected_plugin_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = root / "skippr.yml"
+            output_dir = root / "manifests"
+            target_dir = root / "target"
+            copy_from = root / "runtime-plugin-binaries"
+            copy_from.mkdir()
+            selected = copy_from / "skippr-plugin-data-source-mssql"
+            extra = copy_from / "skippr-plugin-data-source-postgres"
+            selected.write_bytes(b"mssql-plugin")
+            extra.write_bytes(b"postgres-plugin")
+            config.write_text(
+                """pipelines:
+  p1:
+    data_source: data_sources.mssql
+data_sources:
+  mssql:
+    Mssql: {}
+""",
+                encoding="utf-8",
+            )
+            fake_catalog = [
+                {
+                    "package_name": "skippr-plugin-data-source-mssql",
+                    "package_version": "0.1.2",
+                    "sdk_build_fingerprint": "sdk123",
+                    "checksum": "mssql-checksum",
+                    "binary_name": "skippr-plugin-data-source-mssql",
+                    "manifest_filename": "mssql-source.json",
+                    "manifest_kind": "DataSource",
+                    "manifest_name": "mssql-runtime-source",
+                    "plugin_name": "Mssql",
+                    "supports_schema": False,
+                    "config_schema_version": 1,
+                    "args": [],
+                    "source_capability": {"name": "mssql"},
+                    "sink_capability": None,
+                },
+                {
+                    "package_name": "skippr-plugin-data-source-postgres",
+                    "package_version": "0.1.2",
+                    "sdk_build_fingerprint": "sdk123",
+                    "checksum": "postgres-checksum",
+                    "binary_name": "skippr-plugin-data-source-postgres",
+                    "manifest_filename": "postgres-source.json",
+                    "manifest_kind": "DataSource",
+                    "manifest_name": "postgres-runtime-source",
+                    "plugin_name": "Postgres",
+                    "supports_schema": False,
+                    "config_schema_version": 1,
+                    "args": [],
+                    "source_capability": {"name": "postgres"},
+                    "sink_capability": None,
+                },
+            ]
+            with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target_dir)}, clear=False):
+                with mock.patch.object(
+                    local_runtime_plugins,
+                    "load_workspace_plugin_catalog",
+                    return_value=fake_catalog,
+                ), mock.patch.object(
+                    local_runtime_plugins,
+                    "workspace_runtime_protocol_version",
+                    return_value=1,
+                ), mock.patch.object(
+                    local_runtime_plugins,
+                    "current_rust_target_triple",
+                    return_value="x86_64-unknown-linux-gnu",
+                ), mock.patch.object(
+                    local_runtime_plugins,
+                    "run_command",
+                ) as run_command:
+                    local_runtime_plugins.build_local_runtime_plugins(
+                        config_path=config,
+                        pipeline="p1",
+                        output_dir=output_dir,
+                        release=True,
+                        skip_cargo_build=True,
+                        copy_from=copy_from,
+                    )
+            run_command.assert_not_called()
+            dest = target_dir / "release" / "skippr-plugin-data-source-mssql"
+            self.assertTrue(dest.is_file())
+            self.assertEqual(dest.stat().st_ino, selected.stat().st_ino)
+            self.assertTrue(os.access(dest, os.X_OK))
+            self.assertFalse((target_dir / "release" / "skippr-plugin-data-source-postgres").exists())
+            self.assertTrue((output_dir / "mssql-source.json").exists())
+            self.assertFalse((output_dir / "postgres-source.json").exists())
+
     def test_host_triple_without_rustc_uses_uname(self) -> None:
         host = type("Uname", (), {"sysname": "Linux", "machine": "x86_64"})()
         with mock.patch.dict(os.environ, {"SKIPPR_TARGET_TRIPLE": ""}, clear=False):
