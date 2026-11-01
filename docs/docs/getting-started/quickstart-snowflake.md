@@ -143,7 +143,7 @@ What the settings mean:
 - `private_key_path: ${SNOWFLAKE_PRIVATE_KEY_PATH}` is read from the environment when the pipeline starts, so the path never has to live in the file. In the CLI, single quotes stop your shell from expanding it early. You can also put the variable in a `.env` file next to `skippr.yml`.
 - With `private_key_path` set, Skipprd uses key-pair sign-in even if `password` is also set.
 - Skipprd stages files in your user stage (`@~`) unless you set `stage` to a named stage.
-- `LocalStorage()` (`skipprd_el_storage_mode: local`) keeps Skipprd's own state, such as the discovered schema and how far it has read, in `./data`. That is fine for a trial; for production, see [State store](/configuration/skippr-store).
+- `LocalStorage()` (`skipprd_el_storage_mode: local`) keeps Skipprd's own state, such as the discovered schema and how far it has read, in `./data`. That is fine for a trial; for production, see [Skippr Store](/configuration/skippr-store).
 
 After you save the file, check it. Doctor validates `skippr.yml`; it does not connect, so it does not replace `discover`.
 

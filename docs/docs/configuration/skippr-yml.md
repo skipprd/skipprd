@@ -136,7 +136,7 @@ YAML, TOML, and JSON files share the same structure. If none is found, Skipprd s
 
 | Section | Required | What it holds |
 |---|---|---|
-| `skippr` | No | Engine settings: workspace, where state lives, and the state store. Keys are listed below. |
+| `skippr` | No | Engine settings: workspace, where state lives, and Skippr Store. Keys are listed below. |
 | `pipelines` | Yes, to run anything | One entry per pipeline. Each names its source and optional destinations. See [Pipelines](/configuration/pipeline). |
 | `data_sources` | Yes | Source connectors, keyed by a name you choose. See [Sources](/configuration/input). |
 | `data_sinks` | No | Destination connectors that receive synced records. See [Destinations](/configuration/output). |
@@ -252,5 +252,7 @@ Each check prints `[ok]` or `[FAIL]`. Add `--output json` for machine-readable r
 
 - [Configuration overview](/configuration/overview) — how `skippr.yml`, environment variables, and flags combine.
 - [Pipelines](/configuration/pipeline) — every pipeline key.
+- [Transforms](/configuration/transforms) — ops, partitions, flattening, and aggregates.
+- [Skippr Store](/configuration/skippr-store) — catalog, journal, schema, and stream state.
 - [Sources](/configuration/input) and [Destinations](/configuration/output) — wire connectors into a pipeline.
 - [skipprd connect](/cli/connect) — write `skippr.yml` from the command line.

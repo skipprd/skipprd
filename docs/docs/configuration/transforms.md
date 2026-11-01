@@ -1,11 +1,11 @@
 ---
 title: Transforms
-description: Split records into tables, partition output by field or time, flatten nested objects, and sort rows for faster queries.
+description: Split records into tables, partition output, flatten nested objects, run in-memory Arrow ops, and maintain keyed aggregates in Skippr Store.
 ---
 
 # Transforms
 
-A transform shapes records between the source and the destination. Use one to split a mixed stream into separate tables, partition files by a field or by time, flatten nested JSON into columns, or sort rows so queries scan less data.
+A transform shapes records between the source and the destination. Use one to split a mixed stream into separate tables, partition files by a field or by time, flatten nested JSON into columns, sort rows so queries scan less data, filter or derive columns in memory, or keep keyed running aggregates in Skippr Store.
 
 Transforms are set per pipeline under `transform:`. Every key is optional.
 
@@ -154,7 +154,7 @@ transform:
 
 ## Running aggregates
 
-`aggregates` maintains keyed running totals from committed WAL records in the Skippr Store `stream_state` family. CDC inserts add, updates apply the delta from the previous row for that key, and deletes subtract. This is independent of source offsets: compaction does not drop a WAL segment until the processor has passed it.
+`aggregates` are Skipprd's materialised views: keyed running totals over committed WAL, stored in the Skippr Store `stream_state` family. CDC inserts add, updates apply the delta from the previous row for that key, and deletes subtract. This is independent of source offsets: compaction does not drop a WAL segment until the processor has passed it.
 
 ```yaml
 transform:
@@ -166,10 +166,13 @@ transform:
         invoice_count: { count: "*" }
 ```
 
-Changing an aggregate's id, keys, or measures rebuilds that aggregate by replaying the WAL. `type: copy` cannot set `aggregates`. Derived state is not published to sinks in this release.
+Changing an aggregate's id, keys, or measures rebuilds that aggregate by replaying the WAL. `type: copy` cannot set `aggregates`. Measures stay in Skippr Store. They are not published as extra sink tables, and they are not extra names in `skipprd query`. You still `SELECT` the pipeline namespace (Iceberg ∪ WAL after `ops`). See [Materialised views](/concepts/materialised-views).
 
 ## Next steps
 
-- [Destinations](/configuration/output) — where transformed records land.
-- [Schema discovery and evolution](/concepts/schema) — how new fields and tables are detected.
-- [Pipelines](/configuration/pipeline) — the other pipeline keys.
+- [Materialised views](/concepts/materialised-views)
+- [Stream SQL](/concepts/stream-sql)
+- [Skippr Store](/configuration/skippr-store)
+- [Destinations](/configuration/output)
+- [Schema discovery and evolution](/concepts/schema)
+- [Pipelines](/configuration/pipeline)

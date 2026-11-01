@@ -111,6 +111,7 @@ Run [`skipprd sql-help`](/cli/sql-help) or `skipprd query --sql "SHOW DOCS"` for
 
 - [`skipprd migrate`](/cli/migrate)
 - [Python](/python)
+- [Skippr Store](/configuration/skippr-store)
 - [Schema discovery and evolution](/concepts/schema)
 - [SkipprLake](/connectors/outputs/skipprlake)
 - [skipprd query](/cli/query)

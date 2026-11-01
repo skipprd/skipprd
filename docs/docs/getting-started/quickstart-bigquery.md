@@ -126,7 +126,7 @@ What the settings mean:
 
 - `credentials_path` is required. Skipprd reads the key only from this setting; it does not pick up `GOOGLE_APPLICATION_CREDENTIALS` on its own. Writing `${GOOGLE_APPLICATION_CREDENTIALS}` reads the path from the environment when the pipeline starts. In the CLI, single quotes stop your shell from expanding it early.
 - `location` is where Skipprd creates the dataset if it does not exist. If the dataset already exists, use its location.
-- `LocalStorage()` (`skipprd_el_storage_mode: local`) keeps Skipprd's own state, such as the discovered schema and how far it has read, in `./data`. That is fine for a trial; for production, see [State store](/configuration/skippr-store).
+- `LocalStorage()` (`skipprd_el_storage_mode: local`) keeps Skipprd's own state, such as the discovered schema and how far it has read, in `./data`. That is fine for a trial; for production, see [Skippr Store](/configuration/skippr-store).
 
 After you save the file, check it. Doctor validates `skippr.yml`; it does not connect, so it does not replace `discover`.
 

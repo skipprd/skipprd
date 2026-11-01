@@ -125,7 +125,7 @@ What the settings mean:
 - `password` must be an environment reference. In Python, `EnvRef("POSTGRES_PASSWORD")` writes `password: ${POSTGRES_PASSWORD}`; in the CLI, single quotes stop your shell from expanding it. Skipprd reads the value when the pipeline starts, so the password never lands in `skippr.yml`. You can also put it in a `.env` file next to `skippr.yml`.
 - `sslmode: disable` suits the local Docker container, which has no TLS. For a remote server, leave `sslmode` out: the default, `prefer`, uses TLS when the server offers it.
 - `host`, `port`, and `schema` default to `localhost`, `5432`, and `public`. They are spelled out here so you can see what to change for your own server.
-- `LocalStorage()` (`skipprd_el_storage_mode: local`) keeps Skipprd's own state, such as the discovered schema and how far it has read, in `./data`. That is fine for a trial; for production, see [State store](/configuration/skippr-store).
+- `LocalStorage()` (`skipprd_el_storage_mode: local`) keeps Skipprd's own state, such as the discovered schema and how far it has read, in `./data`. That is fine for a trial; for production, see [Skippr Store](/configuration/skippr-store).
 
 After you save the file, check it. Doctor validates `skippr.yml`; it does not connect, so it does not replace `discover`.
 

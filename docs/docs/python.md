@@ -65,6 +65,8 @@ Migration(
 s.migrate()
 ```
 
+In-memory `transform.ops` and keyed `transform.aggregates` go on the pipeline. Aggregates land in Skippr Store `stream_state`. See [Transforms](/configuration/transforms) and [Materialised views](/concepts/materialised-views).
+
 When you create a `Session`, it takes a snapshot of its pipeline's config and resolves every `${NAME}` reference from the environment, including a `.env` file next to `skippr.yml`. A missing variable raises `ValueError` there, before any data moves, not halfway through a sync.
 
 ## Build a config
@@ -340,6 +342,9 @@ Leave out `data_sink` and the pipeline still syncs. The WAL is the dataset, and 
 - [Quickstart: PostgreSQL](/getting-started/quickstart-postgres) or [Snowflake](/getting-started/quickstart-snowflake) — land data in a warehouse from Python.
 - [`skippr.yml` reference](/configuration/skippr-yml) — every engine and pipeline setting.
 - [Data sources](/connectors/) — the connector classes and their options.
-- [Transforms](/configuration/transforms) — namespaces, partitions, and flattening.
+- [Transforms](/configuration/transforms) — namespaces, partitions, flattening, ops, and aggregates.
+- [Materialised views](/concepts/materialised-views) — keyed totals in Skippr Store.
+- [Stream SQL](/concepts/stream-sql) — SELECT over Iceberg ∪ WAL and STREAM.
 - [How Skipprd works](/concepts/how-it-works) — what happens between source and destination.
 - [`skipprd migrate`](/cli/migrate) — author `migrations/*.sql` and apply ALTER without stopping the pipeline.
+- [Skippr Store](/configuration/skippr-store) — catalog, journal, schema, and stream state.

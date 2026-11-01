@@ -59,6 +59,6 @@ Prefer the pipeline field in `skippr.yml` so each pipeline can differ.
 ## Next steps
 
 - [WAL and buffering](/configuration/buffering)
-- [State store](/configuration/skippr-store)
+- [Skippr Store](/configuration/skippr-store)
 - [Logging](/operations/logging)
 - [skippr.yml](/configuration/skippr-yml)

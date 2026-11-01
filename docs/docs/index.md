@@ -10,7 +10,7 @@ Skipprd is an open Streamhouse engine that captures data continuously from your 
 You describe a pipeline once in `skippr.yml`: where data comes from, and where it should land. Skipprd does the rest:
 
 - **Discovers the schema and evolves in-stream.** It samples the source and infers field names and types, including nested structures. When upstream schemas drift, destination tables follow in-stream without breaking existing queries.
-- **Zero vendor lock-in.** Tables land as open Apache Iceberg on Parquet in your bucket. Query realtime state in Skippr, or query historical tables through Athena, Snowflake, DuckDB, or notebooks.
+- **Zero vendor lock-in.** Tables land as open Apache Iceberg on Parquet in your bucket. Query realtime state in Skippr (`SELECT` over Iceberg ∪ WAL, `STREAM` on the tail), or query historical tables through Athena, Snowflake, DuckDB, or notebooks. See [Stream SQL](/concepts/stream-sql).
 - **Does not lose committed data.** Skipprd commits each batch before landing. Whether a retry can duplicate a row depends on the destination — see [Exactly-once delivery](/concepts/exactly-once).
 - **Replicates database changes.** [Change data capture](/cdc/) keeps destination tables at the source's current state, including updates and deletes.
 
@@ -132,7 +132,7 @@ skipprd query --plain --sql "SELECT count(*) FROM bikehire"
 
 - **Land data in a warehouse:** [S3 to Athena](/getting-started/quickstart), [Snowflake](/getting-started/quickstart-snowflake), [PostgreSQL](/getting-started/quickstart-postgres), or [BigQuery](/getting-started/quickstart-bigquery).
 - **Use Skipprd from Python:** [Python](/python).
-- **Understand what happens to your data:** [How Skipprd works](/concepts/how-it-works) and [Schema discovery and evolution](/concepts/schema).
+- **Understand what happens to your data:** [How Skipprd works](/concepts/how-it-works), [Stream SQL](/concepts/stream-sql), [Materialised views](/concepts/materialised-views), and [Schema discovery and evolution](/concepts/schema).
 - **Connect your own systems:** browse [data sources](/connectors/) and the [`skippr.yml` reference](/configuration/skippr-yml).
-- **Run it in production:** [WAL and buffering](/configuration/buffering), [State store](/configuration/skippr-store), [`skipprd migrate`](/cli/migrate), [ALTER operations](/operations/alter), [Logging](/operations/logging), and [Troubleshooting](/operations/troubleshooting).
+- **Run it in production:** [WAL and buffering](/configuration/buffering), [Skippr Store](/configuration/skippr-store), [Transforms](/configuration/transforms), [`skipprd migrate`](/cli/migrate), [ALTER operations](/operations/alter), [Logging](/operations/logging), and [Troubleshooting](/operations/troubleshooting).
 - **Look up a command:** [CLI reference](/cli/overview).

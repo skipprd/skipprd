@@ -40,16 +40,20 @@ Iceberg destinations keep their own tables. They expire old snapshots (they keep
 
 ## Query
 
-Query live state in the Streamhouse:
+Query live state in the Streamhouse. Tables are `<pipeline>.<namespace>`:
 
 ```bash
-skipprd query --pipeline bikehire "SELECT * FROM rides LIMIT 20"
+skipprd query --plain --sql "SELECT * FROM bikehire.rides LIMIT 20"
+skipprd query --sql "STREAM * FROM bikehire.rides LIMIT 100"
 ```
 
-For Iceberg destinations, this returns the committed lake table plus any live rows still in-flight. To follow new events as they land in real time, add `--watch`. For the query command itself, see [skipprd query](/cli/query).
+For Iceberg destinations, `SELECT` returns the committed lake table plus live WAL slices Skippr Store pinned for that statement. `STREAM` follows the tail. `--watch` re-runs a SELECT in the interactive view. See [Stream SQL](/concepts/stream-sql) and [skipprd query](/cli/query).
 
 ## Next steps
 
+- [Stream SQL](/concepts/stream-sql)
+- [Materialised views](/concepts/materialised-views)
+- [Skippr Store](/configuration/skippr-store)
 - [SkipprLake](/connectors/outputs/skipprlake)
 - [Athena Iceberg](/connectors/outputs/athenaiceberg)
 - [DuckDB](/connectors/outputs/duckdb)

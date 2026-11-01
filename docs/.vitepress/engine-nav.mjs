@@ -16,6 +16,8 @@ export const engineSections = [
     text: 'Concepts',
     items: [
       { text: 'How Skipprd works', link: '/concepts/how-it-works' },
+      { text: 'Stream SQL', link: '/concepts/stream-sql' },
+      { text: 'Materialised views', link: '/concepts/materialised-views' },
       { text: 'Schema discovery and evolution', link: '/concepts/schema' },
       { text: 'Exactly-once delivery', link: '/concepts/exactly-once' },
       { text: 'Deadletters', link: '/concepts/deadletters' },
@@ -41,7 +43,7 @@ export const engineSections = [
     text: 'Run in production',
     items: [
       { text: 'WAL and buffering', link: '/configuration/buffering' },
-      { text: 'State store', link: '/configuration/skippr-store' },
+      { text: 'Skippr Store', link: '/configuration/skippr-store' },
       { text: 'Advanced settings', link: '/configuration/advanced' },
       { text: 'ALTER operations', link: '/operations/alter' },
       { text: 'Logging', link: '/operations/logging' },

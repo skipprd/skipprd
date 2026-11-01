@@ -77,13 +77,15 @@ This works only if `skippr.yml` does not set `skippr.store` or `skippr.wal_s3_bu
 | Define a pipeline, its schedule, and its buffers | [Pipelines](/configuration/pipeline) |
 | Pick and wire a source | [Sources](/configuration/input) |
 | Pick and wire a destination, schema sink, or deadletter sink | [Destinations](/configuration/output) |
-| Split, partition, flatten, or sort records | [Transforms](/configuration/transforms) |
+| Split, partition, flatten, sort, filter, or derive records | [Transforms](/configuration/transforms) |
+| Keyed running aggregates in Skippr Store | [Materialised views](/concepts/materialised-views) |
 | Choose disk or S3 WAL | [WAL and buffering](/configuration/buffering) |
-| Keep resume positions and catalog in Skippr Store | [Skippr Store](/configuration/skippr-store) |
+| Keep catalog, journal, schema, and stream state | [Skippr Store](/configuration/skippr-store) |
 | Look up every other engine setting | [Advanced settings](/configuration/advanced) |
 
 ## Next steps
 
 - [skippr.yml reference](/configuration/skippr-yml)
+- [Stream SQL](/concepts/stream-sql)
 - [How Skipprd works](/concepts/how-it-works)
 - [CLI overview](/cli/overview)

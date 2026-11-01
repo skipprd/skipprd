@@ -138,7 +138,7 @@ What the settings mean:
 - `athena_results_s3_bucket` is a bucket **name**, not an `s3://` URI.
 - `glue_database_name` on the Glue schema sink names the database the table is registered in. The Athena destination takes it from the linked schema sink, so you set it once.
 - With the CLI, add the destination before the schema sink: `connect schema-sink` attaches to the pipeline's existing destination.
-- `LocalStorage()` (`skipprd_el_storage_mode: local`) keeps Skipprd's own state, such as the discovered schema and how far it has read, in `./data`. That is fine for a trial; for production, see [State store](/configuration/skippr-store).
+- `LocalStorage()` (`skipprd_el_storage_mode: local`) keeps Skipprd's own state, such as the discovered schema and how far it has read, in `./data`. That is fine for a trial; for production, see [Skippr Store](/configuration/skippr-store).
 
 After you save the file, check it. Doctor validates `skippr.yml`; it does not connect, so it does not replace `discover`.
 

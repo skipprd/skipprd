@@ -10,7 +10,7 @@ description: Run SQL against your pipelines from the terminal or a script, and m
 - **No destination, or a non-Iceberg destination** (Athena, Snowflake, Postgres, and others): the live data in the WAL. For the full history in a warehouse, query the warehouse itself.
 - **Iceberg destination** (SkipprLake, AthenaIceberg, DuckDB): the Iceberg table combined with live data still in the WAL, so you see rows the moment they are ingested.
 
-Use `query` to check a sync, explore data, script checks in CI, and run Skipprd's management statements (`ENABLE PIPELINE`, `SCHEMA DUMP`, and others). Without `--sql` it opens an interactive prompt.
+Use `query` to check a sync, explore data, script checks in CI, follow the WAL with `STREAM`, and run Skipprd's management statements (`ENABLE PIPELINE`, `SCHEMA DUMP`, `ALTER TABLE`, and others). Without `--sql` it opens an interactive prompt. How SELECT, STREAM, and Skippr Store pins fit together: [Stream SQL](/concepts/stream-sql).
 
 ## Usage
 
@@ -25,7 +25,7 @@ print(table.to_pylist())
 ```
 
 ```bash [CLI]
-skipprd query --sql "<SQL>" [--plain] [--watch <seconds>] [--config <path>] [--log [LEVEL]]
+skipprd query --sql "<SQL>" [--plain] [--watch <seconds>] [--warmup] [--repeat <N>] [--config <path>] [--log [LEVEL]]
 skipprd query                      # interactive prompt
 ```
 
@@ -39,7 +39,9 @@ skipprd query                      # interactive prompt
 |---|---|---|
 | `-s`, `--sql <SQL>` | None | Statement to run. Without it, `query` opens an interactive `sql>` prompt; type `:q`, `:quit`, or `exit` to leave. |
 | `--plain` | Off | Print one JSON document to stdout instead of the interactive table view: `{"header": [...], "rows": [[...]]}`. All values are strings. Use this in scripts. |
-| `--watch <SECONDS>` | Off | Re-run a `SELECT` every N seconds in the interactive table view. Ignored with `--plain`. |
+| `--watch <SECONDS>` | Off | Re-run a `SELECT` every N seconds in the interactive table view. Ignored with `--plain`. Not `STREAM`. |
+| `--warmup` | Off | Open catalogs and run the statement once, then time the second collect. |
+| `--repeat <N>` | `1` | Extra untimed collects after the measured one. For profiling. |
 | `--config <PATH>` | `./skippr.yml` | Config file to read. |
 | `--log [LEVEL]` | Off | Print logs to stderr. |
 | `--wal-storage <MODE>` | `disk` | WAL backend: `disk` or `s3`. Same as `WAL_STORAGE`. |
@@ -81,10 +83,12 @@ skipprd query --sql "SELECT count(*) FROM bikehire.rides" --watch 5
 ### Stream new records from the WAL
 
 ```bash
-skipprd query --sql "STREAM * FROM bikehire LIMIT 100"
+skipprd query --sql "STREAM * FROM bikehire.rides LIMIT 100"
 ```
 
-`STREAM` reads data as it is ingested and keeps returning new results.
+`STREAM` reads the WAL as ingest writes it and keeps returning new results. `SELECT` is a snapshot: Iceberg plus the WAL slices Skippr Store pinned for that statement. A second query process can run while `sync` holds the writer. It pins a flushed Skippr Store snapshot and does not take `writer.lock`. See [Stream SQL](/concepts/stream-sql) and [Skippr Store](/configuration/skippr-store).
+
+`skipprd serve` Flight SQL reads committed Iceberg only. Live WAL stays on `skipprd query`.
 
 ### Inspect a pipeline
 
@@ -135,7 +139,10 @@ In scripts, use `--plain`: a failing `SELECT` then prints `query failed: <reason
 
 ## Next steps
 
+- [Stream SQL](/concepts/stream-sql)
 - [skipprd sql-help](/cli/sql-help)
+- [skipprd serve](/cli/serve)
 - [skipprd df](/cli/df)
+- [skipprd migrate](/cli/migrate)
 - [Streamhouse](/concepts/datalake)
 - [Deadletters](/concepts/deadletters)

@@ -77,6 +77,13 @@ test('internal wording is rejected; leftover `sled` and live `fjall` as config v
   const base = '---\ntitle: t\ndescription: d\n---\n\n# Store\n\n## Next steps\n\n'
   assert.deepEqual(checkPage('configuration/skippr-store.md', `${base}Set \`store.type\` to \`fjall\`.\n`), [])
   assert.deepEqual(checkPage('configuration/skippr-store.md', `${base}Leftover \`store.type: sled\` maps to fjall.\n`), [])
+  assert.deepEqual(
+    checkPage(
+      'concepts/materialised-views.md',
+      `${base}A Skipprd materialised view is a keyed running aggregate in Skippr Store.\n`,
+    ),
+    [],
+  )
   for (const text of [
     'The host opens sled on startup.',
     'Plugins talk over TCP.',

@@ -5,15 +5,19 @@ description: Follow a pipeline from discover to query, learn what the write-ahea
 
 # How Skipprd works
 
-You describe a **pipeline** in `skippr.yml`: one source, and optionally one destination. Then you discover the shape of the data, review the schema, sync the rows, and query them. After data has landed, [`skipprd migrate`](/cli/migrate) applies `ALTER TABLE` without stopping the pipeline. Every batch is written to Skipprd's write-ahead log (WAL) first. A crash retries from the WAL. Whether a retry can duplicate a row depends on the destination — see [Exactly-once delivery](/concepts/exactly-once).
+You describe a **pipeline** in `skippr.yml`: one source, and optionally one destination. Then you discover the shape of the data, review the schema, sync the rows, and query them. Optional `transform.ops` reshape the batch before WAL commit. Optional `transform.aggregates` materialise keyed totals in Skippr Store. After data has landed, [`skipprd migrate`](/cli/migrate) applies `ALTER TABLE` without stopping the pipeline. Every batch is written to Skipprd's write-ahead log (WAL) first. A crash retries from the WAL. Whether a retry can duplicate a row depends on the destination. See [Exactly-once delivery](/concepts/exactly-once).
 
 ```text
                 ┌──────────────────────── skipprd ────────────────────────┐
-  data source ──▶  read batch ──▶ commit to WAL ──▶ write to destination   ──▶ destination
-                │                      │                     │            │
-                │                      ▼                     ▼            │
-                │              resume position        deadletter sink     │
-                │              (state store)          (optional)          │
+  data source ──▶  ops ──▶ commit WAL ──▶ destination (Iceberg / warehouse)
+                │           │                    │
+                │           ▼                    ▼
+                │     Skippr Store          deadletter sink
+                │     catalog, offsets,     (optional)
+                │     schema, journal,
+                │     stream_state
+                │           │
+                │           └── skipprd query pins Iceberg ∪ WAL
                 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -53,7 +57,7 @@ For each pass, Skipprd:
 
 ### 4. Query
 
-Query the tables in your warehouse with its own SQL client. For Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB), you can also query from the machine running Skipprd with [`skipprd query`](/cli/query). That view includes rows still in the WAL that have not landed yet. See [Streamhouse](/concepts/datalake).
+Query the tables in your warehouse with its own SQL client. For Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB), [`skipprd query`](/cli/query) on the machine that holds `DATA_DIR` runs SQL against committed Iceberg **union** live WAL. `STREAM` follows the tail. Skippr Store pins which slices that statement may see, including from a second reader process while ingest holds the writer. See [Stream SQL](/concepts/stream-sql) and [Streamhouse](/concepts/datalake).
 
 ### 5. Migrate
 
@@ -61,7 +65,7 @@ Query the tables in your warehouse with its own SQL client. For Iceberg destinat
 skipprd migrate --pipeline bikehire
 ```
 
-When a table already has data and you need to rename, merge, drop, or widen a column, put SQL in `migrations/` next to `skippr.yml` (or run `skipprd query --sql "ALTER TABLE …"`). Skipprd applies the change to its schema, the live WAL, and the destination. You do not stop the pipeline. `DISABLE PIPELINE` still freezes ingest; it is not required to alter. See [ALTER operations](/operations/alter).
+When a table already has data and you need to rename, merge, drop, or widen a column, put SQL in `migrations/` next to `skippr.yml` (or run `skipprd query --sql "ALTER TABLE …"`). Skipprd applies the change to its schema, the live WAL, and the destination, and records the file in the Skippr Store journal so a retry is idempotent. You do not stop the pipeline. `DISABLE PIPELINE` still freezes ingest; it is not required to alter. See [ALTER operations](/operations/alter) and [`skipprd migrate`](/cli/migrate).
 
 ## What the WAL guarantees
 
@@ -93,13 +97,13 @@ Because nothing is reclaimed, watch disk use on long-running pipelines without a
 
 ## Where state lives
 
-Skipprd keeps four kinds of state. Know where each one lives before you run a pipeline in production.
+Skipprd keeps these kinds of state. Know where each one lives before you run a pipeline in production.
 
 | State | Default location | What to do |
 |---|---|---|
 | `skippr.yml` | Your project directory | Keep it in version control. Secrets stay in the environment as `${NAME}` references. |
-| WAL and resume positions | `DATA_DIR` (default `./data`), one subdirectory per pipeline | Put `DATA_DIR` on a persistent disk and reuse the same path on every run. |
-| Pipeline schema | Skippr Store under `DATA_DIR` | Keep `DATA_DIR`. Losing it means running discover again. |
+| WAL payloads | `DATA_DIR` (default `./data`) `.seg` files, or S3 when `WAL_STORAGE=s3` | Put `DATA_DIR` on a persistent disk. S3 WAL still needs that directory for Skippr Store. |
+| Skippr Store | `{DATA_DIR}/skippr-store` (fjall) | Catalog, offsets, shredded schema, DDL journal, materialised aggregates. One writer. See [Skippr Store](/configuration/skippr-store). |
 | Connector cache | `~/.skippr/runtime_plugins` | Nothing. Skipprd downloads a connector again if the cache is empty. |
 
 Set the data directory with the `DATA_DIR` environment variable or per pipeline with `data_dir` in `skippr.yml`.
@@ -138,5 +142,9 @@ data_sources:
 - [Install Skipprd](/getting-started/install) and run the [S3 to Athena quickstart](/getting-started/quickstart).
 - [Exactly-once delivery](/concepts/exactly-once): what each destination guarantees on retry.
 - [Schema discovery and evolution](/concepts/schema): how types are inferred and how changes land.
+- [Stream SQL](/concepts/stream-sql): SELECT, STREAM, and Skippr Store pins.
+- [Materialised views](/concepts/materialised-views): keyed aggregates in `stream_state`.
+- [Transforms](/configuration/transforms): ops, partitions, aggregates.
+- [Skippr Store](/configuration/skippr-store): the KV that backs catalog, journal, and stream state.
 - [WAL and buffering](/configuration/buffering): choose a WAL backend for production.
 - [skippr.yml](/configuration/skippr-yml): the full project file.

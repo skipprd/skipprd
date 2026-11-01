@@ -44,5 +44,6 @@ skipprd sql-help --output sql-reference.md --format md
 ## Next steps
 
 - [skipprd query](/cli/query)
+- [Stream SQL](/concepts/stream-sql)
 - [skipprd serve](/cli/serve)
 - [Streamhouse](/concepts/datalake)

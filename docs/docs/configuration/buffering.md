@@ -72,7 +72,7 @@ If the WAL is gone, Skipprd re-reads the source. Append-only destinations can th
 
 ## Next steps
 
-- [State store](/configuration/skippr-store)
+- [Skippr Store](/configuration/skippr-store)
 - [How Skipprd works](/concepts/how-it-works)
 - [Exactly-once delivery](/concepts/exactly-once)
 - [Advanced settings](/configuration/advanced)
