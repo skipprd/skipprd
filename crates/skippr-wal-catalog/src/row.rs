@@ -5,7 +5,10 @@ use skippr_lease::{LeaseEpoch, NodeId, SegmentId};
 use crate::error::CatalogError;
 use crate::key::CompactionId;
 
-pub const ROW_MAX_BYTES: usize = 350 * 1024;
+/// Encode ceiling for one catalog row. Not a DynamoDB 400 KiB leftover; fjall
+/// is the live store. 4 MiB covers COPY segment-index rows (staging hit 514 KiB)
+/// without letting a whole WAL segment into the KV.
+pub const ROW_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub const FORMAT_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]

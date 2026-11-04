@@ -30,7 +30,9 @@ pub use row::{
     LegacySliceRow, PayloadLocation, PutCond, SegmentIndexRow, SegmentRow, SeqRow, SliceBitmap,
     SliceDirEntry, FORMAT_VERSION, ROW_MAX_BYTES,
 };
-pub use sled_migrate::{lookup_miss_in_sled, migrate_sled_db, MigrateStatus, SLED_TREES};
+pub use sled_migrate::{
+    lookup_miss_in_sled, migrate_sled_db, migrate_sled_db_step, MigrateStatus, SLED_TREES,
+};
 pub use store::{query_all, reset_catalog, WalCatalogRead, WalCatalogStore};
 pub use txn::{CatalogTxn, TXN_MAX_OPS};
 
@@ -174,6 +176,19 @@ mod tests {
         kv_conformance::assert_skippr_store_conformance(&store, f);
     }
 
+    fn seed_offset_keys(sled_path: &std::path::Path, n: u32) {
+        let db = sled::open(sled_path).unwrap();
+        let tree = db.open_tree("offsets").unwrap();
+        for i in 0..n {
+            tree.insert(
+                format!("k{i:03}").into_bytes(),
+                format!("v{i}").into_bytes(),
+            )
+            .unwrap();
+        }
+        db.flush().unwrap();
+    }
+
     #[test]
     fn sled_migrate_copies_trees_and_archives() {
         let root = tempfile::tempdir().unwrap();
@@ -200,16 +215,12 @@ mod tests {
 
         let f = fence();
         let store = FjallSkipprStore::open(root.path().join("store"), f).unwrap();
-        loop {
-            match migrate_sled_db(&store, f, &sled_path, 1).unwrap() {
-                MigrateStatus::Complete { archived_to } => {
-                    assert!(archived_to.exists());
-                    assert!(!sled_path.exists());
-                    break;
-                }
-                MigrateStatus::InProgress { .. } => {}
-                MigrateStatus::NoSled => panic!("sled should exist"),
+        match migrate_sled_db(&store, f, &sled_path, 1).unwrap() {
+            MigrateStatus::Complete { archived_to } => {
+                assert!(archived_to.exists());
+                assert!(!sled_path.exists());
             }
+            other => panic!("happy path drains in one open, got {other:?}"),
         }
         assert_eq!(
             SkipprStoreRead::get(&store, &StoreFamily::Offsets.key(b"ns-p"))
@@ -229,10 +240,72 @@ mod tests {
             "leftover sled journal keys must not stay in offsets"
         );
         assert_eq!(
+            SkipprStoreRead::get(&store, &StoreFamily::Catalog.key(b"wal#seq"))
+                .unwrap()
+                .as_deref(),
+            Some(b"seq".as_slice())
+        );
+        assert_eq!(
             SkipprStoreRead::get(&store, &StoreFamily::StreamState.key(b"meta/p/id"))
                 .unwrap()
                 .as_deref(),
             Some(b"st".as_slice())
+        );
+    }
+
+    #[test]
+    fn sled_migrate_happy_path_ranges_from_cursor_not_full_scan() {
+        let root = tempfile::tempdir().unwrap();
+        let sled_path = root.path().join("db");
+        seed_offset_keys(&sled_path, 256);
+        let f = fence();
+        let store = FjallSkipprStore::open(root.path().join("store"), f).unwrap();
+        let _ = crate::sled_migrate::take_keys_visited();
+        match migrate_sled_db_step(&store, f, &sled_path, 1).unwrap() {
+            MigrateStatus::InProgress {
+                tree,
+                remaining_hint,
+            } => {
+                assert_eq!(tree, "offsets");
+                assert_eq!(remaining_hint, 64);
+            }
+            other => panic!("expected one batch, got {other:?}"),
+        }
+        let first = crate::sled_migrate::take_keys_visited();
+        assert_eq!(first, 64, "first batch visits only the first 64 keys");
+        match migrate_sled_db(&store, f, &sled_path, 1).unwrap() {
+            MigrateStatus::Complete { .. } => {}
+            other => panic!("drain should finish, got {other:?}"),
+        }
+        let rest = crate::sled_migrate::take_keys_visited();
+        assert_eq!(
+            rest, 192,
+            "resume must range after last_key (192 remaining), not rescan 256"
+        );
+        assert_eq!(
+            SkipprStoreRead::get(&store, &StoreFamily::Offsets.key(b"k255"))
+                .unwrap()
+                .as_deref(),
+            Some(b"v255".as_slice())
+        );
+    }
+
+    #[test]
+    fn sled_migrate_one_open_visits_each_key_once() {
+        let root = tempfile::tempdir().unwrap();
+        let sled_path = root.path().join("db");
+        seed_offset_keys(&sled_path, 256);
+        let f = fence();
+        let store = FjallSkipprStore::open(root.path().join("store"), f).unwrap();
+        let _ = crate::sled_migrate::take_keys_visited();
+        match migrate_sled_db(&store, f, &sled_path, 1).unwrap() {
+            MigrateStatus::Complete { .. } => {}
+            other => panic!("expected complete, got {other:?}"),
+        }
+        assert_eq!(
+            crate::sled_migrate::take_keys_visited(),
+            256,
+            "happy path must not rescan already-copied keys"
         );
     }
 
@@ -256,7 +329,7 @@ mod tests {
 
         let f = fence();
         let store = FjallSkipprStore::open(root.path().join("store"), f).unwrap();
-        match migrate_sled_db(&store, f, &sled_path, 1).unwrap() {
+        match migrate_sled_db_step(&store, f, &sled_path, 1).unwrap() {
             MigrateStatus::InProgress { tree, .. } => assert_eq!(tree, "offsets"),
             other => panic!("expected in-progress copy, got {other:?}"),
         }
@@ -322,20 +395,23 @@ mod tests {
         let store_path = root.path().join("store");
         {
             let store = FjallSkipprStore::open(&store_path, f).unwrap();
-            match migrate_sled_db(&store, f, &sled_path, 1).unwrap() {
+            match migrate_sled_db_step(&store, f, &sled_path, 1).unwrap() {
                 MigrateStatus::InProgress { .. } => {}
                 other => panic!("expected in-progress, got {other:?}"),
             }
             drop(store);
         }
         let store = FjallSkipprStore::open(&store_path, f).unwrap();
-        loop {
-            match migrate_sled_db(&store, f, &sled_path, 1).unwrap() {
-                MigrateStatus::Complete { .. } => break,
-                MigrateStatus::InProgress { .. } => {}
-                MigrateStatus::NoSled => panic!("sled should still exist until complete"),
-            }
+        let _ = crate::sled_migrate::take_keys_visited();
+        match migrate_sled_db(&store, f, &sled_path, 1).unwrap() {
+            MigrateStatus::Complete { .. } => {}
+            other => panic!("resume drain should complete, got {other:?}"),
         }
+        assert_eq!(
+            crate::sled_migrate::take_keys_visited(),
+            16,
+            "crash resume ranges after last_key (80-64), does not rescan"
+        );
         assert_eq!(
             SkipprStoreRead::get(&store, &StoreFamily::Offsets.key(b"k079"))
                 .unwrap()
@@ -354,6 +430,109 @@ mod tests {
         assert_eq!(
             migrate_sled_db(&store, f, &archived, 3).unwrap(),
             MigrateStatus::NoSled
+        );
+    }
+
+    #[test]
+    fn sled_migrate_missing_path_is_nosled() {
+        let root = tempfile::tempdir().unwrap();
+        let f = fence();
+        let store = FjallSkipprStore::open(root.path().join("store"), f).unwrap();
+        assert_eq!(
+            migrate_sled_db(&store, f, &root.path().join("db"), 1).unwrap(),
+            MigrateStatus::NoSled
+        );
+    }
+
+    #[test]
+    fn sled_migrate_skips_missing_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let sled_path = root.path().join("db");
+        let db = sled::open(&sled_path).unwrap();
+        db.open_tree("wal_catalog")
+            .unwrap()
+            .insert(b"wal#seq", b"seq")
+            .unwrap();
+        db.flush().unwrap();
+        drop(db);
+        let f = fence();
+        let store = FjallSkipprStore::open(root.path().join("store"), f).unwrap();
+        match migrate_sled_db(&store, f, &sled_path, 1).unwrap() {
+            MigrateStatus::Complete { .. } => {}
+            other => panic!("expected complete, got {other:?}"),
+        }
+        assert_eq!(
+            SkipprStoreRead::get(&store, &StoreFamily::Catalog.key(b"wal#seq"))
+                .unwrap()
+                .as_deref(),
+            Some(b"seq".as_slice())
+        );
+    }
+
+    #[test]
+    fn sled_migrate_corrupt_cursor_fail_closes() {
+        let root = tempfile::tempdir().unwrap();
+        let sled_path = root.path().join("db");
+        seed_offset_keys(&sled_path, 8);
+        let f = fence();
+        let store = FjallSkipprStore::open(root.path().join("store"), f).unwrap();
+        SkipprStore::commit(
+            &store,
+            &[KvOp::Put {
+                key: StoreFamily::StoreMeta.key(b"sled_migrate/cursor"),
+                value: b"not-a-cursor".to_vec(),
+            }],
+            f,
+        )
+        .unwrap();
+        let err = migrate_sled_db(&store, f, &sled_path, 1).unwrap_err();
+        match err {
+            CatalogError::Codec(_) | CatalogError::Io(_) => {}
+            other => panic!("corrupt cursor must fail closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sled_migrate_lost_cursor_starts_over_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let sled_path = root.path().join("db");
+        seed_offset_keys(&sled_path, 80);
+        let f = fence();
+        let store = FjallSkipprStore::open(root.path().join("store"), f).unwrap();
+        match migrate_sled_db_step(&store, f, &sled_path, 1).unwrap() {
+            MigrateStatus::InProgress { .. } => {}
+            other => panic!("expected in-progress, got {other:?}"),
+        }
+        SkipprStore::commit(
+            &store,
+            &[
+                KvOp::Put {
+                    key: StoreFamily::Offsets.key(b"live"),
+                    value: b"ingest".to_vec(),
+                },
+                KvOp::Delete {
+                    key: StoreFamily::StoreMeta.key(b"sled_migrate/cursor"),
+                },
+            ],
+            f,
+        )
+        .unwrap();
+        match migrate_sled_db(&store, f, &sled_path, 1).unwrap() {
+            MigrateStatus::Complete { .. } => {}
+            other => panic!("expected complete, got {other:?}"),
+        }
+        assert_eq!(
+            SkipprStoreRead::get(&store, &StoreFamily::Offsets.key(b"k079"))
+                .unwrap()
+                .as_deref(),
+            Some(b"v79".as_slice())
+        );
+        assert_eq!(
+            SkipprStoreRead::get(&store, &StoreFamily::Offsets.key(b"live"))
+                .unwrap()
+                .as_deref(),
+            Some(b"ingest".as_slice()),
+            "live ingest keys not in sled must survive a lost-cursor rescan"
         );
     }
 }

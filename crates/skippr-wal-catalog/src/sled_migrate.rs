@@ -1,5 +1,12 @@
 //! Read-only copy of leftover `{DATA_DIR}/db` sled trees into fjall.
+//!
+//! Happy path: open sled once, range from the persist cursor, copy until the
+//! last tree, archive. Crash recovery: a valid cursor resumes with `range`
+//! after `last_key`. A missing cursor starts at the first key; puts are
+//! idempotent so already-copied keys are safe to see again. A checksum
+//! mismatch fail-closes.
 
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -13,6 +20,12 @@ const FORMAT_KEY: &[u8] = b"format_version";
 const COPY_BATCH: usize = 64;
 
 pub const SLED_TREES: [&str; 3] = ["offsets", "wal_catalog", "stream_state"];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Drain {
+    OneBatch,
+    UntilComplete,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MigrateStatus {
@@ -69,11 +82,34 @@ fn family_for_sled_key(tree: &str, key: &[u8]) -> StoreFamily {
     }
 }
 
+/// Copy leftover sled into fjall from the persist cursor through the last tree.
+/// Keeps sled open. Logs every [`COPY_BATCH`] keys.
 pub fn migrate_sled_db(
     store: &dyn SkipprStore,
     fence: CatalogFence,
     sled_path: &Path,
     seq: u64,
+) -> Result<MigrateStatus, CatalogError> {
+    migrate_inner(store, fence, sled_path, seq, Drain::UntilComplete)
+}
+
+/// One [`COPY_BATCH`] of keys. Tests and DST inject crash / ingest-during-copy
+/// between steps. Production [`migrate_sled_db`] drains in one open.
+pub fn migrate_sled_db_step(
+    store: &dyn SkipprStore,
+    fence: CatalogFence,
+    sled_path: &Path,
+    seq: u64,
+) -> Result<MigrateStatus, CatalogError> {
+    migrate_inner(store, fence, sled_path, seq, Drain::OneBatch)
+}
+
+fn migrate_inner(
+    store: &dyn SkipprStore,
+    fence: CatalogFence,
+    sled_path: &Path,
+    seq: u64,
+    drain: Drain,
 ) -> Result<MigrateStatus, CatalogError> {
     ensure_format(store, fence)?;
     if !sled_path.exists() {
@@ -111,11 +147,10 @@ pub fn migrate_sled_db(
         let mut ops = Vec::new();
         let mut copied = 0usize;
         let mut last = cursor.last_key.clone();
-        for item in tree.iter() {
+        for item in range_after(&tree, &cursor.last_key) {
             let (key, value) = item.map_err(|err| CatalogError::Io(err.to_string()))?;
-            if !cursor.last_key.is_empty() && key.as_ref() <= cursor.last_key.as_slice() {
-                continue;
-            }
+            #[cfg(test)]
+            KEYS_VISITED.with(|c| c.set(c.get() + 1));
             let family = family_for_sled_key(tree_name, &key);
             ops.push(KvOp::Put {
                 key: family.key(&key),
@@ -135,10 +170,29 @@ pub fn migrate_sled_db(
         store.commit(&ops, fence)?;
         cursor = Cursor::signed(cursor.tree_index, last, cursor.keys_copied + copied as u64);
         persist_cursor(store, fence, &cursor)?;
-        return Ok(MigrateStatus::InProgress {
-            tree: tree_name.to_string(),
-            remaining_hint: COPY_BATCH,
-        });
+        tracing::info!(
+            tree = tree_name,
+            keys_copied = cursor.keys_copied,
+            batch = copied,
+            "sled → fjall migrate running under live store"
+        );
+        if drain == Drain::OneBatch {
+            return Ok(MigrateStatus::InProgress {
+                tree: tree_name.to_string(),
+                remaining_hint: copied,
+            });
+        }
+    }
+}
+
+/// Keys strictly after `after`. Empty `after` is a full tree scan (missing
+/// cursor / first tree). Inclusive `after..` plus skip would still be O(1)
+/// extra; `Excluded` avoids even that.
+fn range_after(tree: &sled::Tree, after: &[u8]) -> sled::Iter {
+    if after.is_empty() {
+        tree.iter()
+    } else {
+        tree.range((Bound::Excluded(after.to_vec()), Bound::Unbounded))
     }
 }
 
@@ -222,4 +276,16 @@ pub fn lookup_miss_in_sled(
     tree.get(rest)
         .map(|v| v.map(|bytes| bytes.to_vec()))
         .map_err(|err| CatalogError::Io(err.to_string()))
+}
+
+#[cfg(test)]
+use std::cell::Cell;
+#[cfg(test)]
+thread_local! {
+    static KEYS_VISITED: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_keys_visited() -> u64 {
+    KEYS_VISITED.with(|c| c.replace(0))
 }

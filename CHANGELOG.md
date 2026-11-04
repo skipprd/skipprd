@@ -39,6 +39,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Leftover sled → fjall migrate ranges from the persist cursor and keeps sled open until the copy finishes. It no longer reopens the 2.8 GB file and scans from key 1 every 64 keys. Crash resume still uses the cursor; a missing cursor starts over (idempotent puts); a corrupt cursor fail-closes.
 - `skipprd query` after migrate uses the two-part Iceberg name (`s3_alter.s3_alter`). A one-part name resolved as `datafusion.public.*` and missed the table.
 - File-to-Postgres e2e keeps migration SQL inside the composite `run` block so GitHub Actions can load the action.
 - DATA_DIR min-free (default 5 GB) is tuned down when it is larger than the free space left at the high watermark, so a small volume cannot pause at the floor and then fail to resume.
@@ -64,6 +65,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Catalog `ROW_MAX_BYTES` is 4 MiB (was 350 KiB, DynamoDB item headroom). Fjall is the live store; COPY segment-index rows at ~514 KiB no longer fail closed.
 - Per-request runtime IPC frame names (`control write` / `control read`) are `debug`, not `info`. Handshake, decode errors, and the 6-byte PrepareSink desync warn stay. Staging with `SKIPPR_LOG_LEVEL=info` logged every PrepareSink/ack on the COPY hot path.
 - Plugin crate patch versions are bumped so catalog paths pick up the SDK wire/logging change.
 
