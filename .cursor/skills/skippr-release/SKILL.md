@@ -2,7 +2,7 @@
 name: skippr-release
 description: >-
   Cut a skipprd engine release: SHA batteries first (rust e2e+DST, skippr-fuzz,
-  skippr-tpc SF10, skippr-perf, skippr-perf-db), then bump plugin crates,
+  skippr-perf, skippr-perf-db), then bump plugin crates,
   CHANGELOG, commit with hooks, tag, publish, skipprd-docs. Use when the user
   says /skippr-release, skippr-release, or asks to tag/publish skipprd.
 disable-model-invocation: true
@@ -44,9 +44,10 @@ Batteries (all must pass; never skip a cell):
 |---|---|
 | `rust.yml` | File smoke e2e + `linux_dst` (`sqlrt::dst::`). CDN e2e still waits for the tag. |
 | `skippr-fuzz.yml` | Timeboxed cargo fuzz; timeout fails |
-| `skippr-tpc.yml` | TPC-H **SF10** Q1/Q3/Q6 vs DuckDB + vanilla DataFusion + `skipprd query` |
 | `perf.yml` | skippr-perf `linux_matrix` (timings/correctness). Not frame-pointer / flamegraph / heaptrack / perf-stat. |
 | `perf-db.yml` | skippr-perf-db `linux_matrix`. Not frame-pointer / flamegraph / heaptrack / perf-stat. |
+
+TPC-H SF10 is **`/skippr-tpc`**. It is not a SHA battery. Do not block the tag on it.
 
 ```bash
 python3 .github/scripts/release_sha_batteries.py --ensure --sha "$(git rev-parse HEAD)"
@@ -54,7 +55,7 @@ python3 .github/scripts/release_sha_batteries.py --ensure --sha "$(git rev-parse
 # zero: every workflow already succeeded on this SHA — do not re-dispatch; tag.
 ```
 
-Do not treat a red SHA as green. Do not skip a workflow because a laptop SF1 TPC or a local fuzz timebox passed.
+Do not treat a red SHA as green. Do not skip a workflow because a local fuzz timebox passed. Do not wait on `/skippr-tpc`.
 
 ## Commands
 

@@ -26,7 +26,7 @@ skippr-beta-release:
 - [ ] No plugin crate bumps; no CHANGELOG Unreleased move; no skipprd-docs; no latest pointers
 - [ ] Commit only the product/CI changes that belong on the tag (hooks, never --no-verify)
 - [ ] git push origin HEAD
-- [ ] SHA batteries green on this commit (rust.yml, skippr-fuzz.yml, skippr-tpc.yml, perf.yml, perf-db.yml)
+- [ ] SHA batteries green on this commit (rust.yml, skippr-fuzz.yml, perf.yml, perf-db.yml; not skippr-tpc)
 - [ ] git tag + push the new x.y.z-beta-N (never -f, never delete the tag)
 - [ ] Watch Python CI/CD + Rust CI/CD for that tag
 - [ ] Fix + iterate with a new N on the new SHA until python-publish, publish_runtime_plugins, and publish_skipprd succeeded

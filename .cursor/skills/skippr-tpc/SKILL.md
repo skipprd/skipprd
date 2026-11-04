@@ -3,15 +3,16 @@ name: skippr-tpc
 description: >-
   Run TPC-H Q1/Q3/Q6 against DuckDB, vanilla DataFusion, and skipprd query.
   GitHub is SF10. Laptop may SF1 with SKIPPR_TPC_LAPTOP=1; that is not a SHA
-  substitute. Use when the user says /skippr-tpc, skippr-tpc, or TPC-H.
+  substitute for GitHub SF10. Not a /skippr-release battery. Use when the user
+  says /skippr-tpc, skippr-tpc, or TPC-H.
 disable-model-invocation: true
 ---
 
 # skippr-tpc
 
-Opt-in. SHA battery is `.github/workflows/skippr-tpc.yml` **TPC-H SF10** (`tpcgen-cli tpch parquet -s 10`) Q1/Q3/Q6. File ingest is parquet → Arrow IPC (not a JSON conversion of SF10). Hash mismatch vs DuckDB or vanilla DataFusion fails. Do **not** run skipprd-docs. Do **not** publish. Do **not** write CloudCycle EU buckets. Do **not** put SF1 on precommit.
+Opt-in. GitHub job is `.github/workflows/skippr-tpc.yml` **TPC-H SF10** (`tpcgen-cli tpch parquet -s 10`) Q1/Q3/Q6. File ingest is parquet bytes through IngestBatch (not a JSON conversion of SF10). Hash mismatch vs DuckDB or vanilla DataFusion fails. Do **not** run skipprd-docs. Do **not** publish. Do **not** write CloudCycle EU buckets. Do **not** put SF1 on precommit. **`/skippr-release` does not wait on this workflow.**
 
-Laptop SF1 is iteration only and **not a SHA substitute**.
+Laptop SF1 is iteration only and **not a SHA substitute** for GitHub SF10.
 
 ```bash
 # laptop only

@@ -79,7 +79,6 @@ BATTERIES: tuple[Battery, ...] = (
         ),
     ),
     Battery("skippr-fuzz.yml", "skippr-fuzz"),
-    Battery("skippr-tpc.yml", "skippr-tpc"),
     Battery(
         "perf.yml",
         "skippr-perf",

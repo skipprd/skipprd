@@ -68,6 +68,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- SHA batteries for `/skippr-release` are rust File smoke + `linux_dst`, fuzz, skippr-perf, and skippr-perf-db. TPC-H SF10 stays `/skippr-tpc` and does not gate the tag.
 - Runtime plugin `{semver}` and `latest` manifest indexes must list every workspace catalog plugin, including File source and sink. A three-plugin S3/Athena/Glue subset is a publish error.
 - Catalog `ROW_MAX_BYTES` is 4 MiB (was 350 KiB, DynamoDB item headroom). Fjall is the live store; COPY segment-index rows at ~514 KiB no longer fail closed.
 - Per-request runtime IPC frame names (`control write` / `control read`) are `debug`, not `info`. Handshake, decode errors, and the 6-byte PrepareSink desync warn stay. Staging with `SKIPPR_LOG_LEVEL=info` logged every PrepareSink/ack on the COPY hot path.

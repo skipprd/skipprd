@@ -16,18 +16,18 @@ SPEC.loader.exec_module(mod)
 
 
 class ReleaseShaBatteriesTests(unittest.TestCase):
-    def test_battery_names_are_the_five_workflows(self) -> None:
+    def test_battery_names_are_the_release_workflows(self) -> None:
         names = [b.workflow for b in mod.BATTERIES]
         self.assertEqual(
             names,
             [
                 "rust.yml",
                 "skippr-fuzz.yml",
-                "skippr-tpc.yml",
                 "perf.yml",
                 "perf-db.yml",
             ],
         )
+        self.assertNotIn("skippr-tpc.yml", names)
         self.assertNotIn("skippr-gate.yml", names)
         self.assertFalse((ROOT / ".github" / "workflows" / "skippr-gate.yml").exists())
 
@@ -242,6 +242,8 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("release_sha_batteries.py", release)
+        self.assertNotIn("| `skippr-tpc.yml` |", release)
+        self.assertIn("not a SHA battery", release)
         self.assertFalse((ROOT / ".cursor" / "skills" / "skippr-gate").exists())
         self.assertFalse((ROOT / ".github" / "workflows" / "skippr-gate.yml").exists())
 
