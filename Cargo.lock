@@ -12395,7 +12395,7 @@ dependencies = [
 
 [[package]]
 name = "skipprd-python"
-version = "18.3.6"
+version = "16.0.0"
 dependencies = [
  "arrow 59.3.1",
  "pyo3",
