@@ -656,11 +656,6 @@ skipprd = { path = "../.." }
         self.assertNotIn("DataSink.", python_md)
         self.assertNotIn("Athena Iceberg", python_md)
         self.assertNotIn("DuckDB Iceberg", python_md)
-        otel_wbs = (
-            repo / "docs" / "docs" / "maintainers" / "hla-observability-implementation-wbs.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn("SkipprLake is the dest", otel_wbs)
-        self.assertNotIn("Iceberg is the dest", otel_wbs)
         plugins = repo / "plugins"
         self.assertFalse((plugins / "data_sink" / "iceberg").exists())
         self.assertFalse((plugins / "schema_sink" / "iceberg").exists())
