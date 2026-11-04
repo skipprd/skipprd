@@ -81,7 +81,7 @@ runs:
         }
         test "$(query_count)" = "2"
         printf '%s\n' 'id,name,category' '3,Alan Turing,gamma' > "${work}/source/people_overlap.csv"
-        echo hold_before_compaction_sink > "${work}/data/failpoint"
+        echo hold_before_compaction_sink > "${work}/data/test_file_duckdb_append/failpoint"
         DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
           target/debug/skipprd sync --log --pipeline file_duckdb_append --once \
           --config "${work}/skippr.yml" &
@@ -100,7 +100,7 @@ runs:
           --config "${work}/skippr.yml" \
           | python3 -c 'import json,sys; d=next(json.loads(l) for l in reversed(sys.stdin.read().splitlines()) if l.strip().startswith("{") and "\"rows\"" in l); print(len({r[0] for r in d["rows"]}))')"
         test "${ids}" = "3"
-        rm -f "${work}/data/failpoint"
+        rm -f "${work}/data/test_file_duckdb_append/failpoint"
         wait "${sync_pid}" || true
         test "$(query_count)" = "3"
         mkdir -p "${work}/migrations"

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -189,6 +191,17 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("hold_before_compaction_sink", file_duckdb)
         self.assertNotIn('>> "${work}/source/people.csv"', file_duckdb)
         self.assertIn("people_overlap.csv", file_duckdb)
+        self.assertIn("${work}/data/test_file_duckdb_append/failpoint", file_duckdb)
+        self.assertNotIn('> "${work}/data/failpoint"', file_duckdb)
+        self.assertIn('print(len({r[0] for r in d["rows"]}))\')"', file_duckdb)
+        duckdb_script = textwrap.dedent(file_duckdb.split("run: |\n", 1)[1])
+        parsed = subprocess.run(
+            ["bash", "-n"],
+            input=duckdb_script,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
         file_duckdb_action = (
             ROOT / ".github" / "actions" / "e2e" / "file_duckdb_append" / "action.yaml"
         ).read_text(encoding="utf-8")
@@ -198,6 +211,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("SELECT id FROM file_duckdb_append.file_duckdb_append", file_duckdb_action)
         self.assertNotIn('>> "${work}/source/people.csv"', file_duckdb_action)
         self.assertIn("people_overlap.csv", file_duckdb_action)
+        self.assertIn("${work}/data/test_file_duckdb_append/failpoint", file_duckdb_action)
+        self.assertNotIn('> "${work}/data/failpoint"', file_duckdb_action)
         skipprlake = text.split("\n  e2e_skipprlake:", 1)[1].split("\n  e2e_postgres_cdc:", 1)[0]
         self.assertIn("USE_PUBLISHED_PLUGINS", skipprlake)
         self.assertNotIn("runtime-plugin-binaries-linux_x86", skipprlake)

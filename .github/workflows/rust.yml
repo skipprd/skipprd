@@ -188,7 +188,7 @@ jobs:
           echo "skipprd query count=$(query_count)"
           test "$(query_count)" = "2"
           printf '%s\n' 'id,name,category' '3,Alan Turing,gamma' > "${work}/source/people_overlap.csv"
-          echo hold_before_compaction_sink > "${work}/data/failpoint"
+          echo hold_before_compaction_sink > "${work}/data/test_file_duckdb_append/failpoint"
           USE_LOCAL_PLUGIN_CODE=1 \
           SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests" \
           DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
@@ -207,9 +207,9 @@ jobs:
           ids="$(DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
             ./skipprd-linux_x86/skipprd --config "${work}/skippr.yml" \
             query --plain --sql "SELECT id FROM file_duckdb_append.file_duckdb_append" \
-            | python3 -c 'import json,sys; d=next(json.loads(l) for l in reversed(sys.stdin.read().splitlines()) if l.strip().startswith("{") and "\"rows\"" in l); print(len({r[0] for r in d["rows"]}))'"
+            | python3 -c 'import json,sys; d=next(json.loads(l) for l in reversed(sys.stdin.read().splitlines()) if l.strip().startswith("{") and "\"rows\"" in l); print(len({r[0] for r in d["rows"]}))')"
           test "${ids}" = "3"
-          rm -f "${work}/data/failpoint"
+          rm -f "${work}/data/test_file_duckdb_append/failpoint"
           wait "${sync_pid}" || true
           test "$(query_count)" = "3"
 
