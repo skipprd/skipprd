@@ -300,6 +300,7 @@ skipprd doctor
 
 ## Next steps
 
+- [Skippr MCP](/mcp/). Code agents call `skippr_connect` on `https://mcp.skippr.io/mcp` and run the argv it returns.
 - [skippr.yml reference](/configuration/skippr-yml)
 - [skipprd doctor](/cli/doctor)
 - [skipprd discover](/cli/discover)

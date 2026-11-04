@@ -9,7 +9,7 @@ description: >-
 
 # skipprd public documentation
 
-SoT for engine how-tos is [docs/docs](../../../docs/docs) in this repo. `/skippr-release` calls this skill. Do not restate Cloud `public-docs`.
+SoT for engine how-tos is [docs/docs](../../../docs/docs) in this repo. `/skippr-release` calls this skill. Do not restate Cloud `public-docs`. New sentences follow sibling skill **`skippr-voice`** (skippr-web). Do not restyle a page to match mill copy.
 
 ## Where to edit
 

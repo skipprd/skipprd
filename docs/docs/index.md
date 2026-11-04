@@ -47,6 +47,8 @@ python -c "import skippr; print(skippr.Session)"
 
 The `pip` package gives you the Python API (`import skippr`). It does not add the `skipprd` command. See [Install](/getting-started/install) for user-local installs, pinned versions, and fixes for common problems.
 
+If a code agent is writing the pipeline, add [Skippr MCP](/mcp/) at `https://mcp.skippr.io/mcp`. It returns `skipprd connect` argv. It does not run skipprd for you.
+
 ## Your first pipeline in 5 minutes
 
 Read public sample JSON from S3, discover its schema, sync it, and count the rows with SQL. You do not need a warehouse: without a destination, Skipprd keeps the data in its local WAL and you can query it there.

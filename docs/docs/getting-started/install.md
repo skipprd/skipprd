@@ -123,6 +123,7 @@ pip install --upgrade skippr
 
 ## Next steps
 
+- [Skippr MCP](/mcp/). Point Cursor, Claude, or VS Code at `https://mcp.skippr.io/mcp`.
 - [Quickstart: S3 to Athena](/getting-started/quickstart) — land sample data in a queryable AWS table.
 - [Quickstart: Snowflake](/getting-started/quickstart-snowflake), [PostgreSQL](/getting-started/quickstart-postgres), or [BigQuery](/getting-started/quickstart-bigquery).
 - [Python](/python) — build and run pipelines from code.
