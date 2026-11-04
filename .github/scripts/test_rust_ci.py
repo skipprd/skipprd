@@ -187,6 +187,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("DATA_DIR_HIGH_WATERMARK_PCT=0", file_duckdb)
         self.assertIn("skipprd query", file_duckdb)
         self.assertIn("hold_before_compaction_sink", file_duckdb)
+        self.assertNotIn('>> "${work}/source/people.csv"', file_duckdb)
+        self.assertIn("people_overlap.csv", file_duckdb)
         file_duckdb_action = (
             ROOT / ".github" / "actions" / "e2e" / "file_duckdb_append" / "action.yaml"
         ).read_text(encoding="utf-8")
@@ -194,6 +196,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("skipprd query", file_duckdb_action)
         self.assertIn("hold_before_compaction_sink", file_duckdb_action)
         self.assertIn("SELECT id FROM file_duckdb_append.file_duckdb_append", file_duckdb_action)
+        self.assertNotIn('>> "${work}/source/people.csv"', file_duckdb_action)
+        self.assertIn("people_overlap.csv", file_duckdb_action)
         skipprlake = text.split("\n  e2e_skipprlake:", 1)[1].split("\n  e2e_postgres_cdc:", 1)[0]
         self.assertIn("USE_PUBLISHED_PLUGINS", skipprlake)
         self.assertNotIn("runtime-plugin-binaries-linux_x86", skipprlake)

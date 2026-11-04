@@ -187,7 +187,7 @@ jobs:
           }
           echo "skipprd query count=$(query_count)"
           test "$(query_count)" = "2"
-          printf '%s\n' '3,Alan Turing,gamma' >> "${work}/source/people.csv"
+          printf '%s\n' 'id,name,category' '3,Alan Turing,gamma' > "${work}/source/people_overlap.csv"
           echo hold_before_compaction_sink > "${work}/data/failpoint"
           USE_LOCAL_PLUGIN_CODE=1 \
           SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${work}/manifests" \
