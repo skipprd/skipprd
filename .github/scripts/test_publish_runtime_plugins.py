@@ -272,6 +272,32 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             )
         )
 
+    def test_require_complete_catalog_index_rejects_s3_athena_glue_subset(self) -> None:
+        catalog = [
+            {"manifest_filename": "s3-source.json"},
+            {"manifest_filename": "file-source.json"},
+            {"manifest_filename": "file-sink.json"},
+            {"manifest_filename": "athena-sink.json"},
+            {"manifest_filename": "glue-schema.json"},
+        ]
+        subset = [
+            {"manifest_filename": "s3-source.json"},
+            {"manifest_filename": "athena-sink.json"},
+            {"manifest_filename": "glue-schema.json"},
+        ]
+        with self.assertRaises(SystemExit) as raised:
+            publish_runtime_plugins.require_complete_catalog_index(subset, catalog)
+        message = str(raised.exception)
+        self.assertIn("file-source.json", message)
+        self.assertIn("file-sink.json", message)
+
+    def test_require_complete_catalog_index_accepts_full_catalog(self) -> None:
+        catalog = [
+            {"manifest_filename": "file-source.json"},
+            {"manifest_filename": "file-sink.json"},
+        ]
+        publish_runtime_plugins.require_complete_catalog_index(catalog, catalog)
+
     def test_latest_manifest_index_url_uses_latest_pointer(self) -> None:
         self.assertEqual(
             publish_runtime_plugins.latest_manifest_index_url(

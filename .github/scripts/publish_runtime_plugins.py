@@ -84,6 +84,25 @@ def release_bundle_version(raw: Optional[str] = None) -> Optional[str]:
     return None
 
 
+def require_complete_catalog_index(index_entries: list, catalog_entries: list) -> None:
+    expected = {
+        entry["manifest_filename"]
+        for entry in catalog_entries
+        if entry.get("manifest_filename")
+    }
+    actual = {
+        entry.get("manifest_filename")
+        for entry in index_entries
+        if isinstance(entry, dict) and entry.get("manifest_filename")
+    }
+    missing = sorted(filename for filename in expected if filename not in actual)
+    if missing:
+        raise SystemExit(
+            "staged runtime plugin index is missing catalog plugins: "
+            + ", ".join(missing)
+        )
+
+
 def write_manifest_index(
     output_dir: Path,
     bundle_version: str,
@@ -432,6 +451,8 @@ def main() -> None:
                 ),
             }
         )
+
+    require_complete_catalog_index(latest_entries, catalog_entries)
 
     if should_write_latest_pointer(bundle_version) or not bundle_version:
         latest_dir = output_dir / "latest"

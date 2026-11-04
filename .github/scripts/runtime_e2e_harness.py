@@ -212,11 +212,6 @@ SCENARIO_RUNTIME_VERSION_ANCHORS = {
         ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
 }
-RUNTIME_PLUGIN_SMOKE_SUPPORT_MANIFESTS = (
-    "file-sink.json",
-    "postgres-sink.json",
-    "postgres-schema.json",
-)
 RUNTIME_PLUGIN_SMOKE_DOWNLOAD_MANIFESTS = {
     "smoke": frozenset(
         {
@@ -1135,21 +1130,16 @@ def runtime_source_manifest_filenames(catalog_entries: list[dict]) -> list[str]:
 
 
 def runtime_release_manifest_filenames(catalog_entries: list[dict]) -> list[str]:
-    available = {entry["manifest_filename"] for entry in catalog_entries}
-    missing_support = sorted(
-        manifest
-        for manifest in RUNTIME_PLUGIN_SMOKE_SUPPORT_MANIFESTS
-        if manifest not in available
+    filenames = sorted(
+        {
+            entry["manifest_filename"]
+            for entry in catalog_entries
+            if entry.get("manifest_filename")
+        }
     )
-    if missing_support:
-        raise HarnessError(
-            "runtime plugin catalog is missing required smoke manifests: "
-            + ", ".join(missing_support)
-        )
-    return sorted(
-        set(runtime_source_manifest_filenames(catalog_entries))
-        | set(RUNTIME_PLUGIN_SMOKE_SUPPORT_MANIFESTS)
-    )
+    if not filenames:
+        raise HarnessError("runtime plugin catalog returned no manifests")
+    return filenames
 
 
 def runtime_full_download_manifests(mode: str) -> frozenset[str]:

@@ -405,13 +405,13 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
 
         self.assertEqual(list(expected_queries), observed)
 
-    def test_runtime_release_manifest_filenames_include_all_sources_and_smoke_support(self) -> None:
+    def test_runtime_release_manifest_filenames_include_entire_catalog(self) -> None:
         catalog = [
             {"manifest_filename": "file-source.json", "manifest_kind": "DataSource"},
-            {"manifest_filename": "postgres-source.json", "manifest_kind": "DataSource"},
+            {"manifest_filename": "s3-source.json", "manifest_kind": "DataSource"},
             {"manifest_filename": "file-sink.json", "manifest_kind": "DataSink"},
-            {"manifest_filename": "postgres-sink.json", "manifest_kind": "DataSink"},
-            {"manifest_filename": "postgres-schema.json", "manifest_kind": "SchemaSink"},
+            {"manifest_filename": "duckdb-sink.json", "manifest_kind": "DataSink"},
+            {"manifest_filename": "glue-schema.json", "manifest_kind": "SchemaSink"},
         ]
 
         manifest_filenames = runtime_e2e_harness.runtime_release_manifest_filenames(catalog)
@@ -419,24 +419,17 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
         self.assertEqual(
             manifest_filenames,
             [
+                "duckdb-sink.json",
                 "file-sink.json",
                 "file-source.json",
-                "postgres-schema.json",
-                "postgres-sink.json",
-                "postgres-source.json",
+                "glue-schema.json",
+                "s3-source.json",
             ],
         )
 
-    def test_runtime_release_manifest_filenames_require_smoke_support_manifests(self) -> None:
-        catalog = [
-            {"manifest_filename": "file-source.json", "manifest_kind": "DataSource"},
-            {"manifest_filename": "postgres-source.json", "manifest_kind": "DataSource"},
-            {"manifest_filename": "postgres-sink.json", "manifest_kind": "DataSink"},
-            {"manifest_filename": "postgres-schema.json", "manifest_kind": "SchemaSink"},
-        ]
-
+    def test_runtime_release_manifest_filenames_reject_empty_catalog(self) -> None:
         with self.assertRaises(runtime_e2e_harness.HarnessError):
-            runtime_e2e_harness.runtime_release_manifest_filenames(catalog)
+            runtime_e2e_harness.runtime_release_manifest_filenames([])
 
     def test_scenario_pipeline_name_requires_single_pipeline(self) -> None:
         scenario = runtime_e2e_harness.Scenario(

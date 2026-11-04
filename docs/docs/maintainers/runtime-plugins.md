@@ -42,7 +42,7 @@ The runtime plugin release toolchain is:
 1. `.github/scripts/runtime_plugin_catalog.py` reads Cargo metadata and computes the workspace catalog.
 2. `.github/scripts/runtime_plugin_release_plan.py` compares the workspace catalog to the latest published manifest index.
 3. platform build jobs produce the selected plugin binaries.
-4. `.github/scripts/publish_runtime_plugins.py` generates versioned JSON manifests plus `latest/manifest-index.json`.
+4. `.github/scripts/publish_runtime_plugins.py` generates versioned JSON manifests plus `{semver}/manifest-index.json` and `latest/manifest-index.json`. Each index lists **every** workspace catalog plugin (File source and sink included). A subset index is a publish error.
 
 Manifest checksum split:
 

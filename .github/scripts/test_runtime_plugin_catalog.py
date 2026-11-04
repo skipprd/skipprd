@@ -545,6 +545,46 @@ skipprd = { path = "../.." }
             [catalog_entry],
         )
 
+    def test_manifest_index_must_list_every_catalog_plugin_including_file(self) -> None:
+        catalog = [
+            {
+                "manifest_filename": "s3-source.json",
+                "sdk_build_fingerprint": "sdk",
+            },
+            {
+                "manifest_filename": "file-source.json",
+                "sdk_build_fingerprint": "sdk",
+            },
+            {
+                "manifest_filename": "file-sink.json",
+                "sdk_build_fingerprint": "sdk",
+            },
+        ]
+        with self.assertRaises(SystemExit) as raised:
+            runtime_plugin_catalog.validate_manifest_index_sdk_build_fingerprint(
+                {
+                    "sdk_build_fingerprint": "sdk",
+                    "manifests": [
+                        {
+                            "manifest_filename": "s3-source.json",
+                            "sdk_build_fingerprint": "sdk",
+                        }
+                    ],
+                },
+                catalog,
+            )
+        self.assertIn("file-source.json", str(raised.exception))
+
+    def test_workspace_catalog_includes_file_source_and_sink(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        catalog = runtime_plugin_catalog.load_workspace_plugin_catalog(repo)
+        names = {
+            (entry["plugin_name"], entry["manifest_kind"]) for entry in catalog
+        }
+        self.assertIn(("File", "DataSource"), names)
+        self.assertIn(("File", "DataSink"), names)
+        self.assertGreater(len(catalog), 3)
+
     def test_workspace_runtime_protocol_version_uses_current_runtime_plugin_location(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)

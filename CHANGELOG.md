@@ -65,6 +65,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Runtime plugin `{semver}` and `latest` manifest indexes must list every workspace catalog plugin, including File source and sink. A three-plugin S3/Athena/Glue subset is a publish error.
 - Catalog `ROW_MAX_BYTES` is 4 MiB (was 350 KiB, DynamoDB item headroom). Fjall is the live store; COPY segment-index rows at ~514 KiB no longer fail closed.
 - Per-request runtime IPC frame names (`control write` / `control read`) are `debug`, not `info`. Handshake, decode errors, and the 6-byte PrepareSink desync warn stay. Staging with `SKIPPR_LOG_LEVEL=info` logged every PrepareSink/ack on the COPY hot path.
 - Plugin crate patch versions are bumped so catalog paths pick up the SDK wire/logging change.
