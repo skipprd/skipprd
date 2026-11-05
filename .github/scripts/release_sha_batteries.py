@@ -153,11 +153,22 @@ def dispatch_ref() -> str:
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         text=True,
     ).strip()
-    if not name or name == "HEAD":
-        raise SystemExit(
-            "workflow_dispatch --ref must be a branch or tag, not a SHA; checkout a branch"
-        )
-    return name
+    if name and name != "HEAD":
+        return name
+    tags = [
+        tag.strip()
+        for tag in subprocess.check_output(
+            ["git", "tag", "--points-at", "HEAD"],
+            text=True,
+        ).splitlines()
+        if tag.strip()
+    ]
+    if tags:
+        ranked = sorted(tags, key=lambda tag: (tag == "0.0.0", tag))
+        return ranked[0]
+    raise SystemExit(
+        "workflow_dispatch --ref must be a branch or tag, not a SHA; checkout a branch or tag"
+    )
 
 
 def head_sha() -> str:

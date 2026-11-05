@@ -240,7 +240,8 @@ class RustCiTests(unittest.TestCase):
             ROOT / ".github" / "actions" / "e2e" / "s3_skipprlake_evolve" / "action.yaml"
         ).read_text(encoding="utf-8")
         self.assertIn("unsafe_enable_version_guessing", evolve)
-        self.assertIn("firmware_revision_decimal", evolve)
+        self.assertIn("firmware_revision IS NOT NULL", evolve)
+        self.assertNotIn("firmware_revision_decimal", evolve)
         alter = (
             ROOT / ".github" / "actions" / "e2e" / "s3_skipprlake_alter" / "action.yaml"
         ).read_text(encoding="utf-8")

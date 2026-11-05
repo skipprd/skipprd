@@ -283,6 +283,7 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
         self.assertIn("--abbrev-ref", src)
         self.assertIn("dispatch_ref()", src)
         self.assertNotIn('"--ref",\n                    sha', src)
+        self.assertIn("--points-at", src)
         ref = mod.dispatch_ref()
         self.assertTrue(ref)
         self.assertNotEqual(ref, "HEAD")

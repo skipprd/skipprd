@@ -105,7 +105,7 @@ runs:
         done
         scan="${work}/warehouse/bronze/bike_hire_evolve"
         count="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}');")"
-        evolved="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}') WHERE firmware_revision IS NOT NULL OR firmware_revision_decimal IS NOT NULL;")"
+        evolved="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}') WHERE firmware_revision IS NOT NULL;")"
         echo "count=${count}"
         echo "evolved=${evolved}"
         echo "${count}" | tail -n 1 | grep -qx '2000'
