@@ -1,11 +1,11 @@
 ---
 title: Stream SQL
-description: Run SELECT and STREAM against Iceberg plus the live WAL, watch a table fill, and serve committed tables over Flight SQL.
+description: One Skippr SQL query is Iceberg plus the live WAL together. STREAM tails that same SQL. Watch a table fill, and serve committed tables over Flight SQL.
 ---
 
 # Stream SQL
 
-Skipprd is a Streamhouse engine: ingest writes a write-ahead log (WAL), compact lands Apache Iceberg on your object store, and SQL reads both. You do not wait for a warehouse load to ask what just arrived.
+Skipprd is a Streamhouse engine: ingest writes a write-ahead log (WAL), compact lands Apache Iceberg on your object store, and SQL reads both. You query Skippr once. The engine returns live stream plus history together. You do not choose a live view or a history view, and you do not wait for a warehouse load to ask what just arrived. CDC ingest is the same contract: current stream plus current history in one result.
 
 [`skipprd query`](/cli/query) is the SQL client on the machine that holds `DATA_DIR`. [`skipprd serve`](/cli/serve) is for other tools that should see committed Iceberg only.
 
@@ -44,15 +44,13 @@ print(table.to_pylist())
 
 ## STREAM
 
-`STREAM` reads the WAL as ingest is writing it and keeps returning new rows:
+`STREAM` is the same Skippr SQL as `SELECT` on that table. It tails new results to stdout as they arrive, like `watch`. `LIMIT` stops the stream.
 
 ```bash
 skipprd query --sql "STREAM * FROM bikehire.rides LIMIT 100"
 ```
 
-`SELECT` is a snapshot (Iceberg plus the WAL slices frozen for that statement). `STREAM` follows the tail. `LIMIT` stops the stream after that many rows.
-
-`--watch <seconds>` re-runs a `SELECT` in the interactive table view. It is a poll, not `STREAM`.
+`SELECT` is a snapshot of Iceberg plus the WAL slices frozen for that statement. `STREAM` follows new live rows on that same table. `--watch <seconds>` re-runs a `SELECT` in the interactive table view. It is a poll, not `STREAM`.
 
 ## How Skippr Store supports the query
 

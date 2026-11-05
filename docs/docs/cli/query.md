@@ -5,12 +5,12 @@ description: Run SQL against your pipelines from the terminal or a script, and m
 
 # skipprd query
 
-`skipprd query` runs SQL against the data your pipelines have ingested. Each namespace is a table named `<pipeline>.<namespace>`, for example `bikehire.rides`. What a table contains depends on the destination:
+`skipprd query` runs SQL against the data your pipelines have ingested. Each namespace is a table named `<pipeline>.<namespace>`, for example `bikehire.rides`. You query Skippr once: live stream plus history together. You do not pick a live view or a history view. What a table contains depends on the destination:
 
 - **No destination, or a non-Iceberg destination** (Athena, Snowflake, Postgres, and others): the live data in the WAL. For the full history in a warehouse, query the warehouse itself.
 - **Iceberg destination** (SkipprLake, AthenaIceberg, DuckDB): the Iceberg table combined with live data still in the WAL, so you see rows the moment they are ingested.
 
-Use `query` to check a sync, explore data, script checks in CI, follow the WAL with `STREAM`, and run Skipprd's management statements (`ENABLE PIPELINE`, `SCHEMA DUMP`, `ALTER TABLE`, and others). Without `--sql` it opens an interactive prompt. How SELECT, STREAM, and Skippr Store pins fit together: [Stream SQL](/concepts/stream-sql).
+Use `query` to check a sync, explore data, script checks in CI, tail new results with `STREAM`, and run Skipprd's management statements (`ENABLE PIPELINE`, `SCHEMA DUMP`, `ALTER TABLE`, and others). Without `--sql` it opens an interactive prompt. How SELECT, STREAM, and Skippr Store pins fit together: [Stream SQL](/concepts/stream-sql).
 
 ## Usage
 
@@ -80,13 +80,15 @@ skipprd query --sql "SELECT station, count(*) AS rides FROM bikehire.rides GROUP
 skipprd query --sql "SELECT count(*) FROM bikehire.rides" --watch 5
 ```
 
-### Stream new records from the WAL
+### Stream query
+
+`STREAM` is the same Skippr SQL as `SELECT` on that table. It tails new results to stdout as they arrive, like `watch`. `LIMIT` stops the stream. `--watch` is a poll of `SELECT`, not `STREAM`.
 
 ```bash
 skipprd query --sql "STREAM * FROM bikehire.rides LIMIT 100"
 ```
 
-`STREAM` reads the WAL as ingest writes it and keeps returning new results. `SELECT` is a snapshot: Iceberg plus the WAL slices Skippr Store pinned for that statement. A second query process can run while `sync` holds the writer. It pins a flushed Skippr Store snapshot and does not take `writer.lock`. See [Stream SQL](/concepts/stream-sql) and [Skippr Store](/configuration/skippr-store).
+`SELECT` is a snapshot of Iceberg plus the WAL slices Skippr Store pinned for that statement. `STREAM` follows new live rows on that same table. A second query process can run while `sync` holds the writer. It pins a flushed Skippr Store snapshot and does not take `writer.lock`. See [Stream SQL](/concepts/stream-sql) and [Skippr Store](/configuration/skippr-store).
 
 `skipprd serve` Flight SQL reads committed Iceberg only. Live WAL stays on `skipprd query`.
 

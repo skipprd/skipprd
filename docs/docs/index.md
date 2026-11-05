@@ -10,7 +10,7 @@ Skipprd is an open Streamhouse engine that captures data continuously from your 
 You describe a pipeline once in `skippr.yml`: where data comes from, and where it should land. Skipprd does the rest:
 
 - **Discovers the schema and evolves in-stream.** It samples the source and infers field names and types, including nested structures. When upstream schemas drift, destination tables follow in-stream without breaking existing queries.
-- **Zero vendor lock-in.** Tables land as open Apache Iceberg on Parquet in your bucket. Query realtime state in Skippr (`SELECT` over Iceberg ∪ WAL, `STREAM` on the tail), or query historical tables through Athena, Snowflake, DuckDB, or notebooks. See [Stream SQL](/concepts/stream-sql).
+- **Zero vendor lock-in.** Tables land as open Apache Iceberg on Parquet in your bucket. Query live stream plus history together in Skippr (`SELECT` over Iceberg ∪ WAL; `STREAM` tails that same SQL). Other engines such as Athena, Snowflake, DuckDB, or notebooks can query the same Iceberg tables. See [Stream SQL](/concepts/stream-sql).
 - **Does not lose committed data.** Skipprd commits each batch before landing. Whether a retry can duplicate a row depends on the destination — see [Exactly-once delivery](/concepts/exactly-once).
 - **Replicates database changes.** [Change data capture](/cdc/) keeps destination tables at the source's current state, including updates and deletes.
 

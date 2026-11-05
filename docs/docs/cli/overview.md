@@ -31,7 +31,7 @@ If the command is not found, follow [Install](/getting-started/install).
 | [`skipprd metadata`](/cli/metadata) | Show the schema `discover` saved, or apply a reviewed schema for one namespace. |
 | [`skipprd migrate`](/cli/migrate) | Apply `migrations/*.sql` ALTER batches to skippr metadata, WAL, and the destination. |
 | [`skipprd sync`](/cli/sync) | Ingest from the source, buffer through the write-ahead log (WAL), and land data in the destination. |
-| [`skipprd query`](/cli/query) | Run SQL against your pipelines (`SELECT` Iceberg ∪ WAL, `STREAM` the tail), interactively or as JSON for scripts. |
+| [`skipprd query`](/cli/query) | Run SQL against your pipelines (`SELECT` Iceberg ∪ WAL together, `STREAM` tails that same SQL), interactively or as JSON for scripts. |
 | [`skipprd df`](/cli/df) | Print every row of a pipeline or namespace as JSON. |
 | [`skipprd serve`](/cli/serve) | Expose your Iceberg tables over Iceberg REST and Flight SQL to tools such as Spark, Trino, and PyIceberg. |
 | [`skipprd doctor`](/cli/doctor) | Check `skippr.yml` for mistakes before a long sync. Omit `--pipeline` to check the whole file. |

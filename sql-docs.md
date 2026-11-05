@@ -258,7 +258,7 @@ SELECT <columns> FROM <table_name> [WHERE <condition>] [GROUP BY <expressions>] 
 ```
 
 **Description:**
-Executes a standard SQL query against Iceberg tables and the live WAL.
+One Skippr SQL query against Iceberg tables and the live WAL together. You do not pick a live view or a history view.
 
 **Example:**
 ```sql
@@ -333,7 +333,7 @@ STREAM <columns> FROM <table_name> [WHERE <condition>] [ORDER BY <expressions>] 
 ```
 
 **Description:**
-Executes a streaming SQL query against the data currently ingesting into the WAL, continuously returning new results as data arrives.
+Same Skippr SQL as SELECT on that table. Tails new results to stdout as they arrive, like watch.
 
 **Example:**
 ```sql

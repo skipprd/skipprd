@@ -57,7 +57,7 @@ For each pass, Skipprd:
 
 ### 4. Query
 
-Query the tables in your warehouse with its own SQL client. For Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB), [`skipprd query`](/cli/query) on the machine that holds `DATA_DIR` runs SQL against committed Iceberg **union** live WAL. `STREAM` follows the tail. Skippr Store pins which slices that statement may see, including from a second reader process while ingest holds the writer. See [Stream SQL](/concepts/stream-sql) and [Streamhouse](/concepts/datalake).
+Query the tables in your warehouse with its own SQL client. For Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB), [`skipprd query`](/cli/query) on the machine that holds `DATA_DIR` runs one SQL statement against committed Iceberg **union** live WAL. You do not pick a live view or a history view. `STREAM` is that same SQL, tailed as new rows arrive. Skippr Store pins which slices that statement may see, including from a second reader process while ingest holds the writer. See [Stream SQL](/concepts/stream-sql) and [Streamhouse](/concepts/datalake).
 
 ### 5. Migrate
 

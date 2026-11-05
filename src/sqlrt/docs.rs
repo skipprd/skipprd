@@ -172,7 +172,7 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "SELECT".to_string(),
             syntax: "SELECT <columns> FROM <table_name> [WHERE <condition>] [GROUP BY <expressions>] [HAVING <condition>] [ORDER BY <expressions>] [LIMIT <count>]".to_string(),
-            description: "Executes a standard SQL query against Iceberg tables and the live WAL.".to_string(),
+            description: "One Skippr SQL query against Iceberg tables and the live WAL together. You do not pick a live view or a history view.".to_string(),
             example: "SELECT user_id, COUNT(*) FROM bike_hire WHERE date > '2023-01-01' GROUP BY user_id LIMIT 10".to_string(),
         },
     );
@@ -183,7 +183,7 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "STREAM".to_string(),
             syntax: "STREAM <columns> FROM <table_name> [WHERE <condition>] [ORDER BY <expressions>] [LIMIT <count>]".to_string(),
-            description: "Executes a streaming SQL query against the data currently ingesting into the WAL, continuously returning new results as data arrives.".to_string(),
+            description: "Same Skippr SQL as SELECT on that table. Tails new results to stdout as they arrive, like watch.".to_string(),
             example: "STREAM user_id, event_type FROM user_events WHERE event_time > CURRENT_TIMESTAMP - INTERVAL '1' HOUR ORDER BY event_time LIMIT 100".to_string(),
         },
     );
@@ -464,6 +464,20 @@ mod tests {
                 "get_sql_docs() is the SQL-doc SoT and must include {name}"
             );
         }
+    }
+
+    #[test]
+    fn stream_docs_name_same_sql_and_tail() {
+        let description = &get_sql_docs()["STREAM"].description;
+        let lower = description.to_ascii_lowercase();
+        assert!(
+            description.contains("SELECT"),
+            "STREAM must name SELECT: {description}"
+        );
+        assert!(
+            lower.contains("tail"),
+            "STREAM must say it tails results: {description}"
+        );
     }
 
     #[test]

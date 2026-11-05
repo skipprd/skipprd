@@ -344,7 +344,7 @@ Leave out `data_sink` and the pipeline still syncs. The WAL is the dataset, and 
 - [Data sources](/connectors/) — the connector classes and their options.
 - [Transforms](/configuration/transforms) — namespaces, partitions, flattening, ops, and aggregates.
 - [Materialised views](/concepts/materialised-views) — keyed totals in Skippr Store.
-- [Stream SQL](/concepts/stream-sql) — SELECT over Iceberg ∪ WAL and STREAM.
+- [Stream SQL](/concepts/stream-sql) — SELECT is Iceberg ∪ WAL together; STREAM tails that same SQL.
 - [How Skipprd works](/concepts/how-it-works) — what happens between source and destination.
 - [`skipprd migrate`](/cli/migrate) — author `migrations/*.sql` and apply ALTER without stopping the pipeline.
 - [Skippr Store](/configuration/skippr-store) — catalog, journal, schema, and stream state.

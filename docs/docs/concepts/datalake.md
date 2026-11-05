@@ -1,6 +1,6 @@
 ---
 title: Streamhouse
-description: An open Streamhouse architecture. Land Skipprd pipelines as open Iceberg tables in object storage with zero vendor lock-in. Realtime state in Skippr, historical queries anywhere.
+description: An open Streamhouse architecture. Land Skipprd pipelines as open Iceberg tables in object storage with zero vendor lock-in. Query live stream plus history together in Skippr. Other engines can read the same Iceberg tables.
 ---
 
 # Streamhouse
@@ -13,8 +13,8 @@ Skipprd is an open Streamhouse engine. It lands pipelines as [Apache Iceberg](ht
 
 Because storage is open Apache Iceberg and Parquet in a bucket you control, **your data is never trapped**. Compute is decoupled from storage:
 
-1. **Realtime operational queries in Skippr:** [`skipprd query`](/cli/query) runs SQL against the committed Iceberg table combined with in-flight rows that just arrived. Readers never see half-written tables because Iceberg snapshot commits are atomic.
-2. **Historical queries anywhere:** Athena, Snowflake, DuckDB, Databricks, PyIceberg, and local notebooks can query the exact same Iceberg tables in your bucket. There is no second ETL copy and no proprietary format to migrate out of.
+1. **Query live plus history in Skippr:** [`skipprd query`](/cli/query) runs one SQL statement against the committed Iceberg table combined with in-flight rows that just arrived. You do not pick a live view or a history view. Readers never see half-written tables because Iceberg snapshot commits are atomic. `STREAM` is that same SQL, tailed to stdout as new rows arrive.
+2. **Same Iceberg tables anywhere:** Athena, Snowflake, DuckDB, Databricks, PyIceberg, and local notebooks can query the exact same Iceberg tables in your bucket. There is no second ETL copy and no proprietary format to migrate out of. Those engines see committed history, not the live WAL.
 
 ## How a pipeline lands in the Streamhouse
 
@@ -40,14 +40,14 @@ Iceberg destinations keep their own tables. They expire old snapshots (they keep
 
 ## Query
 
-Query live state in the Streamhouse. Tables are `<pipeline>.<namespace>`:
+Query Skippr. One SQL statement is live plus history. Tables are `<pipeline>.<namespace>`:
 
 ```bash
 skipprd query --plain --sql "SELECT * FROM bikehire.rides LIMIT 20"
 skipprd query --sql "STREAM * FROM bikehire.rides LIMIT 100"
 ```
 
-For Iceberg destinations, `SELECT` returns the committed lake table plus live WAL slices Skippr Store pinned for that statement. `STREAM` follows the tail. `--watch` re-runs a SELECT in the interactive view. See [Stream SQL](/concepts/stream-sql) and [skipprd query](/cli/query).
+For Iceberg destinations, `SELECT` returns the committed lake table plus live WAL slices Skippr Store pinned for that statement. `STREAM` is the same SQL over the same table; it tails new results to stdout as they arrive. `--watch` re-runs a SELECT in the interactive view. See [Stream SQL](/concepts/stream-sql) and [skipprd query](/cli/query).
 
 ## Next steps
 
