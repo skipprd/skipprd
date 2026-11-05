@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import urllib.parse
 import sys
@@ -108,6 +109,32 @@ class PublishRuntimePluginsTests(unittest.TestCase):
                 published_index_entry,
                 plugin,
                 [target],
+                10,
+            )
+        )
+        plugin["checksum"] = "abc123"
+        self.assertTrue(
+            publish_runtime_plugins.published_source_matches_catalog(
+                published,
+                published_index,
+                published_index_entry,
+                plugin,
+                10,
+            )
+        )
+        published_rebuild = copy.deepcopy(published)
+        published_rebuild["artifacts"] = {
+            "x86_64-unknown-linux-gnu": {
+                "sha256": "rebuilt",
+                "build_environment": {"runner_baseline": "skippr-linux-x64-16"},
+            }
+        }
+        self.assertTrue(
+            publish_runtime_plugins.published_source_matches_catalog(
+                published_rebuild,
+                published_index,
+                published_index_entry,
+                plugin,
                 10,
             )
         )

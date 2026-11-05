@@ -190,6 +190,25 @@ def published_artifacts_match_build_environment(
     return True
 
 
+def published_source_matches_catalog(
+    published: dict,
+    published_index: dict,
+    published_index_entry: dict,
+    plugin: dict,
+    protocol_version: int,
+) -> bool:
+    sdk_build_fingerprint = plugin["sdk_build_fingerprint"]
+    return (
+        published.get("version") == plugin["package_version"]
+        and published.get("protocol_version") == protocol_version
+        and published.get("sdk_build_fingerprint") == sdk_build_fingerprint
+        and published_index.get("sdk_build_fingerprint") == sdk_build_fingerprint
+        and published_index_entry.get("sdk_build_fingerprint")
+        == sdk_build_fingerprint
+        and published.get("build_checksum") == plugin["checksum"]
+    )
+
+
 def published_manifest_matches_catalog(
     published: dict,
     published_index: dict,
@@ -320,6 +339,13 @@ def main() -> None:
     latest_entries = []
     for entry in catalog_entries:
         published_manifest = published_manifests.get(entry["manifest_filename"])
+        can_reuse_source = published_source_matches_catalog(
+            published_manifest or {},
+            published_index,
+            published_index_entries.get(entry["manifest_filename"], {}),
+            entry,
+            protocol_version,
+        )
         can_reuse_published = published_manifest_matches_catalog(
             published_manifest or {},
             published_index,
@@ -330,7 +356,31 @@ def main() -> None:
         )
         artifacts = {}
 
-        for target in publish_targets:
+        if can_reuse_source:
+            for target in publish_targets:
+                fallback_artifact = resolve_target_artifact(
+                    (published_manifest or {}).get("artifacts", {}), target
+                )
+                if not fallback_artifact:
+                    raise SystemExit(
+                        f"published {entry['manifest_filename']} is missing {target.triple}"
+                    )
+                fallback_artifact["executable"] = Path(
+                    fallback_artifact.get("executable", entry["binary_name"])
+                ).name
+                if fallback_artifact.get("url"):
+                    fallback_artifact["url"] = rewrite_public_url(
+                        fallback_artifact["url"], public_base_url, args.subdir
+                    )
+                artifacts[target.triple] = fallback_artifact
+            if not artifacts:
+                raise SystemExit(
+                    f"No runtime plugin artifacts were available for {entry['manifest_filename']}"
+                )
+            # Keep going to write the versioned manifest from published bytes.
+            # Do not copy a rebuilt binary onto an immutable version path.
+        else:
+          for target in publish_targets:
             binary_name = target_binary_name(entry["binary_name"], target.triple)
             source_binary = workspace / target.publish_artifact_dir / binary_name
             if source_binary.exists():
