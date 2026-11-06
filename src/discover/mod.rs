@@ -2762,6 +2762,23 @@ mod is_valid_date_tests {
 
     #[test]
     #[serial]
+    fn quote_only_strings_do_not_panic_date_discovery() {
+        let _foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        for date_str in ["\"", "'", "`"] {
+            assert_eq!(None, AnalyseSchema::is_valid_date(date_str));
+        }
+        assert_eq!(
+            AnalyseSchema::is_valid_date("\"2022-02-22T22:22:22Z\""),
+            AnalyseSchema::is_valid_date("2022-02-22T22:22:22Z")
+        );
+        assert_eq!(
+            Some("Iso8601_2"),
+            AnalyseSchema::is_valid_date("2022-02-22T22:22:22Z")
+        );
+    }
+
+    #[test]
+    #[serial]
     fn test_valid_date_time() {
         let _foo: AnalyseSchema = AnalyseSchema { i: 0 };
         let date_str = "2022-02-22T22:22:22Z";

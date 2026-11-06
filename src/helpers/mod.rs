@@ -84,6 +84,15 @@ use walkdir::WalkDir;
 //     Lazy::new(|| TimedRwLock::new("clean_field_cache".to_string(), DashMap::new()));
 static CLEAN_FIELD_CACHE: Lazy<Arc<DashMap<String, String>>> =
     Lazy::new(|| Arc::new(DashMap::new()));
+// Compiled once. `clean_field_name` used to `Regex::new` on every cache miss,
+// and never cached already-clean names (stored sentinel `"no"` then ignored it),
+// which made COPY namespace/partition keying ~4.5ms/row in debug.
+static CLEAN_FIELD_INVALID_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"[^_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]")
+        .expect("clean_field invalid regex")
+});
+static CLEAN_FIELD_UNDERSCORE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"_+").expect("clean_field underscore regex"));
 
 fn clean_field_cache_key(flatten_events: bool, field: &str) -> String {
     if flatten_events {
@@ -138,11 +147,10 @@ impl Helpers {
 
     pub fn clean_field_name<'a>(config: &Config, field: String) -> String {
         let cache_key = clean_field_cache_key(config.get_transform_flatten_events(), &field);
-        {
-            if let Some(cached) = CLEAN_FIELD_CACHE.get(&cache_key) {
-                if cached.value() != "no" {
-                    return cached.value().to_string();
-                }
+        if let Some(cached) = CLEAN_FIELD_CACHE.get(&cache_key) {
+            // Legacy sentinel `"no"` meant "identity"; treat it as a miss once.
+            if cached.value() != "no" {
+                return cached.value().clone();
             }
         }
 
@@ -156,38 +164,17 @@ impl Helpers {
         }
 
         clean = clean.to_lowercase();
-
-        let re = Regex::new(r"[^_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]")
-            .unwrap();
-        clean = re.replace_all(&clean, "_").to_string();
-        clean = regex::Regex::new(r"_+")
-            .unwrap()
+        clean = CLEAN_FIELD_INVALID_RE.replace_all(&clean, "_").into_owned();
+        clean = CLEAN_FIELD_UNDERSCORE_RE
             .replace_all(&clean, "_")
-            .to_string();
-
-        // let pattern = "/[^" + preg_quote(
-        //     "_0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        //     "/"
-        // ) + "]/";
-        // clean = preg_replace(pattern, "_", field);
+            .into_owned();
 
         let x: &[_] = &['1', '2', '3', '4', '5', '6', '7', '8', '9'];
         clean = clean.trim_start_matches(x).to_string();
-        // clean = ltrim(clean, "0123456789");
-
         // '_' at the beginning is common and probably allowable
         clean = clean.trim_matches('_').to_string();
-        // clean = trim(clean, '_');
 
-        {
-            let mut cache = CLEAN_FIELD_CACHE
-                .entry(cache_key)
-                .or_insert_with(|| "no".to_string());
-            if clean != field {
-                *cache = clean.clone();
-            }
-        }
-
+        CLEAN_FIELD_CACHE.insert(cache_key, clean.clone());
         clean
     }
 
@@ -512,40 +499,30 @@ impl Helpers {
         parse_namespace_cache: &mut HashMap<String, String>,
         namespace_fields: &str,
     ) -> String {
-        let mut clean_namespace = namespace.clone();
-
-        if !parse_namespace_cache.contains_key(&namespace)
-            || parse_namespace_cache.get(&namespace).unwrap() == "yes"
-        {
-            clean_namespace = Helpers::clean_field_name(config, clean_namespace);
-
-            if !namespace_fields.is_empty() {
-                let mut namespaces = vec!["".to_string()];
-
-                for entity_field_dot in namespace_fields.split(',') {
-                    match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
-                        Some(entity_value) => {
-                            namespaces.push(entity_value.as_str().unwrap().to_string());
-                        }
-                        None => (),
-                    }
-                }
-
-                let join = namespaces.join("_").trim_matches('_').to_lowercase();
-
-                if join != "" {
-                    clean_namespace = Helpers::clean_field_name(config, join);
-                }
-            }
+        let value = Self::namespace_field_value(message, namespace_fields);
+        if !value.is_empty() {
+            return Helpers::clean_field_name(config, value);
         }
+        // Every record reads its own namespace fields; only the empty-value
+        // fallback is cached, so one record without them cannot latch later records.
+        parse_namespace_cache
+            .entry(namespace)
+            .or_insert_with_key(|namespace| Helpers::clean_field_name(config, namespace.clone()))
+            .clone()
+    }
 
-        if clean_namespace != namespace {
-            parse_namespace_cache.insert(namespace, "yes".to_string());
-        } else {
-            parse_namespace_cache.insert(namespace, "no".to_string());
+    fn namespace_field_value(message: &Value, namespace_fields: &str) -> String {
+        if namespace_fields.is_empty() {
+            return String::new();
         }
-
-        clean_namespace
+        namespace_fields
+            .split(',')
+            .filter_map(|field| Helpers::get_nested_value_from_dot_notation(message, field))
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect::<Vec<_>>()
+            .join("_")
+            .trim_matches('_')
+            .to_lowercase()
     }
 
     fn is_millisecond_timestamp(time: i64) -> bool {
@@ -788,10 +765,14 @@ impl Helpers {
     fn normalize_datetime_input(input: &str) -> String {
         // Trim whitespace
         let mut s = input.trim().to_string();
-        // Strip wrapping quotes/backticks if present
-        if (s.starts_with('"') && s.ends_with('"'))
-            || (s.starts_with('\'') && s.ends_with('\''))
-            || (s.starts_with('`') && s.ends_with('`'))
+        // Strip wrapping quotes/backticks if present. A single `"`, `'`, or `\``
+        // matches starts_with+ends_with, and `s[1..len-1]` panics (Rust
+        // `begin <= end (1 <= 0)`). US staging COPY died on that panic in
+        // skippr 16.0.0 at helpers/mod.rs:796.
+        if s.len() >= 2
+            && ((s.starts_with('"') && s.ends_with('"'))
+                || (s.starts_with('\'') && s.ends_with('\''))
+                || (s.starts_with('`') && s.ends_with('`')))
         {
             s = s[1..s.len() - 1].to_string();
         }
@@ -1230,6 +1211,7 @@ mod date_timezones {
 mod parse_date_normalization_tests {
     use super::*;
     use chrono::TimeZone;
+    use serde_json::json;
 
     #[test]
     fn parses_space_z_without_fraction() {
@@ -1309,6 +1291,60 @@ mod parse_date_normalization_tests {
             dt.with_timezone(&chrono::Utc).timestamp(),
             expected.timestamp()
         );
+    }
+
+    #[test]
+    fn single_quote_chars_do_not_panic_datetime_normalize() {
+        // US staging COPY: skippr 16.0.0 panicked at helpers/mod.rs:796
+        // `begin <= end (1 <= 0) when slicing` on `"`, `'`, or `\``.
+        for input in ["\"", "'", "`", "", " ", "\"\"", "''", "``"] {
+            let parsed = Helpers::parse_date_from_string(input, "%Y-%m-%dT%H:%M:%SZ");
+            assert!(parsed.is_err(), "{input:?} should not parse as a datetime");
+            let parsed_tz = Helpers::parse_date_from_string_with_tz(input, "%Y-%m-%dT%H:%M:%SZ");
+            assert!(
+                parsed_tz.is_err(),
+                "{input:?} should not parse as a tz datetime"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapping_quoted_rfc3339_still_parses() {
+        let plain =
+            Helpers::parse_date_from_string("2022-02-22T22:22:22Z", "%Y-%m-%dT%H:%M:%SZ").unwrap();
+        let parsed =
+            Helpers::parse_date_from_string("\"2022-02-22T22:22:22Z\"", "%Y-%m-%dT%H:%M:%SZ")
+                .unwrap();
+        let single =
+            Helpers::parse_date_from_string("'2022-02-22T22:22:22Z'", "%Y-%m-%dT%H:%M:%SZ")
+                .unwrap();
+        assert_eq!(parsed.timestamp(), plain.timestamp());
+        assert_eq!(single.timestamp(), plain.timestamp());
+    }
+
+    #[test]
+    fn eventbridge_time_quote_does_not_panic_time_field_parse() {
+        let message = json!({
+            "detail-type": "raw-docket",
+            "time": "\"",
+            "detail": {"raw_docket": "{}", "rmc": "tilcon"}
+        });
+        assert_eq!(
+            Helpers::parse_time_field_with_fields(&message, "time"),
+            None
+        );
+        let backtick = json!({"time": "`"});
+        assert_eq!(
+            Helpers::parse_time_field_with_fields(&backtick, "time"),
+            None
+        );
+        let quoted_iso = json!({"time": "\"2022-02-22T22:22:22Z\""});
+        let plain_iso = json!({"time": "2022-02-22T22:22:22Z"});
+        assert_eq!(
+            Helpers::parse_time_field_with_fields(&quoted_iso, "time"),
+            Helpers::parse_time_field_with_fields(&plain_iso, "time")
+        );
+        assert!(Helpers::parse_time_field_with_fields(&plain_iso, "time").is_some());
     }
 }
 
@@ -1418,7 +1454,7 @@ mod clean_field_name_tests {
             "cachedfield".to_string()
         );
 
-        // Cache has a record marked as "no"
+        // Legacy cache sentinel "no" is treated as a miss and rewritten.
         {
             CLEAN_FIELD_CACHE.clear();
             CLEAN_FIELD_CACHE.insert(
@@ -1429,6 +1465,32 @@ mod clean_field_name_tests {
         assert_eq!(
             Helpers::clean_field_name(&Config::new(), "no_change_field".to_string()),
             "no_change_field".to_string()
+        );
+        assert_eq!(
+            CLEAN_FIELD_CACHE
+                .get(&clean_field_cache_key(false, "no_change_field"))
+                .map(|v| v.value().clone()),
+            Some("no_change_field".to_string())
+        );
+
+        // Already-clean names are cached (identity), so repeats are hits.
+        {
+            CLEAN_FIELD_CACHE.clear();
+        }
+        let cfg = Config::new();
+        assert_eq!(
+            Helpers::clean_field_name(&cfg, "p_rmc".to_string()),
+            "p_rmc".to_string()
+        );
+        assert_eq!(
+            CLEAN_FIELD_CACHE
+                .get(&clean_field_cache_key(false, "p_rmc"))
+                .map(|v| v.value().clone()),
+            Some("p_rmc".to_string())
+        );
+        assert_eq!(
+            Helpers::clean_field_name(&cfg, "p_rmc".to_string()),
+            "p_rmc".to_string()
         );
     }
 }
@@ -1858,81 +1920,75 @@ mod parse_namespace_field_tests {
     use serde_json::json;
     use serial_test::serial;
 
+    const PIPELINE: &str = "cube_events_json_to_partitioned";
+
+    fn parse(message: &Value, namespace: &str, cache: &mut HashMap<String, String>) -> String {
+        Helpers::parse_namespace_field(&Config::new(), message, namespace.to_string(), cache)
+    }
+
     #[test]
     #[serial]
     fn test_parse_namespace_field_with_empty_field() {
         let mut cache = HashMap::new();
-        let message = json!({"my_field": ""});
-        let namespace = "my_namespace".to_string();
         Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "my_field");
-        let result =
-            Helpers::parse_namespace_field(&Config::new(), &message, namespace, &mut cache);
+        let result = parse(&json!({"my_field": ""}), "my_namespace", &mut cache);
         assert_eq!(result, "my_namespace");
-        assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
+        assert_eq!(cache.get("my_namespace"), Some(&"my_namespace".to_string()));
     }
 
     #[test]
     #[serial]
     fn test_parse_namespace_field_with_missing_field() {
         let mut cache = HashMap::new();
-        let message = json!({"my_field": "blah"});
-        let namespace = "my_namespace".to_string();
         Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "abc");
-        let result =
-            Helpers::parse_namespace_field(&Config::new(), &message, namespace, &mut cache);
+        let result = parse(&json!({"my_field": "blah"}), "my_namespace", &mut cache);
         assert_eq!(result, "my_namespace");
-        assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
+        assert_eq!(cache.get("my_namespace"), Some(&"my_namespace".to_string()));
     }
 
     #[test]
     #[serial]
     fn test_parse_namespace_field_with_existing_namespace() {
         let mut cache = HashMap::new();
-        cache.insert("my_namespace".to_string(), "yes".to_string());
-        let message = json!({"my_field": "my_value"});
-        let namespace = "my_namespace".to_string();
+        cache.insert("my_namespace".to_string(), "cached_namespace".to_string());
         Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "");
-        let result =
-            Helpers::parse_namespace_field(&Config::new(), &message, namespace, &mut cache);
-        assert_eq!(result, "my_namespace");
-        assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
+        let result = parse(&json!({"my_field": "my_value"}), "my_namespace", &mut cache);
+        assert_eq!(result, "cached_namespace");
     }
 
     #[test]
     #[serial]
     fn test_parse_namespace_field_with_new_namespace() {
         let mut cache = HashMap::new();
-        let message = json!({"my_field": "my_value"});
-        let namespace = "my_namespace".to_string();
         Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "");
-        let result =
-            Helpers::parse_namespace_field(&Config::new(), &message, namespace, &mut cache);
+        let result = parse(&json!({"my_field": "my_value"}), "My Namespace", &mut cache);
         assert_eq!(result, "my_namespace");
-        assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
+        assert_eq!(cache.get("My Namespace"), Some(&"my_namespace".to_string()));
     }
 
     #[test]
     #[serial]
     fn test_parse_namespace_field_with_composite_key() {
         let mut cache = HashMap::new();
-        let message =
-            json!({"entity_field_1": "entity_value_1","entity_field_2": "entity_value_2"});
-        let namespace = "my_namespace".to_string();
         Config::setenv(
             "TRANSFORM_NAMESPACE_FIELDS",
             "entity_field_1,entity_field_2",
         );
-        let result =
-            Helpers::parse_namespace_field(&Config::new(), &message, namespace, &mut cache);
+        let message =
+            json!({"entity_field_1": "entity_value_1","entity_field_2": "entity_value_2"});
+        let result = parse(&message, "my_namespace", &mut cache);
         assert_eq!(result, "entity_value_1_entity_value_2");
-        assert_eq!(cache.get("my_namespace"), Some(&"yes".to_string()));
-        // assert_eq!(cache.get("entity_field_1,entity_field_2"), Some(&"yes".to_string()));
+        assert!(cache.is_empty());
     }
 
     #[test]
     #[serial]
     fn test_parse_namespace_field_with_neasted_composite_key() {
         let mut cache = HashMap::new();
+        Config::setenv(
+            "TRANSFORM_NAMESPACE_FIELDS",
+            "entity_field_1,entity_field_3.entity_field_3a",
+        );
         let message = json!({
             "entity_field_1": "entity_value_1",
             "entity_field_2": "entity_value_2",
@@ -1940,16 +1996,61 @@ mod parse_namespace_field_tests {
                 "entity_field_3a": "entity_value_3a",
             }
         });
-        let namespace = "my_namespace".to_string();
-        Config::setenv(
-            "TRANSFORM_NAMESPACE_FIELDS",
-            "entity_field_1,entity_field_3.entity_field_3a",
-        );
-        let result =
-            Helpers::parse_namespace_field(&Config::new(), &message, namespace, &mut cache);
+        let result = parse(&message, "my_namespace", &mut cache);
         assert_eq!(result, "entity_value_1_entity_value_3a");
-        assert_eq!(cache.get("my_namespace"), Some(&"yes".to_string()));
-        // assert_eq!(cache.get("entity_field_1,entity_field_2"), Some(&"yes".to_string()));
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn empty_value_cache_does_not_latch_later_records() {
+        let mut cache = HashMap::new();
+        Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "detail-type");
+        let unwrapped = json!({"raw_docket": "{}", "rmc": "tilcon"});
+        let envelope = json!({
+            "detail-type": "raw-docket",
+            "time": "2026-10-01T12:00:00Z",
+            "detail": {"raw_docket": "{}", "rmc": "tilcon"}
+        });
+        for _ in 0..1_000 {
+            assert_eq!(parse(&unwrapped, PIPELINE, &mut cache), PIPELINE);
+        }
+        assert_eq!(cache.get(PIPELINE), Some(&PIPELINE.to_string()));
+        assert_eq!(parse(&envelope, PIPELINE, &mut cache), "raw_docket");
+        assert_eq!(parse(&unwrapped, PIPELINE, &mut cache), PIPELINE);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn interleaved_detail_types_each_namespace_by_own_value() {
+        let mut cache = HashMap::new();
+        Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "detail-type");
+        for i in 0..64 {
+            let (detail_type, expected) = match i % 3 {
+                0 => (Some("raw-docket"), "raw_docket"),
+                1 => (Some("cloudcycle-docket"), "cloudcycle_docket"),
+                _ => (None, PIPELINE),
+            };
+            let message = match detail_type {
+                Some(value) => json!({"detail-type": value}),
+                None => json!({"rmc": "tilcon"}),
+            };
+            assert_eq!(parse(&message, PIPELINE, &mut cache), expected);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn non_string_namespace_field_does_not_panic() {
+        let mut cache = HashMap::new();
+        Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "detail-type");
+        let result = parse(
+            &json!({"detail-type": {"nested": true}}),
+            PIPELINE,
+            &mut cache,
+        );
+        assert_eq!(result, PIPELINE);
     }
 }
 
