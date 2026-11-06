@@ -40,7 +40,7 @@ scenarios:
     sink: file
     fixture: exact_arrow
     profile: none
-    required_perf: [sync, wal_persist]
+    required_perf: [sync, wal_persist, copy_ingest, copy_profile]
     asserts:
       identity: true
 
@@ -190,7 +190,7 @@ scenarios:
     sink: file
     fixture: exact_arrow
     profile: none
-    required_perf: [sync, wal_persist]
+    required_perf: [sync, wal_persist, copy_ingest, copy_profile]
     asserts:
       identity: true
 
@@ -200,7 +200,7 @@ scenarios:
     sink: file
     fixture: exact_arrow
     profile: none
-    required_perf: [sync, wal_persist]
+    required_perf: [sync, wal_persist, copy_ingest, copy_profile]
     asserts:
       identity: true
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import shutil
@@ -623,11 +624,25 @@ def ingest_profile_totals(events: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def jsonl_object_paths(output: Path) -> list[Path]:
+    gzipped = list(output.rglob("*.jsonl.gz"))
+    if gzipped:
+        return gzipped
+    return list(output.rglob("*.jsonl"))
+
+
+def read_jsonl_text(path: Path) -> str:
+    raw = path.read_bytes()
+    if path.name.endswith(".jsonl.gz") or raw.startswith(b"\x1f\x8b"):
+        raw = gzip.decompress(raw)
+    return raw.decode()
+
+
 def count_jsonl(output: Path) -> tuple[int, set[str]]:
     ids: set[str] = set()
     rows = 0
-    for path in output.rglob("*.jsonl"):
-        for line in path.read_text(encoding="utf-8").splitlines():
+    for path in jsonl_object_paths(output):
+        for line in read_jsonl_text(path).splitlines():
             if not line.strip():
                 continue
             rows += 1

@@ -190,6 +190,37 @@ class PerfCatalogTests(unittest.TestCase):
         for name in ("copy-b-json-json", "copy-stdin-file", "copy-socket-file"):
             self.assertTrue((catalog["scenarios"][name].get("asserts") or {}).get("identity"), name)
 
+    def test_copy_b_requires_copy_profile_phases(self) -> None:
+        catalog = load_catalog()
+        for name in ("copy-b-json-json", "copy-stdin-file", "copy-socket-file"):
+            phases = required_perf_for(catalog, catalog["scenarios"][name])
+            self.assertIn("copy_profile", phases, name)
+            self.assertIn("copy_ingest", phases, name)
+
+    def test_count_jsonl_reads_gzip_identity_objects(self) -> None:
+        import gzip
+
+        from run import count_jsonl
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "ns" / "part.jsonl.gz"
+            dest.parent.mkdir(parents=True)
+            dest.write_bytes(gzip.compress(b'{"id":1}\n{"id":2}\n'))
+            rows, ids = count_jsonl(Path(tmp))
+        self.assertEqual(rows, 2)
+        self.assertEqual(ids, {"1", "2"})
+
+    def test_count_jsonl_still_reads_plain_jsonl(self) -> None:
+        from run import count_jsonl
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "ns" / "part.jsonl"
+            dest.parent.mkdir(parents=True)
+            dest.write_text('{"id":1}\n{"id":2}\n', encoding="utf-8")
+            rows, ids = count_jsonl(Path(tmp))
+        self.assertEqual(rows, 2)
+        self.assertEqual(ids, {"1", "2"})
+
     def test_socket_copy_caps_once_idle_timeout(self) -> None:
         source = Path(HARNESS_DIR / "run.py").read_text(encoding="utf-8")
         fn = source.split("def run_copy_socket", 1)[1].split("\ndef ", 1)[0]
