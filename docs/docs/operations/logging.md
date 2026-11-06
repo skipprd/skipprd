@@ -45,6 +45,8 @@ On shutdown you may also see a drain line such as `Finalising: compactor drained
 
 Throughput lines (`Messages per Min`, `Uploads total`) are trends, not a pass/fail signal.
 
+`--log perf` keeps `skipprd::perf` PERF_EVENT lines and turns on COPY Instant timers (`skippr.perf_profile`). Use it for skippr-perf and local COPY benches, not production.
+
 ## Chaos testing
 
 `SKIPPR_CHAOS_MODE=yes` kills the process on purpose. You should see a SIGKILL, then a later run that recovers. Leave it off in production. See [Advanced settings](/configuration/advanced).

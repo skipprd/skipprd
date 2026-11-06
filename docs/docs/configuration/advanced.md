@@ -52,6 +52,10 @@ A bare `skipprd sync` already loops every `sync_frequency_seconds` on the pipeli
 
 Prefer the pipeline field in `skippr.yml` so each pipeline can differ.
 
+## COPY perf profile
+
+`skippr.perf_profile: true` (or `SKIPPR_PERF_PROFILE=yes`) times COPY ingest and compact and writes `copy_profile` / `copy_ingest` PERF_EVENT lines. `--log perf` turns the same timers on. Leave it unset in production — the clocks sit on the COPY hot path.
+
 ## Chaos testing
 
 `SKIPPR_CHAOS_MODE=yes` kills the process with SIGKILL at a random point 15–60 seconds into a run. Use it only to prove [exactly-once delivery](/concepts/exactly-once) under failure. Leave it unset in production.

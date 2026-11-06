@@ -157,6 +157,7 @@ Skipprd rejects any other root key, and any unknown key inside these sections, w
 | `wal_s3_bucket` | string | `skippr_s3_bucket` | Dedicated bucket for the write-ahead log when `WAL_STORAGE=s3`. See [WAL and buffering](/configuration/buffering). |
 | `store.type` | `fjall`, leftover `sled` | `fjall` | Local Skippr Store on `DATA_DIR`. Leftover `sled` maps to `fjall`. `dynamodb` is an error. See [Skippr Store](/configuration/skippr-store). |
 | `store.name` | string | none | Leftover YAML. Ignored. Not a remote table. |
+| `perf_profile` | bool | `false` | Time COPY ingest and compact hot paths and emit `copy_profile` / `copy_ingest` PERF_EVENT lines. Falls back to `SKIPPR_PERF_PROFILE`. Also on with `--log perf`. Leave unset in production. |
 
 The WAL backend is not a YAML key. Set it with the `WAL_STORAGE` environment variable or the `--wal-storage` flag, because it describes the machine Skipprd runs on rather than the data you move.
 

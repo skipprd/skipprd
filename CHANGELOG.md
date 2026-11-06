@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Quote-only `"`, `'`, or backtick datetime strings no longer panic COPY ingest on the wrapping-quote strip (`begin <= end`).
+- COPY namespace fields are parsed per record. An empty or missing value no longer latches later records onto the pipeline name.
+
+### Changed
+
+- COPY Identity JSONL objects are gzip (`.jsonl.gz`). CSV and XML Identity PUTs stay plain. Ingest and CDC grouped objects are unchanged.
+- COPY WAL codec 2 encodes on the ingest worker (`CopyPart` gzip members). The writer concatenates chunks and does not re-encode records. Codec 1 leftover parts still decode.
+- File source submits multiple payload tasks the way S3 does, instead of waiting on one group at a time.
+- COPY Instant timers and `copy_profile` / `copy_ingest` PERF_EVENT lines stay off unless `skippr.perf_profile`, `SKIPPR_PERF_PROFILE`, or `--log perf`.
+
 ## [16.0.0] - 2026-11-04
 
 ### Breaking

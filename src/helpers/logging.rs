@@ -4,6 +4,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 static mut CLI_LOGS_ENABLED: bool = false;
 static LOGGING_INIT: OnceLock<()> = OnceLock::new();
+static CLI_LOG_LEVEL: OnceLock<String> = OnceLock::new();
 
 const LOG_DIR_NAME: &str = "logs";
 const MAX_LOG_FILES: usize = 10;
@@ -29,6 +30,9 @@ hyper=warn,reqwest=warn,rustls=warn,h2=warn";
 
     let lvl = parse_log_level(level_opt.as_deref().unwrap_or("info"))
         .unwrap_or_else(|err| panic!("{err}"));
+    if enabled {
+        let _ = CLI_LOG_LEVEL.set(lvl.clone());
+    }
     let composed = env_filter_directives(&lvl, base_filter);
 
     let file_appender = build_file_appender();
@@ -159,6 +163,13 @@ pub fn cli_logs_enabled() -> bool {
     unsafe { CLI_LOGS_ENABLED }
 }
 
+pub fn cli_log_is_perf() -> bool {
+    CLI_LOG_LEVEL
+        .get()
+        .map(|level| level.as_str() == "perf")
+        .unwrap_or(false)
+}
+
 pub fn parse_log_level(raw: &str) -> Result<String, String> {
     let level = raw.to_ascii_lowercase();
     match level.as_str() {
@@ -206,6 +217,10 @@ mod tests {
         assert!(parse_log_level("verbose").is_err());
         assert_eq!(parse_log_level("perf").unwrap(), "perf");
         assert_eq!(parse_log_level("INFO").unwrap(), "info");
+        assert!(
+            !cli_log_is_perf(),
+            "--log perf is the only way cli_log_is_perf is true"
+        );
     }
 
     #[test]

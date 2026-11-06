@@ -24,7 +24,7 @@ When the same setting can come from more than one place, Skipprd resolves it lik
 | Setting | Order, first wins |
 |---|---|
 | Pipeline settings such as `buffer_threshold_bytes`, `data_dir`, `sync_frequency_seconds`, and `transform.*` | `skippr.yml` pipeline key → environment variable → built-in default |
-| `skippr.workspace`, `skippr.tenant`, `skippr.skippr_s3_bucket`, `skippr.skipprd_el_storage_mode` | `skippr.yml` → environment variable → built-in default |
+| `skippr.workspace`, `skippr.tenant`, `skippr.skippr_s3_bucket`, `skippr.skipprd_el_storage_mode`, `skippr.perf_profile` | `skippr.yml` → environment variable → built-in default. `--log perf` also turns `perf_profile` on. |
 | `skippr.wal_s3_bucket`, `skippr.store.type` | `skippr.yml` → CLI flag → environment variable → built-in default. Leftover `store.name` in YAML is ignored. |
 | `WAL_STORAGE` | `--wal-storage` flag → `WAL_STORAGE` environment variable → `disk` |
 | Which config file to read | `--config` → `SKIPPR_CONFIG_FILE` → `./skippr.yml` and the other default names |

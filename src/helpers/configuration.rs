@@ -133,6 +133,13 @@ pub struct Skippr {
     /// Live Skippr Store block. Lock: `docs/docs/maintainers/skippr-store-kv.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<SkipprStore>,
+    /// Time COPY ingest and compact hot paths and emit `copy_profile` PERF_EVENT lines. Default false (`SKIPPR_PERF_PROFILE`). Also on with `--log perf`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_flag",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub perf_profile: Option<bool>,
 }
 
 /// The one boolean-flag grammar for YAML and env: true/t/yes/1 and false/f/no/0,
@@ -2291,6 +2298,17 @@ impl Config {
         Self::yaml_bool_or_env(
             self.get_pipeline_config().chaos_mode,
             "SKIPPR_CHAOS_MODE",
+            "no",
+        )
+    }
+
+    pub fn perf_profile_enabled(&self) -> bool {
+        if crate::helpers::logging::cli_log_is_perf() {
+            return true;
+        }
+        Self::yaml_bool_or_env(
+            self.skippr.as_ref().and_then(|skippr| skippr.perf_profile),
+            "SKIPPR_PERF_PROFILE",
             "no",
         )
     }
@@ -5261,6 +5279,22 @@ pipelines:
                 .to_string();
             assert!(err.contains("unknown field"), "{key}: {err}");
         }
+    }
+
+    #[test]
+    fn perf_profile_yaml_flag_enables_copy_timers() {
+        let on: Config =
+            serde_yaml::from_str("skippr:\n  workspace: ws\n  perf_profile: true\npipelines: {}\n")
+                .unwrap();
+        assert_eq!(on.skippr.as_ref().unwrap().perf_profile, Some(true));
+        assert!(on.perf_profile_enabled());
+
+        let off: Config = serde_yaml::from_str(
+            "skippr:\n  workspace: ws\n  perf_profile: false\npipelines: {}\n",
+        )
+        .unwrap();
+        assert_eq!(off.skippr.as_ref().unwrap().perf_profile, Some(false));
+        assert!(!off.perf_profile_enabled());
     }
 
     #[test]

@@ -938,6 +938,7 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
     );
     // Stats tailer removed; catalogs built at end-of-run only
 
+    crate::metrics::copy_profile::set_enabled(config.perf_profile_enabled());
     crate::metrics::ingest_profile::reset_profile_counters();
     crate::metrics::copy_profile::reset_profile_counters();
     clear_runtime_source_schema_state();
