@@ -460,7 +460,10 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("linux_analyze", text)
         self.assertIn("build_linux_profile", text)
         self.assertIn("perf.folded", text)
-        self.assertIn("needs.linux_profile.result == 'success'", text)
+        analyze = text.split("\n  linux_analyze:")[1]
+        self.assertNotIn("needs.linux_profile.result == 'success'", analyze)
+        self.assertIn("needs.linux_profile.result != 'skipped'", analyze)
+        self.assertIn("!cancelled()", analyze)
         self.assertIn(
             "linux_contracts",
             text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0],

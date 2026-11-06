@@ -263,7 +263,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r) heaptrack
+          sudo apt-get install -y linux-tools-common linux-tools-$(uname -r) heaptrack
           if ! command -v duckdb >/dev/null 2>&1; then
             curl -fsSL https://install.duckdb.org | sh
             echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
@@ -310,7 +310,7 @@ jobs:
     name: bottlenecks vs new code
     needs:
       - linux_profile
-    if: needs.linux_profile.result == 'success'
+    if: needs.linux_profile.result != 'skipped' && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

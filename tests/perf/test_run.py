@@ -724,7 +724,10 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("linux_analyze", text)
         self.assertIn("build_linux_profile", text)
         self.assertIn("perf.folded", text)
-        self.assertIn("needs.linux_profile.result == 'success'", text)
+        analyze = text.split("\n  linux_analyze:")[1]
+        self.assertNotIn("needs.linux_profile.result == 'success'", analyze)
+        self.assertIn("needs.linux_profile.result != 'skipped'", analyze)
+        self.assertIn("!cancelled()", analyze)
         self.assertIn("perf-*-linux-flamegraph", text)
         self.assertNotIn("if: always() && needs.linux_profile.result != 'skipped'", text)
         self.assertIn("ingest-slow-flatten-duckdb", text)
@@ -760,6 +763,13 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("linux_contracts", profile_job)
         contracts = workflow.split("\n  linux_contracts:")[1].split("\n  build_linux:")[0]
         self.assertIn("test_release_sha_batteries.py", contracts)
+
+    def test_linux_profile_apt_skips_generic_kernel_tools(self) -> None:
+        text = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        profile = text.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0]
+        self.assertNotIn("linux-tools-generic", profile)
+        self.assertIn("linux-tools-$(uname -r)", profile)
+        self.assertIn("heaptrack", profile)
 
     def test_ci_does_not_skip_r2_cells(self) -> None:
         src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
