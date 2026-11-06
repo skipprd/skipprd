@@ -10,6 +10,7 @@ use skippr_object_writer::{
 };
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
+use skippr_runtime_sdk::serdes::output_format::ObjectBody;
 use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, manifest_object_name, persisted_object_write_matches,
     GroupedWriteReceipt, ObjectWriteManifest,
@@ -247,7 +248,8 @@ impl DataSink for DataSinkSftpPlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
+        let remote_file_path =
+            self.remote_file_path(ObjectBody::Grouped, &ctx.filename, &object_stem);
         let remote_manifest_path = format!(
             "{}/{}",
             self.config.remote_path.trim_end_matches('/'),
@@ -319,7 +321,8 @@ impl DataSink for DataSinkSftpPlugin {
                 "",
             )?
         };
-        let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
+        let remote_file_path =
+            self.remote_file_path(ObjectBody::Grouped, &ctx.filename, &object_stem);
         self.write_stream(stream, &remote_file_path).await?;
 
         info!("SFTP: uploaded to {}", remote_file_path);
@@ -341,7 +344,8 @@ impl DataSink for DataSinkSftpPlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
+        let remote_file_path =
+            self.remote_file_path(ObjectBody::Grouped, &ctx.filename, &object_stem);
         let remote_manifest_path = format!(
             "{}/{}",
             self.config.remote_path.trim_end_matches('/'),
@@ -383,7 +387,8 @@ impl DataSink for DataSinkSftpPlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
+        let remote_file_path =
+            self.remote_file_path(ObjectBody::Grouped, &ctx.filename, &object_stem);
         let remote_manifest_path = format!(
             "{}/{}",
             self.config.remote_path.trim_end_matches('/'),
@@ -433,7 +438,8 @@ impl DataSink for DataSinkSftpPlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
+        let remote_file_path =
+            self.remote_file_path(ObjectBody::Identity, &ctx.filename, &object_stem);
         self.write_copy_bytes(body, rows, &remote_file_path).await?;
         Ok(SinkWriteOutcome::Applied)
     }
@@ -463,10 +469,11 @@ impl DataSinkSftpPlugin {
         }
     }
 
-    fn remote_file_path(&self, filename: &str, object_stem: &str) -> String {
+    fn remote_file_path(&self, body: ObjectBody, filename: &str, object_stem: &str) -> String {
         let relative = self
             .output_layout
             .hive_object_key(
+                body,
                 self.config.remote_path.trim_matches('/'),
                 filename,
                 object_stem,
@@ -485,7 +492,8 @@ impl DataSinkSftpPlugin {
         chunk_index: u64,
     ) -> std::io::Result<(String, String, ObjectWriteManifest)> {
         let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
-        let remote_file_path = self.remote_file_path(&ctx.filename, &object_stem);
+        let remote_file_path =
+            self.remote_file_path(ObjectBody::Grouped, &ctx.filename, &object_stem);
         let remote_manifest_path = format!(
             "{}/{}",
             self.config.remote_path.trim_end_matches('/'),
@@ -667,15 +675,15 @@ impl DataSinkSftpPlugin {
         remote_file_path: &str,
     ) -> Result<ObjectWriteReceipt, std::io::Error> {
         use skippr_runtime_sdk::metrics::counters;
-        let format = self
+        let content_type = self
             .output_layout
-            .required_format()
+            .object_content_type(ObjectBody::Identity)
             .map_err(std::io::Error::other)?;
         counters::inc_uploads_in_flight();
         let result = identity_put_bytes(
             self.object_backend.clone(),
             remote_file_path,
-            format.content_type(),
+            content_type,
             body,
             rows,
         )
@@ -774,7 +782,7 @@ mod tests {
         };
 
         assert_eq!(
-            plugin.remote_file_path("", "apply-0001"),
+            plugin.remote_file_path(ObjectBody::Grouped, "", "apply-0001"),
             "/exports/root/apply-0001.parquet"
         );
         assert!(plugin
@@ -805,6 +813,7 @@ mod tests {
         };
         assert_eq!(
             plugin.remote_file_path(
+                ObjectBody::Grouped,
                 "buffer=test&namespace=events&partition=p_rmc=EU1&time=1645296045",
                 "apply-0001",
             ),
@@ -814,13 +823,13 @@ mod tests {
         csv.output_layout.format =
             Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Csv);
         assert_eq!(
-            csv.remote_file_path("namespace=events", "apply-0001"),
+            csv.remote_file_path(ObjectBody::Grouped, "namespace=events", "apply-0001"),
             "/exports/root/events/apply-0001.csv"
         );
         csv.output_layout.format =
             Some(skippr_runtime_sdk::serdes::output_format::OutputFormat::Xml);
         assert_eq!(
-            csv.remote_file_path("namespace=events", "apply-0001"),
+            csv.remote_file_path(ObjectBody::Grouped, "namespace=events", "apply-0001"),
             "/exports/root/events/apply-0001.xml"
         );
     }
@@ -847,19 +856,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("skippr-sftp-copy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let remote = plugin.remote_file_path("namespace=events", "apply-copy");
+        let remote =
+            plugin.remote_file_path(ObjectBody::Identity, "namespace=events", "apply-copy");
         let path = dir.join(remote.trim_start_matches('/'));
         let body = b"{\"id\":1}\n".to_vec();
         skippr_object_writer::identity_put_bytes(
             std::sync::Arc::new(AtomicFileBackend::new()),
             path.to_string_lossy(),
-            skippr_runtime_sdk::serdes::output_format::OutputFormat::Jsonl.content_type(),
+            plugin
+                .output_layout
+                .object_content_type(ObjectBody::Identity)
+                .unwrap(),
             body.clone(),
             1,
         )
         .await
         .unwrap();
-        assert_eq!(remote, "/exports/root/events/apply-copy.jsonl");
+        assert_eq!(remote, "/exports/root/events/apply-copy.jsonl.gz");
         assert_eq!(std::fs::read(&path).unwrap(), body);
         let _ = std::fs::remove_dir_all(&dir);
     }

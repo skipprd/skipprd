@@ -26,6 +26,15 @@ pub enum OutputFormat {
     Xml,
 }
 
+/// Which sink write produced an object body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObjectBody {
+    /// Arrow batches the sink encodes (ingest, CDC, deadletters).
+    Grouped,
+    /// `type: copy` bytes from `encode_copy`, written as-is.
+    Identity,
+}
+
 impl OutputFormat {
     /// Error when a file sink is asked to use table encoding.
     pub const FILE_SINK_NEEDS_PARQUET_OR_JSONL: &'static str =
@@ -61,6 +70,28 @@ impl OutputFormat {
             Self::Csv => "text/csv",
             Self::Xml => "application/xml",
             Self::Native => "application/octet-stream",
+        }
+    }
+
+    /// Identity PUT JSONL is gzip so readers that decompress on `.gz`
+    /// (S3 source, Firehose consumers) read copy output unchanged.
+    pub fn is_gzip_body(self, body: ObjectBody) -> bool {
+        matches!((body, self), (ObjectBody::Identity, Self::Jsonl))
+    }
+
+    pub fn object_extension(self, body: ObjectBody) -> &'static str {
+        if self.is_gzip_body(body) {
+            "jsonl.gz"
+        } else {
+            self.extension()
+        }
+    }
+
+    pub fn object_content_type(self, body: ObjectBody) -> &'static str {
+        if self.is_gzip_body(body) {
+            "application/gzip"
+        } else {
+            self.content_type()
         }
     }
 
@@ -239,6 +270,42 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
+
+    #[test]
+    fn only_identity_jsonl_bodies_are_gzip() {
+        for format in [
+            OutputFormat::Parquet,
+            OutputFormat::Jsonl,
+            OutputFormat::Csv,
+            OutputFormat::Xml,
+        ] {
+            assert!(!format.is_gzip_body(ObjectBody::Grouped));
+            assert_eq!(
+                format.object_extension(ObjectBody::Grouped),
+                format.extension()
+            );
+            assert_eq!(
+                format.object_content_type(ObjectBody::Grouped),
+                format.content_type()
+            );
+        }
+        assert_eq!(
+            OutputFormat::Jsonl.object_extension(ObjectBody::Identity),
+            "jsonl.gz"
+        );
+        assert_eq!(
+            OutputFormat::Jsonl.object_content_type(ObjectBody::Identity),
+            "application/gzip"
+        );
+        assert_eq!(
+            OutputFormat::Csv.object_extension(ObjectBody::Identity),
+            "csv"
+        );
+        assert_eq!(
+            OutputFormat::Xml.object_extension(ObjectBody::Identity),
+            "xml"
+        );
+    }
 
     #[test]
     fn parse_accepts_parquet_jsonl_and_json_alias() {

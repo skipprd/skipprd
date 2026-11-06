@@ -1,3 +1,7 @@
+use std::io::Write;
+
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -5,7 +9,15 @@ use thiserror::Error;
 use crate::helpers::configuration::Config;
 use crate::serdes::decode::{decode_ingest, DecodedIngest};
 use crate::serdes::input_format::InputFormat;
-use crate::serdes::output_format::OutputFormat;
+use crate::serdes::output_format::{ObjectBody, OutputFormat};
+
+fn gzip(plain: &[u8]) -> Result<Vec<u8>, CopyEncodeError> {
+    let mut encoder = GzEncoder::new(Vec::with_capacity(plain.len() / 4), Compression::fast());
+    encoder
+        .write_all(plain)
+        .and_then(|()| encoder.finish())
+        .map_err(|err| CopyEncodeError::Output(format!("gzip copy body: {err}")))
+}
 
 /// Format-agnostic copy WAL frame. `identity` is original NDJSON source bytes,
 /// not sink encode intent.
@@ -133,17 +145,23 @@ pub fn decode_copy_bytes(
     }
 }
 
+/// Identity PUT body for one compaction transaction.
 pub fn encode_copy(
     output: OutputFormat,
     records: &[CopyWalRecord],
 ) -> Result<Vec<u8>, CopyEncodeError> {
-    match output {
+    let plain = match output {
         OutputFormat::Jsonl => encode_jsonl(records),
         OutputFormat::Csv => encode_csv(records),
         OutputFormat::Xml => encode_xml(records),
         OutputFormat::Parquet | OutputFormat::Native => Err(CopyEncodeError::Output(format!(
             "type: copy cannot encode {output}"
         ))),
+    }?;
+    if output.is_gzip_body(ObjectBody::Identity) {
+        gzip(&plain)
+    } else {
+        Ok(plain)
     }
 }
 
@@ -384,6 +402,27 @@ mod tests {
         records[0].value.as_object().cloned().unwrap()
     }
 
+    fn is_gzip(bytes: &[u8]) -> bool {
+        bytes.starts_with(&[0x1f, 0x8b])
+    }
+
+    fn gunzip_jsonl(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(bytes)
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    }
+
+    fn plain_body(output: OutputFormat, body: &[u8]) -> Vec<u8> {
+        if output.is_gzip_body(ObjectBody::Identity) {
+            gunzip_jsonl(body)
+        } else {
+            body.to_vec()
+        }
+    }
+
     #[test]
     fn nine_cell_decode_encode_matrix() {
         let config = Config::new();
@@ -404,7 +443,9 @@ mod tests {
                     OutputFormat::Xml => InputFormat::Xml,
                     _ => unreachable!(),
                 };
-                let again = decode_copy_bytes(&config, round_trip_format, &encoded).unwrap();
+                let again =
+                    decode_copy_bytes(&config, round_trip_format, &plain_body(output, &encoded))
+                        .unwrap();
                 let object = cell_map(&again);
                 for (key, expect) in FIXTURE {
                     assert_eq!(
@@ -474,7 +515,8 @@ mod tests {
         let decoded = decode_copy_bytes(&config, InputFormat::Json, payload.as_bytes()).unwrap();
         assert_eq!(decoded[0].identity.as_deref(), Some(payload.as_bytes()));
         let encoded = encode_copy(OutputFormat::Jsonl, &decoded).unwrap();
-        assert_eq!(encoded, payload.as_bytes());
+        assert!(is_gzip(&encoded));
+        assert_eq!(gunzip_jsonl(&encoded), payload.as_bytes());
     }
 
     #[test]
@@ -484,9 +526,12 @@ mod tests {
             decode_copy_bytes(&config, InputFormat::Json, br#"[{"id":1},{"id":2}]"#).unwrap();
         assert_eq!(decoded.len(), 2);
         assert!(decoded.iter().all(|record| record.identity.is_none()));
-        let encoded =
-            String::from_utf8(encode_copy(OutputFormat::Jsonl, &decoded).unwrap()).unwrap();
-        assert_eq!(encoded, "{\"id\":1}\n{\"id\":2}\n");
+        let encoded = encode_copy(OutputFormat::Jsonl, &decoded).unwrap();
+        assert!(is_gzip(&encoded));
+        assert_eq!(
+            String::from_utf8(gunzip_jsonl(&encoded)).unwrap(),
+            "{\"id\":1}\n{\"id\":2}\n"
+        );
     }
 
     #[test]
@@ -495,9 +540,39 @@ mod tests {
         let payload = "{\n  \"id\": 1\n}\n";
         let decoded = decode_copy_bytes(&config, InputFormat::Json, payload.as_bytes()).unwrap();
         assert!(decoded[0].identity.is_none());
-        let encoded =
-            String::from_utf8(encode_copy(OutputFormat::Jsonl, &decoded).unwrap()).unwrap();
-        assert_eq!(encoded, "{\"id\":1}\n");
+        let encoded = encode_copy(OutputFormat::Jsonl, &decoded).unwrap();
+        assert!(is_gzip(&encoded));
+        assert_eq!(
+            String::from_utf8(gunzip_jsonl(&encoded)).unwrap(),
+            "{\"id\":1}\n"
+        );
+    }
+
+    #[test]
+    fn copy_jsonl_gzip_roundtrips_and_leaves_csv_xml_plain() {
+        let config = Config::new();
+        let decoded = decode_copy_bytes(&config, InputFormat::Json, br#"{"id":1}"#).unwrap();
+        let jsonl = encode_copy(OutputFormat::Jsonl, &decoded).unwrap();
+        assert!(is_gzip(&jsonl));
+        let again = decode_copy_bytes(&config, InputFormat::Json, &gunzip_jsonl(&jsonl)).unwrap();
+        assert_eq!(again[0].value["id"], 1);
+        let csv = encode_copy(OutputFormat::Csv, &decoded).unwrap();
+        assert!(!is_gzip(&csv));
+        assert!(std::str::from_utf8(&csv).unwrap().contains("id"));
+        let xml = encode_copy(OutputFormat::Xml, &decoded).unwrap();
+        assert!(!is_gzip(&xml));
+        assert!(std::str::from_utf8(&xml).unwrap().contains("<id>"));
+    }
+
+    #[test]
+    fn copy_jsonl_gzip_is_deterministic() {
+        let config = Config::new();
+        let decoded =
+            decode_copy_bytes(&config, InputFormat::Json, b"{\"id\":1}\n{\"id\":2}\n").unwrap();
+        assert_eq!(
+            encode_copy(OutputFormat::Jsonl, &decoded).unwrap(),
+            encode_copy(OutputFormat::Jsonl, &decoded).unwrap()
+        );
     }
 
     #[test]
@@ -602,7 +677,14 @@ mod tests {
         let encoded = encode_copy(OutputFormat::Jsonl, &decoded).unwrap();
         let estimate: u64 = decoded.iter().map(CopyWalRecord::estimated_wal_bytes).sum();
         let elapsed = started.elapsed();
-        assert_eq!(encoded, payload.as_bytes());
+        assert!(is_gzip(&encoded));
+        assert_eq!(gunzip_jsonl(&encoded), payload.as_bytes());
+        assert!(
+            encoded.len() < payload.len(),
+            "gzip jsonl should shrink {n} similar rows ({} vs {})",
+            encoded.len(),
+            payload.len()
+        );
         assert!(estimate >= payload.len() as u64);
         assert!(
             elapsed.as_millis() < 1_500,
@@ -628,7 +710,8 @@ mod tests {
         let estimate: u64 = decoded.iter().map(CopyWalRecord::estimated_wal_bytes).sum();
         let elapsed = started.elapsed();
         assert_eq!(decoded.len(), n);
-        assert_eq!(encoded, payload.as_bytes());
+        assert!(is_gzip(&encoded));
+        assert_eq!(gunzip_jsonl(&encoded), payload.as_bytes());
         println!(
             "copy identity jsonl rows={n} input_bytes={} duration_ms={:.2} records_per_sec={:.0} estimated_wal_bytes={estimate}",
             payload.len(),

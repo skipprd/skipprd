@@ -31,7 +31,7 @@ def download_cell(client, bucket: str, prefix: str, dest: Path, sink_fmt: str) -
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents") or []:
             key = obj["Key"]
-            if not key.endswith(f".{sink_fmt}"):
+            if not key.endswith(matrix.sink_suffix(sink_fmt)):
                 continue
             relative = key[len(prefix) :].lstrip("/")
             path = dest / relative
@@ -115,7 +115,7 @@ def run_cell(
         ]
         remaining = list(expect)
         for path in written:
-            body = path.read_bytes()
+            body = matrix.read_sink_body(path, sink_fmt)
             if body and not body.endswith(b"\n"):
                 print(f"{cell}: {path} missing trailing newline", file=sys.stderr)
                 return 1

@@ -21,7 +21,7 @@ use skippr_object_writer::{
 use skippr_runtime_sdk::plugins::cdc;
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
-use skippr_runtime_sdk::serdes::output_format::OutputFormat;
+use skippr_runtime_sdk::serdes::output_format::{ObjectBody, OutputFormat};
 use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, manifest_object_name, persisted_object_write_matches,
     GroupedWriteReceipt, ObjectWriteManifest,
@@ -73,6 +73,7 @@ impl DataSink for FileSinkRuntimePlugin {
             &ctx.filename,
             &object_stem,
             &self.output_layout,
+            ObjectBody::Grouped,
         )?;
         let manifest_file = output_file.with_file_name(manifest_object_name(
             output_file
@@ -175,6 +176,7 @@ impl DataSink for FileSinkRuntimePlugin {
             &ctx.filename,
             &object_stem,
             &self.output_layout,
+            ObjectBody::Grouped,
         )?;
         let manifest_file = output_file.with_file_name(manifest_object_name(
             output_file
@@ -228,6 +230,7 @@ impl DataSink for FileSinkRuntimePlugin {
             &ctx.filename,
             &object_stem,
             &self.output_layout,
+            ObjectBody::Grouped,
         )?;
         let manifest_file = output_file.with_file_name(manifest_object_name(
             output_file
@@ -301,15 +304,16 @@ impl DataSink for FileSinkRuntimePlugin {
             &ctx.filename,
             &object_stem,
             &self.output_layout,
+            ObjectBody::Identity,
         )?;
-        let format = self
+        let content_type = self
             .output_layout
-            .required_format()
+            .object_content_type(ObjectBody::Identity)
             .map_err(io::Error::other)?;
         identity_put_bytes(
             self.object_backend.clone(),
             output_file.to_string_lossy(),
-            format.content_type(),
+            content_type,
             body,
             rows,
         )
@@ -390,6 +394,7 @@ async fn sync_file_sink(
         &filename,
         &object_stem,
         output_layout,
+        ObjectBody::Grouped,
     )?;
     let format = output_layout.required_format().map_err(io::Error::other)?;
     let schema = stream.schema();
@@ -447,8 +452,14 @@ fn legacy_file_chunk_manifest(
 ) -> io::Result<(PathBuf, PathBuf, ObjectWriteManifest)> {
     let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
     let chunk_filename = ctx.chunk_filename(chunk_index, false);
-    let output_file =
-        output_file_path(data_dir, None, &chunk_filename, &object_stem, output_layout)?;
+    let output_file = output_file_path(
+        data_dir,
+        None,
+        &chunk_filename,
+        &object_stem,
+        output_layout,
+        ObjectBody::Grouped,
+    )?;
     let manifest_file = output_file.with_file_name(manifest_object_name(
         output_file
             .file_name()
@@ -586,10 +597,11 @@ fn output_file_path(
     filename: &str,
     object_stem: &str,
     output_layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
+    body: ObjectBody,
 ) -> io::Result<std::path::PathBuf> {
     Ok(lake_root(data_dir, output_dir).join(
         output_layout
-            .hive_object_key("", filename, object_stem)
+            .hive_object_key(body, "", filename, object_stem)
             .map_err(io::Error::other)?,
     ))
 }
@@ -610,6 +622,7 @@ mod tests {
                     format: Some(OutputFormat::Parquet),
                     ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
                 },
+                ObjectBody::Grouped,
             )
             .unwrap(),
             PathBuf::from("/data/output/events/apply-0001.parquet")
@@ -627,9 +640,22 @@ mod tests {
                 "namespace=events",
                 "apply-0001",
                 &layout,
+                ObjectBody::Grouped,
             )
             .unwrap(),
             PathBuf::from("/lake/events/apply-0001.jsonl")
+        );
+        assert_eq!(
+            output_file_path(
+                "/data",
+                Some("/lake"),
+                "namespace=events",
+                "apply-0001",
+                &layout,
+                ObjectBody::Identity,
+            )
+            .unwrap(),
+            PathBuf::from("/lake/events/apply-0001.jsonl.gz")
         );
     }
 
@@ -648,6 +674,7 @@ mod tests {
                 "buffer=test&namespace=events&partition=p_rmc=EU1&time=1645296045",
                 "apply-0001",
                 &layout,
+                ObjectBody::Grouped,
             )
             .unwrap(),
             PathBuf::from(
@@ -661,12 +688,20 @@ mod tests {
         for (format, ext) in [
             (OutputFormat::Csv, "csv"),
             (OutputFormat::Xml, "xml"),
-            (OutputFormat::Jsonl, "jsonl"),
+            (OutputFormat::Jsonl, "jsonl.gz"),
         ] {
             let mut layout = skippr_runtime_sdk::protocol::RuntimeOutputLayout::default();
             layout.format = Some(format);
             assert_eq!(
-                output_file_path("/data", None, "namespace=events", "apply-0001", &layout).unwrap(),
+                output_file_path(
+                    "/data",
+                    None,
+                    "namespace=events",
+                    "apply-0001",
+                    &layout,
+                    ObjectBody::Identity,
+                )
+                .unwrap(),
                 PathBuf::from(format!("/data/output/events/apply-0001.{ext}"))
             );
         }
@@ -715,7 +750,7 @@ mod tests {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
                     stack.push(path);
-                } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+                } else if path.to_string_lossy().ends_with(".jsonl.gz") {
                     written.push(path);
                 }
             }

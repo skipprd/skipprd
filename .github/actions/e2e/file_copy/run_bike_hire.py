@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import io
 import json
 import os
@@ -127,7 +128,7 @@ def main() -> int:
     jsonl_cfg = work / "jsonl" / "skippr.yml"
     jsonl_cfg.write_text(write_cfg(template, source, jsonl_out, "jsonl", partition))
     run_sync(skipprd, jsonl_cfg, jsonl_data)
-    jsonl_files = list(jsonl_out.rglob("*.jsonl"))
+    jsonl_files = list(jsonl_out.rglob("*.jsonl.gz"))
     if not jsonl_files:
         print(f"bike_hire jsonl: no objects under {jsonl_out}", file=sys.stderr)
         return 1
@@ -142,7 +143,9 @@ def main() -> int:
         return 1
     written = 0
     for path in jsonl_files:
-        written += sum(1 for line in path.read_text().splitlines() if line.strip())
+        written += sum(
+            1 for line in gzip.decompress(path.read_bytes()).decode().splitlines() if line.strip()
+        )
     if written != len(records):
         print(
             f"bike_hire jsonl: expected {len(records)} records, got {written}",

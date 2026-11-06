@@ -17,6 +17,7 @@ use crate::plugins::cdc::{
 };
 use crate::plugins::source_contract::{SinkWritePolicySupport, SourceNamespaceContract};
 use crate::plugins::{AlterSupport, SinkWriteOutcome};
+pub use crate::serdes::output_format::ObjectBody;
 use crate::serdes::output_format::OutputFormat;
 use crate::sink_apply_identity::SinkApplyEnvelopeV2;
 use serde::{Deserialize, Serialize};
@@ -311,12 +312,17 @@ impl RuntimeOutputLayout {
         Ok(format)
     }
 
-    pub fn object_extension(&self) -> Result<&'static str, String> {
-        Ok(self.required_format()?.extension())
+    pub fn object_extension(&self, body: ObjectBody) -> Result<&'static str, String> {
+        Ok(self.required_format()?.object_extension(body))
+    }
+
+    pub fn object_content_type(&self, body: ObjectBody) -> Result<&'static str, String> {
+        Ok(self.required_format()?.object_content_type(body))
     }
 
     pub fn hive_object_key(
         &self,
+        body: ObjectBody,
         prefix: &str,
         filename: &str,
         object_stem: &str,
@@ -325,7 +331,7 @@ impl RuntimeOutputLayout {
             prefix,
             filename,
             object_stem,
-            self.object_extension()?,
+            self.object_extension(body)?,
             self.time_partition_granularity.as_deref(),
             self.time_partition_prefix.as_deref(),
         ))
@@ -1557,9 +1563,15 @@ mod tests {
     fn object_layout_requires_format() {
         let missing = RuntimeOutputLayout::default();
         assert!(missing.required_format().is_err());
-        assert!(missing.object_extension().is_err());
+        assert!(missing.object_extension(ObjectBody::Grouped).is_err());
+        assert!(missing.object_content_type(ObjectBody::Identity).is_err());
         assert!(missing
-            .hive_object_key("warehouse", "namespace=events", "apply-0001")
+            .hive_object_key(
+                ObjectBody::Grouped,
+                "warehouse",
+                "namespace=events",
+                "apply-0001"
+            )
             .is_err());
         let native = RuntimeOutputLayout {
             format: Some(OutputFormat::Native),
@@ -1571,12 +1583,35 @@ mod tests {
             ..RuntimeOutputLayout::default()
         };
         assert_eq!(layout.required_format().unwrap(), OutputFormat::Jsonl);
-        assert_eq!(layout.object_extension().unwrap(), "jsonl");
+        assert_eq!(
+            layout.object_extension(ObjectBody::Grouped).unwrap(),
+            "jsonl"
+        );
         assert_eq!(
             layout
-                .hive_object_key("warehouse", "namespace=events", "apply-0001")
+                .hive_object_key(
+                    ObjectBody::Grouped,
+                    "warehouse",
+                    "namespace=events",
+                    "apply-0001"
+                )
                 .unwrap(),
             "warehouse/events/apply-0001.jsonl"
+        );
+        assert_eq!(
+            layout
+                .hive_object_key(
+                    ObjectBody::Identity,
+                    "warehouse",
+                    "namespace=events",
+                    "apply-0001"
+                )
+                .unwrap(),
+            "warehouse/events/apply-0001.jsonl.gz"
+        );
+        assert_eq!(
+            layout.object_content_type(ObjectBody::Identity).unwrap(),
+            "application/gzip"
         );
         let hive = RuntimeOutputLayout {
             format: Some(OutputFormat::Parquet),
@@ -1586,6 +1621,7 @@ mod tests {
         };
         assert_eq!(
             hive.hive_object_key(
+                ObjectBody::Grouped,
                 "warehouse",
                 "buffer=test&namespace=events&partition=p_rmc=EU1&time=1645296045",
                 "apply-0001",

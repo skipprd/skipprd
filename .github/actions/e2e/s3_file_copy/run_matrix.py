@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import io
 import json
 import os
@@ -35,8 +36,22 @@ CELLS = [
 ]
 
 
+def sink_suffix(sink_fmt: str) -> str:
+    """Copy JSONL objects are gzip (`.jsonl.gz`); csv/xml stay plain."""
+    return ".jsonl.gz" if sink_fmt == "jsonl" else f".{sink_fmt}"
+
+
+def read_sink_body(path: Path, sink_fmt: str) -> bytes:
+    body = path.read_bytes()
+    return gzip.decompress(body) if sink_fmt == "jsonl" else body
+
+
+def list_sink_objects(root: Path, sink_fmt: str) -> list[Path]:
+    return list(root.rglob(f"*{sink_suffix(sink_fmt)}"))
+
+
 def count_records(path: Path, sink_fmt: str) -> int:
-    text = path.read_text()
+    text = read_sink_body(path, sink_fmt).decode()
     if sink_fmt == "jsonl":
         return sum(1 for line in text.splitlines() if line.strip())
     if sink_fmt == "csv":
@@ -66,7 +81,7 @@ def assert_nested_csv(paths: list[Path]) -> str | None:
 
 
 def record_ids(path: Path, sink_fmt: str) -> set[str]:
-    text = path.read_text()
+    text = read_sink_body(path, sink_fmt).decode()
     if sink_fmt == "jsonl":
         return {
             str(json.loads(line)["id"])
@@ -134,7 +149,7 @@ def run_cell(
         ],
         env=env,
     )
-    written = list(out.rglob(f"*.{sink_fmt}"))
+    written = list_sink_objects(out, sink_fmt)
     if not written:
         print(f"{cell}: no {sink_fmt} objects under {out}", file=sys.stderr)
         return 1
@@ -159,7 +174,7 @@ def run_cell(
         ]
         remaining = list(expect)
         for path in written:
-            body = path.read_bytes()
+            body = read_sink_body(path, sink_fmt)
             if body and not body.endswith(b"\n"):
                 print(f"{cell}: {path} missing trailing newline", file=sys.stderr)
                 return 1

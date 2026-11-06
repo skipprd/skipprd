@@ -14,7 +14,7 @@ use skippr_object_writer::{
 };
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
-use skippr_runtime_sdk::serdes::output_format::OutputFormat;
+use skippr_runtime_sdk::serdes::output_format::{ObjectBody, OutputFormat};
 use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, manifest_object_name, persisted_object_write_matches,
     GroupedWriteReceipt, ObjectWriteManifest,
@@ -71,7 +71,8 @@ impl DataSink for DataSinkGcsPlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let final_key =
+            self.object_key_for_filename(ObjectBody::Grouped, &ctx.filename, &object_stem);
         let manifest_path = ObjectPath::from(manifest_object_name(&final_key));
         let expected_manifest = ObjectWriteManifest::from_context(
             ctx.compaction_id,
@@ -131,7 +132,8 @@ impl DataSink for DataSinkGcsPlugin {
                 "",
             )?
         };
-        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let final_key =
+            self.object_key_for_filename(ObjectBody::Grouped, &ctx.filename, &object_stem);
         self.write_stream(stream, &final_key).await?;
         info!("GCS: uploaded gs://{}/{}", self.config.bucket, final_key);
         Ok(())
@@ -152,7 +154,8 @@ impl DataSink for DataSinkGcsPlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let final_key =
+            self.object_key_for_filename(ObjectBody::Grouped, &ctx.filename, &object_stem);
         let manifest_path = ObjectPath::from(manifest_object_name(&final_key));
         let expected_manifest = ObjectWriteManifest::from_context(
             ctx.compaction_id.clone(),
@@ -185,7 +188,8 @@ impl DataSink for DataSinkGcsPlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let final_key =
+            self.object_key_for_filename(ObjectBody::Grouped, &ctx.filename, &object_stem);
         let manifest_path = ObjectPath::from(manifest_object_name(&final_key));
         let expected_manifest = ObjectWriteManifest::from_context(
             ctx.compaction_id.clone(),
@@ -226,7 +230,8 @@ impl DataSink for DataSinkGcsPlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let final_key =
+            self.object_key_for_filename(ObjectBody::Identity, &ctx.filename, &object_stem);
         self.write_copy_bytes(body, rows, &final_key).await?;
         Ok(SinkWriteOutcome::Applied)
     }
@@ -264,9 +269,15 @@ impl DataSinkGcsPlugin {
         })
     }
 
-    fn object_key_for_filename(&self, filename: &str, object_stem: &str) -> String {
+    fn object_key_for_filename(
+        &self,
+        body: ObjectBody,
+        filename: &str,
+        object_stem: &str,
+    ) -> String {
         self.output_layout
             .hive_object_key(
+                body,
                 self.config
                     .prefix
                     .as_deref()
@@ -285,7 +296,8 @@ impl DataSinkGcsPlugin {
     ) -> io::Result<(String, ObjectPath, ObjectWriteManifest)> {
         let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
         let chunk_filename = ctx.chunk_filename(chunk_index, false);
-        let final_key = self.object_key_for_filename(&chunk_filename, &object_stem);
+        let final_key =
+            self.object_key_for_filename(ObjectBody::Grouped, &chunk_filename, &object_stem);
         let manifest_path = ObjectPath::from(manifest_object_name(&final_key));
         let manifest = ObjectWriteManifest::from_context(
             legacy_chunk_idempotency_key(&ctx.compaction_id, chunk_index),
@@ -446,15 +458,15 @@ impl DataSinkGcsPlugin {
         final_key: &str,
     ) -> io::Result<ObjectWriteReceipt> {
         use skippr_runtime_sdk::metrics::counters;
-        let format = self
+        let content_type = self
             .output_layout
-            .required_format()
+            .object_content_type(ObjectBody::Identity)
             .map_err(io::Error::other)?;
         counters::inc_uploads_in_flight();
         let result = identity_put_bytes(
             self.object_backend.clone(),
             final_key,
-            format.content_type(),
+            content_type,
             body,
             rows,
         )
@@ -564,7 +576,7 @@ mod tests {
         let plugin = test_plugin(store);
 
         assert_eq!(
-            plugin.object_key_for_filename("namespace=events", "apply-0001"),
+            plugin.object_key_for_filename(ObjectBody::Grouped, "namespace=events", "apply-0001"),
             "root/events/apply-0001.parquet"
         );
     }
@@ -577,6 +589,7 @@ mod tests {
         plugin.output_layout.time_partition_prefix = Some("p_".into());
         assert_eq!(
             plugin.object_key_for_filename(
+                ObjectBody::Grouped,
                 "buffer=test&namespace=events&partition=p_rmc=EU1&time=1645296045",
                 "apply-0001",
             ),
@@ -585,19 +598,24 @@ mod tests {
         plugin.output_layout.format = Some(OutputFormat::Jsonl);
         assert_eq!(
             plugin.object_key_for_filename(
+                ObjectBody::Grouped,
                 "buffer=test&namespace=events&partition=region%252Dus&time=1645296045",
                 "apply-0001",
             ),
             "root/events/region/us/p_year=2022/p_month=2/p_day=19/apply-0001.jsonl"
         );
+        assert_eq!(
+            plugin.object_key_for_filename(ObjectBody::Identity, "namespace=events", "apply-0001"),
+            "root/events/apply-0001.jsonl.gz"
+        );
         plugin.output_layout.format = Some(OutputFormat::Csv);
         assert_eq!(
-            plugin.object_key_for_filename("namespace=events", "apply-0001"),
+            plugin.object_key_for_filename(ObjectBody::Grouped, "namespace=events", "apply-0001"),
             "root/events/apply-0001.csv"
         );
         plugin.output_layout.format = Some(OutputFormat::Xml);
         assert_eq!(
-            plugin.object_key_for_filename("namespace=events", "apply-0001"),
+            plugin.object_key_for_filename(ObjectBody::Grouped, "namespace=events", "apply-0001"),
             "root/events/apply-0001.xml"
         );
     }
@@ -608,7 +626,8 @@ mod tests {
         let mut plugin = test_plugin(store.clone());
         plugin.output_layout.format = Some(OutputFormat::Csv);
         let body = b"id,region\n1,eu\n".to_vec();
-        let key = plugin.object_key_for_filename("namespace=events", "apply-copy");
+        let key =
+            plugin.object_key_for_filename(ObjectBody::Identity, "namespace=events", "apply-copy");
         plugin
             .write_copy_bytes(body.clone(), 1, &key)
             .await

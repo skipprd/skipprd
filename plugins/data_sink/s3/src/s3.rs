@@ -14,7 +14,7 @@ use skippr_object_writer::{
 };
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
-use skippr_runtime_sdk::serdes::output_format::OutputFormat;
+use skippr_runtime_sdk::serdes::output_format::{ObjectBody, OutputFormat};
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, persisted_object_write_matches, sidecar_manifest_object_key,
@@ -293,7 +293,8 @@ impl DataSink for DataSinkS3Plugin {
         {
             return Ok(SinkWriteOutcome::AlreadyApplied);
         }
-        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let final_key =
+            self.object_key_for_filename(ObjectBody::Grouped, &ctx.filename, &object_stem);
         let stream = match ctx.cdc_ctx {
             Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
             None => stream,
@@ -334,7 +335,8 @@ impl DataSink for DataSinkS3Plugin {
                 .await?;
             return Ok(SinkWriteOutcome::Applied);
         }
-        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let final_key =
+            self.object_key_for_filename(ObjectBody::Grouped, &ctx.filename, &object_stem);
         let (stream, _stream_progress) = reader.into_stream();
         let stream = match ctx.cdc_ctx {
             Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
@@ -356,7 +358,8 @@ impl DataSink for DataSinkS3Plugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let final_key =
+            self.object_key_for_filename(ObjectBody::Identity, &ctx.filename, &object_stem);
         self.write_copy_bytes(body, rows, &final_key).await?;
         Ok(SinkWriteOutcome::Applied)
     }
@@ -412,7 +415,7 @@ impl DataSinkS3Plugin {
         let object_stem = object_stem
             .map(str::to_string)
             .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
-        let final_key = self.object_key_for_filename(&filename, &object_stem);
+        let final_key = self.object_key_for_filename(ObjectBody::Grouped, &filename, &object_stem);
         let namespace = BufferChunker::decode_file_namespace(&filename);
         let full_key = final_key
             .rsplit_once('/')
@@ -433,9 +436,15 @@ impl DataSinkS3Plugin {
         Ok(())
     }
 
-    fn object_key_for_filename(&self, filename: &str, object_stem: &str) -> String {
+    fn object_key_for_filename(
+        &self,
+        body: ObjectBody,
+        filename: &str,
+        object_stem: &str,
+    ) -> String {
         self.output_layout
             .hive_object_key(
+                body,
                 self.config.s3_prefix.trim_matches('/'),
                 filename,
                 object_stem,
@@ -471,7 +480,8 @@ impl DataSinkS3Plugin {
             return Ok(true);
         }
         let chunk_filename = ctx.chunk_filename(chunk_index, false);
-        let final_key = self.object_key_for_filename(&chunk_filename, &object_stem);
+        let final_key =
+            self.object_key_for_filename(ObjectBody::Grouped, &chunk_filename, &object_stem);
         match self
             .s3_client
             .head_object()
@@ -503,7 +513,8 @@ impl DataSinkS3Plugin {
             let (object_stem, manifest_key, expected) =
                 self.legacy_chunk_manifest(ctx, chunk.chunk_index)?;
             let chunk_filename = ctx.chunk_filename(chunk.chunk_index, false);
-            let final_key = self.object_key_for_filename(&chunk_filename, &object_stem);
+            let final_key =
+                self.object_key_for_filename(ObjectBody::Grouped, &chunk_filename, &object_stem);
             let chunk_rows = chunk.rows;
             let (chunk_bytes, chunk_transport_count, chunk_etag, chunk_checksum) = if self
                 .manifest_matches(&manifest_key, &expected)
@@ -638,15 +649,15 @@ impl DataSinkS3Plugin {
         final_key: &str,
     ) -> io::Result<ObjectWriteReceipt> {
         use skippr_runtime_sdk::metrics::counters;
-        let format = self
+        let content_type = self
             .output_layout
-            .required_format()
+            .object_content_type(ObjectBody::Identity)
             .map_err(io::Error::other)?;
         counters::inc_uploads_in_flight();
         let result = identity_put_bytes(
             self.object_backend.clone(),
             final_key,
-            format.content_type(),
+            content_type,
             body,
             rows,
         )
@@ -805,7 +816,7 @@ mod tests {
         };
 
         assert_eq!(
-            plugin.object_key_for_filename("namespace=events", "apply-0001"),
+            plugin.object_key_for_filename(ObjectBody::Grouped, "namespace=events", "apply-0001"),
             "root/events/apply-0001.parquet"
         );
         let mut plugin = plugin;
@@ -825,10 +836,18 @@ mod tests {
         ] {
             plugin.output_layout.format = Some(format);
             assert_eq!(
-                plugin.object_key_for_filename("namespace=events", "apply-0001"),
+                plugin.object_key_for_filename(
+                    ObjectBody::Grouped,
+                    "namespace=events",
+                    "apply-0001"
+                ),
                 format!("root/events/apply-0001.{ext}")
             );
         }
+        assert_eq!(
+            plugin.object_key_for_filename(ObjectBody::Identity, "namespace=events", "apply-0001"),
+            "root/events/apply-0001.jsonl.gz"
+        );
     }
 
     #[test]
@@ -860,6 +879,7 @@ mod tests {
         };
         assert_eq!(
             plugin.object_key_for_filename(
+                ObjectBody::Grouped,
                 "buffer=test&namespace=events&partition=p_rmc=EU1&time=1645296045",
                 "apply-0001",
             ),
@@ -895,19 +915,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("skippr-s3-copy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let key = plugin.object_key_for_filename("namespace=events", "apply-copy");
+        let key =
+            plugin.object_key_for_filename(ObjectBody::Identity, "namespace=events", "apply-copy");
         let path = dir.join(&key);
         let body = b"{\"id\":1}\n".to_vec();
         skippr_object_writer::identity_put_bytes(
             std::sync::Arc::new(skippr_object_writer::backends::AtomicFileBackend::new()),
             path.to_string_lossy(),
-            skippr_runtime_sdk::serdes::output_format::OutputFormat::Jsonl.content_type(),
+            plugin
+                .output_layout
+                .object_content_type(ObjectBody::Identity)
+                .unwrap(),
             body.clone(),
             1,
         )
         .await
         .unwrap();
-        assert_eq!(key, "root/events/apply-copy.jsonl");
+        assert_eq!(key, "root/events/apply-copy.jsonl.gz");
         assert_eq!(std::fs::read(&path).unwrap(), body);
         let _ = std::fs::remove_dir_all(&dir);
     }
