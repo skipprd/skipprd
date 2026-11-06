@@ -939,6 +939,7 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
     // Stats tailer removed; catalogs built at end-of-run only
 
     crate::metrics::ingest_profile::reset_profile_counters();
+    crate::metrics::copy_profile::reset_profile_counters();
     clear_runtime_source_schema_state();
     METADATA.store(Arc::new(pipeline_metadata.clone()));
     {
@@ -1461,6 +1462,73 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
                 "wal_enqueue_ms": profile.wal_enqueue_ns as f64 / 1_000_000.0
             }),
         );
+        let copy = crate::metrics::copy_profile::snapshot();
+        if crate::metrics::copy_profile::enabled()
+            && (copy.ingest_records > 0 || copy.compact_objects > 0)
+        {
+            let avg_rows = if copy.compact_objects > 0 {
+                copy.compact_rows as f64 / copy.compact_objects as f64
+            } else {
+                0.0
+            };
+            let avg_parts = if copy.compact_objects > 0 {
+                copy.compact_wal_parts as f64 / copy.compact_objects as f64
+            } else {
+                0.0
+            };
+            info!(
+                "Copy profile: ingest_batch_ms={:.2} ingest_decode_ms={:.2} ingest_key_ms={:.2} ingest_ns_ms={:.2} ingest_partition_ms={:.2} ingest_time_ms={:.2} ingest_encode_ms={:.2} ingest_wal_submit_ms={:.2} ingest_batches={} ingest_records={} ingest_keys={} compact_decode_ms={:.2} compact_encode_ms={:.2} compact_put_ms={:.2} objects={} rows={} avg_rows_per_object={:.1} avg_wal_parts={:.2} compact_bytes={}",
+                copy.ingest_batch_ns as f64 / 1_000_000.0,
+                copy.ingest_decode_ns as f64 / 1_000_000.0,
+                copy.ingest_key_ns as f64 / 1_000_000.0,
+                copy.ingest_ns_parse_ns as f64 / 1_000_000.0,
+                copy.ingest_partition_parse_ns as f64 / 1_000_000.0,
+                copy.ingest_time_parse_ns as f64 / 1_000_000.0,
+                copy.ingest_encode_ns as f64 / 1_000_000.0,
+                copy.ingest_wal_submit_ns as f64 / 1_000_000.0,
+                copy.ingest_batches,
+                copy.ingest_records,
+                copy.ingest_keys,
+                copy.compact_decode_ns as f64 / 1_000_000.0,
+                copy.compact_encode_ns as f64 / 1_000_000.0,
+                copy.compact_put_ns as f64 / 1_000_000.0,
+                copy.compact_objects,
+                copy.compact_rows,
+                avg_rows,
+                avg_parts,
+                copy.compact_bytes
+            );
+            crate::helpers::perf::emit(
+                "copy_profile",
+                json!({
+                    "ingest_batch_ms": copy.ingest_batch_ns as f64 / 1_000_000.0,
+                    "ingest_decode_ms": copy.ingest_decode_ns as f64 / 1_000_000.0,
+                    "ingest_key_ms": copy.ingest_key_ns as f64 / 1_000_000.0,
+                    "ingest_ns_ms": copy.ingest_ns_parse_ns as f64 / 1_000_000.0,
+                    "ingest_partition_ms": copy.ingest_partition_parse_ns as f64 / 1_000_000.0,
+                    "ingest_time_ms": copy.ingest_time_parse_ns as f64 / 1_000_000.0,
+                    "ingest_encode_ms": copy.ingest_encode_ns as f64 / 1_000_000.0,
+                    "ingest_wal_submit_ms": copy.ingest_wal_submit_ns as f64 / 1_000_000.0,
+                    "ingest_batches": copy.ingest_batches,
+                    "ingest_records": copy.ingest_records,
+                    "ingest_keys": copy.ingest_keys,
+                    "compact_decode_ms": copy.compact_decode_ns as f64 / 1_000_000.0,
+                    "compact_encode_ms": copy.compact_encode_ns as f64 / 1_000_000.0,
+                    "compact_put_ms": copy.compact_put_ns as f64 / 1_000_000.0,
+                    "objects": copy.compact_objects,
+                    "rows": copy.compact_rows,
+                    "avg_rows_per_object": avg_rows,
+                    "avg_wal_parts": avg_parts,
+                    "compact_bytes": copy.compact_bytes,
+                    "plugin_apply_ms": crate::metrics::counters::SINK_APPLY_DURATION_NS_TOTAL
+                        .load(std::sync::atomic::Ordering::Relaxed) as f64
+                        / 1_000_000.0,
+                    "plugin_spawn_ms": crate::metrics::counters::RUNTIME_PLUGIN_SPAWN_NS_TOTAL
+                        .load(std::sync::atomic::Ordering::Relaxed) as f64
+                        / 1_000_000.0
+                }),
+            );
+        }
         crate::helpers::perf::emit(
             "plugin_ipc",
             json!({

@@ -1,4 +1,6 @@
-use crate::buffer::segment_file::{SegmentFile, WalPayload, PART_CODEC_ARROW, PART_CODEC_COPY};
+use crate::buffer::segment_file::{
+    is_copy_codec, CopyPart, SegmentFile, WalPayload, PART_CODEC_ARROW,
+};
 use crate::discover::schema_alter::SchemaAlterOp;
 use arrow::array::RecordBatch;
 use arrow::datatypes::{Field, Schema};
@@ -147,7 +149,7 @@ fn rewrite_wal_bytes(
     let mut part_meta_blobs = HashMap::new();
     let mut mutated = false;
     for idx in &meta.index {
-        if idx.codec == PART_CODEC_COPY && idx.key.namespace == namespace {
+        if is_copy_codec(idx.codec) && idx.key.namespace == namespace {
             return Err("copy/non-Arrow WAL parts cannot be rewritten".to_string());
         }
         let start = idx.start as usize;
@@ -171,10 +173,9 @@ fn rewrite_wal_bytes(
             }
             WalPayload::Arrow(arrow_batches)
         } else {
-            WalPayload::Raw(
-                crate::buffer::segment_file::decode_copy_part(slice)
-                    .map_err(|err| err.to_string())?,
-            )
+            let records = crate::buffer::segment_file::decode_copy_part(idx.codec, slice)
+                .map_err(|err| err.to_string())?;
+            WalPayload::Copy(CopyPart::encode(&records).map_err(|err| err.to_string())?)
         };
         if idx.part_meta_len > 0 {
             let meta_start = idx.part_meta_start as usize;

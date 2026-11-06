@@ -70,6 +70,7 @@ use std::sync::mpsc::Sender;
 // use dashmap::{DashMap};
 
 use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord};
+use crate::buffer::segment_file::{CopyPart, WalPayload};
 use crate::discover::evolution::{infer_specs_for_record, EvolutionProposal};
 use crate::ingest::exact_arrow::{
     append_row_to_exact_partition, resolve_cached_exact_plan, ExactArrowPartition, ExactArrowPlan,
@@ -78,6 +79,7 @@ use crate::ingest::fast_ingest::{
     create_default_nested_message, fast_path_ingest, DEFAULT_NESTED_MESSAGE,
 };
 use crate::ingest::record_types::{NormalizedRecord, SourceRecord};
+use crate::serdes::copy::CopyWalRecord;
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
@@ -2978,6 +2980,8 @@ impl Ingest {
         handle: runtime::Handle,
         submit_id: u64,
     ) {
+        let profile = crate::metrics::copy_profile::enabled();
+        let batch_started = profile.then(Instant::now);
         let format = match config.get_pipeline_input_plugin_config() {
             Ok(plugin) => plugin.input_format(),
             Err(_) => Default::default(),
@@ -2991,14 +2995,24 @@ impl Ingest {
             cleaned_partition_allowed_values(config, &config.get_partition_allowed_values());
         let mut ns_cache = HashMap::new();
         let mut buf: HashMap<IngestPartitionKey, IngestBufferBatch> = HashMap::new();
+        let mut records_by_key: HashMap<IngestPartitionKey, Vec<CopyWalRecord>> = HashMap::new();
         let mut dl_records: Vec<DeadletterRecord> = Vec::new();
         let mut dl_offsets: HashMap<OffsetKey, u64> = HashMap::new();
+        let mut decode_ns = 0u64;
+        let mut key_ns = 0u64;
+        let mut ns_parse_ns_total = 0u64;
+        let mut partition_parse_ns_total = 0u64;
+        let mut time_parse_ns_total = 0u64;
 
         for ingest_batch in datas.iter() {
+            let decode_started = profile.then(Instant::now);
             let records =
                 match crate::serdes::copy::decode_copy_bytes(config, format, &ingest_batch.data) {
                     Ok(records) => records,
                     Err(err) => {
+                        decode_ns += decode_started
+                            .map(|started| started.elapsed().as_nanos() as u64)
+                            .unwrap_or(0);
                         let decode_offset_pos = std::str::from_utf8(&ingest_batch.data)
                             .map(|text| text.lines().count().max(1) as u64)
                             .unwrap_or(1);
@@ -3027,6 +3041,9 @@ impl Ingest {
                         continue;
                     }
                 };
+            decode_ns += decode_started
+                .map(|started| started.elapsed().as_nanos() as u64)
+                .unwrap_or(0);
             let offset_pos = ingest_batch
                 .offset_pos
                 .unwrap_or_else(|| records.len().max(1) as u64);
@@ -3039,7 +3056,12 @@ impl Ingest {
             } else {
                 None
             };
+            let key_started = profile.then(Instant::now);
+            let mut ns_parse_ns = 0u64;
+            let mut partition_parse_ns = 0u64;
+            let mut time_parse_ns = 0u64;
             for record in records {
+                let ns_started = profile.then(Instant::now);
                 let namespace = if let Some(fixed) = fixed_namespace.as_ref() {
                     fixed.clone()
                 } else {
@@ -3054,6 +3076,10 @@ impl Ingest {
                         ),
                     )
                 };
+                ns_parse_ns += ns_started
+                    .map(|started| started.elapsed().as_nanos() as u64)
+                    .unwrap_or(0);
+                let partition_started = profile.then(Instant::now);
                 let partition = if transform_snap.skip_partition_parse {
                     String::new()
                 } else {
@@ -3064,6 +3090,10 @@ impl Ingest {
                         &transform_snap.partition_fields,
                     )
                 };
+                partition_parse_ns += partition_started
+                    .map(|started| started.elapsed().as_nanos() as u64)
+                    .unwrap_or(0);
+                let time_started = profile.then(Instant::now);
                 let time = if transform_snap.skip_time_parse {
                     None
                 } else {
@@ -3073,6 +3103,9 @@ impl Ingest {
                     )
                     .map(|ts| BufferChunker::event_time_bucket(config, ts))
                 };
+                time_parse_ns += time_started
+                    .map(|started| started.elapsed().as_nanos() as u64)
+                    .unwrap_or(0);
                 let key = (
                     primary_sink_ref.clone(),
                     namespace.clone(),
@@ -3088,26 +3121,52 @@ impl Ingest {
                     _time: time,
                     _schema_fingerprint: fingerprint.clone(),
                     schema: empty_schema.clone(),
-                    payload: crate::buffer::segment_file::WalPayload::Raw(Vec::new()),
+                    payload: WalPayload::Copy(CopyPart::default()),
                     cdc_rows: None,
                     checkpoint_update: None,
                 });
-                match &mut entry.payload {
-                    crate::buffer::segment_file::WalPayload::Raw(records) => records.push(record),
-                    crate::buffer::segment_file::WalPayload::Arrow(_) => {
-                        error!("copy admit mixed Arrow+Raw under one WAL key");
-                        if submit_id != 0 {
-                            crate::buffer::wal_writer::fail_request(
-                                submit_id,
-                                "copy admit mixed Arrow+Raw under one WAL key".to_string(),
-                            );
-                        }
-                        return;
-                    }
-                }
                 update_partition_offset(entry, &ingest_batch.offset_key, offset_pos);
+                records_by_key.entry(key).or_default().push(record);
+            }
+            key_ns += key_started
+                .map(|started| started.elapsed().as_nanos() as u64)
+                .unwrap_or(0);
+            ns_parse_ns_total += ns_parse_ns;
+            partition_parse_ns_total += partition_parse_ns;
+            time_parse_ns_total += time_parse_ns;
+            crate::metrics::copy_profile::add_ingest_ns_parse_ns(ns_parse_ns);
+            crate::metrics::copy_profile::add_ingest_partition_parse_ns(partition_parse_ns);
+            crate::metrics::copy_profile::add_ingest_time_parse_ns(time_parse_ns);
+        }
+        crate::metrics::copy_profile::add_ingest_decode_ns(decode_ns);
+        crate::metrics::copy_profile::add_ingest_key_ns(key_ns);
+
+        // Encode here, on the ingest worker, so the single WAL writer only appends bytes.
+        let encode_started = profile.then(Instant::now);
+        let mut encoded_records = 0u64;
+        let key_count = records_by_key.len() as u64;
+        for (key, records) in records_by_key {
+            encoded_records += records.len() as u64;
+            let part = match CopyPart::encode(&records) {
+                Ok(part) => part,
+                Err(err) => {
+                    error!("Copy: WAL part encode failed: {err}");
+                    if submit_id != 0 {
+                        crate::buffer::wal_writer::fail_request(submit_id, err.to_string());
+                    }
+                    return;
+                }
+            };
+            if let Some(entry) = buf.get_mut(&key) {
+                entry.payload = WalPayload::Copy(part);
             }
         }
+        let encode_ns = encode_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or(0);
+        crate::metrics::copy_profile::add_ingest_encode_ns(encode_ns);
+        crate::metrics::copy_profile::add_ingest_records(encoded_records);
+        crate::metrics::copy_profile::add_ingest_keys(key_count);
 
         if !commit_deadletters(
             config,
@@ -3125,6 +3184,11 @@ impl Ingest {
             if submit_id != 0 {
                 crate::buffer::wal_writer::complete_request_without_wal(submit_id);
             }
+            crate::metrics::copy_profile::add_ingest_batch_ns(
+                batch_started
+                    .map(|started| started.elapsed().as_nanos() as u64)
+                    .unwrap_or(0),
+            );
             return;
         }
         let arrow_bytes = all_batches
@@ -3142,17 +3206,42 @@ impl Ingest {
             done: done_tx,
         };
         let wal_started = Instant::now();
-        if let Err(err) = handle.block_on(crate::buffer::wal_writer::submit(unit)) {
+        let wal_submit_result = handle.block_on(crate::buffer::wal_writer::submit(unit));
+        let wal_submit_ns = wal_started.elapsed().as_nanos() as u64;
+        crate::metrics::copy_profile::add_ingest_wal_submit_ns(wal_submit_ns);
+        let batch_ns = batch_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or(0);
+        crate::metrics::copy_profile::add_ingest_batch_ns(batch_ns);
+        if profile {
+            crate::helpers::perf::emit(
+                "copy_ingest",
+                serde_json::json!({
+                    "elapsed_ms": batch_ns / 1_000_000,
+                    "decode_ms": decode_ns / 1_000_000,
+                    "key_ms": key_ns / 1_000_000,
+                    "ns_ms": ns_parse_ns_total / 1_000_000,
+                    "partition_ms": partition_parse_ns_total / 1_000_000,
+                    "time_ms": time_parse_ns_total / 1_000_000,
+                    "encode_ms": encode_ns / 1_000_000,
+                    "wal_submit_ms": wal_submit_ns / 1_000_000,
+                    "rows": encoded_records,
+                    "keys": key_count,
+                    "raw_bytes": raw_bytes,
+                }),
+            );
+        }
+        if let Err(err) = wal_submit_result {
             error!(
-                elapsed_ms = wal_started.elapsed().as_millis() as u64,
+                elapsed_ms = wal_submit_ns / 1_000_000,
                 "Copy: WAL writer enqueue failed: {err}"
             );
             if submit_id != 0 {
                 crate::buffer::wal_writer::fail_request(submit_id, err.to_string());
             }
-        } else if wal_started.elapsed() >= Duration::from_secs(1) {
+        } else if wal_submit_ns >= 1_000_000_000 {
             info!(
-                elapsed_ms = wal_started.elapsed().as_millis() as u64,
+                elapsed_ms = wal_submit_ns / 1_000_000,
                 raw_bytes, arrow_bytes, "Copy: WAL writer enqueue was slow"
             );
         }
@@ -4107,7 +4196,7 @@ impl Ingest {
                     .iter()
                     .map(|e| match &e.payload {
                         crate::buffer::segment_file::WalPayload::Arrow(batches) => batches.len(),
-                        crate::buffer::segment_file::WalPayload::Raw(records) => records.len(),
+                        WalPayload::Copy(part) => part.rows() as usize,
                     })
                     .sum();
                 let total_offsets: usize =

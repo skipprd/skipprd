@@ -6,11 +6,12 @@ use crate::serdes::copy::CopyWalRecord;
 use arrow::array::RecordBatch;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 use bincode;
-use flate2::read::GzDecoder;
+use flate2::read::{GzDecoder, MultiGzDecoder};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 #[cfg(test)]
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, Write};
@@ -22,23 +23,70 @@ use std::{fs, io};
 
 /// Arrow IPC PART (SEGF v3 payload and v4 codec 0).
 pub const PART_CODEC_ARROW: u8 = 0;
-/// Compressed bincode of `CopyWalRecord` frames (v4 codec 1).
+/// One gzip member of bincode `Vec<LegacyCopyWalFrame>` (v4 codec 1). Read-only.
 pub const PART_CODEC_COPY: u8 = 1;
+/// Concatenated gzip members, each bincode `Vec<CopyFrame>` (v4 codec 2). Hosts
+/// without codec 2 reject the PART instead of reading only the first member.
+pub const PART_CODEC_COPY_CHUNKED: u8 = 2;
 const SEGF_VERSION_V3: u32 = 3;
+
+pub fn is_copy_codec(codec: u8) -> bool {
+    matches!(codec, PART_CODEC_COPY | PART_CODEC_COPY_CHUNKED)
+}
+
+/// Copy WAL rows encoded by the ingest worker that admitted them. The WAL
+/// writer concatenates chunks; it never re-encodes records.
+#[derive(Clone, Debug, Default)]
+pub struct CopyPart {
+    chunks: Vec<Vec<u8>>,
+    rows: u64,
+    estimated_bytes: u64,
+}
+
+impl CopyPart {
+    pub fn encode(records: &[CopyWalRecord]) -> io::Result<Self> {
+        if records.is_empty() {
+            return Ok(Self::default());
+        }
+        let frames = records
+            .iter()
+            .map(CopyFrame::from_record)
+            .collect::<io::Result<Vec<_>>>()?;
+        let raw = bincode::serialize(&frames)
+            .map_err(|err| invalid_data(format!("encode copy WAL: {err}")))?;
+        let mut encoder = GzEncoder::new(Vec::with_capacity(raw.len() / 4), Compression::fast());
+        encoder.write_all(&raw)?;
+        Ok(Self {
+            chunks: vec![encoder.finish()?],
+            rows: records.len() as u64,
+            estimated_bytes: records.iter().map(CopyWalRecord::estimated_wal_bytes).sum(),
+        })
+    }
+
+    pub fn rows(&self) -> u64 {
+        self.rows
+    }
+
+    fn extend(&mut self, other: CopyPart) {
+        self.chunks.extend(other.chunks);
+        self.rows = self.rows.saturating_add(other.rows);
+        self.estimated_bytes = self.estimated_bytes.saturating_add(other.estimated_bytes);
+    }
+}
 
 /// One partition's WAL bytes. Copy and Arrow never share a map entry
 /// (`schema_fingerprint` for copy is always `"copy"`).
 #[derive(Clone, Debug)]
 pub enum WalPayload {
     Arrow(Vec<RecordBatch>),
-    Raw(Vec<CopyWalRecord>),
+    Copy(CopyPart),
 }
 
 impl WalPayload {
     pub fn is_empty(&self) -> bool {
         match self {
             Self::Arrow(batches) => batches.is_empty(),
-            Self::Raw(records) => records.is_empty(),
+            Self::Copy(part) => part.rows == 0,
         }
     }
 
@@ -48,21 +96,21 @@ impl WalPayload {
                 .iter()
                 .map(|batch| batch.get_array_memory_size() as u64)
                 .sum(),
-            Self::Raw(records) => records.iter().map(CopyWalRecord::estimated_wal_bytes).sum(),
+            Self::Copy(part) => part.estimated_bytes,
         }
     }
 
     pub fn row_count(&self) -> u64 {
         match self {
             Self::Arrow(batches) => batches.iter().map(|batch| batch.num_rows() as u64).sum(),
-            Self::Raw(records) => records.len() as u64,
+            Self::Copy(part) => part.rows,
         }
     }
 
     pub fn codec(&self) -> u8 {
         match self {
             Self::Arrow(_) => PART_CODEC_ARROW,
-            Self::Raw(_) => PART_CODEC_COPY,
+            Self::Copy(_) => PART_CODEC_COPY_CHUNKED,
         }
     }
 
@@ -72,7 +120,7 @@ impl WalPayload {
                 dst.extend(src);
                 Ok(())
             }
-            (Self::Raw(dst), Self::Raw(src)) => {
+            (Self::Copy(dst), Self::Copy(src)) => {
                 dst.extend(src);
                 Ok(())
             }
@@ -261,7 +309,7 @@ fn read_part_codec_and_len<R: Read>(reader: &mut R, version: u32) -> io::Result<
     } else {
         PART_CODEC_ARROW
     };
-    if codec != PART_CODEC_ARROW && codec != PART_CODEC_COPY {
+    if codec != PART_CODEC_ARROW && !is_copy_codec(codec) {
         return Err(invalid_data(format!("unknown WAL PART codec {codec}")));
     }
     let mut len_buf = [0u8; 8];
@@ -269,47 +317,81 @@ fn read_part_codec_and_len<R: Read>(reader: &mut R, version: u32) -> io::Result<
     Ok((codec, u64::from_le_bytes(len_buf)))
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CopyWalFrame {
+#[derive(serde::Deserialize)]
+struct LegacyCopyWalFrame {
     value: Vec<u8>,
     identity: Option<Vec<u8>>,
 }
 
-fn encode_copy_part(records: &[CopyWalRecord]) -> io::Result<Vec<u8>> {
-    let frames: Vec<CopyWalFrame> = records
-        .iter()
-        .map(|record| {
-            Ok(CopyWalFrame {
-                value: serde_json::to_vec(&record.value)
-                    .map_err(|err| invalid_data(format!("encode copy WAL value: {err}")))?,
-                identity: record.identity.clone(),
-            })
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    let raw = bincode::serialize(&frames)
-        .map_err(|err| invalid_data(format!("encode copy WAL: {err}")))?;
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-    encoder.write_all(&raw)?;
-    encoder.finish()
+/// Each record is stored once: NDJSON identity lines keep their source bytes.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum CopyFrame<'a> {
+    Identity(Cow<'a, [u8]>),
+    Json(Cow<'a, [u8]>),
+}
+
+impl<'a> CopyFrame<'a> {
+    fn from_record(record: &'a CopyWalRecord) -> io::Result<Self> {
+        match &record.identity {
+            Some(line) => Ok(Self::Identity(Cow::Borrowed(line))),
+            None => serde_json::to_vec(&record.value)
+                .map(|json| Self::Json(Cow::Owned(json)))
+                .map_err(|err| invalid_data(format!("encode copy WAL value: {err}"))),
+        }
+    }
+
+    fn into_record(self) -> io::Result<CopyWalRecord> {
+        match self {
+            Self::Identity(line) => Ok(CopyWalRecord {
+                value: parse_copy_json(&line)?,
+                identity: Some(line.into_owned()),
+            }),
+            Self::Json(json) => Ok(CopyWalRecord {
+                value: parse_copy_json(&json)?,
+                identity: None,
+            }),
+        }
+    }
+}
+
+fn parse_copy_json(bytes: &[u8]) -> io::Result<serde_json::Value> {
+    serde_json::from_slice(bytes)
+        .map_err(|err| invalid_data(format!("decode copy WAL value: {err}")))
 }
 
 /// Decompress a copy PART payload into format-agnostic WAL frames.
-pub fn decode_copy_part(bytes: &[u8]) -> io::Result<Vec<CopyWalRecord>> {
-    let mut decoder = GzDecoder::new(bytes);
+pub fn decode_copy_part(codec: u8, bytes: &[u8]) -> io::Result<Vec<CopyWalRecord>> {
     let mut raw = Vec::new();
-    decoder.read_to_end(&mut raw)?;
-    let frames: Vec<CopyWalFrame> = bincode::deserialize(&raw)
-        .map_err(|err| invalid_data(format!("decode copy WAL: {err}")))?;
-    frames
-        .into_iter()
-        .map(|frame| {
-            Ok(CopyWalRecord {
-                value: serde_json::from_slice(&frame.value)
-                    .map_err(|err| invalid_data(format!("decode copy WAL value: {err}")))?,
-                identity: frame.identity,
-            })
-        })
-        .collect()
+    match codec {
+        PART_CODEC_COPY => {
+            GzDecoder::new(bytes).read_to_end(&mut raw)?;
+            let frames: Vec<LegacyCopyWalFrame> = bincode::deserialize(&raw)
+                .map_err(|err| invalid_data(format!("decode copy WAL: {err}")))?;
+            frames
+                .into_iter()
+                .map(|frame| {
+                    Ok(CopyWalRecord {
+                        value: parse_copy_json(&frame.value)?,
+                        identity: frame.identity,
+                    })
+                })
+                .collect()
+        }
+        PART_CODEC_COPY_CHUNKED => {
+            MultiGzDecoder::new(bytes).read_to_end(&mut raw)?;
+            let mut cursor = Cursor::new(raw.as_slice());
+            let mut records = Vec::new();
+            while (cursor.position() as usize) < raw.len() {
+                let frames: Vec<CopyFrame<'static>> = bincode::deserialize_from(&mut cursor)
+                    .map_err(|err| invalid_data(format!("decode copy WAL: {err}")))?;
+                for frame in frames {
+                    records.push(frame.into_record()?);
+                }
+            }
+            Ok(records)
+        }
+        other => Err(invalid_data(format!("not a copy WAL PART codec {other}"))),
+    }
 }
 
 fn parse_part_meta_blob(blob: &[u8]) -> io::Result<(WalPartMeta, SegmentPartMetaSummary)> {
@@ -687,10 +769,11 @@ pub fn encode_snapshot(
                     .finish()
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
             }
-            WalPayload::Raw(records) => {
-                let encoded = encode_copy_part(records)?;
-                total_rows = total_rows.saturating_add(records.len() as u64);
-                file.write_all(&encoded)?;
+            WalPayload::Copy(part) => {
+                total_rows = total_rows.saturating_add(part.rows);
+                for chunk in &part.chunks {
+                    file.write_all(chunk)?;
+                }
             }
         }
         let end = file.stream_position()?;
@@ -1252,13 +1335,23 @@ mod tests_wal_writer {
         };
         let mut batches = HashMap::new();
         batches.insert(arrow_key.clone(), WalPayload::Arrow(vec![make_batch()]));
-        batches.insert(
-            copy_key.clone(),
-            WalPayload::Raw(vec![crate::serdes::copy::CopyWalRecord {
+        let mut copy_payload = WalPayload::Copy(
+            CopyPart::encode(&[crate::serdes::copy::CopyWalRecord {
                 value: serde_json::json!({"id": 1}),
                 identity: Some(b"{\"id\":1}\n".to_vec()),
-            }]),
+            }])
+            .unwrap(),
         );
+        copy_payload
+            .extend(WalPayload::Copy(
+                CopyPart::encode(&[crate::serdes::copy::CopyWalRecord {
+                    value: serde_json::json!({"id": 2, "nested": {"a": [1, 2]}}),
+                    identity: None,
+                }])
+                .unwrap(),
+            ))
+            .unwrap();
+        batches.insert(copy_key.clone(), copy_payload);
         let mut parts_meta = HashMap::new();
         parts_meta.insert(arrow_key.clone(), (0, SystemTime::now()));
         parts_meta.insert(copy_key.clone(), (0, SystemTime::now()));
@@ -1272,7 +1365,7 @@ mod tests_wal_writer {
             )
             .unwrap();
         assert_eq!(meta.num_partitions, 2);
-        assert_eq!(rows, 4);
+        assert_eq!(rows, 5);
         let read = SegmentFile::read_metadata_from_bytes(&fs::read(&seg.path).unwrap()).unwrap();
         let copy_idx = read
             .index
@@ -1284,14 +1377,70 @@ mod tests_wal_writer {
             .iter()
             .find(|idx| idx.key.schema_fingerprint == "arrow-fp")
             .unwrap();
-        assert_eq!(copy_idx.codec, PART_CODEC_COPY);
+        assert_eq!(copy_idx.codec, PART_CODEC_COPY_CHUNKED);
         assert_eq!(arrow_idx.codec, PART_CODEC_ARROW);
         let bytes = fs::read(&seg.path).unwrap();
         let start = copy_idx.start as usize;
         let end = start + copy_idx.len as usize;
-        let decoded = decode_copy_part(&bytes[start..end]).unwrap();
-        assert_eq!(decoded.len(), 1);
+        let decoded = decode_copy_part(copy_idx.codec, &bytes[start..end]).unwrap();
+        assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[0].value["id"], 1);
+        assert_eq!(decoded[0].identity.as_deref(), Some(&b"{\"id\":1}\n"[..]));
+        assert_eq!(
+            decoded[1].value,
+            serde_json::json!({"id": 2, "nested": {"a": [1, 2]}})
+        );
+        assert!(decoded[1].identity.is_none());
+    }
+
+    #[test]
+    fn legacy_copy_codec_still_decodes() {
+        #[derive(serde::Serialize)]
+        struct Frame {
+            value: Vec<u8>,
+            identity: Option<Vec<u8>>,
+        }
+        let raw = bincode::serialize(&vec![Frame {
+            value: b"{\"id\":7}".to_vec(),
+            identity: Some(b"{\"id\":7}\n".to_vec()),
+        }])
+        .unwrap();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&raw).unwrap();
+        let legacy = encoder.finish().unwrap();
+        let decoded = decode_copy_part(PART_CODEC_COPY, &legacy).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].value["id"], 7);
+        assert_eq!(decoded[0].identity.as_deref(), Some(&b"{\"id\":7}\n"[..]));
+        assert!(decode_copy_part(PART_CODEC_ARROW, &legacy).is_err());
+    }
+
+    #[test]
+    fn copy_part_is_deterministic_and_merges_in_order() {
+        let records = |ids: &[i64]| {
+            ids.iter()
+                .map(|id| crate::serdes::copy::CopyWalRecord {
+                    value: serde_json::json!({"id": id}),
+                    identity: Some(format!("{{\"id\":{id}}}\n").into_bytes()),
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = CopyPart::encode(&records(&[1, 2])).unwrap();
+        assert_eq!(
+            first.chunks,
+            CopyPart::encode(&records(&[1, 2])).unwrap().chunks
+        );
+        let mut merged = first;
+        merged.extend(CopyPart::encode(&records(&[3])).unwrap());
+        assert_eq!(merged.rows(), 3);
+        let bytes = merged.chunks.concat();
+        let ids: Vec<i64> = decode_copy_part(PART_CODEC_COPY_CHUNKED, &bytes)
+            .unwrap()
+            .iter()
+            .map(|record| record.value["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert!(CopyPart::encode(&[]).unwrap().chunks.is_empty());
     }
 
     #[test]
@@ -1351,10 +1500,13 @@ mod tests_wal_writer {
     #[test]
     fn copy_estimated_bytes_tracks_identity_without_json_display() {
         let identity = b"{\"id\":1}\n".to_vec();
-        let payload = WalPayload::Raw(vec![crate::serdes::copy::CopyWalRecord {
-            value: serde_json::json!({"id": 1}),
-            identity: Some(identity.clone()),
-        }]);
+        let payload = WalPayload::Copy(
+            CopyPart::encode(&[crate::serdes::copy::CopyWalRecord {
+                value: serde_json::json!({"id": 1}),
+                identity: Some(identity.clone()),
+            }])
+            .unwrap(),
+        );
         let bytes = payload.estimated_bytes();
         assert!(bytes >= identity.len() as u64);
         assert!(bytes < 64);

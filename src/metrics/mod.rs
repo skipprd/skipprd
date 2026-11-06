@@ -18,6 +18,7 @@ use crate::helpers::Helpers;
 use crate::{METRICS, RUNNING};
 use tracing::{error, info};
 
+pub mod copy_profile;
 pub mod counters;
 pub mod ingest_profile;
 

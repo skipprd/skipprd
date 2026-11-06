@@ -1019,7 +1019,7 @@ impl Buffers {
                 continue;
             }
             match payload {
-                WalPayload::Raw(_) => {
+                WalPayload::Copy(_) => {
                     return Err("copy/non-Arrow WAL parts cannot be rewritten".to_string());
                 }
                 WalPayload::Arrow(batches) => {
@@ -1049,7 +1049,7 @@ impl Buffers {
             let time = ingest_buffer_batch._time;
             let schema_fingerprint = if ingest_buffer_batch._schema_fingerprint.is_empty() {
                 match &ingest_buffer_batch.payload {
-                    WalPayload::Raw(_) => crate::pipeline_type::COPY_WAL_FINGERPRINT.to_string(),
+                    WalPayload::Copy(_) => crate::pipeline_type::COPY_WAL_FINGERPRINT.to_string(),
                     WalPayload::Arrow(_) => schema_fingerprint(&ingest_buffer_batch.schema),
                 }
             } else {
@@ -2698,28 +2698,16 @@ impl Buffers {
         work: &CompactionWork,
         expected_cdc_rows: Option<u64>,
     ) -> io::Result<(SendableRecordBatchStream, u64)> {
+        use futures::StreamExt;
         let mut batches = Vec::new();
-        for entry in work.entries.iter() {
-            let s3_body = Self::resolve_entry_s3_body(entry).await?;
-            let entry_for_blocking = entry.clone();
-            let cfg = config.clone();
-            let entry_batches = tokio::task::spawn_blocking(move || {
-                Self::read_entry_batches(&cfg, &entry_for_blocking, s3_body)
-            })
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))??;
-            if let Some(expected) = entry.idx.part_meta_summary.row_count() {
-                let actual = entry_batches
-                    .iter()
-                    .map(|batch| batch.num_rows() as u64)
-                    .sum::<u64>();
-                if actual != expected {
-                    return Err(io::Error::other(format!(
-                        "CDC WAL slice ordinal {} metadata expected {} rows but Arrow stream produced {} rows",
-                        entry.idx.slice_ordinal, expected, actual
-                    )));
-                }
-            }
+        let mut parts = std::pin::pin!(Self::read_entries_ordered(
+            config,
+            work.entries.clone(),
+            Self::read_entry_batches,
+        ));
+        while let Some(part) = parts.next().await {
+            let (entry, entry_batches) = part?;
+            Self::check_cdc_entry_rows(&entry, &entry_batches)?;
             batches.extend(entry_batches);
         }
 
@@ -2791,6 +2779,64 @@ impl Buffers {
                 .map(Some),
             SegmentSource::Disk(_) | SegmentSource::Wal { .. } => Ok(None),
         }
+    }
+
+    /// Ordered, bounded WAL PART reads for one compaction transaction. Arrow and
+    /// copy share one prefetch depth so a job cannot oversubscribe the blocking pool.
+    fn read_entries_ordered<T, R>(
+        config: &Config,
+        entries: Vec<CompactionEntry>,
+        read: R,
+    ) -> impl futures::Stream<Item = io::Result<(CompactionEntry, T)>> + Send + 'static
+    where
+        T: Send + 'static,
+        R: Fn(&Config, &CompactionEntry, Option<Arc<Vec<u8>>>) -> io::Result<T>
+            + Copy
+            + Send
+            + 'static,
+    {
+        use futures::stream::{self, StreamExt};
+        let config = config.clone();
+        stream::iter(entries)
+            .map(move |entry| {
+                let cfg = config.clone();
+                async move {
+                    let s3_body = Self::resolve_entry_s3_body(&entry).await?;
+                    tokio::task::spawn_blocking(move || {
+                        let value = read(&cfg, &entry, s3_body)?;
+                        Ok((entry, value))
+                    })
+                    .await
+                    .map_err(|err| io::Error::other(err.to_string()))?
+                }
+            })
+            .buffered(GROUPED_STREAM_PREFETCH_PARTS)
+    }
+
+    fn check_cdc_entry_rows(entry: &CompactionEntry, batches: &[RecordBatch]) -> io::Result<()> {
+        let Some(expected) = entry.idx.part_meta_summary.row_count() else {
+            return Ok(());
+        };
+        let actual = batches
+            .iter()
+            .map(|batch| batch.num_rows() as u64)
+            .sum::<u64>();
+        if actual != expected {
+            return Err(io::Error::other(format!(
+                "CDC WAL slice ordinal {} metadata expected {} rows but Arrow stream produced {} rows",
+                entry.idx.slice_ordinal, expected, actual
+            )));
+        }
+        Ok(())
+    }
+
+    fn pin_work_s3_segments(work: &CompactionWork) -> s3_wal_body_cache::S3BodyPin {
+        s3_wal_body_cache::pin_segments(
+            work.entries
+                .iter()
+                .filter(|entry| entry.source.is_s3())
+                .map(|entry| entry.source.segment_id().to_string()),
+        )
     }
 
     fn read_entry_part_meta(
@@ -2923,37 +2969,19 @@ impl Buffers {
         let entries = work.entries.clone();
         let producer_config = config.clone();
         let producer_handle = tokio::spawn(async move {
-            use futures::stream::{self, StreamExt};
-            let producer = stream::iter(entries.into_iter().enumerate())
-                .map(|(entry_index, entry)| {
-                    let cfg = producer_config.clone();
-                    async move {
-                    let s3_body = Buffers::resolve_entry_s3_body(&entry)
-                        .await
-                        .map_err(|err| DataFusionError::External(Box::new(err)))?;
-                    let entry_for_blocking = entry.clone();
-                    let batches = tokio::task::spawn_blocking(move || {
-                        Buffers::read_entry_batches(&cfg, &entry_for_blocking, s3_body)
-                    })
-                    .await
-                    .map_err(|err| DataFusionError::External(Box::new(io::Error::other(err))))?
-                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
-                    if let Some(expected) = entry.idx.part_meta_summary.row_count() {
-                        let actual = batches
-                            .iter()
-                            .map(|batch| batch.num_rows() as u64)
-                            .sum::<u64>();
-                        if actual != expected {
-                            return Err(DataFusionError::Internal(format!(
-                                "CDC WAL slice ordinal {} metadata expected {} rows but Arrow stream produced {} rows",
-                                entry.idx.slice_ordinal, expected, actual
-                            )));
-                        }
-                    }
-                    Ok((entry_index, batches))
-                    }
-                })
-                .buffered(GROUPED_STREAM_PREFETCH_PARTS);
+            use futures::StreamExt;
+            let producer = Buffers::read_entries_ordered(
+                &producer_config,
+                entries,
+                Buffers::read_entry_batches,
+            )
+            .enumerate()
+            .map(|(entry_index, part)| {
+                let (entry, batches) = part?;
+                Buffers::check_cdc_entry_rows(&entry, &batches)?;
+                Ok::<_, io::Error>((entry_index, batches))
+            })
+            .map(|result| result.map_err(|err| DataFusionError::External(Box::new(err))));
 
             let mut producer = std::pin::pin!(producer);
             while let Some(result) = producer.next().await {
@@ -3306,20 +3334,10 @@ impl Buffers {
         crate::metrics::counters::inc_wal_compactions_in_flight();
         crate::metrics::counters::add_wal_compaction_started(work.entries.len() as u64);
         crate::metrics::counters::add_wal_compaction_transaction_started(1);
+        let profile = crate::metrics::copy_profile::enabled();
         let compact_started = Instant::now();
         let _guard = WorkGuard(&work);
-        let mut records = Vec::new();
-        for entry in work.entries.iter() {
-            let s3_body = Self::resolve_entry_s3_body(entry).await?;
-            let entry_for_blocking = entry.clone();
-            let cfg = config.clone();
-            let part = tokio::task::spawn_blocking(move || {
-                Self::read_entry_copy(&cfg, &entry_for_blocking, s3_body)
-            })
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))??;
-            records.extend(part);
-        }
+        let _s3_body_pin = Self::pin_work_s3_segments(&work);
         let pipeline_type = config.pipeline_type().map_err(io::Error::other)?;
         let source = config
             .get_pipeline_input_plugin_config()
@@ -3331,10 +3349,39 @@ impl Buffers {
             .resolved_output_format(pipeline_type, source)
             .map_err(io::Error::other)?
             .ok_or_else(|| io::Error::other("type: copy requires an output format"))?;
-        let body = crate::serdes::copy::encode_copy(format, &records)
-            .map_err(|err| io::Error::other(err.to_string()))?;
+        let wal_parts = work.entries.len() as u64;
+        let (body, rows, decode_ns, encode_ns) = {
+            use futures::StreamExt;
+            let _decode_permit = budget.acquire_decode().await?;
+            let decode_started = profile.then(Instant::now);
+            let mut records = Vec::new();
+            let mut parts = std::pin::pin!(Self::read_entries_ordered(
+                config,
+                work.entries.clone(),
+                Self::read_entry_copy,
+            ));
+            while let Some(part) = parts.next().await {
+                records.extend(part?.1);
+            }
+            let decode_ns = decode_started
+                .map(|started| started.elapsed().as_nanos() as u64)
+                .unwrap_or(0);
+            crate::metrics::copy_profile::add_compact_decode_ns(decode_ns);
+            let rows = records.len() as u64;
+            let encode_started = profile.then(Instant::now);
+            let body = tokio::task::spawn_blocking(move || {
+                crate::serdes::copy::encode_copy(format, &records)
+                    .map_err(|err| io::Error::other(err.to_string()))
+            })
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))??;
+            let encode_ns = encode_started
+                .map(|started| started.elapsed().as_nanos() as u64)
+                .unwrap_or(0);
+            crate::metrics::copy_profile::add_compact_encode_ns(encode_ns);
+            (body, rows, decode_ns, encode_ns)
+        };
         let body_len = body.len();
-        let rows = records.len() as u64;
         let source_contract =
             crate::plugins::source_contract::namespace_source_contract(&work.txn.namespace);
         let sink_ctx = crate::plugins::SinkWriteContext {
@@ -3356,6 +3403,7 @@ impl Buffers {
         Self::persist_compaction_row(config, &sent_txn).await?;
         let _sink_permit = budget.acquire_sink().await?;
         let timeout = Self::grouped_compaction_timeout();
+        let put_started = profile.then(Instant::now);
         match tokio::time::timeout(timeout, shared_output.sync_bytes(body, rows, sink_ctx)).await {
             Ok(result) => {
                 result?;
@@ -3371,6 +3419,11 @@ impl Buffers {
                 ));
             }
         }
+        let put_ns = put_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or(0);
+        crate::metrics::copy_profile::add_compact_put_ns(put_ns);
+        crate::metrics::copy_profile::record_compact_object(rows, wal_parts, body_len as u64);
         Self::persist_compaction_row(config, &sent_txn.clone().mark_acked()).await?;
         Self::tombstone_grouped_work(config, &work)?;
         Self::commit_durable_compaction_reclaim(&work, &sent_txn).await?;
@@ -3378,15 +3431,18 @@ impl Buffers {
         COMPACT_FAILURES.remove(&format!("{}:{}", work.txn.sink_ref, work.txn.id));
         crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
         crate::metrics::counters::add_wal_compaction_transaction_completed(1);
-        crate::helpers::perf::emit(
-            "wal_compact",
-            serde_json::json!({
-                "elapsed_ms": compact_started.elapsed().as_millis() as u64,
-                "rows": records.len(),
-                "wal_parts": work.entries.len(),
-                "bytes": body_len
-            }),
-        );
+        let mut wal_compact = serde_json::json!({
+            "elapsed_ms": compact_started.elapsed().as_millis() as u64,
+            "rows": rows,
+            "wal_parts": work.entries.len(),
+            "bytes": body_len,
+        });
+        if profile {
+            wal_compact["decode_ms"] = serde_json::json!(decode_ns / 1_000_000);
+            wal_compact["encode_ms"] = serde_json::json!(encode_ns / 1_000_000);
+            wal_compact["put_ms"] = serde_json::json!(put_ns / 1_000_000);
+        }
+        crate::helpers::perf::emit("wal_compact", wal_compact);
         Ok(true)
     }
 
@@ -3395,7 +3451,7 @@ impl Buffers {
         entry: &CompactionEntry,
         s3_resolved: Option<Arc<Vec<u8>>>,
     ) -> io::Result<Vec<crate::serdes::copy::CopyWalRecord>> {
-        if entry.idx.codec != crate::buffer::segment_file::PART_CODEC_COPY {
+        if !crate::buffer::segment_file::is_copy_codec(entry.idx.codec) {
             return Err(io::Error::other("expected copy WAL PART"));
         }
         let bytes = match (&s3_resolved, &entry.source) {
@@ -3421,7 +3477,7 @@ impl Buffers {
                 ))
             }
         };
-        crate::buffer::segment_file::decode_copy_part(&bytes)
+        crate::buffer::segment_file::decode_copy_part(entry.idx.codec, &bytes)
     }
 
     async fn compact_grouped_work(
@@ -3439,16 +3495,10 @@ impl Buffers {
             Self::release_work_in_flight(&work);
             return Ok(false);
         };
-        if work
-            .entries
-            .iter()
-            .any(|entry| entry.idx.codec == crate::buffer::segment_file::PART_CODEC_COPY)
-        {
-            if work
-                .entries
-                .iter()
-                .any(|entry| entry.idx.codec != crate::buffer::segment_file::PART_CODEC_COPY)
-            {
+        let is_copy =
+            |entry: &CompactionEntry| crate::buffer::segment_file::is_copy_codec(entry.idx.codec);
+        if work.entries.iter().any(is_copy) {
+            if !work.entries.iter().all(is_copy) {
                 Self::release_work_in_flight(&work);
                 return Err(io::Error::other(
                     "compaction group mixed copy and Arrow WAL parts",
@@ -3488,12 +3538,7 @@ impl Buffers {
         crate::metrics::counters::add_wal_compaction_transaction_started(1);
         crate::metrics::counters::inc_wal_compactions_in_flight();
         let _guard = WorkGuard(&work);
-        let _s3_body_pin = s3_wal_body_cache::pin_segments(
-            work.entries
-                .iter()
-                .filter(|entry| entry.source.is_s3())
-                .map(|entry| entry.source.segment_id().to_string()),
-        );
+        let _s3_body_pin = Self::pin_work_s3_segments(&work);
 
         Self::persist_compaction_row(config, &work.txn).await?;
         let _decode_permit = budget.acquire_decode().await?;
