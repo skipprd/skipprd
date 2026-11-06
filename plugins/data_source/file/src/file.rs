@@ -20,7 +20,8 @@ use skippr_runtime_sdk::helpers::configuration::runtime_child_config;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
-    partition_already_closed, submit_payload_batch_groups, IngestBatch, SourceSyncContext,
+    partition_already_closed, source_payload_task, IngestBatch, SourcePayloadTask,
+    SourceSyncContext,
 };
 
 type BatchSender = UnboundedSender<Vec<Vec<IngestBatch>>>;
@@ -189,9 +190,51 @@ impl DataSourceLocalFilePlugin {
             self.config.batch_size_bytes.unwrap_or(1_000_000),
         )?);
 
+        // Match S3: accept many payload tasks without waiting per batch so host
+        // ingest threads actually fan out. File previously used
+        // submit_payload_batch_groups → and_wait, which kept active_threads at 1.
+        let total_cpus = std::env::var("INGEST_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
+            .unwrap_or(4)
+            .max(1);
+        let pending_byte_cap: usize = std::env::var("INGEST_PENDING_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(512 * 1024 * 1024);
+        let mut pending_tasks: Vec<SourcePayloadTask> = Vec::with_capacity(total_cpus);
+        let mut pending_bytes: usize = 0;
+        let mut accepted = Vec::new();
+
         while let Some(batch_groups) = data_batches_stream.next().await {
-            submit_payload_batch_groups(ctx.as_ref(), batch_groups)?;
+            for group in batch_groups {
+                if group.is_empty() {
+                    continue;
+                }
+                pending_bytes = pending_bytes.saturating_add(group.iter().map(|b| b.bytes).sum());
+                pending_tasks.push(source_payload_task(group));
+                if pending_tasks.len() >= total_cpus || pending_bytes >= pending_byte_cap {
+                    let submission =
+                        ctx.submit_payload_tasks_accepted(std::mem::take(&mut pending_tasks))?;
+                    accepted.push(submission);
+                    pending_bytes = 0;
+                    if accepted.len() >= 1024 {
+                        ctx.wait_payload_acks(&accepted)?;
+                        accepted.clear();
+                    }
+                }
+            }
         }
+        if !pending_tasks.is_empty() {
+            accepted.push(ctx.submit_payload_tasks_accepted(pending_tasks)?);
+        }
+        if !accepted.is_empty() {
+            ctx.wait_payload_acks(&accepted)?;
+        }
+        ctx.drain_payload_acks()?;
         Ok(())
     }
 
