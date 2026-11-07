@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [16.0.1] - 2026-11-07
+
 ### Fixed
 
 - Quote-only `"`, `'`, or backtick datetime strings no longer panic COPY ingest on the wrapping-quote strip (`begin <= end`).

@@ -57,7 +57,7 @@ Files land at `output_dir/<namespace>/…`.
 
 - `<namespace>` is the source namespace (table or stream name).
 - Optional partition folders follow the namespace: `p_country=GB/` from `batch_partition_fields`, and `year=2026/month=10/day=9/` from `batch_time_fields` (or `p_year=…` when `time_partition_prefix` is `p_`).
-- The file name is the batch identity plus the `format` extension, for example `apply-0001.jsonl`.
+- The file name is the batch identity plus the `format` extension, for example `apply-0001.jsonl`. Copy Identity JSONL is gzip (`apply-0001.jsonl.gz`). CSV and XML copy objects stay `.csv` and `.xml`.
 
 ## Troubleshooting
 
