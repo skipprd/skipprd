@@ -390,7 +390,7 @@ def main() -> None:
                 entry["binary_name"],
             )
             for target in publish_targets:
-                if target.triple in artifacts:
+                if target.triple in artifacts or not target.publish_artifact_dir:
                     continue
                 binary_name = target_binary_name(entry["binary_name"], target.triple)
                 source_binary = workspace / target.publish_artifact_dir / binary_name
