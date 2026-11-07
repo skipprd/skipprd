@@ -4376,6 +4376,44 @@ vector_sources:
     }
 
     #[test]
+    fn skipprlake_pair_accepts_host_version_pins() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+pipelines:
+  p:
+    data_source: data_sources.src
+    data_sink: data_sinks.lake
+data_sources:
+  src:
+    File:
+      version: "0.1.9"
+      path: /tmp/in
+data_sinks:
+  lake:
+    schema_sink: schema_sinks.lake
+    SkipprLake:
+      version: "0.2.6"
+      warehouse: file:///tmp/w
+      catalog_table: cat
+      object_store:
+        type: file
+      table_namespace: bronze
+schema_sinks:
+  lake:
+    SkipprLake:
+      version: "0.2.6"
+      warehouse: file:///tmp/w
+      catalog_table: cat
+      object_store:
+        type: file
+      table_namespace: bronze
+"#,
+        )
+        .unwrap();
+        config.scoped_to("p").expect("version pins are host-owned");
+    }
+
+    #[test]
     fn scoped_to_refuses_a_paired_schema_sink_that_does_not_decode() {
         let config: Config = serde_yaml::from_str(
             "pipelines:\n  p:\n    data_source: data_sources.src\n    data_sink: data_sinks.lake\ndata_sources:\n  src:\n    File:\n      path: /tmp/in\ndata_sinks:\n  lake:\n    schema_sink: schema_sinks.lake\n    Duckdb:\n      warehouse: file:///tmp/w\n      table_namespace: main\nschema_sinks:\n  lake:\n    Duckdb:\n      warehouse: file:///tmp/w\n",

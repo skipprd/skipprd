@@ -231,7 +231,8 @@ impl RuntimePluginConfigEnvelope {
     pub fn new(plugin_name: impl Into<String>, raw_config: serde_json::Value) -> Self {
         Self {
             plugin_name: plugin_name.into(),
-            raw_config_json: raw_config.to_string(),
+            raw_config_json: crate::helpers::plugin_config::config_without_host_pins(&raw_config)
+                .to_string(),
         }
     }
 
@@ -928,6 +929,24 @@ mod tests {
         assert_eq!(
             RuntimeBinding::Deadletter.format_pipeline(crate::pipeline_type::PipelineType::Copy),
             crate::pipeline_type::PipelineType::Ingest
+        );
+    }
+
+    #[test]
+    fn runtime_envelope_omits_host_version_pin() {
+        let envelope = RuntimePluginConfigEnvelope::new(
+            "SkipprLake",
+            serde_json::json!({
+                "version": "0.2.6",
+                "warehouse": "file:///tmp/w",
+                "catalog_table": "cat"
+            }),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&envelope.raw_config_json).unwrap();
+        assert!(parsed.get("version").is_none());
+        assert_eq!(
+            parsed.get("warehouse").and_then(serde_json::Value::as_str),
+            Some("file:///tmp/w")
         );
     }
 

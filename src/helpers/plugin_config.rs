@@ -8,6 +8,22 @@ use serde_json::{Map, Value};
 use crate::serdes::input_format::InputFormat;
 use crate::serdes::output_format::OutputFormat;
 
+/// Host-owned keys in a plugin YAML/JSON block. Plugins never see these.
+const HOST_PLUGIN_CONFIG_KEYS: &[&str] = &["version"];
+
+pub fn config_without_host_pins(config: &Value) -> Value {
+    match config {
+        Value::Object(map) => {
+            let mut filtered = map.clone();
+            for key in HOST_PLUGIN_CONFIG_KEYS {
+                filtered.remove(*key);
+            }
+            Value::Object(filtered)
+        }
+        other => other.clone(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginConfigEntry {
     pub plugin_name: String,
@@ -65,8 +81,12 @@ impl PluginConfigEntry {
             .filter(|value| !value.is_empty())
     }
 
+    pub fn config_for_plugin(&self) -> Value {
+        config_without_host_pins(&self.config)
+    }
+
     pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, String> {
-        serde_json::from_value(self.config.clone()).map_err(|err| {
+        serde_json::from_value(self.config_for_plugin()).map_err(|err| {
             format!(
                 "Failed to decode config for plugin '{}': {}",
                 self.plugin_name, err
@@ -215,6 +235,26 @@ mod tests {
         };
 
         assert_eq!(entry.version().as_deref(), Some("0.1.1"));
+    }
+
+    #[test]
+    fn deserialize_strips_host_version_pin() {
+        let entry = PluginConfigEntry {
+            plugin_name: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME.to_string(),
+            config: json!({
+                "version": "0.2.6",
+                "warehouse": "file:///tmp/warehouse",
+                "catalog_table": "cat",
+                "object_store": { "type": "file" },
+                "table_namespace": "bronze"
+            }),
+        };
+
+        let cfg: skippr_iceberg_catalog::SkipprLakeConfig = entry
+            .deserialize()
+            .expect("YAML version is a host pin, not a SkipprLake field");
+        assert_eq!(cfg.catalog_table, "cat");
+        assert_eq!(entry.version().as_deref(), Some("0.2.6"));
     }
 
     #[test]

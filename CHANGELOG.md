@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [16.0.2] - 2026-11-07
+
+### Fixed
+
+- YAML `version:` on a plugin block is a host pin. Decode and the runtime envelope strip it before SkipprLake (and every other plugin) config, so a pin no longer fails with `unknown field version`.
+
 ## [16.0.1] - 2026-11-07
 
 ### Fixed
