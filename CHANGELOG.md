@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [16.0.3] - 2026-11-07
+
+### Fixed
+
+- Republishing runtime plugins reuses linux/macos artifacts that are already on the CDN and skips triples this catalog never shipped (Windows). A partial `s3 sync` no longer fail-closes with `published … is missing x86_64-pc-windows-msvc`.
+
 ## [16.0.2] - 2026-11-07
 
 ### Fixed

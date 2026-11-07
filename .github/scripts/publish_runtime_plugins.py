@@ -230,6 +230,31 @@ def published_manifest_matches_catalog(
     )
 
 
+def reuse_published_artifacts(
+    published_manifest: dict,
+    publish_targets: list,
+    public_base_url: str,
+    subdir: str,
+    default_binary_name: str,
+) -> dict:
+    """Copy published artifacts that exist. Skip triples this index never shipped."""
+    artifacts = {}
+    published_artifacts = (published_manifest or {}).get("artifacts", {})
+    for target in publish_targets:
+        fallback_artifact = resolve_target_artifact(published_artifacts, target)
+        if not fallback_artifact:
+            continue
+        fallback_artifact["executable"] = Path(
+            fallback_artifact.get("executable", default_binary_name)
+        ).name
+        if fallback_artifact.get("url"):
+            fallback_artifact["url"] = rewrite_public_url(
+                fallback_artifact["url"], public_base_url, subdir
+            )
+        artifacts[target.triple] = fallback_artifact
+    return artifacts
+
+
 def target_binary_name(binary_name: str, target_triple: str) -> str:
     if "windows" in target_triple and not binary_name.endswith(".exe"):
         return f"{binary_name}.exe"
@@ -357,22 +382,38 @@ def main() -> None:
         artifacts = {}
 
         if can_reuse_source:
+            artifacts = reuse_published_artifacts(
+                published_manifest or {},
+                publish_targets,
+                public_base_url,
+                args.subdir,
+                entry["binary_name"],
+            )
             for target in publish_targets:
-                fallback_artifact = resolve_target_artifact(
-                    (published_manifest or {}).get("artifacts", {}), target
+                if target.triple in artifacts:
+                    continue
+                binary_name = target_binary_name(entry["binary_name"], target.triple)
+                source_binary = workspace / target.publish_artifact_dir / binary_name
+                if not source_binary.exists():
+                    continue
+                artifact_relative_path = prefixed_release_path(
+                    versioned_artifact_relative_path(entry, target.triple, binary_name),
+                    bundle_version,
                 )
-                if not fallback_artifact:
-                    raise SystemExit(
-                        f"published {entry['manifest_filename']} is missing {target.triple}"
-                    )
-                fallback_artifact["executable"] = Path(
-                    fallback_artifact.get("executable", entry["binary_name"])
-                ).name
-                if fallback_artifact.get("url"):
-                    fallback_artifact["url"] = rewrite_public_url(
-                        fallback_artifact["url"], public_base_url, args.subdir
-                    )
-                artifacts[target.triple] = fallback_artifact
+                staged_binary = output_dir / artifact_relative_path
+                staged_binary.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_binary, staged_binary)
+                artifacts[target.triple] = {
+                    "executable": binary_name,
+                    "url": public_url(
+                        public_base_url,
+                        args.bucket,
+                        args.subdir,
+                        artifact_relative_path.as_posix(),
+                    ),
+                    "sha256": sha256(source_binary),
+                    "build_environment": target.build_environment,
+                }
             if not artifacts:
                 raise SystemExit(
                     f"No runtime plugin artifacts were available for {entry['manifest_filename']}"

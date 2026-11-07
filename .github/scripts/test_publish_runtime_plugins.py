@@ -299,6 +299,39 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             )
         )
 
+    def test_reuse_published_artifacts_skips_triples_the_index_never_had(self) -> None:
+        published = {
+            "artifacts": {
+                "x86_64-unknown-linux-gnu": {
+                    "executable": "skippr-plugin-data-source-adroll-ads",
+                    "url": "https://install.skippr.io/releases/runtime-plugins/plugins/adroll-ads-source/versions/0.1.9/x86_64-unknown-linux-gnu/skippr-plugin-data-source-adroll-ads",
+                    "sha256": "aaa",
+                }
+            }
+        }
+        targets = [
+            RuntimePluginTarget(
+                triple="x86_64-unknown-linux-gnu",
+                aliases=("linux-x86_64",),
+                publish_artifact_dir="runtime-plugin-binaries-linux_x86",
+                build_environment={"runner_baseline": "skippr-linux-x64-16"},
+            ),
+            RuntimePluginTarget(
+                triple="x86_64-pc-windows-msvc",
+                aliases=("windows-x86_64",),
+                publish_artifact_dir="runtime-plugin-binaries-windows_x86",
+                build_environment={"runner_baseline": "skippr-windows-x64-8"},
+            ),
+        ]
+        artifacts = publish_runtime_plugins.reuse_published_artifacts(
+            published,
+            targets,
+            "https://install.skippr.io/releases/runtime-plugins",
+            "runtime-plugins",
+            "skippr-plugin-data-source-adroll-ads",
+        )
+        self.assertEqual(set(artifacts), {"x86_64-unknown-linux-gnu"})
+
     def test_require_complete_catalog_index_rejects_s3_athena_glue_subset(self) -> None:
         catalog = [
             {"manifest_filename": "s3-source.json"},
