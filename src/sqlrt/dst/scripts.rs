@@ -969,6 +969,7 @@ pub const EXTRA_FIXTURES: &[&str] = &[
     "i_offset_corrupt_schema",
     "j_cube_events_namespaces",
     "j_device_json_wide_row",
+    "j_flatten_json_schema_names_agree_when_namespace_named",
     "j_s3_list_closed_skip",
     "j_debezium_op_maps_to_mutation_kind",
 ];
@@ -1150,6 +1151,7 @@ pub const REQUIRED_PLAN_SCRIPTS: &[&str] = &[
     "i_offset_corrupt_schema",
     "j_cube_events_namespaces",
     "j_device_json_wide_row",
+    "j_flatten_json_schema_names_agree_when_namespace_named",
     "j_s3_list_closed_skip",
     "j_debezium_op_maps_to_mutation_kind",
 ];

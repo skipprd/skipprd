@@ -445,6 +445,45 @@ fn e_leaf_split_then_fast_apply() {
 }
 
 #[test]
+fn j_flatten_json_schema_names_agree_when_namespace_named() {
+    use crate::discover::{Metadata, OutputMetadata, SkipprDataType};
+    fn leaf(out: &str, ty: SkipprDataType) -> Metadata {
+        Metadata::new_with_type(ty, out)
+    }
+    let mut docket = leaf("docket", SkipprDataType::Record);
+    docket.fields.insert(
+        "truck_plate".into(),
+        leaf("truck_plate", SkipprDataType::String),
+    );
+    let mut detail = leaf("detail", SkipprDataType::Record);
+    detail.fields.insert("docket".into(), docket);
+    let mut ns = leaf("cloudcycle_docket", SkipprDataType::Record);
+    ns.fields
+        .insert("id".into(), leaf("id", SkipprDataType::String));
+    ns.fields.insert("detail".into(), detail);
+    let event = json!({
+        "id": "dkt-1",
+        "detail": { "docket": { "truck_plate": "AB12CDE" } }
+    });
+    let json_keys: std::collections::BTreeSet<_> = Helpers::flatten(&event, &ns.fields)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let schema_keys: std::collections::BTreeSet<_> = OutputMetadata::from_flatterened_metadata(&ns)
+        .fields
+        .values()
+        .map(|f| f.out_field_name.clone())
+        .collect();
+    assert_eq!(
+        json_keys, schema_keys,
+        "JSON flatten keys {json_keys:?} must equal schema flatten names {schema_keys:?}"
+    );
+}
+
+#[test]
 fn j_cube_events_namespaces() {
     let events = [
         json!({"detail-type": "pour_start", "id": 10}),

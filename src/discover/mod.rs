@@ -663,6 +663,16 @@ impl Metadata {
         Self::_flatten_metadata(metadata, flattened, "".to_string());
     }
 
+    /// Nested flatten names join with `_`. The root namespace node is a table,
+    /// not a struct column: its `out_field_name` must not prefix leaves.
+    fn flatten_child_path(field_path: &str, child_out: &str) -> String {
+        if field_path.is_empty() {
+            child_out.to_string()
+        } else {
+            format!("{}_{}", field_path, child_out)
+        }
+    }
+
     fn _flatten_metadata(metadata: &Metadata, flattened: &mut OutputMetadata, field_path: String) {
         for (_key, val) in metadata.fields.iter() {
             // Special handling for array elements
@@ -674,16 +684,11 @@ impl Metadata {
 
                 // Process array elements (fields under "0" key)
                 for i in 0..repetition_count {
-                    // Create base path for this array element
-                    let element_path = if field_path.is_empty() {
-                        if metadata.out_field_name.is_empty() {
-                            format!("{}_{}", val.out_field_name, i)
-                        } else {
-                            format!("{}_{}_{}", metadata.out_field_name, val.out_field_name, i)
-                        }
-                    } else {
-                        format!("{}_{}_{}", field_path, val.out_field_name, i)
-                    };
+                    let element_path = format!(
+                        "{}_{}",
+                        Self::flatten_child_path(&field_path, &val.out_field_name),
+                        i
+                    );
 
                     // Process each field in the array template
                     for (_sub_key, sub_val) in array_template.fields.iter() {
@@ -723,15 +728,7 @@ impl Metadata {
             } else if val.determined_type == SkipprDataType::Array && val.fields.is_empty() {
                 // Handle primitive arrays that don't have a '0' field
                 // These are arrays of primitive types like double, int, etc.
-                let new_field_path = if field_path.is_empty() {
-                    if metadata.out_field_name.is_empty() {
-                        val.out_field_name.clone()
-                    } else {
-                        format!("{}_{}", metadata.out_field_name, val.out_field_name)
-                    }
-                } else {
-                    format!("{}_{}", field_path, val.out_field_name)
-                };
+                let new_field_path = Self::flatten_child_path(&field_path, &val.out_field_name);
 
                 // Add the primitive array to the flattened fields
                 let mut el = OutputMetadata::new();
@@ -748,15 +745,7 @@ impl Metadata {
                 flattened.fields.insert(new_field_path.clone(), el);
             } else {
                 // Standard path for non-array fields
-                let new_field_path = if field_path.is_empty() {
-                    if metadata.out_field_name.is_empty() {
-                        val.out_field_name.clone()
-                    } else {
-                        format!("{}_{}", metadata.out_field_name, val.out_field_name)
-                    }
-                } else {
-                    format!("{}_{}", field_path, val.out_field_name)
-                };
+                let new_field_path = Self::flatten_child_path(&field_path, &val.out_field_name);
 
                 if val.determined_type == SkipprDataType::Record
                     || val.determined_type == SkipprDataType::Map
@@ -3542,7 +3531,150 @@ mod tests {
 #[cfg(test)]
 mod tests_flatten_metadata {
     use super::*;
-    use std::collections::HashMap;
+    use crate::converters::skippr_arrow::convert_skippr_to_arrow;
+    use crate::helpers::Helpers;
+    use arrow::array::{Array, StringArray};
+    use arrow::json::ReaderBuilder;
+    use serde_json::json;
+    use std::collections::{BTreeSet, HashMap};
+    use std::sync::Arc;
+
+    fn leaf(out: &str, ty: SkipprDataType) -> Metadata {
+        Metadata::new_with_type(ty, out)
+    }
+
+    fn named_namespace(ns_out: &str) -> Metadata {
+        let mut docket_fields = HashMap::new();
+        docket_fields.insert(
+            "truck_plate".into(),
+            leaf("truck_plate", SkipprDataType::String),
+        );
+        let mut docket = leaf("docket", SkipprDataType::Record);
+        docket.fields = Box::new(docket_fields);
+        let mut detail_fields = HashMap::new();
+        detail_fields.insert("docket".into(), docket);
+        let mut detail = leaf("detail", SkipprDataType::Record);
+        detail.fields = Box::new(detail_fields);
+        let mut ns_fields = HashMap::new();
+        ns_fields.insert("time".into(), leaf("time", SkipprDataType::Timestamp));
+        ns_fields.insert("id".into(), leaf("id", SkipprDataType::String));
+        ns_fields.insert("detail".into(), detail);
+        let mut ns = leaf(ns_out, SkipprDataType::Record);
+        ns.fields = Box::new(ns_fields);
+        ns
+    }
+
+    fn docket_event() -> serde_json::Value {
+        json!({
+            "time": "2026-11-08T12:00:00Z",
+            "id": "dkt-1",
+            "detail": { "docket": { "truck_plate": "AB12CDE" } }
+        })
+    }
+
+    fn flatten_name_sets(ns: &Metadata) -> (BTreeSet<String>, BTreeSet<String>) {
+        let json_keys: BTreeSet<_> = Helpers::flatten(&docket_event(), &ns.fields)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let schema_keys: BTreeSet<_> = OutputMetadata::from_flatterened_metadata(ns)
+            .fields
+            .values()
+            .map(|f| f.out_field_name.clone())
+            .collect();
+        (json_keys, schema_keys)
+    }
+
+    #[test]
+    fn flatten_json_and_flatten_metadata_agree_when_namespace_out_field_name_is_set() {
+        let ns = named_namespace("cloudcycle_docket");
+        let (json_keys, schema_keys) = flatten_name_sets(&ns);
+        assert_eq!(
+            json_keys, schema_keys,
+            "JSON flatten keys {json_keys:?} must equal schema flatten names {schema_keys:?}"
+        );
+        let expected: BTreeSet<_> = ["time", "id", "detail_docket_truck_plate"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(json_keys, expected);
+    }
+
+    #[test]
+    fn flatten_json_and_flatten_metadata_agree_when_namespace_out_field_name_is_empty() {
+        let mut ns = named_namespace("");
+        ns.out_field_name.clear();
+        let (json_keys, schema_keys) = flatten_name_sets(&ns);
+        assert_eq!(
+            json_keys, schema_keys,
+            "JSON flatten keys {json_keys:?} must equal schema flatten names {schema_keys:?}"
+        );
+        let expected: BTreeSet<_> = ["time", "id", "detail_docket_truck_plate"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(json_keys, expected);
+    }
+
+    #[test]
+    fn flatten_json_and_flatten_metadata_agree_on_root_arrays_when_namespace_is_named() {
+        let mut item0 = leaf("0", SkipprDataType::Record);
+        item0
+            .fields
+            .insert("name".into(), leaf("name", SkipprDataType::String));
+        let mut items = leaf("items", SkipprDataType::Array);
+        items.repetition_count = 1;
+        items.fields.insert("0".into(), item0);
+        let mut ns = leaf("ns", SkipprDataType::Record);
+        ns.fields.insert("items".into(), items);
+        let event = json!({ "items": [{ "name": "a" }] });
+        let json_keys: BTreeSet<_> = Helpers::flatten(&event, &ns.fields)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let schema_keys: BTreeSet<_> = OutputMetadata::from_flatterened_metadata(&ns)
+            .fields
+            .values()
+            .map(|f| f.out_field_name.clone())
+            .collect();
+        assert_eq!(
+            json_keys, schema_keys,
+            "JSON flatten keys {json_keys:?} must equal schema flatten names {schema_keys:?}"
+        );
+        let expected: BTreeSet<_> = ["items_0_name"].into_iter().map(str::to_string).collect();
+        assert_eq!(json_keys, expected);
+    }
+
+    #[test]
+    fn flatten_arrow_decode_keeps_values_when_namespace_is_named() {
+        let ns = named_namespace("cloudcycle_docket");
+        let event = docket_event();
+        let flat = Helpers::flatten(&event, &ns.fields).unwrap();
+        let output = OutputMetadata::from_flatterened_metadata(&ns);
+        let schema = Arc::new(convert_skippr_to_arrow(output.fields).unwrap());
+        let mut decoder = ReaderBuilder::new(schema.clone()).build_decoder().unwrap();
+        decoder.serialize(&[&flat]).unwrap();
+        let batch = decoder.flush().unwrap().expect("batch");
+        let id_name = schema
+            .fields()
+            .iter()
+            .find(|f| f.name().ends_with("id"))
+            .unwrap()
+            .name();
+        let col = batch.column_by_name(id_name).expect("id column");
+        let arr = col.as_any().downcast_ref::<StringArray>().unwrap();
+        assert!(
+            !arr.is_null(0),
+            "id was dropped because JSON key != Arrow field name"
+        );
+        assert_eq!(arr.value(0), "dkt-1");
+    }
 
     #[test]
     fn test_flatten_metadata() {
@@ -3592,10 +3724,9 @@ mod tests_flatten_metadata {
 
         assert_eq!(flattened.fields.len(), 1);
         assert_eq!(
-            flattened.fields.get("parent_child").unwrap().out_field_name,
-            "parent_child"
+            flattened.fields.get("child").unwrap().out_field_name,
+            "child"
         );
-        // assert!(flattened.contains_key("parent_child"));
     }
 
     // @todo - support flattening of arrays of structs?
@@ -3836,7 +3967,7 @@ mod tests_flatten_metadata {
         println!("Flattened: {:?}", flattened);
 
         // Check if the array field exists with the correct path
-        let expected_field_name = "imu_x_axis_linear_mean";
+        let expected_field_name = "x_axis_linear_mean";
         assert!(
             flattened.fields.contains_key(expected_field_name),
             "Flattened metadata does not contain the primitive array field"
