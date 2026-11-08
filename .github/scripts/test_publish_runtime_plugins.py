@@ -1,9 +1,12 @@
 import copy
 import importlib.util
+import tempfile
+import urllib.error
 import urllib.parse
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -138,6 +141,147 @@ class PublishRuntimePluginsTests(unittest.TestCase):
                 10,
             )
         )
+
+    def test_published_source_matches_when_sdk_fingerprint_differs(self) -> None:
+        """Host-only engine edits change the SDK fingerprint (skippr-core
+        path-deps skipprd) without changing plugin checksums. Reuse the
+        published version path instead of rebuilding onto it."""
+        published = {
+            "version": "0.1.9",
+            "protocol_version": 24,
+            "sdk_build_fingerprint": "cdn-sdk",
+            "build_checksum": "adroll-checksum",
+        }
+        plugin = {
+            "package_version": "0.1.9",
+            "sdk_build_fingerprint": "host-telemetry-sdk",
+            "checksum": "adroll-checksum",
+        }
+        self.assertTrue(
+            publish_runtime_plugins.published_source_matches_catalog(
+                published,
+                {"sdk_build_fingerprint": "cdn-sdk"},
+                {"sdk_build_fingerprint": "cdn-sdk"},
+                plugin,
+                24,
+            )
+        )
+        plugin["checksum"] = "rebuilt"
+        self.assertFalse(
+            publish_runtime_plugins.published_source_matches_catalog(
+                published,
+                {"sdk_build_fingerprint": "cdn-sdk"},
+                {"sdk_build_fingerprint": "cdn-sdk"},
+                plugin,
+                24,
+            )
+        )
+
+    def test_same_version_checksum_reuses_cdn_sha_when_local_rebuild_differs(self) -> None:
+        """16.0.3 class: fingerprint drifted, checksum did not. Rebuilt Darwin
+        sha256 must not land on the immutable version path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            output_dir = Path(tmp) / "out"
+            darwin_dir = workspace / "runtime-plugin-binaries-macos_arm64"
+            linux_dir = workspace / "runtime-plugin-binaries-linux_x86"
+            darwin_dir.mkdir(parents=True)
+            linux_dir.mkdir(parents=True)
+            binary = "skippr-plugin-data-source-adroll-ads"
+            (darwin_dir / binary).write_bytes(b"rebuilt-darwin-not-cdn")
+            (linux_dir / binary).write_bytes(b"rebuilt-linux-not-cdn")
+
+            published = {
+                "version": "0.1.9",
+                "protocol_version": 24,
+                "sdk_build_fingerprint": "cdn-fp",
+                "build_checksum": "same-checksum",
+                "artifacts": {
+                    "aarch64-apple-darwin": {
+                        "executable": binary,
+                        "url": "https://install.skippr.io/releases/runtime-plugins/plugins/adroll-ads-source/versions/0.1.9/aarch64-apple-darwin/"
+                        + binary,
+                        "sha256": "cdn-darwin-sha",
+                    },
+                    "x86_64-unknown-linux-gnu": {
+                        "executable": binary,
+                        "url": "https://install.skippr.io/releases/runtime-plugins/plugins/adroll-ads-source/versions/0.1.9/x86_64-unknown-linux-gnu/"
+                        + binary,
+                        "sha256": "cdn-linux-sha",
+                    },
+                },
+            }
+            entry = {
+                "manifest_filename": "adroll-ads-source.json",
+                "binary_name": binary,
+                "package_version": "0.1.9",
+                "sdk_build_fingerprint": "host-telemetry-fp",
+                "checksum": "same-checksum",
+            }
+            targets = [
+                RuntimePluginTarget(
+                    triple="x86_64-unknown-linux-gnu",
+                    aliases=("linux-x86_64",),
+                    publish_artifact_dir="runtime-plugin-binaries-linux_x86",
+                    build_environment={"runner_baseline": "skippr-linux-x64-16"},
+                ),
+                RuntimePluginTarget(
+                    triple="aarch64-apple-darwin",
+                    aliases=("macos-arm64",),
+                    publish_artifact_dir="runtime-plugin-binaries-macos_arm64",
+                    build_environment={"runner_baseline": "skippr-darwin-arm64"},
+                ),
+            ]
+            artifacts, can_reuse_source, _ = (
+                publish_runtime_plugins.collect_entry_artifacts(
+                    entry,
+                    published,
+                    {"sdk_build_fingerprint": "cdn-fp"},
+                    {"sdk_build_fingerprint": "cdn-fp"},
+                    targets,
+                    24,
+                    workspace,
+                    output_dir,
+                    "https://install.skippr.io/releases/runtime-plugins",
+                    "runtime-plugins",
+                    "16.0.3",
+                )
+            )
+            self.assertTrue(can_reuse_source)
+            self.assertEqual(
+                artifacts["aarch64-apple-darwin"]["sha256"], "cdn-darwin-sha"
+            )
+            self.assertEqual(
+                artifacts["x86_64-unknown-linux-gnu"]["sha256"], "cdn-linux-sha"
+            )
+            staged_binaries = [path for path in output_dir.rglob("*") if path.is_file()]
+            self.assertEqual(staged_binaries, [])
+            staged = {
+                "version": "0.1.9",
+                "protocol_version": 24,
+                "build_checksum": "same-checksum",
+                "artifacts": artifacts,
+            }
+            self.assertIsNone(
+                publish_runtime_plugins.version_path_clobber_reason(published, staged)
+            )
+
+    def test_index_http_403_is_not_an_empty_baseline(self) -> None:
+        err = urllib.error.HTTPError(
+            "https://install.skippr.io/releases/runtime-plugins/latest/manifest-index.json",
+            403,
+            "Forbidden",
+            hdrs=MagicMock(),
+            fp=None,
+        )
+        with patch.object(
+            publish_runtime_plugins.urllib.request, "urlopen", side_effect=err
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                publish_runtime_plugins.load_latest_published_manifests(
+                    "https://install.skippr.io/releases/runtime-plugins/latest/manifest-index.json"
+                )
+        self.assertIn("HTTP 403", str(raised.exception))
 
     def test_published_manifest_requires_matching_protocol_version(self) -> None:
         target = RuntimePluginTarget(

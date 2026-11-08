@@ -39,6 +39,7 @@ def metadata_request(url: str) -> urllib.request.Request:
     return urllib.request.Request(
         fresh_metadata_url(url),
         headers={
+            "User-Agent": "skippr-runtime-plugin-plan/1.0",
             "Cache-Control": "no-cache, no-store, max-age=0",
             "Pragma": "no-cache",
         },
@@ -57,7 +58,7 @@ def load_latest_published_manifests(index_url: str) -> tuple[dict, dict[str, dic
     try:
         index = fetch_json_url(index_url)
     except urllib.error.HTTPError as err:
-        if err.code in {403, 404}:
+        if err.code == 404:
             return {}, {}
         raise SystemExit(f"failed to load published runtime plugin index {index_url}: HTTP {err.code}") from err
     except urllib.error.URLError as err:
@@ -68,7 +69,7 @@ def load_latest_published_manifests(index_url: str) -> tuple[dict, dict[str, dic
         try:
             manifests[entry["manifest_filename"]] = fetch_json_url(entry["manifest_url"])
         except urllib.error.HTTPError as err:
-            if err.code in {403, 404}:
+            if err.code == 404:
                 continue
             raise SystemExit(
                 f"failed to load published runtime manifest {entry['manifest_url']}: HTTP {err.code}"
@@ -78,6 +79,15 @@ def load_latest_published_manifests(index_url: str) -> tuple[dict, dict[str, dic
                 f"failed to load published runtime manifest {entry['manifest_url']}: {err}"
             ) from err
 
+    listed = [
+        item.get("manifest_filename")
+        for item in index.get("manifests", [])
+        if isinstance(item, dict) and item.get("manifest_filename")
+    ]
+    if listed and not manifests:
+        raise SystemExit(
+            f"failed to load any published runtime manifests listed in {index_url}"
+        )
     return index, manifests
 
 
@@ -171,11 +181,6 @@ def same_version_path_conflict_reason(
         details.append(
             f"protocol {published_protocol or '<missing>'} != {protocol_version}"
         )
-    sdk_build_reason = stale_sdk_build_metadata_reason(
-        published, published_index, published_index_entry, plugin
-    )
-    if sdk_build_reason is not None:
-        details.append(sdk_build_reason)
     if published.get("build_checksum", "") != plugin["checksum"]:
         details.append("build checksum changed")
     stale_build_targets = published_artifacts_with_stale_build_environment(
@@ -185,10 +190,13 @@ def same_version_path_conflict_reason(
         details.append(
             "artifact build environment changed for " + ", ".join(stale_build_targets)
         )
-    detail = "; ".join(details) if details else "published payload differs"
+    if not details:
+        # Fingerprint-only drift (host src via skippr-core → skipprd) is not a
+        # crate bump. Reuse the published version path.
+        return None
     return (
         f"{plugin['package_name']} version {plugin['package_version']} is already "
-        f"published ({detail}). {IMMUTABLE_VERSION_PATH_HELP}"
+        f"published ({'; '.join(details)}). {IMMUTABLE_VERSION_PATH_HELP}"
     )
 
 
@@ -247,7 +255,7 @@ def plan_runtime_plugin_release(
     elif not selected:
         reason = (
             "all runtime plugins already published at matching version, protocol, "
-            "SDK build fingerprint, build checksum, and build environment"
+            "and build checksum"
         )
     else:
         reason = "build runtime plugins whose crate version is new or unpublished"

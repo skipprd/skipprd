@@ -29,6 +29,8 @@ jobs:
       - run: python3 .github/scripts/test_seed_bike_hire_r2.py
       - run: python3 .github/scripts/test_local_runtime_plugins.py
       - run: python3 .github/scripts/test_runtime_plugin_catalog.py
+      - run: python3 .github/scripts/test_publish_runtime_plugins.py
+      - run: python3 .github/scripts/test_runtime_plugin_release_plan.py
       - run: python3 .github/scripts/test_bump_changed_plugin_crates.py
       - run: python3 .github/scripts/test_previous_protocol_compatible_release.py
       - run: python3 .github/scripts/test_engine_tag.py
@@ -41,8 +43,10 @@ jobs:
   linux_x86:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
     name: cargo build (linux x86)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, skippr-linux-x64-32]
     timeout-minutes: 360
+    env:
+      CARGO_BUILD_JOBS: "28"
     steps:
       - uses: actions/checkout@v4
         with:

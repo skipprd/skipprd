@@ -2,7 +2,7 @@
 
 Operator path is **`/skippr-release`**: bump changed plugin crates, move `CHANGELOG` Unreleased into the tag, commit with the pre-commit hook, wait until SHA batteries are green on this commit (`rust.yml` File smoke + `linux_dst`, `skippr-fuzz.yml`, `perf.yml` / `perf-db.yml` `linux_matrix`; not `skippr-tpc.yml`, not frame-pointer / flamegraph), then tag, push, watch both GitHub Actions pipelines until publish jobs succeed, then surgical public docs via **`skipprd-docs`**. Re-dispatch a workflow unless that SHA already succeeded; `rust.yml` also requires the named File smoke + `linux_dst` jobs. Never skip matrix cells. There is no `skippr-gate`. Everyday plugin commits do not bump crate versions. Immutable pre-release testing is **`/skippr-beta-release`**: same SHA batteries, then next production patch plus `-beta-N` (`18.3.10-beta-1`, N monotonic), full artifact publish (`python-publish` as PEP 440 `18.3.10b1` + skipprd host tarballs + runtime plugins under the unique tag prefix). Never overwrite the tag. Skip `latest` pointers. Skip skipprd-docs.
 
-Python wheels publish from `.github/workflows/ci.yml` (**Python CI/CD Pipeline**). Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on GitHub-hosted Linux x86 (`ubuntu-latest`) plus macOS arm64 on the self-hosted `skippr-darwin-arm64` runner. Both pipelines run on tags (and `workflow_dispatch`), not on `main` / master pushes. Local File smoke (`e2e_file_duckdb`, `e2e_file_copy`) then `linux_dst` gates `publish_runtime_plugins`. Product-tag e2e after that download `{tag}/manifest-index.json` from the CDN. `publish_skipprd` runs after CDN e2e, `chaos_mode_published`, protocol-compat jobs, Darwin, `linux_dst`, and plugin publish. Scratch `0.0.0` runs File smoke plus local `chaos_mode_test` and does not publish. Windows is not a publish target.
+Python wheels publish from `.github/workflows/ci.yml` (**Python CI/CD Pipeline**). Host **Rust CI/CD Pipeline** (`.github/workflows/rust.yml`) builds, tests, chaos-tests, and publishes skipprd on the self-hosted Linux x86 runner (`skippr-linux-x64-32`) plus macOS arm64 on the self-hosted `skippr-darwin-arm64` runner. File smoke, DST, and publish jobs stay on GitHub-hosted `ubuntu-latest`. Both pipelines run on tags (and `workflow_dispatch`), not on `main` / master pushes. Local File smoke (`e2e_file_duckdb`, `e2e_file_copy`) then `linux_dst` gates `publish_runtime_plugins`. Product-tag e2e after that download `{tag}/manifest-index.json` from the CDN. `publish_skipprd` runs after CDN e2e, `chaos_mode_published`, protocol-compat jobs, Darwin, `linux_dst`, and plugin publish. Scratch `0.0.0` runs File smoke plus local `chaos_mode_test` and does not publish. Windows is not a publish target.
 
 ## High-level flow
 
@@ -44,7 +44,7 @@ This is why plugin versions live in each plugin crate's `Cargo.toml`, not in a s
 
 Platform build jobs compile the host binary plus **every** workspace catalog plugin (not an e2e subset):
 
-- `linux_x86` on GitHub-hosted `ubuntu-latest`
+- `linux_x86` on the self-hosted `skippr-linux-x64-32` runner
 - `macos_arm64` on the self-hosted `skippr-darwin-arm64` runner
 
 `rust-build-release` loads that catalog via `catalog_package_names`. Windows is not a publish target.
@@ -78,7 +78,7 @@ Bump `pyproject.toml` and `python/Cargo.toml` together, then tag the engine (`16
 `.github/workflows/rust.yml` (**Rust CI/CD Pipeline**) is the linux x86 plus Darwin arm64 release lane. It runs on unprefixed engine tags (`16.0.0`) and `workflow_dispatch`, not on `main` or master branch pushes.
 
 - `linux_test_suite` — Python workflow contracts (`test_rust_ci.py`, harness/plugin/host-boundary scripts). Does not run `cargo test -p skipprd`.
-- `linux_x86` — `rust-build-release` of skipprd plus the full workspace plugin catalog; starts in parallel with `linux_test_suite`
+- `linux_x86` — `rust-build-release` of skipprd plus the full workspace plugin catalog on `skippr-linux-x64-32`; starts in parallel with `linux_test_suite`
 - `macos_arm64` — the same catalog build on the self-hosted `skippr-darwin-arm64` runner
 - `e2e_file_duckdb` — local File source append into Duckdb Iceberg; gates plugin publish
 - `e2e_file_copy` — local File → File `type: copy`; gates plugin publish

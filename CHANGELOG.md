@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 
 - Schema flatten no longer prefixes a namespace node's `out_field_name`, so JSON, Arrow, and Iceberg column names match when `flatten_events=true`.
 - Iceberg writer keeps prior schema ids instead of calling `remove_old_schemas()`, so Athena/Glue can still resolve snapshot schema id 0.
+- Runtime plugin publish reuses an existing crate version path when the plugin checksum is unchanged, even if a host-only engine edit shifted the SDK fingerprint. Version paths stay immutable.
 
 ## [16.0.2] - 2026-11-07
 

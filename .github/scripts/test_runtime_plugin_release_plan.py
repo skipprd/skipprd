@@ -1,7 +1,9 @@
 import importlib.util
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -90,36 +92,55 @@ class RuntimePluginReleasePlanTests(unittest.TestCase):
         self.assertIn("0.1.9", message)
         self.assertIn("version paths are immutable", message)
 
-    def test_sdk_build_change_same_crate_version_is_immutable(self) -> None:
+    def test_sdk_fingerprint_change_same_checksum_reuses_published_paths(self) -> None:
         index, manifests = self.published_metadata("old-sdk")
 
-        with self.assertRaises(SystemExit) as raised:
-            runtime_plugin_release_plan.plan_runtime_plugin_release(
-                self.catalog("current-sdk"),
-                [],
-                17,
-                index,
-                manifests,
-            )
+        plan = runtime_plugin_release_plan.plan_runtime_plugin_release(
+            self.catalog("current-sdk"),
+            [],
+            17,
+            index,
+            manifests,
+        )
 
-        self.assertIn("version paths are immutable", str(raised.exception))
+        self.assertFalse(plan["build_all"])
+        self.assertEqual(plan["packages"], [])
 
-    def test_stale_catalog_entry_same_crate_version_is_immutable(self) -> None:
+    def test_stale_index_entry_fingerprint_same_checksum_reuses_published_paths(
+        self,
+    ) -> None:
         index, manifests = self.published_metadata("current-sdk")
         index["manifests"][0]["sdk_build_fingerprint"] = "stale-sdk"
 
-        with self.assertRaises(SystemExit) as raised:
-            runtime_plugin_release_plan.plan_runtime_plugin_release(
-                self.catalog("current-sdk"),
-                [],
-                17,
-                index,
-                manifests,
-            )
+        plan = runtime_plugin_release_plan.plan_runtime_plugin_release(
+            self.catalog("current-sdk"),
+            [],
+            17,
+            index,
+            manifests,
+        )
 
+        self.assertFalse(plan["build_all"])
+        self.assertEqual(plan["packages"], [])
+
+    def test_index_http_403_is_not_an_empty_baseline(self) -> None:
+        err = urllib.error.HTTPError(
+            runtime_plugin_release_plan.DEFAULT_PUBLISHED_INDEX_URL,
+            403,
+            "Forbidden",
+            hdrs=MagicMock(),
+            fp=None,
+        )
+        with patch.object(
+            runtime_plugin_release_plan.urllib.request, "urlopen", side_effect=err
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                runtime_plugin_release_plan.load_latest_published_manifests(
+                    runtime_plugin_release_plan.DEFAULT_PUBLISHED_INDEX_URL
+                )
         message = str(raised.exception)
-        self.assertIn("skippr-plugin-data-sink-athena", message)
-        self.assertIn("version paths are immutable", message)
+        self.assertIn("HTTP 403", message)
+        self.assertNotIn("not yet published", message)
 
     def test_crate_version_bump_selects_new_path(self) -> None:
         index, manifests = self.published_metadata("current-sdk")

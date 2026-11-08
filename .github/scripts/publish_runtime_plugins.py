@@ -156,7 +156,7 @@ def load_latest_published_manifests(index_url: str) -> tuple[dict, dict[str, dic
     try:
         index = fetch_json_url(index_url)
     except urllib.error.HTTPError as err:
-        if err.code in {403, 404}:
+        if err.code == 404:
             return {}, {}
         raise SystemExit(f"Failed to load runtime plugin index {index_url}: HTTP {err.code}") from err
     except urllib.error.URLError as err:
@@ -167,7 +167,7 @@ def load_latest_published_manifests(index_url: str) -> tuple[dict, dict[str, dic
         try:
             manifests[entry["manifest_filename"]] = fetch_json_url(entry["manifest_url"])
         except urllib.error.HTTPError as err:
-            if err.code in {403, 404}:
+            if err.code == 404:
                 continue
             raise SystemExit(
                 f"Failed to load runtime manifest {entry['manifest_url']}: HTTP {err.code}"
@@ -176,6 +176,15 @@ def load_latest_published_manifests(index_url: str) -> tuple[dict, dict[str, dic
             raise SystemExit(
                 f"Failed to load runtime manifest {entry['manifest_url']}: {err}"
             ) from err
+    listed = [
+        item.get("manifest_filename")
+        for item in index.get("manifests", [])
+        if isinstance(item, dict) and item.get("manifest_filename")
+    ]
+    if listed and not manifests:
+        raise SystemExit(
+            f"Failed to load any runtime manifests listed in {index_url}"
+        )
     return index, manifests
 
 
@@ -197,14 +206,13 @@ def published_source_matches_catalog(
     plugin: dict,
     protocol_version: int,
 ) -> bool:
-    sdk_build_fingerprint = plugin["sdk_build_fingerprint"]
+    # Fingerprint is not a reuse gate. skippr-core path-deps skipprd, so host-only
+    # src edits (telemetry, docs pins) change it without changing plugin checksum.
+    # Reuse the immutable version-path binaries; do not rebuild onto them.
+    del published_index, published_index_entry
     return (
         published.get("version") == plugin["package_version"]
         and published.get("protocol_version") == protocol_version
-        and published.get("sdk_build_fingerprint") == sdk_build_fingerprint
-        and published_index.get("sdk_build_fingerprint") == sdk_build_fingerprint
-        and published_index_entry.get("sdk_build_fingerprint")
-        == sdk_build_fingerprint
         and published.get("build_checksum") == plugin["checksum"]
     )
 
@@ -328,6 +336,121 @@ def artifact_urls_rewritten(manifest: dict, public_base_url: str, subdir: str) -
     return rewritten
 
 
+def collect_entry_artifacts(
+    entry: dict,
+    published_manifest: dict | None,
+    published_index: dict,
+    published_index_entry: dict,
+    publish_targets: list,
+    protocol_version: int,
+    workspace: Path,
+    output_dir: Path,
+    public_base_url: str,
+    subdir: str,
+    bundle_version: str,
+) -> tuple[dict, bool, bool]:
+    """Stage or reuse binaries for one catalog plugin.
+
+    Matching version + protocol + checksum reuses CDN bytes, even when a local
+    rebuild would hash differently (host-only fingerprint drift).
+    """
+    published_manifest = published_manifest or {}
+    can_reuse_source = published_source_matches_catalog(
+        published_manifest,
+        published_index,
+        published_index_entry,
+        entry,
+        protocol_version,
+    )
+    can_reuse_published = published_manifest_matches_catalog(
+        published_manifest,
+        published_index,
+        published_index_entry,
+        entry,
+        publish_targets,
+        protocol_version,
+    )
+    artifacts: dict = {}
+
+    if can_reuse_source:
+        artifacts = reuse_published_artifacts(
+            published_manifest,
+            publish_targets,
+            public_base_url,
+            subdir,
+            entry["binary_name"],
+        )
+        for target in publish_targets:
+            if target.triple in artifacts or not target.publish_artifact_dir:
+                continue
+            binary_name = target_binary_name(entry["binary_name"], target.triple)
+            source_binary = workspace / target.publish_artifact_dir / binary_name
+            if not source_binary.exists():
+                continue
+            artifact_relative_path = prefixed_release_path(
+                versioned_artifact_relative_path(entry, target.triple, binary_name),
+                bundle_version,
+            )
+            staged_binary = output_dir / artifact_relative_path
+            staged_binary.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_binary, staged_binary)
+            artifacts[target.triple] = {
+                "executable": binary_name,
+                "url": public_url(
+                    public_base_url,
+                    "",
+                    subdir,
+                    artifact_relative_path.as_posix(),
+                ),
+                "sha256": sha256(source_binary),
+                "build_environment": target.build_environment,
+            }
+    else:
+        for target in publish_targets:
+            binary_name = target_binary_name(entry["binary_name"], target.triple)
+            source_binary = workspace / target.publish_artifact_dir / binary_name
+            if source_binary.exists():
+                artifact_relative_path = prefixed_release_path(
+                    versioned_artifact_relative_path(entry, target.triple, binary_name),
+                    bundle_version,
+                )
+                staged_binary = output_dir / artifact_relative_path
+                staged_binary.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_binary, staged_binary)
+                artifacts[target.triple] = {
+                    "executable": binary_name,
+                    "url": public_url(
+                        public_base_url,
+                        "",
+                        subdir,
+                        artifact_relative_path.as_posix(),
+                    ),
+                    "sha256": sha256(source_binary),
+                    "build_environment": target.build_environment,
+                }
+                continue
+
+            if can_reuse_published:
+                fallback_artifact = resolve_target_artifact(
+                    published_manifest.get("artifacts", {}), target
+                )
+                if fallback_artifact:
+                    fallback_artifact["executable"] = Path(
+                        fallback_artifact.get("executable", binary_name)
+                    ).name
+                    if fallback_artifact.get("url"):
+                        fallback_artifact["url"] = rewrite_public_url(
+                            fallback_artifact["url"], public_base_url, subdir
+                        )
+                    artifacts[target.triple] = fallback_artifact
+
+    if not artifacts:
+        raise SystemExit(
+            f"No runtime plugin artifacts were available for {entry['manifest_filename']}"
+        )
+    return artifacts, can_reuse_source, can_reuse_published
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage runtime plugin artifacts and publish manifests")
     parser.add_argument("--bucket", required=True)
@@ -364,106 +487,19 @@ def main() -> None:
     latest_entries = []
     for entry in catalog_entries:
         published_manifest = published_manifests.get(entry["manifest_filename"])
-        can_reuse_source = published_source_matches_catalog(
-            published_manifest or {},
+        artifacts, _, can_reuse_published = collect_entry_artifacts(
+            entry,
+            published_manifest,
             published_index,
             published_index_entries.get(entry["manifest_filename"], {}),
-            entry,
-            protocol_version,
-        )
-        can_reuse_published = published_manifest_matches_catalog(
-            published_manifest or {},
-            published_index,
-            published_index_entries.get(entry["manifest_filename"], {}),
-            entry,
             publish_targets,
             protocol_version,
+            workspace,
+            output_dir,
+            public_base_url,
+            args.subdir,
+            bundle_version,
         )
-        artifacts = {}
-
-        if can_reuse_source:
-            artifacts = reuse_published_artifacts(
-                published_manifest or {},
-                publish_targets,
-                public_base_url,
-                args.subdir,
-                entry["binary_name"],
-            )
-            for target in publish_targets:
-                if target.triple in artifacts or not target.publish_artifact_dir:
-                    continue
-                binary_name = target_binary_name(entry["binary_name"], target.triple)
-                source_binary = workspace / target.publish_artifact_dir / binary_name
-                if not source_binary.exists():
-                    continue
-                artifact_relative_path = prefixed_release_path(
-                    versioned_artifact_relative_path(entry, target.triple, binary_name),
-                    bundle_version,
-                )
-                staged_binary = output_dir / artifact_relative_path
-                staged_binary.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source_binary, staged_binary)
-                artifacts[target.triple] = {
-                    "executable": binary_name,
-                    "url": public_url(
-                        public_base_url,
-                        args.bucket,
-                        args.subdir,
-                        artifact_relative_path.as_posix(),
-                    ),
-                    "sha256": sha256(source_binary),
-                    "build_environment": target.build_environment,
-                }
-            if not artifacts:
-                raise SystemExit(
-                    f"No runtime plugin artifacts were available for {entry['manifest_filename']}"
-                )
-            # Keep going to write the versioned manifest from published bytes.
-            # Do not copy a rebuilt binary onto an immutable version path.
-        else:
-          for target in publish_targets:
-            binary_name = target_binary_name(entry["binary_name"], target.triple)
-            source_binary = workspace / target.publish_artifact_dir / binary_name
-            if source_binary.exists():
-                artifact_relative_path = prefixed_release_path(
-                    versioned_artifact_relative_path(entry, target.triple, binary_name),
-                    bundle_version,
-                )
-                staged_binary = output_dir / artifact_relative_path
-                staged_binary.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source_binary, staged_binary)
-                artifacts[target.triple] = {
-                    "executable": binary_name,
-                    "url": public_url(
-                        public_base_url,
-                        args.bucket,
-                        args.subdir,
-                        artifact_relative_path.as_posix(),
-                    ),
-                    # This is the release/download integrity checksum for the staged binary.
-                    "sha256": sha256(source_binary),
-                    "build_environment": target.build_environment,
-                }
-                continue
-
-            if can_reuse_published:
-                fallback_artifact = resolve_target_artifact(
-                    (published_manifest or {}).get("artifacts", {}), target
-                )
-                if fallback_artifact:
-                    fallback_artifact["executable"] = Path(
-                        fallback_artifact.get("executable", binary_name)
-                    ).name
-                    if fallback_artifact.get("url"):
-                        fallback_artifact["url"] = rewrite_public_url(
-                            fallback_artifact["url"], public_base_url, args.subdir
-                        )
-                    artifacts[target.triple] = fallback_artifact
-
-        if not artifacts:
-            raise SystemExit(
-                f"No runtime plugin artifacts were available for {entry['manifest_filename']}"
-            )
 
         manifest_relative_path = prefixed_release_path(
             versioned_manifest_relative_path(entry), bundle_version

@@ -42,6 +42,9 @@ python3 .github/scripts/test_stream_transforms_ci.py
 echo "precommit: python3 .github/scripts/test_publish_runtime_plugins.py"
 python3 .github/scripts/test_publish_runtime_plugins.py
 
+echo "precommit: python3 .github/scripts/test_runtime_plugin_release_plan.py"
+python3 .github/scripts/test_runtime_plugin_release_plan.py
+
 echo "precommit: python3 .github/scripts/test_bump_changed_plugin_crates.py"
 python3 .github/scripts/test_bump_changed_plugin_crates.py
 
