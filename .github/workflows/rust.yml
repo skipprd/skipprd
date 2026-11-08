@@ -43,10 +43,8 @@ jobs:
   linux_x86:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
     name: cargo build (linux x86)
-    runs-on: [self-hosted, skippr-linux-x64-32]
+    runs-on: ubuntu-latest
     timeout-minutes: 360
-    env:
-      CARGO_BUILD_JOBS: "28"
     steps:
       - uses: actions/checkout@v4
         with:

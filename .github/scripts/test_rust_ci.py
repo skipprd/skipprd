@@ -133,10 +133,9 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-latest", linux_test)
         self.assertNotIn("dtolnay/rust-toolchain", linux_test)
         linux_build = text.split("\n  linux_x86:", 1)[1].split("\n  macos_arm64:", 1)[0]
-        self.assertIn("runs-on: [self-hosted, skippr-linux-x64-32]", linux_build)
+        self.assertIn("runs-on: ubuntu-latest", linux_build)
         self.assertNotIn("linux_test_suite", linux_build)
-        self.assertNotIn("ubuntu-latest", linux_build)
-        self.assertNotIn("skippr-linux-x64-16", linux_build)
+        self.assertNotIn("[self-hosted", linux_build)
         self.assertNotIn("runtime_plugin_packages_json", linux_build)
         macos_build = text.split("\n  macos_arm64:", 1)[1].split("\n  chaos_mode_test:", 1)[0]
         self.assertIn("runs-on: [self-hosted, skippr-darwin-arm64]", macos_build)
@@ -406,7 +405,6 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("`.github/workflows/rust.yml`", text)
         self.assertIn("Rust CI/CD Pipeline", text)
         self.assertIn("ubuntu-latest", text)
-        self.assertIn("skippr-linux-x64-32", text)
         self.assertIn("skippr-darwin-arm64", text)
         self.assertIn("macos_arm64", text)
         self.assertIn("catalog", text)
