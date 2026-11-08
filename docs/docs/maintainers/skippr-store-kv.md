@@ -41,7 +41,7 @@ Config after cutover: default is fjall on `DATA_DIR`. `skippr.store.type=dynamod
 
 | Family | Role |
 |---|---|
-| `store_meta` | Format version, sled-migrate cursor, schema-import cursor, snapshot seq |
+| `store_meta` | Format version, sled-migrate cursor, schema-import cursor, snapshot seq, `telemetry/install_id`, `telemetry/last_post_unix` |
 | `catalog` | Live WAL (`CatalogKey`: segments, index, compaction, seq, format) |
 | `offsets` / `checkpoints` | Source resume; CDC envelopes; rebuildable from catalog |
 | `stream_state` | MV / aggregate checkpoint; cursor in the same txn as measures |

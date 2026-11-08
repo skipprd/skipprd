@@ -905,6 +905,11 @@ impl Metrics {
                             Ok(_g) => {}
                             Err(_err) => {}
                         }
+                        crate::telemetry::spawn_maybe_post(
+                            metrics_cfg,
+                            crate::telemetry::Command::Sync,
+                            crate::telemetry::ErrorClass::Ok,
+                        );
                     });
 
                 }

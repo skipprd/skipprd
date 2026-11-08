@@ -140,6 +140,13 @@ pub struct Skippr {
         skip_serializing_if = "Option::is_none"
     )]
     pub perf_profile: Option<bool>,
+    /// Anonymous usage cube. Default on (`SKIPPR_TELEMETRY`). YAML wins. `CI=true` forces off.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_flag",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub telemetry: Option<bool>,
 }
 
 /// The one boolean-flag grammar for YAML and env: true/t/yes/1 and false/f/no/0,
@@ -2310,6 +2317,17 @@ impl Config {
             self.skippr.as_ref().and_then(|skippr| skippr.perf_profile),
             "SKIPPR_PERF_PROFILE",
             "no",
+        )
+    }
+
+    pub fn telemetry_enabled(&self) -> bool {
+        if crate::telemetry::ci_forced_off() {
+            return false;
+        }
+        Self::yaml_bool_or_env(
+            self.skippr.as_ref().and_then(|skippr| skippr.telemetry),
+            "SKIPPR_TELEMETRY",
+            "yes",
         )
     }
 
@@ -5317,6 +5335,28 @@ pipelines:
                 .to_string();
             assert!(err.contains("unknown field"), "{key}: {err}");
         }
+    }
+
+    #[test]
+    fn telemetry_yaml_flag_parses() {
+        let off: Config =
+            serde_yaml::from_str("skippr:\n  workspace: ws\n  telemetry: false\npipelines: {}\n")
+                .unwrap();
+        assert_eq!(off.skippr.as_ref().unwrap().telemetry, Some(false));
+        let on: Config =
+            serde_yaml::from_str("skippr:\n  workspace: ws\n  telemetry: true\npipelines: {}\n")
+                .unwrap();
+        assert_eq!(on.skippr.as_ref().unwrap().telemetry, Some(true));
+        assert!(!crate::telemetry::telemetry_enabled(
+            Some(false),
+            Some("1"),
+            false
+        ));
+        assert!(!crate::telemetry::telemetry_enabled(
+            Some(true),
+            Some("1"),
+            true
+        ));
     }
 
     #[test]

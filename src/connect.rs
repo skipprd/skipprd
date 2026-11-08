@@ -358,6 +358,7 @@ pub fn skippr_keys(
         wal_s3_bucket: wal_s3_bucket.map(str::to_string),
         store,
         perf_profile: None,
+        telemetry: None,
     };
     Ok((skippr != Skippr::default()).then_some(skippr))
 }

@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [16.0.3] - 2026-11-08
+
+### Added
+
+- Anonymous usage rollups to skippr.io: command, catalog connectors, version, OS, error class, and counts. No pipeline names, field names, SQL, YAML, or cell values. Opt out with `SKIPPR_TELEMETRY=0` or `skippr.telemetry: false`. `CI=true` never posts.
+
+### Fixed
+
+- Schema flatten no longer prefixes a namespace node's `out_field_name`, so JSON, Arrow, and Iceberg column names match when `flatten_events=true`.
+- Iceberg writer keeps prior schema ids instead of calling `remove_old_schemas()`, so Athena/Glue can still resolve snapshot schema id 0.
+
 ## [16.0.2] - 2026-11-07
 
 ### Fixed

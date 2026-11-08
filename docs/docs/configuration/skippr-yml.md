@@ -158,6 +158,7 @@ Skipprd rejects any other root key, and any unknown key inside these sections, w
 | `store.type` | `fjall`, leftover `sled` | `fjall` | Local Skippr Store on `DATA_DIR`. Leftover `sled` maps to `fjall`. `dynamodb` is an error. See [Skippr Store](/configuration/skippr-store). |
 | `store.name` | string | none | Leftover YAML. Ignored. Not a remote table. |
 | `perf_profile` | bool | `false` | Time COPY ingest and compact hot paths and emit `copy_profile` / `copy_ingest` PERF_EVENT lines. Falls back to `SKIPPR_PERF_PROFILE`. Also on with `--log perf`. Leave unset in production. |
+| `telemetry` | bool | `true` | Anonymous usage rollup to skippr.io. Falls back to `SKIPPR_TELEMETRY`. `CI=true` forces it off. See [Telemetry](/operations/telemetry). |
 
 The WAL backend is not a YAML key. Set it with the `WAL_STORAGE` environment variable or the `--wal-storage` flag, because it describes the machine Skipprd runs on rather than the data you move.
 

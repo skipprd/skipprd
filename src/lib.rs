@@ -49,4 +49,5 @@ pub mod sink_apply_identity;
 pub mod sqlrt;
 pub mod stream_transform;
 pub mod table_formats;
+pub mod telemetry;
 pub mod wal_slice_ref;

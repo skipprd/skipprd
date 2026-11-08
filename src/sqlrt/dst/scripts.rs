@@ -973,6 +973,7 @@ pub const EXTRA_FIXTURES: &[&str] = &[
     "j_flatten_json_schema_names_agree_when_namespace_named",
     "j_s3_list_closed_skip",
     "j_debezium_op_maps_to_mutation_kind",
+    "j_telemetry_payload_has_no_pipeline_name",
 ];
 
 pub const REQUIRED_PLAN_SCRIPTS: &[&str] = &[
@@ -1156,6 +1157,7 @@ pub const REQUIRED_PLAN_SCRIPTS: &[&str] = &[
     "j_flatten_json_schema_names_agree_when_namespace_named",
     "j_s3_list_closed_skip",
     "j_debezium_op_maps_to_mutation_kind",
+    "j_telemetry_payload_has_no_pipeline_name",
 ];
 
 #[test]

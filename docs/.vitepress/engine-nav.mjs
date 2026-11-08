@@ -47,6 +47,7 @@ export const engineSections = [
       { text: 'Advanced settings', link: '/configuration/advanced' },
       { text: 'ALTER operations', link: '/operations/alter' },
       { text: 'Logging', link: '/operations/logging' },
+      { text: 'Telemetry', link: '/operations/telemetry' },
       { text: 'Troubleshooting', link: '/operations/troubleshooting' },
     ],
   },

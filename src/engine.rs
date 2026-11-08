@@ -709,6 +709,11 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
         if reporter.enabled() {
             reporter.finish();
         }
+        crate::telemetry::maybe_post_from_config(
+            config,
+            crate::telemetry::Command::Discover,
+            crate::telemetry::classify_io(&err),
+        );
         return Err(err);
     }
     if reporter.enabled() {
@@ -786,6 +791,12 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
     if reporter.enabled() {
         reporter.finish();
     }
+
+    crate::telemetry::maybe_post_from_config(
+        config,
+        crate::telemetry::Command::Discover,
+        crate::telemetry::ErrorClass::Ok,
+    );
 
     Ok(())
 }
@@ -1389,6 +1400,17 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
                 .await;
         }
     }
+
+    let telemetry_class = match &source_sync_result {
+        Err(err) => crate::telemetry::classify_io(err),
+        Ok(()) if finalization_error.is_some() => crate::telemetry::ErrorClass::Compact,
+        Ok(()) => crate::telemetry::ErrorClass::Ok,
+    };
+    crate::telemetry::maybe_post_from_config(
+        config,
+        crate::telemetry::Command::Sync,
+        telemetry_class,
+    );
 
     // Note: sync_license is not implemented in the Config struct
     // Commenting out the license sync call

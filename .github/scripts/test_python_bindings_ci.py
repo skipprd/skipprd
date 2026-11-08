@@ -267,7 +267,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         install = (ROOT / "docs" / "docs" / "getting-started" / "install.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("SKIPPR_VERSION=16.0.2", install)
+        self.assertIn("SKIPPR_VERSION=16.0.3", install)
         self.assertNotIn("SKIPPR_VERSION=v", install)
         script = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("unprefixed semver", script)

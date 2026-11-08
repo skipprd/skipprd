@@ -37,6 +37,8 @@ mod s3_list;
 mod scripts;
 #[cfg(test)]
 mod store;
+#[cfg(test)]
+mod telemetry;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

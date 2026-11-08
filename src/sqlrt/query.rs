@@ -353,6 +353,25 @@ pub async fn query_collect_warm(
     warmup: bool,
     repeat: u32,
 ) -> std::io::Result<Vec<arrow::array::RecordBatch>> {
+    let result = query_collect_warm_body(config, sql_str, warmup, repeat).await;
+    crate::telemetry::maybe_post_from_config(
+        config,
+        crate::telemetry::Command::Query,
+        if result.is_ok() {
+            crate::telemetry::ErrorClass::Ok
+        } else {
+            crate::telemetry::ErrorClass::Query
+        },
+    );
+    result
+}
+
+async fn query_collect_warm_body(
+    config: &Config,
+    sql_str: &str,
+    warmup: bool,
+    repeat: u32,
+) -> std::io::Result<Vec<arrow::array::RecordBatch>> {
     config.init().await;
     for name in config.get_pipelines() {
         let bound = config.bind_pipeline(&name);
