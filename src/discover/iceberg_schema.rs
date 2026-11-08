@@ -118,7 +118,7 @@ pub fn iceberg_schema_after_alter(
         }
     }
     Schema::builder()
-        .with_schema_id(0)
+        .with_schema_id(current.schema_id() + 1)
         .with_fields(fields)
         .build()
         .map_err(|err| err.to_string())

@@ -256,6 +256,18 @@ fn f_query_after_migrate_two_part_name() {
 }
 
 #[test]
+fn f_iceberg_writer_does_not_remove_old_schemas() {
+    let src = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/crates/skippr-iceberg-writer/src/lib.rs"
+    ));
+    assert!(
+        !src.contains("remove_old_schemas()"),
+        "Iceberg writer must keep historical schemas so Athena can resolve snapshot schema id 0"
+    );
+}
+
+#[test]
 fn f_iceberg_replace_schema_rename_field_id() {
     use crate::sqlrt::iceberg_table::snapshot_scan_names;
     use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};

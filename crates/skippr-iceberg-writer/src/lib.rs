@@ -2811,18 +2811,16 @@ impl<S: SinkSpec> IcebergWriter<S> {
                 table.metadata().current_schema().as_struct().fields().len(),
                 desired_schema.as_struct().fields().len()
             );
+            let next_schema_id = next_iceberg_schema_id(table.metadata());
             let evolved_schema = merge_iceberg_schema_missing_fields(
                 namespace,
                 table.metadata().current_schema(),
                 &desired_schema,
+                next_schema_id,
             )?;
             let tx = Transaction::new(&table);
             let tx = tx
                 .replace_schema(evolved_schema)
-                .apply(tx)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            let tx = tx
-                .remove_old_schemas()
                 .apply(tx)
                 .map_err(|err| io::Error::other(err.to_string()))?;
             return match tx.commit(catalog).await {
@@ -3539,6 +3537,15 @@ fn apply_iceberg_field_ids_to_batches(
         .collect()
 }
 
+fn next_iceberg_schema_id(metadata: &iceberg::spec::TableMetadata) -> i32 {
+    metadata
+        .schemas_iter()
+        .map(|schema| schema.schema_id())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
 fn iceberg_schema_has_all_fields(current: &Schema, desired: &Schema) -> bool {
     desired
         .as_struct()
@@ -3551,6 +3558,7 @@ fn merge_iceberg_schema_missing_fields(
     namespace: &str,
     current: &Schema,
     desired: &Schema,
+    next_schema_id: i32,
 ) -> Result<Schema, io::Error> {
     let mut fields: Vec<Arc<NestedField>> = current.as_struct().fields().iter().cloned().collect();
     let mut seen_field_ids = HashMap::<i32, ()>::new();
@@ -3569,7 +3577,7 @@ fn merge_iceberg_schema_missing_fields(
         }
     }
     Schema::builder()
-        .with_schema_id(0)
+        .with_schema_id(next_schema_id)
         .with_fields(fields)
         .build()
         .map_err(|err| io::Error::other(err.to_string()))
@@ -4176,6 +4184,7 @@ mod tests {
     use iceberg::spec::{DataFileBuilder, DataFileFormat, Struct};
     use iceberg::CatalogBuilder;
     use serde_json::json;
+    use skippr_runtime_sdk::wal_slice_ref::WalSliceRef;
 
     fn output_metadata(value: serde_json::Value) -> OutputMetadata {
         serde_json::from_value(value).unwrap()
@@ -4286,7 +4295,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let merged = merge_iceberg_schema_missing_fields("cube_events", &current, &desired)
+        let merged = merge_iceberg_schema_missing_fields("cube_events", &current, &desired, 1)
             .expect("schema merge should remap colliding field ids");
         let appended = merged.field_by_name("new_top_level").unwrap();
 
@@ -4296,6 +4305,35 @@ mod tests {
             collect_iceberg_field_ids(field, &mut seen);
         }
         assert_eq!(seen.len(), 3);
+        assert_eq!(
+            merged.schema_id(),
+            1,
+            "evolved Iceberg schemas must not reuse schema id 0"
+        );
+    }
+
+    #[test]
+    fn iceberg_schema_from_output_metadata_keeps_schema_id_zero_on_create() {
+        let metadata = output_metadata(json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "id": {
+                    "out_field_name": "id",
+                    "determined_type": "long",
+                    "determined_type_values": "",
+                    "field_id": 10,
+                    "schema_id": 1,
+                    "lineage_id": "orders:id",
+                    "nullable": false,
+                    "default_value": null,
+                    "fields": {}
+                }
+            }
+        }));
+        let schema = iceberg_schema_from_output_metadata("orders", &metadata).unwrap();
+        assert_eq!(schema.schema_id(), 0);
     }
 
     #[test]
@@ -5065,6 +5103,119 @@ mod tests {
 
         let ident = TableIdent::from_strs(["lake", "orders"]).unwrap();
         assert!(catalog.table_exists(&ident).await.unwrap());
+    }
+
+    fn long_field(name: &str, field_id: i32) -> serde_json::Value {
+        json!({
+            "out_field_name": name,
+            "determined_type": "long",
+            "determined_type_values": "",
+            "field_id": field_id,
+            "schema_id": 1,
+            "lineage_id": format!("orders:{name}"),
+            "nullable": false,
+            "default_value": null,
+            "fields": {}
+        })
+    }
+
+    #[tokio::test]
+    async fn schema_evolution_keeps_schema_id_zero_for_snapshots() {
+        let catalog: Arc<dyn Catalog> = Arc::new(
+            MemoryCatalogBuilder::default()
+                .load(
+                    "test",
+                    HashMap::from([(
+                        MEMORY_CATALOG_WAREHOUSE.to_string(),
+                        "memory://warehouse-schema-id".to_string(),
+                    )]),
+                )
+                .await
+                .unwrap(),
+        );
+        catalog
+            .create_namespace(
+                &NamespaceIdent::from_strs(["lake"]).unwrap(),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let writer = IcebergWriter::<TestIcebergSpec>::new(
+            skippr_runtime_sdk::protocol::RuntimeExecutionContext {
+                pipeline_name: "p".to_string(),
+                workspace_name: "w".to_string(),
+                data_dir: "/tmp".to_string(),
+                execution_mode: Default::default(),
+                output_layout: Default::default(),
+                inject_fields: BTreeMap::new(),
+                pipeline_type: Default::default(),
+            },
+            skippr_runtime_sdk::protocol::RuntimeBinding::Primary,
+            "schema".to_string(),
+            Arc::clone(&catalog),
+            IcebergWriterConfig {
+                policies: SinkWritePolicySupport {
+                    supports_merge_by_key: true,
+                    supports_replace_partition: true,
+                    supports_replace_table: true,
+                },
+                table_namespace: "lake".to_string(),
+                location_root: "memory://warehouse-schema-id/lake".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let ident = TableIdent::from_strs(["lake", "orders"]).unwrap();
+        let create = output_metadata(json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": { "id": long_field("id", 10) }
+        }));
+        <IcebergWriter<TestIcebergSpec> as SchemaSink>::sync_schema(&writer, "orders", &create)
+            .await
+            .unwrap();
+        let first = output_metadata(json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "id": long_field("id", 10),
+                "amount": long_field("amount", 11)
+            }
+        }));
+        <IcebergWriter<TestIcebergSpec> as SchemaSink>::sync_schema(&writer, "orders", &first)
+            .await
+            .unwrap();
+        let second = output_metadata(json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "id": long_field("id", 10),
+                "amount": long_field("amount", 11),
+                "region": long_field("region", 12)
+            }
+        }));
+        <IcebergWriter<TestIcebergSpec> as SchemaSink>::sync_schema(&writer, "orders", &second)
+            .await
+            .unwrap();
+
+        let table = catalog.load_table(&ident).await.unwrap();
+        assert!(
+            table.metadata().schema_by_id(0).is_some(),
+            "Athena/Glue look up snapshot schema id 0; remove_old_schemas must not drop it"
+        );
+        assert_ne!(
+            table.metadata().current_schema_id(),
+            0,
+            "replacement schema must not reuse schema id 0"
+        );
+        assert!(table
+            .metadata()
+            .current_schema()
+            .field_by_name("region")
+            .is_some());
     }
 
     #[tokio::test]
