@@ -177,9 +177,9 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             )
         )
 
-    def test_same_version_checksum_reuses_cdn_sha_when_local_rebuild_differs(self) -> None:
-        """16.0.3 class: fingerprint drifted, checksum did not. Rebuilt Darwin
-        sha256 must not land on the immutable version path."""
+    def test_same_version_checksum_fails_when_local_build_sha_differs(self) -> None:
+        """s3-sink 0.1.10 class: source checksum matched CDN but CI rebuilt
+        different bytes (host-linked output_format). Must not reuse stale CDN."""
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "ws"
             output_dir = Path(tmp) / "out"
@@ -187,34 +187,34 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             linux_dir = workspace / "runtime-plugin-binaries-linux_x86"
             darwin_dir.mkdir(parents=True)
             linux_dir.mkdir(parents=True)
-            binary = "skippr-plugin-data-source-adroll-ads"
+            binary = "skippr-plugin-data-sink-s3"
             (darwin_dir / binary).write_bytes(b"rebuilt-darwin-not-cdn")
             (linux_dir / binary).write_bytes(b"rebuilt-linux-not-cdn")
 
             published = {
-                "version": "0.1.9",
+                "version": "0.1.10",
                 "protocol_version": 24,
                 "sdk_build_fingerprint": "cdn-fp",
                 "build_checksum": "same-checksum",
                 "artifacts": {
                     "aarch64-apple-darwin": {
                         "executable": binary,
-                        "url": "https://install.skippr.io/releases/runtime-plugins/plugins/adroll-ads-source/versions/0.1.9/aarch64-apple-darwin/"
+                        "url": "https://install.skippr.io/releases/runtime-plugins/plugins/s3-sink/versions/0.1.10/aarch64-apple-darwin/"
                         + binary,
                         "sha256": "cdn-darwin-sha",
                     },
                     "x86_64-unknown-linux-gnu": {
                         "executable": binary,
-                        "url": "https://install.skippr.io/releases/runtime-plugins/plugins/adroll-ads-source/versions/0.1.9/x86_64-unknown-linux-gnu/"
+                        "url": "https://install.skippr.io/releases/runtime-plugins/plugins/s3-sink/versions/0.1.10/x86_64-unknown-linux-gnu/"
                         + binary,
                         "sha256": "cdn-linux-sha",
                     },
                 },
             }
             entry = {
-                "manifest_filename": "adroll-ads-source.json",
+                "manifest_filename": "s3-sink.json",
                 "binary_name": binary,
-                "package_version": "0.1.9",
+                "package_version": "0.1.10",
                 "sdk_build_fingerprint": "host-telemetry-fp",
                 "checksum": "same-checksum",
             }
@@ -232,6 +232,66 @@ class PublishRuntimePluginsTests(unittest.TestCase):
                     build_environment={"runner_baseline": "skippr-darwin-arm64"},
                 ),
             ]
+            with self.assertRaises(SystemExit) as raised:
+                publish_runtime_plugins.collect_entry_artifacts(
+                    entry,
+                    published,
+                    {"sdk_build_fingerprint": "cdn-fp"},
+                    {"sdk_build_fingerprint": "cdn-fp"},
+                    targets,
+                    24,
+                    workspace,
+                    output_dir,
+                    "https://install.skippr.io/releases/runtime-plugins",
+                    "runtime-plugins",
+                    "16.0.4",
+                )
+            message = str(raised.exception)
+            self.assertIn("sha256 differs from CDN", message)
+            self.assertIn("bump the plugin crate", message)
+
+    def test_same_version_checksum_reuses_cdn_when_local_build_sha_matches(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            output_dir = Path(tmp) / "out"
+            linux_dir = workspace / "runtime-plugin-binaries-linux_x86"
+            linux_dir.mkdir(parents=True)
+            binary = "skippr-plugin-data-sink-s3"
+            payload = b"cdn-identical-bytes"
+            (linux_dir / binary).write_bytes(payload)
+            local_sha = publish_runtime_plugins.sha256(linux_dir / binary)
+
+            published = {
+                "version": "0.1.10",
+                "protocol_version": 24,
+                "sdk_build_fingerprint": "cdn-fp",
+                "build_checksum": "same-checksum",
+                "artifacts": {
+                    "x86_64-unknown-linux-gnu": {
+                        "executable": binary,
+                        "url": "https://install.skippr.io/releases/runtime-plugins/plugins/s3-sink/versions/0.1.10/x86_64-unknown-linux-gnu/"
+                        + binary,
+                        "sha256": local_sha,
+                    },
+                },
+            }
+            entry = {
+                "manifest_filename": "s3-sink.json",
+                "binary_name": binary,
+                "package_version": "0.1.10",
+                "sdk_build_fingerprint": "host-only-fp",
+                "checksum": "same-checksum",
+            }
+            targets = [
+                RuntimePluginTarget(
+                    triple="x86_64-unknown-linux-gnu",
+                    aliases=("linux-x86_64",),
+                    publish_artifact_dir="runtime-plugin-binaries-linux_x86",
+                    build_environment={"runner_baseline": "ubuntu-latest"},
+                ),
+            ]
             artifacts, can_reuse_source, _ = (
                 publish_runtime_plugins.collect_entry_artifacts(
                     entry,
@@ -244,26 +304,15 @@ class PublishRuntimePluginsTests(unittest.TestCase):
                     output_dir,
                     "https://install.skippr.io/releases/runtime-plugins",
                     "runtime-plugins",
-                    "16.0.3",
+                    "16.0.4",
                 )
             )
             self.assertTrue(can_reuse_source)
             self.assertEqual(
-                artifacts["aarch64-apple-darwin"]["sha256"], "cdn-darwin-sha"
+                artifacts["x86_64-unknown-linux-gnu"]["sha256"], local_sha
             )
             self.assertEqual(
-                artifacts["x86_64-unknown-linux-gnu"]["sha256"], "cdn-linux-sha"
-            )
-            staged_binaries = [path for path in output_dir.rglob("*") if path.is_file()]
-            self.assertEqual(staged_binaries, [])
-            staged = {
-                "version": "0.1.9",
-                "protocol_version": 24,
-                "build_checksum": "same-checksum",
-                "artifacts": artifacts,
-            }
-            self.assertIsNone(
-                publish_runtime_plugins.version_path_clobber_reason(published, staged)
+                [path for path in output_dir.rglob("*") if path.is_file()], []
             )
 
     def test_index_http_403_is_not_an_empty_baseline(self) -> None:

@@ -358,6 +358,37 @@ skipprd = { path = "../.." }
 
             self.assertEqual(initial, updated)
 
+    def test_package_build_checksum_changes_when_output_format_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            plugin_dir = workspace / "plugins" / "data_sink" / "s3"
+            self.write_workspace_file(
+                workspace,
+                "plugins/data_sink/s3/Cargo.toml",
+                "[package]\nname = 'skippr-plugin-data-sink-s3'\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "plugins/data_sink/s3/src/main.rs",
+                "fn main() {}\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "src/serdes/output_format.rs",
+                "pub fn object_extension() -> &'static str { \"jsonl\" }\n",
+            )
+
+            initial = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
+
+            self.write_workspace_file(
+                workspace,
+                "src/serdes/output_format.rs",
+                "pub fn object_extension() -> &'static str { \"jsonl.gz\" }\n",
+            )
+            updated = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
+
+            self.assertNotEqual(initial, updated)
+
     def test_package_build_checksum_includes_plugin_path_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)

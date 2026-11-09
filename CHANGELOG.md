@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Runtime plugin publish compares each local CI artifact sha256 to the CDN before reusing a crate version path. Matching source checksum with divergent bytes fail-closes (bump the crate) instead of shipping stale CDN plugins. `build_checksum` also includes `src/serdes/output_format.rs` so COPY Identity `.jsonl.gz` naming changes force a new immutable path.
+
 ## [16.0.3] - 2026-11-08
 
 ### Added

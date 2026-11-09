@@ -60,6 +60,8 @@ RUNTIME_PLUGIN_BUILD_INPUTS = (
     Path("Cargo.lock"),
     Path("src/runtime_plugins/protocol.rs"),
     Path("src/runtime_plugins/wire.rs"),
+    # Plugins link skippr-core → skipprd; object-sink Identity keys use this.
+    Path("src/serdes/output_format.rs"),
     Path("crates/skippr-runtime-sdk/Cargo.toml"),
     Path("crates/skippr-runtime-sdk/src"),
 )

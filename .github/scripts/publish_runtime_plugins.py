@@ -206,9 +206,9 @@ def published_source_matches_catalog(
     plugin: dict,
     protocol_version: int,
 ) -> bool:
-    # Fingerprint is not a reuse gate. skippr-core path-deps skipprd, so host-only
-    # src edits (telemetry, docs pins) change it without changing plugin checksum.
-    # Reuse the immutable version-path binaries; do not rebuild onto them.
+    # Fingerprint is not a reuse gate by itself. Host-only edits can change it
+    # without changing build_checksum. collect_entry_artifacts still compares
+    # local CI artifact sha256 to the CDN before reusing the version path.
     del published_index, published_index_entry
     return (
         published.get("version") == plugin["package_version"]
@@ -336,6 +336,45 @@ def artifact_urls_rewritten(manifest: dict, public_base_url: str, subdir: str) -
     return rewritten
 
 
+def local_build_sha_mismatch_reason(
+    entry: dict,
+    published_artifacts: dict,
+    publish_targets: list,
+    workspace: Path,
+) -> str | None:
+    """Fail closed when CI rebuilt a same-version plugin with different bytes.
+
+    Source build_checksum can match while the linked host graph (skippr-core →
+    skipprd) still changed the binary. Compare the actual build to the CDN.
+    """
+    mismatches: list[str] = []
+    for target in publish_targets:
+        if not target.publish_artifact_dir:
+            continue
+        published_artifact = resolve_target_artifact(published_artifacts, target)
+        if not published_artifact:
+            continue
+        published_sha = published_artifact.get("sha256")
+        if not isinstance(published_sha, str) or not published_sha.strip():
+            continue
+        binary_name = target_binary_name(entry["binary_name"], target.triple)
+        source_binary = workspace / target.publish_artifact_dir / binary_name
+        if not source_binary.exists():
+            continue
+        local_sha = sha256(source_binary)
+        if local_sha != published_sha.strip():
+            mismatches.append(
+                f"{target.triple} local={local_sha} cdn={published_sha.strip()}"
+            )
+    if not mismatches:
+        return None
+    return (
+        f"{entry.get('manifest_filename', entry.get('binary_name', 'plugin'))} "
+        f"version {entry.get('package_version', '<unknown>')} local build sha256 "
+        f"differs from CDN ({'; '.join(mismatches)}). {IMMUTABLE_VERSION_PATH_HELP}"
+    )
+
+
 def collect_entry_artifacts(
     entry: dict,
     published_manifest: dict | None,
@@ -351,8 +390,10 @@ def collect_entry_artifacts(
 ) -> tuple[dict, bool, bool]:
     """Stage or reuse binaries for one catalog plugin.
 
-    Matching version + protocol + checksum reuses CDN bytes, even when a local
-    rebuild would hash differently (host-only fingerprint drift).
+    Matching version + protocol + checksum reuses CDN bytes only when the local
+    CI build (when present) has the same artifact sha256. A divergent local
+    build fail-closes so the crate must be bumped instead of shipping stale CDN
+    bytes or clobbering an immutable path.
     """
     published_manifest = published_manifest or {}
     can_reuse_source = published_source_matches_catalog(
@@ -373,6 +414,14 @@ def collect_entry_artifacts(
     artifacts: dict = {}
 
     if can_reuse_source:
+        sha_mismatch = local_build_sha_mismatch_reason(
+            entry,
+            published_manifest.get("artifacts") or {},
+            publish_targets,
+            workspace,
+        )
+        if sha_mismatch:
+            raise SystemExit(sha_mismatch)
         artifacts = reuse_published_artifacts(
             published_manifest,
             publish_targets,

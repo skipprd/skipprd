@@ -34,11 +34,11 @@ A plugin package is selected when:
 - it has never been published
 - its crate version changed
 
-If the crate version is unchanged but protocol, checksum, SDK fingerprint, or artifact sha256 differs, the planner fails closed. Bump the plugin crate.
+If the crate version is unchanged but protocol, checksum, or artifact sha256 differs, publish fails closed. Bump the plugin crate. Host-only SDK fingerprint drift alone is not a bump when the local CI build sha256 still matches the CDN.
 
 This is why plugin versions live in each plugin crate's `Cargo.toml`, not in a shared bundle version.
 
-`build_checksum` is intentionally narrow: it tracks the plugin crate source tree plus `plugins/shared/`, so semver clobber decisions follow plugin code changes rather than unrelated workspace churn.
+`build_checksum` tracks the plugin crate source tree, `plugins/shared/`, runtime ABI inputs, and host files plugins compile in (including `src/serdes/output_format.rs`). Unrelated docs or engine-only churn outside those inputs does not force a bump. `publish_runtime_plugins` still compares each local CI artifact sha256 to the CDN before reusing a version path.
 
 ## 2. Build the selected host and plugin artifacts
 
