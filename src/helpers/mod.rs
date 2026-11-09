@@ -589,6 +589,13 @@ impl Helpers {
                                 return Some(secs);
                             }
                         }
+                        if let Some(f) = n.as_f64() {
+                            if f.is_finite() && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                                if let Some(secs) = Helpers::posix_seconds_from_i64(f as i64) {
+                                    return Some(secs);
+                                }
+                            }
+                        }
                     }
                     _ => continue,
                 }
@@ -1529,6 +1536,27 @@ mod parse_time_field_tests {
         assert_eq!(
             Helpers::parse_time_field(&Config::new(), &message),
             Some(1646901960)
+        );
+    }
+
+    #[test]
+    fn posix_seconds_from_i64_seconds_and_millis() {
+        let posix = 1_794_063_845i64;
+        assert_eq!(Helpers::posix_seconds_from_i64(posix), Some(posix));
+        assert_eq!(Helpers::posix_seconds_from_i64(posix * 1000), Some(posix));
+        assert_eq!(Helpers::posix_seconds_from_i64(posix * 1_000_000), None);
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_time_field_with_numeric_float_millis() {
+        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time");
+        let message = serde_json::json!({
+            "time": serde_json::Number::from_f64(1_646_901_960_000.0).unwrap()
+        });
+        assert_eq!(
+            Helpers::parse_time_field(&Config::new(), &message),
+            Some(1_646_901_960)
         );
     }
 

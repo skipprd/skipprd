@@ -8,6 +8,7 @@ use arrow::array::{
     UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
+use arrow::util::display::array_value_to_string;
 use iceberg::spec::Schema;
 use skippr_runtime_sdk::helpers::Helpers;
 use skippr_runtime_sdk::protocol::RuntimeOutputLayout;
@@ -146,12 +147,25 @@ fn column_index_for_time_field(schema: &ArrowSchema, field: &str) -> Option<usiz
     }
 }
 
+fn posix_seconds_from_numeric_i64(time: i64) -> Option<i64> {
+    if let Some(secs) = Helpers::posix_seconds_from_i64(time) {
+        return Some(secs);
+    }
+    let abs = time.unsigned_abs();
+    let digits = if abs == 0 { 1 } else { abs.ilog10() + 1 };
+    match digits {
+        16 | 17 => Some(time / 1_000_000),
+        18 | 19 => Some(time / 1_000_000_000),
+        _ => None,
+    }
+}
+
 fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> {
     if row >= column.len() || column.is_null(row) {
         return None;
     }
     if let Some(arr) = column.as_any().downcast_ref::<Int64Array>() {
-        return Helpers::posix_seconds_from_i64(arr.value(row));
+        return posix_seconds_from_numeric_i64(arr.value(row));
     }
     if let Some(arr) = column.as_any().downcast_ref::<Int32Array>() {
         return Helpers::posix_seconds_from_i64(i64::from(arr.value(row)));
@@ -164,14 +178,14 @@ fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> 
         if value > i64::MAX as u64 {
             return None;
         }
-        return Helpers::posix_seconds_from_i64(value as i64);
+        return posix_seconds_from_numeric_i64(value as i64);
     }
     if let Some(arr) = column.as_any().downcast_ref::<Float64Array>() {
         let value = arr.value(row);
         if !value.is_finite() || value > i64::MAX as f64 || value < i64::MIN as f64 {
             return None;
         }
-        return Helpers::posix_seconds_from_i64(value as i64);
+        return posix_seconds_from_numeric_i64(value as i64);
     }
     if let Some(arr) = column.as_any().downcast_ref::<Float32Array>() {
         let value = arr.value(row);
@@ -181,7 +195,7 @@ fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> 
         {
             return None;
         }
-        return Helpers::posix_seconds_from_i64(value as i64);
+        return posix_seconds_from_numeric_i64(value as i64);
     }
     if let Some(arr) = column.as_any().downcast_ref::<Decimal128Array>() {
         let DataType::Decimal128(_, scale) = column.data_type() else {
@@ -196,7 +210,7 @@ fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> 
         if scaled > i64::MAX as i128 || scaled < i64::MIN as i128 {
             return None;
         }
-        return Helpers::posix_seconds_from_i64(scaled as i64);
+        return posix_seconds_from_numeric_i64(scaled as i64);
     }
     if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
         return Helpers::posix_seconds_from_str(arr.value(row));
@@ -239,7 +253,15 @@ fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> 
             .as_any()
             .downcast_ref::<TimestampNanosecondArray>()
             .map(|arr| arr.value(row) / 1_000_000_000),
-        _ => None,
+        _ => {
+            let displayed = array_value_to_string(column, row).ok()?;
+            Helpers::posix_seconds_from_str(&displayed).or_else(|| {
+                displayed
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(posix_seconds_from_numeric_i64)
+            })
+        }
     }
 }
 
@@ -299,12 +321,46 @@ mod tests {
     fn posix_seconds_ms_and_rfc3339_resolve() {
         let posix = 1_794_063_845i64; // 2026-11-07 15:04:05 UTC
         let ms_batch = RecordBatch::try_from_iter(vec![(
+            "time",
+            Arc::new(Int64Array::from(vec![posix * 1000])) as ArrayRef,
+        )])
+        .unwrap();
+        assert_eq!(
+            event_time_posix_seconds(&ms_batch, &["time".into()], 0),
+            Some(posix)
+        );
+
+        let us_batch = RecordBatch::try_from_iter(vec![(
+            "time",
+            Arc::new(Int64Array::from(vec![posix * 1_000_000])) as ArrayRef,
+        )])
+        .unwrap();
+        assert_eq!(
+            event_time_posix_seconds(&us_batch, &["time".into()], 0),
+            Some(posix)
+        );
+
+        let keys = arrow::array::Int8Array::from(vec![0i8]);
+        let values = Int64Array::from(vec![posix * 1000]);
+        let dict = arrow::array::DictionaryArray::<arrow::datatypes::Int8Type>::try_new(
+            keys,
+            Arc::new(values),
+        )
+        .unwrap();
+        let dict_batch =
+            RecordBatch::try_from_iter(vec![("time", Arc::new(dict) as ArrayRef)]).unwrap();
+        assert_eq!(
+            event_time_posix_seconds(&dict_batch, &["time".into()], 0),
+            Some(posix)
+        );
+
+        let ms_named = RecordBatch::try_from_iter(vec![(
             "event_ts",
             Arc::new(Int64Array::from(vec![posix * 1000])) as ArrayRef,
         )])
         .unwrap();
         assert_eq!(
-            event_time_posix_seconds(&ms_batch, &["event_ts".into()], 0),
+            event_time_posix_seconds(&ms_named, &["event_ts".into()], 0),
             Some(posix)
         );
 

@@ -83,7 +83,7 @@ use skippr_runtime_sdk::plugins::{
 use skippr_runtime_sdk::protocol::{
     RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState, SchemaDelta, SinkWriteStats,
 };
-use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::sink_compat::{deadletter, BufferChunker};
 use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
 
 /// Everything the writer needs that is not the catalog itself. Plugins resolve their own
@@ -811,6 +811,34 @@ impl<S: SinkSpec> IcebergWriter<S> {
             .entry(namespace.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
+    }
+
+    fn is_deadletter_target(&self, namespace: &str) -> bool {
+        self.binding == RuntimeBinding::Deadletter
+            || namespace == deadletter::table_name_for_pipeline(&self.context.pipeline_name)
+    }
+
+    fn time_partition_columns_for(&self, namespace: &str) -> Result<Vec<String>, io::Error> {
+        if self.is_deadletter_target(namespace) {
+            return Ok(Vec::new());
+        }
+        time_partition::time_partition_column_names_from_layout(&self.context.output_layout)
+    }
+
+    fn stamp_time_partition_for(
+        &self,
+        namespace: &str,
+        batch: RecordBatch,
+        iceberg_schema: &Schema,
+    ) -> Result<RecordBatch, io::Error> {
+        if self.is_deadletter_target(namespace) {
+            return Ok(batch);
+        }
+        time_partition::stamp_time_partition_columns(
+            batch,
+            &self.context.output_layout,
+            iceberg_schema,
+        )
     }
 
     async fn namespace_schema_state(
@@ -1774,18 +1802,13 @@ impl<S: SinkSpec> IcebergWriter<S> {
         iceberg_schema: Arc<Schema>,
         equality_ids: Vec<i32>,
     ) -> Result<PendingIcebergFile, io::Error> {
-        let time_columns =
-            time_partition::time_partition_column_names_from_layout(&self.context.output_layout)?;
+        let time_columns = self.time_partition_columns_for(&namespace)?;
         let mut prepared = Vec::with_capacity(batches.len());
         for batch in batches {
             let batch = crate::parquet_util::coerce_timestamp_dates_to_date32(batch, &date_fields)?;
             let batch = crate::parquet_util::coerce_timestamps_to_microseconds(batch)?;
             let batch = if content == PendingFileContent::Data {
-                time_partition::stamp_time_partition_columns(
-                    batch,
-                    &self.context.output_layout,
-                    iceberg_schema.as_ref(),
-                )?
+                self.stamp_time_partition_for(&namespace, batch, iceberg_schema.as_ref())?
             } else {
                 batch
             };
@@ -2139,14 +2162,12 @@ impl<S: SinkSpec> IcebergWriter<S> {
         let mut row_count = 0;
         if upsert_rows != Some(0) {
             let iceberg_schema = table.metadata().current_schema();
-            let time_columns = time_partition::time_partition_column_names_from_layout(
-                &self.context.output_layout,
-            )?;
-            let data_batches = stamp_data_batches(
-                collect_record_batches(data_stream).await?,
-                &self.context.output_layout,
-                iceberg_schema,
-            )?;
+            let time_columns = self.time_partition_columns_for(&namespace)?;
+            let data_batches = collect_record_batches(data_stream)
+                .await?
+                .into_iter()
+                .map(|batch| self.stamp_time_partition_for(&namespace, batch, iceberg_schema))
+                .collect::<Result<Vec<_>, _>>()?;
             let data_batches = apply_iceberg_field_ids_to_batches(data_batches, iceberg_schema)?;
             let partition = partition_struct_from_table_and_batches(
                 &table,
@@ -2354,14 +2375,9 @@ impl<S: SinkSpec> IcebergWriter<S> {
 
         if data_batch.num_rows() > 0 {
             let iceberg_schema = table.metadata().current_schema();
-            let time_columns = time_partition::time_partition_column_names_from_layout(
-                &self.context.output_layout,
-            )?;
-            let data_batch = time_partition::stamp_time_partition_columns(
-                data_batch,
-                &self.context.output_layout,
-                iceberg_schema,
-            )?;
+            let time_columns = self.time_partition_columns_for(&namespace)?;
+            let data_batch =
+                self.stamp_time_partition_for(&namespace, data_batch, iceberg_schema)?;
             let data_batch = apply_iceberg_field_ids(data_batch, iceberg_schema)?;
             let partition = partition_struct_from_table_and_batches(
                 &table,
@@ -2880,8 +2896,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
         self.ensure_catalog_namespace(catalog, &namespace_ident)
             .await?;
 
-        let time_columns =
-            time_partition::time_partition_column_names_from_layout(&self.context.output_layout)?;
+        let time_columns = self.time_partition_columns_for(namespace)?;
         let iceberg_schema = iceberg_schema_from_output_metadata(namespace, metadata)?;
         let iceberg_schema =
             append_engine_time_partition_fields(namespace, iceberg_schema, &time_columns)?;
@@ -3579,17 +3594,6 @@ fn apply_iceberg_field_ids_to_batches(
     batches
         .into_iter()
         .map(|batch| apply_iceberg_field_ids(batch, iceberg_schema))
-        .collect()
-}
-
-fn stamp_data_batches(
-    batches: Vec<RecordBatch>,
-    layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
-    iceberg_schema: &Schema,
-) -> Result<Vec<RecordBatch>, io::Error> {
-    batches
-        .into_iter()
-        .map(|batch| time_partition::stamp_time_partition_columns(batch, layout, iceberg_schema))
         .collect()
 }
 

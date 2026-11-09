@@ -750,6 +750,15 @@ fn time_partition_metadata() -> serde_json::Value {
 }
 
 async fn time_partition_harness(metadata: serde_json::Value) -> Harness {
+    time_partition_harness_for(metadata, RuntimeBinding::Primary, NAMESPACE, &["event_ts"]).await
+}
+
+async fn time_partition_harness_for(
+    metadata: serde_json::Value,
+    binding: RuntimeBinding,
+    namespace: &str,
+    time_fields: &[&str],
+) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let counting = Arc::new(CountingCatalog {
         inner: FsCatalog::new(
@@ -773,13 +782,16 @@ async fn time_partition_harness(metadata: serde_json::Value) -> Harness {
             execution_mode: Default::default(),
             output_layout: RuntimeOutputLayout {
                 time_partition_granularity: Some("day".into()),
-                batch_time_fields: vec!["event_ts".into()],
+                batch_time_fields: time_fields
+                    .iter()
+                    .map(|field| (*field).to_string())
+                    .collect(),
                 ..RuntimeOutputLayout::default()
             },
             inject_fields: BTreeMap::new(),
             pipeline_type: Default::default(),
         },
-        RuntimeBinding::Primary,
+        binding,
         "lake".to_string(),
         Arc::clone(&catalog),
         IcebergWriterConfig {
@@ -798,8 +810,8 @@ async fn time_partition_harness(metadata: serde_json::Value) -> Harness {
     writer
         .install_schema_snapshot(&RuntimeSchemaState {
             version: 1,
-            namespaces: BTreeMap::from([(NAMESPACE.to_string(), metadata)]),
-            namespace_versions: BTreeMap::from([(NAMESPACE.to_string(), 1)]),
+            namespaces: BTreeMap::from([(namespace.to_string(), metadata)]),
+            namespace_versions: BTreeMap::from([(namespace.to_string(), 1)]),
         })
         .await
         .unwrap();
@@ -931,4 +943,212 @@ async fn iceberg_time_partition_collides_with_source_year() {
             .unwrap_err()
     };
     assert!(err.to_string().contains("collides"), "{}", err);
+}
+
+fn numeric_time_metadata() -> serde_json::Value {
+    json!({
+        "out_field_name": "",
+        "determined_type": "record",
+        "determined_type_values": "",
+        "fields": {
+            "id": {
+                "out_field_name": "id",
+                "determined_type": "long",
+                "determined_type_values": "",
+                "field_id": 1,
+                "schema_id": 1,
+                "lineage_id": "orders:id",
+                "nullable": false,
+                "default_value": null,
+                "fields": {}
+            },
+            "time": {
+                "out_field_name": "time",
+                "determined_type": "long",
+                "determined_type_values": "",
+                "field_id": 2,
+                "schema_id": 1,
+                "lineage_id": "orders:time",
+                "nullable": false,
+                "default_value": null,
+                "fields": {}
+            }
+        }
+    })
+}
+
+fn deadletter_metadata() -> serde_json::Value {
+    json!({
+        "out_field_name": "",
+        "determined_type": "record",
+        "determined_type_values": "",
+        "fields": {
+            "id": {
+                "out_field_name": "id",
+                "determined_type": "string",
+                "determined_type_values": "",
+                "field_id": 1,
+                "schema_id": 1,
+                "lineage_id": "dl:id",
+                "nullable": false,
+                "default_value": null,
+                "fields": {}
+            },
+            "namespace": {
+                "out_field_name": "namespace",
+                "determined_type": "string",
+                "determined_type_values": "",
+                "field_id": 2,
+                "schema_id": 1,
+                "lineage_id": "dl:namespace",
+                "nullable": false,
+                "default_value": null,
+                "fields": {}
+            },
+            "record": {
+                "out_field_name": "record",
+                "determined_type": "string",
+                "determined_type_values": "",
+                "field_id": 3,
+                "schema_id": 1,
+                "lineage_id": "dl:record",
+                "nullable": false,
+                "default_value": null,
+                "fields": {}
+            },
+            "error": {
+                "out_field_name": "error",
+                "determined_type": "string",
+                "determined_type_values": "",
+                "field_id": 4,
+                "schema_id": 1,
+                "lineage_id": "dl:error",
+                "nullable": false,
+                "default_value": null,
+                "fields": {}
+            },
+            "event_time": {
+                "out_field_name": "event_time",
+                "determined_type": "long",
+                "determined_type_values": "",
+                "field_id": 5,
+                "schema_id": 1,
+                "lineage_id": "dl:event_time",
+                "nullable": true,
+                "default_value": null,
+                "fields": {}
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn iceberg_stamps_posix_millis_on_numeric_time_field() {
+    let harness = time_partition_harness_for(
+        numeric_time_metadata(),
+        RuntimeBinding::Primary,
+        NAMESPACE,
+        &["time"],
+    )
+    .await;
+    let filename = format!("namespace={NAMESPACE}");
+    let posix = 1_794_063_845i64;
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("time", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1i64])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![posix * 1000])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    harness.native_write_batch(&filename, batch).await;
+
+    let table = harness.table().await;
+    let batches: Vec<RecordBatch> = table
+        .scan()
+        .select_all()
+        .build()
+        .unwrap()
+        .to_arrow()
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let day = batches[0]
+        .column_by_name("day")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(day.value(0), 7);
+}
+
+#[tokio::test]
+async fn iceberg_deadletter_does_not_identity_partition_by_time() {
+    let namespace = skippr_runtime_sdk::sink_compat::deadletter::table_name_for_pipeline("p");
+    let harness = time_partition_harness_for(
+        deadletter_metadata(),
+        RuntimeBinding::Deadletter,
+        &namespace,
+        &["time"],
+    )
+    .await;
+    let filename = format!("namespace={namespace}");
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("namespace", DataType::Utf8, false),
+        Field::new("record", DataType::Utf8, false),
+        Field::new("error", DataType::Utf8, false),
+        Field::new("event_time", DataType::Int64, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(arrow::array::StringArray::from(vec!["row-1"])) as ArrayRef,
+            Arc::new(arrow::array::StringArray::from(vec!["device_modify"])) as ArrayRef,
+            Arc::new(arrow::array::StringArray::from(vec!["{}"])) as ArrayRef,
+            Arc::new(arrow::array::StringArray::from(vec![
+                "missing or unresolvable event time",
+            ])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![None::<i64>])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    harness.native_write_batch(&filename, batch).await;
+
+    let ident = TableIdent::new(
+        NamespaceIdent::new("lake".into()),
+        harness.writer.table_name(&namespace),
+    );
+    let table = harness.catalog.load_table(&ident).await.unwrap();
+    assert!(
+        table
+            .metadata()
+            .current_schema()
+            .field_by_name("year")
+            .is_none(),
+        "deadletter Iceberg tables must stay unpartitioned"
+    );
+    assert!(table
+        .metadata()
+        .default_partition_spec()
+        .fields()
+        .is_empty());
+    let batches: Vec<RecordBatch> = table
+        .scan()
+        .select_all()
+        .build()
+        .unwrap()
+        .to_arrow()
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(batches[0].num_rows(), 1);
 }

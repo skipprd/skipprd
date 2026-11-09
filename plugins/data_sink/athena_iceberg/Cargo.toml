@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-sink-athena-iceberg"
-version = "0.2.9"
+version = "0.2.10"
 edition = "2021"
 
 [[bin]]

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [16.0.6] - 2026-11-09
+
+### Fixed
+
+- Iceberg identity time partitions stamp POSIX millis (and micros) in numeric `time` columns, including dictionary-encoded values. Deadletter Iceberg tables stay unpartitioned, so compact no longer fail-closes on `batch_time_fields` when rows were deadlettered.
+
 ## [16.0.5] - 2026-11-09
 
 ### Added
