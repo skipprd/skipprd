@@ -17,6 +17,14 @@ SPEC.loader.exec_module(harness)
 
 
 class SkipprLakeE2eHarnessTests(unittest.TestCase):
+    def test_harness_import_does_not_need_boto3_at_module_load(self) -> None:
+        src = (
+            Path(__file__).resolve().parents[1] / "e2e_support" / "dynamodb_local.py"
+        ).read_text(encoding="utf-8")
+        header = src.split("def wait_client", 1)[0]
+        self.assertNotIn("import boto3", header)
+        self.assertIn("import boto3", src)
+
     def test_expected_gold_matches_twelve_shop_rows(self) -> None:
         expected = json.loads(
             (Path(__file__).resolve().parent / "expected.json").read_text(encoding="utf-8")

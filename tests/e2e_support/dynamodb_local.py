@@ -12,10 +12,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-import boto3
-from botocore.config import Config as BotoConfig
-from botocore.exceptions import ClientError
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DDB_LOCAL_DIR = REPO_ROOT / ".skippr" / "dynamodb-local"
 DDB_LOCAL_URL = "https://d1ni2b6xgvw0s0.cloudfront.net/v2.x/dynamodb_local_latest.tar.gz"
@@ -81,6 +77,9 @@ def ensure_jar() -> Path:
 
 
 def wait_client(endpoint: str) -> Any:
+    import boto3
+    from botocore.config import Config as BotoConfig
+
     client = boto3.client(
         "dynamodb",
         endpoint_url=endpoint,
@@ -100,6 +99,8 @@ def wait_client(endpoint: str) -> Any:
 
 
 def ensure_pk_sk_table(client: Any, name: str) -> None:
+    from botocore.exceptions import ClientError
+
     try:
         client.delete_table(TableName=name)
         client.get_waiter("table_not_exists").wait(TableName=name)
