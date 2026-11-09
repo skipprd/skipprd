@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
+// Protocol 25: RuntimeOutputLayout.batch_time_fields for Iceberg identity time columns.
 // Protocol 24: IngestBatch.data is bytes; prepared IPC ingest frames are gone.
 // Protocol 23: HostFrame::ApplyAlter for SchemaSink migrations.
 // Protocol 22: PipelineType is a bincode u32 (YAML/JSON stay lowercase names).
@@ -33,7 +34,7 @@ use serde::{Deserialize, Serialize};
 // payload cannot steal the next length prefix (EU Staging COPY desync).
 // Bump every plugin crate patch when this constant changes so catalog paths
 // stay immutable.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 24;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 25;
 pub const COMMIT_RECEIPT_VERSION: u32 = 1;
 pub const CATALOG_INTENT_VERSION: u32 = 2;
 pub const GLUE_PARTITION_CATALOG_INTENT_VERSION: u32 = 1;
@@ -300,6 +301,10 @@ pub struct RuntimeOutputLayout {
     pub time_partition_prefix: Option<String>,
     #[serde(default)]
     pub format: Option<OutputFormat>,
+    /// Event-time field names from `transform.batch_time_fields` (comma-split, trimmed).
+    /// Empty means unset. Iceberg writers stamp UTC calendar ints from these fields.
+    #[serde(default)]
+    pub batch_time_fields: Vec<String>,
 }
 
 impl RuntimeOutputLayout {
@@ -1482,8 +1487,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_hard_cut_to_v24() {
-        assert_eq!(RUNTIME_PROTOCOL_VERSION, 24);
+    fn protocol_version_is_hard_cut_to_v25() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 25);
     }
 
     #[test]
@@ -1648,6 +1653,16 @@ mod tests {
             .unwrap(),
             "warehouse/events/p_rmc=EU1/p_year=2022/p_month=2/p_day=19/apply-0001.parquet"
         );
+        let iceberg_time = RuntimeOutputLayout {
+            time_partition_granularity: Some("day".into()),
+            batch_time_fields: vec!["system.datetime_posix_utc_seconds".into()],
+            ..RuntimeOutputLayout::default()
+        };
+        assert_eq!(
+            iceberg_time.batch_time_fields,
+            ["system.datetime_posix_utc_seconds"]
+        );
+        assert!(RuntimeOutputLayout::default().batch_time_fields.is_empty());
     }
 
     #[test]

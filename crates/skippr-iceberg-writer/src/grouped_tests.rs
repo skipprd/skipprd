@@ -1,16 +1,19 @@
 //! Grouped writes end to end against a filesystem catalog.
 
 use super::*;
-use arrow::array::Int64Array;
+use arrow::array::{ArrayRef, Int32Array, Int64Array};
 use arrow::datatypes::{DataType, Field};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use futures::TryStreamExt;
 use iceberg::io::FileIO;
+use iceberg::spec::{PrimitiveType, Transform, Type};
 use serde_json::json;
 use skippr_iceberg_catalog_fs::FsCatalog;
 use skippr_runtime_sdk::plugins::{
     GroupedBatchReader, GroupedBatchReaderConfig, GroupedSinkWriteContext, LiveWalSegments,
     SinkCallResult,
 };
+use skippr_runtime_sdk::protocol::RuntimeOutputLayout;
 use skippr_runtime_sdk::protocol::RuntimeWalPartRef;
 use skippr_runtime_sdk::wal_slice_ref::{decode_wal_slices, WalSliceRef, SNAPSHOT_WAL_SLICES};
 use std::collections::BTreeSet;
@@ -327,6 +330,18 @@ impl Harness {
     pub fn warehouse_data_dir(&self) -> PathBuf {
         let location = self.writer.table_location(NAMESPACE);
         PathBuf::from(location.strip_prefix("file://").unwrap()).join("data")
+    }
+
+    pub async fn native_write_batch(&self, filename: &str, batch: RecordBatch) {
+        let schema = batch.schema();
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            futures::stream::iter(vec![Ok(batch)]),
+        ));
+        self.writer
+            .sync(stream, filename.to_string(), None)
+            .await
+            .unwrap();
     }
 }
 
@@ -700,4 +715,220 @@ async fn two_native_appends_with_the_same_filename_keep_every_row() {
         scanned_ids(&harness.table().await).await,
         vec![0, 1, 2, 3, 4, 5]
     );
+}
+
+fn time_partition_metadata() -> serde_json::Value {
+    json!({
+        "out_field_name": "",
+        "determined_type": "record",
+        "determined_type_values": "",
+        "fields": {
+            "id": {
+                "out_field_name": "id",
+                "determined_type": "long",
+                "determined_type_values": "",
+                "field_id": 1,
+                "schema_id": 1,
+                "lineage_id": "orders:id",
+                "nullable": false,
+                "default_value": null,
+                "fields": {}
+            },
+            "event_ts": {
+                "out_field_name": "event_ts",
+                "determined_type": "long",
+                "determined_type_values": "",
+                "field_id": 2,
+                "schema_id": 1,
+                "lineage_id": "orders:event_ts",
+                "nullable": false,
+                "default_value": null,
+                "fields": {}
+            }
+        }
+    })
+}
+
+async fn time_partition_harness(metadata: serde_json::Value) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let counting = Arc::new(CountingCatalog {
+        inner: FsCatalog::new(
+            format!("file://{}", dir.path().display()),
+            FileIO::new_with_fs(),
+        )
+        .unwrap(),
+        loads: Default::default(),
+    });
+    let catalog: Arc<dyn Catalog> = counting.clone();
+    catalog
+        .create_namespace(&NamespaceIdent::new("lake".into()), HashMap::new())
+        .await
+        .unwrap();
+    let warehouse = format!("file://{}", dir.path().display());
+    let writer = IcebergWriter::<GroupedTestSpec>::new(
+        RuntimeExecutionContext {
+            pipeline_name: "p".to_string(),
+            workspace_name: "w".to_string(),
+            data_dir: dir.path().display().to_string(),
+            execution_mode: Default::default(),
+            output_layout: RuntimeOutputLayout {
+                time_partition_granularity: Some("day".into()),
+                batch_time_fields: vec!["event_ts".into()],
+                ..RuntimeOutputLayout::default()
+            },
+            inject_fields: BTreeMap::new(),
+            pipeline_type: Default::default(),
+        },
+        RuntimeBinding::Primary,
+        "lake".to_string(),
+        Arc::clone(&catalog),
+        IcebergWriterConfig {
+            policies: SinkWritePolicySupport {
+                supports_merge_by_key: true,
+                supports_replace_partition: true,
+                supports_replace_table: true,
+            },
+            table_namespace: "lake".to_string(),
+            location_root: format!("{warehouse}/lake"),
+        },
+    )
+    .await
+    .unwrap();
+    let metadata: OutputMetadata = serde_json::from_value(metadata).unwrap();
+    writer
+        .install_schema_snapshot(&RuntimeSchemaState {
+            version: 1,
+            namespaces: BTreeMap::from([(NAMESPACE.to_string(), metadata)]),
+            namespace_versions: BTreeMap::from([(NAMESPACE.to_string(), 1)]),
+        })
+        .await
+        .unwrap();
+    Harness {
+        dir,
+        counting,
+        catalog,
+        writer,
+    }
+}
+
+#[tokio::test]
+async fn iceberg_day_unit_creates_identity_year_month_day_and_stamps_rows() {
+    let harness = time_partition_harness(time_partition_metadata()).await;
+    let filename = format!("namespace={NAMESPACE}");
+    let posix = 1_794_063_845i64;
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("event_ts", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1i64])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![posix])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    harness.native_write_batch(&filename, batch).await;
+
+    let table = harness.table().await;
+    let iceberg_schema = table.metadata().current_schema();
+    for name in ["year", "month", "day"] {
+        let field = iceberg_schema
+            .field_by_name(name)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert!(field.required);
+        assert!(matches!(
+            field.field_type.as_ref(),
+            Type::Primitive(PrimitiveType::Int)
+        ));
+    }
+    let spec = table.metadata().default_partition_spec();
+    assert_eq!(
+        spec.fields()
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["year", "month", "day"]
+    );
+    assert!(spec
+        .fields()
+        .iter()
+        .all(|field| field.transform == Transform::Identity));
+
+    let batches: Vec<RecordBatch> = table
+        .scan()
+        .select_all()
+        .build()
+        .unwrap()
+        .to_arrow()
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let year = batches[0]
+        .column_by_name("year")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    let month = batches[0]
+        .column_by_name("month")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    let day = batches[0]
+        .column_by_name("day")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(year.value(0), 2026);
+    assert_eq!(month.value(0), 11);
+    assert_eq!(day.value(0), 7);
+}
+
+#[tokio::test]
+async fn iceberg_time_partition_collides_with_source_year() {
+    let mut metadata = time_partition_metadata();
+    metadata["fields"]["year"] = json!({
+        "out_field_name": "year",
+        "determined_type": "long",
+        "determined_type_values": "",
+        "field_id": 3,
+        "schema_id": 1,
+        "lineage_id": "orders:year",
+        "nullable": false,
+        "default_value": null,
+        "fields": {}
+    });
+    let harness = time_partition_harness(metadata).await;
+    let filename = format!("namespace={NAMESPACE}");
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("event_ts", DataType::Int64, false),
+        Field::new("year", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1i64])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![1_794_063_845i64])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![1999i64])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let err = {
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            batch.schema(),
+            futures::stream::iter(vec![Ok(batch)]),
+        ));
+        harness
+            .writer
+            .sync(stream, filename, None)
+            .await
+            .unwrap_err()
+    };
+    assert!(err.to_string().contains("collides"), "{}", err);
 }

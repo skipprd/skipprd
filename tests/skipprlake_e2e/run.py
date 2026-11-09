@@ -32,7 +32,31 @@ STORE_TABLE = "skippr-lake-e2e"
 DDB_PORT = 18010
 DDB_CONTAINER = "skippr-lake-e2e-ddb"
 TOKEN = "skipprlake-e2e-token"
+QUERY_TABLE = "shop.shop"
+FLIGHT_TABLE = "bronze.shop"
 EXPECTED = json.loads((HARNESS_DIR / "expected.json").read_text(encoding="utf-8"))
+DAY_PARTITIONS = (
+    {
+        "year": 2026,
+        "month": 11,
+        "day": 7,
+        "count_key": "day_2026_11_07",
+        "event_ts": "2026-11-07T15:04:05Z",
+    },
+    {
+        "year": 2026,
+        "month": 11,
+        "day": 8,
+        "count_key": "day_2026_11_08",
+        "event_ts": "2026-11-08T09:00:00Z",
+    },
+)
+MISSING_DAY = {
+    "year": 2026,
+    "month": 11,
+    "day": 9,
+    "count_key": "day_missing",
+}
 
 
 class HarnessError(RuntimeError):
@@ -79,11 +103,23 @@ def sde_bin() -> Path | None:
     return path
 
 
+def event_ts_for_id(row_id: int) -> str:
+    return DAY_PARTITIONS[0]["event_ts"] if row_id <= 6 else DAY_PARTITIONS[1]["event_ts"]
+
+
 def write_source(source_dir: Path) -> None:
     source_dir.mkdir(parents=True, exist_ok=True)
     for i in range(1, 13):
         (source_dir / f"event_{i:02d}.json").write_text(
-            json.dumps({"id": i, "name": f"user_{i}", "amount": i * 10}) + "\n",
+            json.dumps(
+                {
+                    "id": i,
+                    "name": f"user_{i}",
+                    "amount": i * 10,
+                    "event_ts": event_ts_for_id(i),
+                }
+            )
+            + "\n",
             encoding="utf-8",
         )
 
@@ -102,6 +138,9 @@ pipelines:
     env: test
     data_source: data_sources.orders
     data_sink: data_sinks.lake
+    transform:
+      batch_time_fields: event_ts
+      batch_time_unit: day
 
 data_sources:
   orders:
@@ -262,6 +301,77 @@ def stage_plugins(config_path: Path) -> str:
     return lines[-1]
 
 
+def date_partition_sql(table: str, year: int, month: int, day: int) -> str:
+    return (
+        f"SELECT count(*) FROM {table} "
+        f"WHERE year = {year} AND month = {month} AND day = {day}"
+    )
+
+
+def parse_query_plain_count(stdout: str) -> int | None:
+    for line in reversed(stdout.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("{") and '"rows"' in stripped:
+            return int(float(json.loads(stripped)["rows"][0][0]))
+    return None
+
+
+def skipprd_query_count(
+    skipprd: Path, config_path: Path, env: dict[str, str], sql: str
+) -> int:
+    result = subprocess.run(
+        [
+            str(skipprd),
+            "--config",
+            str(config_path),
+            "query",
+            "--plain",
+            "--sql",
+            sql,
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise HarnessError(
+            f"skipprd query failed rc={result.returncode} sql={sql!r}:\n"
+            f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+        )
+    count = parse_query_plain_count(result.stdout)
+    if count is None:
+        raise HarnessError(f"skipprd query {sql!r} printed no count JSON:\n{result.stdout!r}")
+    return count
+
+
+def assert_iceberg_date_partitions(count_sql, table: str) -> None:
+    for part in (*DAY_PARTITIONS, MISSING_DAY):
+        sql = date_partition_sql(table, part["year"], part["month"], part["day"])
+        got = count_sql(sql)
+        expected = EXPECTED[part["count_key"]]
+        if got != expected:
+            raise HarnessError(
+                f"{table} {sql} count {got} != {expected} "
+                "(Iceberg date partitions year/month/day)"
+            )
+
+
+def amount_sum_sql(table: str) -> str:
+    return f"SELECT sum(amount) FROM {table}"
+
+
+def assert_iceberg_amount_sum(count_sql, table: str) -> None:
+    sql = amount_sum_sql(table)
+    got = count_sql(sql)
+    expected = EXPECTED["amount_sum"]
+    if got != expected:
+        raise HarnessError(
+            f"{table} {sql} {got} != {expected} "
+            "(Iceberg date partitions must not scramble amount)"
+        )
+
+
 def run_sync(skipprd: Path, config_path: Path, env: dict[str, str]) -> None:
     log("stage sync")
     result = subprocess.run(
@@ -364,7 +474,7 @@ def run_dbt(dbt: Path, project: Path, profiles: Path, env: dict[str, str]) -> No
 
 def assert_gold(flight: str) -> None:
     count = flight_sql.query_flight_count(
-        flight, "SELECT COUNT(*) FROM bronze.shop", token=TOKEN
+        flight, f"SELECT COUNT(*) FROM {FLIGHT_TABLE}", token=TOKEN
     )
     if count != EXPECTED["bronze_count"]:
         raise HarnessError(f"bronze.shop count {count} != {EXPECTED['bronze_count']}")
@@ -493,44 +603,46 @@ def main() -> int:
         env = lake_env(config, data_dir, manifests)
         run_sync(skipprd, config, env)
         log("stage skipprd query bronze count")
-        query = subprocess.run(
-            [
-                str(skipprd),
-                "--config",
-                str(config),
-                "query",
-                "--plain",
-                "--sql",
-                "SELECT count(*) FROM shop.shop",
-            ],
-            cwd=REPO_ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
+        query_count = skipprd_query_count(
+            skipprd, config, env, f"SELECT count(*) FROM {QUERY_TABLE}"
         )
-        if query.returncode != 0:
-            raise HarnessError(
-                f"skipprd query failed rc={query.returncode}:\nstdout={query.stdout!r}\nstderr={query.stderr!r}"
-            )
-        query_count = None
-        for line in reversed(query.stdout.splitlines()):
-            stripped = line.strip()
-            if stripped.startswith("{") and '"rows"' in stripped:
-                query_count = int(float(json.loads(stripped)["rows"][0][0]))
-                break
         if query_count != EXPECTED["bronze_count"]:
             raise HarnessError(
-                f"skipprd query shop.shop count {query_count} != {EXPECTED['bronze_count']}"
+                f"skipprd query {QUERY_TABLE} count {query_count} != {EXPECTED['bronze_count']}"
             )
+        log("stage skipprd query Iceberg date partitions")
+        assert_iceberg_date_partitions(
+            lambda sql: skipprd_query_count(skipprd, config, env, sql),
+            QUERY_TABLE,
+        )
+        log("stage skipprd query Iceberg amount sum")
+        assert_iceberg_amount_sum(
+            lambda sql: skipprd_query_count(skipprd, config, env, sql),
+            QUERY_TABLE,
+        )
         if use_published_plugins():
             assert_published_file_lake_plugins(env["SKIPPR_RUNTIME_PLUGIN_DIR"])
         serve, endpoints = start_serve(skipprd, config, env, workdir)
         log("stage bronze count")
         bronze = flight_sql.query_flight_count(
-            endpoints["flight"], "SELECT COUNT(*) FROM bronze.shop", token=TOKEN
+            endpoints["flight"], f"SELECT COUNT(*) FROM {FLIGHT_TABLE}", token=TOKEN
         )
         if bronze != EXPECTED["bronze_count"]:
-            raise HarnessError(f"bronze.shop count {bronze} != {EXPECTED['bronze_count']}")
+            raise HarnessError(f"{FLIGHT_TABLE} count {bronze} != {EXPECTED['bronze_count']}")
+        log("stage Flight Iceberg date partitions")
+        assert_iceberg_date_partitions(
+            lambda sql: flight_sql.query_flight_count(
+                endpoints["flight"], sql, token=TOKEN
+            ),
+            FLIGHT_TABLE,
+        )
+        log("stage Flight Iceberg amount sum")
+        assert_iceberg_amount_sum(
+            lambda sql: flight_sql.query_flight_count(
+                endpoints["flight"], sql, token=TOKEN
+            ),
+            FLIGHT_TABLE,
+        )
         dbt = dbt_bin()
         if dbt is None:
             log("stage dbt SKIP (DBT_BIN unset and sibling dbt-skipprlake missing)")

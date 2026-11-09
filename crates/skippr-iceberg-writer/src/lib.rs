@@ -54,6 +54,7 @@ use tracing::{info, warn};
 
 mod history;
 mod maintenance;
+mod time_partition;
 use skippr_runtime_sdk::wal_slice_ref::{encode_wal_slices, SNAPSHOT_WAL_SLICES};
 
 const ICEBERG_FILE_MAX_ROWS: usize = 100_000;
@@ -1773,18 +1774,37 @@ impl<S: SinkSpec> IcebergWriter<S> {
         iceberg_schema: Arc<Schema>,
         equality_ids: Vec<i32>,
     ) -> Result<PendingIcebergFile, io::Error> {
+        let time_columns =
+            time_partition::time_partition_column_names_from_layout(&self.context.output_layout)?;
         let mut prepared = Vec::with_capacity(batches.len());
         for batch in batches {
             let batch = crate::parquet_util::coerce_timestamp_dates_to_date32(batch, &date_fields)?;
             let batch = crate::parquet_util::coerce_timestamps_to_microseconds(batch)?;
+            let batch = if content == PendingFileContent::Data {
+                time_partition::stamp_time_partition_columns(
+                    batch,
+                    &self.context.output_layout,
+                    iceberg_schema.as_ref(),
+                )?
+            } else {
+                batch
+            };
             prepared.push(apply_iceberg_field_ids(batch, &iceberg_schema)?);
         }
         let schema = prepared
             .first()
             .map(RecordBatch::schema)
             .ok_or_else(|| io::Error::other("refusing to upload an empty Iceberg file"))?;
-        let partition =
-            stored_partition_from_schema_and_batches(iceberg_schema.as_ref(), &prepared);
+        let partition = if content == PendingFileContent::Data {
+            stored_partition_from_identity_fields(
+                iceberg_schema.as_ref(),
+                &time_columns,
+                &prepared,
+                !time_columns.is_empty(),
+            )?
+        } else {
+            Vec::new()
+        };
         let order_fields =
             skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
                 &schema,
@@ -2118,12 +2138,21 @@ impl<S: SinkSpec> IcebergWriter<S> {
         let mut commit_files = Vec::new();
         let mut row_count = 0;
         if upsert_rows != Some(0) {
-            let data_batches = collect_record_batches(data_stream).await?;
-            let data_batches = apply_iceberg_field_ids_to_batches(
-                data_batches,
-                table.metadata().current_schema(),
+            let iceberg_schema = table.metadata().current_schema();
+            let time_columns = time_partition::time_partition_column_names_from_layout(
+                &self.context.output_layout,
             )?;
-            let partition = partition_struct_from_table_and_batches(&table, &data_batches)?;
+            let data_batches = stamp_data_batches(
+                collect_record_batches(data_stream).await?,
+                &self.context.output_layout,
+                iceberg_schema,
+            )?;
+            let data_batches = apply_iceberg_field_ids_to_batches(data_batches, iceberg_schema)?;
+            let partition = partition_struct_from_table_and_batches(
+                &table,
+                &data_batches,
+                !time_columns.is_empty(),
+            )?;
             let parquet_bytes = crate::parquet_util::serialize_to_parquet_for_iceberg(
                 batch_stream(data_batches),
                 &date_fields,
@@ -2324,9 +2353,21 @@ impl<S: SinkSpec> IcebergWriter<S> {
         }
 
         if data_batch.num_rows() > 0 {
-            let data_batch =
-                apply_iceberg_field_ids(data_batch, table.metadata().current_schema())?;
-            let partition = partition_struct_from_table_and_batches(&table, &[data_batch.clone()])?;
+            let iceberg_schema = table.metadata().current_schema();
+            let time_columns = time_partition::time_partition_column_names_from_layout(
+                &self.context.output_layout,
+            )?;
+            let data_batch = time_partition::stamp_time_partition_columns(
+                data_batch,
+                &self.context.output_layout,
+                iceberg_schema,
+            )?;
+            let data_batch = apply_iceberg_field_ids(data_batch, iceberg_schema)?;
+            let partition = partition_struct_from_table_and_batches(
+                &table,
+                &[data_batch.clone()],
+                !time_columns.is_empty(),
+            )?;
             let data_stream = batch_stream(vec![data_batch]);
             let parquet_bytes = crate::parquet_util::serialize_to_parquet_for_iceberg(
                 data_stream,
@@ -2839,7 +2880,11 @@ impl<S: SinkSpec> IcebergWriter<S> {
         self.ensure_catalog_namespace(catalog, &namespace_ident)
             .await?;
 
+        let time_columns =
+            time_partition::time_partition_column_names_from_layout(&self.context.output_layout)?;
         let iceberg_schema = iceberg_schema_from_output_metadata(namespace, metadata)?;
+        let iceberg_schema =
+            append_engine_time_partition_fields(namespace, iceberg_schema, &time_columns)?;
         let mut properties: HashMap<String, String> = HashMap::new();
         properties.insert(
             "skippr.pipeline".to_string(),
@@ -2848,7 +2893,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
         properties.insert("skippr.binding".to_string(), format!("{:?}", self.binding));
         properties.insert(history::DELETE_AFTER_COMMIT.to_string(), "true".to_string());
 
-        let partition_spec = identity_partition_spec(&iceberg_schema)?;
+        let partition_spec = identity_partition_spec(&iceberg_schema, &time_columns)?;
         let creation = TableCreation::builder()
             .name(table_ident.name().to_string())
             .schema(iceberg_schema)
@@ -3537,6 +3582,51 @@ fn apply_iceberg_field_ids_to_batches(
         .collect()
 }
 
+fn stamp_data_batches(
+    batches: Vec<RecordBatch>,
+    layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
+    iceberg_schema: &Schema,
+) -> Result<Vec<RecordBatch>, io::Error> {
+    batches
+        .into_iter()
+        .map(|batch| time_partition::stamp_time_partition_columns(batch, layout, iceberg_schema))
+        .collect()
+}
+
+fn append_engine_time_partition_fields(
+    namespace: &str,
+    schema: Schema,
+    column_names: &[String],
+) -> Result<Schema, io::Error> {
+    if column_names.is_empty() {
+        return Ok(schema);
+    }
+    let mut fields: Vec<Arc<NestedField>> = schema.as_struct().fields().iter().cloned().collect();
+    let mut seen_field_ids = HashMap::<i32, ()>::new();
+    for field in &fields {
+        collect_iceberg_field_ids(field, &mut seen_field_ids);
+    }
+    for name in column_names {
+        if schema.field_by_name(name).is_some() {
+            return Err(io::Error::other(format!(
+                "Iceberg time partition column '{name}' collides with an existing field; rename the source field or unset batch_time_unit"
+            )));
+        }
+        let field_id = unique_iceberg_field_id(namespace, &[name.clone()], &seen_field_ids);
+        seen_field_ids.insert(field_id, ());
+        fields.push(Arc::new(NestedField::required(
+            field_id,
+            name,
+            Type::Primitive(PrimitiveType::Int),
+        )));
+    }
+    Schema::builder()
+        .with_schema_id(schema.schema_id())
+        .with_fields(fields)
+        .build()
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
 fn next_iceberg_schema_id(metadata: &iceberg::spec::TableMetadata) -> i32 {
     metadata
         .schemas_iter()
@@ -3665,10 +3755,38 @@ fn remap_iceberg_type_field_ids(
     }
 }
 
+fn align_batch_to_iceberg_schema(
+    batch: RecordBatch,
+    iceberg_schema: &Schema,
+) -> Result<RecordBatch, io::Error> {
+    let schema = batch.schema();
+    for field in schema.fields() {
+        validate_flat_column_name(field.name())?;
+        if iceberg_schema.field_by_name(field.name()).is_none() {
+            return Err(io::Error::other(format!(
+                "Iceberg field '{}' is not present in table schema; schema must be evolved before writing",
+                field.name()
+            )));
+        }
+    }
+    let mut fields = Vec::new();
+    let mut columns = Vec::new();
+    for iceberg_field in iceberg_schema.as_struct().fields() {
+        let Ok(idx) = schema.index_of(&iceberg_field.name) else {
+            continue;
+        };
+        fields.push(schema.field(idx).clone());
+        columns.push(batch.column(idx).clone());
+    }
+    RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns)
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
 fn apply_iceberg_field_ids(
     batch: RecordBatch,
     iceberg_schema: &Schema,
 ) -> Result<RecordBatch, io::Error> {
+    let batch = align_batch_to_iceberg_schema(batch, iceberg_schema)?;
     let schema = batch.schema();
     let mut fields = Vec::with_capacity(schema.fields().len());
     for field in schema.fields().iter() {
@@ -3786,19 +3904,32 @@ fn is_s3_not_found_error_text(err: &str) -> bool {
 
 const IDENTITY_PARTITION_FIELD_NAMES: [&str; 3] = ["hour", "service_name", "tenant_id"];
 
-fn identity_partition_spec(schema: &Schema) -> Result<Option<UnboundPartitionSpec>, io::Error> {
-    let present = IDENTITY_PARTITION_FIELD_NAMES
-        .into_iter()
-        .filter(|name| schema.field_by_name(name).is_some())
-        .count();
-    if present == 0 {
-        return Ok(None);
+fn identity_partition_field_names(schema: &Schema, time_columns: &[String]) -> Vec<String> {
+    if !time_columns.is_empty() {
+        return time_columns.to_vec();
     }
-    if present != IDENTITY_PARTITION_FIELD_NAMES.len() {
+    if IDENTITY_PARTITION_FIELD_NAMES
+        .iter()
+        .all(|name| schema.field_by_name(name).is_some())
+    {
+        return IDENTITY_PARTITION_FIELD_NAMES
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    }
+    Vec::new()
+}
+
+fn identity_partition_spec(
+    schema: &Schema,
+    time_columns: &[String],
+) -> Result<Option<UnboundPartitionSpec>, io::Error> {
+    let names = identity_partition_field_names(schema, time_columns);
+    if names.is_empty() {
         return Ok(None);
     }
     let mut builder = UnboundPartitionSpec::builder();
-    for name in IDENTITY_PARTITION_FIELD_NAMES {
+    for name in &names {
         let field = schema
             .field_by_name(name)
             .ok_or_else(|| io::Error::other(format!("missing partition field {name}")))?;
@@ -3807,6 +3938,28 @@ fn identity_partition_spec(schema: &Schema) -> Result<Option<UnboundPartitionSpe
             .map_err(|err| io::Error::other(err.to_string()))?;
     }
     Ok(Some(builder.build()))
+}
+
+fn stored_partition_value_at(column: &dyn Array, row: usize) -> Option<StoredPartitionValue> {
+    if column.is_null(row) {
+        return None;
+    }
+    if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
+        return Some(StoredPartitionValue::String(arr.value(row).to_string()));
+    }
+    if let Some(arr) = column.as_any().downcast_ref::<BooleanArray>() {
+        return Some(StoredPartitionValue::Bool(arr.value(row)));
+    }
+    if let Some(arr) = column.as_any().downcast_ref::<Int32Array>() {
+        return Some(StoredPartitionValue::Int(i64::from(arr.value(row))));
+    }
+    if let Some(arr) = column.as_any().downcast_ref::<UInt32Array>() {
+        return Some(StoredPartitionValue::Int(i64::from(arr.value(row))));
+    }
+    if let Some(arr) = column.as_any().downcast_ref::<Int64Array>() {
+        return Some(StoredPartitionValue::Int(arr.value(row)));
+    }
+    None
 }
 
 fn first_non_null_partition_value(
@@ -3818,43 +3971,84 @@ fn first_non_null_partition_value(
             continue;
         };
         for i in 0..col.len() {
-            if col.is_null(i) {
-                continue;
+            if let Some(value) = stored_partition_value_at(col.as_ref(), i) {
+                return Some(value);
             }
-            if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                return Some(StoredPartitionValue::String(arr.value(i).to_string()));
-            }
-            if let Some(arr) = col.as_any().downcast_ref::<BooleanArray>() {
-                return Some(StoredPartitionValue::Bool(arr.value(i)));
-            }
-            if let Some(arr) = col.as_any().downcast_ref::<Int32Array>() {
-                return Some(StoredPartitionValue::Int(i64::from(arr.value(i))));
-            }
-            if let Some(arr) = col.as_any().downcast_ref::<UInt32Array>() {
-                return Some(StoredPartitionValue::Int(i64::from(arr.value(i))));
-            }
-            if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
-                return Some(StoredPartitionValue::Int(arr.value(i)));
-            }
-            return None;
         }
     }
     None
 }
 
-fn stored_partition_from_schema_and_batches(
-    iceberg_schema: &Schema,
+fn homogeneous_partition_value(
     batches: &[RecordBatch],
-) -> Vec<Option<StoredPartitionValue>> {
-    if IDENTITY_PARTITION_FIELD_NAMES
-        .iter()
-        .any(|name| iceberg_schema.field_by_name(name).is_none())
-    {
-        return Vec::new();
+    name: &str,
+) -> Result<Option<StoredPartitionValue>, io::Error> {
+    let mut seen: Option<StoredPartitionValue> = None;
+    let mut saw_null = false;
+    let mut saw_value = false;
+    let mut saw_column = false;
+    for batch in batches {
+        let Some(col) = batch.column_by_name(name) else {
+            continue;
+        };
+        saw_column = true;
+        for i in 0..col.len() {
+            match stored_partition_value_at(col.as_ref(), i) {
+                None => {
+                    saw_null = true;
+                    if saw_value {
+                        return Err(mixed_identity_partition_error(name));
+                    }
+                }
+                Some(value) => {
+                    saw_value = true;
+                    if saw_null {
+                        return Err(mixed_identity_partition_error(name));
+                    }
+                    if let Some(prev) = &seen {
+                        if prev != &value {
+                            return Err(mixed_identity_partition_error(name));
+                        }
+                    } else {
+                        seen = Some(value);
+                    }
+                }
+            }
+        }
     }
-    IDENTITY_PARTITION_FIELD_NAMES
-        .into_iter()
-        .map(|name| first_non_null_partition_value(batches, name))
+    if !saw_column {
+        return Err(io::Error::other(format!(
+            "Iceberg data file is missing identity partition column '{name}'"
+        )));
+    }
+    Ok(seen)
+}
+
+fn mixed_identity_partition_error(name: &str) -> io::Error {
+    io::Error::other(format!(
+        "Iceberg data file mixes partition values for '{name}'"
+    ))
+}
+
+fn stored_partition_from_identity_fields(
+    iceberg_schema: &Schema,
+    time_columns: &[String],
+    batches: &[RecordBatch],
+    require_homogeneous: bool,
+) -> Result<Vec<Option<StoredPartitionValue>>, io::Error> {
+    let names = identity_partition_field_names(iceberg_schema, time_columns);
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    names
+        .iter()
+        .map(|name| {
+            if require_homogeneous {
+                homogeneous_partition_value(batches, name)
+            } else {
+                Ok(first_non_null_partition_value(batches, name))
+            }
+        })
         .collect()
 }
 
@@ -3879,22 +4073,34 @@ fn stored_partition_to_struct(values: &[Option<StoredPartitionValue>]) -> Struct
 fn partition_struct_from_table_and_batches(
     table: &iceberg::table::Table,
     batches: &[RecordBatch],
+    require_homogeneous: bool,
 ) -> Result<Struct, io::Error> {
     let spec = table.metadata().default_partition_spec();
     if spec.is_unpartitioned() {
         return Ok(Struct::empty());
     }
     let schema = table.metadata().current_schema();
-    let values: Vec<Option<StoredPartitionValue>> = spec
+    let values: Result<Vec<Option<StoredPartitionValue>>, io::Error> = spec
         .fields()
         .iter()
         .map(|field| {
-            schema
+            let name = schema
                 .field_by_id(field.source_id)
-                .and_then(|source| first_non_null_partition_value(batches, source.name.as_str()))
+                .map(|source| source.name.as_str())
+                .ok_or_else(|| {
+                    io::Error::other(format!(
+                        "Iceberg partition field {} has no source column",
+                        field.field_id
+                    ))
+                })?;
+            if require_homogeneous {
+                homogeneous_partition_value(batches, name)
+            } else {
+                Ok(first_non_null_partition_value(batches, name))
+            }
         })
         .collect();
-    Ok(stored_partition_to_struct(&values))
+    Ok(stored_partition_to_struct(&values?))
 }
 
 fn iceberg_schema_from_output_metadata(
@@ -4501,6 +4707,49 @@ mod tests {
         assert_eq!(projected.num_columns(), 1);
         assert_eq!(projected.schema().field(0).name(), "id");
         assert_eq!(projected.num_rows(), 1);
+    }
+
+    #[test]
+    fn apply_iceberg_field_ids_reorders_columns_to_schema() {
+        let iceberg_schema = Schema::builder()
+            .with_schema_id(1)
+            .with_fields(vec![
+                NestedField::required(3, "amount", Type::Primitive(PrimitiveType::Long)).into(),
+                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
+            ])
+            .build()
+            .unwrap();
+        let batch = RecordBatch::try_from_iter(vec![
+            ("id", Arc::new(Int64Array::from(vec![1i64])) as ArrayRef),
+            (
+                "amount",
+                Arc::new(Int64Array::from(vec![10i64])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let aligned = apply_iceberg_field_ids(batch, &iceberg_schema).unwrap();
+        assert_eq!(aligned.schema().field(0).name(), "amount");
+        assert_eq!(aligned.schema().field(1).name(), "id");
+        assert_eq!(
+            aligned
+                .schema()
+                .field(0)
+                .metadata()
+                .get(PARQUET_FIELD_ID_META_KEY),
+            Some(&"3".to_string())
+        );
+        let amount = aligned
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let id = aligned
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(amount.value(0), 10);
+        assert_eq!(id.value(0), 1);
     }
 
     #[test]
@@ -5558,7 +5807,9 @@ mod tests {
 
     #[test]
     fn identity_partition_spec_when_hour_service_tenant_exist() {
-        let spec = identity_partition_spec(&o11y_schema()).unwrap().unwrap();
+        let spec = identity_partition_spec(&o11y_schema(), &[])
+            .unwrap()
+            .unwrap();
         assert_eq!(spec.fields().len(), 3);
         assert!(spec
             .fields()
@@ -5585,13 +5836,114 @@ mod tests {
             .into()])
             .build()
             .unwrap();
-        assert!(identity_partition_spec(&schema).unwrap().is_none());
+        assert!(identity_partition_spec(&schema, &[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn identity_partition_spec_prefers_time_unit_columns_over_otlp() {
+        let schema = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![
+                NestedField::required(1, "year", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(2, "month", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(3, "day", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(4, "hour", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(5, "service_name", Type::Primitive(PrimitiveType::String))
+                    .into(),
+                NestedField::required(6, "tenant_id", Type::Primitive(PrimitiveType::String))
+                    .into(),
+            ])
+            .build()
+            .unwrap();
+        let spec = identity_partition_spec(&schema, &["year".into(), "month".into(), "day".into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            spec.fields()
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["year", "month", "day"]
+        );
+        assert!(spec
+            .fields()
+            .iter()
+            .all(|field| field.transform == Transform::Identity));
+    }
+
+    #[test]
+    fn append_engine_time_partition_fields_rejects_name_collision() {
+        let schema = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![NestedField::required(
+                1,
+                "year",
+                Type::Primitive(PrimitiveType::Int),
+            )
+            .into()])
+            .build()
+            .unwrap();
+        let err =
+            append_engine_time_partition_fields("events", schema, &["year".into(), "month".into()])
+                .unwrap_err();
+        assert!(err.to_string().contains("collides"));
+    }
+
+    #[test]
+    fn append_engine_time_partition_fields_adds_required_ints() {
+        let schema = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![NestedField::required(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Long),
+            )
+            .into()])
+            .build()
+            .unwrap();
+        let schema = append_engine_time_partition_fields(
+            "events",
+            schema,
+            &["year".into(), "month".into(), "day".into()],
+        )
+        .unwrap();
+        for name in ["year", "month", "day"] {
+            let field = schema.field_by_name(name).unwrap();
+            assert!(field.required);
+            assert!(matches!(
+                field.field_type.as_ref(),
+                Type::Primitive(PrimitiveType::Int)
+            ));
+        }
+        assert!(identity_partition_spec(&schema, &[]).unwrap().is_none());
+        let spec = identity_partition_spec(&schema, &["year".into(), "month".into(), "day".into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.fields().len(), 3);
+    }
+
+    #[test]
+    fn mixed_identity_partition_values_fail_closed() {
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "year",
+                Arc::new(Int32Array::from(vec![2026, 2025])) as ArrayRef,
+            ),
+            (
+                "month",
+                Arc::new(Int32Array::from(vec![11, 11])) as ArrayRef,
+            ),
+            ("day", Arc::new(Int32Array::from(vec![7, 7])) as ArrayRef),
+        ])
+        .unwrap();
+        let err = homogeneous_partition_value(&[batch], "year").unwrap_err();
+        assert!(err.to_string().contains("mixes partition values"));
     }
 
     #[test]
     fn table_creation_carries_identity_partition_spec() {
         let schema = o11y_schema();
-        let spec = identity_partition_spec(&schema).unwrap();
+        let spec = identity_partition_spec(&schema, &[]).unwrap();
         let creation = TableCreation::builder()
             .name("spans".to_string())
             .schema(schema)
@@ -5616,7 +5968,7 @@ mod tests {
             ),
         ])
         .unwrap();
-        let stored = stored_partition_from_schema_and_batches(&schema, &[batch]);
+        let stored = stored_partition_from_identity_fields(&schema, &[], &[batch], false).unwrap();
         let part = stored_partition_to_struct(&stored);
         assert_eq!(part.fields().len(), 3);
         assert_ne!(part, Struct::empty());
@@ -5655,7 +6007,7 @@ mod tests {
             Arc::new(Int32Array::from(vec![1])) as ArrayRef,
         )])
         .unwrap();
-        let stored = stored_partition_from_schema_and_batches(&schema, &[batch]);
+        let stored = stored_partition_from_identity_fields(&schema, &[], &[batch], false).unwrap();
         assert!(stored.is_empty());
         assert_eq!(stored_partition_to_struct(&stored), Struct::empty());
     }

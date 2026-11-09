@@ -1,6 +1,6 @@
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
-use chrono::{DateTime, Datelike, FixedOffset, Timelike};
+use chrono::{DateTime, Datelike, FixedOffset, TimeZone, Timelike, Utc};
 use std::io;
 
 const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
@@ -176,6 +176,54 @@ impl TimePartitioner {
     }
 }
 
+/// Cumulative UTC calendar column names from `year` through `granularity` (inclusive).
+/// Iceberg identity partitions use these unprefixed names; Hive may prefix them separately.
+pub fn time_partition_column_names(granularity: &str) -> Result<Vec<&'static str>, io::Error> {
+    let granularity = granularity.trim();
+    if granularity.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Time partition granularity is empty",
+        ));
+    }
+    let mut names = Vec::new();
+    for name in GRANULARITIES {
+        names.push(name);
+        if name.eq_ignore_ascii_case(granularity) {
+            return Ok(names);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("Unsupported time partition granularity '{granularity}'"),
+    ))
+}
+
+/// UTC calendar ints for Iceberg identity columns: year, month 1–12, day 1–31, hour 0–23, minute 0–59.
+pub fn calendar_columns_utc(
+    posix_seconds: i64,
+    granularity: &str,
+) -> Result<Vec<(String, i32)>, io::Error> {
+    let names = time_partition_column_names(granularity)?;
+    let dt = Utc
+        .timestamp_opt(posix_seconds, 0)
+        .single()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("event time {posix_seconds} is out of range"),
+            )
+        })?;
+    let offset = dt.fixed_offset();
+    names
+        .into_iter()
+        .map(|name| {
+            let value = TimePartitioner::get_date_component(offset, name)?;
+            Ok((name.to_string(), value as i32))
+        })
+        .collect()
+}
+
 /// Hive-style object key: `{prefix}/{namespace}/{p_field=...}/{p_year=...}/{stem}.{ext}`.
 pub fn hive_object_relative_path(
     prefix: &str,
@@ -220,6 +268,42 @@ pub fn hive_object_relative_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calendar_columns_utc_matches_hive_components_for_day_and_minute() {
+        let posix = Utc
+            .with_ymd_and_hms(2026, 11, 7, 15, 4, 5)
+            .single()
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            calendar_columns_utc(posix, "day").unwrap(),
+            [
+                ("year".to_string(), 2026),
+                ("month".to_string(), 11),
+                ("day".to_string(), 7),
+            ]
+        );
+        assert_eq!(
+            calendar_columns_utc(posix, "minute").unwrap(),
+            [
+                ("year".to_string(), 2026),
+                ("month".to_string(), 11),
+                ("day".to_string(), 7),
+                ("hour".to_string(), 15),
+                ("minute".to_string(), 4),
+            ]
+        );
+        assert_eq!(time_partition_column_names("year").unwrap(), ["year"]);
+        assert_eq!(
+            time_partition_column_names("HOUR").unwrap(),
+            ["year", "month", "day", "hour"]
+        );
+        assert!(time_partition_column_names("week")
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported"));
+    }
 
     #[test]
     fn process_from_layout_uses_runtime_granularity() {

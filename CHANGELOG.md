@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [16.0.5] - 2026-11-09
+
+### Added
+
+- Iceberg tables (Athena Iceberg, SkipprLake, DuckDB Iceberg) materialize UTC `year`/`month`/`day` (and hour/minute) int columns plus identity partitions from `transform.batch_time_fields` and `transform.batch_time_unit`. Recreate existing unpartitioned tables to pick this up. SkipprLake File e2e asserts Hive-parity `WHERE year/month/day` and `SUM(amount)` on `skipprd query` and Flight.
+
+### Fixed
+
+- Iceberg parquet writes follow table schema field order, and `skipprd query` / Flight keep column values on those names when parquet physical order differs, so identity date partitions cannot swap `id` and `amount`.
+
 ## [16.0.4] - 2026-11-09
 
 ### Fixed

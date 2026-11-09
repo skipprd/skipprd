@@ -129,6 +129,7 @@ class RustCiTests(unittest.TestCase):
         linux_test = text.split("\n  linux_test_suite:", 1)[1].split("\n  linux_x86:", 1)[0]
         self.assertIn("test_release_sha_batteries.py", linux_test)
         self.assertIn("tests/tpc/test_run.py", linux_test)
+        self.assertIn("tests/skipprlake_e2e/test_run.py", linux_test)
         self.assertIn("tests/perf_db/test_run.py", linux_test)
         self.assertIn("runs-on: ubuntu-latest", linux_test)
         self.assertNotIn("dtolnay/rust-toolchain", linux_test)

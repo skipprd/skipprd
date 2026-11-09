@@ -482,6 +482,15 @@ fn rename_batch_fields(batch: RecordBatch, names: &[String]) -> Result<RecordBat
     if names.is_empty() || batch.num_columns() != names.len() {
         return Ok(batch);
     }
+    // Parquet physical order can differ from Iceberg schema order. When the scan
+    // already returned current names, keep values on those names; project_batch
+    // reorders. Zip-by-index is only for snapshot→current renames.
+    if names
+        .iter()
+        .all(|name| batch.schema().index_of(name).is_ok())
+    {
+        return Ok(batch);
+    }
     let fields = batch
         .schema()
         .fields()
@@ -635,6 +644,39 @@ mod tests {
         let src = include_str!("iceberg_table.rs");
         assert!(!src.contains(concat!("Listing", "Table::")));
         assert!(!src.contains(concat!("build_s3", "_df(")));
+    }
+
+    #[test]
+    fn rename_batch_fields_keeps_named_values_when_parquet_order_differs() {
+        use datafusion::arrow::array::{Int64Array, RecordBatch};
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "id",
+                std::sync::Arc::new(Int64Array::from(vec![1i64]))
+                    as datafusion::arrow::array::ArrayRef,
+            ),
+            (
+                "amount",
+                std::sync::Arc::new(Int64Array::from(vec![10i64]))
+                    as datafusion::arrow::array::ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let renamed = super::rename_batch_fields(batch, &["amount".into(), "id".into()]).unwrap();
+        let amount = renamed
+            .column_by_name("amount")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let id = renamed
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(amount.value(0), 10);
+        assert_eq!(id.value(0), 1);
     }
 
     #[test]

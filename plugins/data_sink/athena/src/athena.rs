@@ -3518,6 +3518,7 @@ mod contract_schema_tests {
                 time_partition_granularity: Some("day".to_string()),
                 time_partition_prefix: None,
                 format: None,
+                batch_time_fields: vec![],
             },
             inject_fields: Default::default(),
             pipeline_type: Default::default(),

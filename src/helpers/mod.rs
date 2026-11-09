@@ -529,6 +529,40 @@ impl Helpers {
         let num_digits = ((time as f64).log10() + 1.0).floor() as i32;
         num_digits > 10
     }
+
+    /// POSIX seconds from a numeric event-time. Values with more than 10 digits are milliseconds.
+    pub fn posix_seconds_from_i64(time: i64) -> Option<i64> {
+        if time > 999999999999999 || time < -999999999999999 {
+            return None;
+        }
+        if Self::is_millisecond_timestamp(time) {
+            Some(time / 1000)
+        } else {
+            Some(time)
+        }
+    }
+
+    /// POSIX seconds from an RFC3339, numeric, or known date-format string.
+    pub fn posix_seconds_from_str(s: &str) -> Option<i64> {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+            return Some(dt.timestamp());
+        }
+        if let Ok(numeric) = s.parse::<i64>() {
+            if let Some(secs) = Self::posix_seconds_from_i64(numeric) {
+                return Some(secs);
+            }
+            if Self::is_millisecond_timestamp(numeric) {
+                return None;
+            }
+        }
+        for format in DateFormats::iterator() {
+            if let Ok(dt) = Helpers::parse_date_from_string(s, format.as_str()) {
+                return Some(dt.timestamp());
+            }
+        }
+        None
+    }
+
     pub fn parse_time_field(config: &Config, message: &Value) -> Option<i64> {
         Self::parse_time_field_with_fields(message, &config.get_transform_batch_time_fields())
     }
@@ -544,47 +578,16 @@ impl Helpers {
         for field_dot in time_fields.split(',') {
             if let Some(value) = Helpers::get_nested_value_from_dot_notation(message, field_dot) {
                 match value {
-                    // Handle string timestamps
                     Value::String(ref s) => {
-                        // Try parsing as RFC3339/ISO8601 first
-                        if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-                            return Some(dt.timestamp());
-                        }
-
-                        // Try parsing as millisecond timestamp string
-                        if let Ok(numeric) = s.parse::<i64>() {
-                            // Determine if seconds or milliseconds by magnitude
-                            if Helpers::is_millisecond_timestamp(numeric) {
-                                if numeric <= 999999999999999 && numeric >= -999999999999999 {
-                                    return Some(numeric / 1000);
-                                } else {
-                                    continue;
-                                }
-                            } else {
-                                return Some(numeric);
-                            }
-                        }
-
-                        // Try various date formats using parse_date_from_string
-                        for format in DateFormats::iterator() {
-                            if let Ok(dt) = Helpers::parse_date_from_string(s, format.as_str()) {
-                                return Some(dt.timestamp());
-                            }
+                        if let Some(secs) = Helpers::posix_seconds_from_str(s) {
+                            return Some(secs);
                         }
                     }
-
-                    // Handle numeric timestamps
                     Value::Number(n) => {
                         if let Some(ts) = n.as_i64() {
-                            // Validate timestamp range
-                            if ts > 999999999999999 || ts < -999999999999999 {
-                                continue; // Invalid range, try next field
+                            if let Some(secs) = Helpers::posix_seconds_from_i64(ts) {
+                                return Some(secs);
                             }
-                            // Assume milliseconds if timestamp is too large for seconds
-                            if Helpers::is_millisecond_timestamp(ts) {
-                                return Some(ts / 1000);
-                            }
-                            return Some(ts);
                         }
                     }
                     _ => continue,

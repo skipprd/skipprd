@@ -1357,6 +1357,13 @@ fn runtime_execution_context(
         value => Some(value),
     };
     let time_partition_prefix = config.get_time_partition_prefix();
+    let batch_time_fields = config
+        .get_transform_batch_time_fields()
+        .split(',')
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+        .map(|field| field.to_string())
+        .collect();
     let inject_fields = config
         .get_transform_inject_fields()
         .into_iter()
@@ -1378,6 +1385,7 @@ fn runtime_execution_context(
             order_fields,
             time_partition_granularity,
             time_partition_prefix,
+            batch_time_fields,
             format: {
                 let pipeline_type = binding.format_pipeline(
                     config

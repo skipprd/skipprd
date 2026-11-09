@@ -99,6 +99,8 @@ schema_sinks:
 
 Each source namespace becomes an Iceberg table in `glue_database_name`. Skipprd maintains snapshots: recent commits are kept, older ones expire, and small files are rewritten. Do not rely on time travel to old snapshots.
 
+With `transform.batch_time_fields` and `transform.batch_time_unit`, Skipprd writes Hive-parity UTC int columns (`year`, `month`, `day`, and `hour` / `minute` when you set those units) and identity-partitions on them. `WHERE year = 2026 AND month = 11 AND day = 7` works the same as Hive Athena. Recreate an existing unpartitioned Iceberg table to pick this up.
+
 Supports `append`, `merge_by_key`, `replace_partition`, and `replace_table`. `skipprd query` reads the Iceberg table plus in-flight WAL rows.
 
 ## Troubleshooting
