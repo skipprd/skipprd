@@ -47,7 +47,7 @@ curl -sL https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh | SKI
 To pin a release, for example on a production host, set `SKIPPR_VERSION` to an unprefixed version number:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh | SKIPPR_VERSION=16.0.5 sh
+curl -sL https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh | SKIPPR_VERSION=16.0.6 sh
 ```
 
 You can also download the Linux x86_64 or macOS arm64 archive from [GitHub Releases](https://github.com/skipprd/skipprd/releases) and put `skipprd` on your `PATH` yourself.
