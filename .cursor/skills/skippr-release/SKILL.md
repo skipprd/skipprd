@@ -25,7 +25,7 @@ skippr-release:
 - [ ] Next engine tag named (user arg or last unprefixed tag + patch, excluding 0.0.0)
 - [ ] Plugin crates bumped for changed checksum inputs
 - [ ] Planner dry-run clean (no immutable-path SystemExit)
-- [ ] CHANGELOG Unreleased → [tag]; python semver iff python/ or pyproject.toml changed
+- [ ] CHANGELOG Unreleased → [tag]
 - [ ] Engine how-tos in skipprd/docs (same commit as the tag; surgical)
 - [ ] git commit with hooks (never --no-verify; DST + lib proptest run here)
 - [ ] git push origin HEAD
@@ -71,7 +71,7 @@ python3 .github/scripts/release_sha_batteries.py --ensure --sha "$(git rev-parse
 git tag <tag> && git push origin <tag>
 ```
 
-Python wheel: bump `pyproject.toml` and `python/Cargo.toml` together **only** when `python/` or `pyproject.toml` changed since `<last-tag>`. Do not bump Python just to clobber PyPI. Do not stamp root `Cargo.toml`.
+Python wheel: CI stamps `skippr==<tag>` from the engine tag. Do not bump committed `pyproject.toml` / `python/Cargo.toml` (dummy, like root `Cargo.toml`). Moving the same tag whose wheel filenames already exist stamps a PEP 427 build number. Do not stamp root `Cargo.toml`.
 
 CHANGELOG: move `## [Unreleased]` bullets into `## [<tag>]`; leave an empty Unreleased.
 

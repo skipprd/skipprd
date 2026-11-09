@@ -6,7 +6,7 @@ This repository is a Cargo workspace with a single host binary and many separate
 
 | Path | Responsibility |
 |---|---|
-| `python/` | PyO3 `skippr` module. Maturin crate wrapping `Session`. Own semver in `pyproject.toml` / `python/Cargo.toml`, not the skipprd git tag. CI always builds and tests the wheel via `scripts/test-python.sh` on Skippr Cloud runners. PyPI publish is GitHub OIDC, only when that Python semver is new. |
+| `python/` | PyO3 `skippr` module. Maturin crate wrapping `Session`. Wheel version is the engine git tag (CI stamps `pyproject.toml` / `python/Cargo.toml`; committed files stay a dummy). CI always builds and tests the wheel via `scripts/test-python.sh`. PyPI publish is GitHub OIDC on the same unprefixed engine tags as `publish_skipprd`. |
 | `crates/skippr-core/` | Shared core logic used by the host and plugin crates. |
 | `crates/skippr-query-plan/` | `FlightSqlExec` physical node and SkipprPhysicalCodec for datafusion-distributed. |
 | `src/query_flight/` | Arrow Flight SQL 59.2, live WAL selector, in-process QueryRuntime. |

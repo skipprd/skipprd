@@ -52,7 +52,7 @@ git tag <x.y.z-beta-N>
 git push origin <x.y.z-beta-N>
 ```
 
-Do not stamp root `Cargo.toml` locally (stays `0.1.0`; CI stamps `x.y.z-beta-N`). Do not commit a `-beta` version in `pyproject.toml`. CI stamps the skippr wheel to PEP 440 `x.y.zbN` for that tag so PyPI gets a unique pre-release. `pip install skippr` still prefers the last production; `pip install skippr==x.y.zbN` (or `==x.y.z-beta-N`) gets the beta.
+Do not stamp root `Cargo.toml` locally (stays `0.1.0`; CI stamps `x.y.z-beta-N`). Do not commit a `-beta` version in `pyproject.toml` (committed Python files stay a dummy). Production tags stamp `skippr==x.y.z`; beta tags stamp PEP 440 `x.y.zbN` so PyPI gets a unique pre-release. `pip install skippr` still prefers the last production; `pip install skippr==x.y.zbN` (or `==x.y.z-beta-N`) gets the beta.
 
 Scratch `0.0.0` is not required: the beta tag **is** the CI vehicle. Workflow/harness edits ship on this tag.
 

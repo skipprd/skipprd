@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Python wheel semver lives in pyproject.toml, not skipprd git tags.
+"""Python wheel version is the engine git tag.
 
-Beta engine tags stamp a unique PEP 440 pre-release (`x.y.zbN`) in CI so PyPI
-never reuses a filename. Committed pyproject stays x.y.z.
+CI stamps pyproject.toml / python/Cargo.toml from GITHUB_REF_NAME before
+maturin. Production x.y.z → skippr==x.y.z. Beta x.y.z-beta-N → PEP 440
+x.y.zbN. Moving a production tag whose filenames already exist stamps a
+PEP 427 build number. Committed pyproject stays a dummy x.y.z.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
-from engine_tag import is_beta_engine_tag, pep440_version
+from engine_tag import is_beta_engine_tag, is_engine_tag, pep440_version
 
 PYPROJECT = ROOT / "pyproject.toml"
 PYTHON_CARGO = ROOT / "python" / "Cargo.toml"
@@ -70,14 +72,21 @@ def stamp_python_package_version(
         path.write_text(updated, encoding="utf-8")
 
 
+def python_version_for_tag(tag: str, pyproject: Path = PYPROJECT, cargo: Path = PYTHON_CARGO) -> str:
+    """PyPI/PEP 440 spelling for this ref. Engine tags match the tag; else committed dummy."""
+    if is_engine_tag(tag):
+        return pep440_version(tag)
+    return python_semver(pyproject=pyproject, cargo=cargo)
+
+
 def prepare_ci_package_versions(
     ref_name: str | None = None,
     pyproject: Path = PYPROJECT,
     cargo: Path = PYTHON_CARGO,
 ) -> str:
-    """Return the skipprd stamp version. On beta tags, also stamp unique wheel semver."""
+    """Return the skipprd host stamp. Engine tags also stamp the skippr wheel semver."""
     tag = (ref_name if ref_name is not None else os.environ.get("GITHUB_REF_NAME", "")).strip()
-    if is_beta_engine_tag(tag):
+    if is_engine_tag(tag):
         stamp_python_package_version(pep440_version(tag), pyproject=pyproject, cargo=cargo)
         return tag
     return python_semver(pyproject=pyproject, cargo=cargo)
@@ -214,7 +223,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     tag = os.environ.get("GITHUB_REF_NAME", "").strip()
-    version = pep440_version(tag) if is_beta_engine_tag(tag) else python_semver()
+    version = python_version_for_tag(tag)
     if not args.skip_if_published:
         print(version)
         return

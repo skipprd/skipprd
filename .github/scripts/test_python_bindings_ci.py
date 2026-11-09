@@ -263,6 +263,9 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("from the tag name (`1.2.3`)", text)
         self.assertNotIn("optionally with a `v` prefix", text)
         self.assertNotIn("stamps the root host package version from the tag name (`v1.2.3`", text)
+        self.assertNotIn("Python has its own semver", text)
+        self.assertIn("stamps the `skippr` wheel from the unprefixed engine tag", text)
+        self.assertNotIn("Bump `pyproject.toml` and `python/Cargo.toml` together, then tag", text)
 
     def test_install_docs_pin_unprefixed_engine_version(self):
         install = (ROOT / "docs" / "docs" / "getting-started" / "install.md").read_text(
@@ -318,19 +321,49 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("test_stream_transforms_ci.py", script)
         self.assertIn(".githooks/pre-commit", installer)
 
-    def test_python_semver_is_independent_of_engine_tags(self):
+    def test_committed_python_semver_is_a_dummy(self):
         module = load_wheel_version()
         self.assertEqual(module.python_semver(), "16.0.0")
         self.assertTrue(
             module.should_publish(
-                "16.0.0", unpublished=["skippr-16.0.0-cp310-abi3-macosx_11_0_arm64.whl"]
+                "16.0.5", unpublished=["skippr-16.0.5-cp310-abi3-macosx_11_0_arm64.whl"]
             )
         )
-        self.assertFalse(module.should_publish("18.0.0", unpublished=[]))
+        self.assertFalse(module.should_publish("16.0.5", unpublished=[]))
         self.assertFalse(module.should_publish("0.0.0", unpublished=["skippr-0.0.0-any.whl"]))
+
+    def test_production_tag_stamps_python_from_engine_tag(self):
+        module = load_wheel_version()
+        self.assertEqual(module.python_version_for_tag("16.0.5"), "16.0.5")
+        self.assertEqual(module.python_version_for_tag("0.0.0"), "0.0.0")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "python").mkdir()
+            pyproject = root / "pyproject.toml"
+            cargo = root / "python" / "Cargo.toml"
+            pyproject.write_text('version = "16.0.0"\n', encoding="utf-8")
+            cargo.write_text(
+                '[package]\nname = "skipprd-python"\nversion = "16.0.0"\n', encoding="utf-8"
+            )
+            stamped = module.prepare_ci_package_versions(
+                "16.0.5", pyproject=pyproject, cargo=cargo
+            )
+            self.assertEqual(stamped, "16.0.5")
+            self.assertIn('version = "16.0.5"', pyproject.read_text(encoding="utf-8"))
+            self.assertIn('version = "16.0.5"', cargo.read_text(encoding="utf-8"))
+            pyproject.write_text('version = "16.0.0"\n', encoding="utf-8")
+            cargo.write_text(
+                '[package]\nname = "skipprd-python"\nversion = "16.0.0"\n', encoding="utf-8"
+            )
+            self.assertEqual(
+                module.prepare_ci_package_versions("", pyproject=pyproject, cargo=cargo),
+                "16.0.0",
+            )
+            self.assertIn('version = "16.0.0"', pyproject.read_text(encoding="utf-8"))
 
     def test_beta_tag_stamps_unique_pep440_python_version(self):
         module = load_wheel_version()
+        self.assertEqual(module.python_version_for_tag("18.3.10-beta-2"), "18.3.10b2")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "python").mkdir()
@@ -349,8 +382,10 @@ class PythonBindingsCiTests(unittest.TestCase):
             cargo.write_text('[package]\nname = "skipprd-python"\nversion = "18.3.6"\n', encoding="utf-8")
             self.assertEqual(
                 module.prepare_ci_package_versions("18.3.10", pyproject=pyproject, cargo=cargo),
-                "18.3.6",
+                "18.3.10",
             )
+            self.assertIn('version = "18.3.10"', pyproject.read_text(encoding="utf-8"))
+            self.assertIn('version = "18.3.10"', cargo.read_text(encoding="utf-8"))
 
     def test_beta_publish_does_not_stamp_pep427_build_tag(self):
         module = load_wheel_version()

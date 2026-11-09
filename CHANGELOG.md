@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Iceberg parquet writes follow table schema field order, and `skipprd query` / Flight keep column values on those names when parquet physical order differs, so identity date partitions cannot swap `id` and `amount`.
+- `pip install skippr==16.0.5` matches the engine tag. Moving the same tag stamps a PEP 427 build number on that version; committed `pyproject.toml` stays a dummy.
 
 ## [16.0.4] - 2026-11-09
 
