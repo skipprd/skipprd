@@ -16,7 +16,7 @@ use skippr_wal_catalog::{
     query_all, CatalogFence, CatalogKey, CatalogPrefix, CatalogRow, CatalogTxn, CompactionId,
     CompactionRow, CompactionState, FormatPhase, FormatRow, LegacySliceRow, PayloadLocation,
     PutCond, SegmentIndexRow, SegmentRow, SeqRow, SliceBitmap, SliceDirEntry, WalCatalogStore,
-    FORMAT_VERSION, ROW_MAX_BYTES,
+    FORMAT_VERSION,
 };
 
 use crate::buffer::compaction_transaction::{CompactionTransaction, CompactionTransactionState};
@@ -774,12 +774,6 @@ fn import_compaction_json(
             .unwrap_or("compaction.json")
             .to_string();
         let bytes = fs::read(&path).map_err(DurableError::from)?;
-        if bytes.len() > ROW_MAX_BYTES {
-            return Err(DurableError::Io(format!(
-                "compaction json {name} exceeds row ceiling ({} bytes)",
-                bytes.len()
-            )));
-        }
         let txn: CompactionTransaction = serde_json::from_slice(&bytes)
             .map_err(|err| unreadable_compaction_json_error(&name, err))?;
         let id = CompactionId::new(&txn.id).map_err(|err| {

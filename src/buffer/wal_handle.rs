@@ -27,7 +27,7 @@ use crate::plugins::cdc::CheckpointEnvelope;
 pub const UNPUBLISHED_COMMIT_CEILING: u64 = 32;
 /// Shared progress cadence for import, hydrate, redo, and republish. Not an env knob.
 pub(crate) const WAL_CATALOG_PROGRESS_EVERY: u64 = 250;
-/// Durable Acked cleanup batch. Stays under TXN_MAX_OPS. Not an env knob.
+/// Durable Acked cleanup batch. Not an env knob.
 pub(crate) const REDO_ACKED_BATCH: usize = 32;
 /// Reclaim OCC retries with a fresh catalog read. Not an env knob.
 pub(crate) const RECLAIM_OCC_ATTEMPTS: usize = 8;

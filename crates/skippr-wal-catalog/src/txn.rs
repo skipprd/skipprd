@@ -2,8 +2,6 @@ use crate::error::CatalogError;
 use crate::key::CatalogKey;
 use crate::row::{CatalogOp, CatalogRow, DeleteCond, PutCond};
 
-pub const TXN_MAX_OPS: usize = 99;
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CatalogTxn {
     ops: Vec<CatalogOp>,
@@ -15,9 +13,6 @@ impl CatalogTxn {
     }
 
     pub fn push(&mut self, op: CatalogOp) -> Result<(), CatalogError> {
-        if self.ops.len() >= TXN_MAX_OPS {
-            return Err(CatalogError::TxnFull);
-        }
         if matches!(
             op,
             CatalogOp::Put {
@@ -65,9 +60,9 @@ mod tests {
     use crate::row::{CatalogSeq, SeqRow};
 
     #[test]
-    fn push_returns_txn_full_at_ceiling() {
+    fn push_accepts_more_ops_than_the_old_dynamo_txn_ceiling() {
         let mut txn = CatalogTxn::new();
-        for i in 0..TXN_MAX_OPS {
+        for i in 0..100 {
             txn.put(
                 CatalogKey::Seq,
                 CatalogRow::Seq(SeqRow {
@@ -77,17 +72,14 @@ mod tests {
             )
             .unwrap();
         }
-        let err = txn
-            .put(
-                CatalogKey::Seq,
-                CatalogRow::Seq(SeqRow {
-                    max_seq: CatalogSeq::new(100),
-                }),
-                PutCond::SeqAdvance,
-            )
-            .unwrap_err();
-        assert_eq!(err, CatalogError::TxnFull);
-        assert_eq!(txn.ops().len(), TXN_MAX_OPS);
+        assert_eq!(txn.ops().len(), 100);
+    }
+
+    #[test]
+    fn catalog_txn_has_no_op_ceiling() {
+        let src = include_str!("txn.rs");
+        assert!(!src.contains(concat!("TXN_MAX_", "OPS")));
+        assert!(!src.contains(concat!("Txn", "Full")));
     }
 
     #[test]

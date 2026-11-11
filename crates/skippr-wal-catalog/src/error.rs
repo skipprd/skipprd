@@ -2,10 +2,6 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum CatalogError {
-    #[error("catalog transaction is full")]
-    TxnFull,
-    #[error("catalog row exceeds size ceiling ({bytes} bytes)")]
-    RowTooLarge { bytes: usize },
     #[error("catalog commit fenced")]
     Fenced,
     #[error("catalog condition failed")]
@@ -24,4 +20,16 @@ pub enum CatalogError {
     SeqOpOnNonSeqKey,
     #[error("payload location does not match the configured layer")]
     WrongPayloadLayer,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn catalog_error_has_no_dynamo_size_ceilings() {
+        let src = include_str!("error.rs");
+        assert!(!src.contains(concat!("Txn", "Full")));
+        assert!(!src.contains(concat!("RowToo", "Large")));
+        assert!(!src.contains(concat!("catalog transaction is ", "full")));
+        assert!(!src.contains(concat!("catalog row exceeds size ", "ceiling")));
+    }
 }

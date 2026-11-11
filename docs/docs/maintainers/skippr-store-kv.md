@@ -35,8 +35,6 @@ RocksDB (including secondary) is out. Remote KV (Dynamo, Cloud Tables, Foundatio
 
 Config after cutover: default is fjall on `DATA_DIR`. `skippr.store.type=dynamodb` fails closed. skippr.store.type=sled after cutover maps to fjall (leftover YAML; sled is detected on disk, not chosen as an engine). `sled` is not an operator live-engine choice.
 
-`TXN_MAX_OPS` is a code ceiling, not a Dynamo 99-item portability leftover.
-
 ## Keyspaces (same recovery)
 
 | Family | Role |
@@ -144,4 +142,4 @@ This table is history of the cutover, not a second live design. The right column
 | clustered WAL / leases | already gone; do not restore |
 | second process | second **writer** fail-closes; extra **reader processes** allowed by the trait later |
 | Iceberg catalog via `skippr.store.type` | lake catalog has its own config |
-| `TXN_MAX_OPS = 99` as Dynamo portability | code ceiling only |
+| `TXN_MAX_OPS` / `ROW_MAX_BYTES` Dynamo leftover ceilings | gone; fjall catalog commits are unbounded |
