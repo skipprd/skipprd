@@ -1218,6 +1218,55 @@ struct SchemaHash {
 
 type IngestPartitionKey = (String, String, String, Option<i64>, String);
 
+const DEADLETTER_WAL_WARN_INTERVAL_SECS: u64 = 30;
+static DEADLETTER_WAL_WARN_LAST_SECS: AtomicU64 = AtomicU64::new(0);
+static DEADLETTER_WAL_WARN_PENDING: AtomicU64 = AtomicU64::new(0);
+
+/// Coalesce per-record ingest WARNs. The first event logs immediately; later
+/// events in the interval are counted and emitted on the next interval.
+fn take_deadletter_wal_warn_with(
+    now_secs: u64,
+    add: u64,
+    last_secs: &AtomicU64,
+    pending: &AtomicU64,
+    interval_secs: u64,
+) -> Option<u64> {
+    if add == 0 {
+        return None;
+    }
+    pending.fetch_add(add, Ordering::Relaxed);
+    let last = last_secs.load(Ordering::Relaxed);
+    if last != 0 && now_secs.saturating_sub(last) < interval_secs {
+        return None;
+    }
+    if last_secs
+        .compare_exchange(last, now_secs, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return None;
+    }
+    match pending.swap(0, Ordering::Relaxed) {
+        0 => None,
+        n => Some(n),
+    }
+}
+
+fn emit_deadlettered_into_wal(count: usize) {
+    let now_secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Some(n) = take_deadletter_wal_warn_with(
+        now_secs,
+        count as u64,
+        &DEADLETTER_WAL_WARN_LAST_SECS,
+        &DEADLETTER_WAL_WARN_PENDING,
+        DEADLETTER_WAL_WARN_INTERVAL_SECS,
+    ) {
+        warn!("Deadlettered {} records into WAL", n);
+    }
+}
+
 /// Bind deadletter records into Arrow WAL with offsets, or publish Closed/Position
 /// when there is no deadletter sink. Returns false if the request already failed.
 fn commit_deadletters(
@@ -1271,7 +1320,7 @@ fn commit_deadletters(
                 },
             );
             dl_offsets_committed = true;
-            warn!("Deadlettered {} records into WAL", dl_count);
+            emit_deadlettered_into_wal(dl_count);
         }
     } else {
         warn!(
@@ -1321,6 +1370,55 @@ fn commit_deadletters(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod deadletter_wal_warn_tests {
+    use super::*;
+
+    #[test]
+    fn first_deadletter_warns_immediately() {
+        let last = AtomicU64::new(0);
+        let pending = AtomicU64::new(0);
+        assert_eq!(
+            take_deadletter_wal_warn_with(10, 1, &last, &pending, 30),
+            Some(1)
+        );
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn same_interval_does_not_warn_per_record() {
+        let last = AtomicU64::new(0);
+        let pending = AtomicU64::new(0);
+        assert_eq!(
+            take_deadletter_wal_warn_with(10, 1, &last, &pending, 30),
+            Some(1)
+        );
+        for _ in 0..17 {
+            assert_eq!(
+                take_deadletter_wal_warn_with(10, 1, &last, &pending, 30),
+                None,
+                "one-row ingest tasks must not each emit WARN"
+            );
+        }
+        assert_eq!(pending.load(Ordering::Relaxed), 17);
+        assert_eq!(
+            take_deadletter_wal_warn_with(40, 1, &last, &pending, 30),
+            Some(18)
+        );
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn zero_add_does_not_warn() {
+        let last = AtomicU64::new(0);
+        let pending = AtomicU64::new(0);
+        assert_eq!(
+            take_deadletter_wal_warn_with(10, 0, &last, &pending, 30),
+            None
+        );
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
