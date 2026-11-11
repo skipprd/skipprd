@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -145,6 +146,10 @@ def stage_plugins(config: Path, pipeline: str, manifests: Path) -> None:
     if not plugin_dir:
         os.environ.pop("USE_LOCAL_PLUGIN_CODE", None)
         os.environ.pop("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR", None)
+        if not os.environ.get("SKIPPR_RUNTIME_PLUGIN_DIR"):
+            cache = manifests.parent / "runtime-plugins"
+            cache.mkdir(parents=True, exist_ok=True)
+            os.environ["SKIPPR_RUNTIME_PLUGIN_DIR"] = str(cache)
         return
     release = Path("target/release")
     release.mkdir(parents=True, exist_ok=True)
@@ -251,6 +256,70 @@ def csv_data_rows(scan_out: str) -> list[str]:
     return lines
 
 
+def spawn_sync(
+    bin_path: str, config: Path, pipeline: str, data_dir: Path
+) -> tuple[subprocess.Popen[str], list[str]]:
+    proc = subprocess.Popen(
+        [bin_path, "--config", str(config), "sync", "--log", "--pipeline", pipeline, "--once"],
+        cwd=REPO,
+        env=skipprd_env(data_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    lines: list[str] = []
+
+    def pump() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            lines.append(line)
+
+    threading.Thread(target=pump, daemon=True).start()
+    return proc, lines
+
+
+def wait_sync_log(proc: subprocess.Popen[str], lines: list[str], needle: str, deadline: float) -> None:
+    while time.time() < deadline:
+        if any(needle in line for line in lines):
+            return
+        if proc.poll() is not None:
+            fail(f"sync exited {proc.returncode} before {needle!r}")
+        time.sleep(0.05)
+    fail(f"did not see {needle!r} in skipprd log")
+
+
+def wait_sync(proc: subprocess.Popen[str], label: str) -> None:
+    try:
+        code = proc.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        fail(f"{label} timed out")
+    if code != 0:
+        fail(f"{label} exited {code}")
+
+
+def put_stream_items() -> None:
+    client = ddb_client()
+    client.put_item(
+        TableName=SOURCE_TABLE,
+        Item={
+            "id": {"S": "3"},
+            "rmc": {"S": "uk"},
+            "name": {"S": "gamma"},
+        },
+    )
+    client.put_item(
+        TableName=SOURCE_TABLE,
+        Item={
+            "id": {"S": "1"},
+            "rmc": {"S": "eu"},
+            "name": {"S": "alpha-prime"},
+        },
+    )
+
+
 def run_skipprlake(work: Path) -> None:
     warehouse = work / "lake-warehouse"
     data_dir = work / "lake-data"
@@ -266,31 +335,21 @@ def run_skipprlake(work: Path) -> None:
     pipeline = "dynamodb_skipprlake_cdc"
     stage_plugins(config, pipeline, manifests)
     bin_path = skipprd_bin()
-    proc = subprocess.Popen(
-        [bin_path, "--config", str(config), "sync", "--log", "--pipeline", pipeline, "--once"],
-        cwd=REPO,
-        env=skipprd_env(data_dir),
-        text=True,
-    )
+    snapshot, _ = spawn_sync(bin_path, config, pipeline, data_dir)
     try:
-        wait_iceberg_parquet(warehouse, time.time() + 60)
-        ddb_client().put_item(
-            TableName=SOURCE_TABLE,
-            Item={
-                "id": {"S": "1"},
-                "rmc": {"S": "eu"},
-                "name": {"S": "alpha-prime"},
-            },
-        )
-        try:
-            proc.wait(timeout=120)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            fail("SkipprLake sync timed out")
-        if proc.returncode != 0:
-            fail(f"SkipprLake sync exited {proc.returncode}")
+        wait_sync(snapshot, "SkipprLake snapshot sync")
     except Exception:
-        proc.kill()
+        snapshot.kill()
+        raise
+    wait_iceberg_parquet(warehouse, time.time() + 60)
+    stream, logs = spawn_sync(bin_path, config, pipeline, data_dir)
+    try:
+        wait_sync_log(stream, logs, "Starting with", time.time() + 60)
+        time.sleep(0.5)
+        put_stream_items()
+        wait_sync(stream, "SkipprLake stream sync")
+    except Exception:
+        stream.kill()
         raise
 
     ns = bronze_namespace(warehouse)
@@ -299,8 +358,8 @@ def run_skipprlake(work: Path) -> None:
         ns,
         "SELECT count(DISTINCT id) FROM iceberg_scan('{scan}')",
     )
-    if count.splitlines()[-1].strip() != "2":
-        fail(f"expected 2 distinct keys in SkipprLake Iceberg, got {count!r}")
+    if count.splitlines()[-1].strip() != "3":
+        fail(f"expected 3 distinct keys in SkipprLake Iceberg, got {count!r}")
     token_sql = (
         "SELECT _skippr_order_token, skippr_event_time, name, year, month, day "
         "FROM iceberg_scan('{scan}') WHERE id = '1'"
