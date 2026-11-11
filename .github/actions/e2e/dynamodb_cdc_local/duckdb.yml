@@ -1,0 +1,40 @@
+skippr:
+  workspace: test
+  skipprd_el_storage_mode: local
+
+pipelines:
+  dynamodb_duckdb_cdc:
+    auto_approve: yes
+    env: test
+    type: cdc
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 2
+    data_source: data_sources.dynamodb_cdc
+    data_sink: data_sinks.local
+    cdc:
+      default:
+        business_key_columns: ["id", "rmc"]
+    transform:
+      batch_time_fields: _skippr_event_time
+      batch_time_unit: day
+
+data_sources:
+  dynamodb_cdc:
+    Dynamodb:
+      table_name: skippr_dynamo_cdc
+      region: us-east-1
+      endpoint_url: http://127.0.0.1:18013
+      cdc_mode: snapshot_then_cdc
+
+data_sinks:
+  local:
+    Duckdb:
+      warehouse: WAREHOUSE_URI
+      table_namespace: bronze
+    schema_sink: schema_sinks.local
+
+schema_sinks:
+  local:
+    Duckdb:
+      warehouse: WAREHOUSE_URI
+      table_namespace: bronze

@@ -33,6 +33,33 @@ struct CdcScanConfig {
     anchor_bytes: Vec<u8>,
 }
 
+/// Dynamo stream sequence numbers encode as 16-byte big-endian `u128`. Snapshot
+/// tokens use the same width so Iceberg MergeByKey can compare them. Zeros sort
+/// before every stream sequence, including a new shard that starts at `"1"`.
+const CDC_ORDER_TOKEN_LEN: usize = 16;
+const SKIPPR_EVENT_TIME_FIELD: &str = "_skippr_event_time";
+
+fn snapshot_order_token() -> Vec<u8> {
+    vec![0u8; CDC_ORDER_TOKEN_LEN]
+}
+
+fn ingest_posix_seconds() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+fn stream_event_time_posix(approx_creation_posix: Option<i64>, ingest_posix: i64) -> i64 {
+    approx_creation_posix.unwrap_or(ingest_posix)
+}
+
+fn attach_event_time(map: &mut Map<String, Value>, posix: i64) {
+    map.insert(SKIPPR_EVENT_TIME_FIELD.to_string(), json!(posix));
+}
+
+#[cfg(test)]
+fn token_hex(token: &[u8]) -> String {
+    token.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DynamodbSnapshotCheckpoint {
     stream_arn: String,
@@ -136,10 +163,13 @@ impl DataSourceDynamodbPlugin {
         }
     }
 
-    fn item_to_json(item: &HashMap<String, AttributeValue>) -> String {
+    fn item_to_json(item: &HashMap<String, AttributeValue>, event_time: Option<i64>) -> String {
         let mut map = Map::new();
         for (k, v) in item {
             map.insert(k.clone(), Self::attribute_to_json(v));
+        }
+        if let Some(posix) = event_time {
+            attach_event_time(&mut map, posix);
         }
         serde_json::to_string(&Value::Object(map)).unwrap_or_default()
     }
@@ -177,6 +207,7 @@ impl DataSourceDynamodbPlugin {
 
         let mut page: u64 = 0;
         let mut global_row_idx: u64 = 0;
+        let ingest_posix = ingest_posix_seconds();
 
         for segment in 0..total_segments {
             let mut start_key: Option<HashMap<String, AttributeValue>> = None;
@@ -219,7 +250,7 @@ impl DataSourceDynamodbPlugin {
                     let mut batch_groups: Vec<Vec<IngestBatch>> = Vec::new();
 
                     for item in items {
-                        let json_str = Self::item_to_json(item);
+                        let json_str = Self::item_to_json(item, Some(ingest_posix));
                         let bytes = json_str.len();
 
                         let cdc_rows = if let Some(cfg) = cdc_config {
@@ -322,7 +353,7 @@ impl DataSourceDynamodbPlugin {
         let should_run_snapshot = mode.includes_initial_snapshot() && !snapshot_done;
 
         // --- Phase 2: anchored snapshot ---
-        let anchor_bytes = chrono::Utc::now().timestamp_millis().to_be_bytes().to_vec();
+        let anchor_bytes = snapshot_order_token();
 
         if should_run_snapshot {
             info!(
@@ -552,7 +583,11 @@ impl DataSourceDynamodbPlugin {
                             },
                         };
 
-                    let json_str = Self::streams_item_to_json(image);
+                    let approx_posix = stream_record
+                        .approximate_creation_date_time()
+                        .map(|dt| dt.secs());
+                    let event_time = stream_event_time_posix(approx_posix, ingest_posix_seconds());
+                    let json_str = Self::streams_item_to_json(image, Some(event_time));
                     let bytes = json_str.len();
 
                     let seq_number = stream_record.sequence_number().ok_or_else(|| {
@@ -617,10 +652,14 @@ impl DataSourceDynamodbPlugin {
 
     fn streams_item_to_json(
         item: &HashMap<String, aws_sdk_dynamodbstreams::types::AttributeValue>,
+        event_time: Option<i64>,
     ) -> String {
         let mut map = Map::new();
         for (k, v) in item {
             map.insert(k.clone(), Self::streams_attribute_to_json(v));
+        }
+        if let Some(posix) = event_time {
+            attach_event_time(&mut map, posix);
         }
         serde_json::to_string(&Value::Object(map)).unwrap_or_default()
     }
@@ -820,10 +859,85 @@ mod tests {
         item.insert("count".to_string(), SAV::N("7".into()));
         item.insert("active".to_string(), SAV::Bool(true));
 
-        let json_str = DataSourceDynamodbPlugin::streams_item_to_json(&item);
+        let json_str = DataSourceDynamodbPlugin::streams_item_to_json(&item, None);
         let parsed: Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(parsed["pk"], "user-1");
         assert_eq!(parsed["count"], 7);
         assert_eq!(parsed["active"], true);
+        assert!(parsed.get(SKIPPR_EVENT_TIME_FIELD).is_none());
+    }
+
+    fn is_even_hex(token: &str) -> bool {
+        !token.is_empty() && token.len() % 2 == 0 && token.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    #[test]
+    fn snapshot_order_token_is_16_zero_bytes() {
+        let token = snapshot_order_token();
+        assert_eq!(token.len(), CDC_ORDER_TOKEN_LEN);
+        assert!(token.iter().all(|b| *b == 0));
+        let hex = token_hex(&token);
+        assert_eq!(hex.len(), 32);
+        assert!(is_even_hex(&hex), "Iceberg requires even-length hex");
+    }
+
+    #[test]
+    fn snapshot_order_token_sorts_before_small_stream_sequence() {
+        let snapshot = snapshot_order_token();
+        let stream = DataSourceDynamodbPlugin::sequence_number_to_order_token("1").unwrap();
+        assert_eq!(stream.len(), snapshot.len());
+        assert!(
+            snapshot < stream,
+            "snapshot zeros must lose to a new-shard sequence of 1; millis-as-u128 would not"
+        );
+        assert_eq!(token_hex(&snapshot).len(), token_hex(&stream).len());
+    }
+
+    #[test]
+    fn snapshot_and_stream_tokens_are_iceberg_comparable_hex() {
+        let snapshot = token_hex(&snapshot_order_token());
+        let stream =
+            token_hex(&DataSourceDynamodbPlugin::sequence_number_to_order_token("12345").unwrap());
+        assert!(is_even_hex(&snapshot));
+        assert!(is_even_hex(&stream));
+        assert_eq!(snapshot.len(), stream.len());
+        assert!(snapshot < stream);
+    }
+
+    #[test]
+    fn stream_event_time_prefers_approximate_creation() {
+        assert_eq!(
+            stream_event_time_posix(Some(1_700_000_001), 1_700_000_000),
+            1_700_000_001
+        );
+        assert_eq!(stream_event_time_posix(None, 1_700_000_000), 1_700_000_000);
+        assert_eq!(
+            stream_event_time_posix(Some(0), 1_700_000_000),
+            0,
+            "explicit epoch from the stream is still a time"
+        );
+    }
+
+    #[test]
+    fn snapshot_json_includes_event_time() {
+        let mut item = HashMap::new();
+        item.insert("id".to_string(), AttributeValue::S("a".into()));
+        item.insert("rmc".to_string(), AttributeValue::S("eu".into()));
+        let json_str = DataSourceDynamodbPlugin::item_to_json(&item, Some(1_700_000_000));
+        let parsed: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["id"], "a");
+        assert_eq!(parsed["rmc"], "eu");
+        assert_eq!(parsed[SKIPPR_EVENT_TIME_FIELD], 1_700_000_000);
+    }
+
+    #[test]
+    fn stream_json_includes_event_time() {
+        use aws_sdk_dynamodbstreams::types::AttributeValue as SAV;
+        let mut item = HashMap::new();
+        item.insert("id".to_string(), SAV::S("a".into()));
+        let json_str = DataSourceDynamodbPlugin::streams_item_to_json(&item, Some(1_700_000_000));
+        let parsed: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["id"], "a");
+        assert_eq!(parsed[SKIPPR_EVENT_TIME_FIELD], 1_700_000_000);
     }
 }

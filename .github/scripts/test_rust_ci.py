@@ -172,6 +172,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_file_duckdb:", text)
         self.assertIn("e2e_skipprlake:", text)
         self.assertIn("e2e_postgres_cdc:", text)
+        self.assertIn("e2e_dynamodb_cdc:", text)
         self.assertIn("e2e_s3_schema_evolution:", text)
         self.assertIn("e2e_schema_lifecycle:", text)
         self.assertIn("e2e_file_postgres:", text)
@@ -235,6 +236,28 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("query --plain", postgres_cdc)
         self.assertIn("hold_before_compaction_sink", postgres_cdc)
         self.assertIn("alpha-wal", postgres_cdc)
+        dynamodb_cdc = (
+            ROOT / ".github" / "actions" / "e2e" / "dynamodb_cdc_local" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        dynamodb_cdc_run = (
+            ROOT / ".github" / "actions" / "e2e" / "dynamodb_cdc_local" / "run.py"
+        ).read_text(encoding="utf-8")
+        dynamodb_cdc_lake = (
+            ROOT / ".github" / "actions" / "e2e" / "dynamodb_cdc_local" / "skipprlake.yml"
+        ).read_text(encoding="utf-8")
+        dynamodb_cdc_duckdb = (
+            ROOT / ".github" / "actions" / "e2e" / "dynamodb_cdc_local" / "duckdb.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("run.py", dynamodb_cdc)
+        self.assertIn("_skippr_order_token", dynamodb_cdc_run)
+        self.assertIn("_skippr_event_time", dynamodb_cdc_run)
+        self.assertIn("alpha-prime", dynamodb_cdc_run)
+        self.assertIn("snapshot_then_cdc", dynamodb_cdc_lake)
+        self.assertIn('business_key_columns: ["id", "rmc"]', dynamodb_cdc_lake)
+        self.assertIn("batch_time_fields: _skippr_event_time", dynamodb_cdc_lake)
+        self.assertIn("SkipprLake:", dynamodb_cdc_lake)
+        self.assertIn("snapshot_then_cdc", dynamodb_cdc_duckdb)
+        self.assertIn("Duckdb:", dynamodb_cdc_duckdb)
         postgres_cdc_yml = (
             ROOT / ".github" / "actions" / "e2e" / "postgres_skipprlake_cdc" / "skippr.yml"
         ).read_text(encoding="utf-8")
@@ -331,6 +354,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_file_duckdb", publish)
         self.assertIn("e2e_skipprlake", publish)
         self.assertIn("e2e_postgres_cdc", publish)
+        self.assertIn("e2e_dynamodb_cdc", publish)
         self.assertIn("e2e_s3_schema_evolution", publish)
         self.assertIn("e2e_schema_lifecycle", publish)
         self.assertIn("e2e_file_postgres", publish)

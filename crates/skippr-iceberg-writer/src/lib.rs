@@ -1778,6 +1778,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
             files.push(file);
         }
         files.sort_by(|left, right| left.file_uri.cmp(&right.file_uri));
+        align_equality_delete_partitions(&mut files);
 
         Ok(IcebergGroupedPending {
             version: ICEBERG_GROUPED_PENDING_VERSION,
@@ -4056,6 +4057,24 @@ fn stored_partition_from_identity_fields(
         .collect()
 }
 
+/// iceberg-rust requires every committed file's partition struct to match the
+/// table spec field count. Grouped equality deletes are projected to keys only,
+/// so they would otherwise land as `Struct::empty()` on a day-partitioned table.
+fn align_equality_delete_partitions(files: &mut [PendingIcebergFile]) {
+    let Some(part) = files
+        .iter()
+        .find(|file| file.content == PendingFileContent::Data && !file.partition.is_empty())
+        .map(|file| file.partition.clone())
+    else {
+        return;
+    };
+    for file in files.iter_mut() {
+        if file.content == PendingFileContent::EqualityDeletes && file.partition.is_empty() {
+            file.partition = part.clone();
+        }
+    }
+}
+
 fn stored_partition_to_struct(values: &[Option<StoredPartitionValue>]) -> Struct {
     Struct::from_iter(values.iter().map(|value| {
         value.as_ref().map(|stored| match stored {
@@ -4829,6 +4848,81 @@ mod tests {
         assert!(!compare_cdc_order_tokens("0001", "0002").unwrap());
         assert!(compare_cdc_order_tokens("02", "0001").is_err());
         assert!(validate_cdc_order_token("not_hex").is_err());
+    }
+
+    #[test]
+    fn cdc_order_token_empty_is_not_fixed_width_hex() {
+        let err = validate_cdc_order_token("").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("CDC order token '' is not fixed-width hex"),
+            "{err}"
+        );
+        let empty_state = final_state_cdc_batches(
+            &exact_cdc_contract(),
+            &[cdc_batch(vec![1], vec!["snapshot"], vec![""])],
+            |_| None,
+        )
+        .err()
+        .expect("empty CDC order token must fail-close");
+        assert!(
+            empty_state
+                .to_string()
+                .contains("CDC order token '' is not fixed-width hex"),
+            "{empty_state}"
+        );
+    }
+
+    #[test]
+    fn cdc_order_token_width_mismatch_is_rejected() {
+        let eight = "00000000";
+        let thirty_two = "00000000000000000000000000000001";
+        let err = compare_cdc_order_tokens(eight, thirty_two).unwrap_err();
+        assert!(
+            err.to_string().contains("CDC order token width changed"),
+            "{err}"
+        );
+        let mixed = final_state_cdc_batches(
+            &exact_cdc_contract(),
+            &[cdc_batch(
+                vec![1, 1],
+                vec!["snapshot", "update"],
+                vec![eight, thirty_two],
+            )],
+            |_| None,
+        )
+        .err()
+        .expect("CDC order token width mismatch must fail-close");
+        assert!(
+            mixed.to_string().contains("CDC order token width changed"),
+            "{mixed}"
+        );
+    }
+
+    #[test]
+    fn cdc_snapshot_zeros_then_stream_token_keeps_the_stream_row() {
+        let snapshot = "00000000000000000000000000000000";
+        let stream = "00000000000000000000000000000001";
+        let state = final_state_cdc_batches(
+            &exact_cdc_contract(),
+            &[cdc_batch(
+                vec![1, 1],
+                vec!["snapshot", "update"],
+                vec![snapshot, stream],
+            )],
+            |_| None,
+        )
+        .unwrap();
+        assert_eq!(ids(&state.upserts), vec![1]);
+        assert_eq!(rows(&state.upserts), 1);
+        let token = state.upserts[0]
+            .column_by_name("_skippr_order_token")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0);
+        assert_eq!(token, stream);
     }
 
     #[test]
@@ -5992,6 +6086,36 @@ mod tests {
                 "acme".to_string()
             )))
         );
+    }
+
+    #[test]
+    fn equality_deletes_inherit_data_file_time_partition() {
+        let part = vec![
+            Some(StoredPartitionValue::Int(2026)),
+            Some(StoredPartitionValue::Int(11)),
+            Some(StoredPartitionValue::Int(11)),
+        ];
+        let mut files = vec![
+            PendingIcebergFile {
+                content: PendingFileContent::EqualityDeletes,
+                file_uri: "s3://t/delete.parquet".into(),
+                rows: 1,
+                bytes: 10,
+                equality_ids: vec![1],
+                partition: Vec::new(),
+            },
+            PendingIcebergFile {
+                content: PendingFileContent::Data,
+                file_uri: "s3://t/data.parquet".into(),
+                rows: 1,
+                bytes: 10,
+                equality_ids: Vec::new(),
+                partition: part.clone(),
+            },
+        ];
+        align_equality_delete_partitions(&mut files);
+        assert_eq!(files[0].partition, part);
+        assert_eq!(files[1].partition, part);
     }
 
     #[test]

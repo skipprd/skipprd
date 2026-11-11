@@ -141,10 +141,23 @@ fn column_index_for_time_field(schema: &ArrowSchema, field: &str) -> Option<usiz
     }
     let flattened = trimmed.replace('.', "_");
     if flattened != trimmed {
-        schema.index_of(&flattened).ok()
-    } else {
-        None
+        if let Ok(idx) = schema.index_of(&flattened) {
+            return Some(idx);
+        }
     }
+    // skipprd `clean_field_name` strips leading/trailing underscores, so a
+    // configured `_skippr_event_time` lands on Arrow/Iceberg as `skippr_event_time`.
+    let stripped = trimmed.trim_matches('_');
+    if stripped != trimmed && !stripped.is_empty() {
+        if let Ok(idx) = schema.index_of(stripped) {
+            return Some(idx);
+        }
+        let flattened_stripped = stripped.replace('.', "_");
+        if flattened_stripped != stripped {
+            return schema.index_of(&flattened_stripped).ok();
+        }
+    }
+    None
 }
 
 fn posix_seconds_from_numeric_i64(time: i64) -> Option<i64> {
@@ -412,6 +425,33 @@ mod tests {
         assert_eq!(
             event_time_posix_seconds(&batch, &["system.datetime_posix_utc_seconds".into()], 0),
             Some(1_794_063_845)
+        );
+    }
+
+    #[test]
+    fn explicit_posix_zero_is_a_resolvable_event_time() {
+        let batch = RecordBatch::try_from_iter(vec![(
+            "_skippr_event_time",
+            Arc::new(Int64Array::from(vec![0i64])) as ArrayRef,
+        )])
+        .unwrap();
+        assert_eq!(
+            event_time_posix_seconds(&batch, &["_skippr_event_time".into()], 0),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn cleaned_skipprd_event_time_column_resolves_configured_underscore_name() {
+        let batch = RecordBatch::try_from_iter(vec![(
+            "skippr_event_time",
+            Arc::new(Int64Array::from(vec![1_794_063_845i64])) as ArrayRef,
+        )])
+        .unwrap();
+        assert_eq!(
+            event_time_posix_seconds(&batch, &["_skippr_event_time".into()], 0),
+            Some(1_794_063_845),
+            "Iceberg compact sees skipprd-cleaned column names"
         );
     }
 

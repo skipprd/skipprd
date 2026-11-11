@@ -1548,6 +1548,16 @@ mod parse_time_field_tests {
     }
 
     #[test]
+    fn parse_time_field_honours_explicit_posix_zero() {
+        let message = json!({"time": 0});
+        assert_eq!(
+            Helpers::parse_time_field_with_fields(&message, "time"),
+            Some(0),
+            "an explicit 0 is a configured event time, not missing"
+        );
+    }
+
+    #[test]
     #[serial]
     fn test_parse_time_field_with_numeric_float_millis() {
         Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time");

@@ -1,0 +1,32 @@
+name: DynamoDB CDC into SkipprLake and DuckDB
+description: "Snapshot-then-CDC from DynamoDB Local into SkipprLake (ExactOnce) and DuckDB (CdcEncoded)."
+inputs:
+  skipprd_path:
+    required: true
+  plugin_binaries_dir:
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Install Python deps and DuckDB
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install --quiet boto3
+        if ! command -v duckdb >/dev/null 2>&1; then
+          curl -fsSL https://install.duckdb.org | sh
+          echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
+        fi
+    - name: DynamoDB snapshot-then-CDC into SkipprLake and DuckDB
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: local
+        AWS_SECRET_ACCESS_KEY: local
+        AWS_DEFAULT_REGION: us-east-1
+        AWS_EC2_METADATA_DISABLED: "true"
+        PLUGIN_BINARIES_DIR: ${{ inputs.plugin_binaries_dir }}
+        SKIPPRD_PATH: ${{ inputs.skipprd_path }}
+      run: |
+        set -euo pipefail
+        python3 "${GITHUB_WORKSPACE}/.github/actions/e2e/dynamodb_cdc_local/run.py"

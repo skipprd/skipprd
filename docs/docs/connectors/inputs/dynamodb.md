@@ -71,7 +71,9 @@ data_sources:
 
 ## What gets synced
 
-Each item becomes a row. Snapshot copies the table once. CDC modes apply inserts, updates, and deletes — see [Change data capture](/cdc/).
+Each item becomes a row. Snapshot copies the table once. CDC modes apply inserts, updates, and deletes. See [Change data capture](/cdc/).
+
+`snapshot_then_cdc` writes a 16-byte `_skippr_order_token` (zeros for the snapshot, then the stream sequence) so a warehouse that upserts on business keys can treat the snapshot as the baseline. Dynamo items have no event-time attribute, so Skipprd sets `_skippr_event_time` to the stream `ApproximateCreationDateTime` when it is present, otherwise ingest time. Point `transform.batch_time_fields` at `_skippr_event_time` when you need day partitioning. The warehouse column is `skippr_event_time` (Skipprd strips the leading underscore).
 
 ## Troubleshooting
 
@@ -79,6 +81,8 @@ Each item becomes a row. Snapshot copies the table once. CDC modes apply inserts
 |---|---|
 | `AccessDeniedException` | Grant Scan (and stream read for CDC) |
 | Stream not found | Enable DynamoDB Streams, then use a CDC mode |
+| `CDC order token '' is not fixed-width hex` | The snapshot batch is missing an order token. Use `cdc_mode: snapshot_then_cdc` (not append-only) so Skipprd writes the 16-byte snapshot token. |
+| Compact logs `time=` empty, or Iceberg says missing event time | Dynamo items have no timestamp. Set `batch_time_fields: _skippr_event_time`. The Iceberg column is `skippr_event_time`. |
 | Wrong region | Match `region` to the table |
 
 ## Next steps
