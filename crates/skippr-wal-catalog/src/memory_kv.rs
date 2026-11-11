@@ -9,7 +9,7 @@ use crate::key::{CatalogKey, CatalogPrefix};
 use crate::kv::{KvOp, SkipprStore, SkipprStoreRead, StoreFamily};
 use crate::row::{CatalogFence, CatalogRow};
 use crate::store::{WalCatalogRead, WalCatalogStore};
-use crate::txn::{CatalogTxn, TXN_MAX_OPS};
+use crate::txn::CatalogTxn;
 
 struct Inner {
     rows: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -303,7 +303,7 @@ pub fn catalog_delete_prefix(
     fence: CatalogFence,
 ) -> Result<(), CatalogError> {
     loop {
-        let page = catalog_query_prefix(store, prefix, None, TXN_MAX_OPS)?;
+        let page = catalog_query_prefix(store, prefix, None, usize::MAX)?;
         if page.is_empty() {
             return Ok(());
         }

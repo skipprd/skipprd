@@ -4,7 +4,7 @@ use super::grouped_tests::{scanned_ids, Harness, NAMESPACE};
 use super::*;
 use arrow::array::Int64Array;
 use skippr_runtime_sdk::plugins::cdc::{
-    MutationKind, NamespaceContract, SyncContext, WalPartMeta, WalRowMeta,
+    EffectiveGuarantee, MutationKind, NamespaceContract, SyncContext, WalPartMeta, WalRowMeta,
 };
 
 /// Seeds the idle totals so the writer's own cheap gate skips every pass,
@@ -439,4 +439,110 @@ fn prepare_maintenance_coerces_on_disk_ms_timestamps() {
         src[start..end].contains("coerce_timestamps_to_microseconds"),
         "maintenance read must coerce Timestamp(ms) before rewrite"
     );
+}
+
+async fn try_cdc_write_tokens(
+    harness: &Harness,
+    key: &str,
+    events: &[(i64, MutationKind, Vec<u8>)],
+) -> Result<skippr_runtime_sdk::plugins::SinkCallResult, std::io::Error> {
+    let rows = events
+        .iter()
+        .map(|(id, mutation, token)| WalRowMeta {
+            mutation: *mutation,
+            event_id: id.to_be_bytes().to_vec(),
+            order_token: token.clone(),
+        })
+        .collect::<Vec<_>>();
+    let cdc = SyncContext {
+        part_meta: WalPartMeta::cdc(rows, events.len() as u64).unwrap(),
+        contract: Some(NamespaceContract {
+            namespace: NAMESPACE.to_string(),
+            business_key_columns: vec!["id".to_string()],
+            effective_guarantee: EffectiveGuarantee::ExactOnceFinalState,
+            order_token_semantics: Default::default(),
+            null_key_policy: Default::default(),
+            requires_skippr_system_columns: true,
+        }),
+    };
+    harness
+        .try_write_rows(
+            &harness.writer,
+            key,
+            events.iter().map(|(id, _, _)| *id).collect(),
+            None,
+            None,
+            Some(&cdc),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn empty_cdc_order_token_fail_closes_merge() {
+    let harness = Harness::new().await;
+    hold_maintenance(&harness).await;
+    let err = try_cdc_write_tokens(
+        &harness,
+        "empty-token",
+        &[(1, MutationKind::Snapshot, Vec::new())],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("CDC order token '' is not fixed-width hex"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn dynamo_width_mismatch_fail_closes_after_snapshot() {
+    let harness = Harness::new().await;
+    hold_maintenance(&harness).await;
+    try_cdc_write_tokens(
+        &harness,
+        "snap-8",
+        &[(
+            1,
+            MutationKind::Snapshot,
+            1_700_000_000i64.to_be_bytes().to_vec(),
+        )],
+    )
+    .await
+    .unwrap();
+    let err = try_cdc_write_tokens(
+        &harness,
+        "stream-16",
+        &[(1, MutationKind::Update, 1u128.to_be_bytes().to_vec())],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("CDC order token width changed"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn snapshot_zero_token_then_stream_upserts_one_row() {
+    let harness = Harness::new().await;
+    hold_maintenance(&harness).await;
+    try_cdc_write_tokens(
+        &harness,
+        "snap-zeros",
+        &[(1, MutationKind::Snapshot, vec![0u8; 16])],
+    )
+    .await
+    .unwrap();
+    try_cdc_write_tokens(
+        &harness,
+        "stream-seq",
+        &[(1, MutationKind::Update, 1u128.to_be_bytes().to_vec())],
+    )
+    .await
+    .unwrap();
+    let rows = rows_with_tokens(&harness.table().await).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].0, 1);
+    assert_eq!(rows[0].1, hex::encode(1u128.to_be_bytes()));
 }

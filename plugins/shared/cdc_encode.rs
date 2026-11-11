@@ -277,4 +277,37 @@ mod tests {
         assert_eq!(mutation_kind_str(&MutationKind::Update), "update");
         assert_eq!(mutation_kind_str(&MutationKind::Delete), "delete");
     }
+
+    #[tokio::test]
+    async fn empty_order_token_encodes_to_empty_hex() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1i64])) as Arc<dyn arrow::array::Array>],
+        )
+        .unwrap();
+        let stream = Box::pin(VecBatchStream {
+            schema,
+            batches: vec![batch],
+            index: 0,
+        }) as SendableRecordBatchStream;
+        let meta = WalPartMeta {
+            kind: skippr_runtime_sdk::plugins::cdc::WalPartKind::Cdc,
+            row_count: 1,
+            rows: vec![skippr_runtime_sdk::plugins::cdc::WalRowMeta {
+                mutation: MutationKind::Snapshot,
+                event_id: b"snap".to_vec(),
+                order_token: vec![],
+            }],
+        };
+        let mut augmented = augment_stream_with_cdc_columns(stream, &meta);
+        let result = augmented.next().await.unwrap().unwrap();
+        let tokens = result
+            .column_by_name("_skippr_order_token")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(tokens.value(0), "");
+    }
 }

@@ -260,6 +260,20 @@ impl Harness {
         source_contract: Option<&SourceNamespaceContract>,
         cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> SinkCallResult {
+        self.try_write_rows(writer, key, ids, live, source_contract, cdc_ctx)
+            .await
+            .unwrap()
+    }
+
+    pub async fn try_write_rows(
+        &self,
+        writer: &IcebergWriter<GroupedTestSpec>,
+        key: &str,
+        ids: Vec<i64>,
+        live: Option<LiveWalSegments>,
+        source_contract: Option<&SourceNamespaceContract>,
+        cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
+    ) -> Result<SinkCallResult, std::io::Error> {
         let wal_refs = vec![RuntimeWalPartRef {
             segment_id: format!("seg-{key}"),
             source: format!("wal://seg-{key}"),
@@ -303,7 +317,7 @@ impl Harness {
             ctx.grouping_key.clone(),
             GroupedBatchReaderConfig::default(),
         );
-        writer.sync_grouped_call_result(reader, ctx).await.unwrap()
+        writer.sync_grouped_call_result(reader, ctx).await
     }
 
     pub async fn native_write(&self, filename: &str, ids: Vec<i64>) {
@@ -1151,4 +1165,119 @@ async fn iceberg_deadletter_does_not_identity_partition_by_time() {
         .await
         .unwrap();
     assert_eq!(batches[0].num_rows(), 1);
+}
+
+fn skippr_event_time_metadata() -> serde_json::Value {
+    json!({
+        "out_field_name": "",
+        "determined_type": "record",
+        "determined_type_values": "",
+        "fields": {
+            "id": {
+                "out_field_name": "id",
+                "determined_type": "long",
+                "determined_type_values": "",
+                "field_id": 1,
+                "schema_id": 1,
+                "lineage_id": "orders:id",
+                "nullable": false,
+                "default_value": null,
+                "fields": {}
+            },
+            "_skippr_event_time": {
+                "out_field_name": "_skippr_event_time",
+                "determined_type": "long",
+                "determined_type_values": "",
+                "field_id": 2,
+                "schema_id": 1,
+                "lineage_id": "orders:_skippr_event_time",
+                "nullable": false,
+                "default_value": null,
+                "fields": {}
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn iceberg_day_unit_stamps_from_skippr_event_time() {
+    let harness = time_partition_harness_for(
+        skippr_event_time_metadata(),
+        RuntimeBinding::Primary,
+        NAMESPACE,
+        &["_skippr_event_time"],
+    )
+    .await;
+    let filename = format!("namespace={NAMESPACE}");
+    let posix = 1_794_063_845i64;
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("_skippr_event_time", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1i64])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![posix])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    harness.native_write_batch(&filename, batch).await;
+    let table = harness.table().await;
+    let batches: Vec<RecordBatch> = table
+        .scan()
+        .select_all()
+        .build()
+        .unwrap()
+        .to_arrow()
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let day = batches[0]
+        .column_by_name("day")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(day.value(0), 7);
+}
+
+#[tokio::test]
+async fn missing_skippr_event_time_fail_closes_day_partition() {
+    let harness = time_partition_harness_for(
+        skippr_event_time_metadata(),
+        RuntimeBinding::Primary,
+        NAMESPACE,
+        &["_skippr_event_time"],
+    )
+    .await;
+    let filename = format!("namespace={NAMESPACE}");
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "id",
+        DataType::Int64,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(Int64Array::from(vec![1i64])) as ArrayRef],
+    )
+    .unwrap();
+    let err = {
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            batch.schema(),
+            futures::stream::iter(vec![Ok(batch)]),
+        ));
+        harness
+            .writer
+            .sync(stream, filename, None)
+            .await
+            .unwrap_err()
+    };
+    assert!(
+        err.to_string()
+            .contains("missing or unresolvable event time"),
+        "{err}"
+    );
 }

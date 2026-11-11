@@ -208,9 +208,26 @@ struct CachedSegment {
 static SEGMENT_CACHE: OnceLazy<DashMap<String, CachedSegment>> = OnceLazy::new(DashMap::new);
 static COMPACTION_INDEX: Lazy<std::sync::Mutex<CompactionIndex>> =
     Lazy::new(|| std::sync::Mutex::new(CompactionIndex::default()));
+static HYDRATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(test)]
+static HYDRATE_TEST_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static HYDRATE_BEGIN_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static HYDRATE_COMPLETE_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static HYDRATE_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static HYDRATE_MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 
 fn compaction_index() -> std::sync::MutexGuard<'static, CompactionIndex> {
     COMPACTION_INDEX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn hydrate_lock() -> std::sync::MutexGuard<'static, ()> {
+    HYDRATE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -1712,6 +1729,10 @@ impl Buffers {
 
     pub(crate) fn reclaimable_wal_partition_count(config: &Config, limit: usize) -> usize {
         Self::hydrate_planner(config);
+        Self::reclaimable_wal_partition_count_in_memory(limit)
+    }
+
+    fn reclaimable_wal_partition_count_in_memory(limit: usize) -> usize {
         compaction_index().reclaimable_slice_count(
             true,
             Self::now_secs(),
@@ -1801,12 +1822,30 @@ impl Buffers {
         handle: &crate::buffer::wal_handle::PipelineWalHandle,
         config: &Config,
     ) {
+        let _guard = hydrate_lock();
+        Self::hydrate_from_catalog_locked(handle, config);
+    }
+
+    fn hydrate_from_catalog_locked(
+        handle: &crate::buffer::wal_handle::PipelineWalHandle,
+        config: &Config,
+    ) {
         let Ok(rows) = handle.live_segment_rows() else {
             return;
         };
         let started = Instant::now();
         let live_segments = rows.len();
         info!(live_segments, "WAL catalog hydrate begin");
+        #[cfg(test)]
+        {
+            HYDRATE_BEGIN_COUNT.fetch_add(1, AtomicOrdering::SeqCst);
+            let inflight = HYDRATE_IN_FLIGHT.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            HYDRATE_MAX_IN_FLIGHT.fetch_max(inflight, AtomicOrdering::SeqCst);
+            let delay_ms = HYDRATE_TEST_DELAY_MS.load(AtomicOrdering::SeqCst);
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+        }
         let live: HashSet<String> = rows
             .iter()
             .map(|seg| seg.segment_id.as_str().to_string())
@@ -1896,6 +1935,11 @@ impl Buffers {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "WAL catalog hydrate complete"
         );
+        #[cfg(test)]
+        {
+            HYDRATE_IN_FLIGHT.fetch_sub(1, AtomicOrdering::SeqCst);
+            HYDRATE_COMPLETE_COUNT.fetch_add(1, AtomicOrdering::SeqCst);
+        }
     }
 
     fn segment_cache_register_from_write(config: &Config, result: &SegmentWriteResult) {
@@ -1993,8 +2037,12 @@ impl Buffers {
         if compaction_index().manifests_loaded() {
             return;
         }
+        let _guard = hydrate_lock();
+        if compaction_index().manifests_loaded() {
+            return;
+        }
         if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
-            Self::hydrate_from_catalog(&handle, config);
+            Self::hydrate_from_catalog_locked(&handle, config);
         }
     }
 
@@ -2522,7 +2570,7 @@ impl Buffers {
             pipeline: config.get_pipeline_name(),
             committed_segments: Self::segs_remaining(config),
             indexed_refs: Self::indexed_wal_ref_count(),
-            schedulable_refs: Self::reclaimable_wal_partition_count(config, usize::MAX),
+            schedulable_refs: Self::reclaimable_wal_partition_count_in_memory(usize::MAX),
             sink_work_in_flight: crate::buffer::compaction_progress::sink_work_in_flight_count(),
             wal_compactions_in_flight: crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
                 .load(AtomicOrdering::Relaxed),
@@ -4006,6 +4054,11 @@ mod tests_wal_commit {
         compaction_index().clear_all();
         metrics_hot::set_compaction_planner_ready_work_count(0);
         s3_wal_body_cache::clear_for_tests();
+        HYDRATE_TEST_DELAY_MS.store(0, AtomicOrdering::SeqCst);
+        HYDRATE_BEGIN_COUNT.store(0, AtomicOrdering::SeqCst);
+        HYDRATE_COMPLETE_COUNT.store(0, AtomicOrdering::SeqCst);
+        HYDRATE_IN_FLIGHT.store(0, AtomicOrdering::SeqCst);
+        HYDRATE_MAX_IN_FLIGHT.store(0, AtomicOrdering::SeqCst);
     }
 
     fn test_part(
@@ -4554,6 +4607,147 @@ mod tests_wal_commit {
         ));
 
         assert!(compacted);
+        reset_in_memory_segments();
+    }
+
+    fn persist_named_test_segment(
+        handle: &crate::buffer::wal_handle::PipelineWalHandle,
+        segment_id: &str,
+    ) {
+        let key = PartitionKey {
+            sink_ref: "out".into(),
+            namespace: "ns".into(),
+            partition: String::new(),
+            time: Some(0),
+            schema_fingerprint: "schema".into(),
+        };
+        let schema = arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "v",
+            arrow_schema::DataType::Int32,
+            false,
+        )]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(arrow::array::Int32Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+        let mut batches = HashMap::new();
+        batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
+        let mut parts_meta = HashMap::new();
+        parts_meta.insert(key, (0, SystemTime::now()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(handle.persist_segment(
+                segment_id,
+                &HashMap::new(),
+                &batches,
+                &parts_meta,
+                &HashMap::new(),
+                &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn wal_catalog_hydrate_is_single_flight_while_metrics_ticks() {
+        let (_legacy_base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let offsets_db = Arc::new(Offsets::init(&Config::new()).unwrap());
+        let _store = install_test_ingest_store(&Config::new(), offsets_db);
+        let handle = crate::buffer::wal_store::ingest_wal_handle().expect("handle");
+        persist_named_test_segment(&handle, "hydrate-single-flight");
+        SEGMENT_CACHE.clear();
+        compaction_index().clear_all();
+        HYDRATE_BEGIN_COUNT.store(0, AtomicOrdering::SeqCst);
+        HYDRATE_COMPLETE_COUNT.store(0, AtomicOrdering::SeqCst);
+        HYDRATE_IN_FLIGHT.store(0, AtomicOrdering::SeqCst);
+        HYDRATE_MAX_IN_FLIGHT.store(0, AtomicOrdering::SeqCst);
+        HYDRATE_TEST_DELAY_MS.store(250, AtomicOrdering::SeqCst);
+
+        let startup = std::thread::spawn({
+            let handle = handle.clone();
+            move || Buffers::hydrate_from_catalog(&handle, &Config::new())
+        });
+        let wait_started = Instant::now();
+        while HYDRATE_BEGIN_COUNT.load(AtomicOrdering::SeqCst) == 0 {
+            assert!(
+                wait_started.elapsed() < std::time::Duration::from_secs(2),
+                "wal_startup hydrate never logged begin"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    Buffers::hydrate_planner(&Config::new());
+                    let _ = Buffers::reclaimable_wal_partition_count(&Config::new(), 10_000);
+                    let _ = Buffers::wal_pressure_snapshot(&Config::new());
+                });
+            }
+        });
+        startup.join().expect("wal_startup hydrate thread");
+
+        assert_eq!(
+            HYDRATE_BEGIN_COUNT.load(AtomicOrdering::SeqCst),
+            1,
+            "metrics/planner ticks must not start another catalog hydrate"
+        );
+        assert_eq!(
+            HYDRATE_COMPLETE_COUNT.load(AtomicOrdering::SeqCst),
+            1,
+            "wal_startup hydrate must complete once"
+        );
+        assert_eq!(
+            HYDRATE_MAX_IN_FLIGHT.load(AtomicOrdering::SeqCst),
+            1,
+            "at most one catalog hydrate may run at a time"
+        );
+        assert!(
+            compaction_index().manifests_loaded(),
+            "hydrate complete must install manifests so the compactor can start"
+        );
+        reset_in_memory_segments();
+    }
+
+    #[test]
+    #[serial]
+    fn hydrate_from_catalog_serializes_overlapping_refreshers() {
+        let (_legacy_base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let offsets_db = Arc::new(Offsets::init(&Config::new()).unwrap());
+        let _store = install_test_ingest_store(&Config::new(), offsets_db);
+        let handle = crate::buffer::wal_store::ingest_wal_handle().expect("handle");
+        persist_named_test_segment(&handle, "hydrate-serialize");
+        SEGMENT_CACHE.clear();
+        compaction_index().clear_all();
+        HYDRATE_BEGIN_COUNT.store(0, AtomicOrdering::SeqCst);
+        HYDRATE_COMPLETE_COUNT.store(0, AtomicOrdering::SeqCst);
+        HYDRATE_IN_FLIGHT.store(0, AtomicOrdering::SeqCst);
+        HYDRATE_MAX_IN_FLIGHT.store(0, AtomicOrdering::SeqCst);
+        HYDRATE_TEST_DELAY_MS.store(80, AtomicOrdering::SeqCst);
+
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let handle = handle.clone();
+                scope.spawn(move || {
+                    Buffers::hydrate_from_catalog(&handle, &Config::new());
+                });
+            }
+        });
+
+        assert_eq!(HYDRATE_BEGIN_COUNT.load(AtomicOrdering::SeqCst), 4);
+        assert_eq!(HYDRATE_COMPLETE_COUNT.load(AtomicOrdering::SeqCst), 4);
+        assert_eq!(
+            HYDRATE_MAX_IN_FLIGHT.load(AtomicOrdering::SeqCst),
+            1,
+            "catalog refreshers must wait, not overlap"
+        );
         reset_in_memory_segments();
     }
 

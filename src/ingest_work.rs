@@ -271,12 +271,20 @@ fn merge_inject_fields(record: &mut Value, fields: &std::collections::BTreeMap<S
     }
 }
 
-fn apply_transform_inject_fields(config: &Config, record: &mut Value) {
-    let fields = config.get_transform_inject_fields();
-    if fields.is_empty() {
-        return;
+/// Inject configured fields, then parse event time. Arrow ingest injects first;
+/// the JSON CDC path must do the same so `inject_fields` can supply a time.
+fn json_record_event_time(
+    record: &mut Value,
+    inject: &std::collections::BTreeMap<String, Value>,
+    time_fields: &str,
+    skip_time_parse: bool,
+) -> Option<i64> {
+    merge_inject_fields(record, inject);
+    if skip_time_parse {
+        None
+    } else {
+        Helpers::parse_time_field_with_fields(record, time_fields)
     }
-    merge_inject_fields(record, &fields);
 }
 
 fn inject_fields_into_record_batch(
@@ -3659,6 +3667,13 @@ impl Ingest {
                         }
 
                         let offset_pos = ingest_batch.offset_pos_for_line(line);
+                        let inject = config.get_transform_inject_fields();
+                        let skpr_time = json_record_event_time(
+                            &mut record,
+                            &inject,
+                            &transform_snap.time_fields,
+                            transform_snap.skip_time_parse,
+                        );
 
                         if should_ingest_at_offset(
                             offset_snapshot.as_ref(),
@@ -3706,14 +3721,6 @@ impl Ingest {
                                     });
                                 &skpr_partition_owned
                             };
-                            let skpr_time = if transform_snap.skip_time_parse {
-                                None
-                            } else {
-                                Helpers::parse_time_field_with_fields(
-                                    &record,
-                                    &transform_snap.time_fields,
-                                )
-                            };
 
                             let mut skpr_time_bucket: Option<i64> = None;
 
@@ -3728,8 +3735,6 @@ impl Ingest {
                             ingest_profile::add_partition_ns(
                                 partition_started.elapsed().as_nanos() as u64,
                             );
-
-                            apply_transform_inject_fields(config, &mut record);
 
                             refresh_metadata_snapshot_for_namespace(
                                 skpr_namespace,
@@ -4759,6 +4764,35 @@ mod transform_inject_fields_tests {
         let mut record = json!({"workspace_id": "old", "event": "click"});
         merge_inject_fields(&mut record, &fields);
         assert_eq!(record["workspace_id"], "old");
+    }
+
+    #[test]
+    fn json_record_event_time_sees_injected_time_field() {
+        let mut record = json!({"id": 1});
+        let inject =
+            std::collections::BTreeMap::from([("time".to_string(), json!(1_700_000_000i64))]);
+        let got = json_record_event_time(&mut record, &inject, "time", false);
+        assert_eq!(got, Some(1_700_000_000));
+        assert_eq!(record["time"], 1_700_000_000);
+    }
+
+    #[test]
+    fn json_record_event_time_honours_explicit_posix_zero() {
+        let mut record = json!({"id": 1});
+        let inject = std::collections::BTreeMap::from([("time".to_string(), json!(0i64))]);
+        let got = json_record_event_time(&mut record, &inject, "time", false);
+        assert_eq!(got, Some(0), "explicit 0 is a time, not missing");
+    }
+
+    #[test]
+    fn json_record_event_time_skips_parse_when_unconfigured() {
+        let mut record = json!({"id": 1});
+        let inject =
+            std::collections::BTreeMap::from([("time".to_string(), json!(1_700_000_000i64))]);
+        assert_eq!(
+            json_record_event_time(&mut record, &inject, "time", true),
+            None
+        );
     }
 
     #[test]

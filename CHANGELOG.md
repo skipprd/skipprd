@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- WAL catalog commits have no `TXN_MAX_OPS` or `ROW_MAX_BYTES` ceiling. Fjall is the store; bulk COPY segment-index rows and large compaction JSON are not fail-closed on Dynamo leftover limits.
+
 ## [16.0.6] - 2026-11-09
 
 ### Fixed

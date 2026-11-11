@@ -5,10 +5,6 @@ use skippr_lease::{LeaseEpoch, NodeId, SegmentId};
 use crate::error::CatalogError;
 use crate::key::CompactionId;
 
-/// Encode ceiling for one catalog row. Not a DynamoDB 400 KiB leftover; fjall
-/// is the live store. 4 MiB covers COPY segment-index rows (staging hit 514 KiB)
-/// without letting a whole WAL segment into the KV.
-pub const ROW_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub const FORMAT_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -242,17 +238,10 @@ pub enum CatalogRow {
 
 impl CatalogRow {
     pub fn encode(&self) -> Result<Vec<u8>, CatalogError> {
-        let bytes = bincode::serialize(self).map_err(|err| CatalogError::Codec(err.to_string()))?;
-        if bytes.len() > ROW_MAX_BYTES {
-            return Err(CatalogError::RowTooLarge { bytes: bytes.len() });
-        }
-        Ok(bytes)
+        bincode::serialize(self).map_err(|err| CatalogError::Codec(err.to_string()))
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, CatalogError> {
-        if bytes.len() > ROW_MAX_BYTES {
-            return Err(CatalogError::RowTooLarge { bytes: bytes.len() });
-        }
         bincode::deserialize(bytes).map_err(|err| CatalogError::Codec(err.to_string()))
     }
 
@@ -326,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn segment_row_roundtrip_under_ceiling() {
+    fn segment_row_roundtrips() {
         let row = CatalogRow::Segment(SegmentRow {
             segment_id: SegmentId::new("s").unwrap(),
             seq: CatalogSeq::new(1),
@@ -349,7 +338,6 @@ mod tests {
             version: 0,
         });
         let bytes = row.encode().unwrap();
-        assert!(bytes.len() < ROW_MAX_BYTES);
         assert_eq!(CatalogRow::decode(&bytes).unwrap(), row);
     }
 
@@ -454,21 +442,28 @@ mod tests {
             }],
         });
         let bytes = row.encode().unwrap();
-        assert!(bytes.len() < ROW_MAX_BYTES);
         assert_eq!(CatalogRow::decode(&bytes).unwrap(), row);
     }
 
     #[test]
-    fn oversize_compaction_body_is_rejected() {
+    fn compaction_body_larger_than_the_old_4mib_ceiling_encodes() {
         let row = CatalogRow::Compaction(CompactionRow {
             id: CompactionId::new("c").unwrap(),
             state: CompactionState::Sent,
-            body: vec![0; ROW_MAX_BYTES],
+            body: vec![0; 4 * 1024 * 1024],
             version: 0,
         });
-        assert!(matches!(
-            row.encode(),
-            Err(CatalogError::RowTooLarge { .. })
-        ));
+        let bytes = row
+            .encode()
+            .expect("fjall catalog rows have no byte ceiling");
+        assert!(bytes.len() > 4 * 1024 * 1024);
+        assert_eq!(CatalogRow::decode(&bytes).unwrap(), row);
+    }
+
+    #[test]
+    fn catalog_row_has_no_byte_ceiling() {
+        let src = include_str!("row.rs");
+        assert!(!src.contains(concat!("ROW_MAX_", "BYTES")));
+        assert!(!src.contains(concat!("RowToo", "Large")));
     }
 }

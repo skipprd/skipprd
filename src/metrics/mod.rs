@@ -711,8 +711,8 @@ impl Metrics {
                     let wal_refs_tombstoned_min = wal_refs_tombstoned_total.saturating_sub(
                         LAST_PRINT_WAL_REFS_TOMBSTONED.swap(wal_refs_tombstoned_total, Ordering::SeqCst),
                     );
-                    let reclaimable_partitions = crate::buffer::ingest_buffer::Buffers::reclaimable_wal_partition_count(&loop_config, 10_000);
                     let pressure = crate::buffer::ingest_buffer::Buffers::wal_pressure_snapshot(&loop_config);
+                    let reclaimable_partitions = pressure.schedulable_refs;
                     let data_dir_paused = crate::data_dir_ingest_paused();
                     let should_print_wal_digest = wal_pending_count > 0
                         || wal_pending_bytes > 0
@@ -918,5 +918,30 @@ impl Metrics {
             periodic::Every::new(Duration::from_secs(60)),
         );
         planner.start();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn init_send_loop_does_not_hydrate_wal_catalog() {
+        let src = include_str!("mod.rs");
+        let init = src
+            .split("pub fn init_send_loop")
+            .nth(1)
+            .expect("init_send_loop")
+            .split("planner.start()")
+            .next()
+            .expect("init_send_loop body");
+        assert!(
+            !init.contains("reclaimable_wal_partition_count"),
+            "metrics ticks must not start a full WAL catalog hydrate"
+        );
+        assert!(!init.contains("hydrate_planner"));
+        assert!(!init.contains("hydrate_from_catalog"));
+        assert!(
+            init.contains("wal_pressure_snapshot"),
+            "metrics should read RAM pressure counters"
+        );
     }
 }

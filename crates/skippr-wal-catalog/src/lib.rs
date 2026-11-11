@@ -28,13 +28,13 @@ pub use row::{
     CatalogFence, CatalogOp, CatalogRow, CatalogSeq, CommittedCheckpoint, CommittedOffset,
     CompactionRow, CompactionState, ControlBody, ControlRow, DeleteCond, FormatPhase, FormatRow,
     LegacySliceRow, PayloadLocation, PutCond, SegmentIndexRow, SegmentRow, SeqRow, SliceBitmap,
-    SliceDirEntry, FORMAT_VERSION, ROW_MAX_BYTES,
+    SliceDirEntry, FORMAT_VERSION,
 };
 pub use sled_migrate::{
     lookup_miss_in_sled, migrate_sled_db, migrate_sled_db_step, MigrateStatus, SLED_TREES,
 };
 pub use store::{query_all, reset_catalog, WalCatalogRead, WalCatalogStore};
-pub use txn::{CatalogTxn, TXN_MAX_OPS};
+pub use txn::CatalogTxn;
 
 #[cfg(test)]
 mod tests {
