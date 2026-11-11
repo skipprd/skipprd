@@ -1291,6 +1291,7 @@ pub fn set_date(
 mod tests_nested_ingest_evolution {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
 
     fn root_with_record(
         field: &str,
@@ -1964,6 +1965,23 @@ mod tests_nested_ingest_evolution {
         }
     }
 
+    fn try_serialize_batch(
+        schema: std::sync::Arc<arrow::datatypes::Schema>,
+        values: &[&Value],
+    ) -> Result<(), String> {
+        let mut decoder = arrow::json::ReaderBuilder::new(schema)
+            .build_decoder()
+            .map_err(|e| format!("build_decoder: {e}"))?;
+        decoder
+            .serialize(values)
+            .map_err(|e| format!("serialize: {e}"))?;
+        match decoder.flush() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err("flush returned no batch".into()),
+            Err(e) => Err(format!("flush: {e}")),
+        }
+    }
+
     #[test]
     fn mixed_array_row_denied_before_arrow_serialize() {
         use arrow::datatypes::{DataType, Field, Schema};
@@ -2063,6 +2081,85 @@ mod tests_nested_ingest_evolution {
             Field::new("detail_docket_plant_code_string", DataType::Utf8, true),
         ]));
         try_serialize(schema, &live).expect("leaf-split siblings must serialize");
+    }
+
+    #[test]
+    #[serial]
+    fn json_string_integer_then_alphanumeric_must_serialize_mixed_batch() {
+        use crate::converters::skippr_arrow::convert_skippr_to_arrow;
+        use crate::discover::OutputMetadata;
+        use std::sync::Arc;
+
+        let digit = json!({"detail":{"code":"99"}});
+        let alphanumeric = json!({"detail":{"code":"AB99"}});
+        let mut namespaces = HashMap::new();
+        AnalyseSchema { i: 0 }.infer_json_schema(
+            &Config::new(),
+            &mut digit.to_string(),
+            Some(1),
+            &mut namespaces,
+            Some("orders"),
+        );
+        let ns = namespaces
+            .keys()
+            .next()
+            .cloned()
+            .expect("discover must emit a namespace");
+        {
+            let fields = &mut namespaces.get_mut(&ns).expect("namespace metadata").fields;
+            AnalyseSchema::determine_field_types(&Config::new(), fields, None, true);
+        }
+        let fields = &mut namespaces.get_mut(&ns).expect("namespace metadata").fields;
+        let code_leaf = fields.get("detail").and_then(|d| d.fields.get("code"));
+        let code_type = code_leaf.map(|leaf| leaf.determined_type.clone());
+        assert_eq!(
+            code_type,
+            Some(SkipprDataType::Integer),
+            "digit-looking JSON strings are pinned as integer; that is the type-split trigger; detail keys={:?} types={:?}",
+            fields.get("detail").map(|d| d.fields.keys().collect::<Vec<_>>()),
+            code_leaf.map(|leaf| leaf.types.clone()),
+        );
+
+        let mut updated = "no".to_string();
+        let digit_row = ingest(&Config::new(), &digit, fields, &ns, &mut updated, true)
+            .expect("digit-looking JSON string must ingest against the pinned integer");
+        let mixed_row = ingest(
+            &Config::new(),
+            &alphanumeric,
+            fields,
+            &ns,
+            &mut updated,
+            true,
+        )
+        .expect("alphanumeric JSON string must type-split, not deny the row");
+        let mixed_obj = mixed_row.as_object().expect("flattened object");
+        let sibling = mixed_obj
+            .keys()
+            .find(|k| k.ends_with("code_string"))
+            .cloned();
+        assert!(
+            sibling.is_some(),
+            "expected flattened *_string sibling, keys={:?}",
+            mixed_obj.keys().collect::<Vec<_>>()
+        );
+
+        let mut ns_root = Metadata::new().unwrap();
+        ns_root.determined_type = SkipprDataType::Record;
+        ns_root.fields = fields.clone();
+        let flat = OutputMetadata::from_flatterened_metadata(&ns_root);
+        let schema = Arc::new(
+            convert_skippr_to_arrow(flat.fields).expect("evolved flattened metadata must be Arrow"),
+        );
+
+        try_serialize(schema.clone(), &digit_row)
+            .unwrap_or_else(|err| panic!("digit row must serialize after type-split: {err}"));
+        try_serialize(schema.clone(), &mixed_row)
+            .unwrap_or_else(|err| panic!("type-split row must serialize: {err}"));
+        try_serialize_batch(schema, &[&digit_row, &mixed_row]).unwrap_or_else(|err| {
+            panic!(
+                "mixed batch must serialize after ingest-time type-split (ARROW_SERIALIZE otherwise): {err}\ndigit={digit_row}\nmixed={mixed_row}"
+            )
+        });
     }
 }
 

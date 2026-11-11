@@ -2586,6 +2586,16 @@ mod get_type_bool_tests {
     }
 
     #[test]
+    fn test_get_type_json_string_digits_is_integer() {
+        assert_eq!(get_type(&mut "\"99\"".to_string()), SkipprDataType::Integer);
+        assert_eq!(get_type(&mut "99".to_string()), SkipprDataType::Integer);
+        assert_eq!(
+            get_type(&mut "\"AB99\"".to_string()),
+            SkipprDataType::String
+        );
+    }
+
+    #[test]
     fn test_get_type_true_str() {
         let expected_type = SkipprDataType::Boolean;
 
