@@ -157,7 +157,7 @@ skipprd connect schema-sink glue \
 | `source_uri` | Source file or object path |
 | `offset_key` / `offset_pos` | Resume coordinates of the failed record |
 
-Athena deadletter tables are named `_dl_<pipeline>` in the deadletter database:
+Athena deadletter tables are named `_dl_<pipeline>` in the deadletter database. Hive Glue tables stay unpartitioned: parquet at the table prefix, no year/month/day folders, and no Glue partition indexes.
 
 ```sql
 SELECT id, namespace, error, failure_code

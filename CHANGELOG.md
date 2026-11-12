@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Hive Glue no longer attaches partition indexes on unpartitioned deadletter `_dl_*` tables, so first compact can create them.
+
 ### Changed
 
 - WAL catalog commits have no `TXN_MAX_OPS` or `ROW_MAX_BYTES` ceiling. Fjall is the store; bulk COPY segment-index rows and large compaction JSON are not fail-closed on Dynamo leftover limits.

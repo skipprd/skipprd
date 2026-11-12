@@ -59,8 +59,9 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::protocol::{
     CatalogIntent, CatalogIntentIdentity, CatalogIntentKind, GlueColumnIntent,
-    GluePartitionCatalogIntentV1, RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState,
-    SchemaDelta, SinkWriteStats, CATALOG_INTENT_VERSION, GLUE_PARTITION_CATALOG_INTENT_VERSION,
+    GluePartitionCatalogIntentV1, RuntimeBinding, RuntimeExecutionContext, RuntimeOutputLayout,
+    RuntimeSchemaState, SchemaDelta, SinkWriteStats, CATALOG_INTENT_VERSION,
+    GLUE_PARTITION_CATALOG_INTENT_VERSION,
 };
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2694,11 +2695,6 @@ impl AwsAthena {
         let database = config.glue_database_name.clone();
         let table_name = namespace.to_string();
         let bucket = config.s3_bucket.clone();
-        let granularity_target = context
-            .output_layout
-            .time_partition_granularity
-            .as_deref()
-            .unwrap_or("");
 
         let path = config.s3_prefix.clone();
         let path = path.trim_matches('/');
@@ -2717,25 +2713,7 @@ impl AwsAthena {
             metadata,
             partition_columns_override,
         );
-        let mut partition_indexes: Vec<PartitionIndex> = Vec::new();
-        let mut partition_index_keys: Vec<String> = Vec::new();
-        if !granularity_target.is_empty() {
-            for granularity in AwsAthena::time_partition_names_for_layout(&context.output_layout) {
-                if partition_index_keys.len() < 3 {
-                    partition_index_keys.push(granularity.to_string());
-                    partition_indexes.push(
-                        PartitionIndex::builder()
-                            .index_name(granularity.to_string())
-                            .set_keys(Some(partition_index_keys.clone()))
-                            .build()
-                            .unwrap(),
-                    );
-                }
-                if granularity == granularity_target {
-                    break;
-                }
-            }
-        }
+        let partition_indexes = build_glue_partition_indexes(&context.output_layout, &partitions);
 
         let columns =
             SkipprHive::storage_columns_excluding_partition_keys(metadata, &partitions).unwrap();
@@ -3029,6 +3007,39 @@ fn glue_partition_column_layout(columns: &[Column]) -> Vec<(String, String)> {
 
 fn partition_layout_mismatch(existing: &[Column], expected: &[Column]) -> bool {
     glue_partition_column_layout(existing) != glue_partition_column_layout(expected)
+}
+
+fn build_glue_partition_indexes(
+    output_layout: &RuntimeOutputLayout,
+    partitions: &[Column],
+) -> Vec<PartitionIndex> {
+    if partitions.is_empty() {
+        return Vec::new();
+    }
+    let granularity_target = output_layout
+        .time_partition_granularity
+        .as_deref()
+        .unwrap_or("");
+    let mut partition_indexes: Vec<PartitionIndex> = Vec::new();
+    let mut partition_index_keys: Vec<String> = Vec::new();
+    if !granularity_target.is_empty() {
+        for granularity in AwsAthena::time_partition_names_for_layout(output_layout) {
+            if partition_index_keys.len() < 3 {
+                partition_index_keys.push(granularity.to_string());
+                partition_indexes.push(
+                    PartitionIndex::builder()
+                        .index_name(granularity.to_string())
+                        .set_keys(Some(partition_index_keys.clone()))
+                        .build()
+                        .unwrap(),
+                );
+            }
+            if granularity == granularity_target {
+                break;
+            }
+        }
+    }
+    partition_indexes
 }
 
 fn build_glue_partition_keys(
@@ -3502,13 +3513,10 @@ mod contract_schema_tests {
         ));
     }
 
-    #[test]
-    fn build_glue_partition_keys_includes_day_granularity() {
-        use skippr_runtime_sdk::protocol::{
-            RuntimeExecutionContext, RuntimeExecutionMode, RuntimeOutputLayout,
-        };
-        let context = RuntimeExecutionContext {
-            pipeline_name: "device_data".to_string(),
+    fn day_grain_context(pipeline: &str) -> RuntimeExecutionContext {
+        use skippr_runtime_sdk::protocol::RuntimeExecutionMode;
+        RuntimeExecutionContext {
+            pipeline_name: pipeline.to_string(),
             workspace_name: "prod".to_string(),
             data_dir: "/tmp".to_string(),
             execution_mode: RuntimeExecutionMode::Sync,
@@ -3522,7 +3530,19 @@ mod contract_schema_tests {
             },
             inject_fields: Default::default(),
             pipeline_type: Default::default(),
-        };
+        }
+    }
+
+    fn glue_partition_index_names(indexes: &[PartitionIndex]) -> Vec<String> {
+        indexes
+            .iter()
+            .map(|index| index.index_name().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn build_glue_partition_keys_includes_day_granularity() {
+        let context = day_grain_context("device_data");
         let keys = build_glue_partition_keys(
             &context,
             RuntimeBinding::Primary,
@@ -3533,6 +3553,51 @@ mod contract_schema_tests {
         );
         assert_eq!(
             glue_partition_column_names(&keys),
+            vec!["year", "month", "day"]
+        );
+    }
+
+    #[test]
+    fn build_glue_partition_keys_returns_empty_for_deadletter_with_day_granularity() {
+        let context = day_grain_context("device_connection_data");
+        let keys = build_glue_partition_keys(
+            &context,
+            RuntimeBinding::Deadletter,
+            "_dl_device_connection_data",
+            None,
+            &OutputMetadata::new(),
+            None,
+        );
+        assert!(
+            keys.is_empty(),
+            "deadletter Glue tables must stay unpartitioned"
+        );
+    }
+
+    #[test]
+    fn build_glue_partition_indexes_empty_when_table_has_no_partition_keys() {
+        let context = day_grain_context("device_connection_data");
+        let indexes = build_glue_partition_indexes(&context.output_layout, &[]);
+        assert!(
+            indexes.is_empty(),
+            "Glue rejects partition indexes on unpartitioned tables"
+        );
+    }
+
+    #[test]
+    fn build_glue_partition_indexes_includes_day_granularity() {
+        let context = day_grain_context("device_data");
+        let keys = build_glue_partition_keys(
+            &context,
+            RuntimeBinding::Primary,
+            "device_data",
+            None,
+            &OutputMetadata::new(),
+            None,
+        );
+        let indexes = build_glue_partition_indexes(&context.output_layout, &keys);
+        assert_eq!(
+            glue_partition_index_names(&indexes),
             vec!["year", "month", "day"]
         );
     }
