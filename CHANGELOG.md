@@ -4,13 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [16.0.7] - 2026-11-12
+
 ### Fixed
 
 - Hive Glue no longer attaches partition indexes on unpartitioned deadletter `_dl_*` tables, so first compact can create them.
+- WAL catalog hydrate latches so a metrics tick cannot start a second walk while startup is still loading; compact and ingest wait until `manifests_loaded`.
+- Dynamo `snapshot_then_cdc` writes a 16-byte `_skippr_order_token` (zeros for the snapshot, then the stream sequence) and `_skippr_event_time` from `ApproximateCreationDateTime` when present, otherwise ingest time, so Iceberg MergeByKey can compact day partitions.
+- Deadlettered-into-WAL WARNs coalesce: the first line fires, later hits in 30s become one count line, so one-row ingest tasks cannot flood the log.
+- Default `--log` / `--log info` turns `skipprd::perf` off, so `PERF_EVENT` stays on `--log perf` only.
 
 ### Changed
 
 - WAL catalog commits have no `TXN_MAX_OPS` or `ROW_MAX_BYTES` ceiling. Fjall is the store; bulk COPY segment-index rows and large compaction JSON are not fail-closed on Dynamo leftover limits.
+- Source plugins accept payloads before WAL persist so ingest threads can fan out. Persist still gates origin commit, delete, and checkpoint. S3 fetch is a byte-capped prefetch plus host WAL/outstanding admission.
+- Disk WAL persist and compact use 1 MiB `O_DIRECT` I/O. Disk ingest admission is 25% of RAM and does not scale with ingest thread count.
+- Bump every catalog plugin crate patch so CDN version paths pick up SDK prefetch and Dynamo CDC encode.
 
 ## [16.0.6] - 2026-11-09
 
