@@ -311,7 +311,6 @@ fn apply_persist_result(
     match &result {
         Ok((rows, bytes)) => {
             let elapsed_ms = started.elapsed().as_millis() as u64;
-            info!(rows, bytes, elapsed_ms, "WAL writer flush finished");
             crate::helpers::perf::emit(
                 "wal_persist",
                 serde_json::json!({
@@ -321,6 +320,7 @@ fn apply_persist_result(
                 }),
             );
             if Config::log_wal_enabled() {
+                info!(rows, bytes, elapsed_ms, "WAL writer flush finished");
                 info!(
                     "WAL writer flushed live segment rows={} bytes={}",
                     rows,
@@ -364,11 +364,13 @@ fn try_start_persist(
         return;
     };
     let acked = std::mem::take(pending_acks);
-    info!(
-        pending = acked.len(),
-        live_bytes = Buffers::live_segment_bytes(),
-        "WAL writer flush starting"
-    );
+    if Config::log_wal_enabled() {
+        info!(
+            pending = acked.len(),
+            live_bytes = Buffers::live_segment_bytes(),
+            "WAL writer flush starting"
+        );
+    }
     let cfg = config.clone();
     *persist = Some(tokio::spawn(async move {
         let started = Instant::now();
@@ -556,6 +558,35 @@ async fn run_writer(config: Config, mut rx: mpsc::Receiver<WalWriterCommand>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flush_start_and_finish_logs_are_behind_log_wal() {
+        let src = include_str!("wal_writer.rs");
+        let start = src.find("fn try_start_persist").expect("try_start_persist");
+        let start_fn = src[start..]
+            .split("fn queue_submit")
+            .next()
+            .expect("try_start_persist body");
+        assert!(start_fn.contains("Config::log_wal_enabled()"));
+        assert!(start_fn.contains("WAL writer flush starting"));
+        let finish = src
+            .find("fn apply_persist_result")
+            .expect("apply_persist_result");
+        let finish_fn = src[finish..]
+            .split("fn fail_pending_acks")
+            .next()
+            .expect("apply_persist_result body");
+        let finished_at = finish_fn
+            .find("WAL writer flush finished")
+            .expect("flush finished");
+        let wal_gate = finish_fn
+            .rfind("Config::log_wal_enabled()")
+            .expect("flush finished behind LOG_WAL");
+        assert!(
+            wal_gate < finished_at,
+            "WAL writer flush finished must sit inside log_wal_enabled"
+        );
+    }
 
     #[test]
     fn writer_capacity_is_derived_from_ingest_threads() {

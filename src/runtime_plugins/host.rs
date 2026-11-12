@@ -810,12 +810,32 @@ fn runtime_source_blocking_spawn_cap() -> usize {
 /// Pause new payload intake when WAL pending plus ingest outstanding already
 /// fill the autotuned admission budget. Persist is the ceiling; this is the
 /// OOM / pile-up guard, not a persist-ACK for the plugin.
+///
+/// Pause at the budget; resume only after used bytes drop to half of it so
+/// intake does not refill the moment one persist frees a byte.
+pub(crate) fn runtime_source_intake_used_bytes(
+    wal_pending_bytes: usize,
+    ingest_outstanding_bytes: usize,
+) -> usize {
+    wal_pending_bytes.saturating_add(ingest_outstanding_bytes)
+}
+
 pub(crate) fn runtime_source_intake_should_pause(
     wal_pending_bytes: usize,
     ingest_outstanding_bytes: usize,
     admission_budget_bytes: usize,
 ) -> bool {
-    wal_pending_bytes.saturating_add(ingest_outstanding_bytes) > admission_budget_bytes
+    runtime_source_intake_used_bytes(wal_pending_bytes, ingest_outstanding_bytes)
+        > admission_budget_bytes
+}
+
+pub(crate) fn runtime_source_intake_should_resume(
+    wal_pending_bytes: usize,
+    ingest_outstanding_bytes: usize,
+    admission_budget_bytes: usize,
+) -> bool {
+    runtime_source_intake_used_bytes(wal_pending_bytes, ingest_outstanding_bytes)
+        <= admission_budget_bytes / 2
 }
 
 /// Join any finished blocking tasks, then wait if too many are still in-flight.
@@ -854,13 +874,18 @@ async fn runtime_source_throttle_intake(
     ingest: &Ingest,
 ) -> io::Result<()> {
     runtime_source_throttle_blocking_tasks(pending_tasks).await?;
-    while runtime_source_intake_should_pause(
-        crate::buffer::wal_writer::pending_bytes(),
-        ingest.outstanding_payload_bytes(),
-        ingest.admission_budget_bytes(),
-    ) {
-        runtime_source_throttle_blocking_tasks(pending_tasks).await?;
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    let wal_pending = crate::buffer::wal_writer::pending_bytes();
+    let outstanding = ingest.outstanding_payload_bytes();
+    let budget = ingest.admission_budget_bytes();
+    if runtime_source_intake_should_pause(wal_pending, outstanding, budget) {
+        while !runtime_source_intake_should_resume(
+            crate::buffer::wal_writer::pending_bytes(),
+            ingest.outstanding_payload_bytes(),
+            ingest.admission_budget_bytes(),
+        ) {
+            runtime_source_throttle_blocking_tasks(pending_tasks).await?;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
     Ok(())
 }
@@ -4245,6 +4270,16 @@ mod tests {
         assert!(super::runtime_source_intake_should_pause(40, 61, 100));
         assert!(super::runtime_source_intake_should_pause(1, 0, 0));
         assert!(!super::runtime_source_intake_should_pause(0, 0, 0));
+    }
+
+    #[test]
+    fn intake_resumes_only_after_used_bytes_drop_to_half_budget() {
+        assert!(super::runtime_source_intake_should_resume(0, 0, 100));
+        assert!(super::runtime_source_intake_should_resume(40, 10, 100));
+        assert!(!super::runtime_source_intake_should_resume(40, 11, 100));
+        assert!(!super::runtime_source_intake_should_resume(101, 0, 100));
+        assert!(super::runtime_source_intake_should_resume(0, 0, 0));
+        assert!(!super::runtime_source_intake_should_resume(1, 0, 0));
     }
 
     #[test]

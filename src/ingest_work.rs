@@ -2238,21 +2238,17 @@ impl Ingest {
     /// With `WAL_STORAGE=s3`, uses this process’s share of the **combined** S3 WAL memory
     /// envelope (see `buffer::s3_wal_memory_budget`): admission + S3 body LRU never exceed
     /// ~70% of MemAvailable (Linux) / total RAM (macOS) together.
-    /// Disk WAL keeps a lower base fraction plus mild scaling with ingest thread count.
+    /// Disk WAL is a flat **25%** of that hint. Do not scale with ingest thread count:
+    /// `*(n+2)/4` on a 32-core box grew the budget past RAM and never paused.
     fn compute_admission_budget_bytes(
         hint_bytes: usize,
         wal_s3: bool,
-        num_ingest_threads: usize,
+        _num_ingest_threads: usize,
     ) -> usize {
         let budget = if wal_s3 {
             crate::buffer::s3_wal_memory_budget::split_s3_wal_memory_budget(hint_bytes).0
         } else {
-            let n = num_ingest_threads.max(1);
-            let raw = hint_bytes
-                .saturating_mul(25)
-                .saturating_div(100)
-                .saturating_mul(n.saturating_add(2))
-                .saturating_div(4);
+            let raw = hint_bytes.saturating_mul(25).saturating_div(100);
             const MIN_B: usize = 256 * 1024 * 1024;
             const MAX_B: usize = 64 * 1024 * 1024 * 1024;
             raw.clamp(MIN_B, MAX_B)
@@ -4964,6 +4960,20 @@ mod ingest_admission_tests {
         assert!(
             s3 >= disk,
             "expected s3 WAL budget >= disk WAL budget, got disk={disk} s3={s3}"
+        );
+    }
+
+    #[test]
+    fn disk_admission_budget_is_25pct_of_hint_regardless_of_thread_count() {
+        let hint = 8_usize * 1024 * 1024 * 1024;
+        let expected = hint * 25 / 100;
+        let one = Ingest::admission_budget_for_tests(hint, false, 1);
+        let thirty_two = Ingest::admission_budget_for_tests(hint, false, 32);
+        assert_eq!(one, expected);
+        assert_eq!(thirty_two, expected);
+        assert!(
+            thirty_two < hint,
+            "32-core disk admission must stay under RAM hint, got {thirty_two} of {hint}"
         );
     }
 }

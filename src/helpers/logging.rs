@@ -187,7 +187,8 @@ pub fn env_filter_directives(level: &str, base_filter: &str) -> String {
         "warn" => "skipprd=warn,skippr=warn",
         "error" => "skipprd=error,skippr=error",
         "perf" => "skipprd::perf=info,skipprd=warn,skippr=warn",
-        "info" => "skipprd=info,skippr=info",
+        // skipprd=info would also match skipprd::perf; keep PERF_EVENT on --log perf only.
+        "info" => "skipprd::perf=off,skipprd=info,skippr=info",
         other => panic!("unparsed log level {other}; call parse_log_level first"),
     };
     format!("{crate_filter},{base_filter}")
@@ -210,6 +211,14 @@ mod tests {
             "{filter}"
         );
         EnvFilter::try_new(&filter).expect("perf filter should parse");
+    }
+
+    #[test]
+    fn info_level_does_not_emit_perf_events() {
+        let filter = env_filter_directives("info", BASE);
+        assert!(filter.contains("skipprd::perf=off"), "{filter}");
+        assert!(filter.contains("skipprd=info"), "{filter}");
+        EnvFilter::try_new(&filter).expect("info filter should parse");
     }
 
     #[test]

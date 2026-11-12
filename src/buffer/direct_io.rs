@@ -1,6 +1,8 @@
 //! Durability I/O for local WAL files.
 //!
-//! Linux uses `O_DIRECT` (aligned bounce buffer). macOS uses `F_NOCACHE`.
+//! Linux uses `O_DIRECT` with a 1 MiB aligned bounce so WAL persist and compact
+//! issue large I/Os. A 4 KiB bounce caps gp3 at ~12 MiB/s (3000 IOPS × 4 KiB)
+//! instead of the 125 MiB/s throughput limit. macOS uses `F_NOCACHE`.
 //! Windows keeps ordinary buffered `std::fs::File`. `fsync`/`fdatasync` failure
 //! poisons the handle; callers must drop it and must not retry on the same fd.
 
@@ -15,8 +17,12 @@ use std::os::unix::fs::FileExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
 
+/// O_DIRECT alignment (logical block). I/O offset, length, and buffer share this.
 #[cfg(target_os = "linux")]
-const ALIGN: usize = 4096;
+const BLOCK: usize = 4096;
+/// Bounce size submitted per `pwrite`/`pread`. Must be a multiple of `BLOCK`.
+#[cfg(target_os = "linux")]
+const IO_SIZE: usize = 1024 * 1024;
 #[cfg(not(windows))]
 static WARNED_FALLBACK: AtomicBool = AtomicBool::new(false);
 
@@ -29,7 +35,7 @@ struct AlignedBuf {
 #[cfg(target_os = "linux")]
 impl AlignedBuf {
     fn new() -> io::Result<Self> {
-        let layout = std::alloc::Layout::from_size_align(ALIGN, ALIGN)
+        let layout = std::alloc::Layout::from_size_align(IO_SIZE, BLOCK)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         let raw = unsafe { std::alloc::alloc_zeroed(layout) };
         let ptr = std::ptr::NonNull::new(raw).ok_or_else(|| {
@@ -39,7 +45,7 @@ impl AlignedBuf {
     }
 
     fn as_mut(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), ALIGN) }
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), IO_SIZE) }
     }
 }
 
@@ -425,6 +431,22 @@ impl Seek for DirectIoFile {
 }
 
 #[cfg(target_os = "linux")]
+fn align_up(n: usize, block: usize) -> usize {
+    n.saturating_add(block - 1) / block * block
+}
+
+#[cfg(target_os = "linux")]
+fn read_block(file: &File, dest: &mut [u8], offset: u64) -> io::Result<()> {
+    debug_assert_eq!(dest.len(), BLOCK);
+    dest.fill(0);
+    match file.read_at(dest, offset) {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn read_direct(
     file: &File,
     bounce: &mut AlignedBuf,
@@ -435,12 +457,20 @@ fn read_direct(
     if *pos >= logical_len || buf.is_empty() {
         return Ok(0);
     }
-    let page = *pos / ALIGN as u64 * ALIGN as u64;
-    load_page(file, bounce, page, logical_len)?;
+    let bounce_buf = bounce.as_mut();
+    let page = *pos / BLOCK as u64 * BLOCK as u64;
     let page_off = (*pos - page) as usize;
-    let available = (ALIGN - page_off).min((logical_len - *pos) as usize);
-    let n = available.min(buf.len());
-    buf[..n].copy_from_slice(&bounce.as_mut()[page_off..page_off + n]);
+    let n = (bounce_buf.len() - page_off)
+        .min(buf.len())
+        .min((logical_len - *pos) as usize);
+    let io_len = align_up(page_off + n, BLOCK);
+    bounce_buf[..io_len].fill(0);
+    match file.read_at(&mut bounce_buf[..io_len], page) {
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {}
+        Err(err) => return Err(err),
+    }
+    buf[..n].copy_from_slice(&bounce_buf[page_off..page_off + n]);
     *pos += n as u64;
     Ok(n)
 }
@@ -453,31 +483,41 @@ fn write_direct(
     logical_len: &mut u64,
     buf: &[u8],
 ) -> io::Result<usize> {
-    let page = *pos / ALIGN as u64 * ALIGN as u64;
-    load_page(file, bounce, page, *logical_len)?;
+    let bounce_buf = bounce.as_mut();
+    let page = *pos / BLOCK as u64 * BLOCK as u64;
     let page_off = (*pos - page) as usize;
-    let n = (ALIGN - page_off).min(buf.len());
-    bounce.as_mut()[page_off..page_off + n].copy_from_slice(&buf[..n]);
-    file.write_at(bounce.as_mut(), page)?;
+    let n = (bounce_buf.len() - page_off).min(buf.len());
+    let data_end = page_off + n;
+    let io_len = align_up(data_end, BLOCK);
+    let first_partial = page_off != 0;
+    let last_partial = data_end % BLOCK != 0;
+    if first_partial {
+        if page < *logical_len {
+            read_block(file, &mut bounce_buf[..BLOCK], page)?;
+        } else {
+            bounce_buf[..BLOCK].fill(0);
+        }
+    }
+    if last_partial {
+        let last_off = (data_end / BLOCK) * BLOCK;
+        let last_file = page + last_off as u64;
+        if last_file < *logical_len {
+            read_block(
+                file,
+                &mut bounce_buf[last_off..last_off + BLOCK],
+                last_file,
+            )?;
+        } else {
+            bounce_buf[last_off..last_off + BLOCK].fill(0);
+        }
+    }
+    bounce_buf[page_off..page_off + n].copy_from_slice(&buf[..n]);
+    file.write_at(&bounce_buf[..io_len], page)?;
     *pos += n as u64;
     if *pos > *logical_len {
         *logical_len = *pos;
     }
     Ok(n)
-}
-
-#[cfg(target_os = "linux")]
-fn load_page(file: &File, bounce: &mut AlignedBuf, page: u64, logical_len: u64) -> io::Result<()> {
-    let buf = bounce.as_mut();
-    buf.fill(0);
-    if page >= logical_len {
-        return Ok(());
-    }
-    match file.read_at(buf, page) {
-        Ok(_) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
-        Err(err) => Err(err),
-    }
 }
 
 #[cfg(test)]
@@ -488,6 +528,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal-dio");
         (dir, path)
+    }
+
+    #[test]
+    fn bounce_is_large_enough_to_hit_gp3_throughput() {
+        let src = include_str!("direct_io.rs");
+        assert!(src.contains("const IO_SIZE: usize = 1024 * 1024"));
+        assert!(src.contains("const BLOCK: usize = 4096"));
+        assert!(
+            !src.contains(concat!("Layout::from_size_align(", "ALIGN, ALIGN)")),
+            "4 KiB bounce would cap gp3 at 3000 IOPS × 4 KiB"
+        );
+    }
+
+    #[test]
+    fn megabyte_plus_round_trips_after_fdatasync() {
+        let (_dir, path) = temp_path();
+        let mut payload = vec![0x5Au8; 1024 * 1024 + 1234];
+        let last = payload.len() - 1;
+        payload[0] = 0x11;
+        payload[4095] = 0x22;
+        payload[1024 * 1024] = 0x33;
+        payload[last] = 0x44;
+        {
+            let mut file = DirectIoFile::create(&path).unwrap();
+            file.write_all(&payload).unwrap();
+            file.sync_data().unwrap();
+        }
+        let mut file = DirectIoFile::open(&path).unwrap();
+        let mut got = Vec::new();
+        file.read_to_end(&mut got).unwrap();
+        assert_eq!(got, payload);
     }
 
     #[test]
@@ -528,14 +599,29 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn sequential_write_submits_more_than_one_block() {
+        let (_dir, path) = temp_path();
+        let data = vec![0xABu8; 256 * 1024];
+        let mut file = DirectIoFile::create(&path).unwrap();
+        let n = file.write(&data).unwrap();
+        assert!(
+            n > BLOCK,
+            "O_DIRECT write returned {n} bytes; bounce must submit >4 KiB"
+        );
+        assert_eq!(n, data.len());
+        file.sync_data().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn paper_direct_read_misses_dirty_page_cache() {
         let (_dir, path) = temp_path();
-        let data = vec![0xABu8; ALIGN];
+        let data = vec![0xABu8; BLOCK];
         {
             let mut buffered = File::create(&path).unwrap();
             buffered.write_all(&data).unwrap();
         }
-        let mut before = vec![0u8; ALIGN];
+        let mut before = vec![0u8; BLOCK];
         {
             let mut direct = DirectIoFile::open(&path).unwrap();
             let _ = direct.read(&mut before);
@@ -544,7 +630,7 @@ mod tests {
             let buffered = File::options().write(true).open(&path).unwrap();
             buffered.sync_all().unwrap();
         }
-        let mut after = vec![0u8; ALIGN];
+        let mut after = vec![0u8; BLOCK];
         {
             let mut direct = DirectIoFile::open(&path).unwrap();
             direct.read_exact(&mut after).unwrap();
