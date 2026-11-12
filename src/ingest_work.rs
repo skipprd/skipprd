@@ -2297,11 +2297,14 @@ impl Ingest {
         Self::compute_admission_budget_bytes(hint_bytes, wal_s3, num_ingest_threads)
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn outstanding_payload_bytes_for_tests(&self) -> usize {
+    pub(crate) fn outstanding_payload_bytes(&self) -> usize {
         self.outstanding_bytes.load(Ordering::Acquire)
     }
+
+    pub(crate) fn admission_budget_bytes(&self) -> usize {
+        Self::autotuned_ingest_admission_budget_bytes(&self.app_config, self.num_cpus)
+    }
+
     #[allow(dead_code)]
     fn infer_required_type(value: &serde_json::Value) -> (String, Option<String>) {
         use serde_json::Value as V;

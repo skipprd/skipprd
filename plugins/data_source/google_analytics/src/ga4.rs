@@ -19,7 +19,7 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, submit_payload_batches, IngestBatch,
+    load_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
 };
 use tokio::time::{sleep, Duration as TokioDuration};
 use tracing::{info, warn};
@@ -360,7 +360,7 @@ impl DataSourceGoogleAnalyticsPlugin {
         if batches.is_empty() {
             return Ok(());
         }
-        submit_payload_batches(ctx, batches)?;
+        submit_payload_batches_durable(ctx, batches)?;
         Ok(())
     }
 }

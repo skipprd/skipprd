@@ -19,7 +19,7 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches, IngestBatch,
+    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
     SourceSyncContext,
 };
 
@@ -156,13 +156,13 @@ impl DataSourceMongodbPlugin {
             row_idx += 1;
 
             if current_bytes >= chunk_bytes {
-                submit_payload_batches(ctx.as_ref(), std::mem::take(&mut current_batch))?;
+                submit_payload_batches_durable(ctx.as_ref(), std::mem::take(&mut current_batch))?;
                 current_bytes = 0;
             }
         }
 
         if !current_batch.is_empty() {
-            submit_payload_batches(ctx.as_ref(), current_batch)?;
+            submit_payload_batches_durable(ctx.as_ref(), current_batch)?;
         }
 
         Ok(())
@@ -337,7 +337,7 @@ impl DataSourceMongodbPlugin {
                 }]),
             };
 
-            submit_payload_batches(ctx.as_ref(), vec![batch])?;
+            submit_payload_batches_durable(ctx.as_ref(), vec![batch])?;
 
             if let Some(ref token) = stream.resume_token() {
                 if let Ok(token_bytes) = serde_json::to_vec(token) {

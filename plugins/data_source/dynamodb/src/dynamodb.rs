@@ -24,7 +24,8 @@ use skippr_runtime_sdk::plugins::{
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, partition_already_closed, store_checkpoint_payload,
-    submit_payload_batch_groups, submit_payload_batches, IngestBatch, SourceSyncContext,
+    submit_payload_batch_groups_durable, submit_payload_batches_durable, IngestBatch,
+    SourceSyncContext,
 };
 
 /// CDC scan configuration passed to `sync_scan` when CDC tagging is needed.
@@ -290,7 +291,7 @@ impl DataSourceDynamodbPlugin {
                     }
 
                     if !batch_groups.is_empty() {
-                        submit_payload_batch_groups(ctx.as_ref(), batch_groups)?;
+                        submit_payload_batch_groups_durable(ctx.as_ref(), batch_groups)?;
                     }
                 }
 
@@ -618,7 +619,7 @@ impl DataSourceDynamodbPlugin {
                 }
 
                 if !batch.is_empty() {
-                    submit_payload_batches(ctx.as_ref(), batch)?;
+                    submit_payload_batches_durable(ctx.as_ref(), batch)?;
 
                     if let Some(ref seq) = last_seq {
                         store_checkpoint_payload(

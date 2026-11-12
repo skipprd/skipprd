@@ -16,7 +16,7 @@ use crate::RUNNING;
 use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches, IngestBatch,
+    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
     SourceSyncContext,
 };
 
@@ -155,7 +155,7 @@ impl DataSourceKinesisPlugin {
         }) {
             *last_seq = Some(last);
         }
-        submit_payload_batches(ctx, batch)?;
+        submit_payload_batches_durable(ctx, batch)?;
         let seq = last_seq.clone().unwrap_or_default();
         if !seq.is_empty() {
             Self::write_checkpoint(ctx, stream_name, shard_id, &seq)?;

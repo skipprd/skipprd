@@ -61,7 +61,7 @@ class TpcContractTests(unittest.TestCase):
         self.assertNotIn("for_each_parquet_ipc_batch", file_src)
         self.assertNotIn("submit_arrow_ipc_batches", file_src)
         self.assertIn("InputFormat::Parquet", file_src)
-        self.assertIn("submit_payload_batch_groups", file_src)
+        self.assertIn("submit_payload_tasks_accepted", file_src)
         self.assertIn("read_to_end", file_src)
         contracts = WORKFLOW.split("\n  tpc_h_sf10:", 1)[0]
         self.assertIn("test_local_runtime_plugins.py", contracts)

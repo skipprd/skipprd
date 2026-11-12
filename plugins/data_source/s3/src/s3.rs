@@ -16,7 +16,9 @@ use std::time::Duration;
 use serde_derive::Deserialize;
 
 use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
-use skippr_runtime_sdk::source_compat::{IngestBatch, SourcePayloadTask, SourceSyncContext};
+use skippr_runtime_sdk::source_compat::{
+    ByteBoundedPrefetch, IngestBatch, SourcePayloadTask, SourceSyncContext,
+};
 use skippr_runtime_sdk::source_sync::{collect_open_list_keys, offset_validation_entry};
 
 use crate::helpers::Helpers;
@@ -503,8 +505,7 @@ impl DataSourceS3Plugin {
         let mut current_bytes: usize = 0;
         let mut pending_tasks: Vec<SourcePayloadTask> = Vec::with_capacity(total_cpus);
         let mut accepted_submissions = Vec::new();
-        // Bound total bytes staged in memory before dispatching to ingest threads
-        // Use dynamic pending cap if memory manager is active; fallback to env default
+        // Prefetch cap is the ready-pile bound. Dispatch when enough tasks exist to fan out.
         let is_ci_pending = runtime_is_ci();
         let pending_max_bytes_env = env_string("INGEST_PENDING_MAX_BYTES").unwrap_or_default();
         let pending_default_max: usize = pending_max_bytes_env
@@ -522,12 +523,30 @@ impl DataSourceS3Plugin {
             .pending_cap
             .clone()
             .unwrap_or_else(|| Arc::new(AtomicUsize::new(pending_default_max)));
-        let mut pending_bytes_sum: usize = 0;
+        let prefetch = ByteBoundedPrefetch::new(pending_cap_arc.load(AtomicOrdering::Relaxed));
+        let prefetch_in = Arc::clone(&prefetch);
+        let download_task = tokio::spawn(async move {
+            futures::pin_mut!(download_stream);
+            while let Some(result) = StreamExt::next(&mut download_stream).await {
+                match result {
+                    Ok(Some((key, data))) => {
+                        let n = data.len();
+                        prefetch_in.push((key, data), n).await;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        prefetch_in.close();
+                        return Err(err);
+                    }
+                }
+            }
+            prefetch_in.close();
+            Ok(())
+        });
 
-        futures::pin_mut!(download_stream);
-        while let Some(result) = StreamExt::next(&mut download_stream).await {
-            if let Some((key, str_data)) = result? {
-                let bytes = str_data.len();
+        let consume_result = async {
+            let _close = prefetch.close_on_drop();
+            while let Some(((key, str_data), bytes)) = prefetch.pop().await {
                 current_bytes += bytes;
                 let source_uri = format!("s3://{}/{}", s3_bucket_outer, key);
                 current_batch.push(IngestBatch::new(
@@ -563,16 +582,12 @@ impl DataSourceS3Plugin {
                         );
                     }
                     current_bytes = 0;
-                    pending_bytes_sum = pending_bytes_sum.saturating_add(batch_bytes);
                     pending_tasks.push(SourcePayloadTask { batches: batch });
-                    if pending_tasks.len() >= total_cpus
-                        || pending_bytes_sum >= pending_cap_arc.load(AtomicOrdering::Relaxed)
-                    {
+                    if pending_tasks.len() >= total_cpus {
                         if runtime_log_wal_enabled() {
                             info!(
-                                "s3 source: dispatching {} pending source payload tasks total_bytes={}",
-                                pending_tasks.len(),
-                                pending_bytes_sum
+                                "s3 source: dispatching {} pending source payload tasks",
+                                pending_tasks.len()
                             );
                         }
                         let submission =
@@ -580,15 +595,19 @@ impl DataSourceS3Plugin {
                         self.active_threads = submission.metrics.active_cores;
                         self.optimal_chunk_size = submission.metrics.optimal_chunk_size;
                         accepted_submissions.push(submission);
-                        if accepted_submissions.len() >= 1024 {
-                            ctx.wait_payload_acks(&accepted_submissions)?;
-                            accepted_submissions.clear();
-                        }
-                        pending_bytes_sum = 0;
                     }
                 }
             }
+            Ok::<(), std::io::Error>(())
         }
+        .await;
+
+        let download_result = download_task
+            .await
+            .map_err(|err| std::io::Error::other(format!("s3 download task failed: {err}")))
+            .and_then(|result| result);
+        consume_result?;
+        download_result?;
 
         if !current_batch.is_empty() {
             let batch_bytes = current_bytes;

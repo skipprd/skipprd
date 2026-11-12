@@ -19,7 +19,9 @@ use skippr_runtime_sdk::plugins::{
     DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
 use skippr_runtime_sdk::progress::OffsetKey;
-use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
+use skippr_runtime_sdk::source_compat::{
+    submit_payload_batches_durable, IngestBatch, SourceSyncContext,
+};
 
 #[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceKafkaPluginConfig {
@@ -195,7 +197,7 @@ impl DataSource for DataSourceKafkaPlugin {
                             partition: format!("{}:{}", msg.partition(), msg.offset()),
                         };
                         let bytes = payload_bytes.len();
-                        submit_payload_batches(
+                        submit_payload_batches_durable(
                             ctx.as_ref(),
                             vec![IngestBatch {
                                 offset_key,
@@ -220,7 +222,7 @@ impl DataSource for DataSourceKafkaPlugin {
                                 partition: format!("{}:{}", msg.partition(), msg.offset()),
                             };
                             let bytes = payload_bytes.len();
-                            submit_payload_batches(
+                            submit_payload_batches_durable(
                                 ctx.as_ref(),
                                 vec![IngestBatch {
                                     offset_key,
@@ -272,7 +274,7 @@ impl DataSource for DataSourceKafkaPlugin {
                     };
 
                     let bytes = data.len();
-                    submit_payload_batches(
+                    submit_payload_batches_durable(
                         ctx.as_ref(),
                         vec![IngestBatch {
                             offset_key,
@@ -320,5 +322,23 @@ impl DataSource for DataSourceKafkaPlugin {
             &source_capabilities::KAFKA,
             once,
         )
+    }
+}
+
+#[cfg(test)]
+mod persist_before_commit_tests {
+    #[test]
+    fn kafka_waits_for_wal_persist_before_commit() {
+        let src = include_str!("kafka.rs");
+        let impl_src = src.split("#[cfg(test)]").next().expect("impl");
+        assert!(impl_src.contains("submit_payload_batches_durable"));
+        let commit = impl_src.find("commit_message").expect("commit");
+        let submit = impl_src
+            .rfind("submit_payload_batches_durable")
+            .expect("durable submit");
+        assert!(
+            submit < commit,
+            "Kafka must persist WAL before committing the source offset"
+        );
     }
 }

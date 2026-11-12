@@ -807,6 +807,17 @@ fn runtime_source_blocking_spawn_cap() -> usize {
         .unwrap_or(4)
 }
 
+/// Pause new payload intake when WAL pending plus ingest outstanding already
+/// fill the autotuned admission budget. Persist is the ceiling; this is the
+/// OOM / pile-up guard, not a persist-ACK for the plugin.
+pub(crate) fn runtime_source_intake_should_pause(
+    wal_pending_bytes: usize,
+    ingest_outstanding_bytes: usize,
+    admission_budget_bytes: usize,
+) -> bool {
+    wal_pending_bytes.saturating_add(ingest_outstanding_bytes) > admission_budget_bytes
+}
+
 /// Join any finished blocking tasks, then wait if too many are still in-flight.
 async fn runtime_source_throttle_blocking_tasks(
     pending_tasks: &mut JoinSet<io::Result<()>>,
@@ -834,6 +845,22 @@ async fn runtime_source_throttle_blocking_tasks(
             }
             None => return Ok(()),
         }
+    }
+    Ok(())
+}
+
+async fn runtime_source_throttle_intake(
+    pending_tasks: &mut JoinSet<io::Result<()>>,
+    ingest: &Ingest,
+) -> io::Result<()> {
+    runtime_source_throttle_blocking_tasks(pending_tasks).await?;
+    while runtime_source_intake_should_pause(
+        crate::buffer::wal_writer::pending_bytes(),
+        ingest.outstanding_payload_bytes(),
+        ingest.admission_budget_bytes(),
+    ) {
+        runtime_source_throttle_blocking_tasks(pending_tasks).await?;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Ok(())
 }
@@ -1123,8 +1150,11 @@ pub async fn sync_runtime_input_plugin(
                                 runtime_source_blocking_spawn_cap()
                             );
                         }
-                        if let Err(err) =
-                            runtime_source_throttle_blocking_tasks(&mut pending_source_tasks).await
+                        if let Err(err) = runtime_source_throttle_intake(
+                            &mut pending_source_tasks,
+                            ingest.as_ref(),
+                        )
+                        .await
                         {
                             crate::buffer::wal_writer::fail_request(request_id, err.to_string());
                             return Err(err);
@@ -4206,6 +4236,15 @@ mod tests {
 
     fn env_lock() -> MutexGuard<'static, ()> {
         ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn intake_pauses_only_when_wal_and_outstanding_exceed_budget() {
+        assert!(!super::runtime_source_intake_should_pause(0, 0, 100));
+        assert!(!super::runtime_source_intake_should_pause(40, 60, 100));
+        assert!(super::runtime_source_intake_should_pause(40, 61, 100));
+        assert!(super::runtime_source_intake_should_pause(1, 0, 0));
+        assert!(!super::runtime_source_intake_should_pause(0, 0, 0));
     }
 
     #[test]

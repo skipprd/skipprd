@@ -20,7 +20,7 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, submit_payload_batches, IngestBatch,
+    load_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
 };
 use tracing::info;
 
@@ -328,7 +328,7 @@ impl DataSourceMetaInstagramAdsPlugin {
             .join("\n");
         let bytes = payload.len();
         let offset_key = OffsetKey::new(stream.namespace, date.format("%Y-%m-%d").to_string());
-        submit_payload_batches(
+        submit_payload_batches_durable(
             ctx,
             vec![IngestBatch {
                 offset_key,

@@ -21,7 +21,8 @@ use skippr_runtime_sdk::plugins::{
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, partition_already_closed, store_checkpoint_payload,
-    submit_payload_batch_groups, submit_payload_batches, IngestBatch, SourceSyncContext,
+    submit_payload_batch_groups_durable, submit_payload_batches_durable, IngestBatch,
+    SourceSyncContext,
 };
 
 #[derive(Debug, Deserialize, SkipprConfig, Clone)]
@@ -334,7 +335,7 @@ impl DataSourceMysqlPlugin {
             }
 
             if !batch_groups.is_empty() {
-                submit_payload_batch_groups(ctx.as_ref(), batch_groups)?;
+                submit_payload_batch_groups_durable(ctx.as_ref(), batch_groups)?;
             }
         }
 
@@ -506,7 +507,7 @@ impl DataSourceMysqlPlugin {
                     }]),
                 };
 
-                submit_payload_batches(ctx.as_ref(), vec![batch])?;
+                submit_payload_batches_durable(ctx.as_ref(), vec![batch])?;
             }
 
             store_checkpoint_payload(
@@ -634,7 +635,7 @@ impl DataSourceMysqlPlugin {
             }
 
             if !batch_groups.is_empty() {
-                submit_payload_batch_groups(ctx.as_ref(), batch_groups)?;
+                submit_payload_batch_groups_durable(ctx.as_ref(), batch_groups)?;
             }
         }
 

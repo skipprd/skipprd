@@ -13,7 +13,9 @@ use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
-use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
+use skippr_runtime_sdk::source_compat::{
+    submit_payload_batches_durable, IngestBatch, SourceSyncContext,
+};
 
 #[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceEventbridgePluginConfig {
@@ -123,7 +125,7 @@ impl DataSource for DataSourceEventbridgePlugin {
             }
 
             if !pending.is_empty() {
-                submit_payload_batches(ctx.as_ref(), pending)?;
+                submit_payload_batches_durable(ctx.as_ref(), pending)?;
             }
 
             for msg in &messages {

@@ -190,9 +190,7 @@ impl DataSourceLocalFilePlugin {
             self.config.batch_size_bytes.unwrap_or(1_000_000),
         )?);
 
-        // Match S3: accept many payload tasks without waiting per batch so host
-        // ingest threads actually fan out. File previously used
-        // submit_payload_batch_groups → and_wait, which kept active_threads at 1.
+        // Accept without per-batch persist so host ingest threads can fan out.
         let total_cpus = std::env::var("INGEST_THREADS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -221,10 +219,6 @@ impl DataSourceLocalFilePlugin {
                         ctx.submit_payload_tasks_accepted(std::mem::take(&mut pending_tasks))?;
                     accepted.push(submission);
                     pending_bytes = 0;
-                    if accepted.len() >= 1024 {
-                        ctx.wait_payload_acks(&accepted)?;
-                        accepted.clear();
-                    }
                 }
             }
         }

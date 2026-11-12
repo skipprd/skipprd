@@ -50,11 +50,11 @@ pub trait SourceSyncContext: Send + Sync {
         tasks: Vec<SourcePayloadTask>,
     ) -> Result<ThroughputMetrics, io::Error>;
 
-    /// Submit payload tasks and return once the host has accepted them.
+    /// Submit payload tasks and return once the host has accepted the frame.
     ///
-    /// Implementations that do not support asynchronous ACKs can keep the old
-    /// behavior by using the default implementation, which waits for durability
-    /// via `submit_payload_tasks`.
+    /// This is not a WAL persist barrier. Use [`Self::submit_payload_tasks_and_wait`]
+    /// (or `submit_payload_batches_durable`) before origin ack, delete, commit, or
+    /// checkpoint. Implementations without async ACKs may treat accept as already durable.
     fn submit_payload_tasks_accepted(
         &self,
         tasks: Vec<SourcePayloadTask>,
@@ -63,7 +63,7 @@ pub trait SourceSyncContext: Send + Sync {
             .map(PayloadSubmissionBatch::already_durable)
     }
 
-    /// Compatibility helper for callers that still need submit to be a durability barrier.
+    /// Submit and wait until WAL persist ACK.
     fn submit_payload_tasks_and_wait(
         &self,
         tasks: Vec<SourcePayloadTask>,

@@ -20,7 +20,7 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches, IngestBatch,
+    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
     SourceSyncContext,
 };
 
@@ -170,7 +170,7 @@ impl DataSourcePostgresPlugin {
         if batches.is_empty() {
             return Ok(());
         }
-        submit_payload_batches(ctx, batches).map(|_| ())
+        submit_payload_batches_durable(ctx, batches).map(|_| ())
     }
 
     fn cdc_batch(

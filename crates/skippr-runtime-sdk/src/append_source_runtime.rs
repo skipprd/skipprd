@@ -433,9 +433,7 @@ pub async fn run_append_data_source_main(
     let control = RuntimeSourceControl::new();
     let mut shutdown_rx = control.subscribe_shutdown();
     let reader_control = control.clone();
-    let ingest_ack_client = Arc::new(RuntimeIngestAckClient::new(
-        start.source_ingest_window.clone(),
-    ));
+    let ingest_ack_client = Arc::new(RuntimeIngestAckClient::new());
     let reader_ingest_ack_client = ingest_ack_client.clone();
     tokio::spawn(async move {
         let _ = run_runtime_source_host_frame_loop(

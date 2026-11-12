@@ -19,7 +19,7 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, submit_payload_batches, IngestBatch,
+    load_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
 };
 use tracing::{info, warn};
 
@@ -373,7 +373,7 @@ impl DataSourceXeroAccountingPlugin {
             .join("\n");
         let bytes = payload.len();
         let offset_key = OffsetKey::new(namespace, run_date.to_string());
-        submit_payload_batches(
+        submit_payload_batches_durable(
             ctx,
             vec![IngestBatch {
                 offset_key,

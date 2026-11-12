@@ -1,4 +1,5 @@
 pub mod append_source_runtime;
+pub mod prefetch;
 pub mod progress;
 pub mod protocol;
 pub mod runtime_main;

@@ -19,7 +19,7 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, submit_payload_batches, IngestBatch,
+    load_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
 };
 
 use crate::linkedin_ads_api::{
@@ -216,7 +216,7 @@ impl DataSourceLinkedInAdsPlugin {
             .map_err(|e| std::io::Error::other(e.to_string()))?
             .join("\n");
         let bytes = payload.len();
-        submit_payload_batches(
+        submit_payload_batches_durable(
             ctx,
             vec![IngestBatch {
                 offset_key: OffsetKey::new(stream.namespace, offset),
