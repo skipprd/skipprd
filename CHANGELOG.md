@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Grouped compact does not send a 0-row object write when WAL is missing or empty. Missing payload keeps the catalog row and other groups still schedule. Readable empty slices Ack without a sink object.
 - Hive Glue no longer attaches partition indexes on unpartitioned deadletter `_dl_*` tables, so first compact can create them.
 - WAL catalog hydrate latches so a metrics tick cannot start a second walk while startup is still loading; compact and ingest wait until `manifests_loaded`.
 - Dynamo `snapshot_then_cdc` writes a 16-byte `_skippr_order_token` (zeros for the snapshot, then the stream sequence) and `_skippr_event_time` from `ApproximateCreationDateTime` when present, otherwise ingest time, so Iceberg MergeByKey can compact day partitions.

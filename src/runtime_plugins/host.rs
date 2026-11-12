@@ -3419,6 +3419,9 @@ impl RuntimeDataSinkPlugin {
                 let mut total_rows = 0u64;
                 let mut total_bytes = 0u64;
                 while let Some(chunk) = reader.next_chunk().await? {
+                    if chunk.rows == 0 {
+                        continue;
+                    }
                     let arrow_stream_bytes = encode_record_batches(&chunk.batches)?;
                     let sink_chunk = SinkChunk {
                         request_id,
@@ -3439,20 +3442,12 @@ impl RuntimeDataSinkPlugin {
                     tokio::task::yield_now().await;
                 }
                 if sent_chunks == 0 {
-                    let sink_chunk = SinkChunk {
-                        request_id,
-                        chunk_index: 0,
-                        row_offset: 0,
-                        rows: 0,
-                        arrow_stream_bytes: encode_record_batches(&[])?,
-                    };
-                    sink_chunk.validate_bound().map_err(io::Error::other)?;
-                    total_bytes = sink_chunk.arrow_stream_bytes.len() as u64;
-                    payload_started = true;
-                    connection
-                        .send_data(&HostDataFrame::SinkChunk(sink_chunk))
-                        .await?;
-                    sent_chunks = 1;
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "grouped sink produced no rows request_id={request_id} compaction_id={compaction_id}"
+                        ),
+                    ));
                 }
                 connection
                     .send_data(&HostDataFrame::FinishSink(FinishSink {
@@ -3472,7 +3467,8 @@ impl RuntimeDataSinkPlugin {
             let frame = match response {
                 Ok(Ok(frame)) => frame,
                 Ok(Err(err)) => {
-                    let retry = !payload_started && !retried;
+                    let retry =
+                        !payload_started && !retried && err.kind() != ErrorKind::InvalidInput;
                     let _ = self.restart_worker(&worker).await;
                     if retry {
                         retried = true;
@@ -4256,6 +4252,24 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
     use tokio::net::{TcpListener, TcpStream};
+
+    #[test]
+    fn grouped_sink_does_not_synthesize_a_zero_row_chunk() {
+        let src = include_str!("host.rs");
+        let body = src
+            .split("async fn send_grouped_sink_request")
+            .nth(1)
+            .expect("send_grouped_sink_request")
+            .split("async fn sync(")
+            .next()
+            .expect("grouped sink body");
+        assert!(
+            !body.contains("rows: 0"),
+            "grouped sink must not synthesize a 0-row SinkChunk"
+        );
+        assert!(body.contains("grouped sink produced no rows"));
+        assert!(body.contains("if chunk.rows == 0"));
+    }
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 

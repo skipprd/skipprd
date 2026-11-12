@@ -116,6 +116,14 @@ impl SegmentSource {
     fn is_s3(&self) -> bool {
         matches!(self, SegmentSource::S3 { .. })
     }
+
+    fn disk_payload_missing(&self) -> bool {
+        match self {
+            SegmentSource::Disk(path) | SegmentSource::Wal { path, .. } => !path.is_file(),
+            SegmentSource::S3 { body: Some(_), .. } => false,
+            SegmentSource::S3 { body: None, .. } => false,
+        }
+    }
 }
 
 fn is_s3_wal(config: &Config) -> bool {
@@ -2252,6 +2260,14 @@ impl Buffers {
             if cached.source.display_name() != slice.id.source_id {
                 return None;
             }
+            if cached.source.disk_payload_missing() {
+                warn!(
+                    "Compactor: planned group skipped missing payload file segment_id={} source={}",
+                    slice.id.segment_id,
+                    cached.source.display_name()
+                );
+                return None;
+            }
             let ordinal = slice.index_entry.slice_ordinal as usize;
             entries.push(CompactionEntry {
                 source: cached.source.clone(),
@@ -2295,6 +2311,13 @@ impl Buffers {
                 );
                 return None;
             };
+            if cached.source.disk_payload_missing() {
+                warn!(
+                    "Compactor: manifest resume skipped missing payload file segment_id={} compaction_id={}; catalog row kept",
+                    wal_ref.segment_id, txn.id
+                );
+                return None;
+            }
             let Some((ordinal, idx)) = cached.meta.index.iter().enumerate().find(|(_, idx)| {
                 idx.start == wal_ref.start && idx.len == wal_ref.len && idx.key == wal_ref.key
             }) else {
@@ -3528,6 +3551,55 @@ impl Buffers {
         crate::buffer::segment_file::decode_copy_part(entry.idx.codec, &bytes)
     }
 
+    fn grouped_work_payload_missing(work: &CompactionWork) -> bool {
+        work.entries
+            .iter()
+            .any(|entry| entry.source.disk_payload_missing())
+    }
+
+    fn is_missing_payload_error(err: &io::Error) -> bool {
+        err.kind() == io::ErrorKind::NotFound
+    }
+
+    async fn grouped_reader_has_rows(
+        reader: &mut crate::plugins::GroupedBatchReader,
+    ) -> io::Result<bool> {
+        loop {
+            match reader.next_chunk().await? {
+                None => return Ok(false),
+                Some(chunk) if chunk.rows == 0 => continue,
+                Some(chunk) => {
+                    reader.push_front_chunk(chunk);
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    async fn finish_grouped_without_sink(
+        config: &Config,
+        work: &CompactionWork,
+        progress: GroupedCompactionTracker,
+    ) -> io::Result<bool> {
+        progress.set_rows(0);
+        Self::persist_compaction_row(config, &work.txn.clone().mark_acked()).await?;
+        Self::tombstone_grouped_work(config, work)?;
+        Self::commit_durable_compaction_reclaim(work, &work.txn).await?;
+        COMPACT_FAILURES.remove(&format!("{}:{}", work.txn.sink_ref, work.txn.id));
+        crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
+        crate::metrics::counters::add_wal_compaction_transaction_completed(1);
+        crate::metrics::counters::add_wal_compaction_refs_tombstoned(work.entries.len() as u64);
+        Self::remove_compaction_row(config, &work.txn.id)?;
+        progress.finish();
+        info!(
+            "Compactor: grouped compaction complete with no rows namespace={} wal_parts={} compaction_id={}",
+            work.txn.namespace,
+            work.entries.len(),
+            work.txn.id,
+        );
+        Ok(true)
+    }
+
     async fn compact_grouped_work(
         config: &Config,
         work: CompactionWork,
@@ -3588,12 +3660,32 @@ impl Buffers {
         let _guard = WorkGuard(&work);
         let _s3_body_pin = Self::pin_work_s3_segments(&work);
 
+        if Self::grouped_work_payload_missing(&work) {
+            warn!(
+                "Compactor: grouped compaction skipped missing payload namespace={} sink_ref={} compaction_id={}; catalog row kept",
+                work.txn.namespace,
+                work.txn.sink_ref,
+                work.txn.id,
+            );
+            return Ok(false);
+        }
+
         Self::persist_compaction_row(config, &work.txn).await?;
         let _decode_permit = budget.acquire_decode().await?;
         let stream_started = std::time::Instant::now();
         let (batch_stream, cdc_ctx, rows, row_counter, rows_known_at_build) =
             match Self::build_grouped_stream(&config, &work).await {
                 Ok(stream) => stream,
+                Err(err) if Self::is_missing_payload_error(&err) => {
+                    warn!(
+                        "Compactor: grouped stream build skipped missing payload sink_ref={} namespace={} compaction_id={}; catalog row kept err={}",
+                        work.txn.sink_ref,
+                        work.txn.namespace,
+                        work.txn.id,
+                        err
+                    );
+                    return Ok(false);
+                }
                 Err(err) => {
                     let err_str = err.to_string();
                     Self::quarantine_truncated_entries(
@@ -3671,11 +3763,34 @@ impl Buffers {
                 grouped_ctx.grouping_key.time.is_none()
             );
         }
-        let grouped_reader = crate::plugins::GroupedBatchReader::new(
+        let mut grouped_reader = crate::plugins::GroupedBatchReader::new(
             batch_stream,
             grouped_ctx.grouping_key.clone(),
             crate::plugins::GroupedBatchReaderConfig::default(),
         );
+        let has_rows = if rows_known_at_build {
+            rows > 0
+        } else {
+            Self::grouped_reader_has_rows(&mut grouped_reader).await?
+        };
+        if !has_rows {
+            if Self::grouped_work_payload_missing(&work) {
+                warn!(
+                    "Compactor: grouped compaction produced no rows with missing payload namespace={} sink_ref={} compaction_id={}; catalog row kept",
+                    work.txn.namespace,
+                    work.txn.sink_ref,
+                    work.txn.id,
+                );
+                return Ok(false);
+            }
+            info!(
+                "Compactor: grouped compaction has no rows to publish namespace={} sink_ref={} compaction_id={}",
+                work.txn.namespace,
+                work.txn.sink_ref,
+                work.txn.id,
+            );
+            return Self::finish_grouped_without_sink(config, &work, progress).await;
+        }
         let _commit_lane =
             crate::buffer::sink_conflict::acquire_exact_once_commit_lane(&work.txn).await;
         let sink_permit = budget.acquire_sink().await?;
@@ -3963,6 +4078,11 @@ mod tests_wal_commit {
         RecordBatch::try_new(Arc::new(schema), vec![Arc::new(arr)]).unwrap()
     }
 
+    fn make_empty_batch() -> RecordBatch {
+        let schema = Schema::new(vec![Field::new("v", DataType::Int32, false)]);
+        RecordBatch::new_empty(Arc::new(schema))
+    }
+
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     fn env_lock() -> MutexGuard<'static, ()> {
         ENV_LOCK
@@ -4138,18 +4258,48 @@ mod tests_wal_commit {
         segment_id: &str,
         sink_refs: &[&str],
     ) -> SyntheticDiskBacklog {
+        synthetic_disk_backlog_with_batch(
+            base,
+            segment_id,
+            sink_refs,
+            "synthetic_backlog",
+            make_batch(),
+        )
+    }
+
+    fn synthetic_empty_disk_backlog(
+        base: &Path,
+        segment_id: &str,
+        sink_refs: &[&str],
+    ) -> SyntheticDiskBacklog {
+        synthetic_disk_backlog_with_batch(
+            base,
+            segment_id,
+            sink_refs,
+            "synthetic_backlog",
+            make_empty_batch(),
+        )
+    }
+
+    fn synthetic_disk_backlog_with_batch(
+        base: &Path,
+        segment_id: &str,
+        sink_refs: &[&str],
+        namespace: &str,
+        batch: RecordBatch,
+    ) -> SyntheticDiskBacklog {
         let segf = SegmentFile::new(base, segment_id).unwrap();
         let mut batches = StdHashMap::new();
         let mut parts_meta = StdHashMap::new();
         for (index, sink_ref) in sink_refs.iter().enumerate() {
             let key = PartitionKey {
                 sink_ref: (*sink_ref).to_string(),
-                namespace: "synthetic_backlog".to_string(),
+                namespace: namespace.to_string(),
                 partition: format!("slice-{index}"),
                 time: Some(1_700_000_000),
                 schema_fingerprint: "schema-v1".to_string(),
             };
-            batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
+            batches.insert(key.clone(), WalPayload::Arrow(vec![batch.clone()]));
             parts_meta.insert(key, (0, SystemTime::UNIX_EPOCH));
         }
         let offsets = StdHashMap::new();
@@ -4210,6 +4360,16 @@ mod tests_wal_commit {
 
     struct SyntheticGroupedSink {
         behavior: SyntheticGroupedBehavior,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SyntheticGroupedSink {
+        fn new(behavior: SyntheticGroupedBehavior) -> Self {
+            Self {
+                behavior,
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
     }
 
     #[async_trait]
@@ -4228,6 +4388,7 @@ mod tests_wal_commit {
             mut reader: crate::plugins::GroupedBatchReader,
             _ctx: crate::plugins::GroupedSinkWriteContext<'_>,
         ) -> io::Result<SinkWriteOutcome> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             while reader.next_chunk().await?.is_some() {}
             match self.behavior {
                 SyntheticGroupedBehavior::Apply => Ok(SinkWriteOutcome::Applied),
@@ -4415,9 +4576,7 @@ mod tests_wal_commit {
         Buffers::segment_cache_register(&config, SegmentSource::Disk(segf.path.clone()), meta);
 
         SegmentFile::reset_full_part_meta_scan_count();
-        let sink = SyntheticGroupedSink {
-            behavior: SyntheticGroupedBehavior::Apply,
-        };
+        let sink = SyntheticGroupedSink::new(SyntheticGroupedBehavior::Apply);
         let works = Buffers::next_compaction_transactions(
             &config,
             PARTS,
@@ -4479,9 +4638,9 @@ mod tests_wal_commit {
                 GroupedCompactionTestEvent::SlicesTombstoned => {}
             }
         });
-        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(SyntheticGroupedSink {
-            behavior: SyntheticGroupedBehavior::Apply,
-        }));
+        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(
+            SyntheticGroupedSink::new(SyntheticGroupedBehavior::Apply),
+        ));
         let budget = Arc::new(FlushExecutionBudget::new(1, 1));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -4522,9 +4681,9 @@ mod tests_wal_commit {
         let observer: GroupedCompactionTestObserver = Arc::new(move |event| {
             observed_for_hook.lock().unwrap().push(event);
         });
-        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(SyntheticGroupedSink {
-            behavior: SyntheticGroupedBehavior::Fail("synthetic sink failure"),
-        }));
+        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(
+            SyntheticGroupedSink::new(SyntheticGroupedBehavior::Fail("synthetic sink failure")),
+        ));
         let budget = Arc::new(FlushExecutionBudget::new(1, 1));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -4542,6 +4701,132 @@ mod tests_wal_commit {
         assert!(observed.lock().unwrap().is_empty());
         assert!(backlog.segment_path.exists());
         COMPACT_FAILURES.remove(&failure_key);
+        reset_in_memory_segments();
+    }
+
+    #[test]
+    #[serial]
+    fn grouped_compaction_skips_sink_when_wal_payload_is_missing() {
+        let (base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let offsets_db = Arc::new(Offsets::init(&Config::new()).unwrap());
+        let _store = install_test_ingest_store(&Config::new(), offsets_db);
+        let backlog = synthetic_disk_backlog(&base, "missing-payload", &["data_sinks.ds_datalake"]);
+        let work = backlog.work_for_sink("data_sinks.ds_datalake");
+        fs::remove_file(&backlog.segment_path).unwrap();
+        let sink = SyntheticGroupedSink::new(SyntheticGroupedBehavior::Apply);
+        let calls = sink.calls.clone();
+        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(sink));
+        let budget = Arc::new(FlushExecutionBudget::new(1, 1));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let compacted = runtime
+            .block_on(Buffers::compact_grouped_work(
+                &Config::new(),
+                work,
+                sink,
+                budget,
+            ))
+            .unwrap();
+
+        assert!(!compacted);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!backlog.segment_path.exists());
+        reset_in_memory_segments();
+    }
+
+    #[test]
+    #[serial]
+    fn grouped_compaction_acks_readable_empty_wal_without_sink() {
+        let (base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let offsets_db = Arc::new(Offsets::init(&Config::new()).unwrap());
+        let _store = install_test_ingest_store(&Config::new(), offsets_db);
+        let backlog =
+            synthetic_empty_disk_backlog(&base, "empty-payload", &["data_sinks.ds_datalake"]);
+        let work = backlog.work_for_sink("data_sinks.ds_datalake");
+        let sink = SyntheticGroupedSink::new(SyntheticGroupedBehavior::Apply);
+        let calls = sink.calls.clone();
+        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(sink));
+        let budget = Arc::new(FlushExecutionBudget::new(1, 1));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let compacted = runtime
+            .block_on(Buffers::compact_grouped_work(
+                &Config::new(),
+                work,
+                sink,
+                budget,
+            ))
+            .unwrap();
+
+        assert!(compacted);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        reset_in_memory_segments();
+    }
+
+    #[test]
+    #[serial]
+    fn missing_payload_manifest_does_not_starve_other_compaction_groups() {
+        let (base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let doomed = synthetic_disk_backlog_with_batch(
+            &base,
+            "doomed-payload",
+            &["data_sinks.ds_datalake"],
+            "doomed_ns",
+            make_batch(),
+        );
+        let healthy = synthetic_disk_backlog_with_batch(
+            &base,
+            "healthy-payload",
+            &["data_sinks.ds_datalake"],
+            "healthy_ns",
+            make_batch(),
+        );
+        let config = Config::new().bind_pipeline("synthetic");
+        Buffers::segment_cache_register(
+            &config,
+            SegmentSource::Disk(doomed.segment_path.clone()),
+            doomed.meta.clone(),
+        );
+        Buffers::segment_cache_register(
+            &config,
+            SegmentSource::Disk(healthy.segment_path.clone()),
+            healthy.meta.clone(),
+        );
+        compaction_index().install_manifests(Vec::new());
+        compaction_index().upsert_manifest(doomed.work_for_sink("data_sinks.ds_datalake").txn);
+        fs::remove_file(&doomed.segment_path).unwrap();
+        let sink = SyntheticGroupedSink::new(SyntheticGroupedBehavior::Apply);
+        let works = Buffers::next_compaction_transactions(
+            &config,
+            4,
+            true,
+            &sink,
+            &HashMap::new(),
+            &HashSet::new(),
+            4,
+        );
+        assert!(
+            works.iter().any(|work| work
+                .entries
+                .iter()
+                .any(|entry| { entry.source.segment_id() == "healthy-payload" })),
+            "healthy WAL group must still be planned when a missing-payload manifest is present"
+        );
+        assert!(works.iter().all(|work| {
+            !work
+                .entries
+                .iter()
+                .any(|entry| entry.source.segment_id() == "doomed-payload")
+        }));
         reset_in_memory_segments();
     }
 
@@ -4563,9 +4848,9 @@ mod tests_wal_commit {
         let backlog = synthetic_disk_backlog(&base, "hung-group", &["data_sinks.ds_datalake"]);
         let work = backlog.work_for_sink("data_sinks.ds_datalake");
         let failure_key = format!("{}:{}", work.txn.sink_ref, work.txn.id);
-        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(SyntheticGroupedSink {
-            behavior: SyntheticGroupedBehavior::Hang,
-        }));
+        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(
+            SyntheticGroupedSink::new(SyntheticGroupedBehavior::Hang),
+        ));
         let budget = Arc::new(FlushExecutionBudget::new(1, 1));
         let timeout = Buffers::grouped_compaction_timeout();
 
@@ -4594,9 +4879,10 @@ mod tests_wal_commit {
         let backlog = synthetic_disk_backlog(&base, "slow-group", &["data_sinks.ds_datalake"]);
         let work = backlog.work_for_sink("data_sinks.ds_datalake");
         let timeout = Buffers::grouped_compaction_timeout();
-        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(SyntheticGroupedSink {
-            behavior: SyntheticGroupedBehavior::ApplyAfter(timeout - TokioDuration::from_millis(1)),
-        }));
+        let sink: Arc<Box<dyn DataSink + Send + Sync>> =
+            Arc::new(Box::new(SyntheticGroupedSink::new(
+                SyntheticGroupedBehavior::ApplyAfter(timeout - TokioDuration::from_millis(1)),
+            )));
         let budget = Arc::new(FlushExecutionBudget::new(1, 1));
 
         let compacted = paused_runtime().block_on(Buffers::compaction_job_future(

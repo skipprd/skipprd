@@ -453,6 +453,7 @@ pub struct GroupedBatchReader {
     chunk_index: u64,
     rows_emitted: u64,
     pending: Option<RecordBatch>,
+    replay_chunk: Option<RecordBatchChunk>,
     finished: bool,
 }
 
@@ -472,6 +473,7 @@ impl GroupedBatchReader {
             chunk_index: 0,
             rows_emitted: 0,
             pending: None,
+            replay_chunk: None,
             finished: false,
         }
     }
@@ -496,8 +498,18 @@ impl GroupedBatchReader {
             chunk_index: 0,
             rows_emitted: 0,
             pending: None,
+            replay_chunk: None,
             finished: false,
         }
+    }
+
+    /// Put a chunk back so the next `next_chunk` returns it unchanged.
+    pub fn push_front_chunk(&mut self, chunk: RecordBatchChunk) {
+        debug_assert!(
+            self.replay_chunk.is_none(),
+            "grouped reader already has a replay chunk"
+        );
+        self.replay_chunk = Some(chunk);
     }
 
     pub fn schema(&self) -> SchemaRef {
@@ -509,6 +521,9 @@ impl GroupedBatchReader {
     }
 
     pub async fn next_chunk(&mut self) -> io::Result<Option<RecordBatchChunk>> {
+        if let Some(chunk) = self.replay_chunk.take() {
+            return Ok(Some(chunk));
+        }
         if self.finished {
             return Ok(None);
         }
@@ -1129,6 +1144,35 @@ mod tests {
         assert_eq!(second.row_offset, 2);
         assert_eq!(second.rows, 1);
         assert!(second.final_chunk);
+        assert!(reader.next_chunk().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn grouped_batch_reader_push_front_replays_the_same_chunk() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .unwrap();
+        let stream: SendableRecordBatchStream = Box::pin(ChunkRecordBatchStream {
+            schema,
+            batches: vec![batch].into_iter(),
+        });
+        let refs = GroupedWalRefs::new(vec![runtime_ref()]).unwrap();
+        let key = GroupedWalPartitionKey::from_refs(&refs, "schema", None);
+        let mut reader = GroupedBatchReader::new(
+            stream,
+            key,
+            GroupedBatchReaderConfig {
+                max_rows: 100,
+                max_bytes: usize::MAX,
+            },
+        );
+        let first = reader.next_chunk().await.unwrap().unwrap();
+        assert_eq!(first.rows, 2);
+        reader.push_front_chunk(first.clone());
+        let replayed = reader.next_chunk().await.unwrap().unwrap();
+        assert_eq!(replayed.rows, first.rows);
+        assert_eq!(replayed.chunk_index, first.chunk_index);
         assert!(reader.next_chunk().await.unwrap().is_none());
     }
 
