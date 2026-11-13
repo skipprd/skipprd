@@ -190,6 +190,14 @@ fn explode_arrays(values: Vec<Value>) -> Vec<Value> {
     out
 }
 
+fn line_looks_like_json_value(content: &str) -> bool {
+    let trimmed = content.trim();
+    matches!(
+        (trimmed.as_bytes().first(), trimmed.as_bytes().last()),
+        (Some(b'{'), Some(b'}')) | (Some(b'['), Some(b']'))
+    )
+}
+
 fn identity_ndjson(
     config: &Config,
     format: InputFormat,
@@ -211,13 +219,15 @@ fn identity_ndjson(
         if content.trim().is_empty() {
             continue;
         }
-        let value = serde_json::from_str::<Value>(content).ok()?;
+        if !line_looks_like_json_value(content) {
+            return None;
+        }
         let mut identity = line.as_bytes().to_vec();
         if !identity.ends_with(&[b'\n']) {
             identity.push(b'\n');
         }
         records.push(CopyWalRecord {
-            value,
+            value: Value::Null,
             identity: Some(identity),
         });
     }
@@ -415,7 +425,12 @@ mod tests {
     }
 
     fn cell_map(records: &[CopyWalRecord]) -> Map<String, Value> {
-        records[0].value.as_object().cloned().unwrap()
+        records[0]
+            .decoded_value()
+            .unwrap()
+            .as_object()
+            .cloned()
+            .unwrap()
     }
 
     fn is_gzip(bytes: &[u8]) -> bool {
@@ -529,10 +544,19 @@ mod tests {
         let config = Config::new();
         let payload = "{\"id\":1,\"name\":\"keep\"}\n";
         let decoded = decode_copy_bytes(&config, InputFormat::Json, payload.as_bytes()).unwrap();
+        assert!(decoded[0].value.is_null());
         assert_eq!(decoded[0].identity.as_deref(), Some(payload.as_bytes()));
+        assert_eq!(decoded[0].decoded_value().unwrap()["id"], 1);
         let encoded = encode_copy(OutputFormat::Jsonl, &decoded).unwrap();
         assert!(is_gzip(&encoded));
         assert_eq!(gunzip_jsonl(&encoded), payload.as_bytes());
+    }
+
+    #[test]
+    fn pretty_json_does_not_take_identity_path() {
+        assert!(line_looks_like_json_value(r#"{"id":1}"#));
+        assert!(!line_looks_like_json_value("{"));
+        assert!(!line_looks_like_json_value(r#"  "id": 1"#));
     }
 
     #[test]
@@ -583,7 +607,7 @@ mod tests {
         let jsonl = encode_copy(OutputFormat::Jsonl, &decoded).unwrap();
         assert!(is_gzip(&jsonl));
         let again = decode_copy_bytes(&config, InputFormat::Json, &gunzip_jsonl(&jsonl)).unwrap();
-        assert_eq!(again[0].value["id"], 1);
+        assert_eq!(again[0].decoded_value().unwrap()["id"], 1);
         let csv = encode_copy(OutputFormat::Csv, &decoded).unwrap();
         assert!(!is_gzip(&csv));
         assert!(std::str::from_utf8(&csv).unwrap().contains("id"));

@@ -3196,6 +3196,13 @@ impl Ingest {
                 }
             }
             for record in records {
+                let routed_value;
+                let value = if record.value.is_null() {
+                    routed_value = record.decoded_value().unwrap_or(Value::Null);
+                    &routed_value
+                } else {
+                    &record.value
+                };
                 let ns_started = profile.then(Instant::now);
                 let namespace = if let Some(fixed) = fixed_namespace.as_ref() {
                     fixed.clone()
@@ -3204,7 +3211,7 @@ impl Ingest {
                         config,
                         &Helpers::parse_namespace_field_with_fields(
                             config,
-                            &record.value,
+                            value,
                             batch_namespace_override.clone(),
                             &mut ns_cache,
                             &transform_snap.namespace_fields,
@@ -3220,7 +3227,7 @@ impl Ingest {
                 } else {
                     Helpers::parse_partition_field_with_fields(
                         config,
-                        &record.value,
+                        value,
                         &allowed_values,
                         &transform_snap.partition_fields,
                     )
@@ -3232,11 +3239,8 @@ impl Ingest {
                 let time = if transform_snap.skip_time_parse {
                     None
                 } else {
-                    Helpers::parse_time_field_with_fields(
-                        &record.value,
-                        &transform_snap.time_fields,
-                    )
-                    .map(|ts| BufferChunker::event_time_bucket(config, ts))
+                    Helpers::parse_time_field_with_fields(value, &transform_snap.time_fields)
+                        .map(|ts| BufferChunker::event_time_bucket(config, ts))
                 };
                 time_parse_ns += time_started
                     .map(|started| started.elapsed().as_nanos() as u64)
