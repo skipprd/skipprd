@@ -40,8 +40,6 @@ runs:
           echo "AWS_DEFAULT_REGION=auto"
           echo "AWS_REGION=auto"
           echo "AWS_ENDPOINT_URL=${endpoint}"
-          echo "AWS_SESSION_TOKEN="
-          echo "AWS_SECURITY_TOKEN="
           echo "AWS_CONFIG_FILE=/dev/null"
           echo "AWS_SHARED_CREDENTIALS_FILE=/dev/null"
           echo "RUST_BUILD_CACHE_BUCKET=skippr-web-rust-cache"
@@ -63,3 +61,10 @@ runs:
       uses: mozilla-actions/sccache-action@v0.0.9
       with:
         version: v0.10.0
+    - name: Restart sccache without session token
+      shell: bash
+      run: |
+        set -euo pipefail
+        unset AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
+        sccache --stop-server >/dev/null 2>&1 || true
+        sccache --start-server

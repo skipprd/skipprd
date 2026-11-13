@@ -675,6 +675,13 @@ class GithubActionsStorageTests(unittest.TestCase):
         self.assertIn("skippr-web-rust-cache", sccache)
         self.assertIn("mozilla-actions/sccache-action", sccache)
         self.assertIn("RUSTC_WRAPPER=sccache", sccache)
+        self.assertNotIn(
+            'echo "AWS_SESSION_TOKEN="',
+            sccache,
+            "empty AWS_SESSION_TOKEN makes sccache send X-Amz-Security-Token; R2 rejects it",
+        )
+        self.assertIn("unset AWS_SESSION_TOKEN", sccache)
+        self.assertIn("sccache --start-server", sccache)
         secrets = (ROOT / ".github" / "R2_RELEASE_SECRETS.md").read_text(encoding="utf-8")
         self.assertIn("skippr-web-rust-cache", secrets)
         self.assertIn("GitHub Actions cache", secrets)

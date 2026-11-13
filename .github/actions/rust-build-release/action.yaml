@@ -96,6 +96,7 @@ runs:
       shell: bash
       run: |
         cd "${{ inputs.workspace-root }}"
+        unset AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
         export RUNTIME_PLUGIN_PACKAGES_JSON='${{ inputs.runtime_plugin_packages_json }}'
         plugin_packages_file="$(mktemp)"
         python3 - <<'PY' > "${plugin_packages_file}"
