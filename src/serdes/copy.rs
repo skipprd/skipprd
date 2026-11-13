@@ -29,6 +29,20 @@ pub struct CopyWalRecord {
 }
 
 impl CopyWalRecord {
+    /// JSON value for encode paths that cannot use identity bytes.
+    /// Identity WAL frames leave `value` null until this runs.
+    pub fn decoded_value(&self) -> Result<Value, CopyEncodeError> {
+        if !self.value.is_null() {
+            return Ok(self.value.clone());
+        }
+        let Some(bytes) = &self.identity else {
+            return Ok(Value::Null);
+        };
+        let line = bytes.strip_suffix(&[b'\n']).unwrap_or(bytes.as_slice());
+        serde_json::from_slice(line)
+            .map_err(|err| CopyEncodeError::Output(format!("decode copy identity: {err}")))
+    }
+
     /// WAL-size estimate without `Value::to_string()` (which allocates a full JSON document).
     pub fn estimated_wal_bytes(&self) -> u64 {
         json_value_bytes(&self.value)
@@ -236,7 +250,8 @@ fn encode_csv(records: &[CopyWalRecord]) -> Result<Vec<u8>, CopyEncodeError> {
     let mut header: Option<Vec<String>> = None;
     let mut rows: Vec<Vec<String>> = Vec::new();
     for record in records {
-        let object = record.value.as_object().ok_or_else(|| {
+        let parsed = record.decoded_value()?;
+        let object = parsed.as_object().ok_or_else(|| {
             CopyEncodeError::Output("CSV encode requires each record to be a JSON object".into())
         })?;
         let keys = csv_keys(object);
@@ -295,7 +310,8 @@ fn encode_xml(records: &[CopyWalRecord]) -> Result<Vec<u8>, CopyEncodeError> {
     let mut out = String::from("<records>");
     for record in records {
         out.push_str("<record>");
-        write_xml_value(&mut out, &record.value)?;
+        let parsed = record.decoded_value()?;
+        write_xml_value(&mut out, &parsed)?;
         out.push_str("</record>");
     }
     out.push_str("</records>");
@@ -517,6 +533,18 @@ mod tests {
         let encoded = encode_copy(OutputFormat::Jsonl, &decoded).unwrap();
         assert!(is_gzip(&encoded));
         assert_eq!(gunzip_jsonl(&encoded), payload.as_bytes());
+    }
+
+    #[test]
+    fn identity_wal_frame_jsonl_does_not_need_parsed_value() {
+        let records = [CopyWalRecord {
+            value: Value::Null,
+            identity: Some(b"{\"id\":1}\n".to_vec()),
+        }];
+        let encoded = encode_copy(OutputFormat::Jsonl, &records).unwrap();
+        assert_eq!(gunzip_jsonl(&encoded), b"{\"id\":1}\n");
+        let csv = encode_copy(OutputFormat::Csv, &records).unwrap();
+        assert!(std::str::from_utf8(&csv).unwrap().contains("id"));
     }
 
     #[test]

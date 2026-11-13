@@ -343,7 +343,8 @@ impl<'a> CopyFrame<'a> {
     fn into_record(self) -> io::Result<CopyWalRecord> {
         match self {
             Self::Identity(line) => Ok(CopyWalRecord {
-                value: parse_copy_json(&line)?,
+                // Compact JSONL writes identity bytes; skip serde_json until CSV/XML encode.
+                value: serde_json::Value::Null,
                 identity: Some(line.into_owned()),
             }),
             Self::Json(json) => Ok(CopyWalRecord {
@@ -1384,8 +1385,9 @@ mod tests_wal_writer {
         let end = start + copy_idx.len as usize;
         let decoded = decode_copy_part(copy_idx.codec, &bytes[start..end]).unwrap();
         assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0].value["id"], 1);
+        assert!(decoded[0].value.is_null());
         assert_eq!(decoded[0].identity.as_deref(), Some(&b"{\"id\":1}\n"[..]));
+        assert_eq!(decoded[0].decoded_value().unwrap()["id"], 1);
         assert_eq!(
             decoded[1].value,
             serde_json::json!({"id": 2, "nested": {"a": [1, 2]}})
@@ -1437,7 +1439,7 @@ mod tests_wal_writer {
         let ids: Vec<i64> = decode_copy_part(PART_CODEC_COPY_CHUNKED, &bytes)
             .unwrap()
             .iter()
-            .map(|record| record.value["id"].as_i64().unwrap())
+            .map(|record| record.decoded_value().unwrap()["id"].as_i64().unwrap())
             .collect();
         assert_eq!(ids, vec![1, 2, 3]);
         assert!(CopyPart::encode(&[]).unwrap().chunks.is_empty());
