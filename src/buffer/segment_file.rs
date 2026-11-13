@@ -48,12 +48,20 @@ impl CopyPart {
         if records.is_empty() {
             return Ok(Self::default());
         }
-        let frames = records
-            .iter()
-            .map(CopyFrame::from_record)
-            .collect::<io::Result<Vec<_>>>()?;
-        let raw = bincode::serialize(&frames)
-            .map_err(|err| invalid_data(format!("encode copy WAL: {err}")))?;
+        let identity_batch = concat_identity_ndjson(records);
+        let raw = if let Some(bytes) = identity_batch.as_ref() {
+            bincode::serialize(&vec![CopyFrame::IdentityBatch(Cow::Borrowed(
+                bytes.as_slice(),
+            ))])
+            .map_err(|err| invalid_data(format!("encode copy WAL: {err}")))?
+        } else {
+            let frames = records
+                .iter()
+                .map(CopyFrame::from_record)
+                .collect::<io::Result<Vec<_>>>()?;
+            bincode::serialize(&frames)
+                .map_err(|err| invalid_data(format!("encode copy WAL: {err}")))?
+        };
         let mut encoder = GzEncoder::new(Vec::with_capacity(raw.len() / 4), Compression::fast());
         encoder.write_all(&raw)?;
         Ok(Self {
@@ -324,10 +332,44 @@ struct LegacyCopyWalFrame {
 }
 
 /// Each record is stored once: NDJSON identity lines keep their source bytes.
+/// `IdentityBatch` is concatenated NDJSON (added after Identity/Json so old WAL still decodes).
 #[derive(serde::Serialize, serde::Deserialize)]
 enum CopyFrame<'a> {
     Identity(Cow<'a, [u8]>),
     Json(Cow<'a, [u8]>),
+    IdentityBatch(Cow<'a, [u8]>),
+}
+
+fn concat_identity_ndjson(records: &[CopyWalRecord]) -> Option<Vec<u8>> {
+    if records.is_empty() || !records.iter().all(|record| record.identity.is_some()) {
+        return None;
+    }
+    let mut out = Vec::new();
+    for record in records {
+        out.extend_from_slice(record.identity.as_deref().unwrap());
+    }
+    Some(out)
+}
+
+fn records_from_identity_ndjson(bytes: &[u8]) -> Vec<CopyWalRecord> {
+    let mut records = Vec::new();
+    for line in bytes.split_inclusive(|&b| b == b'\n') {
+        if line
+            .iter()
+            .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        {
+            continue;
+        }
+        let mut identity = line.to_vec();
+        if !identity.ends_with(&[b'\n']) {
+            identity.push(b'\n');
+        }
+        records.push(CopyWalRecord {
+            value: serde_json::Value::Null,
+            identity: Some(identity),
+        });
+    }
+    records
 }
 
 impl<'a> CopyFrame<'a> {
@@ -351,6 +393,7 @@ impl<'a> CopyFrame<'a> {
                 value: parse_copy_json(&json)?,
                 identity: None,
             }),
+            Self::IdentityBatch(_) => Err(invalid_data("identity batch must be split")),
         }
     }
 }
@@ -386,7 +429,12 @@ pub fn decode_copy_part(codec: u8, bytes: &[u8]) -> io::Result<Vec<CopyWalRecord
                 let frames: Vec<CopyFrame<'static>> = bincode::deserialize_from(&mut cursor)
                     .map_err(|err| invalid_data(format!("decode copy WAL: {err}")))?;
                 for frame in frames {
-                    records.push(frame.into_record()?);
+                    match frame {
+                        CopyFrame::IdentityBatch(bytes) => {
+                            records.extend(records_from_identity_ndjson(&bytes));
+                        }
+                        other => records.push(other.into_record()?),
+                    }
                 }
             }
             Ok(records)
@@ -1443,6 +1491,38 @@ mod tests_wal_writer {
             .collect();
         assert_eq!(ids, vec![1, 2, 3]);
         assert!(CopyPart::encode(&[]).unwrap().chunks.is_empty());
+    }
+
+    #[test]
+    fn identity_batch_wal_roundtrips_without_per_row_frames() {
+        let records: Vec<_> = (0..8)
+            .map(|i| crate::serdes::copy::CopyWalRecord {
+                value: serde_json::Value::Null,
+                identity: Some(format!("{{\"id\":{i}}}\n").into_bytes()),
+            })
+            .collect();
+        let part = CopyPart::encode(&records).unwrap();
+        assert_eq!(part.rows(), 8);
+        let mut body = Vec::new();
+        for chunk in &part.chunks {
+            body.extend_from_slice(chunk);
+        }
+        let decoded = decode_copy_part(PART_CODEC_COPY_CHUNKED, &body).unwrap();
+        assert_eq!(decoded.len(), 8);
+        assert!(decoded.iter().all(|record| record.value.is_null()));
+        assert_eq!(decoded[3].identity.as_deref(), Some(&b"{\"id\":3}\n"[..]));
+    }
+
+    #[test]
+    fn identity_copy_frame_variant_still_decodes() {
+        let frames = vec![CopyFrame::Identity(Cow::Borrowed(&b"{\"id\":1}\n"[..]))];
+        let raw = bincode::serialize(&frames).unwrap();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&raw).unwrap();
+        let body = encoder.finish().unwrap();
+        let decoded = decode_copy_part(PART_CODEC_COPY_CHUNKED, &body).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].identity.as_deref(), Some(&b"{\"id\":1}\n"[..]));
     }
 
     #[test]
