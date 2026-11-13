@@ -56,7 +56,7 @@ skipprd query --sql "STREAM * FROM bikehire.rides LIMIT 100"
 
 Skippr Store is the local KV next to the WAL. Payload bytes stay in `.seg` files or S3. The store is the catalog of which slices are live.
 
-1. Ingest holds the **writer** for that `DATA_DIR` (`writer.lock`). One process writes catalog, offsets, schema, journal, and stream state.
+1. Ingest holds the **writer** for that `DATA_DIR` (`writer.lock`). One process writes catalog, schema, journal, and stream state. The `offsets` family is rebuilt from the catalog on start.
 2. `skipprd query` **pins** a Skippr Store snapshot (`query_pin`): which WAL slices are visible, and which Iceberg snapshot they sit beside.
 3. A second **reader** process can query while ingest is still writing. It pins a flushed copy of the store. It does not take the writer lock and it does not commit.
 4. After compact, `query_pin` reports `wal_pin: drained` when the SELECT was lake-only, or `wal_pin: live` when the statement still held WAL (STREAM, overlap).

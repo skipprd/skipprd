@@ -392,7 +392,10 @@ mod tests {
         let family = kv
             .query_prefix(StoreFamily::Offsets.prefix(), None, usize::MAX)
             .unwrap();
-        assert!(family.is_empty(), "remember must not write the offsets family");
+        assert!(
+            family.is_empty(),
+            "remember must not write the offsets family"
+        );
         store.reset_published_ingest().unwrap();
         assert!(store.get_offset("ns", "p").unwrap().is_none());
     }

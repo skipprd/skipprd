@@ -24,7 +24,7 @@ WAL payloads are **not** in the KV. Optional store snapshots (`SKIPPR_S3_BUCKET`
 
 ## How the jobs use it
 
-**Ingest and transforms.** Stateless `transform.ops` run in memory, then Skipprd commits the batch to the WAL and records the catalog + offsets. The lake sees transformed rows.
+**Ingest and transforms.** Stateless `transform.ops` run in memory, then Skipprd commits the batch to the WAL catalog. Live resume is remembered in process. The `offsets` family is rebuilt from that catalog on start. The lake sees transformed rows.
 
 **Materialised views.** After WAL commit, the processor updates `stream_state` in the same Skippr Store transaction as its cursor. Compact waits on that cursor. See [Materialised views](/concepts/materialised-views).
 

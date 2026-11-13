@@ -1252,9 +1252,7 @@ impl PipelineWalHandle {
                     let CatalogKey::OffsetHint(hint) = key else {
                         continue;
                     };
-                    let filesize = match self
-                        .offsets
-                        .get_offset(hint.namespace(), hint.partition())
+                    let filesize = match self.offsets.get_offset(hint.namespace(), hint.partition())
                     {
                         Ok(Some(bytes)) => filesize_from_offset_bytes(&bytes),
                         Ok(None) => 0,
@@ -1816,7 +1814,9 @@ mod tests {
             .persist_offset_hint("ns", "part-hint", 11, true)
             .await
         {
-            Ok(_) => panic!("AfterCatalogCommit should reject control persist after catalog commit"),
+            Ok(_) => {
+                panic!("AfterCatalogCommit should reject control persist after catalog commit")
+            }
             Err(err) => err,
         };
         crate::failpoint::disarm();

@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Ingest ACKs plugins after WAL catalog commit. Live resume is an in-process overlay. The Skippr Store `offsets` family is filled only by startup `republish_all`, not during ingest.
 - Compile cache in GitHub Actions is R2 sccache (`skippr-web-rust-cache`). GitHub Actions cache (`Swatinem/rust-cache`) is gone. Intra-run artifacts expire in one day.
 
 ## [16.0.7] - 2026-11-12
