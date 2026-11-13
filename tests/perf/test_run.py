@@ -788,6 +788,13 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("R2 secrets required on CI", chunk)
         self.assertLess(chunk.index("GITHUB_ACTIONS"), chunk.index("missing_r2_secrets"))
 
+    def test_base_env_disables_imds(self) -> None:
+        src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        start = src.index("def base_env")
+        chunk = src[start : src.index("\n\ndef ", start)]
+        self.assertIn('"AWS_EC2_METADATA_DISABLED": "true"', chunk)
+        self.assertIn('"AWS_DEFAULT_REGION": "us-east-1"', chunk)
+
 
 if __name__ == "__main__":
     unittest.main()

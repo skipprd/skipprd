@@ -16,6 +16,7 @@ use std::sync::Mutex;
 /// Ref-counted segment IDs currently being compacted. Bodies for these keys
 /// are never evicted until the last active compaction releases its guard.
 static S3_BODY_CACHE_PINS: Lazy<DashMap<String, usize>> = Lazy::new(DashMap::new);
+static TEST_PIN_ISOLATION: Mutex<()> = Mutex::new(());
 
 pub struct S3BodyPin {
     segment_ids: Vec<String>,
@@ -186,6 +187,7 @@ pub fn remove(segment_id: &str) {
 }
 
 pub fn clear_for_tests() {
+    let _isolation = TEST_PIN_ISOLATION.lock().unwrap_or_else(|e| e.into_inner());
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     *g = Inner::new_autotuned();
     refresh_gauges(&g);
@@ -262,6 +264,7 @@ mod tests {
 
     #[test]
     fn pin_guard_is_ref_counted() {
+        let _isolation = TEST_PIN_ISOLATION.lock().unwrap_or_else(|e| e.into_inner());
         let first = pin_segments(["shared".to_string()]);
         let second = pin_segments(["shared".to_string(), "shared".to_string()]);
         assert_eq!(*S3_BODY_CACHE_PINS.get("shared").unwrap(), 2);

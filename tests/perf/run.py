@@ -138,6 +138,9 @@ def base_env(config: Path, data_dir: Path, manifests: Path) -> dict[str, str]:
             "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR": str(manifests),
             "SKIPPR_LOG_LEVEL": "perf",
             "SKIPPR_RUNTIME_LOG_LEVEL": "warn",
+            "AWS_EC2_METADATA_DISABLED": "true",
+            "AWS_REGION": "us-east-1",
+            "AWS_DEFAULT_REGION": "us-east-1",
         }
     )
     env.pop("RUST_LOG", None)
