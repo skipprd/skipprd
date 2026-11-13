@@ -153,6 +153,15 @@ class PerfCatalogTests(unittest.TestCase):
             rows = int(spec.get("linux_rows", defaults["linux_rows"]))
             self.assertGreaterEqual(rows, 50000, name)
 
+    def test_linux_matrix_uses_linux_scale(self) -> None:
+        text = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
+        self.assertIn("scale: linux", matrix)
+        self.assertNotIn("scale: ci", matrix)
+        profile = text.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0]
+        self.assertIn("scale: linux", profile)
+        self.assertNotIn("scale: ci", profile)
+
     def test_file_once_batch_holds_linux_rows(self) -> None:
         catalog = load_catalog()
         linux_rows = int(catalog["defaults"]["linux_rows"])

@@ -124,7 +124,7 @@ jobs:
           scenario: ${{ matrix.scenario }}
           skipprd_path: ${{ github.workspace }}/skipprd/skipprd-linux_x86/skipprd
           plugin_binaries_dir: ${{ github.workspace }}/skipprd/runtime-plugin-binaries-linux_x86
-          scale: ci
+          scale: linux
           workspace-root: skipprd
           work: ${{ runner.temp }}/skippr-perf
         env:
