@@ -141,7 +141,7 @@ fn register_table_under_pipeline_schema(
     table: Arc<dyn TableProvider>,
 ) -> Result<(), DataFusionError> {
     use datafusion::catalog::memory::{MemoryCatalogProvider, MemorySchemaProvider};
-    use datafusion::catalog::{CatalogProvider, SchemaProvider};
+    use datafusion::catalog::CatalogProvider;
     let state = ctx.state();
     let cat_list = state.catalog_list();
     let Some(catalog) = cat_list.catalog("datafusion") else {
@@ -149,25 +149,42 @@ fn register_table_under_pipeline_schema(
             "Default catalog 'datafusion' not found".to_string(),
         ));
     };
-    if let Some(schema) = catalog.schema(pipeline) {
-        let _ = schema.deregister_table(namespace);
-        schema
-            .register_table(namespace.to_string(), table)
-            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-    } else if let Some(memcat) = catalog.downcast_ref::<MemoryCatalogProvider>() {
-        let new_schema = Arc::new(MemorySchemaProvider::new());
-        let _ = memcat.register_schema(pipeline, new_schema.clone());
-        let _ = new_schema.deregister_table(namespace);
-        new_schema
-            .register_table(namespace.to_string(), table)
-            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-    } else {
+    if catalog.schema(pipeline).is_none() {
+        let Some(memcat) = catalog.downcast_ref::<MemoryCatalogProvider>() else {
+            return Err(DataFusionError::Plan(format!(
+                "Cannot register schema for pipeline '{pipeline}' in default catalog"
+            )));
+        };
+        let _ = memcat.register_schema(pipeline, Arc::new(MemorySchemaProvider::new()));
+    }
+    let Some(schema) = catalog.schema(pipeline) else {
         return Err(DataFusionError::Plan(format!(
             "Cannot register schema for pipeline '{pipeline}' in default catalog"
         )));
-    }
+    };
+    replace_table_in_schema(schema, namespace, table)?;
     info!("DF FQN: registered datafusion.{pipeline}.{namespace}.");
     Ok(())
+}
+
+/// Shared QueryRuntime catalog: GetFlightInfo and DoGet both re-register.
+/// MemorySchemaProvider's exist-then-insert is not atomic with deregister.
+fn replace_table_in_schema(
+    schema: Arc<dyn datafusion::catalog::SchemaProvider>,
+    namespace: &str,
+    table: Arc<dyn TableProvider>,
+) -> Result<(), DataFusionError> {
+    for _ in 0..32 {
+        let _ = schema.deregister_table(namespace);
+        match schema.register_table(namespace.to_string(), Arc::clone(&table)) {
+            Ok(_) => return Ok(()),
+            Err(err) if err.to_string().contains("already exists") => continue,
+            Err(err) => return Err(DataFusionError::Execution(err.to_string())),
+        }
+    }
+    Err(DataFusionError::Execution(format!(
+        "The table {namespace} already exists"
+    )))
 }
 
 /// Catalog namespaces that are not ingest tables become DataFusion schemas of the same name.
@@ -918,6 +935,36 @@ mod tests {
             .unwrap()
             .value(0);
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn register_table_under_pipeline_schema_replaces_racy_duplicate() {
+        let arrow = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let ctx = SessionContext::new();
+        let tasks: Vec<_> = (0..32)
+            .map(|_| {
+                let ctx = ctx.clone();
+                let arrow = arrow.clone();
+                tokio::spawn(async move {
+                    let mem = MemTable::try_new(arrow, vec![vec![]]).unwrap();
+                    register_table_under_pipeline_schema(
+                        &ctx,
+                        "shop_silver",
+                        "stg_bronze_shop",
+                        Arc::new(mem),
+                    )
+                })
+            })
+            .collect();
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        ctx.sql("SELECT count(*) FROM shop_silver.stg_bronze_shop")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
     }
 
     #[test]

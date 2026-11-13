@@ -10,6 +10,10 @@ All notable changes to this project will be documented in this file.
 - Compile cache in GitHub Actions is R2 sccache (`skippr-web-rust-cache`). GitHub Actions cache (`Swatinem/rust-cache`) is gone. Intra-run artifacts expire in one day.
 - Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB Iceberg) map `batch_time_unit` 1:1 to a hidden `year|month|day|hour` transform on the event-time column, and identity-partition `batch_partition_fields`. Calendar `year`/`month`/`day` ints are no longer table columns. `minute` fail-closes on Iceberg. File sinks keep Hive `year=` / `month=` / `day=` folders. Recreate existing Iceberg tables that still identity-partition those ints. SkipprLake e2e filters `WHERE event_ts >= TIMESTAMP … AND event_ts < TIMESTAMP …`. File smoke now includes `e2e_skipprlake_local` on `skippr-linux-x64-32`.
 
+### Fixed
+
+- FlightSQL re-register of Iceberg `namespace.table` on the shared QueryRuntime catalog no longer fails with `The table … already exists` when GetFlightInfo and DoGet overlap (dbt `dim_shop` after `stg_bronze_shop`).
+
 ## [16.0.7] - 2026-11-12
 
 ### Fixed
