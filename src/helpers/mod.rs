@@ -69,6 +69,36 @@ impl IngestTransformSnapshot {
             flatten: config.get_transform_flatten_events(),
         }
     }
+
+    /// Copy File JSON→JSON has empty transform fields, so every row shares one WAL key.
+    pub fn single_copy_wal_key(&self) -> bool {
+        self.skip_namespace_field_parse && self.skip_partition_parse && self.skip_time_parse
+    }
+}
+
+#[cfg(test)]
+mod tests_copy_wal_key {
+    use super::IngestTransformSnapshot;
+
+    fn snap(ns: bool, part: bool, time: bool) -> IngestTransformSnapshot {
+        IngestTransformSnapshot {
+            partition_fields: String::new(),
+            namespace_fields: String::new(),
+            time_fields: String::new(),
+            record_field_path: String::new(),
+            flatten: false,
+            skip_partition_parse: part,
+            skip_time_parse: time,
+            skip_namespace_field_parse: ns,
+        }
+    }
+
+    #[test]
+    fn empty_transform_uses_one_copy_wal_key() {
+        assert!(snap(true, true, true).single_copy_wal_key());
+        assert!(!snap(true, true, false).single_copy_wal_key());
+        assert!(!snap(false, true, true).single_copy_wal_key());
+    }
 }
 
 #[cfg(test)]

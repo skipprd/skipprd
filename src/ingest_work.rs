@@ -3165,6 +3165,36 @@ impl Ingest {
             let mut ns_parse_ns = 0u64;
             let mut partition_parse_ns = 0u64;
             let mut time_parse_ns = 0u64;
+            if transform_snap.single_copy_wal_key() {
+                if let Some(namespace) = fixed_namespace.as_ref() {
+                    let key = (
+                        primary_sink_ref.clone(),
+                        namespace.clone(),
+                        String::new(),
+                        None,
+                        fingerprint.clone(),
+                    );
+                    let entry =
+                        ensure_partition_buffer_entry(&mut buf, &key, || IngestBufferBatch {
+                            offsets: HashMap::new(),
+                            sink_ref: primary_sink_ref.clone(),
+                            _namespace: namespace.clone(),
+                            _partition: String::new(),
+                            _time: None,
+                            _schema_fingerprint: fingerprint.clone(),
+                            schema: empty_schema.clone(),
+                            payload: WalPayload::Copy(CopyPart::default()),
+                            cdc_rows: None,
+                            checkpoint_update: None,
+                        });
+                    update_partition_offset(entry, &ingest_batch.offset_key, offset_pos);
+                    records_by_key.entry(key).or_default().extend(records);
+                    key_ns += key_started
+                        .map(|started| started.elapsed().as_nanos() as u64)
+                        .unwrap_or(0);
+                    continue;
+                }
+            }
             for record in records {
                 let ns_started = profile.then(Instant::now);
                 let namespace = if let Some(fixed) = fixed_namespace.as_ref() {
