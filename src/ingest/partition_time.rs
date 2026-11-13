@@ -199,7 +199,7 @@ pub fn time_partition_column_names(granularity: &str) -> Result<Vec<&'static str
     ))
 }
 
-/// UTC calendar ints for Iceberg identity columns: year, month 1–12, day 1–31, hour 0–23, minute 0–59.
+/// UTC calendar ints for Hive/file folder names: year, month 1–12, day 1–31, hour 0–23, minute 0–59.
 pub fn calendar_columns_utc(
     posix_seconds: i64,
     granularity: &str,

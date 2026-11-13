@@ -68,6 +68,7 @@ jobs:
           cargo +nightly fuzz run wal_slices --fuzz-dir fuzz -- -max_total_time=30
           cargo +nightly fuzz run catalog_row --fuzz-dir fuzz -- -max_total_time=30
           cargo +nightly fuzz run iceberg_metadata --fuzz-dir fuzz -- -max_total_time=30
+          cargo +nightly fuzz run iceberg_partition_spec --fuzz-dir fuzz -- -max_total_time=30
           cargo +nightly fuzz run discover_json --fuzz-dir fuzz -- -max_total_time=30
           cargo +nightly fuzz run migrate_journal --fuzz-dir fuzz -- -max_total_time=30
           cargo +nightly fuzz run pipeline_yaml --fuzz-dir fuzz -- -max_total_time=30

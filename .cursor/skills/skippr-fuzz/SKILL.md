@@ -20,6 +20,7 @@ Targets (production parsers / World checker, never a second oracle):
 - `wal_slices` — `decode_wal_slices` and `SegmentFile` SEGF header
 - `catalog_row` — `CatalogRow` bincode + `CatalogTxn::put`
 - `iceberg_metadata` — Iceberg `TableMetadata` JSON + `skippr.wal-slices`
+- `iceberg_partition_spec` — layout unit + identity fields → Iceberg partition spec
 - `discover_json` — flatten documents
 - `migrate_journal` — ALTER SQL + checksum
 - `pipeline_yaml` — `Config` YAML

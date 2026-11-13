@@ -302,10 +302,20 @@ def stage_plugins(config_path: Path) -> str:
 
 
 def date_partition_sql(table: str, year: int, month: int, day: int) -> str:
+    start = f"{year:04d}-{month:02d}-{day:02d} 00:00:00"
+    nxt = _next_day(year, month, day)
+    end = f"{nxt[0]:04d}-{nxt[1]:02d}-{nxt[2]:02d} 00:00:00"
     return (
         f"SELECT count(*) FROM {table} "
-        f"WHERE year = {year} AND month = {month} AND day = {day}"
+        f"WHERE event_ts >= TIMESTAMP '{start}' AND event_ts < TIMESTAMP '{end}'"
     )
+
+
+def _next_day(year: int, month: int, day: int) -> tuple[int, int, int]:
+    from datetime import date, timedelta
+
+    nxt = date(year, month, day) + timedelta(days=1)
+    return nxt.year, nxt.month, nxt.day
 
 
 def parse_query_plain_count(stdout: str) -> int | None:
@@ -353,7 +363,7 @@ def assert_iceberg_date_partitions(count_sql, table: str) -> None:
         if got != expected:
             raise HarnessError(
                 f"{table} {sql} count {got} != {expected} "
-                "(Iceberg date partitions year/month/day)"
+                "(Iceberg day(event_ts) hidden partitions)"
             )
 
 

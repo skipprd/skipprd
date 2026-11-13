@@ -83,7 +83,7 @@ Without `namespace_fields`, all records from a source share one table, apart fro
 Partitions organise files into folders so query engines can skip folders a filter rules out.
 
 - **By field:** `batch_partition_fields: country` writes `p_country=GB/`, `p_country=US/`, and so on. To cap the number of partitions, list the values you want in `partition_allowed_values`; other values are not used as partition values.
-- **By time:** `batch_time_fields: created_at` with `batch_time_unit: day` writes `year=2026/month=10/day=9/` folders. Each unit includes the coarser ones above it. `time_partition_prefix: p_` changes those to `p_year=2026/p_month=10/p_day=9/`.
+- **By time:** `batch_time_fields: created_at` with `batch_time_unit: day` writes `year=2026/month=10/day=9/` folders on file sinks (S3, GCS, Azure Blob, Local file, Hive Athena). Each unit includes the coarser ones above it. `time_partition_prefix: p_` changes those to `p_year=2026/p_month=10/p_day=9/`. Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB Iceberg) use one hidden `year|month|day|hour` transform on that timestamp instead, and identity-partition `batch_partition_fields`. `minute` is File-only.
 
 Setting `batch_time_unit` without `batch_time_fields`, or `partition_allowed_values` without `batch_partition_fields`, stops the run with `Config dependency missing: ...`.
 

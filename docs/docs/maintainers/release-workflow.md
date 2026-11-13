@@ -82,11 +82,12 @@ Scratch `0.0.0` does not publish the wheel. `python-v*` still builds and tests t
 - `macos_arm64` — the same catalog build on the self-hosted `skippr-darwin-arm64` runner
 - `e2e_file_duckdb` — local File source append into Duckdb Iceberg; gates plugin publish
 - `e2e_file_copy` — local File → File `type: copy`; gates plugin publish
+- `e2e_skipprlake_local` — File source into SkipprLake (`tests/skipprlake_e2e`) with local plugins on `skippr-linux-x64-32`; Iceberg `WHERE event_ts` day windows; gates plugin publish
 - `linux_dst` — `cargo test -p skipprd --lib -- sqlrt::dst::` after File smoke; gates plugin publish and `publish_skipprd`
 - `chaos_mode_test` — local plugins on scratch `0.0.0` only. `bike_hire_many` reads 5,100,000 mixed-size bike-hire JSON objects from R2 (`skippr-e2e-sample-data/bike-hire/`) into SkipprLake on the runner (DynamoDB Local catalog, `file://` warehouse) and asserts that exact row count. Mid-sync SIGKILL chaos is off on GitHub-hosted runners so the 5.1M ingest can finish. Pipeline buffers hold until 4 GiB or 7200s so R2 ingest is not overlapping SkipprLake compact; drain then compact in `WAL_COMPACTION_GROUP_MAX_PARTS=16` / 8 MiB groups on GitHub-hosted `ubuntu-latest` (4 cores / 16 GB). The skipprd org is GitHub Free, so larger 8-core hosted runners are not available. R2 secrets only; no AWS.
 - `publish_runtime_plugins` — on product engine tags, after linux and Darwin catalog builds plus File smoke **and** `linux_dst`, stage and upload protocol-matching manifests plus binaries
 - `chaos_mode_published` — same `bike_hire_many` path after plugin publish; skipprd downloads `{tag}/manifest-index.json`. Product tags only (not `0.0.0`).
-- `e2e_skipprlake` — File source into SkipprLake (`tests/skipprlake_e2e`), including Iceberg `year`/`month`/`day` predicates, `SUM(amount)`, and atomic dbt replace, against published plugins
+- `e2e_skipprlake` — File source into SkipprLake (`tests/skipprlake_e2e`), including Iceberg `WHERE event_ts` day windows, `SUM(amount)`, and atomic dbt replace, against published plugins
 - `e2e_postgres_cdc` — Postgres snapshot-then-CDC upsert into SkipprLake
 - `e2e_s3_schema_evolution` — S3 v1 then backward-compatible v2 into SkipprLake
 - `e2e_schema_lifecycle` — discover/sync then `skipprd migrate` + `ALTER TABLE` matrix into SkipprLake (rename / merge / drop / promote / fail-closed), with a second sync after apply

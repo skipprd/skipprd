@@ -114,7 +114,7 @@ Table files live at `{warehouse}/{table_namespace}/{table_name}`.
 
 Supports `append`, `merge_by_key`, `replace_partition`, and `replace_table`. Skipprd expires old snapshots (recent commits are kept), rewrites small files, and folds delete files. Query results stay the same; do not use old snapshots as time travel.
 
-With `transform.batch_time_fields` and `transform.batch_time_unit`, Skipprd writes Hive-parity UTC int columns (`year`, `month`, `day`, and `hour` / `minute` when you set those units) and identity-partitions on them. POSIX millis and micros in numeric columns resolve as event time. Deadletter Iceberg tables stay unpartitioned. Recreate an existing unpartitioned Iceberg table to pick this up.
+With `transform.batch_time_fields` and `transform.batch_time_unit`, Skipprd adds one hidden Iceberg time transform (`year`, `month`, `day`, or `hour`) on the event-time column, plus identity partitions from `batch_partition_fields`. It does not write `year`/`month`/`day` int columns. `minute` is rejected (Iceberg has no `minute()`). POSIX millis and micros in numeric columns resolve as event time, then the transform runs on the timestamp. Deadletter Iceberg tables stay unpartitioned. Filter with `WHERE event_ts >= TIMESTAMP '2026-11-07 00:00:00' AND event_ts < TIMESTAMP '2026-11-08 00:00:00'`. Recreate an existing Iceberg table if the live spec still identity-partitions calendar ints.
 
 `skipprd query` returns the current table (Iceberg plus uncompacted WAL, CDC applied).
 

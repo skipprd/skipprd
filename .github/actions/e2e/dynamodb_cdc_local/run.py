@@ -361,7 +361,7 @@ def run_skipprlake(work: Path) -> None:
     if count.splitlines()[-1].strip() != "3":
         fail(f"expected 3 distinct keys in SkipprLake Iceberg, got {count!r}")
     token_sql = (
-        "SELECT _skippr_order_token, skippr_event_time, name, year, month, day "
+        "SELECT _skippr_order_token, skippr_event_time, name "
         "FROM iceberg_scan('{scan}') WHERE id = '1'"
     )
     scan_out = iceberg_scan(warehouse, ns, token_sql)
@@ -377,8 +377,6 @@ def run_skipprlake(work: Path) -> None:
         fail(f"SkipprLake _skippr_event_time missing: {scan_out!r}")
     if name != "alpha-prime":
         fail(f"SkipprLake name={name!r}")
-    if len(body) < 6:
-        fail(f"SkipprLake day partition columns missing: {scan_out!r}")
 
 
 def run_duckdb(work: Path) -> None:

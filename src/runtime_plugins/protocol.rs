@@ -302,7 +302,7 @@ pub struct RuntimeOutputLayout {
     #[serde(default)]
     pub format: Option<OutputFormat>,
     /// Event-time field names from `transform.batch_time_fields` (comma-split, trimmed).
-    /// Empty means unset. Iceberg writers stamp UTC calendar ints from these fields.
+    /// Empty means unset. Iceberg writers apply one hidden time transform from `time_partition_granularity`.
     #[serde(default)]
     pub batch_time_fields: Vec<String>,
 }

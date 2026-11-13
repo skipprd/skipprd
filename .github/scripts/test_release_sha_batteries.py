@@ -216,7 +216,7 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
         self.assertIn('iceberg = { path = "../third_party/iceberg" }', fuzz_toml)
         self.assertNotIn("continue-on-error", text)
         self.assertNotRegex(text, r"(?m)^          cargo fuzz run")
-        self.assertEqual(text.count("cargo +nightly fuzz run"), 12)
+        self.assertEqual(text.count("cargo +nightly fuzz run"), 13)
         self.assertIn("rust-src", text)
         for target in (
             "world_schedule",
@@ -226,6 +226,7 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
             "wal_slices",
             "catalog_row",
             "iceberg_metadata",
+            "iceberg_partition_spec",
             "discover_json",
             "migrate_journal",
             "pipeline_yaml",
@@ -259,6 +260,7 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
         self.assertIn('run: "cargo test -p skipprd --lib -- sqlrt::dst::"', dst)
         self.assertIn("e2e_file_copy", dst)
         self.assertIn("e2e_file_duckdb", dst)
+        self.assertIn("e2e_skipprlake_local", dst)
         plugins = text.split("\n  publish_runtime_plugins:", 1)[1].split("\n    steps:", 1)[0]
         self.assertIn("linux_dst", plugins)
         publish = text.split("\n  publish_skipprd:", 1)[1].split("\n    steps:", 1)[0]

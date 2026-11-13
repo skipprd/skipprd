@@ -9,116 +9,325 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use arrow::util::display::array_value_to_string;
-use iceberg::spec::Schema;
+use iceberg::spec::{NestedField, PrimitiveType, Schema, Transform, Type, UnboundPartitionSpec};
 use skippr_runtime_sdk::helpers::Helpers;
 use skippr_runtime_sdk::protocol::RuntimeOutputLayout;
-use skippr_runtime_sdk::sink_compat::partition_time;
 
-pub(crate) fn time_partition_column_names_from_layout(
-    layout: &RuntimeOutputLayout,
-) -> Result<Vec<String>, io::Error> {
-    let Some(unit) = layout
+pub(crate) const SPEC_MISMATCH_RECREATE: &str =
+    "Iceberg table partition spec does not match batch_time_unit / batch_partition_fields; recreate the table";
+
+pub(crate) fn iceberg_time_transform(unit: &str) -> Result<Transform, io::Error> {
+    match unit.trim().to_ascii_lowercase().as_str() {
+        "year" => Ok(Transform::Year),
+        "month" => Ok(Transform::Month),
+        "day" => Ok(Transform::Day),
+        "hour" => Ok(Transform::Hour),
+        "minute" => Err(io::Error::other(
+            "Iceberg has no minute() transform; unset batch_time_unit or use year, month, day, or hour",
+        )),
+        other if other.is_empty() => Err(io::Error::other(
+            "Iceberg time partition unit is empty",
+        )),
+        other => Err(io::Error::other(format!(
+            "unsupported Iceberg batch_time_unit '{other}'"
+        ))),
+    }
+}
+
+pub(crate) fn layout_has_iceberg_time_partition(layout: &RuntimeOutputLayout) -> bool {
+    layout
         .time_partition_granularity
         .as_deref()
         .map(str::trim)
-        .filter(|unit| !unit.is_empty())
-    else {
-        return Ok(Vec::new());
-    };
-    if layout.batch_time_fields.is_empty() {
-        return Ok(Vec::new());
-    }
-    Ok(partition_time::time_partition_column_names(unit)?
-        .into_iter()
-        .map(str::to_string)
-        .collect())
+        .is_some_and(|unit| !unit.is_empty())
+        && !layout.batch_time_fields.is_empty()
 }
 
+pub(crate) fn require_homogeneous_iceberg_partitions(
+    layout: &RuntimeOutputLayout,
+    deadletter: bool,
+) -> bool {
+    if deadletter {
+        return false;
+    }
+    layout_has_iceberg_time_partition(layout)
+        || layout
+            .partition_fields
+            .iter()
+            .any(|field| !field.trim().is_empty())
+}
+
+/// Identity `batch_partition_fields` first, then one hidden time transform.
+/// Unset unit and identity fields: OTLP `hour`/`service_name`/`tenant_id` when all three exist, else unpartitioned.
+pub fn layout_partition_spec(
+    schema: &Schema,
+    layout: &RuntimeOutputLayout,
+    deadletter: bool,
+) -> Result<Option<UnboundPartitionSpec>, io::Error> {
+    if deadletter {
+        return Ok(None);
+    }
+    let mut builder = UnboundPartitionSpec::builder();
+    let mut added = 0usize;
+
+    for configured in &layout.partition_fields {
+        let trimmed = configured.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let field = resolve_schema_field(schema, trimmed).ok_or_else(|| {
+            io::Error::other(format!(
+                "Iceberg identity partition field '{trimmed}' is not in the table schema"
+            ))
+        })?;
+        builder = builder
+            .add_partition_field(field.id, field.name.clone(), Transform::Identity)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        added += 1;
+    }
+
+    if layout_has_iceberg_time_partition(layout) {
+        let unit = layout
+            .time_partition_granularity
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default();
+        let transform = iceberg_time_transform(unit)?;
+        let source =
+            first_present_time_field(schema, &layout.batch_time_fields).ok_or_else(|| {
+                io::Error::other(format!(
+                    "Iceberg time partition field [{}] is not in the table schema",
+                    layout.batch_time_fields.join(", ")
+                ))
+            })?;
+        fail_closed_time_source(&source.field_type, transform, &source.name)?;
+        let part_name = format!("{}_{unit}", source.name);
+        builder = builder
+            .add_partition_field(source.id, part_name, transform)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        added += 1;
+    }
+
+    if added == 0 {
+        return otlp_identity_spec(schema);
+    }
+    Ok(Some(builder.build()))
+}
+
+pub(crate) fn live_spec_matches_layout(
+    schema: &Schema,
+    live_fields: &[(i32, Transform)],
+    layout: &RuntimeOutputLayout,
+    deadletter: bool,
+) -> Result<bool, io::Error> {
+    let desired = layout_partition_spec(schema, layout, deadletter)?;
+    let desired_fields: Vec<(i32, Transform)> = match desired {
+        None => Vec::new(),
+        Some(spec) => spec
+            .fields()
+            .iter()
+            .map(|field| (field.source_id, field.transform))
+            .collect(),
+    };
+    Ok(desired_fields == live_fields)
+}
+
+pub(crate) fn spec_mismatch_error() -> io::Error {
+    io::Error::other(SPEC_MISMATCH_RECREATE)
+}
+
+fn otlp_identity_spec(schema: &Schema) -> Result<Option<UnboundPartitionSpec>, io::Error> {
+    const NAMES: [&str; 3] = ["hour", "service_name", "tenant_id"];
+    if !NAMES
+        .iter()
+        .all(|name| schema.field_by_name(name).is_some())
+    {
+        return Ok(None);
+    }
+    let mut builder = UnboundPartitionSpec::builder();
+    for name in NAMES {
+        let field = schema
+            .field_by_name(name)
+            .expect("OTLP field presence checked");
+        builder = builder
+            .add_partition_field(field.id, name, Transform::Identity)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+    }
+    Ok(Some(builder.build()))
+}
+
+fn fail_closed_time_source(
+    field_type: &Type,
+    transform: Transform,
+    field_name: &str,
+) -> Result<(), io::Error> {
+    if transform == Transform::Hour && matches!(field_type, Type::Primitive(PrimitiveType::Date)) {
+        return Err(io::Error::other(format!(
+            "Iceberg hour() requires timestamp, not date, on '{field_name}'; recreate the table or pin schema"
+        )));
+    }
+    transform.result_type(field_type).map_err(|_| {
+        io::Error::other(format!(
+            "{SPEC_MISMATCH_RECREATE} (time field '{field_name}' cannot take {transform})"
+        ))
+    })?;
+    Ok(())
+}
+
+pub(crate) fn first_present_time_field<'a>(
+    schema: &'a Schema,
+    configured: &[String],
+) -> Option<&'a NestedField> {
+    configured
+        .iter()
+        .find_map(|name| resolve_schema_field(schema, name))
+}
+
+pub(crate) fn resolve_schema_field<'a>(
+    schema: &'a Schema,
+    configured: &str,
+) -> Option<&'a NestedField> {
+    field_name_candidates(configured)
+        .into_iter()
+        .find_map(|name| schema.field_by_name(&name).map(|field| field.as_ref()))
+}
+
+pub(crate) fn field_name_candidates(configured: &str) -> Vec<String> {
+    let trimmed = configured.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut names = vec![trimmed.to_string()];
+    let flattened = trimmed.replace('.', "_");
+    if flattened != trimmed {
+        names.push(flattened.clone());
+    }
+    let stripped = trimmed.trim_matches('_');
+    if stripped != trimmed && !stripped.is_empty() {
+        names.push(stripped.to_string());
+        let stripped_flat = stripped.replace('.', "_");
+        if stripped_flat != stripped {
+            names.push(stripped_flat);
+        }
+    }
+    names
+}
+
+pub(crate) fn numeric_time_fields_to_promote(
+    metadata: &skippr_runtime_sdk::discover::OutputMetadata,
+    layout: &RuntimeOutputLayout,
+    deadletter: bool,
+) -> std::collections::HashSet<String> {
+    use skippr_runtime_sdk::discover::SkipprDataType;
+    let mut names = std::collections::HashSet::new();
+    if deadletter || !layout_has_iceberg_time_partition(layout) {
+        return names;
+    }
+    for configured in &layout.batch_time_fields {
+        for (_, child) in metadata.child_fields() {
+            let child_name = child.out_field_name();
+            if !field_name_candidates(configured)
+                .iter()
+                .any(|alias| alias == child_name)
+            {
+                continue;
+            }
+            match child.determined_type() {
+                SkipprDataType::Long
+                | SkipprDataType::Integer
+                | SkipprDataType::Byte
+                | SkipprDataType::Short
+                | SkipprDataType::TimestampMilli => {
+                    names.insert(child_name.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    names
+}
+
+/// Coerce the event-time column to timestamp micros. Does not materialize calendar ints.
 pub(crate) fn stamp_time_partition_columns(
     batch: RecordBatch,
     layout: &RuntimeOutputLayout,
     iceberg_schema: &Schema,
 ) -> Result<RecordBatch, io::Error> {
-    let column_names = time_partition_column_names_from_layout(layout)?;
-    if column_names.is_empty() {
+    if !layout_has_iceberg_time_partition(layout) {
         return Ok(batch);
     }
-    let missing: Vec<&str> = column_names
-        .iter()
-        .filter(|name| iceberg_schema.field_by_name(name).is_none())
-        .map(String::as_str)
-        .collect();
-    if !missing.is_empty() {
-        return Err(io::Error::other(format!(
-            "Iceberg table is missing time partition columns {}; recreate the table",
-            missing.join(", ")
-        )));
-    }
+    let unit = layout
+        .time_partition_granularity
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    let transform = iceberg_time_transform(unit)?;
+    let source =
+        first_present_time_field(iceberg_schema, &layout.batch_time_fields).ok_or_else(|| {
+            io::Error::other(format!(
+                "{SPEC_MISMATCH_RECREATE} (missing time field [{}])",
+                layout.batch_time_fields.join(", ")
+            ))
+        })?;
+    fail_closed_time_source(&source.field_type, transform, &source.name)?;
     if batch.num_rows() == 0 {
-        return attach_time_partition_columns(batch, &column_names, Vec::new());
+        return coerce_event_time_to_timestamp(batch, &layout.batch_time_fields);
     }
-    let mut values: Vec<Vec<i32>> = column_names
-        .iter()
-        .map(|_| Vec::with_capacity(batch.num_rows()))
-        .collect();
     for row in 0..batch.num_rows() {
-        let posix =
-            event_time_posix_seconds(&batch, &layout.batch_time_fields, row).ok_or_else(|| {
-                io::Error::other(format!(
-                    "missing or unresolvable event time in configured batch_time_fields [{}]",
-                    layout.batch_time_fields.join(", ")
-                ))
-            })?;
-        let unit = layout
-            .time_partition_granularity
-            .as_deref()
-            .unwrap_or_default();
-        let columns = partition_time::calendar_columns_utc(posix, unit)?;
-        if columns.len() != column_names.len() {
-            return Err(io::Error::other(
-                "Iceberg time partition column count did not match the configured unit",
-            ));
-        }
-        for (idx, (name, value)) in columns.into_iter().enumerate() {
-            if name != column_names[idx] {
-                return Err(io::Error::other(format!(
-                    "Iceberg time partition column mismatch: expected {}, got {name}",
-                    column_names[idx]
-                )));
-            }
-            values[idx].push(value);
+        if event_time_posix_seconds(&batch, &layout.batch_time_fields, row).is_none() {
+            return Err(io::Error::other(format!(
+                "missing or unresolvable event time in configured batch_time_fields [{}]",
+                layout.batch_time_fields.join(", ")
+            )));
         }
     }
-    attach_time_partition_columns(batch, &column_names, values)
+    coerce_event_time_to_timestamp(batch, &layout.batch_time_fields)
 }
 
-fn attach_time_partition_columns(
+fn coerce_event_time_to_timestamp(
     batch: RecordBatch,
-    column_names: &[String],
-    values: Vec<Vec<i32>>,
+    fields: &[String],
 ) -> Result<RecordBatch, io::Error> {
     let schema = batch.schema();
-    let drop: std::collections::HashSet<&str> = column_names.iter().map(String::as_str).collect();
-    let mut fields = Vec::new();
-    let mut columns = Vec::new();
-    for (field, column) in schema.fields().iter().zip(batch.columns()) {
-        if drop.contains(field.name().as_str()) {
-            continue;
-        }
-        fields.push(field.clone());
-        columns.push(column.clone());
+    let Some(idx) = fields
+        .iter()
+        .find_map(|field| column_index_for_time_field(schema.as_ref(), field))
+    else {
+        return Ok(batch);
+    };
+    let field = schema.field(idx);
+    match field.data_type() {
+        DataType::Timestamp(_, _) | DataType::Date32 | DataType::Date64 => return Ok(batch),
+        _ => {}
     }
-    let empty = Vec::new();
-    for (idx, name) in column_names.iter().enumerate() {
-        let ints = values.get(idx).unwrap_or(&empty);
-        fields.push(Arc::new(Field::new(name, DataType::Int32, false)));
-        columns.push(Arc::new(Int32Array::from(ints.clone())) as arrow::array::ArrayRef);
+    let mut micros: Vec<Option<i64>> = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        micros.push(
+            event_time_posix_seconds(&batch, fields, row)
+                .map(|secs| secs.saturating_mul(1_000_000)),
+        );
     }
-    RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns)
+    let ts = TimestampMicrosecondArray::from(micros);
+    let mut fields_out: Vec<Arc<Field>> = schema.fields().iter().cloned().collect();
+    fields_out[idx] = Arc::new(
+        Field::new(
+            field.name(),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            field.is_nullable(),
+        )
+        .with_metadata(field.metadata().clone()),
+    );
+    let mut columns = batch.columns().to_vec();
+    columns[idx] = Arc::new(ts);
+    RecordBatch::try_new(Arc::new(ArrowSchema::new(fields_out)), columns)
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
-fn event_time_posix_seconds(batch: &RecordBatch, fields: &[String], row: usize) -> Option<i64> {
+pub(crate) fn event_time_posix_seconds(
+    batch: &RecordBatch,
+    fields: &[String],
+    row: usize,
+) -> Option<i64> {
     let schema = batch.schema();
     for field in fields {
         let Some(idx) = column_index_for_time_field(schema.as_ref(), field) else {
@@ -132,35 +341,12 @@ fn event_time_posix_seconds(batch: &RecordBatch, fields: &[String], row: usize) 
 }
 
 fn column_index_for_time_field(schema: &ArrowSchema, field: &str) -> Option<usize> {
-    let trimmed = field.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(idx) = schema.index_of(trimmed) {
-        return Some(idx);
-    }
-    let flattened = trimmed.replace('.', "_");
-    if flattened != trimmed {
-        if let Ok(idx) = schema.index_of(&flattened) {
-            return Some(idx);
-        }
-    }
-    // skipprd `clean_field_name` strips leading/trailing underscores, so a
-    // configured `_skippr_event_time` lands on Arrow/Iceberg as `skippr_event_time`.
-    let stripped = trimmed.trim_matches('_');
-    if stripped != trimmed && !stripped.is_empty() {
-        if let Ok(idx) = schema.index_of(stripped) {
-            return Some(idx);
-        }
-        let flattened_stripped = stripped.replace('.', "_");
-        if flattened_stripped != stripped {
-            return schema.index_of(&flattened_stripped).ok();
-        }
-    }
-    None
+    field_name_candidates(field)
+        .into_iter()
+        .find_map(|name| schema.index_of(&name).ok())
 }
 
-fn posix_seconds_from_numeric_i64(time: i64) -> Option<i64> {
+pub(crate) fn posix_seconds_from_numeric_i64(time: i64) -> Option<i64> {
     if let Some(secs) = Helpers::posix_seconds_from_i64(time) {
         return Some(secs);
     }
@@ -284,24 +470,17 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{ArrayRef, Decimal128Array, Int64Array, TimestampMillisecondArray};
-    use arrow::datatypes::Field;
     use iceberg::spec::{NestedField, PrimitiveType, Type};
 
-    fn iceberg_with_time_columns(names: &[&str]) -> Schema {
-        let fields: Vec<Arc<NestedField>> = names
-            .iter()
-            .enumerate()
-            .map(|(idx, name)| {
-                Arc::new(NestedField::required(
-                    (idx as i32) + 10,
-                    *name,
-                    Type::Primitive(PrimitiveType::Int),
-                ))
-            })
-            .collect();
+    fn ts_schema(name: &str) -> Schema {
         Schema::builder()
             .with_schema_id(0)
-            .with_fields(fields)
+            .with_fields(vec![NestedField::required(
+                1,
+                name,
+                Type::Primitive(PrimitiveType::Timestamp),
+            )
+            .into()])
             .build()
             .unwrap()
     }
@@ -314,20 +493,204 @@ mod tests {
         }
     }
 
+    fn layout_unit(unit: &str, fields: &[&str]) -> RuntimeOutputLayout {
+        RuntimeOutputLayout {
+            time_partition_granularity: Some(unit.into()),
+            batch_time_fields: fields.iter().map(|field| (*field).to_string()).collect(),
+            ..RuntimeOutputLayout::default()
+        }
+    }
+
     #[test]
     fn layout_without_unit_or_fields_is_disabled() {
-        assert!(
-            time_partition_column_names_from_layout(&RuntimeOutputLayout::default())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!layout_has_iceberg_time_partition(
+            &RuntimeOutputLayout::default()
+        ));
         let unit_only = RuntimeOutputLayout {
             time_partition_granularity: Some("day".into()),
             ..RuntimeOutputLayout::default()
         };
-        assert!(time_partition_column_names_from_layout(&unit_only)
+        assert!(!layout_has_iceberg_time_partition(&unit_only));
+    }
+
+    #[test]
+    fn unit_maps_one_to_one_to_iceberg_transform() {
+        assert_eq!(iceberg_time_transform("year").unwrap(), Transform::Year);
+        assert_eq!(iceberg_time_transform("month").unwrap(), Transform::Month);
+        assert_eq!(iceberg_time_transform("DAY").unwrap(), Transform::Day);
+        assert_eq!(iceberg_time_transform("hour").unwrap(), Transform::Hour);
+        let err = iceberg_time_transform("minute").unwrap_err();
+        assert!(err.to_string().contains("no minute()"), "{err}");
+    }
+
+    #[test]
+    fn day_spec_is_day_transform_without_calendar_columns() {
+        let schema = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![
+                NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
+                NestedField::required(2, "event_ts", Type::Primitive(PrimitiveType::Timestamp))
+                    .into(),
+            ])
+            .build()
+            .unwrap();
+        let spec = layout_partition_spec(&schema, &day_layout(&["event_ts"]), false)
             .unwrap()
-            .is_empty());
+            .unwrap();
+        assert_eq!(spec.fields().len(), 1);
+        assert_eq!(spec.fields()[0].source_id, 2);
+        assert_eq!(spec.fields()[0].transform, Transform::Day);
+        assert_eq!(spec.fields()[0].name, "event_ts_day");
+        assert!(schema.field_by_name("year").is_none());
+        assert!(schema.field_by_name("month").is_none());
+        assert!(schema.field_by_name("day").is_none());
+    }
+
+    #[test]
+    fn hour_month_year_specs() {
+        let schema = ts_schema("time");
+        for (unit, transform) in [
+            ("hour", Transform::Hour),
+            ("month", Transform::Month),
+            ("year", Transform::Year),
+        ] {
+            let spec = layout_partition_spec(&schema, &layout_unit(unit, &["time"]), false)
+                .unwrap()
+                .unwrap();
+            assert_eq!(spec.fields().len(), 1, "{unit}");
+            assert_eq!(spec.fields()[0].transform, transform, "{unit}");
+            assert_eq!(spec.fields()[0].source_id, 1, "{unit}");
+        }
+    }
+
+    #[test]
+    fn identity_fields_then_day_transform() {
+        let schema = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![
+                NestedField::required(1, "detail_rmc", Type::Primitive(PrimitiveType::String))
+                    .into(),
+                NestedField::required(2, "time", Type::Primitive(PrimitiveType::Timestamp)).into(),
+            ])
+            .build()
+            .unwrap();
+        let layout = RuntimeOutputLayout {
+            partition_fields: vec!["detail.rmc".into()],
+            time_partition_granularity: Some("day".into()),
+            batch_time_fields: vec!["time".into()],
+            ..RuntimeOutputLayout::default()
+        };
+        let spec = layout_partition_spec(&schema, &layout, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.fields().len(), 2);
+        assert_eq!(spec.fields()[0].source_id, 1);
+        assert_eq!(spec.fields()[0].transform, Transform::Identity);
+        assert_eq!(spec.fields()[1].source_id, 2);
+        assert_eq!(spec.fields()[1].transform, Transform::Day);
+    }
+
+    #[test]
+    fn minute_fail_closed_on_spec() {
+        let err =
+            layout_partition_spec(&ts_schema("time"), &layout_unit("minute", &["time"]), false)
+                .unwrap_err();
+        assert!(err.to_string().contains("no minute()"), "{err}");
+    }
+
+    #[test]
+    fn hour_on_date_fail_closed() {
+        let schema = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![NestedField::required(
+                1,
+                "time",
+                Type::Primitive(PrimitiveType::Date),
+            )
+            .into()])
+            .build()
+            .unwrap();
+        let err =
+            layout_partition_spec(&schema, &layout_unit("hour", &["time"]), false).unwrap_err();
+        assert!(
+            err.to_string().contains("hour() requires timestamp"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("not date"), "{err}");
+    }
+
+    #[test]
+    fn deadletter_is_unpartitioned() {
+        assert!(
+            layout_partition_spec(&ts_schema("time"), &day_layout(&["time"]), true)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn otlp_identity_when_layout_unset() {
+        let schema = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![
+                NestedField::required(1, "hour", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(2, "service_name", Type::Primitive(PrimitiveType::String))
+                    .into(),
+                NestedField::required(3, "tenant_id", Type::Primitive(PrimitiveType::String))
+                    .into(),
+            ])
+            .build()
+            .unwrap();
+        let spec = layout_partition_spec(&schema, &RuntimeOutputLayout::default(), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.fields().len(), 3);
+        assert!(spec
+            .fields()
+            .iter()
+            .all(|field| field.transform == Transform::Identity));
+    }
+
+    #[test]
+    fn unset_layout_without_otlp_is_unpartitioned() {
+        let schema = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![NestedField::required(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Long),
+            )
+            .into()])
+            .build()
+            .unwrap();
+        assert!(
+            layout_partition_spec(&schema, &RuntimeOutputLayout::default(), false)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn live_identity_calendar_ints_do_not_match_day_layout() {
+        let schema = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![
+                NestedField::required(1, "event_ts", Type::Primitive(PrimitiveType::Timestamp))
+                    .into(),
+                NestedField::required(2, "year", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(3, "month", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::required(4, "day", Type::Primitive(PrimitiveType::Int)).into(),
+            ])
+            .build()
+            .unwrap();
+        let live = vec![
+            (2, Transform::Identity),
+            (3, Transform::Identity),
+            (4, Transform::Identity),
+        ];
+        assert!(
+            !live_spec_matches_layout(&schema, &live, &day_layout(&["event_ts"]), false).unwrap()
+        );
     }
 
     #[test]
@@ -456,37 +819,27 @@ mod tests {
     }
 
     #[test]
-    fn stamp_writes_utc_calendar_ints() {
+    fn stamp_does_not_materialize_calendar_ints() {
         let posix = 1_794_063_845i64;
         let batch = RecordBatch::try_from_iter(vec![(
             "event_ts",
             Arc::new(Int64Array::from(vec![posix])) as ArrayRef,
         )])
         .unwrap();
-        let schema = iceberg_with_time_columns(&["year", "month", "day"]);
+        let schema = ts_schema("event_ts");
         let stamped =
             stamp_time_partition_columns(batch, &day_layout(&["event_ts"]), &schema).unwrap();
-        let year = stamped
-            .column_by_name("year")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        let month = stamped
-            .column_by_name("month")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        let day = stamped
-            .column_by_name("day")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        assert_eq!(year.value(0), 2026);
-        assert_eq!(month.value(0), 11);
-        assert_eq!(day.value(0), 7);
+        assert!(stamped.column_by_name("year").is_none());
+        assert!(stamped.column_by_name("month").is_none());
+        assert!(stamped.column_by_name("day").is_none());
+        assert!(matches!(
+            stamped
+                .schema()
+                .field_with_name("event_ts")
+                .unwrap()
+                .data_type(),
+            DataType::Timestamp(TimeUnit::Microsecond, _)
+        ));
     }
 
     #[test]
@@ -496,14 +849,14 @@ mod tests {
             Arc::new(Int64Array::from(vec![None::<i64>])) as ArrayRef,
         )])
         .unwrap();
-        let schema = iceberg_with_time_columns(&["year", "month", "day"]);
+        let schema = ts_schema("event_ts");
         let err =
             stamp_time_partition_columns(batch, &day_layout(&["event_ts"]), &schema).unwrap_err();
         assert!(err.to_string().contains("batch_time_fields [event_ts]"));
     }
 
     #[test]
-    fn stamp_fails_when_table_lacks_calendar_columns() {
+    fn stamp_fails_when_table_lacks_time_source() {
         let batch = RecordBatch::try_from_iter(vec![(
             "event_ts",
             Arc::new(Int64Array::from(vec![1_794_063_845i64])) as ArrayRef,
@@ -513,7 +866,7 @@ mod tests {
             .with_schema_id(0)
             .with_fields(vec![NestedField::required(
                 1,
-                "event_ts",
+                "id",
                 Type::Primitive(PrimitiveType::Long),
             )
             .into()])

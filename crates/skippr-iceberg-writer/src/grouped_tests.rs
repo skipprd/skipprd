@@ -1,12 +1,13 @@
 //! Grouped writes end to end against a filesystem catalog.
 
 use super::*;
-use arrow::array::{ArrayRef, Int32Array, Int64Array};
+use arrow::array::{ArrayRef, Int64Array};
 use arrow::datatypes::{DataType, Field};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use futures::TryStreamExt;
 use iceberg::io::FileIO;
-use iceberg::spec::{PrimitiveType, Transform, Type};
+use iceberg::spec::{NestedField, PrimitiveType, Schema, Transform, Type, UnboundPartitionSpec};
+use iceberg::TableCreation;
 use serde_json::json;
 use skippr_iceberg_catalog_fs::FsCatalog;
 use skippr_runtime_sdk::plugins::{
@@ -767,11 +768,42 @@ async fn time_partition_harness(metadata: serde_json::Value) -> Harness {
     time_partition_harness_for(metadata, RuntimeBinding::Primary, NAMESPACE, &["event_ts"]).await
 }
 
+async fn time_partition_harness_layout(
+    metadata: serde_json::Value,
+    binding: RuntimeBinding,
+    namespace: &str,
+    layout: RuntimeOutputLayout,
+) -> Harness {
+    time_partition_harness_with(metadata, binding, namespace, layout).await
+}
+
 async fn time_partition_harness_for(
     metadata: serde_json::Value,
     binding: RuntimeBinding,
     namespace: &str,
     time_fields: &[&str],
+) -> Harness {
+    time_partition_harness_with(
+        metadata,
+        binding,
+        namespace,
+        RuntimeOutputLayout {
+            time_partition_granularity: Some("day".into()),
+            batch_time_fields: time_fields
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect(),
+            ..RuntimeOutputLayout::default()
+        },
+    )
+    .await
+}
+
+async fn time_partition_harness_with(
+    metadata: serde_json::Value,
+    binding: RuntimeBinding,
+    namespace: &str,
+    layout: RuntimeOutputLayout,
 ) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let counting = Arc::new(CountingCatalog {
@@ -794,14 +826,7 @@ async fn time_partition_harness_for(
             workspace_name: "w".to_string(),
             data_dir: dir.path().display().to_string(),
             execution_mode: Default::default(),
-            output_layout: RuntimeOutputLayout {
-                time_partition_granularity: Some("day".into()),
-                batch_time_fields: time_fields
-                    .iter()
-                    .map(|field| (*field).to_string())
-                    .collect(),
-                ..RuntimeOutputLayout::default()
-            },
+            output_layout: layout,
             inject_fields: BTreeMap::new(),
             pipeline_type: Default::default(),
         },
@@ -837,8 +862,29 @@ async fn time_partition_harness_for(
     }
 }
 
+fn assert_hidden_time_spec(table: &iceberg::table::Table, source: &str, transform: Transform) {
+    let iceberg_schema = table.metadata().current_schema();
+    for name in ["year", "month", "day", "hour", "minute"] {
+        assert!(
+            iceberg_schema.field_by_name(name).is_none(),
+            "Iceberg must not materialize calendar column {name}"
+        );
+    }
+    let source_field = iceberg_schema
+        .field_by_name(source)
+        .unwrap_or_else(|| panic!("missing {source}"));
+    let spec = table.metadata().default_partition_spec();
+    let time_fields: Vec<_> = spec
+        .fields()
+        .iter()
+        .filter(|field| field.source_id == source_field.id)
+        .collect();
+    assert_eq!(time_fields.len(), 1, "spec={:?}", spec.fields());
+    assert_eq!(time_fields[0].transform, transform);
+}
+
 #[tokio::test]
-async fn iceberg_day_unit_creates_identity_year_month_day_and_stamps_rows() {
+async fn iceberg_day_unit_creates_day_transform_without_calendar_columns() {
     let harness = time_partition_harness(time_partition_metadata()).await;
     let filename = format!("namespace={NAMESPACE}");
     let posix = 1_794_063_845i64;
@@ -857,29 +903,16 @@ async fn iceberg_day_unit_creates_identity_year_month_day_and_stamps_rows() {
     harness.native_write_batch(&filename, batch).await;
 
     let table = harness.table().await;
+    assert_hidden_time_spec(&table, "event_ts", Transform::Day);
     let iceberg_schema = table.metadata().current_schema();
-    for name in ["year", "month", "day"] {
-        let field = iceberg_schema
-            .field_by_name(name)
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert!(field.required);
-        assert!(matches!(
-            field.field_type.as_ref(),
-            Type::Primitive(PrimitiveType::Int)
-        ));
-    }
-    let spec = table.metadata().default_partition_spec();
-    assert_eq!(
-        spec.fields()
-            .iter()
-            .map(|field| field.name.as_str())
-            .collect::<Vec<_>>(),
-        ["year", "month", "day"]
-    );
-    assert!(spec
-        .fields()
-        .iter()
-        .all(|field| field.transform == Transform::Identity));
+    assert!(matches!(
+        iceberg_schema
+            .field_by_name("event_ts")
+            .unwrap()
+            .field_type
+            .as_ref(),
+        Type::Primitive(PrimitiveType::Timestamp)
+    ));
 
     let batches: Vec<RecordBatch> = table
         .scan()
@@ -892,31 +925,13 @@ async fn iceberg_day_unit_creates_identity_year_month_day_and_stamps_rows() {
         .try_collect()
         .await
         .unwrap();
-    let year = batches[0]
-        .column_by_name("year")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .unwrap();
-    let month = batches[0]
-        .column_by_name("month")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .unwrap();
-    let day = batches[0]
-        .column_by_name("day")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .unwrap();
-    assert_eq!(year.value(0), 2026);
-    assert_eq!(month.value(0), 11);
-    assert_eq!(day.value(0), 7);
+    assert!(batches[0].column_by_name("year").is_none());
+    assert!(batches[0].column_by_name("day").is_none());
+    assert_eq!(batches[0].num_rows(), 1);
 }
 
 #[tokio::test]
-async fn iceberg_time_partition_collides_with_source_year() {
+async fn iceberg_source_year_column_is_not_a_time_partition() {
     let mut metadata = time_partition_metadata();
     metadata["fields"]["year"] = json!({
         "out_field_name": "year",
@@ -945,18 +960,20 @@ async fn iceberg_time_partition_collides_with_source_year() {
         ],
     )
     .unwrap();
-    let err = {
-        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
-            batch.schema(),
-            futures::stream::iter(vec![Ok(batch)]),
-        ));
-        harness
-            .writer
-            .sync(stream, filename, None)
-            .await
-            .unwrap_err()
-    };
-    assert!(err.to_string().contains("collides"), "{}", err);
+    harness.native_write_batch(&filename, batch).await;
+    let table = harness.table().await;
+    let spec = table.metadata().default_partition_spec();
+    assert_eq!(spec.fields().len(), 1);
+    assert_eq!(spec.fields()[0].transform, Transform::Day);
+    let year = table
+        .metadata()
+        .current_schema()
+        .field_by_name("year")
+        .unwrap();
+    assert!(matches!(
+        year.field_type.as_ref(),
+        Type::Primitive(PrimitiveType::Long)
+    ));
 }
 
 fn numeric_time_metadata() -> serde_json::Value {
@@ -1093,13 +1110,8 @@ async fn iceberg_stamps_posix_millis_on_numeric_time_field() {
         .try_collect()
         .await
         .unwrap();
-    let day = batches[0]
-        .column_by_name("day")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .unwrap();
-    assert_eq!(day.value(0), 7);
+    assert!(batches[0].column_by_name("day").is_none());
+    assert_hidden_time_spec(&table, "time", Transform::Day);
 }
 
 #[tokio::test]
@@ -1235,13 +1247,8 @@ async fn iceberg_day_unit_stamps_from_skippr_event_time() {
         .try_collect()
         .await
         .unwrap();
-    let day = batches[0]
-        .column_by_name("day")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .unwrap();
-    assert_eq!(day.value(0), 7);
+    assert!(batches[0].column_by_name("day").is_none());
+    assert_hidden_time_spec(&table, "_skippr_event_time", Transform::Day);
 }
 
 #[tokio::test]
@@ -1280,4 +1287,272 @@ async fn missing_skippr_event_time_fail_closes_day_partition() {
             .contains("missing or unresolvable event time"),
         "{err}"
     );
+}
+
+fn rmc_time_metadata() -> serde_json::Value {
+    let mut metadata = time_partition_metadata();
+    metadata["fields"]["detail_rmc"] = json!({
+        "out_field_name": "detail_rmc",
+        "determined_type": "string",
+        "determined_type_values": "",
+        "field_id": 3,
+        "schema_id": 1,
+        "lineage_id": "orders:rmc",
+        "nullable": false,
+        "default_value": null,
+        "fields": {}
+    });
+    metadata
+}
+
+#[tokio::test]
+async fn iceberg_identity_rmc_then_day_time() {
+    let harness = time_partition_harness_layout(
+        rmc_time_metadata(),
+        RuntimeBinding::Primary,
+        NAMESPACE,
+        RuntimeOutputLayout {
+            partition_fields: vec!["detail.rmc".into()],
+            time_partition_granularity: Some("day".into()),
+            batch_time_fields: vec!["event_ts".into()],
+            ..RuntimeOutputLayout::default()
+        },
+    )
+    .await;
+    let filename = format!("namespace={NAMESPACE}");
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("event_ts", DataType::Int64, false),
+        Field::new("detail_rmc", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1i64])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![1_794_063_845i64])) as ArrayRef,
+            Arc::new(arrow::array::StringArray::from(vec!["EU1"])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    harness.native_write_batch(&filename, batch).await;
+    let table = harness.table().await;
+    let spec = table.metadata().default_partition_spec();
+    assert_eq!(spec.fields().len(), 2);
+    assert_eq!(spec.fields()[0].transform, Transform::Identity);
+    assert_eq!(spec.fields()[1].transform, Transform::Day);
+}
+
+#[tokio::test]
+async fn iceberg_minute_unit_fail_closes() {
+    let harness = time_partition_harness_layout(
+        time_partition_metadata(),
+        RuntimeBinding::Primary,
+        NAMESPACE,
+        RuntimeOutputLayout {
+            time_partition_granularity: Some("minute".into()),
+            batch_time_fields: vec!["event_ts".into()],
+            ..RuntimeOutputLayout::default()
+        },
+    )
+    .await;
+    let filename = format!("namespace={NAMESPACE}");
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("event_ts", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1i64])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![1_794_063_845i64])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let err = {
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            batch.schema(),
+            futures::stream::iter(vec![Ok(batch)]),
+        ));
+        harness
+            .writer
+            .sync(stream, filename, None)
+            .await
+            .unwrap_err()
+    };
+    assert!(err.to_string().contains("no minute()"), "{err}");
+}
+
+#[tokio::test]
+async fn iceberg_hour_on_date_fail_closes() {
+    let mut metadata = time_partition_metadata();
+    metadata["fields"]["event_ts"]["determined_type"] = json!("date");
+    let harness = time_partition_harness_layout(
+        metadata,
+        RuntimeBinding::Primary,
+        NAMESPACE,
+        RuntimeOutputLayout {
+            time_partition_granularity: Some("hour".into()),
+            batch_time_fields: vec!["event_ts".into()],
+            ..RuntimeOutputLayout::default()
+        },
+    )
+    .await;
+    let filename = format!("namespace={NAMESPACE}");
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("event_ts", DataType::Date32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1i64])) as ArrayRef,
+            Arc::new(arrow::array::Date32Array::from(vec![20_764i32])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let err = {
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            batch.schema(),
+            futures::stream::iter(vec![Ok(batch)]),
+        ));
+        harness
+            .writer
+            .sync(stream, filename, None)
+            .await
+            .unwrap_err()
+    };
+    assert!(
+        err.to_string().contains("hour() requires timestamp"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn iceberg_hour_month_year_hidden_transforms() {
+    for (unit, transform) in [
+        ("hour", Transform::Hour),
+        ("month", Transform::Month),
+        ("year", Transform::Year),
+    ] {
+        let harness = time_partition_harness_layout(
+            time_partition_metadata(),
+            RuntimeBinding::Primary,
+            NAMESPACE,
+            RuntimeOutputLayout {
+                time_partition_granularity: Some(unit.into()),
+                batch_time_fields: vec!["event_ts".into()],
+                ..RuntimeOutputLayout::default()
+            },
+        )
+        .await;
+        let filename = format!("namespace={NAMESPACE}");
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("event_ts", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1i64])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![1_794_063_845i64])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        harness.native_write_batch(&filename, batch).await;
+        assert_hidden_time_spec(&harness.table().await, "event_ts", transform);
+    }
+}
+
+#[tokio::test]
+async fn iceberg_mixed_days_in_one_file_fail_closed() {
+    let harness = time_partition_harness(time_partition_metadata()).await;
+    let filename = format!("namespace={NAMESPACE}");
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("event_ts", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1i64, 2])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![1_794_063_845i64, 1_794_149_645i64])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let err = {
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            batch.schema(),
+            futures::stream::iter(vec![Ok(batch)]),
+        ));
+        harness
+            .writer
+            .sync(stream, filename, None)
+            .await
+            .unwrap_err()
+    };
+    assert!(err.to_string().contains("mixes partition values"), "{err}");
+}
+
+#[tokio::test]
+async fn iceberg_recreate_when_live_spec_is_identity_calendar_ints() {
+    let harness = time_partition_harness(time_partition_metadata()).await;
+    let schema = Schema::builder()
+        .with_schema_id(0)
+        .with_fields(vec![
+            NestedField::required(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
+            NestedField::required(2, "event_ts", Type::Primitive(PrimitiveType::Timestamp)).into(),
+            NestedField::required(3, "year", Type::Primitive(PrimitiveType::Int)).into(),
+            NestedField::required(4, "month", Type::Primitive(PrimitiveType::Int)).into(),
+            NestedField::required(5, "day", Type::Primitive(PrimitiveType::Int)).into(),
+        ])
+        .build()
+        .unwrap();
+    let mut builder = UnboundPartitionSpec::builder();
+    builder = builder
+        .add_partition_field(3, "year", Transform::Identity)
+        .unwrap()
+        .add_partition_field(4, "month", Transform::Identity)
+        .unwrap()
+        .add_partition_field(5, "day", Transform::Identity)
+        .unwrap();
+    let creation = TableCreation::builder()
+        .name(harness.writer.table_name(NAMESPACE))
+        .schema(schema)
+        .partition_spec_opt(Some(builder.build()))
+        .build();
+    let creation = TableCreation {
+        location: Some(harness.writer.table_location(NAMESPACE)),
+        ..creation
+    };
+    harness
+        .catalog
+        .create_table(&NamespaceIdent::new("lake".into()), creation)
+        .await
+        .unwrap();
+
+    let filename = format!("namespace={NAMESPACE}");
+    let arrow = Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("event_ts", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        arrow,
+        vec![
+            Arc::new(Int64Array::from(vec![1i64])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![1_794_063_845i64])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let err = {
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            batch.schema(),
+            futures::stream::iter(vec![Ok(batch)]),
+        ));
+        harness
+            .writer
+            .sync(stream, filename, None)
+            .await
+            .unwrap_err()
+    };
+    assert!(err.to_string().contains("recreate the table"), "{err}");
 }

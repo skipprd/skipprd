@@ -719,4 +719,16 @@ mod tests {
         assert!(!prod.contains("compacted_wal_segment_ids"));
         assert!(!prod.contains("segment_ids_from_snapshot_properties"));
     }
+
+    #[test]
+    fn iceberg_scan_does_not_inject_hive_calendar_columns() {
+        let src = include_str!("iceberg_table.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !prod.contains("year/month/day"),
+            "Iceberg query must filter on the event-time column, not Hive calendar ints"
+        );
+        assert!(!prod.contains("Identity(year"));
+        assert!(prod.contains("table.scan()"));
+    }
 }

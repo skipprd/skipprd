@@ -61,10 +61,12 @@ class SkipprLakeE2eHarnessTests(unittest.TestCase):
             self.assertIn("batch_time_unit: day", text)
             self.assertNotIn("time_partition_prefix", text)
 
-    def test_date_partition_sql_is_hive_parity_year_month_day(self) -> None:
+    def test_date_partition_sql_filters_event_ts_day_window(self) -> None:
         self.assertEqual(
             harness.date_partition_sql("bronze.shop", 2026, 11, 7),
-            "SELECT count(*) FROM bronze.shop WHERE year = 2026 AND month = 11 AND day = 7",
+            "SELECT count(*) FROM bronze.shop "
+            "WHERE event_ts >= TIMESTAMP '2026-11-07 00:00:00' "
+            "AND event_ts < TIMESTAMP '2026-11-08 00:00:00'",
         )
 
     def test_assert_iceberg_date_partitions_checks_both_days_and_missing(self) -> None:
@@ -72,17 +74,18 @@ class SkipprLakeE2eHarnessTests(unittest.TestCase):
 
         def count_sql(sql: str) -> int:
             seen.append(sql)
-            if "day = 7" in sql:
+            if "2026-11-07" in sql:
                 return 6
-            if "day = 8" in sql:
+            if "2026-11-08" in sql:
                 return 6
-            if "day = 9" in sql:
+            if "2026-11-09" in sql:
                 return 0
             raise AssertionError(sql)
 
         harness.assert_iceberg_date_partitions(count_sql, "bronze.shop")
         self.assertEqual(len(seen), 3)
-        self.assertTrue(all("year = 2026" in sql and "month = 11" in sql for sql in seen))
+        self.assertTrue(all("event_ts >=" in sql and "TIMESTAMP" in sql for sql in seen))
+        self.assertTrue(all("year =" not in sql and "month =" not in sql for sql in seen))
 
     def test_assert_iceberg_amount_sum_checks_source_amounts(self) -> None:
         seen: list[str] = []
@@ -111,7 +114,7 @@ class SkipprLakeE2eHarnessTests(unittest.TestCase):
         with self.assertRaises(harness.HarnessError) as ctx:
             harness.assert_iceberg_date_partitions(count_sql, "bronze.shop")
         self.assertIn("COLUMN_NOT_FOUND", str(ctx.exception))
-        self.assertIn("year = 2026", str(ctx.exception))
+        self.assertIn("event_ts >= TIMESTAMP", str(ctx.exception))
 
     def test_parse_query_plain_count_reads_skipprd_json(self) -> None:
         stdout = 'noise\n{"rows": [[6.0]]}\n'

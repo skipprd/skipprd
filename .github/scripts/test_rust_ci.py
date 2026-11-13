@@ -169,7 +169,13 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("runtime-plugin-binaries-linux_x86", published_chaos)
         self.assertNotIn("secrets.AWS_ACCESS_KEY_ID", published_chaos)
         self.assertIn("secrets.R2_ACCOUNT_ID", published_chaos)
+        self.assertNotIn(
+            "if: ${{ secrets.",
+            text,
+            "workflow_dispatch cannot parse secrets in if; map the secret to env first",
+        )
         self.assertIn("e2e_file_duckdb:", text)
+        self.assertIn("e2e_skipprlake_local:", text)
         self.assertIn("e2e_skipprlake:", text)
         self.assertIn("e2e_postgres_cdc:", text)
         self.assertIn("e2e_dynamodb_cdc:", text)
@@ -189,6 +195,14 @@ class RustCiTests(unittest.TestCase):
             '["skippr-plugin-data-source-s3","skippr-plugin-data-source-file"',
             text,
         )
+        skipprlake_local = text.split("\n  e2e_skipprlake_local:", 1)[1].split(
+            "\n  linux_dst:", 1
+        )[0]
+        self.assertIn("[self-hosted, skippr-linux-x64-32]", skipprlake_local)
+        self.assertIn("tests/skipprlake_e2e/run.py", skipprlake_local)
+        self.assertIn("SKIP_CARGO_BUILD", skipprlake_local)
+        self.assertIn("runtime-plugin-binaries-linux_x86", skipprlake_local)
+        self.assertNotIn("USE_PUBLISHED_PLUGINS", skipprlake_local)
         file_duckdb = text.split("\n  e2e_file_duckdb:", 1)[1].split("\n  e2e_file_copy:", 1)[0]
         self.assertIn("chmod +x target/release/skippr-plugin-*", file_duckdb)
         self.assertIn("unsafe_enable_version_guessing", file_duckdb)
@@ -259,6 +273,8 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("gamma", dynamodb_cdc_run)
         self.assertIn("expected 3 distinct keys", dynamodb_cdc_run)
         self.assertIn("Starting with", dynamodb_cdc_run)
+        self.assertNotIn("year, month, day", dynamodb_cdc_run)
+        self.assertNotIn("day partition columns missing", dynamodb_cdc_run)
         self.assertIn("snapshot_then_cdc", dynamodb_cdc_lake)
         self.assertIn('business_key_columns: ["id", "rmc"]', dynamodb_cdc_lake)
         self.assertIn("batch_time_fields: _skippr_event_time", dynamodb_cdc_lake)
@@ -344,6 +360,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("macos_arm64", plugins)
         self.assertIn("e2e_file_duckdb", plugins)
         self.assertIn("e2e_file_copy", plugins)
+        self.assertIn("e2e_skipprlake_local", plugins)
         self.assertIn("linux_dst", plugins)
         self.assertIn("publish_runtime_plugins.py", plugins)
         self.assertIn("runtime-plugin-binaries-linux_x86", plugins)

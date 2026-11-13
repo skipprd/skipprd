@@ -13,6 +13,8 @@ libfuzzer-sys = "0.4"
 serde_json = "1"
 serde_yaml = "0.9"
 iceberg = { path = "../third_party/iceberg" }
+skippr-iceberg-writer = { path = "../crates/skippr-iceberg-writer" }
+skippr-runtime-sdk = { path = "../crates/skippr-runtime-sdk" }
 skippr-wal-catalog = { path = "../crates/skippr-wal-catalog" }
 skipprd = { path = ".." }
 
@@ -102,6 +104,13 @@ bench = false
 [[bin]]
 name = "order_tokens"
 path = "fuzz_targets/order_tokens.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iceberg_partition_spec"
+path = "fuzz_targets/iceberg_partition_spec.rs"
 test = false
 doc = false
 bench = false
