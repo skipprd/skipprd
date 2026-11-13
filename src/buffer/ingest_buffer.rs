@@ -1175,7 +1175,10 @@ impl Buffers {
         {
             Ok(result) => result,
             Err(err) => {
-                // fsync/EIO fail-closed: do not ACK. Disk never publishes Closed.
+                // Persist failed: do not ACK. Catalog may already have committed
+                // (AfterCatalogCommit / post-commit I/O). Overlay is installed only
+                // after persist returns Ok. Restart republishes from catalog if the
+                // row landed.
                 error!(
                     "Segment write failed ({}): id={} err={}",
                     context, snapshot_id, err
@@ -1201,23 +1204,10 @@ impl Buffers {
             );
         }
         if Config::debug_enabled() || Config::log_wal_enabled() {
-            info!(
-                "WAL persist marking offsets durable id={} offset_sample={:?}",
-                snapshot_id,
-                offset_sample(snapshot.offsets.iter(), 3)
-            );
-            append_wal_debug_trace(config, &format!("persist_mark_offsets id={}", snapshot_id));
-        }
-        if !write_result.offsets_published {
-            return Err(ArrowError::ExternalError(Box::new(std::io::Error::other(
-                "WAL catalog persist did not publish offsets",
-            ))));
-        }
-        if Config::debug_enabled() || Config::log_wal_enabled() {
-            info!("WAL persist offsets durable id={}", snapshot_id);
+            info!("WAL persist catalog committed id={}", snapshot_id);
             append_wal_debug_trace(
                 config,
-                &format!("persist_offsets_durable id={}", snapshot_id),
+                &format!("persist_catalog_committed id={}", snapshot_id),
             );
         }
         Self::segment_cache_register_from_write(config, &write_result);

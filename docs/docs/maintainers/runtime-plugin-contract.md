@@ -5,9 +5,9 @@ This is the hard contract for Skippr's runtime plugin boundary after the TCP cut
 ## Core rules
 
 1. **WAL commit is the only durable boundary.** A batch becomes durable when the host makes the committed WAL segment visible.
-2. **Offsets are a Skippr Store family, host-owned materialized state.** They reflect visible WAL commits. They are not the source of truth and are not owned by plugins. Lock: [skippr-store-kv.md](skippr-store-kv.md).
+2. **Live resume is host-owned overlay state plus a Skippr Store family rebuilt on start.** Overlay is installed at WAL catalog commit. The `offsets` family is not the source of truth and is not owned by plugins. Lock: [skippr-store-kv.md](skippr-store-kv.md).
 3. **Runtime transport is TCP only.** Every runtime plugin opens one control channel and one data channel, then authenticates both with `RuntimeSessionHello`.
-4. **Source plugins never mutate host durability state.** They read resume state from the host, emit batches, emit offset hints, and emit checkpoints. The host owns WAL writes and offset materialization.
+4. **Source plugins never mutate host durability state.** They read resume state from the host, emit batches, emit offset hints, and emit checkpoints. The host owns WAL writes and live resume.
 5. **Sink and schema work must be replay-safe.** The host may replay the same logical compaction after reconnect, restart, or crash. `compaction_id` is the stable idempotency key for that work.
 
 ## Transport shape
@@ -24,7 +24,7 @@ There is no stdio compatibility path. Runtime plugins now speak the same TCP pro
 ### Host owns
 
 - WAL persistence and visibility
-- offsets DB writes
+- live resume overlay at catalog commit; Skippr Store `offsets` family via startup republish
 - recovery and WAL catalog hydrate/republish
 - sink/schema orchestration
 - schema state distribution
@@ -47,7 +47,7 @@ There is no stdio compatibility path. Runtime plugins now speak the same TCP pro
 On restart, the host recovers from committed WAL state first and rebuilds the rest from there:
 
 1. Hydrate live `SegmentRow`s from the WAL catalog.
-2. Republish offsets and checkpoints from those rows.
+2. Republish offsets and checkpoints from those rows, then from `ControlRow`s (`Checkpoint` and `OffsetHint`). Offset-hint republish keeps any filesize already published from the matching `SegmentRow`.
 3. Re-run any remaining compaction work from `CompactionRow`s.
 4. Resume sources from host-provided checkpoint and materialized offsets.
 
@@ -55,11 +55,12 @@ The offsets DB is therefore a cache of host-owned durable progress, not an autho
 
 ## Crash matrix
 
-| Crash point | What must be true after restart |
+| Crash point | What must be true |
 | --- | --- |
 | Before committed WAL visibility | The batch is not durable yet. The source resumes from the last materialized host state. |
-| After committed WAL visibility, before offsets materialization | Catalog republish materializes offsets and re-queues compaction. |
-| After offsets materialization, before sink/schema ack | The host may replay the same compaction with the same `compaction_id`. |
+| After catalog commit, before overlay (`AfterCatalogCommit`) | Segment or control persist returns Err, so the plugin is not ACK'd. Overlay for that persist was not installed; prior overlay stays. After restart, `republish_all` fills the `offsets` family from catalog rows. |
+| After overlay, before plugin ACK | Overlay is live in this process. Persist already returned Ok; a crash before ACK still drops the overlay with the process. After restart, `republish_all` fills the family from catalog rows. |
+| After plugin ACK (same process) | Overlay already has resume. A later restart still fills the family via `republish_all`. |
 | After sink/schema ack, before catalog reclaim | Replaying the same compaction must still be safe and idempotent. |
 | After catalog reclaim (row deleted, payload gone) | Recovery skips that compaction because the durable work is already complete. |
 

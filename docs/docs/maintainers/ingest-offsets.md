@@ -10,7 +10,7 @@ Skipprd treats each source partition as an **immutable whole object** (S3 key, l
 
 ## Where offsets live
 
-Every backend publishes `Closed=1` / `Position` through `publish_wal_commit` after the catalog row is durable. Offsets are a Skippr Store family, not a second WAL authority. Lock: [Skippr Store KV](skippr-store-kv.md).
+WAL catalog commit is the durability boundary. `Closed=1` / `Position` ride on the catalog `SegmentRow` (and control rows for hints/checkpoints). Ingest installs an in-process overlay at that commit so the ingest gate and plugin offset RPC see progress in the same run. The Skippr Store `offsets` family is rebuilt only by `republish_all` on startup. Ingest does not write that family. Lock: [Skippr Store KV](skippr-store-kv.md).
 
 ## When `Position` matters
 

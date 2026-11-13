@@ -235,7 +235,6 @@ async fn persist_payload_object(
             key: body_key.to_string(),
             bucket: bucket.to_string(),
         },
-        offsets_published: false,
     })
 }
 

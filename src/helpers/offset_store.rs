@@ -1,7 +1,12 @@
-//! Offset/checkpoint families on Skippr Store. DDL journal is not this trait.
+//! Resume overlay and Skippr Store `offsets` family (offset tuples and `cdc_checkpoint:` keys).
+//! DDL journal is not this trait.
+//!
+//! Live resume is an in-process overlay installed at WAL catalog commit.
+//! The Skippr Store `offsets` family is written only by startup `republish_all`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::helpers::offsets::{OffsetTypes, OffsetValue};
 use skippr_lease::{decide_wal_publish, OffsetPublishError, PublishAction, PublishMode};
@@ -15,6 +20,11 @@ pub trait OffsetStore: Send + Sync {
     fn get_offset(&self, namespace: &str, partition: &str) -> Result<Option<Vec<u8>>, String>;
     fn get_checkpoint(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
     fn flush(&self) -> Result<(), String>;
+    fn remember_committed(
+        &self,
+        offsets: &[skippr_wal_catalog::CommittedOffset],
+        checkpoints: &[skippr_wal_catalog::CommittedCheckpoint],
+    ) -> Result<(), String>;
     fn publish_wal_commit(
         &self,
         sk: &str,
@@ -29,6 +39,22 @@ pub trait OffsetStore: Send + Sync {
     fn reset_published_ingest(&self) -> Result<(), String>;
 }
 
+pub fn committed_offset_bytes(offset: &skippr_wal_catalog::CommittedOffset) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(24);
+    bytes.extend_from_slice(&offset.filesize.to_le_bytes());
+    bytes.extend_from_slice(&offset.position.to_le_bytes());
+    bytes.extend_from_slice(&offset.closed.to_le_bytes());
+    bytes
+}
+
+pub fn filesize_from_offset_bytes(bytes: &[u8]) -> u64 {
+    if bytes.len() == 24 {
+        u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+    } else {
+        0
+    }
+}
+
 pub fn publish_committed(
     store: &dyn OffsetStore,
     offsets: &[skippr_wal_catalog::CommittedOffset],
@@ -39,10 +65,7 @@ pub fn publish_committed(
 ) -> Result<(), OffsetPublishError> {
     for offset in offsets {
         let sk = store.offset_publish_sk(&offset.namespace, &offset.partition);
-        let mut bytes = Vec::with_capacity(24);
-        bytes.extend_from_slice(&offset.filesize.to_le_bytes());
-        bytes.extend_from_slice(&offset.position.to_le_bytes());
-        bytes.extend_from_slice(&offset.closed.to_le_bytes());
+        let bytes = committed_offset_bytes(offset);
         let sha = {
             use sha2::{Digest, Sha256};
             hex::encode(Sha256::digest(&bytes))
@@ -64,6 +87,7 @@ pub struct StoreOffsetStore {
     store: Arc<dyn SkipprStore>,
     fence: CatalogFence,
     sled_fallback: Option<PathBuf>,
+    live: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl StoreOffsetStore {
@@ -72,6 +96,7 @@ impl StoreOffsetStore {
             store,
             fence,
             sled_fallback: None,
+            live: Mutex::new(HashMap::new()),
         }
     }
 
@@ -132,6 +157,14 @@ impl StoreOffsetStore {
 
 impl OffsetStore for StoreOffsetStore {
     fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String> {
+        let live = self
+            .live
+            .lock()
+            .map_err(|_| "offset overlay lock poisoned".to_string())?;
+        if let Some(bytes) = live.get(sk) {
+            return Ok(Some(bytes.clone()));
+        }
+        drop(live);
         self.family_get(StoreFamily::Offsets, sk.as_bytes())
     }
 
@@ -145,6 +178,30 @@ impl OffsetStore for StoreOffsetStore {
 
     fn flush(&self) -> Result<(), String> {
         self.store.flush_durable().map_err(|err| err.to_string())
+    }
+
+    fn remember_committed(
+        &self,
+        offsets: &[skippr_wal_catalog::CommittedOffset],
+        checkpoints: &[skippr_wal_catalog::CommittedCheckpoint],
+    ) -> Result<(), String> {
+        let mut live = self
+            .live
+            .lock()
+            .map_err(|_| "offset overlay lock poisoned".to_string())?;
+        for offset in offsets {
+            live.insert(
+                Self::offset_key(&offset.namespace, &offset.partition),
+                committed_offset_bytes(offset),
+            );
+        }
+        for checkpoint in checkpoints {
+            live.insert(
+                Self::checkpoint_key(&checkpoint.logical_key),
+                checkpoint.envelope.clone(),
+            );
+        }
+        Ok(())
     }
 
     fn publish_wal_commit(
@@ -194,6 +251,10 @@ impl OffsetStore for StoreOffsetStore {
     }
 
     fn reset_published_ingest(&self) -> Result<(), String> {
+        self.live
+            .lock()
+            .map_err(|_| "offset overlay lock poisoned".to_string())?
+            .clear();
         let page = self
             .store
             .query_prefix(StoreFamily::Offsets.prefix(), None, usize::MAX)
@@ -223,6 +284,13 @@ impl OffsetStore for Arc<dyn OffsetStore> {
     }
     fn flush(&self) -> Result<(), String> {
         (**self).flush()
+    }
+    fn remember_committed(
+        &self,
+        offsets: &[skippr_wal_catalog::CommittedOffset],
+        checkpoints: &[skippr_wal_catalog::CommittedCheckpoint],
+    ) -> Result<(), String> {
+        (**self).remember_committed(offsets, checkpoints)
     }
     fn publish_wal_commit(
         &self,
@@ -300,6 +368,47 @@ mod tests {
             Arc::new(skippr_wal_catalog::MemorySkipprStore::open(fence)),
             fence,
         )
+    }
+
+    #[test]
+    fn remember_committed_is_visible_without_family_write() {
+        let fence = CatalogFence::local();
+        let kv: Arc<dyn SkipprStore> = Arc::new(skippr_wal_catalog::MemorySkipprStore::open(fence));
+        let store = StoreOffsetStore::new(Arc::clone(&kv), fence);
+        store
+            .remember_committed(
+                &[skippr_wal_catalog::CommittedOffset {
+                    namespace: "ns".into(),
+                    partition: "p".into(),
+                    filesize: 0,
+                    position: 9,
+                    closed: 1,
+                }],
+                &[],
+            )
+            .unwrap();
+        let live = store.get_offset("ns", "p").unwrap().expect("overlay");
+        assert_eq!(&live[8..16], &9u64.to_le_bytes());
+        let family = kv
+            .query_prefix(StoreFamily::Offsets.prefix(), None, usize::MAX)
+            .unwrap();
+        assert!(family.is_empty(), "remember must not write the offsets family");
+        store.reset_published_ingest().unwrap();
+        assert!(store.get_offset("ns", "p").unwrap().is_none());
+    }
+
+    #[test]
+    fn filesize_from_offset_bytes_reads_leading_u64() {
+        let bytes = committed_offset_bytes(&skippr_wal_catalog::CommittedOffset {
+            namespace: "ns".into(),
+            partition: "p".into(),
+            filesize: 42,
+            position: 9,
+            closed: 1,
+        });
+        assert_eq!(filesize_from_offset_bytes(&bytes), 42);
+        assert_eq!(filesize_from_offset_bytes(&[]), 0);
+        assert_eq!(filesize_from_offset_bytes(&[1, 2, 3]), 0);
     }
 
     #[test]

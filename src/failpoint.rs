@@ -13,7 +13,6 @@ use skippr_lease::DurableError;
 
 pub const BEFORE_CATALOG_COMMIT: &str = "before_catalog_commit";
 pub const AFTER_CATALOG_COMMIT: &str = "after_catalog_commit";
-pub const AFTER_OFFSETS_PUBLISHED: &str = "after_offsets_published";
 pub const BEFORE_COMPACTION_SINK: &str = "before_compaction_sink";
 pub const AFTER_COMPACTION_SINK: &str = "after_compaction_sink";
 pub const HOLD_BEFORE_COMPACTION_SINK: &str = "hold_before_compaction_sink";
@@ -22,17 +21,15 @@ pub const HOLD_BEFORE_COMPACTION_SINK: &str = "hold_before_compaction_sink";
 pub enum FailpointName {
     BeforeCatalogCommit,
     AfterCatalogCommit,
-    AfterOffsetsPublished,
     BeforeCompactionSink,
     AfterCompactionSink,
     HoldBeforeCompactionSink,
 }
 
 impl FailpointName {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::BeforeCatalogCommit,
         Self::AfterCatalogCommit,
-        Self::AfterOffsetsPublished,
         Self::BeforeCompactionSink,
         Self::AfterCompactionSink,
         Self::HoldBeforeCompactionSink,
@@ -42,7 +39,6 @@ impl FailpointName {
         match self {
             Self::BeforeCatalogCommit => BEFORE_CATALOG_COMMIT,
             Self::AfterCatalogCommit => AFTER_CATALOG_COMMIT,
-            Self::AfterOffsetsPublished => AFTER_OFFSETS_PUBLISHED,
             Self::BeforeCompactionSink => BEFORE_COMPACTION_SINK,
             Self::AfterCompactionSink => AFTER_COMPACTION_SINK,
             Self::HoldBeforeCompactionSink => HOLD_BEFORE_COMPACTION_SINK,
@@ -53,7 +49,6 @@ impl FailpointName {
         match raw.trim() {
             BEFORE_CATALOG_COMMIT => Ok(Self::BeforeCatalogCommit),
             AFTER_CATALOG_COMMIT => Ok(Self::AfterCatalogCommit),
-            AFTER_OFFSETS_PUBLISHED => Ok(Self::AfterOffsetsPublished),
             BEFORE_COMPACTION_SINK => Ok(Self::BeforeCompactionSink),
             AFTER_COMPACTION_SINK => Ok(Self::AfterCompactionSink),
             HOLD_BEFORE_COMPACTION_SINK => Ok(Self::HoldBeforeCompactionSink),
@@ -263,13 +258,10 @@ mod tests {
             FailpointName::BeforeCatalogCommit
         );
         assert_eq!(
-            FailpointName::parse(AFTER_OFFSETS_PUBLISHED).unwrap(),
-            FailpointName::AfterOffsetsPublished
-        );
-        assert_eq!(
             FailpointName::parse(HOLD_BEFORE_COMPACTION_SINK).unwrap(),
             FailpointName::HoldBeforeCompactionSink
         );
+        assert!(FailpointName::parse("after_offsets_published").is_err());
         assert!(FailpointName::parse("lease_timeout").is_err());
         assert!(FailpointName::parse("after_replica_payload_ack").is_err());
     }
@@ -280,7 +272,6 @@ mod tests {
         let names = [
             FailpointName::BeforeCatalogCommit,
             FailpointName::AfterCatalogCommit,
-            FailpointName::AfterOffsetsPublished,
             FailpointName::BeforeCompactionSink,
             FailpointName::AfterCompactionSink,
         ];

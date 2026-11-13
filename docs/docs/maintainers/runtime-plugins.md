@@ -4,7 +4,7 @@ Skippr treats runtime plugins as independently versioned packages. The host bina
 
 The runtime boundary is intentionally narrow:
 
-- the **host** owns WAL durability, recovery, schema distribution, and offset materialization
+- the **host** owns WAL durability, recovery, schema distribution, and live resume
 - **source plugins** read external systems and emit work to the host
 - **sink/schema plugins** perform destination-specific writes that must tolerate replay
 
@@ -116,14 +116,14 @@ There is no stdio fallback path.
 
 ## Host-owned offsets
 
-Host-owned offsets live in Skippr Store. Only the host process opens the store. Lock: [skippr-store-kv.md](skippr-store-kv.md).
+Host-owned live resume is the in-process overlay plus the Skippr Store `offsets` family rebuilt on start. Only the host process opens the store. Lock: [skippr-store-kv.md](skippr-store-kv.md).
 
 Current behavior:
 
 - runtime source plugins never open the durable offsets DB directly
 - plugins may ask the host to validate resume state and load checkpoints
-- plugins emit offset materialization hints and checkpoints back to the host
-- the host writes offsets only after WAL-visible durability has been established
+- plugins emit offset hints and checkpoints back to the host
+- the host ACKs after WAL catalog commit and remembers live resume in process; the offsets family is filled by startup republish
 
 This keeps the offsets DB as a host-owned materialized view of committed WAL state instead of a second durability authority.
 

@@ -22,7 +22,6 @@ pub struct SegmentWriteResult {
     pub total_rows: u64,
     pub sha256: [u8; 32],
     pub location: SegmentWriteLocation,
-    pub offsets_published: bool,
 }
 
 pub(crate) fn block_on_async<F, T>(fut: F) -> io::Result<T>

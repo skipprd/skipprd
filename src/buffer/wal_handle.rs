@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Instant, SystemTime};
 
-use skippr_lease::{DurableError, OffsetPublishError, PipelineKey, PipelinePaths, SegmentId};
+use skippr_lease::{DurableError, PipelineKey, PipelinePaths, SegmentId};
 use skippr_wal_catalog::{
     query_all, CatalogFence, CatalogKey, CatalogPrefix, CatalogRow, CatalogSeq, CatalogTxn,
     CheckpointKey, CommittedCheckpoint, CommittedOffset, ControlBody, ControlRow, FormatPhase,
@@ -18,13 +18,10 @@ use tokio::sync::Mutex;
 
 use crate::buffer::segment_file::{encode_snapshot, PartitionKey, SegmentFile, WalPayload};
 use crate::buffer::wal_store::{SegmentWriteLocation, SegmentWriteResult};
-use crate::helpers::offset_store::{publish_committed, OffsetStore};
+use crate::helpers::offset_store::{filesize_from_offset_bytes, publish_committed, OffsetStore};
 use crate::helpers::offsets::OffsetKey;
 use crate::plugins::cdc::CheckpointEnvelope;
 
-/// Bound on catalog commits that have not yet published. Matches the WAL writer
-/// channel cap class: not an env knob.
-pub const UNPUBLISHED_COMMIT_CEILING: u64 = 32;
 /// Shared progress cadence for import, hydrate, redo, and republish. Not an env knob.
 pub(crate) const WAL_CATALOG_PROGRESS_EVERY: u64 = 250;
 /// Durable Acked cleanup batch. Not an env knob.
@@ -38,14 +35,8 @@ pub struct PipelineWalHandle {
     fence: CatalogFence,
     catalog: Arc<dyn WalCatalogStore>,
     offsets: Arc<dyn OffsetStore>,
-    seq: Mutex<SeqState>,
     catalog_mutex: Mutex<()>,
     in_memory_done: std::sync::Mutex<HashMap<String, SliceBitmap>>,
-}
-
-struct SeqState {
-    max_committed: CatalogSeq,
-    max_published: CatalogSeq,
 }
 
 static ACTIVE: OnceLock<RwLock<HashMap<PipelineKey, Arc<PipelineWalHandle>>>> = OnceLock::new();
@@ -101,10 +92,6 @@ impl PipelineWalHandle {
             fence,
             catalog,
             offsets,
-            seq: Mutex::new(SeqState {
-                max_committed: CatalogSeq::ZERO,
-                max_published: CatalogSeq::ZERO,
-            }),
             catalog_mutex: Mutex::new(()),
             in_memory_done: std::sync::Mutex::new(HashMap::new()),
         })
@@ -675,8 +662,9 @@ impl PipelineWalHandle {
                     "segment_id reuse with different payload sha".into(),
                 ));
             }
-            self.publish_seq(row.seq, epoch, &committed_offsets, &checkpoints)
-                .await?;
+            self.offsets
+                .remember_committed(&committed_offsets, &checkpoints)
+                .map_err(DurableError::Io)?;
             return Ok(SegmentWriteResult {
                 meta: encoded.meta,
                 total_rows: encoded.total_rows,
@@ -687,7 +675,6 @@ impl PipelineWalHandle {
                     },
                     PayloadLocation::S3 { bucket, key } => SegmentWriteLocation::S3 { key, bucket },
                 },
-                offsets_published: true,
             });
         }
         std::fs::create_dir_all(&self.paths.segs).map_err(DurableError::from)?;
@@ -697,20 +684,20 @@ impl PipelineWalHandle {
         let location = PayloadLocation::Disk {
             path: seg_file.path.to_string_lossy().into_owned(),
         };
-        let seq = self
-            .commit_new_segment(
-                &id,
-                &encoded,
-                &location,
-                slice_count,
-                committed_offsets.clone(),
-                checkpoints.clone(),
-                fence,
-                epoch,
-            )
-            .await?;
-        self.publish_seq(seq, epoch, &committed_offsets, &checkpoints)
-            .await?;
+        self.commit_new_segment(
+            &id,
+            &encoded,
+            &location,
+            slice_count,
+            committed_offsets.clone(),
+            checkpoints.clone(),
+            fence,
+            epoch,
+        )
+        .await?;
+        self.offsets
+            .remember_committed(&committed_offsets, &checkpoints)
+            .map_err(DurableError::Io)?;
         Ok(SegmentWriteResult {
             meta: encoded.meta,
             total_rows: encoded.total_rows,
@@ -718,7 +705,6 @@ impl PipelineWalHandle {
             location: SegmentWriteLocation::Disk {
                 path: seg_file.path.clone(),
             },
-            offsets_published: true,
         })
     }
 
@@ -748,19 +734,6 @@ impl PipelineWalHandle {
         epoch: skippr_lease::LeaseEpoch,
     ) -> Result<CatalogSeq, DurableError> {
         let _catalog = self.catalog_mutex.lock().await;
-        {
-            let seq = self.seq.lock().await;
-            if seq
-                .max_committed
-                .get()
-                .saturating_sub(seq.max_published.get())
-                >= UNPUBLISHED_COMMIT_CEILING
-            {
-                return Err(DurableError::Io(
-                    "unpublished WAL catalog commit ceiling reached".into(),
-                ));
-            }
-        }
         crate::failpoint::hit(
             crate::failpoint::FailpointName::BeforeCatalogCommit,
             &self.paths.root,
@@ -809,11 +782,7 @@ impl PipelineWalHandle {
         )
         .map_err(|err| DurableError::Io(err.to_string()))?;
         self.commit_durable(&txn, fence)?;
-        crate::failpoint::hit(
-            crate::failpoint::FailpointName::AfterCatalogCommit,
-            &self.paths.root,
-        )?;
-        self.seq.lock().await.max_committed = seq;
+        self.hit_after_catalog_commit()?;
         Ok(seq)
     }
 
@@ -821,44 +790,11 @@ impl PipelineWalHandle {
         flushing_commit(self.catalog.as_ref(), txn, fence)
     }
 
-    async fn publish_seq(
-        &self,
-        seq: CatalogSeq,
-        epoch: skippr_lease::LeaseEpoch,
-        offsets: &[CommittedOffset],
-        checkpoints: &[CommittedCheckpoint],
-    ) -> Result<(), DurableError> {
-        let mut delay = std::time::Duration::from_millis(50);
-        loop {
-            match publish_committed(
-                self.offsets.as_ref(),
-                offsets,
-                checkpoints,
-                epoch.get(),
-                seq.get(),
-                skippr_lease::PublishMode::Fresh,
-            ) {
-                Ok(()) => {
-                    self.offsets.flush().map_err(|err| DurableError::Io(err))?;
-                    crate::failpoint::hit(
-                        crate::failpoint::FailpointName::AfterOffsetsPublished,
-                        &self.paths.root,
-                    )?;
-                    self.seq.lock().await.max_published = seq;
-                    return Ok(());
-                }
-                Err(OffsetPublishError::Corrupt(err)) => {
-                    return Err(DurableError::CorruptOffset(err));
-                }
-                Err(OffsetPublishError::FenceRegression) => {
-                    return Err(DurableError::FencedAfterCommit);
-                }
-                Err(OffsetPublishError::Transient(_)) => {
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(std::time::Duration::from_secs(2));
-                }
-            }
-        }
+    fn hit_after_catalog_commit(&self) -> Result<(), DurableError> {
+        crate::failpoint::hit(
+            crate::failpoint::FailpointName::AfterCatalogCommit,
+            &self.paths.root,
+        )
     }
 
     pub async fn persist_s3_segment(
@@ -884,13 +820,12 @@ impl PipelineWalHandle {
             .catalog
             .get(&CatalogKey::Segment(id.clone()))
             .map_err(|err| DurableError::Io(err.to_string()))?;
-        let seq = if let Some(CatalogRow::Segment(row)) = existing {
+        if let Some(CatalogRow::Segment(row)) = existing {
             if row.payload_sha256 != encoded.sha256 {
                 return Err(DurableError::ProtocolMismatch(
                     "segment_id reuse with different payload sha".into(),
                 ));
             }
-            row.seq
         } else {
             self.commit_new_segment(
                 &id,
@@ -902,10 +837,11 @@ impl PipelineWalHandle {
                 fence,
                 epoch,
             )
-            .await?
-        };
-        self.publish_seq(seq, epoch, &committed_offsets, &checkpoints)
             .await?;
+        }
+        self.offsets
+            .remember_committed(&committed_offsets, &checkpoints)
+            .map_err(DurableError::Io)?;
         Ok(SegmentWriteResult {
             meta: encoded.meta.clone(),
             total_rows: encoded.total_rows,
@@ -914,7 +850,6 @@ impl PipelineWalHandle {
                 key: object_key.to_string(),
                 bucket: bucket.to_string(),
             },
-            offsets_published: true,
         })
     }
 
@@ -960,10 +895,10 @@ impl PipelineWalHandle {
             .offsets
             .get_offset(namespace, partition)
             .map_err(DurableError::Io)?;
-        let filesize = match existing.as_deref() {
-            Some(bytes) if bytes.len() == 24 => u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-            _ => 0,
-        };
+        let filesize = existing
+            .as_deref()
+            .map(filesize_from_offset_bytes)
+            .unwrap_or(0);
         self.persist_control(
             key,
             body,
@@ -992,18 +927,18 @@ impl PipelineWalHandle {
             .catalog
             .get(&key)
             .map_err(|err| DurableError::Io(err.to_string()))?;
-        let seq = if let Some(CatalogRow::Control(row)) = existing {
-            if row.body == body {
-                row.seq
-            } else {
+        if let Some(CatalogRow::Control(row)) = existing {
+            if row.body != body {
                 self.commit_control_row(&key, body, Some(row.version), fence, epoch)
-                    .await?
+                    .await?;
             }
         } else {
             self.commit_control_row(&key, body, None, fence, epoch)
-                .await?
-        };
-        self.publish_seq(seq, epoch, &offsets, &checkpoints).await
+                .await?;
+        }
+        self.offsets
+            .remember_committed(&offsets, &checkpoints)
+            .map_err(DurableError::Io)
     }
 
     async fn commit_control_row(
@@ -1015,19 +950,6 @@ impl PipelineWalHandle {
         epoch: skippr_lease::LeaseEpoch,
     ) -> Result<CatalogSeq, DurableError> {
         let _catalog = self.catalog_mutex.lock().await;
-        {
-            let seq = self.seq.lock().await;
-            if seq
-                .max_committed
-                .get()
-                .saturating_sub(seq.max_published.get())
-                >= UNPUBLISHED_COMMIT_CEILING
-            {
-                return Err(DurableError::Io(
-                    "unpublished WAL catalog commit ceiling reached".into(),
-                ));
-            }
-        }
         let max_seq = match self
             .catalog
             .get(&CatalogKey::Seq)
@@ -1068,7 +990,7 @@ impl PipelineWalHandle {
         )
         .map_err(|err| DurableError::Io(err.to_string()))?;
         self.commit_durable(&txn, fence)?;
-        self.seq.lock().await.max_committed = seq;
+        self.hit_after_catalog_commit()?;
         Ok(seq)
     }
 
@@ -1330,12 +1252,20 @@ impl PipelineWalHandle {
                     let CatalogKey::OffsetHint(hint) = key else {
                         continue;
                     };
+                    let filesize = match self
+                        .offsets
+                        .get_offset(hint.namespace(), hint.partition())
+                    {
+                        Ok(Some(bytes)) => filesize_from_offset_bytes(&bytes),
+                        Ok(None) => 0,
+                        Err(err) => return Err(DurableError::Io(err)),
+                    };
                     publish_committed(
                         self.offsets.as_ref(),
                         &[CommittedOffset {
                             namespace: hint.namespace().to_string(),
                             partition: hint.partition().to_string(),
-                            filesize: 0,
+                            filesize,
                             position,
                             closed: if closed { 1 } else { 0 },
                         }],
@@ -1619,10 +1549,7 @@ fn committed_offsets_from(
             .get_offset(&key.namespace, &key.partition)
             .map_err(|err| DurableError::Io(err))?;
         let (filesize, closed) = match existing.as_deref() {
-            Some(bytes) if bytes.len() == 24 => {
-                let filesize = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-                (filesize, 1u64)
-            }
+            Some(bytes) if bytes.len() == 24 => (filesize_from_offset_bytes(bytes), 1u64),
             _ => (0, 1),
         };
         out.push(CommittedOffset {
@@ -1698,9 +1625,36 @@ mod tests {
         let paths = PipelinePaths::legacy_disk(dir);
         let fence = CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
-        let offsets: Arc<dyn OffsetStore> =
-            Arc::new(crate::helpers::offset_store::memory_offset_store());
+        let offsets: Arc<dyn OffsetStore> = memory_offset_store();
         PipelineWalHandle::new(key, paths, catalog, offsets, fence)
+    }
+
+    fn overlay_handle(
+        dir: &std::path::Path,
+    ) -> (
+        Arc<PipelineWalHandle>,
+        Arc<StoreOffsetStore>,
+        Arc<dyn skippr_wal_catalog::SkipprStore>,
+    ) {
+        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let paths = PipelinePaths::legacy_disk(dir);
+        let fence = CatalogFence::local();
+        let catalog = memory_catalog_for_test(fence);
+        let kv: Arc<dyn skippr_wal_catalog::SkipprStore> =
+            Arc::new(skippr_wal_catalog::MemorySkipprStore::open(fence));
+        let offsets = Arc::new(StoreOffsetStore::new(Arc::clone(&kv), fence));
+        let handle = PipelineWalHandle::new(key, paths, catalog, offsets.clone(), fence);
+        (handle, offsets, kv)
+    }
+
+    fn offsets_family_empty(kv: &dyn skippr_wal_catalog::SkipprStore) -> bool {
+        kv.query_prefix(
+            skippr_wal_catalog::StoreFamily::Offsets.prefix(),
+            None,
+            usize::MAX,
+        )
+        .unwrap()
+        .is_empty()
     }
 
     #[tokio::test]
@@ -1720,7 +1674,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(result.offsets_published);
         assert!(matches!(result.location, SegmentWriteLocation::Disk { .. }));
         let SegmentWriteLocation::Disk { path } = &result.location else {
             panic!("disk location");
@@ -1742,6 +1695,219 @@ mod tests {
             "empty persist has no PART index, so no wal#idx#"
         );
         assert_eq!(handle.catalog_seq_seen().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn persist_segment_exposes_live_offsets_without_family_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, offsets, kv) = overlay_handle(dir.path());
+        let mut map = HashMap::new();
+        map.insert(OffsetKey::new("ns", "part-a"), 7u64);
+        handle
+            .persist_segment(
+                "seg-live",
+                &map,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+        let live = offsets
+            .get_offset("ns", "part-a")
+            .unwrap()
+            .expect("catalog commit installs live resume");
+        assert_eq!(&live[8..16], &7u64.to_le_bytes());
+        assert_eq!(&live[16..24], &1u64.to_le_bytes());
+        assert!(
+            offsets_family_empty(kv.as_ref()),
+            "ingest must not write the offsets family"
+        );
+        handle.republish_all().await.unwrap();
+        assert!(
+            !offsets_family_empty(kv.as_ref()),
+            "startup republish fills the offsets family"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn persist_control_exposes_live_resume_without_family_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, offsets, kv) = overlay_handle(dir.path());
+        handle
+            .persist_offset_hint("ns", "part-hint", 11, true)
+            .await
+            .unwrap();
+        let live = offsets
+            .get_offset("ns", "part-hint")
+            .unwrap()
+            .expect("offset hint overlay");
+        assert_eq!(&live[8..16], &11u64.to_le_bytes());
+        assert_eq!(&live[16..24], &1u64.to_le_bytes());
+        let envelope = crate::plugins::cdc::CheckpointEnvelope::from_payload(
+            crate::plugins::cdc::CheckpointAuthority::AdvisoryHint,
+            crate::plugins::cdc::CheckpointKind::AdvisoryProgress,
+            1,
+            &b"cp".to_vec(),
+        )
+        .unwrap();
+        handle
+            .persist_checkpoint("cdc-key", &envelope)
+            .await
+            .unwrap();
+        assert!(offsets.get_checkpoint("cdc-key").unwrap().is_some());
+        assert!(
+            offsets_family_empty(kv.as_ref()),
+            "control persist must not write the offsets family"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn persist_after_catalog_commit_failpoint_skips_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, offsets, kv) = overlay_handle(dir.path());
+        crate::failpoint::arm(crate::failpoint::AFTER_CATALOG_COMMIT);
+        let mut map = HashMap::new();
+        map.insert(OffsetKey::new("ns", "part-a"), 7u64);
+        let err = match handle
+            .persist_segment(
+                "seg-after",
+                &map,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+        {
+            Ok(_) => panic!("AfterCatalogCommit should reject persist after catalog commit"),
+            Err(err) => err,
+        };
+        crate::failpoint::disarm();
+        assert!(err.to_string().contains("after_catalog_commit"));
+        assert!(
+            handle
+                .catalog
+                .get(&CatalogKey::Segment(SegmentId::new("seg-after").unwrap()))
+                .unwrap()
+                .is_some(),
+            "catalog row landed"
+        );
+        assert!(
+            offsets.get_offset("ns", "part-a").unwrap().is_none(),
+            "overlay is not installed when AfterCatalogCommit fires"
+        );
+        assert!(offsets_family_empty(kv.as_ref()));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn persist_control_after_catalog_commit_failpoint_skips_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, offsets, kv) = overlay_handle(dir.path());
+        crate::failpoint::arm(crate::failpoint::AFTER_CATALOG_COMMIT);
+        let err = match handle
+            .persist_offset_hint("ns", "part-hint", 11, true)
+            .await
+        {
+            Ok(_) => panic!("AfterCatalogCommit should reject control persist after catalog commit"),
+            Err(err) => err,
+        };
+        crate::failpoint::disarm();
+        assert!(err.to_string().contains("after_catalog_commit"));
+        let key = CatalogKey::OffsetHint(OffsetHintKey::new("ns", "part-hint").unwrap());
+        assert!(
+            handle.catalog.get(&key).unwrap().is_some(),
+            "control row landed"
+        );
+        assert!(
+            offsets.get_offset("ns", "part-hint").unwrap().is_none(),
+            "control overlay is not installed when AfterCatalogCommit fires"
+        );
+        assert!(offsets_family_empty(kv.as_ref()));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn offset_hint_republish_preserves_filesize_from_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, offsets, kv) = overlay_handle(dir.path());
+        offsets
+            .remember_committed(
+                &[CommittedOffset {
+                    namespace: "ns".into(),
+                    partition: "part-hint".into(),
+                    filesize: 42,
+                    position: 3,
+                    closed: 0,
+                }],
+                &[],
+            )
+            .unwrap();
+        let mut map = HashMap::new();
+        map.insert(OffsetKey::new("ns", "part-hint"), 7u64);
+        handle
+            .persist_segment(
+                "seg-filesize",
+                &map,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+        handle
+            .persist_offset_hint("ns", "part-hint", 11, true)
+            .await
+            .unwrap();
+        let live = offsets
+            .get_offset("ns", "part-hint")
+            .unwrap()
+            .expect("hint overlay");
+        assert_eq!(&live[0..8], &42u64.to_le_bytes());
+        assert_eq!(&live[8..16], &11u64.to_le_bytes());
+        offsets.reset_published_ingest().unwrap();
+        handle.republish_all().await.unwrap();
+        let restarted = offsets
+            .get_offset("ns", "part-hint")
+            .unwrap()
+            .expect("republish after overlay drop");
+        assert_eq!(
+            &restarted[0..8],
+            &42u64.to_le_bytes(),
+            "hint republish must not zero filesize already published from the segment row"
+        );
+        assert_eq!(&restarted[8..16], &11u64.to_le_bytes());
+        assert!(!offsets_family_empty(kv.as_ref()));
+    }
+
+    #[test]
+    fn ingest_persist_does_not_publish_offset_family() {
+        let src = include_str!("wal_handle.rs");
+        assert!(
+            !src.contains(concat!("async fn publish", "_seq")),
+            "ingest must not publish offsets after catalog commit"
+        );
+        assert!(
+            !src.contains(concat!("PublishMode", "::Fresh")),
+            "ingest persist must not Fresh-publish the offsets family"
+        );
+        assert!(
+            !src.contains(concat!("UNPUBLISHED_COMMIT", "_CEILING")),
+            "unpublished offset ceiling is ingest-publish lag fiction"
+        );
+        assert!(
+            !src.contains(concat!("AfterOffsets", "Published")),
+            "offset-family publish is not an ingest durability point"
+        );
     }
 
     #[tokio::test]

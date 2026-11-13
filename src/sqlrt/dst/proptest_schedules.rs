@@ -51,7 +51,6 @@ fn arb_op() -> impl Strategy<Value = Op> {
         (0u64..8).prop_map(Op::CompactThru),
         Just(Op::Failpoint(FailpointName::AfterCatalogCommit)),
         Just(Op::Failpoint(FailpointName::BeforeCatalogCommit)),
-        Just(Op::Failpoint(FailpointName::AfterOffsetsPublished)),
         Just(Op::Failpoint(FailpointName::AfterCompactionSink)),
         Just(Op::Failpoint(FailpointName::BeforeCompactionSink)),
         Just(Op::Failpoint(FailpointName::HoldBeforeCompactionSink)),

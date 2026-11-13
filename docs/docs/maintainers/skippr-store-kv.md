@@ -50,7 +50,7 @@ Do not add a `leases` family, membership rows, or cluster ids. Single writer + `
 
 ## Single writer, many readers
 
-**Writes** (one node, one process): ingest catalog commit, offset publish, schema evolution, stream-processor apply, compaction reclaim, migrate-journal on `SkipprStore`.
+**Writes** (one node, one process): ingest catalog commit, startup offset republish, schema evolution, stream-processor apply, compaction reclaim, migrate-journal on `SkipprStore`.
 
 **Reads** (many, overlapping):
 

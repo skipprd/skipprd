@@ -129,6 +129,8 @@ pub enum Op {
     IngestWal(WalEvent),
     CompactThru(u64),
     Failpoint(FailpointName),
+    /// DST1 failpoint idx 2: ingest offset-family publish, removed.
+    RetiredIngestOffsetPublish,
     Reopen,
     HoldPin,
     ReleasePin,
@@ -264,7 +266,16 @@ pub fn apply(world: &mut World, op: Op) {
             if world.armed == Some(FailpointName::BeforeCatalogCommit) || world.disk_paused {
                 return;
             }
+            let payloads_before = world.payloads.len();
             if !commit_ingest(world, &event) {
+                return;
+            }
+            let new_segment = world.payloads.len() > payloads_before;
+            if world.armed == Some(FailpointName::AfterCatalogCommit) && new_segment {
+                // New catalog row: failpoint fires after commit_durable, before
+                // remember_committed. Overlay for this persist is skipped; prior
+                // overlay stays. SameSha retry does not hit the failpoint and
+                // still remembers (wal_handle existing-row persist).
                 return;
             }
             if world.catalog_committed {
@@ -308,6 +319,7 @@ pub fn apply(world: &mut World, op: Op) {
             commit_compaction(world, seq, state);
         }
         Op::Failpoint(name) => apply_failpoint(world, name),
+        Op::RetiredIngestOffsetPublish => {}
         Op::Reopen => {
             match world.armed {
                 Some(FailpointName::HoldBeforeCompactionSink)
@@ -355,11 +367,10 @@ fn apply_failpoint(world: &mut World, name: FailpointName) {
     match name {
         FailpointName::BeforeCatalogCommit => world.catalog_committed = false,
         FailpointName::AfterCatalogCommit => {
+            // Arms the in-persist gate. Does not rewind overlay from completes
+            // that already passed remember_committed. The next IngestWal skips
+            // overlay for that persist only.
             world.catalog_committed = true;
-            world.offsets = 0;
-        }
-        FailpointName::AfterOffsetsPublished => {
-            world.offsets = world.payloads.len() as u64;
         }
         FailpointName::BeforeCompactionSink
         | FailpointName::AfterCompactionSink
@@ -647,6 +658,29 @@ pub fn catalog_segments(world: &World) -> Vec<(CatalogKey, CatalogRow)> {
     query_all(&world.catalog, CatalogPrefix::Segment).unwrap_or_default()
 }
 
+/// DST1 failpoint wire idx. 2 is the retired ingest offset-family publish.
+fn dst_failpoint_idx(name: FailpointName) -> u8 {
+    match name {
+        FailpointName::BeforeCatalogCommit => 0,
+        FailpointName::AfterCatalogCommit => 1,
+        FailpointName::BeforeCompactionSink => 3,
+        FailpointName::AfterCompactionSink => 4,
+        FailpointName::HoldBeforeCompactionSink => 5,
+    }
+}
+
+fn dst_op_from_failpoint_idx(idx: u8) -> Option<Op> {
+    match idx {
+        0 => Some(Op::Failpoint(FailpointName::BeforeCatalogCommit)),
+        1 => Some(Op::Failpoint(FailpointName::AfterCatalogCommit)),
+        2 => Some(Op::RetiredIngestOffsetPublish),
+        3 => Some(Op::Failpoint(FailpointName::BeforeCompactionSink)),
+        4 => Some(Op::Failpoint(FailpointName::AfterCompactionSink)),
+        5 => Some(Op::Failpoint(FailpointName::HoldBeforeCompactionSink)),
+        _ => None,
+    }
+}
+
 pub fn encode_ops(ops: &[Op]) -> Vec<u8> {
     let mut out = Vec::from(*OPS_MAGIC);
     out.extend_from_slice(&(ops.len() as u32).to_le_bytes());
@@ -683,11 +717,11 @@ fn encode_op(out: &mut Vec<u8>, op: &Op) {
         }
         Op::Failpoint(name) => {
             out.push(3);
-            let idx = FailpointName::ALL
-                .iter()
-                .position(|n| *n == *name)
-                .unwrap_or(0) as u8;
-            out.push(idx);
+            out.push(dst_failpoint_idx(*name));
+        }
+        Op::RetiredIngestOffsetPublish => {
+            out.push(3);
+            out.push(2);
         }
         Op::Reopen => out.push(4),
         Op::HoldPin => out.push(5),
@@ -815,8 +849,8 @@ fn decode_op(bytes: &[u8], i: &mut usize) -> Option<Op> {
             Some(Op::CompactThru(seq))
         }
         3 => {
-            let idx = take_u8(bytes, i)? as usize;
-            Some(Op::Failpoint(*FailpointName::ALL.get(idx)?))
+            let idx = take_u8(bytes, i)?;
+            dst_op_from_failpoint_idx(idx)
         }
         4 => Some(Op::Reopen),
         5 => Some(Op::HoldPin),

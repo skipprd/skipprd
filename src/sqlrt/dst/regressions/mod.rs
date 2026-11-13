@@ -7,8 +7,6 @@ const LANDED: &[&str] = &[
     "a_crash_after_catalog_republishes_offsets",
     "a_deadletter_unreadable_json_does_not_advance_offset",
     "c_crash_before_catalog_commit",
-    "c_after_catalog_before_offsets",
-    "c_after_offsets_published_crash_reopen",
     "c_before_compaction_sink_aborts_at_boundary",
     "c_release_compaction_then_compact",
 ];

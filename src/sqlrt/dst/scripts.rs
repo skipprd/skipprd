@@ -96,9 +96,59 @@ pub fn all_scripts() -> Vec<Script> {
         Script {
             name: "a_crash_after_catalog_republishes_offsets",
             ops: vec![
+                Op::Failpoint(FailpointName::AfterCatalogCommit),
+                Op::IngestWal(wal(1, "kept", 7, Insert, 1, 1)),
+                Op::Reopen,
+            ],
+            expect: expect(&[(1, "kept", 7)]),
+            expect_drained: None,
+            expect_offsets: Some(1),
+            expect_count: None,
+            expect_sum: None,
+        },
+        Script {
+            name: "a_armed_after_catalog_ingest_skips_overlay",
+            ops: vec![
+                Op::Failpoint(FailpointName::AfterCatalogCommit),
+                Op::IngestWal(wal(1, "kept", 7, Insert, 1, 1)),
+            ],
+            expect: expect(&[(1, "kept", 7)]),
+            expect_drained: None,
+            expect_offsets: Some(0),
+            expect_count: None,
+            expect_sum: None,
+        },
+        Script {
+            name: "a_after_catalog_failpoint_does_not_rewind_prior_overlay",
+            ops: vec![
                 Op::IngestWal(wal(1, "kept", 7, Insert, 1, 1)),
                 Op::Failpoint(FailpointName::AfterCatalogCommit),
-                Op::Reopen,
+            ],
+            expect: expect(&[(1, "kept", 7)]),
+            expect_drained: None,
+            expect_offsets: Some(1),
+            expect_count: None,
+            expect_sum: None,
+        },
+        Script {
+            name: "a_armed_after_catalog_second_ingest_keeps_prior_overlay",
+            ops: vec![
+                Op::IngestWal(wal(1, "kept", 7, Insert, 1, 1)),
+                Op::Failpoint(FailpointName::AfterCatalogCommit),
+                Op::IngestWal(wal(2, "later", 3, Insert, 1, 2)),
+            ],
+            expect: expect(&[(1, "kept", 7), (2, "later", 3)]),
+            expect_drained: None,
+            expect_offsets: Some(1),
+            expect_count: None,
+            expect_sum: None,
+        },
+        Script {
+            name: "a_armed_after_catalog_samesha_installs_overlay",
+            ops: vec![
+                Op::Failpoint(FailpointName::AfterCatalogCommit),
+                Op::IngestWal(wal(1, "kept", 7, Insert, 1, 1)),
+                Op::IngestWal(wal(1, "kept", 7, Insert, 1, 1)),
             ],
             expect: expect(&[(1, "kept", 7)]),
             expect_drained: None,
@@ -348,7 +398,7 @@ pub fn all_scripts() -> Vec<Script> {
             expect_sum: None,
         },
         Script {
-            name: "c_after_offsets_published_idempotent_reopen",
+            name: "c_republish_offsets_idempotent_reopen",
             ops: vec![
                 Op::IngestWal(wal(1, "kept", 1, Insert, 1, 1)),
                 Op::Reopen,
@@ -574,19 +624,6 @@ pub fn all_scripts() -> Vec<Script> {
             expect_sum: Some(0),
         },
         Script {
-            name: "c_after_catalog_before_offsets",
-            ops: vec![
-                Op::IngestWal(wal(1, "kept", 4, Insert, 1, 1)),
-                Op::Failpoint(FailpointName::AfterCatalogCommit),
-                Op::Reopen,
-            ],
-            expect: expect(&[(1, "kept", 4)]),
-            expect_drained: None,
-            expect_offsets: Some(1),
-            expect_count: Some(1),
-            expect_sum: Some(4),
-        },
-        Script {
             name: "c_before_compaction_sink",
             ops: vec![
                 Op::IngestWal(wal(1, "a", 1, Insert, 1, 1)),
@@ -761,19 +798,6 @@ pub fn all_scripts() -> Vec<Script> {
             expect_offsets: None,
             expect_count: Some(1),
             expect_sum: Some(9),
-        },
-        Script {
-            name: "c_after_offsets_published_crash_reopen",
-            ops: vec![
-                Op::IngestWal(wal(1, "kept", 1, Insert, 1, 1)),
-                Op::Failpoint(FailpointName::AfterOffsetsPublished),
-                Op::Reopen,
-            ],
-            expect: expect(&[(1, "kept", 1)]),
-            expect_offsets: Some(1),
-            expect_drained: None,
-            expect_count: Some(1),
-            expect_sum: Some(1),
         },
         Script {
             name: "c_before_compaction_sink_aborts_at_boundary",
@@ -995,6 +1019,10 @@ pub const REQUIRED_PLAN_SCRIPTS: &[&str] = &[
     "a_duplicate_payload_sha_does_not_rewrite",
     "a_crash_before_catalog_drops_ingest",
     "a_crash_after_catalog_republishes_offsets",
+    "a_armed_after_catalog_ingest_skips_overlay",
+    "a_after_catalog_failpoint_does_not_rewind_prior_overlay",
+    "a_armed_after_catalog_second_ingest_keeps_prior_overlay",
+    "a_armed_after_catalog_samesha_installs_overlay",
     "a_data_dir_min_free_pause_resume",
     "a_deadletter_unreadable_json_does_not_advance_offset",
     "b_uncompacted_snapshot_replaces_lake",
@@ -1028,8 +1056,7 @@ pub const REQUIRED_PLAN_SCRIPTS: &[&str] = &[
     "c_putcond_not_exists_same_sha",
     "c_stale_fence_rejected",
     "c_crash_before_catalog_commit",
-    "c_after_catalog_before_offsets",
-    "c_after_offsets_published_idempotent_reopen",
+    "c_republish_offsets_idempotent_reopen",
     "c_before_compaction_sink",
     "c_after_compaction_sink",
     "c_recover_leftover_committed_slices",
@@ -1052,7 +1079,6 @@ pub const REQUIRED_PLAN_SCRIPTS: &[&str] = &[
     "c_redo_acked",
     "c_persist_matching_sha_skip",
     "c_hydrate_without_segf",
-    "c_after_offsets_published_crash_reopen",
     "c_before_compaction_sink_aborts_at_boundary",
     "c_release_compaction_then_compact",
     "c_failpoint_file_is_single_shot",
@@ -1273,6 +1299,18 @@ fn world_ingest_commits_catalog_and_payload() {
     let world = run(&[Op::IngestWal(wal(1, "a", 10, MutationKind::Insert, 1, 1))]);
     assert_eq!(catalog_segments(&world).len(), 1);
     assert_eq!(world.payloads.len(), 1);
+    assert_eq!(world.offsets, 1);
+}
+
+#[test]
+fn dst1_retired_ingest_offset_publish_is_noop() {
+    let bytes = encode_ops(&[Op::RetiredIngestOffsetPublish]);
+    assert_eq!(bytes[8], 3);
+    assert_eq!(bytes[9], 2);
+    let world = run(&[
+        Op::IngestWal(wal(1, "a", 10, MutationKind::Insert, 1, 1)),
+        Op::RetiredIngestOffsetPublish,
+    ]);
     assert_eq!(world.offsets, 1);
 }
 

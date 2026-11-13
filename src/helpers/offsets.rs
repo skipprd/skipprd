@@ -401,10 +401,15 @@ impl Offsets {
         seq: u64,
     ) -> Result<(), String> {
         let store = self.offset_backend().ok_or("offset store missing")?;
-        let mut bytes = Vec::with_capacity(24);
-        bytes.extend_from_slice(&filesize.to_le_bytes());
-        bytes.extend_from_slice(&position.to_le_bytes());
-        bytes.extend_from_slice(&closed.to_le_bytes());
+        let bytes = crate::helpers::offset_store::committed_offset_bytes(
+            &skippr_wal_catalog::CommittedOffset {
+                namespace: key.namespace.clone(),
+                partition: key.partition.clone(),
+                filesize,
+                position,
+                closed,
+            },
+        );
         let sha = {
             use sha2::{Digest, Sha256};
             hex::encode(Sha256::digest(&bytes))
@@ -797,6 +802,13 @@ mod tests {
             format!("cdc_checkpoint:{key}")
         }
         fn reset_published_ingest(&self) -> Result<(), String> {
+            Err("checkpoint store down".into())
+        }
+        fn remember_committed(
+            &self,
+            _offsets: &[skippr_wal_catalog::CommittedOffset],
+            _checkpoints: &[skippr_wal_catalog::CommittedCheckpoint],
+        ) -> Result<(), String> {
             Err("checkpoint store down".into())
         }
     }
