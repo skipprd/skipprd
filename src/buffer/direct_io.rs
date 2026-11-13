@@ -502,11 +502,7 @@ fn write_direct(
         let last_off = (data_end / BLOCK) * BLOCK;
         let last_file = page + last_off as u64;
         if last_file < *logical_len {
-            read_block(
-                file,
-                &mut bounce_buf[last_off..last_off + BLOCK],
-                last_file,
-            )?;
+            read_block(file, &mut bounce_buf[last_off..last_off + BLOCK], last_file)?;
         } else {
             bounce_buf[last_off..last_off + BLOCK].fill(0);
         }
