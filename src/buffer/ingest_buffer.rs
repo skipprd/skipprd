@@ -3411,31 +3411,80 @@ impl Buffers {
             .map_err(io::Error::other)?
             .ok_or_else(|| io::Error::other("type: copy requires an output format"))?;
         let wal_parts = work.entries.len() as u64;
+        let jsonl = matches!(format, crate::serdes::output_format::OutputFormat::Jsonl);
         let (body, rows, decode_ns, encode_ns) = {
             use futures::StreamExt;
             let _decode_permit = budget.acquire_decode().await?;
             let decode_started = profile.then(Instant::now);
             let mut records = Vec::new();
+            let mut identity_plain = Vec::new();
+            let mut identity_rows = 0u64;
             let mut parts = std::pin::pin!(Self::read_entries_ordered(
                 config,
                 work.entries.clone(),
                 Self::read_entry_copy,
             ));
             while let Some(part) = parts.next().await {
-                records.extend(part?.1);
+                match part?.1 {
+                    crate::buffer::segment_file::CopyPartDecode::IdentityNdjson { plain, rows } => {
+                        if !records.is_empty() {
+                            records.extend(
+                                crate::buffer::segment_file::records_from_identity_ndjson(&plain),
+                            );
+                        } else {
+                            identity_plain.extend_from_slice(&plain);
+                            identity_rows = identity_rows.saturating_add(rows);
+                        }
+                    }
+                    crate::buffer::segment_file::CopyPartDecode::Records(part_records) => {
+                        if !identity_plain.is_empty() {
+                            records.extend(
+                                crate::buffer::segment_file::records_from_identity_ndjson(
+                                    &identity_plain,
+                                ),
+                            );
+                            identity_plain.clear();
+                            identity_rows = 0;
+                        }
+                        records.extend(part_records);
+                    }
+                }
             }
             let decode_ns = decode_started
                 .map(|started| started.elapsed().as_nanos() as u64)
                 .unwrap_or(0);
             crate::metrics::copy_profile::add_compact_decode_ns(decode_ns);
-            let rows = records.len() as u64;
             let encode_started = profile.then(Instant::now);
-            let body = tokio::task::spawn_blocking(move || {
-                crate::serdes::copy::encode_copy(format, &records)
+            let (body, rows) = if jsonl && records.is_empty() {
+                let rows = identity_rows;
+                let body = tokio::task::spawn_blocking(move || {
+                    crate::serdes::copy::encode_copy(
+                        format,
+                        &[crate::serdes::copy::CopyWalRecord {
+                            value: serde_json::Value::Null,
+                            identity: Some(identity_plain),
+                        }],
+                    )
                     .map_err(|err| io::Error::other(err.to_string()))
-            })
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))??;
+                })
+                .await
+                .map_err(|err| io::Error::other(err.to_string()))??;
+                (body, rows)
+            } else {
+                if !identity_plain.is_empty() {
+                    records.extend(crate::buffer::segment_file::records_from_identity_ndjson(
+                        &identity_plain,
+                    ));
+                }
+                let rows = records.len() as u64;
+                let body = tokio::task::spawn_blocking(move || {
+                    crate::serdes::copy::encode_copy(format, &records)
+                        .map_err(|err| io::Error::other(err.to_string()))
+                })
+                .await
+                .map_err(|err| io::Error::other(err.to_string()))??;
+                (body, rows)
+            };
             let encode_ns = encode_started
                 .map(|started| started.elapsed().as_nanos() as u64)
                 .unwrap_or(0);
@@ -3511,7 +3560,7 @@ impl Buffers {
         config: &Config,
         entry: &CompactionEntry,
         s3_resolved: Option<Arc<Vec<u8>>>,
-    ) -> io::Result<Vec<crate::serdes::copy::CopyWalRecord>> {
+    ) -> io::Result<crate::buffer::segment_file::CopyPartDecode> {
         if !crate::buffer::segment_file::is_copy_codec(entry.idx.codec) {
             return Err(io::Error::other("expected copy WAL PART"));
         }
@@ -3538,7 +3587,7 @@ impl Buffers {
                 ))
             }
         };
-        crate::buffer::segment_file::decode_copy_part(entry.idx.codec, &bytes)
+        crate::buffer::segment_file::decode_copy_part_payload(entry.idx.codec, &bytes)
     }
 
     fn grouped_work_payload_missing(work: &CompactionWork) -> bool {

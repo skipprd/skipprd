@@ -351,7 +351,7 @@ fn concat_identity_ndjson(records: &[CopyWalRecord]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn records_from_identity_ndjson(bytes: &[u8]) -> Vec<CopyWalRecord> {
+pub(crate) fn records_from_identity_ndjson(bytes: &[u8]) -> Vec<CopyWalRecord> {
     let mut records = Vec::new();
     for line in bytes.split_inclusive(|&b| b == b'\n') {
         if line
@@ -403,15 +403,43 @@ fn parse_copy_json(bytes: &[u8]) -> io::Result<serde_json::Value> {
         .map_err(|err| invalid_data(format!("decode copy WAL value: {err}")))
 }
 
+/// Decompress a copy PART. Identity-only payloads keep concatenated NDJSON so
+/// JSONL compact can gzip them without allocating one record per line.
+pub enum CopyPartDecode {
+    IdentityNdjson { plain: Vec<u8>, rows: u64 },
+    Records(Vec<CopyWalRecord>),
+}
+
+fn ndjson_row_count(bytes: &[u8]) -> u64 {
+    bytes
+        .split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty() && !line.iter().all(|b| matches!(b, b' ' | b'\t' | b'\r')))
+        .count() as u64
+}
+
+fn extend_identity_plain(plain: &mut Vec<u8>, bytes: &[u8]) {
+    plain.extend_from_slice(bytes);
+    if !bytes.ends_with(&[b'\n']) {
+        plain.push(b'\n');
+    }
+}
+
 /// Decompress a copy PART payload into format-agnostic WAL frames.
 pub fn decode_copy_part(codec: u8, bytes: &[u8]) -> io::Result<Vec<CopyWalRecord>> {
+    match decode_copy_part_payload(codec, bytes)? {
+        CopyPartDecode::IdentityNdjson { plain, .. } => Ok(records_from_identity_ndjson(&plain)),
+        CopyPartDecode::Records(records) => Ok(records),
+    }
+}
+
+pub fn decode_copy_part_payload(codec: u8, bytes: &[u8]) -> io::Result<CopyPartDecode> {
     let mut raw = Vec::new();
     match codec {
         PART_CODEC_COPY => {
             GzDecoder::new(bytes).read_to_end(&mut raw)?;
             let frames: Vec<LegacyCopyWalFrame> = bincode::deserialize(&raw)
                 .map_err(|err| invalid_data(format!("decode copy WAL: {err}")))?;
-            frames
+            let records = frames
                 .into_iter()
                 .map(|frame| {
                     Ok(CopyWalRecord {
@@ -419,25 +447,53 @@ pub fn decode_copy_part(codec: u8, bytes: &[u8]) -> io::Result<Vec<CopyWalRecord
                         identity: frame.identity,
                     })
                 })
-                .collect()
+                .collect::<io::Result<Vec<_>>>()?;
+            Ok(CopyPartDecode::Records(records))
         }
         PART_CODEC_COPY_CHUNKED => {
             MultiGzDecoder::new(bytes).read_to_end(&mut raw)?;
             let mut cursor = Cursor::new(raw.as_slice());
+            let mut identity_plain = Vec::new();
+            let mut identity_rows = 0u64;
             let mut records = Vec::new();
             while (cursor.position() as usize) < raw.len() {
                 let frames: Vec<CopyFrame<'static>> = bincode::deserialize_from(&mut cursor)
                     .map_err(|err| invalid_data(format!("decode copy WAL: {err}")))?;
                 for frame in frames {
                     match frame {
-                        CopyFrame::IdentityBatch(bytes) => {
-                            records.extend(records_from_identity_ndjson(&bytes));
+                        CopyFrame::Identity(line) if records.is_empty() => {
+                            identity_rows = identity_rows.saturating_add(1);
+                            extend_identity_plain(&mut identity_plain, &line);
                         }
-                        other => records.push(other.into_record()?),
+                        CopyFrame::IdentityBatch(batch) if records.is_empty() => {
+                            identity_rows = identity_rows.saturating_add(ndjson_row_count(&batch));
+                            extend_identity_plain(&mut identity_plain, &batch);
+                        }
+                        CopyFrame::Identity(line) => {
+                            records.push(CopyFrame::Identity(line).into_record()?);
+                        }
+                        CopyFrame::IdentityBatch(batch) => {
+                            records.extend(records_from_identity_ndjson(&batch));
+                        }
+                        json @ CopyFrame::Json(_) => {
+                            if !identity_plain.is_empty() {
+                                records.extend(records_from_identity_ndjson(&identity_plain));
+                                identity_plain.clear();
+                                identity_rows = 0;
+                            }
+                            records.push(json.into_record()?);
+                        }
                     }
                 }
             }
-            Ok(records)
+            if records.is_empty() {
+                Ok(CopyPartDecode::IdentityNdjson {
+                    plain: identity_plain,
+                    rows: identity_rows,
+                })
+            } else {
+                Ok(CopyPartDecode::Records(records))
+            }
         }
         other => Err(invalid_data(format!("not a copy WAL PART codec {other}"))),
     }
@@ -1511,6 +1567,14 @@ mod tests_wal_writer {
         assert_eq!(decoded.len(), 8);
         assert!(decoded.iter().all(|record| record.value.is_null()));
         assert_eq!(decoded[3].identity.as_deref(), Some(&b"{\"id\":3}\n"[..]));
+        match decode_copy_part_payload(PART_CODEC_COPY_CHUNKED, &body).unwrap() {
+            CopyPartDecode::IdentityNdjson { plain, rows } => {
+                assert_eq!(rows, 8);
+                assert!(plain.starts_with(br#"{"id":0}"#));
+                assert!(std::str::from_utf8(&plain).unwrap().contains(r#"{"id":7}"#));
+            }
+            CopyPartDecode::Records(_) => panic!("identity batch should stay concatenated"),
+        }
     }
 
     #[test]
