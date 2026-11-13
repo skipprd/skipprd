@@ -56,4 +56,10 @@ runs:
         if [[ -n "${KEY_PREFIX}" ]]; then
           echo "SCCACHE_S3_KEY_PREFIX=${KEY_PREFIX}" >> "$GITHUB_ENV"
         fi
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_IDLE_TIMEOUT=0" >> "$GITHUB_ENV"
         echo "Configured sccache → R2 ${endpoint} (bucket skippr-web-rust-cache)"
+    - name: Install sccache
+      uses: mozilla-actions/sccache-action@v0.0.9
+      with:
+        version: v0.10.0

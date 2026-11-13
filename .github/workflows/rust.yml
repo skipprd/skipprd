@@ -58,6 +58,13 @@ jobs:
         with:
           path: skipprd
           submodules: true
+      - name: R2 sccache
+        if: ${{ secrets.R2_ACCESS_KEY_ID != '' }}
+        uses: ./skipprd/.github/actions/configure-r2-sccache
+        with:
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       - name: Build linux x86 release
         uses: ./skipprd/.github/actions/rust-build-release
         with:
@@ -82,6 +89,13 @@ jobs:
         with:
           path: skipprd
           submodules: true
+      - name: R2 sccache
+        if: ${{ secrets.R2_ACCESS_KEY_ID != '' }}
+        uses: ./skipprd/.github/actions/configure-r2-sccache
+        with:
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       - name: Build macos arm64 release
         uses: ./skipprd/.github/actions/rust-build-release
         with:
@@ -276,9 +290,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@1.94.1
-      - uses: Swatinem/rust-cache@v2
+      - name: R2 sccache
+        if: ${{ secrets.R2_ACCESS_KEY_ID != '' }}
+        uses: ./skipprd/.github/actions/configure-r2-sccache
         with:
-          workspaces: skipprd
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       - name: DST named scripts and bounded proptest
         run: "cargo test -p skipprd --lib -- sqlrt::dst::"
 
@@ -295,6 +313,7 @@ jobs:
         with:
           name: release-notes
           path: release-notes.md
+          retention-days: 1
           if-no-files-found: error
 
   publish_runtime_plugins:

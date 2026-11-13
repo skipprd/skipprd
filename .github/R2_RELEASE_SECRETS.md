@@ -14,7 +14,9 @@ Endpoint used by CI: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`
 | Bucket | Role |
 |--------|------|
 | `skippr-web-install` | Public install + releases (`install.skippr.io`) |
-| `skippr-web-rust-cache` | Private sccache + Windows vcpkg binary cache |
+| `skippr-web-rust-cache` | Private sccache (compile cache). Not GitHub Actions cache. |
+
+Do not use `Swatinem/rust-cache` or `actions/cache`. Intra-run GitHub artifacts (host + plugin binaries, wheels, perf reports) expire in one day. Delete leftover Actions caches under repo Settings → Actions → Caches so they stop accruing GB-hours.
 
 Token permission: **Object Read & Write** on both buckets (or account-wide).
 

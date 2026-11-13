@@ -40,6 +40,13 @@ jobs:
         with:
           path: skipprd
           submodules: true
+      - name: R2 sccache
+        if: ${{ secrets.R2_ACCESS_KEY_ID != '' }}
+        uses: ./skipprd/.github/actions/configure-r2-sccache
+        with:
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       - name: Build linux x86 release (perf plugin subset)
         uses: ./skipprd/.github/actions/rust-build-release
         with:
@@ -132,6 +139,7 @@ jobs:
             ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf.log
             ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/*.svg
             ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/profile.json.gz
+          retention-days: 1
           if-no-files-found: error
 
   build_linux_profile:
@@ -150,6 +158,13 @@ jobs:
         with:
           path: skipprd
           submodules: true
+      - name: R2 sccache
+        if: ${{ secrets.R2_ACCESS_KEY_ID != '' }}
+        uses: ./skipprd/.github/actions/configure-r2-sccache
+        with:
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       - name: Install system deps
         run: |
           set -euo pipefail
@@ -184,16 +199,19 @@ jobs:
         with:
           name: skipprd-linux_x86-profile
           path: skipprd/skipprd-linux_x86-profile
+          retention-days: 1
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: runtime-plugin-binaries-linux_x86-profile
           path: skipprd/runtime-plugin-binaries-linux_x86-profile
+          retention-days: 1
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: inferno-linux_x86
           path: inferno-linux_x86
+          retention-days: 1
           if-no-files-found: error
 
   linux_profile:
@@ -304,6 +322,7 @@ jobs:
             ${{ runner.temp }}/skippr-perf-heaptrack/${{ matrix.scenario }}/perf-report.json
             ${{ runner.temp }}/skippr-perf-heaptrack/${{ matrix.scenario }}/perf.log
             ${{ runner.temp }}/skippr-perf-heaptrack/${{ matrix.scenario }}/heaptrack*
+          retention-days: 1
           if-no-files-found: error
 
   linux_analyze:
@@ -333,4 +352,5 @@ jobs:
         with:
           name: skippr-perf-bottlenecks
           path: bottlenecks.json
+          retention-days: 1
           if-no-files-found: error

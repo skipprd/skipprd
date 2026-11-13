@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Compile cache in GitHub Actions is R2 sccache (`skippr-web-rust-cache`). GitHub Actions cache (`Swatinem/rust-cache`) is gone. Intra-run artifacts expire in one day.
+
 ## [16.0.7] - 2026-11-12
 
 ### Fixed

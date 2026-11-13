@@ -56,9 +56,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@1.94.1
-      - uses: Swatinem/rust-cache@v2
+      - name: R2 sccache
+        if: ${{ secrets.R2_ACCESS_KEY_ID != '' }}
+        uses: ./skipprd/.github/actions/configure-r2-sccache
         with:
-          workspaces: skipprd
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       - name: Install DuckDB
         run: |
           curl -fsSL https://install.duckdb.org | sh

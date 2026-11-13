@@ -643,5 +643,80 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("q-wal-count-file", skill_text)
 
 
+def _github_yaml_files() -> list[Path]:
+    return sorted(
+        path
+        for path in (ROOT / ".github").rglob("*")
+        if path.suffix in {".yml", ".yaml"}
+    )
+
+
+class GithubActionsStorageTests(unittest.TestCase):
+    def test_compile_cache_is_r2_sccache_not_github_actions_cache(self) -> None:
+        for path in _github_yaml_files():
+            text = path.read_text(encoding="utf-8")
+            rel = path.relative_to(ROOT).as_posix()
+            self.assertNotIn(
+                "Swatinem/rust-cache",
+                text,
+                f"{rel} must not upload target/ to GitHub Actions cache",
+            )
+            self.assertNotIn(
+                "actions/cache@",
+                text,
+                f"{rel} must not use GitHub Actions cache",
+            )
+        sccache = (
+            ROOT / ".github" / "actions" / "configure-r2-sccache" / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("skippr-web-rust-cache", sccache)
+        self.assertIn("mozilla-actions/sccache-action", sccache)
+        self.assertIn("RUSTC_WRAPPER=sccache", sccache)
+        secrets = (ROOT / ".github" / "R2_RELEASE_SECRETS.md").read_text(encoding="utf-8")
+        self.assertIn("skippr-web-rust-cache", secrets)
+        self.assertIn("GitHub Actions cache", secrets)
+
+    def test_github_artifacts_expire_in_one_day(self) -> None:
+        for path in _github_yaml_files():
+            text = path.read_text(encoding="utf-8")
+            rel = path.relative_to(ROOT).as_posix()
+            self.assertNotIn(
+                "retention-days: 30",
+                text,
+                f"{rel} must not keep GitHub artifacts for 30 days",
+            )
+            parts = text.split("uses: actions/upload-artifact")
+            for part in parts[1:]:
+                block = part.split("uses:", 1)[0]
+                self.assertIn(
+                    "retention-days: 1",
+                    block,
+                    f"{rel} upload-artifact must set retention-days: 1",
+                )
+
+    def test_release_and_dst_jobs_enable_r2_sccache_before_compile(self) -> None:
+        rust = RUST.read_text(encoding="utf-8")
+        for job in (
+            rust.split("\n  linux_x86:", 1)[1].split("\n  macos_arm64:", 1)[0],
+            rust.split("\n  macos_arm64:", 1)[1].split("\n  chaos_mode_test:", 1)[0],
+            rust.split("\n  linux_dst:", 1)[1].split("\n  release_notes:", 1)[0],
+        ):
+            sccache = job.index("configure-r2-sccache")
+            compile_at = min(
+                i
+                for i in (
+                    job.find("rust-build-release"),
+                    job.find("cargo test -p skipprd"),
+                )
+                if i >= 0
+            )
+            self.assertLess(sccache, compile_at)
+        build = (
+            ROOT / ".github" / "actions" / "rust-build-release" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("Swatinem/rust-cache", build)
+        self.assertIn("retention-days: 1", build)
+
+
 if __name__ == "__main__":
     unittest.main()

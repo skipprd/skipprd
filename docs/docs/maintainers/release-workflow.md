@@ -47,7 +47,7 @@ Platform build jobs compile the host binary plus **every** workspace catalog plu
 - `linux_x86` on self-hosted `skippr-linux-x64-32`
 - `macos_arm64` on the self-hosted `skippr-darwin-arm64` runner
 
-`rust-build-release` loads that catalog via `catalog_package_names`. Windows is not a publish target.
+`rust-build-release` loads that catalog via `catalog_package_names`. Compile cache is R2 sccache (`skippr-web-rust-cache`), not GitHub Actions cache. Intra-run artifacts expire in one day. Windows is not a publish target.
 
 On tag builds, `set_root_package_version.py` stamps the root host package version from the tag name (`1.2.3`) before packaging. It does not stamp `skipprd-python` or `pyproject.toml`. Engine tags are unprefixed (`0.0.0`, `0.1.0`).
 

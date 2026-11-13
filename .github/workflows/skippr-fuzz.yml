@@ -47,9 +47,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: llvm-tools-preview, rust-src
-      - uses: Swatinem/rust-cache@v2
+      - name: R2 sccache
+        if: ${{ secrets.R2_ACCESS_KEY_ID != '' }}
+        uses: ./skipprd/.github/actions/configure-r2-sccache
         with:
-          workspaces: skipprd
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Seed world_schedule corpus from named DST scripts
