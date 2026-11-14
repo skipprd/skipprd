@@ -56,6 +56,18 @@ REQUIRED = SMOKE + (
     "q-cdc-union-sum-pg",
     "q-cdc-overlap-pg",
     "q-cdc-iceberg-only-pg",
+    "q-ops-count-duckdb",
+    "q-ops-stream-iceberg",
+    "q-aggregates-count-duckdb",
+    "q-aggregates-stream-iceberg",
+    "q-migrate-rename-duckdb",
+    "q-migrate-merge-duckdb",
+    "q-migrate-drop-duckdb",
+    "q-migrate-promote-duckdb",
+    "q-migrate-rename-stream-iceberg",
+    "q-migrate-merge-stream-iceberg",
+    "q-migrate-drop-stream-iceberg",
+    "q-migrate-promote-stream-iceberg",
 )
 
 
@@ -74,6 +86,56 @@ class PerfDbCatalogTests(unittest.TestCase):
         self.assertNotIn("q-union-count-skipprlake", ids)
         self.assertIn("q-cdc-union-update-pg", ids)
         self.assertIn("q-union-overlap-duckdb", ids)
+        self.assertIn("q-ops-count-duckdb", ids)
+        self.assertIn("q-migrate-rename-stream-iceberg", ids)
+
+    def test_ops_aggregates_migrate_cover_stream_and_historical(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "tests" / "perf"))
+        from matrix import (  # noqa: WPS433
+            ALTERS,
+            INGEST_MODES,
+            query_agg_id,
+            query_migrate_id,
+            query_ops_id,
+        )
+
+        catalog = db_catalog()
+        ids = catalog["scenarios"]
+        for mode in INGEST_MODES:
+            ops = ids[query_ops_id(mode)]
+            aggs = ids[query_agg_id(mode)]
+            self.assertEqual(ops["kind"], "query_after_ingest")
+            self.assertEqual(ops.get("transform_op"), "compose")
+            self.assertEqual(aggs.get("transform_aggregates"), "both")
+            if mode == "stream":
+                self.assertTrue(ops.get("wal_tail"))
+                self.assertEqual((ops.get("asserts") or {}).get("wal_pin"), "live")
+                self.assertEqual(ops["sink"], "skipprlake")
+            else:
+                self.assertEqual((ops.get("asserts") or {}).get("wal_pin"), "drained")
+                self.assertEqual(ops["sink"], "duckdb")
+            for alter in ALTERS:
+                spec = ids[query_migrate_id(alter, mode)]
+                self.assertEqual(spec.get("alter"), alter)
+                self.assertEqual(spec["kind"], "query_after_ingest")
+                if mode == "stream":
+                    self.assertTrue(spec.get("wal_tail"))
+                    self.assertEqual((spec.get("asserts") or {}).get("wal_pin"), "live")
+                else:
+                    self.assertEqual((spec.get("asserts") or {}).get("wal_pin"), "drained")
+        workflow = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("q-ops-count-duckdb", workflow)
+        self.assertIn("q-ops-stream-iceberg", workflow)
+        self.assertRegex(
+            workflow,
+            r"- scenario: q-ops-count-duckdb\n\s+profile: flamegraph",
+        )
+        self.assertRegex(
+            workflow,
+            r"- scenario: q-migrate-rename-stream-iceberg\n\s+profile: flamegraph",
+        )
 
     def test_smoke_is_wal_file_iceberg_versus_duckdb(self) -> None:
         catalog = db_catalog()

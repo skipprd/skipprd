@@ -39,12 +39,18 @@ KNOWN_ASSERT_KEYS = frozenset(
         "query_unique",
         "query_reconcile",
         "wal_pin",
+        "dest_has",
+        "dest_missing",
+        "amount_column",
+        "query_has",
+        "query_missing",
     }
 )
 
 SCENARIO_KINDS = frozenset(
     {
         "ingest",
+        "ingest_migrate",
         "copy",
         "copy_stdin",
         "copy_socket",

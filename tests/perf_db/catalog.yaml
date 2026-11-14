@@ -1,5 +1,6 @@
 # skippr-perf-db: ingest then skipprd query. File parquet Iceberg vs DuckDB.
 # WAL leftover import is out of suite.
+# Ops/aggregates/migrate: historical = drained DuckDB SELECT; stream = SkipprLake STREAM with live WAL pin.
 # wal_pin: drained = the measured query pinned no WAL (W \ E empty, lake only);
 #          live    = the measured query read WAL held behind the compaction hold.
 defaults:
@@ -188,3 +189,168 @@ scenarios:
     asserts:
       query_count: 3
       wal_pin: drained
+
+  q-ops-count-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    transform_op: compose
+    sql: "SELECT display_name, amount_gbp FROM perf_cell.perf_cell WHERE id = 1"
+    asserts:
+      query_name: user_1
+      iceberg_parquet: true
+      wal_pin: drained
+      query_has: [display_name, amount_gbp]
+      query_missing: [name]
+
+  q-ops-stream-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    transform_op: compose
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+      query_has: [display_name, amount_gbp]
+      query_missing: [name]
+
+  q-aggregates-count-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    transform_aggregates: both
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
+    asserts:
+      query_count: true
+      iceberg_parquet: true
+      wal_pin: drained
+
+  q-aggregates-stream-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    transform_aggregates: both
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+
+  q-migrate-rename-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    alter: rename
+    sql: "SELECT display_name FROM perf_cell.perf_cell WHERE id = 1"
+    asserts:
+      query_name: user_1
+      iceberg_parquet: true
+      wal_pin: drained
+      query_has: [display_name]
+      query_missing: [name]
+
+  q-migrate-merge-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow_merge
+    alter: merge
+    sql: "SELECT amount FROM perf_cell.perf_cell WHERE id = 1"
+    asserts:
+      iceberg_parquet: true
+      wal_pin: drained
+      query_has: [amount]
+      query_missing: [amount_string]
+
+  q-migrate-drop-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    alter: drop
+    sql: "SELECT id, amount FROM perf_cell.perf_cell WHERE id = 1"
+    asserts:
+      query_point: true
+      iceberg_parquet: true
+      wal_pin: drained
+      query_has: [id, amount]
+      query_missing: [name]
+
+  q-migrate-promote-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    alter: promote
+    sql: "SELECT id FROM perf_cell.perf_cell WHERE id = 1"
+    asserts:
+      query_point: true
+      iceberg_parquet: true
+      wal_pin: drained
+      query_has: [id]
+
+  q-migrate-rename-stream-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    alter: rename
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+      query_has: [display_name]
+      query_missing: [name]
+
+  q-migrate-merge-stream-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow_merge
+    alter: merge
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+      query_missing: [amount_string]
+
+  q-migrate-drop-stream-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    alter: drop
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+      query_missing: [name]
+
+  q-migrate-promote-stream-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    alter: promote
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+      query_has: [id]

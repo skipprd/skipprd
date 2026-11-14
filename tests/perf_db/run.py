@@ -195,6 +195,23 @@ def assert_query_doc(
         got = str(result_rows[0][0])
         if got != str(expect_name):
             raise perf_run.PerfError(f"{scenario_id}: name {got!r} != {expect_name!r}")
+    header = [str(col) for col in (doc.get("header") or [])]
+    has = asserts.get("query_has") or []
+    missing = asserts.get("query_missing") or []
+    if isinstance(has, str):
+        has = [has]
+    if isinstance(missing, str):
+        missing = [missing]
+    for col in has:
+        if col not in header:
+            raise perf_run.PerfError(
+                f"{scenario_id}: query header missing {col!r}; header={header}"
+            )
+    for col in missing:
+        if col in header:
+            raise perf_run.PerfError(
+                f"{scenario_id}: query header still has {col!r}; header={header}"
+            )
     if "query_count" in asserts and asserts["query_count"] not in {True, False}:
         got = int(float(result_rows[0][0]))
         expect = int(asserts["query_count"])
@@ -268,7 +285,11 @@ def run_query_after_ingest(
         sink=sink,
         warehouse=warehouse,
         flatten=False,
+        ops=perf_run.transform_op_of(scenario) or False,
+        aggregates=perf_run.transform_aggregates_of(scenario) or False,
     )
+    if scenario.get("alter"):
+        perf_run.write_migration_sql(config, str(scenario["alter"]))
     perf_run.start_ddb()
     tail_proc = None
     overlap_proc = None
@@ -302,6 +323,20 @@ def run_query_after_ingest(
         if scenario.get("wal_tail"):
             hold = arm_compaction_hold(data_dir, INGEST_WORKSPACE, PIPELINE)
             tail_proc = start_held_ingest(sync_cmd, env)
+            if scenario.get("alter"):
+                deadline = time.time() + 90
+                while time.time() < deadline and tail_proc.poll() is None:
+                    if perf_run.leftover_segs(data_dir) > 0:
+                        break
+                    time.sleep(0.2)
+                require_hold_engaged(scenario_id, tail_proc, hold)
+                logs += perf_run.run_skipprd(
+                    skipprd,
+                    ["--config", str(config), "migrate", "--pipeline", PIPELINE],
+                    env=env,
+                    work=work,
+                    profile="none",
+                )
             expect = stream_limit_rows(scenario)
             peek_until(
                 skipprd,
@@ -323,6 +358,14 @@ def run_query_after_ingest(
                 profile="none",
             )
             logs += measured_sync
+            if scenario.get("alter"):
+                logs += perf_run.run_skipprd(
+                    skipprd,
+                    ["--config", str(config), "migrate", "--pipeline", PIPELINE],
+                    env=env,
+                    work=work,
+                    profile="none",
+                )
         if scenario.get("overlap"):
             hold = arm_compaction_hold(data_dir, INGEST_WORKSPACE, PIPELINE)
             records = [

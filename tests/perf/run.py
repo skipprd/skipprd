@@ -35,6 +35,13 @@ from fixtures import (  # noqa: E402
     write_ndjson,
     write_records,
 )
+from matrix import (  # noqa: E402
+    AGG_YAML,
+    ALTER_SQL,
+    OPS_YAML,
+    expected_amount_sum_range,
+    expected_filter_rows,
+)
 from parse import events_by_phase, missing_phases, parse_perf_events  # noqa: E402
 
 PIPELINE = "perf_cell"
@@ -265,8 +272,8 @@ def write_skippr_yml(
     warehouse: Path | None,
     flatten: bool,
     extra_source: dict[str, str] | None = None,
-    ops: bool = False,
-    aggregates: bool = False,
+    ops: bool | str = False,
+    aggregates: bool | str = False,
 ) -> None:
     """SkipprLake Iceberg catalog is `catalog_table`, never `skippr.store.type`."""
     if kind.startswith("copy"):
@@ -276,21 +283,12 @@ def write_skippr_yml(
     else:
         flatten_yaml = "      flatten_events: yes\n" if flatten else "      flatten_events: no\n"
         extra_transform = ""
-        if ops:
-            extra_transform += (
-                "      ops:\n"
-                '        - filter: "amount > 0"\n'
-                "        - project: [id, name, amount]\n"
-            )
-        if aggregates:
-            extra_transform += (
-                "      aggregates:\n"
-                "        - id: name_totals\n"
-                "          key_fields: [name]\n"
-                "          measures:\n"
-                "            amount_total: { sum: amount }\n"
-                '            row_count: { count: "*" }\n'
-            )
+        op_key = "compose" if ops is True else (str(ops) if ops else "")
+        agg_key = "both" if aggregates is True else (str(aggregates) if aggregates else "")
+        if op_key:
+            extra_transform += "      ops:\n" + OPS_YAML[op_key]
+        if agg_key:
+            extra_transform += "      aggregates:\n" + AGG_YAML[agg_key]
         transform_yaml = f"    transform:\n{flatten_yaml}{extra_transform}"
         pipeline_type = ""
     if source_kind == "File":
@@ -483,8 +481,137 @@ def duckdb_scan(warehouse: Path, table: str, sql: str) -> str:
     return out.strip().splitlines()[-1]
 
 
+def stop_skipprd(proc: subprocess.Popen[str], *, timeout: int = 10) -> str:
+    if proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _ = proc.communicate(timeout=timeout)
+        return out or ""
+    if proc.stdout is None:
+        return ""
+    return proc.stdout.read() or ""
+
+
 def leftover_segs(data_dir: Path) -> int:
     return sum(1 for _ in data_dir.rglob("*.seg"))
+
+
+def transform_op_of(scenario: dict[str, Any]) -> str:
+    raw = scenario.get("transform_op")
+    if raw:
+        return str(raw)
+    if scenario.get("transform_ops"):
+        return "compose"
+    return ""
+
+
+def transform_aggregates_of(scenario: dict[str, Any]) -> str:
+    raw = scenario.get("transform_aggregates")
+    if raw is True:
+        return "both"
+    if raw:
+        return str(raw)
+    return ""
+
+
+def expected_dest_rows(scenario: dict[str, Any], rows: int, warmup: bool) -> int:
+    measured = expected_filter_rows(rows) if transform_op_of(scenario) == "filter" else rows
+    if not warmup:
+        return measured
+    if transform_op_of(scenario) == "filter":
+        return measured
+    return measured + 1
+
+
+def expected_dest_amount_sum(scenario: dict[str, Any], rows: int, warmup: bool) -> int:
+    if transform_op_of(scenario) == "filter":
+        return expected_amount_sum_range(6, rows)
+    return expected_amount_sum(rows) + (10 if warmup else 0)
+
+
+def parquet_column_names(output: Path) -> set[str]:
+    files = list(output.rglob("*.parquet"))
+    if not files:
+        raise PerfError(f"no parquet files under {output}")
+    glob = str(output / "**" / "*.parquet")
+    cmd = [
+        duckdb_bin(),
+        "-csv",
+        "-c",
+        "SELECT column_name FROM (DESCRIBE SELECT * FROM "
+        f"read_parquet('{glob}', union_by_name=true))",
+    ]
+    out = subprocess.check_output(cmd, text=True)
+    return {
+        line.strip()
+        for line in out.splitlines()
+        if line.strip() and line.strip() != "column_name"
+    }
+
+
+def iceberg_column_names(warehouse: Path, table: str) -> set[str]:
+    scan = warehouse / "bronze" / table
+    cmd = [
+        duckdb_bin(),
+        "-csv",
+        "-c",
+        "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; "
+        f"SELECT column_name FROM (DESCRIBE SELECT * FROM iceberg_scan('{scan}'))",
+    ]
+    out = subprocess.check_output(cmd, text=True)
+    return {
+        line.strip()
+        for line in out.splitlines()
+        if line.strip() and line.strip() != "column_name"
+    }
+
+
+def assert_dest_columns(
+    scenario_id: str,
+    scenario: dict[str, Any],
+    warehouse: Path,
+    output: Path | None = None,
+) -> None:
+    asserts = scenario.get("asserts") or {}
+    has = asserts.get("dest_has") or []
+    missing = asserts.get("dest_missing") or []
+    if isinstance(has, str):
+        has = [has]
+    if isinstance(missing, str):
+        missing = [missing]
+    if not has and not missing:
+        return
+    sink = str(scenario.get("sink") or "")
+    if sink == "file":
+        if output is None:
+            raise PerfError(f"{scenario_id}: file sink dest columns need output dir")
+        names = parquet_column_names(output)
+    else:
+        names = iceberg_column_names(warehouse, PIPELINE)
+    for col in has:
+        if col not in names:
+            raise PerfError(f"{scenario_id}: dest missing {col!r}; columns={sorted(names)}")
+    for col in missing:
+        if col in names:
+            raise PerfError(f"{scenario_id}: dest still has {col!r}; columns={sorted(names)}")
+
+
+def arm_compaction_hold(data_dir: Path, workspace: str, pipeline: str) -> Path:
+    hold = data_dir / f"{workspace}_{pipeline}" / "failpoint"
+    hold.parent.mkdir(parents=True, exist_ok=True)
+    hold.write_text("hold_before_compaction_sink\n", encoding="utf-8")
+    return hold
+
+
+def disarm_compaction_hold(hold: Path | None) -> None:
+    if hold is not None:
+        hold.unlink(missing_ok=True)
 
 
 def duckdb_sql(db: Path, sql: str) -> str:
@@ -676,7 +803,8 @@ def run_skipprd(
 
 def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Path, profile: str) -> dict[str, Any]:
     rows = row_count(scenario, scale)
-    source = work / "source"
+    source_kind = "Stdin" if str(scenario.get("source") or "file") == "stdin" else "File"
+    source = work / ("stdin" if source_kind == "Stdin" else "source")
     warehouse = work / "warehouse"
     data_dir = work / "data"
     manifests = work / "manifests"
@@ -685,11 +813,15 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
     data_dir.mkdir(parents=True, exist_ok=True)
     fixture_kind = str(scenario.get("fixture", "exact_arrow"))
     flatten = bool(scenario.get("flatten_events"))
-    ops = bool(scenario.get("transform_ops"))
-    aggregates = bool(scenario.get("transform_aggregates"))
+    ops = transform_op_of(scenario)
+    aggregates = transform_aggregates_of(scenario)
     source_format = str(scenario.get("source_format") or "json")
     source_ext = "csv" if source_format == "csv" else "json"
-    warmup = not flatten and bool((scenario.get("asserts") or {}).get("exact_arrow_eq_total"))
+    warmup = (
+        source_kind == "File"
+        and not flatten
+        and bool((scenario.get("asserts") or {}).get("exact_arrow_eq_total"))
+    )
     if warmup:
         write_records(source / f"warmup.{source_ext}", fixture_kind, 1, fmt=source_format)
     sink = str(scenario["sink"])
@@ -699,19 +831,27 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
         output.mkdir(parents=True, exist_ok=True)
         extra_source["output_dir"] = str(output)
         extra_source["format"] = str(scenario.get("sink_format") or "parquet")
+    stdin_payload = work / "stdin.json"
+    if source_kind == "Stdin":
+        write_records(stdin_payload, fixture_kind, rows, fmt="json")
+        write_records(source / "events.json", fixture_kind, 1, fmt="json")
     config = work / "skippr.yml"
-    write_skippr_yml(
-        config,
-        kind="ingest",
-        source_kind="File",
-        source_path=str(source),
-        sink=sink,
-        warehouse=warehouse,
-        flatten=flatten,
-        extra_source=extra_source,
-        ops=ops,
-        aggregates=aggregates,
-    )
+
+    def write_ingest_yml(kind: str) -> None:
+        write_skippr_yml(
+            config,
+            kind="ingest",
+            source_kind=kind,
+            source_path=str(source),
+            sink=sink,
+            warehouse=warehouse,
+            flatten=flatten,
+            extra_source=extra_source,
+            ops=ops or False,
+            aggregates=aggregates or False,
+        )
+
+    write_ingest_yml("File" if source_kind == "Stdin" else source_kind)
     if sink == "skipprlake":
         start_ddb()
     if sink == "postgres":
@@ -724,6 +864,7 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
         skipprd = skipprd_bin()
         started = time.perf_counter()
         logs = ""
+        stdin_data = stdin_payload.read_bytes() if source_kind == "Stdin" else None
         logs += run_skipprd(
             skipprd,
             ["--config", str(config), "discover", "--pipeline", PIPELINE],
@@ -731,7 +872,11 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
             work=work,
             profile="none",
         )
-        if warmup:
+        if source_kind == "Stdin":
+            write_ingest_yml("Stdin")
+            stage_plugins(config, PIPELINE, manifests)
+            (source / "events.json").unlink(missing_ok=True)
+        elif warmup:
             logs += run_skipprd(
                 skipprd,
                 ["--config", str(config), "sync", "--pipeline", PIPELINE, "--once"],
@@ -740,22 +885,27 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
                 profile="none",
             )
             (source / f"warmup.{source_ext}").unlink(missing_ok=True)
-        write_records(source / f"events.{source_ext}", fixture_kind, rows, fmt=source_format)
+        if source_kind == "File":
+            write_records(source / f"events.{source_ext}", fixture_kind, rows, fmt=source_format)
         measured = run_skipprd(
             skipprd,
             ["--config", str(config), "sync", "--pipeline", PIPELINE, "--once"],
             env=env,
             work=work,
             profile=profile,
+            stdin_data=stdin_data,
         )
         logs += measured
         wall_ms = int((time.perf_counter() - started) * 1000)
         events = assert_scenario_perf(measured, scenario)
         totals = ingest_profile_totals(events)
         asserts = scenario.get("asserts") or {}
+        dest_rows = expected_dest_rows(scenario, rows, warmup)
         if asserts.get("exact_arrow_eq_total"):
             if totals["exact_arrow_rows"] != rows or totals["exact_fallback_rows"] != 0:
-                raise PerfError(f"{scenario_id}: exact-Arrow mismatch {totals} expected rows={rows}")
+                raise PerfError(
+                    f"{scenario_id}: exact-Arrow mismatch {totals} expected rows={rows}"
+                )
         if "exact_fallback_rows" in asserts and totals["exact_fallback_rows"] != int(
             asserts["exact_fallback_rows"]
         ):
@@ -766,7 +916,7 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
             raise PerfError(f"{scenario_id}: exact_arrow_rows {totals}")
         table = PIPELINE
         if asserts.get("bronze_count"):
-            expect_count = rows + (1 if warmup else 0)
+            expect_count = dest_rows
             if sink == "postgres":
                 docker = shutil.which("docker")
                 assert docker
@@ -808,9 +958,11 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
                 summed = duckdb_scan(
                     warehouse, table, "SELECT coalesce(sum(amount),0) FROM iceberg_scan('{scan}')"
                 )
-            expect = expected_amount_sum(rows) + (10 if warmup else 0)
+            expect = expected_dest_amount_sum(scenario, rows, warmup)
             if int(float(summed)) != expect:
                 raise PerfError(f"{scenario_id}: amount sum {summed} != {expect}")
+        if sink != "postgres":
+            assert_dest_columns(scenario_id, scenario, warehouse, output)
         if asserts.get("leftover_seg_count") is not None:
             segs = leftover_segs(data_dir)
             if segs != int(asserts["leftover_seg_count"]):
@@ -823,6 +975,143 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
             docker = shutil.which("docker")
             if docker:
                 subprocess.run([docker, "rm", "-f", "skippr-perf-pg"], check=False)
+
+
+def write_migration_sql(config: Path, alter: str) -> Path:
+    sql = ALTER_SQL[alter]
+    directory = config.parent / "migrations"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "001.sql"
+    path.write_text(sql + "\n", encoding="utf-8")
+    return path
+
+
+def run_ingest_migrate(
+    scenario_id: str, scenario: dict[str, Any], scale: str, work: Path, profile: str
+) -> dict[str, Any]:
+    rows = row_count(scenario, scale)
+    source = work / "source"
+    warehouse = work / "warehouse"
+    data_dir = work / "data"
+    manifests = work / "manifests"
+    source.mkdir(parents=True, exist_ok=True)
+    warehouse.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    fixture_kind = str(scenario.get("fixture", "exact_arrow"))
+    alter = str(scenario["alter"])
+    mode = str(scenario.get("mode") or "historical")
+    sink = str(scenario["sink"])
+    config = work / "skippr.yml"
+    write_skippr_yml(
+        config,
+        kind="ingest",
+        source_kind="File",
+        source_path=str(source),
+        sink=sink,
+        warehouse=warehouse,
+        flatten=False,
+    )
+    write_records(source / "events.json", fixture_kind, rows, fmt="json")
+    hold: Path | None = None
+    ingest_proc: subprocess.Popen[str] | None = None
+    try:
+        stage_plugins(config, PIPELINE, manifests)
+        env = base_env(config, data_dir, manifests)
+        skipprd = skipprd_bin()
+        started = time.perf_counter()
+        logs = run_skipprd(
+            skipprd,
+            ["--config", str(config), "discover", "--pipeline", PIPELINE],
+            env=env,
+            work=work,
+            profile="none",
+        )
+        sync_args = ["--config", str(config), "sync", "--pipeline", PIPELINE, "--once"]
+        if mode == "stream":
+            hold = arm_compaction_hold(data_dir, "perf", PIPELINE)
+            cmd = wrap_profile(
+                [str(skipprd), *log_args(env), *sync_args],
+                profile,
+                work,
+            )
+            log("+ " + " ".join(cmd))
+            ingest_proc = subprocess.Popen(
+                cmd,
+                cwd=REPO_ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+            )
+            deadline = time.time() + 90
+            while time.time() < deadline and ingest_proc.poll() is None:
+                if leftover_segs(data_dir) > 0:
+                    break
+                time.sleep(0.2)
+            if ingest_proc.poll() is not None:
+                out = ingest_proc.stdout.read() if ingest_proc.stdout else ""
+                raise PerfError(f"{scenario_id}: compaction hold never engaged: {out}")
+            (source / "events.json").unlink(missing_ok=True)
+            logs += stop_skipprd(ingest_proc)
+            ingest_proc = None
+            write_migration_sql(config, alter)
+            logs += run_skipprd(
+                skipprd,
+                ["--config", str(config), "migrate", "--pipeline", PIPELINE],
+                env=env,
+                work=work,
+                profile="none",
+            )
+            disarm_compaction_hold(hold)
+            hold = None
+            if leftover_segs(data_dir) == 0:
+                raise PerfError(f"{scenario_id}: stream migrate expected leftover WAL")
+            measured = run_skipprd(
+                skipprd,
+                sync_args,
+                env=env,
+                work=work,
+                profile=profile,
+            )
+            logs += measured
+        else:
+            measured = run_skipprd(
+                skipprd,
+                sync_args,
+                env=env,
+                work=work,
+                profile=profile,
+            )
+            logs += measured
+            write_migration_sql(config, alter)
+            logs += run_skipprd(
+                skipprd,
+                ["--config", str(config), "migrate", "--pipeline", PIPELINE],
+                env=env,
+                work=work,
+                profile="none",
+            )
+        wall_ms = int((time.perf_counter() - started) * 1000)
+        events = assert_scenario_perf(logs if mode == "stream" else measured, scenario)
+        asserts = scenario.get("asserts") or {}
+        if asserts.get("bronze_count"):
+            count = duckdb_scan(warehouse, PIPELINE, "SELECT count(*) FROM iceberg_scan('{scan}')")
+            if int(count) != rows:
+                raise PerfError(f"{scenario_id}: bronze count {count} != {rows}")
+        if asserts.get("amount_sum"):
+            summed = duckdb_scan(
+                warehouse, PIPELINE, "SELECT coalesce(sum(amount),0) FROM iceberg_scan('{scan}')"
+            )
+            if int(float(summed)) != expected_amount_sum(rows):
+                raise PerfError(f"{scenario_id}: amount sum {summed}")
+        assert_dest_columns(scenario_id, scenario, warehouse)
+        return report_payload(scenario_id, rows, wall_ms, events, logs, work)
+    finally:
+        disarm_compaction_hold(hold)
+        if ingest_proc is not None:
+            ingest_proc.kill()
+            ingest_proc.communicate(timeout=30)
 
 
 def run_copy(scenario_id: str, scenario: dict[str, Any], scale: str, work: Path, profile: str) -> dict[str, Any]:
@@ -1209,6 +1498,8 @@ def run_scenario(scenario_id: str, scale: str, work: Path, profile: str) -> dict
     kind = scenario_kind(scenario)
     if kind == "ingest":
         return run_ingest(scenario_id, scenario, scale, work, profile)
+    if kind == "ingest_migrate":
+        return run_ingest_migrate(scenario_id, scenario, scale, work, profile)
     if kind == "copy":
         return run_copy(scenario_id, scenario, scale, work, profile)
     if kind == "copy_stdin":

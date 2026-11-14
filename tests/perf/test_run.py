@@ -146,7 +146,11 @@ class PerfCatalogTests(unittest.TestCase):
             "copy-b-json-json",
             "ingest-json-parquet",
             "ingest-ops-duckdb",
+            "ingest-ops-compose-stream-duckdb",
             "ingest-aggregates-duckdb",
+            "ingest-aggregates-stream-duckdb",
+            "ingest-migrate-rename-duckdb",
+            "ingest-migrate-rename-stream-duckdb",
             "ingest-slow-flatten-duckdb",
         ):
             spec = catalog["scenarios"][name]
@@ -356,36 +360,118 @@ class FileParquetYamlTests(unittest.TestCase):
 
 
 class StreamTransformPerfTests(unittest.TestCase):
-    def test_catalog_covers_ops_and_aggregates_ingest(self) -> None:
+    def test_catalog_covers_every_ops_agg_migrate_permutation(self) -> None:
+        from matrix import (
+            AGG_MEASURES,
+            ALTERS,
+            INGEST_MODES,
+            OPS,
+            ingest_agg_id,
+            ingest_migrate_id,
+            ingest_ops_id,
+        )
+
         catalog = load_catalog()
-        ops = catalog["scenarios"]["ingest-ops-duckdb"]
-        aggs = catalog["scenarios"]["ingest-aggregates-duckdb"]
-        self.assertEqual(ops["kind"], "ingest")
-        self.assertEqual(ops["sink"], "duckdb")
-        self.assertEqual(ops["group"], "always")
-        self.assertTrue(ops.get("transform_ops"))
-        self.assertFalse(bool(ops.get("transform_aggregates")))
-        self.assertTrue((ops.get("asserts") or {}).get("exact_arrow_eq_total"))
-        self.assertTrue((ops.get("asserts") or {}).get("amount_sum"))
-        self.assertIn("stream_transform", required_perf_for(catalog, ops))
-        self.assertEqual(aggs["kind"], "ingest")
-        self.assertEqual(aggs["sink"], "duckdb")
-        self.assertEqual(aggs["group"], "always")
-        self.assertTrue(aggs.get("transform_aggregates"))
-        self.assertFalse(bool(aggs.get("transform_ops")))
-        self.assertTrue((aggs.get("asserts") or {}).get("bronze_count"))
-        self.assertIn("stream_processor", required_perf_for(catalog, aggs))
+        ids = catalog["scenarios"]
+        for op in OPS:
+            for mode in INGEST_MODES:
+                name = ingest_ops_id(op, mode)
+                spec = ids[name]
+                self.assertEqual(spec["kind"], "ingest", name)
+                from matrix import SCHEMA_CHANGING_OPS
+
+                if op in SCHEMA_CHANGING_OPS:
+                    self.assertEqual(spec["sink"], "file", name)
+                    self.assertEqual(spec.get("sink_format"), "parquet", name)
+                else:
+                    self.assertEqual(spec["sink"], "duckdb", name)
+                self.assertEqual(spec.get("transform_op"), op, name)
+                if mode == "stream":
+                    self.assertEqual(spec.get("source"), "stdin", name)
+                else:
+                    self.assertNotEqual(spec.get("source"), "stdin", name)
+                self.assertIn("stream_transform", required_perf_for(catalog, spec), name)
+        for measure in AGG_MEASURES:
+            for mode in INGEST_MODES:
+                name = ingest_agg_id(measure, mode)
+                spec = ids[name]
+                self.assertEqual(spec["kind"], "ingest", name)
+                self.assertEqual(spec.get("transform_aggregates"), measure, name)
+                self.assertIn("stream_processor", required_perf_for(catalog, spec), name)
+                if mode == "stream":
+                    self.assertEqual(spec.get("source"), "stdin", name)
+        for alter in ALTERS:
+            for mode in INGEST_MODES:
+                name = ingest_migrate_id(alter, mode)
+                spec = ids[name]
+                self.assertEqual(spec["kind"], "ingest_migrate", name)
+                self.assertEqual(spec.get("alter"), alter, name)
+                self.assertEqual(spec.get("mode"), mode, name)
+                phases = required_perf_for(catalog, spec)
+                if mode == "stream":
+                    self.assertNotIn("wal_compact", phases, name)
+                    self.assertFalse((spec.get("asserts") or {}).get("bronze_count"), name)
+                else:
+                    self.assertIn("wal_compact", phases, name)
+        self.assertEqual(len(OPS) * len(INGEST_MODES), 12)
+        self.assertEqual(len(AGG_MEASURES) * len(INGEST_MODES), 6)
+        self.assertEqual(len(ALTERS) * len(INGEST_MODES), 8)
         workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
-        self.assertIn("ingest-ops-duckdb", workflow)
-        self.assertIn("ingest-aggregates-duckdb", workflow)
         self.assertRegex(
             workflow,
             r"- scenario: ingest-ops-duckdb\n\s+profile: flamegraph",
         )
         self.assertRegex(
             workflow,
+            r"- scenario: ingest-ops-compose-stream-duckdb\n\s+profile: flamegraph",
+        )
+        self.assertRegex(
+            workflow,
             r"- scenario: ingest-aggregates-duckdb\n\s+profile: flamegraph",
         )
+        self.assertRegex(
+            workflow,
+            r"- scenario: ingest-aggregates-stream-duckdb\n\s+profile: flamegraph",
+        )
+        self.assertRegex(
+            workflow,
+            r"- scenario: ingest-migrate-rename-duckdb\n\s+profile: flamegraph",
+        )
+        self.assertRegex(
+            workflow,
+            r"- scenario: ingest-migrate-rename-stream-duckdb\n\s+profile: flamegraph",
+        )
+
+    def test_exact_arrow_eq_total_counts_measured_sync_rows(self) -> None:
+        source = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        self.assertIn('totals["exact_arrow_rows"] != rows', source)
+        self.assertNotIn('totals["exact_arrow_rows"] != dest_rows', source)
+
+    def test_migrate_sql_is_written_after_ingest(self) -> None:
+        source = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        fn = source.split("def run_ingest_migrate", 1)[1].split("\ndef run_copy", 1)[0]
+        write_sql = fn.find("write_migration_sql")
+        self.assertGreater(write_sql, fn.find("write_records"))
+        self.assertGreater(write_sql, fn.find('discover"'))
+        self.assertLess(fn.find("write_skippr_yml"), fn.find("write_records"))
+        self.assertNotIn("write_migration_sql(config, alter)\n    write_records", fn)
+
+    def test_stdin_ingest_discovers_file_sample_then_restages_stdin(self) -> None:
+        source = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        fn = source.split("def run_ingest", 1)[1].split("\ndef write_migration_sql", 1)[0]
+        self.assertIn('write_ingest_yml("File" if source_kind == "Stdin"', fn)
+        self.assertIn('write_ingest_yml("Stdin")', fn)
+        self.assertIn('work / ("stdin" if source_kind == "Stdin"', fn)
+        self.assertGreater(fn.find('write_ingest_yml("Stdin")'), fn.find("discover"))
+
+    def test_stream_migrate_releases_store_before_cli_migrate(self) -> None:
+        source = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        fn = source.split("def run_ingest_migrate", 1)[1].split("\ndef run_copy", 1)[0]
+        self.assertIn("stop_skipprd(ingest_proc)", fn)
+        self.assertLess(fn.find("stop_skipprd"), fn.find("write_migration_sql"))
+        self.assertIn('(source / "events.json").unlink', fn)
+        self.assertIn("start_new_session=True", fn)
+        self.assertIn("os.killpg", (HARNESS_DIR / "run.py").read_text(encoding="utf-8"))
 
     def test_ingest_yaml_writes_ops_and_aggregates(self) -> None:
         from run import write_skippr_yml
@@ -400,7 +486,18 @@ class StreamTransformPerfTests(unittest.TestCase):
                 sink="duckdb",
                 warehouse=Path("/warehouse"),
                 flatten=False,
-                ops=True,
+                ops="compose",
+            )
+            filter_path = Path(tmp) / "filter.yml"
+            write_skippr_yml(
+                filter_path,
+                kind="ingest",
+                source_kind="Stdin",
+                source_path="",
+                sink="duckdb",
+                warehouse=Path("/warehouse"),
+                flatten=False,
+                ops="filter",
             )
             aggs_path = Path(tmp) / "aggs.yml"
             write_skippr_yml(
@@ -411,7 +508,7 @@ class StreamTransformPerfTests(unittest.TestCase):
                 sink="duckdb",
                 warehouse=Path("/warehouse"),
                 flatten=False,
-                aggregates=True,
+                aggregates="both",
             )
             copy_path = Path(tmp) / "copy.yml"
             write_skippr_yml(
@@ -425,11 +522,15 @@ class StreamTransformPerfTests(unittest.TestCase):
                 extra_source={"output_dir": "/out"},
             )
             ops_text = ops_path.read_text(encoding="utf-8")
+            filter_text = filter_path.read_text(encoding="utf-8")
             aggs_text = aggs_path.read_text(encoding="utf-8")
             copy_text = copy_path.read_text(encoding="utf-8")
         self.assertIn('filter: "amount > 0"', ops_text)
-        self.assertIn("project: [id, name, amount]", ops_text)
-        self.assertNotIn("derive:", ops_text)
+        self.assertIn("amount_gbp", ops_text)
+        self.assertIn("display_name", ops_text)
+        self.assertIn("Stdin:", filter_text)
+        self.assertIn('filter: "amount > 50"', filter_text)
+        self.assertNotIn("type: copy", filter_text)
         self.assertNotIn("aggregates:", ops_text)
         self.assertIn("name_totals", aggs_text)
         self.assertIn("key_fields: [name]", aggs_text)
@@ -443,7 +544,11 @@ class StreamTransformPerfTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("ingest-ops-duckdb", skill)
+        self.assertIn("ingest-ops-compose-stream-duckdb", skill)
         self.assertIn("ingest-aggregates-duckdb", skill)
+        self.assertIn("ingest-aggregates-stream-duckdb", skill)
+        self.assertIn("ingest-migrate-rename-duckdb", skill)
+        self.assertIn("ingest-migrate-rename-stream-duckdb", skill)
 
 
 class PerfParseTests(unittest.TestCase):
@@ -743,6 +848,7 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("analyze.py", text)
         self.assertIn("python3 -m pip install --quiet boto3", text)
         self.assertIn("-p skippr-plugin-data-source-file", text)
+        self.assertIn("-p skippr-plugin-data-source-stdin", text)
         self.assertRegex(
             text,
             r"cargo build --profile profiling -p skipprd --bin skipprd[^\n]*\n\s+cargo build --profile profiling",

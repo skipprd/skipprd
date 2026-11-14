@@ -17,6 +17,12 @@ def exact_arrow_ts_record(index: int) -> dict[str, Any]:
     return record
 
 
+def exact_arrow_merge_record(index: int) -> dict[str, Any]:
+    record = exact_arrow_record(index)
+    record["amount_string"] = str(record["amount"])
+    return record
+
+
 def nested_flatten_record(index: int) -> dict[str, Any]:
     return {
         "id": index,
@@ -42,6 +48,7 @@ def _factory(kind: str):
     factories = {
         "exact_arrow": exact_arrow_record,
         "exact_arrow_ts": exact_arrow_ts_record,
+        "exact_arrow_merge": exact_arrow_merge_record,
         "nested_flatten": nested_flatten_record,
     }
     factory = factories.get(kind)

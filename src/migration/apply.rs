@@ -45,8 +45,10 @@ pub async fn apply_query_alter(
         .unwrap_or_else(|| pipeline.clone());
     let bound = config.bind_pipeline(&pipeline);
     bound.init().await;
-    let offsets = Offsets::init(&bound).map_err(|err| err.to_string())?;
-    let (store, fence) = journal_store(&offsets)?;
+    let offsets = Arc::new(Offsets::init(&bound).map_err(|err| err.to_string())?);
+    let (store, fence) = journal_store(offsets.as_ref())?;
+    crate::buffer::wal_store::ensure_disk_wal_handle(&bound, offsets)
+        .map_err(|err| err.to_string())?;
     let loaded = crate::migration::file::load_sql_file(
         MigrationId::query(crate::migration::MigrationChecksum::of(sql)).as_str(),
         sql,
@@ -87,8 +89,10 @@ pub async fn apply_pending(
     config: &Config,
     direction: MigrationDirection,
 ) -> Result<Vec<String>, String> {
-    let offsets = Offsets::init(config).map_err(|err| err.to_string())?;
-    let (store, fence) = journal_store(&offsets)?;
+    let offsets = Arc::new(Offsets::init(config).map_err(|err| err.to_string())?);
+    let (store, fence) = journal_store(offsets.as_ref())?;
+    crate::buffer::wal_store::ensure_disk_wal_handle(config, offsets)
+        .map_err(|err| err.to_string())?;
     apply_pending_files(config, store.as_ref(), fence, direction).await
 }
 

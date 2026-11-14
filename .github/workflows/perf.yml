@@ -79,7 +79,31 @@ jobs:
           - duckdb-insert-values
           - ingest-slow-flatten-duckdb
           - ingest-ops-duckdb
+          - ingest-ops-filter-duckdb
+          - ingest-ops-project-duckdb
+          - ingest-ops-derive-duckdb
+          - ingest-ops-rename-duckdb
+          - ingest-ops-cast-duckdb
+          - ingest-ops-filter-stream-duckdb
+          - ingest-ops-project-stream-duckdb
+          - ingest-ops-derive-stream-duckdb
+          - ingest-ops-rename-stream-duckdb
+          - ingest-ops-cast-stream-duckdb
+          - ingest-ops-compose-stream-duckdb
           - ingest-aggregates-duckdb
+          - ingest-aggregates-sum-duckdb
+          - ingest-aggregates-count-duckdb
+          - ingest-aggregates-stream-duckdb
+          - ingest-aggregates-sum-stream-duckdb
+          - ingest-aggregates-count-stream-duckdb
+          - ingest-migrate-rename-duckdb
+          - ingest-migrate-merge-duckdb
+          - ingest-migrate-drop-duckdb
+          - ingest-migrate-promote-duckdb
+          - ingest-migrate-rename-stream-duckdb
+          - ingest-migrate-merge-stream-duckdb
+          - ingest-migrate-drop-stream-duckdb
+          - ingest-migrate-promote-stream-duckdb
           - copy-format-matrix
           - ingest-file-postgres
           - copy-stdin-file
@@ -181,12 +205,14 @@ jobs:
           cargo build --profile profiling -p skipprd --bin skipprd --features iceberg-catalog-dynamodb
           cargo build --profile profiling \
             -p skippr-plugin-data-source-file \
+            -p skippr-plugin-data-source-stdin \
             -p skippr-plugin-data-sink-file \
             -p skippr-plugin-data-sink-duckdb \
             -p skippr-plugin-schema-sink-duckdb
           mkdir -p skipprd-linux_x86-profile runtime-plugin-binaries-linux_x86-profile
           cp target/profiling/skipprd skipprd-linux_x86-profile/skipprd
           cp target/profiling/skippr-plugin-data-source-file \
+             target/profiling/skippr-plugin-data-source-stdin \
              target/profiling/skippr-plugin-data-sink-file \
              target/profiling/skippr-plugin-data-sink-duckdb \
              target/profiling/skippr-plugin-schema-sink-duckdb \
@@ -237,7 +263,15 @@ jobs:
             profile: flamegraph
           - scenario: ingest-ops-duckdb
             profile: flamegraph
+          - scenario: ingest-ops-compose-stream-duckdb
+            profile: flamegraph
           - scenario: ingest-aggregates-duckdb
+            profile: flamegraph
+          - scenario: ingest-aggregates-stream-duckdb
+            profile: flamegraph
+          - scenario: ingest-migrate-rename-duckdb
+            profile: flamegraph
+          - scenario: ingest-migrate-rename-stream-duckdb
             profile: flamegraph
           - scenario: ingest-a-duckdb
             profile: heaptrack

@@ -428,6 +428,15 @@ mod tests {
     }
 
     #[test]
+    fn apply_pending_installs_disk_wal_handle_before_rewrite() {
+        let src = include_str!("apply.rs");
+        assert!(
+            src.contains("ensure_disk_wal_handle"),
+            "migrate CLI must open leftover disk WAL before rewrite_live_wal"
+        );
+    }
+
+    #[test]
     #[serial_test::serial]
     fn rewrite_live_wal_does_not_skip_s3_rows() {
         let src = include_str!("wal.rs");

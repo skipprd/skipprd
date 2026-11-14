@@ -1,5 +1,7 @@
 # skippr-perf scenario catalog. WAL leftover import is out of suite.
 # Postgres CDC is out of this matrix until sync --once actually exits.
+# Ops/aggregates: File = historical batch, Stdin = stream source.
+# Migrate: historical = ALTER after compact; stream = ALTER under a WAL compaction hold.
 defaults:
   rows: 10000
   smoke_rows: 200
@@ -139,9 +141,87 @@ scenarios:
   ingest-ops-duckdb:
     group: always
     kind: ingest
+    sink: file
+    sink_format: parquet
+    fixture: exact_arrow
+    transform_op: compose
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
+    asserts:
+      exact_arrow_eq_total: true
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+      dest_has: [id, display_name, amount, amount_gbp]
+      dest_missing: [name]
+
+  ingest-ops-filter-duckdb:
+    group: always
+    kind: ingest
     sink: duckdb
     fixture: exact_arrow
-    transform_ops: true
+    transform_op: filter
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
+    asserts:
+      bronze_count: true
+      amount_sum: true
+
+  ingest-ops-project-duckdb:
+    group: always
+    kind: ingest
+    sink: file
+    sink_format: parquet
+    fixture: exact_arrow
+    transform_op: project
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
+    asserts:
+      bronze_count: true
+      amount_sum: true
+      dest_has: [id, amount]
+      dest_missing: [name]
+
+  ingest-ops-derive-duckdb:
+    group: always
+    kind: ingest
+    sink: file
+    sink_format: parquet
+    fixture: exact_arrow
+    transform_op: derive
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
+    asserts:
+      exact_arrow_eq_total: true
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+      dest_has: [id, name, amount, amount_gbp]
+
+  ingest-ops-rename-duckdb:
+    group: always
+    kind: ingest
+    sink: file
+    sink_format: parquet
+    fixture: exact_arrow
+    transform_op: rename
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
+    asserts:
+      exact_arrow_eq_total: true
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+      dest_has: [id, display_name, amount]
+      dest_missing: [name]
+
+  ingest-ops-cast-duckdb:
+    group: always
+    kind: ingest
+    sink: file
+    sink_format: parquet
+    fixture: exact_arrow
+    transform_op: cast
     profile: none
     required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
     asserts:
@@ -150,12 +230,106 @@ scenarios:
       bronze_count: true
       amount_sum: true
 
+  ingest-ops-filter-stream-duckdb:
+    group: always
+    kind: ingest
+    sink: duckdb
+    source: stdin
+    fixture: exact_arrow
+    transform_op: filter
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
+    asserts:
+      bronze_count: true
+      amount_sum: true
+
+  ingest-ops-project-stream-duckdb:
+    group: always
+    kind: ingest
+    sink: file
+    sink_format: parquet
+    source: stdin
+    fixture: exact_arrow
+    transform_op: project
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
+    asserts:
+      bronze_count: true
+      amount_sum: true
+      dest_has: [id, amount]
+      dest_missing: [name]
+
+  ingest-ops-derive-stream-duckdb:
+    group: always
+    kind: ingest
+    sink: file
+    sink_format: parquet
+    source: stdin
+    fixture: exact_arrow
+    transform_op: derive
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
+    asserts:
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+      dest_has: [id, name, amount, amount_gbp]
+
+  ingest-ops-rename-stream-duckdb:
+    group: always
+    kind: ingest
+    sink: file
+    sink_format: parquet
+    source: stdin
+    fixture: exact_arrow
+    transform_op: rename
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
+    asserts:
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+      dest_has: [id, display_name, amount]
+      dest_missing: [name]
+
+  ingest-ops-cast-stream-duckdb:
+    group: always
+    kind: ingest
+    sink: file
+    sink_format: parquet
+    source: stdin
+    fixture: exact_arrow
+    transform_op: cast
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
+    asserts:
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+
+  ingest-ops-compose-stream-duckdb:
+    group: always
+    kind: ingest
+    sink: file
+    sink_format: parquet
+    source: stdin
+    fixture: exact_arrow
+    transform_op: compose
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_transform]
+    asserts:
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+      dest_has: [id, display_name, amount, amount_gbp]
+      dest_missing: [name]
+
   ingest-aggregates-duckdb:
     group: always
     kind: ingest
     sink: duckdb
     fixture: exact_arrow
-    transform_aggregates: true
+    transform_aggregates: both
     profile: none
     required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_processor]
     asserts:
@@ -163,6 +337,179 @@ scenarios:
       exact_fallback_rows: 0
       bronze_count: true
       amount_sum: true
+
+  ingest-aggregates-sum-duckdb:
+    group: always
+    kind: ingest
+    sink: duckdb
+    fixture: exact_arrow
+    transform_aggregates: sum
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_processor]
+    asserts:
+      exact_arrow_eq_total: true
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+
+  ingest-aggregates-count-duckdb:
+    group: always
+    kind: ingest
+    sink: duckdb
+    fixture: exact_arrow
+    transform_aggregates: count
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_processor]
+    asserts:
+      exact_arrow_eq_total: true
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+
+  ingest-aggregates-stream-duckdb:
+    group: always
+    kind: ingest
+    sink: duckdb
+    source: stdin
+    fixture: exact_arrow
+    transform_aggregates: both
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_processor]
+    asserts:
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+
+  ingest-aggregates-sum-stream-duckdb:
+    group: always
+    kind: ingest
+    sink: duckdb
+    source: stdin
+    fixture: exact_arrow
+    transform_aggregates: sum
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_processor]
+    asserts:
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+
+  ingest-aggregates-count-stream-duckdb:
+    group: always
+    kind: ingest
+    sink: duckdb
+    source: stdin
+    fixture: exact_arrow
+    transform_aggregates: count
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim, stream_processor]
+    asserts:
+      exact_fallback_rows: 0
+      bronze_count: true
+      amount_sum: true
+
+  ingest-migrate-rename-duckdb:
+    group: always
+    kind: ingest_migrate
+    sink: duckdb
+    fixture: exact_arrow
+    alter: rename
+    mode: historical
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim]
+    asserts:
+      bronze_count: true
+      dest_has: [display_name]
+      dest_missing: [name]
+
+  ingest-migrate-merge-duckdb:
+    group: always
+    kind: ingest_migrate
+    sink: duckdb
+    fixture: exact_arrow_merge
+    alter: merge
+    mode: historical
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim]
+    asserts:
+      bronze_count: true
+      amount_sum: true
+      dest_missing: [amount_string]
+
+  ingest-migrate-drop-duckdb:
+    group: always
+    kind: ingest_migrate
+    sink: duckdb
+    fixture: exact_arrow
+    alter: drop
+    mode: historical
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim]
+    asserts:
+      bronze_count: true
+      dest_missing: [name]
+
+  ingest-migrate-promote-duckdb:
+    group: always
+    kind: ingest_migrate
+    sink: duckdb
+    fixture: exact_arrow
+    alter: promote
+    mode: historical
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim]
+    asserts:
+      bronze_count: true
+      dest_has: [id]
+
+  ingest-migrate-rename-stream-duckdb:
+    group: always
+    kind: ingest_migrate
+    sink: duckdb
+    fixture: exact_arrow
+    alter: rename
+    mode: stream
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist]
+    asserts:
+      dest_has: [display_name]
+      dest_missing: [name]
+
+  ingest-migrate-merge-stream-duckdb:
+    group: always
+    kind: ingest_migrate
+    sink: duckdb
+    fixture: exact_arrow_merge
+    alter: merge
+    mode: stream
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist]
+    asserts:
+      dest_missing: [amount_string]
+
+  ingest-migrate-drop-stream-duckdb:
+    group: always
+    kind: ingest_migrate
+    sink: duckdb
+    fixture: exact_arrow
+    alter: drop
+    mode: stream
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist]
+    asserts:
+      dest_missing: [name]
+
+  ingest-migrate-promote-stream-duckdb:
+    group: always
+    kind: ingest_migrate
+    sink: duckdb
+    fixture: exact_arrow
+    alter: promote
+    mode: stream
+    profile: none
+    required_perf: [ingest_profile, plugin_ipc, sync, wal_persist]
+    asserts:
+      dest_has: [id]
 
   copy-format-matrix:
     group: always

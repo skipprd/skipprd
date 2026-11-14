@@ -59,8 +59,12 @@ INGEST_LABELS = {
     "duckdb-json-array": "DuckDB nested JSON array (slow)",
     "duckdb-insert-values": "DuckDB row INSERT (slow)",
     "ingest-slow-flatten-duckdb": "Slow flatten",
-    "ingest-ops-duckdb": "Ingest ops",
-    "ingest-aggregates-duckdb": "Ingest aggregates",
+    "ingest-ops-duckdb": "Ingest ops compose (File)",
+    "ingest-ops-compose-stream-duckdb": "Ingest ops compose (Stdin)",
+    "ingest-aggregates-duckdb": "Ingest aggregates (File)",
+    "ingest-aggregates-stream-duckdb": "Ingest aggregates (Stdin)",
+    "ingest-migrate-rename-duckdb": "Migrate rename (historical)",
+    "ingest-migrate-rename-stream-duckdb": "Migrate rename (in-stream WAL)",
 }
 
 QUERY_LABELS = {
@@ -69,6 +73,12 @@ QUERY_LABELS = {
     "q-union-count-duckdb": "DuckDB UNION count",
     "q-iceberg-only-iceberg": "File Iceberg-only count",
     "q-iceberg-only-duckdb": "DuckDB Iceberg-only count",
+    "q-ops-count-duckdb": "Query after ops (historical)",
+    "q-ops-stream-iceberg": "STREAM after ops (live WAL)",
+    "q-aggregates-count-duckdb": "Query after aggregates (historical)",
+    "q-aggregates-stream-iceberg": "STREAM after aggregates (live WAL)",
+    "q-migrate-rename-duckdb": "Query after rename (historical)",
+    "q-migrate-rename-stream-iceberg": "STREAM after rename (live WAL)",
 }
 
 

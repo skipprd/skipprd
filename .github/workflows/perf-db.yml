@@ -85,6 +85,18 @@ jobs:
           - q-cdc-union-sum-pg
           - q-cdc-overlap-pg
           - q-cdc-iceberg-only-pg
+          - q-ops-count-duckdb
+          - q-ops-stream-iceberg
+          - q-aggregates-count-duckdb
+          - q-aggregates-stream-iceberg
+          - q-migrate-rename-duckdb
+          - q-migrate-merge-duckdb
+          - q-migrate-drop-duckdb
+          - q-migrate-promote-duckdb
+          - q-migrate-rename-stream-iceberg
+          - q-migrate-merge-stream-iceberg
+          - q-migrate-drop-stream-iceberg
+          - q-migrate-promote-stream-iceberg
     steps:
       - uses: actions/checkout@v4
         with:
@@ -231,6 +243,14 @@ jobs:
           - scenario: q-union-count-duckdb
             profile: flamegraph
           - scenario: q-cdc-union-update-pg
+            profile: flamegraph
+          - scenario: q-ops-count-duckdb
+            profile: flamegraph
+          - scenario: q-ops-stream-iceberg
+            profile: flamegraph
+          - scenario: q-migrate-rename-duckdb
+            profile: flamegraph
+          - scenario: q-migrate-rename-stream-iceberg
             profile: flamegraph
           - scenario: q-wal-count-iceberg
             profile: heaptrack
