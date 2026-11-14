@@ -7,7 +7,7 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, BooleanArray, RecordBatch};
 use arrow::compute::{cast, filter_record_batch};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
-use datafusion::execution::context::SessionContext;
+use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::helpers::configuration::TransformOp;
 use crate::plugins::cdc::WalRowMeta;
@@ -262,7 +262,7 @@ fn unique_table() -> String {
 
 fn run_sql(batch: RecordBatch, table: &str, sql: &str) -> Result<RecordBatch, String> {
     let batches = block_on_df(async move {
-        let ctx = SessionContext::new();
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
         ctx.register_batch(table, batch)
             .map_err(|err| err.to_string())?;
         let df = ctx.sql(sql).await.map_err(|err| err.to_string())?;
@@ -540,6 +540,51 @@ mod tests {
         let applied = apply_ops(&ops, vec![batch]).unwrap();
         assert_eq!(applied.batches[0].num_rows(), n);
         assert_eq!(applied.kept.as_ref().map(Vec::len), Some(n));
+    }
+
+    fn assert_filter_keeps_high_amounts(n: usize) {
+        let ids: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
+        let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let amounts: Vec<i64> = (1..=n as i64).map(|i| i * 10).collect();
+        let batch = batch_amounts(&id_refs, &amounts);
+        let ops = vec![TransformOp {
+            filter: Some("amount > 50".into()),
+            ..Default::default()
+        }];
+        let applied = apply_ops(&ops, vec![batch]).unwrap();
+        assert_eq!(applied.batches[0].num_rows(), n - 5);
+        assert_eq!(
+            applied.kept.as_deref(),
+            Some(&(5..n).collect::<Vec<_>>()[..])
+        );
+        let out_amounts = applied.batches[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let summed: i64 = (0..out_amounts.len()).map(|i| out_amounts.value(i)).sum();
+        let expect = 10 * (n as i64 - 5) * (6 + n as i64) / 2;
+        assert_eq!(summed, expect);
+        assert_eq!(out_amounts.value(0), 60);
+        assert_eq!(out_amounts.value(out_amounts.len() - 1), n as i64 * 10);
+    }
+
+    #[test]
+    fn filter_mixed_predicate_keeps_original_row_order() {
+        assert_filter_keeps_high_amounts(50_000);
+    }
+
+    #[test]
+    fn filter_mixed_predicate_keeps_order_on_multi_thread_runtime() {
+        // skipprd's host runtime is multi-thread. DataFusion then splits the
+        // boolean mask across partitions; collect() order is not input order.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        assert_filter_keeps_high_amounts(50_000);
     }
 
     #[test]
