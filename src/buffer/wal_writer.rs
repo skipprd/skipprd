@@ -310,6 +310,8 @@ fn apply_persist_result(
 
     match &result {
         Ok((rows, bytes)) => {
+            crate::metrics::counters::add_wal_write_rows(*rows);
+            crate::metrics::counters::add_wal_write_bytes(*bytes);
             let elapsed_ms = started.elapsed().as_millis() as u64;
             crate::helpers::perf::emit(
                 "wal_persist",
@@ -586,6 +588,11 @@ mod tests {
             wal_gate < finished_at,
             "WAL writer flush finished must sit inside log_wal_enabled"
         );
+        assert!(
+            finish_fn.contains("add_wal_write_rows"),
+            "persist success must count WAL rows after transform.ops"
+        );
+        assert!(finish_fn.contains("add_wal_write_bytes"));
     }
 
     #[test]

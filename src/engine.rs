@@ -1357,22 +1357,28 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
 
     let _ = heartbeat_tx.send(true);
 
-    // Summary and integrity check: uploaded rows vs expected rows (normal + deadletters), quarantined parts
+    // Summary and integrity check: dest parquet rows vs WAL write rows (post
+    // transform.ops). Source decode (MESSAGES_TOTAL) is higher when a filter drops rows.
     {
         use std::sync::atomic::Ordering as AO;
         let uploaded_rows =
             crate::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(AO::Relaxed);
-        let expected_msgs = crate::metrics::counters::MESSAGES_TOTAL.load(AO::Relaxed);
+        let wal_write_rows = crate::metrics::counters::WAL_WRITE_ROWS_TOTAL.load(AO::Relaxed);
         let expected_deadletters = crate::metrics::counters::DEADLETTERS_TOTAL.load(AO::Relaxed);
-        let expected_uploaded_rows = expected_msgs.saturating_add(expected_deadletters);
+        let expected_uploaded_rows = wal_write_rows.saturating_add(expected_deadletters);
         let quarantined_parts =
             crate::metrics::counters::QUARANTINED_PARTITIONS_TOTAL.load(AO::Relaxed);
         info!(
-            "Compactor: summary uploaded_rows={} expected_msgs={} expected_deadletters={} expected_uploaded_rows={} quarantined_parts={}",
-            uploaded_rows, expected_msgs, expected_deadletters, expected_uploaded_rows, quarantined_parts
+            "Compactor: summary uploaded_rows={} wal_write_rows={} expected_deadletters={} expected_uploaded_rows={} quarantined_parts={}",
+            uploaded_rows, wal_write_rows, expected_deadletters, expected_uploaded_rows, quarantined_parts
         );
-        if quarantined_parts > 0 || uploaded_rows != expected_uploaded_rows {
-            warn!("Compactor: integrity check mismatch (uploaded_rows != expected_msgs + expected_deadletters or quarantined_parts > 0). Proceeding; this may occur when compacting pre-existing WAL.");
+        if compaction_dest_integrity_mismatch(
+            uploaded_rows,
+            wal_write_rows,
+            expected_deadletters,
+            quarantined_parts,
+        ) {
+            warn!("Compactor: integrity check mismatch (uploaded_rows != wal_write_rows + expected_deadletters or quarantined_parts > 0). Proceeding; this may occur when compacting pre-existing WAL.");
         }
     }
 
@@ -1836,6 +1842,15 @@ pub async fn sync_input_plugin(
     .map_err(|err| io::Error::other(format!("Runtime data source sync failed: {}", err)))
 }
 
+fn compaction_dest_integrity_mismatch(
+    uploaded_rows: u64,
+    wal_write_rows: u64,
+    deadletters: u64,
+    quarantined_parts: u64,
+) -> bool {
+    quarantined_parts > 0 || uploaded_rows != wal_write_rows.saturating_add(deadletters)
+}
+
 #[cfg(test)]
 mod wal_only_tests {
     use super::wal_only;
@@ -1878,6 +1893,26 @@ mod wal_only_tests {
         .unwrap();
         let bound = config.bind_pipeline("bikehire");
         assert!(!wal_only(&bound));
+    }
+}
+
+#[cfg(test)]
+mod compaction_integrity_tests {
+    use super::compaction_dest_integrity_mismatch;
+
+    #[test]
+    fn filter_dropped_source_rows_are_not_a_mismatch() {
+        assert!(!compaction_dest_integrity_mismatch(49_995, 49_995, 0, 0));
+    }
+
+    #[test]
+    fn source_decode_count_is_not_the_dest_expectation() {
+        assert!(compaction_dest_integrity_mismatch(49_995, 50_000, 0, 0));
+    }
+
+    #[test]
+    fn quarantined_parts_are_a_mismatch() {
+        assert!(compaction_dest_integrity_mismatch(50_000, 50_000, 0, 1));
     }
 }
 
