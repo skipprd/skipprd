@@ -23,7 +23,7 @@ use arrow::array::{
     TimestampSecondArray, UInt32Array,
 };
 use arrow::compute::filter_record_batch;
-use arrow::datatypes::{Schema as ArrowSchema, SchemaRef};
+use arrow::datatypes::{DataType, Schema as ArrowSchema, SchemaRef};
 use arrow::util::display::array_value_to_string;
 use async_trait::async_trait;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
@@ -929,6 +929,82 @@ impl<S: SinkSpec> IcebergWriter<S> {
         Ok(table)
     }
 
+    async fn evolve_table_to_arrow_schema(
+        &self,
+        namespace: &str,
+        table: iceberg::table::Table,
+        arrow: &ArrowSchema,
+    ) -> Result<iceberg::table::Table, io::Error> {
+        let dest = iceberg_schema_from_arrow(namespace, arrow)?;
+        let current = table.metadata().current_schema();
+        let names_ok = iceberg_schema_has_all_fields(current, &dest);
+        let types_ok = iceberg_field_types_match(current, &dest);
+        if names_ok && types_ok {
+            return Ok(table);
+        }
+        if !types_ok && table.metadata().current_snapshot().is_none() {
+            info!(
+                "Replacing empty Iceberg table schema namespace={} dest_fields={}",
+                namespace,
+                dest.as_struct().fields().len()
+            );
+            return self
+                .recreate_table_with_iceberg_schema(namespace, dest)
+                .await;
+        }
+        if !names_ok {
+            let catalog = Arc::clone(&self.catalog);
+            let next_schema_id = next_iceberg_schema_id(table.metadata());
+            let evolved = merge_iceberg_schema_missing_fields(
+                namespace,
+                table.metadata().current_schema(),
+                &dest,
+                next_schema_id,
+            )?;
+            let tx = Transaction::new(&table);
+            let tx = tx
+                .replace_schema(evolved)
+                .apply(tx)
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            return match tx.commit(catalog.as_ref()).await {
+                Ok(table) => {
+                    self.table_cache.write().await.remove(namespace);
+                    Ok(table)
+                }
+                Err(err) if err.kind() == iceberg::ErrorKind::CatalogCommitConflicts => catalog
+                    .load_table(&self.table_ident(namespace)?)
+                    .await
+                    .map_err(|err| io::Error::other(err.to_string())),
+                Err(err) => Err(io::Error::other(err.to_string())),
+            };
+        }
+        Err(io::Error::other(format!(
+            "Iceberg field type change for namespace '{namespace}' requires an empty table"
+        )))
+    }
+
+    async fn recreate_table_with_iceberg_schema(
+        &self,
+        namespace: &str,
+        iceberg_schema: Schema,
+    ) -> Result<iceberg::table::Table, io::Error> {
+        let catalog = Arc::clone(&self.catalog);
+        let table_ident = self.table_ident(namespace)?;
+        if catalog
+            .table_exists(&table_ident)
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?
+        {
+            catalog
+                .drop_table(&table_ident)
+                .await
+                .map_err(|err| io::Error::other(err.to_string()))?;
+        }
+        self.table_cache.write().await.remove(namespace);
+        self.create_table_with_iceberg_schema(catalog.as_ref(), namespace, iceberg_schema)
+            .await
+    }
+
     async fn recreate_table_for_grouped(
         &self,
         namespace: &str,
@@ -1628,6 +1704,10 @@ impl<S: SinkSpec> IcebergWriter<S> {
             self.table_for_write(namespace, schema_version, &metadata)
                 .await?
         };
+        let reader_schema = reader.schema();
+        let table = self
+            .evolve_table_to_arrow_schema(namespace, table, reader_schema.as_ref())
+            .await?;
         let exact_cdc_contract = ctx
             .cdc_ctx
             .and_then(|cdc| cdc.contract.as_ref())
@@ -1696,7 +1776,6 @@ impl<S: SinkSpec> IcebergWriter<S> {
         let iceberg_schema = table.metadata().current_schema().clone();
         let partition_spec = Arc::clone(table.metadata().default_partition_spec());
         let require_homogeneous = self.require_homogeneous_partitions(namespace);
-        let reader_schema = reader.schema();
         let mut uploads = FuturesUnordered::new();
         let mut files = Vec::new();
         let mut transport_chunk_count = 0u32;
@@ -2955,6 +3034,22 @@ impl<S: SinkSpec> IcebergWriter<S> {
             .await?;
 
         let iceberg_schema = self.desired_iceberg_schema(namespace, metadata)?;
+        self.create_table_with_iceberg_schema(catalog, namespace, iceberg_schema)
+            .await
+    }
+
+    async fn create_table_with_iceberg_schema(
+        &self,
+        catalog: &dyn Catalog,
+        namespace: &str,
+        iceberg_schema: Schema,
+    ) -> Result<iceberg::table::Table, io::Error> {
+        let table_ident = self.table_ident(namespace)?;
+        let catalog_namespace = self.catalog_namespace()?;
+        let namespace_ident = NamespaceIdent::from_strs([catalog_namespace.as_str()])
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        self.ensure_catalog_namespace(catalog, &namespace_ident)
+            .await?;
         let mut properties: HashMap<String, String> = HashMap::new();
         properties.insert(
             "skippr.pipeline".to_string(),
@@ -3673,6 +3768,58 @@ fn iceberg_schema_has_all_fields(current: &Schema, desired: &Schema) -> bool {
         .fields()
         .iter()
         .all(|field| current.field_by_name(&field.name).is_some())
+}
+
+fn iceberg_field_types_match(current: &Schema, desired: &Schema) -> bool {
+    desired.as_struct().fields().iter().all(|dest| {
+        current
+            .field_by_name(&dest.name)
+            .is_some_and(|cur| cur.field_type.as_ref() == dest.field_type.as_ref())
+    })
+}
+
+fn iceberg_type_from_arrow(data_type: &DataType) -> Result<Type, io::Error> {
+    Ok(Type::Primitive(match data_type {
+        DataType::Boolean => PrimitiveType::Boolean,
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::UInt8 | DataType::UInt16 => {
+            PrimitiveType::Int
+        }
+        DataType::Int64 | DataType::UInt32 | DataType::UInt64 => PrimitiveType::Long,
+        DataType::Float32 => PrimitiveType::Float,
+        DataType::Float64 => PrimitiveType::Double,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => PrimitiveType::String,
+        DataType::Binary | DataType::LargeBinary | DataType::BinaryView => PrimitiveType::Binary,
+        DataType::Date32 | DataType::Date64 => PrimitiveType::Date,
+        DataType::Timestamp(_, _) => PrimitiveType::Timestamp,
+        DataType::Time32(_) | DataType::Time64(_) => PrimitiveType::Time,
+        other => {
+            return Err(io::Error::other(format!(
+                "unsupported Arrow type for Iceberg dest schema: {other}"
+            )))
+        }
+    }))
+}
+
+fn iceberg_schema_from_arrow(namespace: &str, schema: &ArrowSchema) -> Result<Schema, io::Error> {
+    let mut fields = Vec::new();
+    let mut seen_field_ids = HashMap::<i32, ()>::new();
+    for field in schema.fields() {
+        let field_id =
+            unique_iceberg_field_id(namespace, &[field.name().to_string()], &seen_field_ids);
+        seen_field_ids.insert(field_id, ());
+        fields.push(Arc::new(NestedField::new(
+            field_id,
+            field.name(),
+            iceberg_type_from_arrow(field.data_type())?,
+            !field.is_nullable(),
+        )));
+    }
+    append_cdc_encoded_fields(namespace, &mut fields, &mut seen_field_ids);
+    Schema::builder()
+        .with_schema_id(0)
+        .with_fields(fields)
+        .build()
+        .map_err(|err| io::Error::other(err.to_string()))
 }
 
 fn merge_iceberg_schema_missing_fields(
@@ -4645,6 +4792,48 @@ mod tests {
             1,
             "evolved Iceberg schemas must not reuse schema id 0"
         );
+    }
+
+    #[test]
+    fn iceberg_schema_from_arrow_folds_compose_dest() {
+        let arrow = ArrowSchema::new(vec![
+            arrow::datatypes::Field::new("id", DataType::Int64, true),
+            arrow::datatypes::Field::new("display_name", DataType::Utf8, true),
+            arrow::datatypes::Field::new("amount", DataType::Float64, true),
+            arrow::datatypes::Field::new("amount_gbp", DataType::Float64, true),
+        ]);
+        let dest = iceberg_schema_from_arrow("perf_cell", &arrow).unwrap();
+        assert!(dest.field_by_name("display_name").is_some());
+        assert!(dest.field_by_name("amount_gbp").is_some());
+        assert!(matches!(
+            dest.field_by_name("amount").unwrap().field_type.as_ref(),
+            Type::Primitive(PrimitiveType::Double)
+        ));
+    }
+
+    #[test]
+    fn iceberg_field_types_match_rejects_int_vs_double() {
+        let current = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![Arc::new(NestedField::new(
+                1,
+                "amount",
+                Type::Primitive(PrimitiveType::Int),
+                false,
+            ))])
+            .build()
+            .unwrap();
+        let desired = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![Arc::new(NestedField::new(
+                1,
+                "amount",
+                Type::Primitive(PrimitiveType::Double),
+                false,
+            ))])
+            .build()
+            .unwrap();
+        assert!(!iceberg_field_types_match(&current, &desired));
     }
 
     #[test]

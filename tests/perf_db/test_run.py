@@ -310,11 +310,22 @@ class PerfDbRunnerContractTests(unittest.TestCase):
             measured,
             "File overlap must hold compact until after the measured query",
         )
+        overlap = ingest.split('if scenario.get("overlap")')[1]
+        unlink_at = overlap.find('events.json").unlink')
+        second_sync = overlap.find("start_held_ingest")
+        self.assertGreater(unlink_at, 0)
+        self.assertGreater(second_sync, unlink_at)
         self.assertIn("arm_compaction_hold", text)
         self.assertIn("OVERLAP_WAIT_SECONDS", text)
+        self.assertIn("never reached the expected query result", text)
         self.assertNotIn("CLUSTER_TENANT", text)
-        wal_tail = text.split('if scenario.get("wal_tail")')[1].split("else:")[0]
-        self.assertIn("seconds=90", wal_tail)
+        self.assertIn("seconds=90", ingest)
+        alter_tail = ingest.split('if scenario.get("alter")')[1]
+        self.assertLess(
+            alter_tail.find("stop_skipprd"),
+            alter_tail.find("migrate"),
+            "stream migrate must release the store before skipprd migrate",
+        )
         self.assertNotIn("failpoint.unlink", ingest[:measured])
         self.assertLess(
             ingest.find("require_hold_engaged"),
@@ -325,6 +336,14 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertLess(cdc.find("require_hold_engaged"), cdc.find("measured_query"))
         self.assertNotIn("from tests.perf.run import", text)
         self.assertNotIn("copy_b-json-json", text)
+        setup = ingest.split("discover")[0]
+        self.assertNotIn(
+            "write_migration_sql",
+            setup,
+            "pending ALTER SQL before discover makes sync fail with Schema not found",
+        )
+        self.assertGreater(ingest.find("write_migration_sql"), ingest.find("discover"))
+        self.assertGreater(ingest.find("write_migration_sql"), ingest.find("sync"))
 
     def test_profile_query_repeats_collect_after_warmup(self) -> None:
         run = perf_db_run()

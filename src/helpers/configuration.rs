@@ -3593,6 +3593,11 @@ impl Config {
             crate::runtime_plugins::schema_state::runtime_schema_output_metadata(ns)
                 .ok_or_else(|| format!("Schema sync: namespace {} missing from metadata", ns))?
         };
+        let out_meta = crate::stream_transform::dest_output_metadata_for_ops(
+            &self.get_transform_ops(),
+            out_meta,
+            ns,
+        )?;
 
         let sync_timeout = std::time::Duration::from_secs(
             Config::getenv("SCHEMA_SYNC_TIMEOUT_SECONDS", "120")

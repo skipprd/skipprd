@@ -91,6 +91,8 @@ pub(crate) async fn wal_table_for_namespace(
         flatten,
     )
     .map_err(|err| DataFusionError::Plan(err.to_string()))?;
+    let schema = crate::stream_transform::dest_schema_for_ops(&bound.get_transform_ops(), schema)
+        .map_err(DataFusionError::Plan)?;
     let key =
         skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
             .map_err(|err| DataFusionError::Plan(err.to_string()))?;

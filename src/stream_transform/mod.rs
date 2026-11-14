@@ -22,6 +22,52 @@ pub struct AppliedBatches {
     pub kept: Option<Vec<usize>>,
 }
 
+/// Arrow schema after `transform.ops`, including on an empty batch.
+///
+/// Iceberg schema sync and `skipprd query` publish this dest shape. Ingest
+/// mapping still uses the source schema, then `apply_ops` on live rows.
+pub fn dest_schema_for_ops(
+    ops: &[TransformOp],
+    source: Arc<Schema>,
+) -> Result<Arc<Schema>, String> {
+    if ops.is_empty() || !ops_change_schema(ops) {
+        return Ok(source);
+    }
+    let mut current = RecordBatch::new_empty(source);
+    for op in ops {
+        op.validate()?;
+        current = apply_one_filter_recording(op, current, &mut None)?;
+    }
+    Ok(current.schema())
+}
+
+fn ops_change_schema(ops: &[TransformOp]) -> bool {
+    ops.iter().any(|op| {
+        op.project.is_some() || op.derive.is_some() || op.rename.is_some() || op.cast.is_some()
+    })
+}
+
+/// Dest `OutputMetadata` for schema_sink / Iceberg. Source field ids are not reused
+/// across rename/project; `repair_field_identity` assigns a stable dest set.
+pub fn dest_output_metadata_for_ops(
+    ops: &[TransformOp],
+    source: crate::discover::OutputMetadata,
+    namespace: &str,
+) -> Result<crate::discover::OutputMetadata, String> {
+    if ops.is_empty() || !ops_change_schema(ops) {
+        return Ok(source);
+    }
+    let arrow = Arc::new(
+        crate::converters::skippr_arrow::convert_skippr_to_arrow(source.fields)
+            .map_err(|err| err.to_string())?,
+    );
+    let dest = dest_schema_for_ops(ops, arrow)?;
+    let mut metadata = crate::ingest::schema_arrow::output_metadata_for_arrow_schema(&dest)
+        .map_err(|err| err.to_string())?;
+    crate::discover::OutputMetadata::repair_field_identity(namespace, &mut metadata);
+    Ok(metadata)
+}
+
 pub fn apply_configured_ops(
     ops: &[TransformOp],
     batches: Vec<RecordBatch>,
@@ -501,6 +547,73 @@ mod tests {
             .unwrap();
         assert_eq!(gbp.value(0), 8.0);
         assert_eq!(gbp.value(1), 16.0);
+    }
+
+    #[test]
+    fn dest_schema_for_ops_folds_compose_without_rows() {
+        let source = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("amount", DataType::Int32, true),
+        ]));
+        let ops = vec![
+            TransformOp {
+                filter: Some("amount > 0".into()),
+                ..Default::default()
+            },
+            TransformOp {
+                derive: Some(
+                    [("amount_gbp".into(), "amount * 0.8".into())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            TransformOp {
+                rename: Some(
+                    [("name".into(), "display_name".into())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            TransformOp {
+                cast: Some([("amount".into(), "float64".into())].into_iter().collect()),
+                ..Default::default()
+            },
+            TransformOp {
+                project: Some(vec![
+                    "id".into(),
+                    "display_name".into(),
+                    "amount".into(),
+                    "amount_gbp".into(),
+                ]),
+                ..Default::default()
+            },
+        ];
+        let dest = dest_schema_for_ops(&ops, source).unwrap();
+        let names: Vec<_> = dest.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["id", "display_name", "amount", "amount_gbp"]);
+        assert_eq!(
+            dest.field_with_name("amount").unwrap().data_type(),
+            &DataType::Float64
+        );
+        assert!(dest.field_with_name("name").is_err());
+    }
+
+    #[test]
+    fn dest_schema_for_ops_skips_filter_only() {
+        let source = Arc::new(Schema::new(vec![Field::new(
+            "amount",
+            DataType::Int64,
+            true,
+        )]));
+        let ops = vec![TransformOp {
+            filter: Some("amount > 0".into()),
+            ..Default::default()
+        }];
+        let dest = dest_schema_for_ops(&ops, source.clone()).unwrap();
+        assert!(Arc::ptr_eq(&dest, &source));
     }
 
     #[test]

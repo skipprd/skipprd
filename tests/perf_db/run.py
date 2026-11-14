@@ -132,6 +132,7 @@ def peek_until(
     *,
     seconds: int,
     done: Callable[[dict[str, Any]], bool],
+    scenario_id: str,
 ) -> None:
     """Poll `sql` while the held ingest runs; the caller asserts the hold afterwards."""
     deadline = time.time() + seconds
@@ -149,6 +150,9 @@ def peek_until(
         except Exception:  # noqa: BLE001 — peeks race ingest startup; the measured query asserts
             pass
         time.sleep(1)
+    raise perf_run.PerfError(
+        f"{scenario_id}: held ingest never reached the expected query result"
+    )
 
 
 def parse_plain_query(captured: str) -> dict[str, Any]:
@@ -288,8 +292,6 @@ def run_query_after_ingest(
         ops=perf_run.transform_op_of(scenario) or False,
         aggregates=perf_run.transform_aggregates_of(scenario) or False,
     )
-    if scenario.get("alter"):
-        perf_run.write_migration_sql(config, str(scenario["alter"]))
     perf_run.start_ddb()
     tail_proc = None
     overlap_proc = None
@@ -330,6 +332,9 @@ def run_query_after_ingest(
                         break
                     time.sleep(0.2)
                 require_hold_engaged(scenario_id, tail_proc, hold)
+                logs += perf_run.stop_skipprd(tail_proc)
+                tail_proc = None
+                perf_run.write_migration_sql(config, str(scenario["alter"]))
                 logs += perf_run.run_skipprd(
                     skipprd,
                     ["--config", str(config), "migrate", "--pipeline", PIPELINE],
@@ -337,18 +342,24 @@ def run_query_after_ingest(
                     work=work,
                     profile="none",
                 )
-            expect = stream_limit_rows(scenario)
-            peek_until(
-                skipprd,
-                config,
-                env,
-                work,
-                sql,
-                tail_proc,
-                seconds=90,
-                done=lambda doc: len(doc.get("rows") or []) == expect,
-            )
-            require_hold_engaged(scenario_id, tail_proc, hold)
+                if perf_run.leftover_segs(data_dir) == 0:
+                    raise perf_run.PerfError(
+                        f"{scenario_id}: stream migrate expected leftover WAL"
+                    )
+            else:
+                expect = stream_limit_rows(scenario)
+                peek_until(
+                    skipprd,
+                    config,
+                    env,
+                    work,
+                    sql,
+                    tail_proc,
+                    seconds=90,
+                    done=lambda doc: len(doc.get("rows") or []) == expect,
+                    scenario_id=scenario_id,
+                )
+                require_hold_engaged(scenario_id, tail_proc, hold)
         else:
             measured_sync = perf_run.run_skipprd(
                 skipprd,
@@ -359,6 +370,7 @@ def run_query_after_ingest(
             )
             logs += measured_sync
             if scenario.get("alter"):
+                perf_run.write_migration_sql(config, str(scenario["alter"]))
                 logs += perf_run.run_skipprd(
                     skipprd,
                     ["--config", str(config), "migrate", "--pipeline", PIPELINE],
@@ -376,6 +388,7 @@ def run_query_after_ingest(
                 "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in records),
                 encoding="utf-8",
             )
+            (source / "events.json").unlink(missing_ok=True)
             rows = 2 * rows
             overlap_proc = start_held_ingest(sync_cmd, env)
             peek_until(
@@ -387,6 +400,7 @@ def run_query_after_ingest(
                 overlap_proc,
                 seconds=OVERLAP_WAIT_SECONDS,
                 done=lambda doc: first_cell(doc) == str(rows),
+                scenario_id=scenario_id,
             )
             require_hold_engaged(scenario_id, overlap_proc, hold)
         if (scenario.get("asserts") or {}).get("iceberg_parquet") and not scenario.get("wal_tail"):
@@ -413,6 +427,15 @@ def run_query_after_ingest(
                 except Exception:
                     tail_proc.kill()
                 tail_proc = None
+            elif scenario.get("alter"):
+                measured_sync = perf_run.run_skipprd(
+                    skipprd,
+                    ["--config", str(config), "sync", "--pipeline", PIPELINE, "--once"],
+                    env=env,
+                    work=work,
+                    profile="none",
+                )
+                logs += measured_sync
             parquet_files = list(warehouse.rglob("*.parquet"))
             if (scenario.get("asserts") or {}).get("iceberg_parquet") and not parquet_files:
                 raise perf_run.PerfError(
@@ -718,6 +741,7 @@ def run_query_after_cdc(
                 overlap_proc,
                 seconds=OVERLAP_WAIT_SECONDS,
                 done=lambda doc: first_cell(doc) == expect_name,
+                scenario_id=scenario_id,
             )
             require_hold_engaged(scenario_id, overlap_proc, hold)
         else:

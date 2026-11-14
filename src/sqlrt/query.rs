@@ -1274,7 +1274,14 @@ pub async fn query_with_options(
                                 &namespace,
                                 &pm.metadata,
                                 flatten,
-                            ) {
+                            )
+                            .and_then(|schema| {
+                                crate::stream_transform::dest_schema_for_ops(
+                                    &config.get_transform_ops(),
+                                    schema,
+                                )
+                                .map_err(|err| arrow::error::ArrowError::ComputeError(err))
+                            }) {
                                 Ok(schema) => {
                                     ARROW_SCHEMA
                                         .insert(namespace.clone(), ArcSwap::from(schema.clone()));
