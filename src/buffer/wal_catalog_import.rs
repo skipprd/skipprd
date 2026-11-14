@@ -979,14 +979,20 @@ pub fn gc_orphan_payloads(handle: &PipelineWalHandle, config: &Config) -> Result
     let rows = query_all(handle.catalog(), CatalogPrefix::Segment)
         .map_err(|err| DurableError::Io(err.to_string()))?;
     let mut live_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut live_disk: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut live_s3_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (_, row) in rows {
         let CatalogRow::Segment(seg) = row else {
             continue;
         };
         live_ids.insert(seg.segment_id.as_str().to_string());
-        if let PayloadLocation::S3 { key, .. } = seg.location {
-            live_s3_keys.insert(key);
+        match seg.location {
+            PayloadLocation::Disk { path } => {
+                live_disk.insert(PathBuf::from(path));
+            }
+            PayloadLocation::S3 { key, .. } => {
+                live_s3_keys.insert(key);
+            }
         }
     }
     let segs = &handle.paths().segs;
@@ -1008,7 +1014,7 @@ pub fn gc_orphan_payloads(handle: &PipelineWalHandle, config: &Config) -> Result
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
-            if !live_ids.contains(id) {
+            if !live_ids.contains(id) && !live_disk.contains(&path) {
                 warn_drop_file(&path);
             }
         }
@@ -1571,6 +1577,47 @@ mod tests {
             })
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn gc_orphan_payloads_keeps_rewritten_migrating_seg() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = test_handle(dir.path());
+        let segs = &handle.paths().segs;
+        let meta = write_seg(segs, "liveid-migrating");
+        let migrating = segs.join("liveid-migrating.seg");
+        let orphan = segs.join("orphan.seg");
+        fs::write(&orphan, b"stale").unwrap();
+        let id = SegmentId::new("liveid").unwrap();
+        let fence = handle.fence();
+        let mut txn = CatalogTxn::new();
+        txn.put(
+            CatalogKey::Segment(id.clone()),
+            CatalogRow::Segment(SegmentRow {
+                segment_id: id,
+                seq: skippr_wal_catalog::CatalogSeq::new(1),
+                location: PayloadLocation::Disk {
+                    path: migrating.display().to_string(),
+                },
+                payload_len: meta.total_bytes,
+                payload_sha256: meta.body_sha256,
+                slice_count: meta.index.len() as u32,
+                done: SliceBitmap::new(meta.index.len() as u32),
+                offsets: Vec::new(),
+                checkpoints: Vec::new(),
+                epoch: fence.epoch,
+                version: 0,
+            }),
+            PutCond::NotExists,
+        )
+        .unwrap();
+        handle.catalog().commit_durable(&txn, fence).unwrap();
+        gc_orphan_payloads(&handle, &crate::helpers::configuration::Config::new()).unwrap();
+        assert!(
+            migrating.exists(),
+            "migrate rewrite payload is the live SegmentRow location"
+        );
+        assert!(!orphan.exists());
     }
 
     #[test]

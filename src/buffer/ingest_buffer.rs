@@ -208,6 +208,7 @@ static COMPACTION_IN_FLIGHT: OnceLazy<DashMap<(String, u64, u64), ()>> =
 /// In-memory cache of committed WAL segments.
 /// Populated on startup (wal_startup hydrate) and during ingest (flush).
 /// Entries are removed when all partitions in a segment have been compacted.
+#[derive(Clone)]
 struct CachedSegment {
     source: SegmentSource,
     meta: Arc<SegmentFileMetadata>,
@@ -1062,7 +1063,9 @@ impl Buffers {
         path: PathBuf,
         meta: SegmentFileMetadata,
     ) {
-        Self::segment_cache_register(config, SegmentSource::Disk(path), meta);
+        let source = SegmentSource::Disk(path);
+        let id = source.segment_id().to_string();
+        Self::segment_cache_register(config, &id, source, meta);
     }
 
     pub(crate) fn append_batches_to_live(batches: Vec<IngestBufferBatch>) -> Result<u64, String> {
@@ -1752,8 +1755,13 @@ impl Buffers {
 
     // ── Segment cache: single write / single remove / unified read ──────
 
-    fn segment_cache_register(config: &Config, source: SegmentSource, meta: SegmentFileMetadata) {
-        let id = source.segment_id().to_string();
+    fn segment_cache_register(
+        config: &Config,
+        catalog_id: &str,
+        source: SegmentSource,
+        meta: SegmentFileMetadata,
+    ) {
+        let id = catalog_id.to_string();
         let source_id = source.display_name();
         let source_descriptor = Self::source_descriptor(&source);
         let mut indexed_slices = Vec::with_capacity(meta.index.len());
@@ -1883,7 +1891,7 @@ impl Buffers {
                             }
                         }
                     };
-                    Self::segment_cache_register(config, source, meta);
+                    Self::segment_cache_register(config, row.segment_id.as_str(), source, meta);
                     admitted += 1;
                     if admitted % crate::buffer::wal_handle::WAL_CATALOG_PROGRESS_EVERY == 0 {
                         info!(
@@ -1949,7 +1957,8 @@ impl Buffers {
                 body: None,
             },
         };
-        Self::segment_cache_register(config, source, result.meta.clone());
+        let id = source.segment_id().to_string();
+        Self::segment_cache_register(config, &id, source, result.meta.clone());
     }
 
     fn patch_manifest_semantics(
@@ -2270,6 +2279,92 @@ impl Buffers {
         Self::build_compaction_work(entries, schema_fingerprint, output, config)
     }
 
+    fn cached_segment_for_manifest_ref(
+        config: &Config,
+        wal_ref: &WalPartRef,
+    ) -> Option<CachedSegment> {
+        if let Some(cached) = SEGMENT_CACHE.get(&wal_ref.segment_id) {
+            return Some(cached.clone());
+        }
+        let source = Self::manifest_payload_source(wal_ref)?;
+        let meta = match &source {
+            SegmentSource::Disk(path) | SegmentSource::Wal { path, .. } => {
+                SegmentFile::read_index_path(path).ok()?
+            }
+            SegmentSource::S3 { .. } => {
+                let handle = crate::buffer::wal_store::ingest_wal_handle()?;
+                let row = handle
+                    .live_segment_rows()
+                    .ok()?
+                    .into_iter()
+                    .find(|row| row.segment_id.as_str() == wal_ref.segment_id)?;
+                handle.load_or_build_index_meta(&row).ok()?
+            }
+        };
+        Self::segment_cache_register(config, &wal_ref.segment_id, source, meta);
+        SEGMENT_CACHE
+            .get(&wal_ref.segment_id)
+            .map(|cached| cached.clone())
+    }
+
+    fn manifest_payload_source(wal_ref: &WalPartRef) -> Option<SegmentSource> {
+        if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
+            if let Ok(id) = skippr_lease::SegmentId::new(&wal_ref.segment_id) {
+                if let Ok(Some(skippr_wal_catalog::CatalogRow::Segment(row))) = handle
+                    .catalog()
+                    .get(&skippr_wal_catalog::CatalogKey::Segment(id))
+                {
+                    return Self::source_from_payload_location(&row.location);
+                }
+            }
+        }
+        match &wal_ref.source {
+            SegmentSourceDescriptor::Disk { path } if path.is_file() => {
+                Some(SegmentSource::Disk(path.clone()))
+            }
+            SegmentSourceDescriptor::S3 { bucket, key } => Some(SegmentSource::S3 {
+                key: key.clone(),
+                bucket: bucket.clone(),
+                body: None,
+            }),
+            SegmentSourceDescriptor::Disk { .. } | SegmentSourceDescriptor::Wal { .. } => None,
+        }
+    }
+
+    fn source_from_payload_location(
+        location: &skippr_wal_catalog::PayloadLocation,
+    ) -> Option<SegmentSource> {
+        match location {
+            skippr_wal_catalog::PayloadLocation::Disk { path } => {
+                let path = PathBuf::from(path);
+                path.is_file().then_some(SegmentSource::Disk(path))
+            }
+            skippr_wal_catalog::PayloadLocation::S3 { bucket, key } => Some(SegmentSource::S3 {
+                key: key.clone(),
+                bucket: bucket.clone(),
+                body: None,
+            }),
+        }
+    }
+
+    fn manifest_slice_acked(segment_id: &str, ordinal: u32) -> bool {
+        let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() else {
+            return false;
+        };
+        let Ok(id) = skippr_lease::SegmentId::new(segment_id) else {
+            return false;
+        };
+        match handle
+            .catalog()
+            .get(&skippr_wal_catalog::CatalogKey::Segment(id))
+        {
+            Ok(Some(skippr_wal_catalog::CatalogRow::Segment(row))) => row.done.is_done(ordinal),
+            Ok(None) => false,
+            Ok(Some(_)) => false,
+            Err(_) => false,
+        }
+    }
+
     fn work_from_manifest(
         config: &Config,
         txn: CompactionTransaction,
@@ -2294,7 +2389,7 @@ impl Buffers {
         let mut entries = Vec::with_capacity(txn.refs.len());
         let mut completed_refs = Vec::new();
         for wal_ref in txn.refs.iter() {
-            let Some(cached) = SEGMENT_CACHE.get(&wal_ref.segment_id) else {
+            let Some(cached) = Self::cached_segment_for_manifest_ref(config, wal_ref) else {
                 warn!(
                     "Compactor: manifest resume skipped missing segment cache segment_id={} compaction_id={}; catalog row kept",
                     wal_ref.segment_id, txn.id
@@ -2317,13 +2412,7 @@ impl Buffers {
                 );
                 return None;
             };
-            let slice_done = crate::buffer::wal_store::ingest_wal_handle()
-                .and_then(|handle| {
-                    handle
-                        .slice_is_done(cached.source.segment_id(), ordinal as u32)
-                        .ok()
-                })
-                .unwrap_or(false);
+            let slice_done = Self::manifest_slice_acked(&wal_ref.segment_id, ordinal as u32);
             if slice_done {
                 completed_refs.push(wal_ref.clone());
                 continue;
@@ -4612,7 +4701,9 @@ mod tests_wal_commit {
             .iter()
             .all(|index| index.part_meta_summary.is_cdc()));
         let config = Config::new().bind_pipeline("indexed-cdc");
-        Buffers::segment_cache_register(&config, SegmentSource::Disk(segf.path.clone()), meta);
+        let source = SegmentSource::Disk(segf.path.clone());
+        let id = source.segment_id().to_string();
+        Buffers::segment_cache_register(&config, &id, source, meta);
 
         SegmentFile::reset_full_part_meta_scan_count();
         let sink = SyntheticGroupedSink::new(SyntheticGroupedBehavior::Apply);
@@ -4830,16 +4921,12 @@ mod tests_wal_commit {
             make_batch(),
         );
         let config = Config::new().bind_pipeline("synthetic");
-        Buffers::segment_cache_register(
-            &config,
-            SegmentSource::Disk(doomed.segment_path.clone()),
-            doomed.meta.clone(),
-        );
-        Buffers::segment_cache_register(
-            &config,
-            SegmentSource::Disk(healthy.segment_path.clone()),
-            healthy.meta.clone(),
-        );
+        let doomed_source = SegmentSource::Disk(doomed.segment_path.clone());
+        let doomed_id = doomed_source.segment_id().to_string();
+        Buffers::segment_cache_register(&config, &doomed_id, doomed_source, doomed.meta.clone());
+        let healthy_source = SegmentSource::Disk(healthy.segment_path.clone());
+        let healthy_id = healthy_source.segment_id().to_string();
+        Buffers::segment_cache_register(&config, &healthy_id, healthy_source, healthy.meta.clone());
         compaction_index().install_manifests(Vec::new());
         compaction_index().upsert_manifest(doomed.work_for_sink("data_sinks.ds_datalake").txn);
         fs::remove_file(&doomed.segment_path).unwrap();
@@ -5132,6 +5219,196 @@ mod tests_wal_commit {
     }
 
     #[test]
+    #[serial]
+    fn work_from_manifest_loads_leftover_disk_when_segment_row_is_missing() {
+        let (_legacy_base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let offsets_db = Arc::new(Offsets::init(&Config::new()).unwrap());
+        let _store = install_test_ingest_store(&Config::new(), offsets_db);
+        let handle = crate::buffer::wal_store::ingest_wal_handle().expect("handle");
+        let key = PartitionKey {
+            sink_ref: "out".into(),
+            namespace: "ns".into(),
+            partition: String::new(),
+            time: Some(0),
+            schema_fingerprint: "schema".into(),
+        };
+        let schema = arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "v",
+            arrow_schema::DataType::Int32,
+            false,
+        )]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(arrow::array::Int32Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+        let mut batches = HashMap::new();
+        batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
+        let mut parts_meta = HashMap::new();
+        parts_meta.insert(key, (0, SystemTime::now()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(handle.persist_segment(
+                "leftoverseg",
+                &HashMap::new(),
+                &batches,
+                &parts_meta,
+                &HashMap::new(),
+                &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
+            ))
+            .unwrap();
+        let path = handle
+            .live_disk_payload_paths()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("leftover disk payload");
+        let meta = SegmentFile::read_index_path(&path).unwrap();
+        let idx = meta.index.first().expect("slice");
+        let wal_ref = WalPartRef {
+            segment_id: "leftoverseg".into(),
+            source: SegmentSourceDescriptor::Disk { path: path.clone() },
+            start: idx.start,
+            len: idx.len,
+            key: idx.key.clone(),
+            cdc_meta_hash: idx.part_meta_summary.canonical_hash(),
+            ordinal: Some(idx.slice_ordinal),
+        };
+        let txn = CompactionTransaction::new(
+            idx.key.sink_ref.clone(),
+            idx.key.namespace.clone(),
+            idx.key.schema_fingerprint.clone(),
+            crate::plugins::source_contract::WritePolicy::Append,
+            SinkWriteSemantics::ExactOnce,
+            vec![wal_ref],
+            "out.parquet".into(),
+        );
+        let id = skippr_lease::SegmentId::new("leftoverseg").unwrap();
+        let mut drop_row = skippr_wal_catalog::CatalogTxn::new();
+        drop_row
+            .delete(
+                skippr_wal_catalog::CatalogKey::Segment(id),
+                skippr_wal_catalog::DeleteCond::Exists,
+            )
+            .unwrap();
+        crate::buffer::wal_handle::flushing_commit(handle.catalog(), &drop_row, handle.fence())
+            .unwrap();
+        SEGMENT_CACHE.clear();
+        compaction_index().clear_all();
+        let output = SyntheticGroupedSink::new(SyntheticGroupedBehavior::Apply);
+        let work =
+            Buffers::work_from_manifest(&Config::new().bind_pipeline("synthetic"), txn, &output);
+        assert!(
+            work.is_some(),
+            "leftover compact must resume from disk when CompactionRow survives SIGKILL without a SegmentRow"
+        );
+        reset_in_memory_segments();
+    }
+
+    #[test]
+    #[serial]
+    fn work_from_manifest_loads_rewritten_payload_when_compaction_path_is_stale() {
+        let (_legacy_base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let offsets_db = Arc::new(Offsets::init(&Config::new()).unwrap());
+        let _store = install_test_ingest_store(&Config::new(), offsets_db);
+        let handle = crate::buffer::wal_store::ingest_wal_handle().expect("handle");
+        let key = PartitionKey {
+            sink_ref: "out".into(),
+            namespace: "ns".into(),
+            partition: String::new(),
+            time: Some(0),
+            schema_fingerprint: "schema".into(),
+        };
+        let schema = arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "v",
+            arrow_schema::DataType::Int32,
+            false,
+        )]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(arrow::array::Int32Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+        let mut batches = HashMap::new();
+        batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
+        let mut parts_meta = HashMap::new();
+        parts_meta.insert(key, (0, SystemTime::now()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let persisted = runtime
+            .block_on(handle.persist_segment(
+                "rewriteseg",
+                &HashMap::new(),
+                &batches,
+                &parts_meta,
+                &HashMap::new(),
+                &HashMap::new(),
+                std::time::SystemTime::UNIX_EPOCH,
+            ))
+            .unwrap();
+        let old_path = handle
+            .live_disk_payload_paths()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("rewrite disk payload");
+        let new_path = old_path.with_file_name("rewriteseg-migrating.seg");
+        fs::copy(&old_path, &new_path).unwrap();
+        handle
+            .replace_payload_location(
+                "rewriteseg",
+                skippr_wal_catalog::PayloadLocation::Disk {
+                    path: new_path.to_string_lossy().into_owned(),
+                },
+                persisted.meta.total_bytes,
+                persisted.sha256,
+            )
+            .unwrap();
+        fs::remove_file(&old_path).unwrap();
+        let meta = SegmentFile::read_index_path(&new_path).unwrap();
+        let idx = meta.index.first().expect("slice");
+        let wal_ref = WalPartRef {
+            segment_id: "rewriteseg".into(),
+            source: SegmentSourceDescriptor::Disk {
+                path: old_path.clone(),
+            },
+            start: idx.start,
+            len: idx.len,
+            key: idx.key.clone(),
+            cdc_meta_hash: idx.part_meta_summary.canonical_hash(),
+            ordinal: Some(idx.slice_ordinal),
+        };
+        let txn = CompactionTransaction::new(
+            idx.key.sink_ref.clone(),
+            idx.key.namespace.clone(),
+            idx.key.schema_fingerprint.clone(),
+            crate::plugins::source_contract::WritePolicy::Append,
+            SinkWriteSemantics::ExactOnce,
+            vec![wal_ref],
+            "out.parquet".into(),
+        );
+        SEGMENT_CACHE.clear();
+        compaction_index().clear_all();
+        Buffers::hydrate_from_catalog(&handle, &Config::new());
+        let output = SyntheticGroupedSink::new(SyntheticGroupedBehavior::Apply);
+        let work =
+            Buffers::work_from_manifest(&Config::new().bind_pipeline("synthetic"), txn, &output);
+        assert!(
+            work.is_some(),
+            "leftover compact must follow SegmentRow after migrate rewrite moves the payload"
+        );
+        reset_in_memory_segments();
+    }
+
+    #[test]
     fn hydrate_from_catalog_does_not_admit_payload() {
         let src = include_str!("ingest_buffer.rs");
         let start = src
@@ -5163,6 +5440,10 @@ mod tests_wal_commit {
         assert!(
             !work_fn.contains("remove_compaction_row"),
             "planner resume must not delete CompactionRow on cache miss"
+        );
+        assert!(
+            work_fn.contains("cached_segment_for_manifest_ref"),
+            "planner resume must load leftover disk payload when SEGMENT_CACHE misses"
         );
         assert!(!src.contains(concat!("already ", "reclaimed")));
     }
