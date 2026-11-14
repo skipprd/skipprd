@@ -31,6 +31,7 @@ jobs:
     timeout-minutes: 240
     env:
       CARGO_BUILD_JOBS: "2"
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,7 +43,7 @@ jobs:
           path: skipprd
           submodules: true
       - name: R2 sccache
-        if: ${{ secrets.R2_ACCESS_KEY_ID != '' }}
+        if: env.R2_ACCESS_KEY_ID != ''
         uses: ./skipprd/.github/actions/configure-r2-sccache
         with:
           account_id: ${{ secrets.R2_ACCOUNT_ID }}
@@ -155,6 +156,7 @@ jobs:
     timeout-minutes: 240
     env:
       CARGO_BUILD_JOBS: "2"
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -166,7 +168,7 @@ jobs:
           path: skipprd
           submodules: true
       - name: R2 sccache
-        if: ${{ secrets.R2_ACCESS_KEY_ID != '' }}
+        if: env.R2_ACCESS_KEY_ID != ''
         uses: ./skipprd/.github/actions/configure-r2-sccache
         with:
           account_id: ${{ secrets.R2_ACCOUNT_ID }}

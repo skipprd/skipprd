@@ -624,6 +624,9 @@ class RustCiTests(unittest.TestCase):
         )
         self.assertIn("analyze.py", text)
         self.assertNotIn("--delete", text)
+        self.assertNotIn("if: ${{ secrets.", text)
+        self.assertIn("R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}", text)
+        self.assertIn("if: env.R2_ACCESS_KEY_ID != ''", text)
         self.assertIn("actions/e2e/perf-db", text)
         self.assertGreaterEqual(
             text.count("python3 -m pip install --quiet boto3"),

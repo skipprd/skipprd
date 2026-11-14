@@ -4771,17 +4771,31 @@ mod empty_ingest_tasks_tests {
 
     #[test]
     fn ingest_file_empty_tasks_in_discover_mode_does_not_panic() {
-        let ingest = Ingest::new_for_execution(&Config::new(), RuntimeExecutionMode::Discover);
+        let dir = tempfile::tempdir().unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "skippr": { "workspace": "ws", "store": { "type": "fjall" } },
+            "pipelines": {
+                "orders": {
+                    "data_source": "data_sources.sample",
+                    "data_dir": dir.path().to_str().unwrap()
+                }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            }
+        }))
+        .unwrap();
+        let config = config.bind_pipeline("orders");
+        let ingest = Ingest::new_for_execution(&config, RuntimeExecutionMode::Discover);
         let empty_tasks = Arc::new(IngestTasks::new());
 
-        let offsets = Arc::new(
-            crate::helpers::offsets::Offsets::init(&Config::new()).expect("offset DB init"),
-        );
+        let offsets =
+            Arc::new(crate::helpers::offsets::Offsets::init(&config).expect("offset DB init"));
         let noop: Box<dyn crate::plugins::DataSink + Send + Sync> =
             Box::new(crate::plugins::NoopOutputPlugin);
         let output = Arc::new(noop);
 
-        ingest.ingest_file(&Config::new(), &empty_tasks, &offsets, output);
+        ingest.ingest_file(&config, &empty_tasks, &offsets, output);
     }
 }
 
