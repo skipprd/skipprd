@@ -422,6 +422,18 @@ class PerfDbRunnerContractTests(unittest.TestCase):
                 held.kill()
                 held.wait()
 
+    def test_cdc_kill_wrap_records_sync_when_skipprd_never_emits_it(self) -> None:
+        run = perf_db_run()
+        captured = 'PERF_EVENT {"phase":"wal_persist","elapsed_ms":1,"rows":2,"bytes":0}\n'
+        out = run.with_sync_perf(captured, 40, 2)
+        phases = [ev["phase"] for ev in run.parse_perf_events(out)]
+        self.assertIn("sync", phases)
+        already = 'PERF_EVENT {"phase":"sync","elapsed_ms":9,"rows":2,"bytes":0}\n'
+        self.assertEqual(run.with_sync_perf(already, 40, 2), already)
+        src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        once = src.split("def run_cdc_once")[1].split("def run_query_after_cdc")[0]
+        self.assertIn("with_sync_perf", once)
+
     def test_cdc_postgres_failure_includes_container_logs(self) -> None:
         text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
         helper = text.split("def _cdc_postgres_failed")[1].split("def start_cdc_postgres")[0]

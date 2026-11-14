@@ -678,13 +678,27 @@ def cdc_sync_cmd(skipprd: Path, config: Path, env: dict[str, str]) -> list[str]:
     ]
 
 
+def with_sync_perf(captured: str, wall_ms: int, rows: int = 0) -> str:
+    """CDC `sync --once` is KILL-wrapped; skipprd may never emit phase sync."""
+    if any(ev.get("phase") == "sync" for ev in parse_perf_events(captured)):
+        return captured
+    return (
+        captured
+        + f'\nPERF_EVENT {{"phase":"sync","elapsed_ms":{int(wall_ms)},"rows":{int(rows)},"bytes":0}}\n'
+    )
+
+
 def run_cdc_once(skipprd: Path, config: Path, env: dict[str, str]) -> str:
     cmd = cdc_sync_cmd(skipprd, config, env)
     gnu = shutil.which("gtimeout") or shutil.which("timeout")
+    started = time.perf_counter()
     if gnu is not None:
         cmd = [gnu, "--signal=KILL", "120", *cmd]
-        return perf_run.run_logged(cmd, env=env, timeout=130)
-    return perf_run.run_logged(cmd, env=env, timeout=120)
+        captured = perf_run.run_logged(cmd, env=env, timeout=130)
+    else:
+        captured = perf_run.run_logged(cmd, env=env, timeout=120)
+    wall_ms = int((time.perf_counter() - started) * 1000)
+    return with_sync_perf(captured, wall_ms)
 
 
 def run_query_after_cdc(

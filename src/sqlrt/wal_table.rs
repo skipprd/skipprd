@@ -64,7 +64,15 @@ pub(crate) fn project_batch(batch: RecordBatch, schema: &SchemaRef) -> Result<Re
             .iter()
             .position(|src| field_id_or_name(src, field));
         if let Some(idx) = idx {
-            columns.push(batch.column(idx).clone());
+            let col = batch.column(idx);
+            if col.data_type() == field.data_type() {
+                columns.push(col.clone());
+            } else {
+                columns.push(
+                    arrow::compute::cast(col.as_ref(), field.data_type())
+                        .map_err(|err| DataFusionError::ArrowError(Box::new(err), None))?,
+                );
+            }
         } else {
             columns.push(arrow::array::new_null_array(
                 field.data_type(),
@@ -444,6 +452,27 @@ mod tests {
     use crate::sqlrt::stream_plan::StreamingBatchesExec;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use skippr_lease::{PipelineKey, PipelinePaths, SegmentId};
+
+    #[test]
+    fn project_batch_promotes_int32_to_int64() {
+        use datafusion::arrow::array::{Int32Array, Int64Array};
+
+        let src = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, true)]));
+        let batch =
+            RecordBatch::try_new(src, vec![Arc::new(Int32Array::from(vec![1, 2]))]).unwrap();
+        let dest = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let projected = project_batch(batch, &dest).unwrap();
+        assert_eq!(projected.schema().field(0).data_type(), &DataType::Int64);
+        assert_eq!(
+            projected
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[1, 2]
+        );
+    }
 
     #[test]
     fn project_batch_empty_schema_keeps_row_count() {
