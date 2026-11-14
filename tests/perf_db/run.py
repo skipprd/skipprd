@@ -114,6 +114,7 @@ def start_held_ingest(sync_cmd: list[str], env: dict[str, str]) -> subprocess.Po
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        start_new_session=True,
     )
 
 

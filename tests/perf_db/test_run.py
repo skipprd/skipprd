@@ -326,6 +326,8 @@ class PerfDbRunnerContractTests(unittest.TestCase):
             alter_tail.find("migrate"),
             "stream migrate must release the store before skipprd migrate",
         )
+        held = text.split("def start_held_ingest")[1].split("def first_cell")[0]
+        self.assertIn("start_new_session=True", held)
         self.assertNotIn("failpoint.unlink", ingest[:measured])
         self.assertLess(
             ingest.find("require_hold_engaged"),
