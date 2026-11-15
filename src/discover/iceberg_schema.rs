@@ -1,127 +1,113 @@
-//! Field-id-preserving Iceberg schema transform for [`SchemaAlterOp`].
-//! Destination apply lives on IcebergWriter (`SchemaSink::apply_alter`).
+//! Iceberg schema after one [`CanonicalAlter`]. Columns are found by output
+//! name and must carry the alter's field id. Destination apply lives on
+//! IcebergWriter (`SchemaSink::apply_alter`).
 
 use std::sync::Arc;
 
-use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
+use iceberg::spec::{NestedField, PrimitiveType, Schema, StructType, Type};
 
-use crate::discover::schema_alter::SchemaAlterOp;
+use crate::discover::schema_alter::{AlterColumn, CanonicalAlter, SchemaAlterError};
 use crate::discover::SkipprDataType;
 
-fn iceberg_name_candidates(name: &str) -> Vec<String> {
-    let mut out = vec![name.to_string()];
-    if name.contains('.') {
-        out.push(name.replace('.', "_"));
-    }
-    if name.contains('-') {
-        out.push(name.replace('-', "_"));
-        out.push(name.replace('.', "_").replace('-', "_"));
-    }
-    out
-}
-
-fn iceberg_field_name(name: &str) -> String {
-    name.replace('.', "_").replace('-', "_")
-}
-
-fn lookup_op_name(op: &SchemaAlterOp) -> &str {
-    match op {
-        SchemaAlterOp::Rename { from, .. } => from.as_str(),
-        SchemaAlterOp::Merge { src, .. } => src.as_str(),
-        SchemaAlterOp::Drop { column } | SchemaAlterOp::Promote { column, .. } => column.as_str(),
-    }
-}
-
-fn resolve_iceberg_field_index(
-    fields: &[Arc<NestedField>],
-    op: &SchemaAlterOp,
-    field_id: i32,
-) -> Option<usize> {
-    let candidates = iceberg_name_candidates(lookup_op_name(op));
-    let name_idx = fields
-        .iter()
-        .position(|field| candidates.iter().any(|name| field.name == *name));
-    if let Some(idx) = fields.iter().position(|field| field.id == field_id) {
-        if candidates.iter().any(|name| fields[idx].name == *name) {
-            return Some(idx);
-        }
-        // Glue sequential ids (1..N) can collide with a skippr assigned id on a
-        // different column. Prefer the name hit when one exists; keep id when
-        // Iceberg already renamed and only the id still matches.
-        if name_idx.is_none() {
-            return Some(idx);
-        }
-    }
-    name_idx
-}
+type Fields = Vec<Arc<NestedField>>;
 
 pub fn iceberg_schema_after_alter(
     current: &Schema,
-    op: &SchemaAlterOp,
-    field_id: i32,
-) -> Result<Schema, String> {
-    let mut fields: Vec<Arc<NestedField>> = current.as_struct().fields().iter().cloned().collect();
-    match op {
-        SchemaAlterOp::Rename { to, .. } => {
-            let new_name = iceberg_field_name(to);
-            let Some(idx) = resolve_iceberg_field_index(&fields, op, field_id) else {
-                if fields
+    alter: &CanonicalAlter,
+) -> Result<Schema, SchemaAlterError> {
+    let mut fields: Fields = current.as_struct().fields().to_vec();
+    match alter {
+        CanonicalAlter::Rename { column, to_leaf } => {
+            edit(&mut fields, column, |siblings, idx| {
+                if siblings
                     .iter()
-                    .any(|field| field.name == new_name || field.name == *to)
+                    .enumerate()
+                    .any(|(i, field)| i != idx && field.name == *to_leaf)
                 {
-                    return Ok(current.clone());
+                    return Err(SchemaAlterError::ColumnExists(to_leaf.clone()));
                 }
-                return Err(format!("Iceberg field id {field_id} not found"));
-            };
-            if fields[idx].name == new_name {
-                return Ok(current.clone());
-            }
-            if fields
-                .iter()
-                .any(|field| field.name == new_name && field.id != fields[idx].id)
-            {
-                return Err(format!("Iceberg column '{new_name}' already exists"));
-            }
-            let old = fields[idx].as_ref().clone();
-            fields[idx] = Arc::new(NestedField::new(
-                old.id,
-                new_name,
-                old.field_type.as_ref().clone(),
-                old.required,
-            ));
+                let mut renamed = siblings[idx].as_ref().clone();
+                renamed.name = to_leaf.clone();
+                siblings[idx] = Arc::new(renamed);
+                Ok(())
+            })?;
         }
-        SchemaAlterOp::Drop { column } | SchemaAlterOp::Merge { src: column, .. } => {
-            let Some(idx) = resolve_iceberg_field_index(&fields, op, field_id) else {
-                if column.contains('.') {
-                    return Err(format!(
-                        "Iceberg field id {field_id} ('{column}') not found; nested ALTER is not supported"
-                    ));
-                }
-                return Ok(current.clone());
-            };
-            let drop_id = fields[idx].id;
-            fields.retain(|field| field.id != drop_id);
+        CanonicalAlter::Drop { column } => {
+            edit(&mut fields, column, |siblings, idx| {
+                siblings.remove(idx);
+                Ok(())
+            })?;
         }
-        SchemaAlterOp::Promote { to, .. } => {
-            let idx = resolve_iceberg_field_index(&fields, op, field_id)
-                .ok_or_else(|| format!("Iceberg field id {field_id} not found"))?;
-            if fields[idx].field_type.as_ref() == &iceberg_primitive(to) {
-                return Ok(current.clone());
-            }
-            let old = fields[idx].as_ref().clone();
-            fields[idx] = Arc::new(NestedField::new(
-                old.id,
-                old.name,
-                iceberg_primitive(to),
-                old.required,
-            ));
+        CanonicalAlter::Merge { src, dst } => {
+            edit(&mut fields.clone(), dst, |_, _| Ok(()))?;
+            edit(&mut fields, src, |siblings, idx| {
+                siblings.remove(idx);
+                Ok(())
+            })?;
+        }
+        CanonicalAlter::Promote { column, to } => {
+            edit(&mut fields, column, |siblings, idx| {
+                let mut promoted = siblings[idx].as_ref().clone();
+                promoted.field_type = Box::new(iceberg_primitive(to));
+                siblings[idx] = Arc::new(promoted);
+                Ok(())
+            })?;
         }
     }
     Schema::builder()
         .with_schema_id(current.schema_id() + 1)
         .with_fields(fields)
         .build()
-        .map_err(|err| err.to_string())
+        .map_err(|err| SchemaAlterError::Iceberg(err.to_string()))
+}
+
+/// Walk `column`'s output path, check the leaf's id, and edit its siblings.
+/// Enclosing structs are rebuilt with every other attribute kept.
+fn edit(
+    fields: &mut Fields,
+    column: &AlterColumn,
+    f: impl FnOnce(&mut Fields, usize) -> Result<(), SchemaAlterError>,
+) -> Result<(), SchemaAlterError> {
+    let path: Vec<&str> = column
+        .name
+        .parent()
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(column.name.leaf()))
+        .collect();
+    descend(fields, &path, column, f)
+}
+
+fn descend(
+    fields: &mut Fields,
+    path: &[&str],
+    column: &AlterColumn,
+    f: impl FnOnce(&mut Fields, usize) -> Result<(), SchemaAlterError>,
+) -> Result<(), SchemaAlterError> {
+    let (segment, rest) = path.split_first().ok_or(SchemaAlterError::EmptyName)?;
+    let idx = fields
+        .iter()
+        .position(|field| field.name == *segment)
+        .ok_or_else(|| SchemaAlterError::ColumnNotFound(column.name.to_string()))?;
+    if rest.is_empty() {
+        if fields[idx].id != column.id {
+            return Err(SchemaAlterError::IdNameMismatch {
+                id: column.id,
+                name: column.name.to_string(),
+            });
+        }
+        return f(fields, idx);
+    }
+    let mut children: Fields = match fields[idx].field_type.as_ref() {
+        Type::Struct(st) => st.fields().to_vec(),
+        Type::List(_) | Type::Map(_) => return Err(SchemaAlterError::NestedCollection),
+        Type::Primitive(_) => return Err(SchemaAlterError::NotStruct(segment.to_string())),
+    };
+    descend(&mut children, rest, column, f)?;
+    let mut parent = fields[idx].as_ref().clone();
+    parent.field_type = Box::new(Type::Struct(StructType::new(children)));
+    fields[idx] = Arc::new(parent);
+    Ok(())
 }
 
 fn iceberg_primitive(value: &SkipprDataType) -> Type {
@@ -150,363 +136,165 @@ fn iceberg_primitive(value: &SkipprDataType) -> Type {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discover::schema_alter::{FlattenMode, OutputName};
 
-    #[test]
-    fn rename_keeps_field_id() {
-        let current = Schema::builder()
-            .with_schema_id(0)
-            .with_fields(vec![Arc::new(NestedField::new(
-                7,
-                "price",
-                Type::Primitive(PrimitiveType::Long),
-                false,
-            ))])
-            .build()
-            .unwrap();
-        let next = iceberg_schema_after_alter(
-            &current,
-            &SchemaAlterOp::Rename {
-                from: "price".into(),
-                to: "amount".into(),
-            },
-            7,
-        )
-        .unwrap();
-        assert_eq!(next.field_by_name("amount").unwrap().id, 7);
-        assert!(next.field_by_name("price").is_none());
-        let already = iceberg_schema_after_alter(
-            &next,
-            &SchemaAlterOp::Rename {
-                from: "price".into(),
-                to: "amount".into(),
-            },
-            7,
-        )
-        .unwrap();
-        assert_eq!(already.field_by_name("amount").unwrap().id, 7);
+    fn prim(id: i32, name: &str, ty: PrimitiveType) -> Arc<NestedField> {
+        Arc::new(NestedField::optional(id, name, Type::Primitive(ty)))
     }
 
-    fn two_cols() -> Schema {
+    fn schema(fields: Fields) -> Schema {
         Schema::builder()
             .with_schema_id(0)
-            .with_fields(vec![
-                Arc::new(NestedField::new(
-                    7,
-                    "price",
-                    Type::Primitive(PrimitiveType::Long),
-                    false,
-                )),
-                Arc::new(NestedField::new(
-                    9,
-                    "price_string",
-                    Type::Primitive(PrimitiveType::String),
-                    false,
-                )),
-            ])
+            .with_fields(fields)
             .build()
             .unwrap()
     }
 
-    #[test]
-    fn drop_nested_path_without_id_fails_closed() {
-        let err = iceberg_schema_after_alter(
-            &two_cols(),
-            &SchemaAlterOp::Drop {
-                column: "hardware.manufacturer".into(),
-            },
-            99,
-        )
-        .unwrap_err();
-        assert!(err.contains("nested ALTER is not supported"), "{err}");
+    fn trips() -> Schema {
+        schema(vec![
+            prim(7, "price", PrimitiveType::String),
+            prim(9, "price_string", PrimitiveType::String),
+            prim(3, "n", PrimitiveType::Int),
+            prim(11, "event_day", PrimitiveType::Date),
+            Arc::new(NestedField::optional(
+                1,
+                "detail",
+                Type::Struct(StructType::new(vec![Arc::new(
+                    NestedField::optional(4, "region", Type::Primitive(PrimitiveType::String))
+                        .with_doc("kept"),
+                )])),
+            )),
+        ])
+    }
+
+    fn column(sql: &str, id: i32, ty: SkipprDataType) -> AlterColumn {
+        AlterColumn {
+            name: OutputName::parse_sql(FlattenMode::Nested, sql).unwrap(),
+            id,
+            ty,
+        }
     }
 
     #[test]
-    fn drop_already_absent_is_idempotent() {
+    fn rename_nested_leaf_keeps_id_and_doc() {
         let next = iceberg_schema_after_alter(
-            &two_cols(),
-            &SchemaAlterOp::Drop {
-                column: "missing".into(),
+            &trips(),
+            &CanonicalAlter::Rename {
+                column: column("detail.region", 4, SkipprDataType::String),
+                to_leaf: "region_code".into(),
             },
-            11,
         )
         .unwrap();
-        assert_eq!(next.field_by_name("price").unwrap().id, 7);
+        let field = next.field_by_name("detail.region_code").unwrap();
+        assert_eq!(field.id, 4);
+        assert_eq!(field.doc.as_deref(), Some("kept"));
+        assert!(next.field_by_name("detail.region").is_none());
     }
 
     #[test]
-    fn sequential_id_collision_does_not_mutate_wrong_column() {
-        let current = Schema::builder()
-            .with_schema_id(0)
-            .with_fields(vec![
-                Arc::new(NestedField::new(
-                    1,
-                    "region",
-                    Type::Primitive(PrimitiveType::String),
-                    false,
-                )),
-                Arc::new(NestedField::new(
-                    8,
-                    "n_float",
-                    Type::Primitive(PrimitiveType::Float),
-                    false,
-                )),
-                Arc::new(NestedField::new(
-                    3,
-                    "note",
-                    Type::Primitive(PrimitiveType::String),
-                    false,
-                )),
-            ])
-            .build()
+    fn drop_and_merge_remove_by_name_and_id() {
+        let dropped = iceberg_schema_after_alter(
+            &trips(),
+            &CanonicalAlter::Drop {
+                column: column("price_string", 9, SkipprDataType::String),
+            },
+        )
+        .unwrap();
+        assert!(dropped.field_by_name("price_string").is_none());
+        let merged = iceberg_schema_after_alter(
+            &trips(),
+            &CanonicalAlter::Merge {
+                src: column("price_string", 9, SkipprDataType::String),
+                dst: column("price", 7, SkipprDataType::String),
+            },
+        )
+        .unwrap();
+        assert!(merged.field_by_name("price_string").is_none());
+        assert_eq!(merged.field_by_name("price").unwrap().id, 7);
+    }
+
+    #[test]
+    fn promote_keeps_id() {
+        for (sql, id, from, to, want) in [
+            (
+                "n",
+                3,
+                SkipprDataType::Integer,
+                SkipprDataType::Long,
+                PrimitiveType::Long,
+            ),
+            (
+                "event_day",
+                11,
+                SkipprDataType::Date,
+                SkipprDataType::Timestamp,
+                PrimitiveType::Timestamp,
+            ),
+        ] {
+            let next = iceberg_schema_after_alter(
+                &trips(),
+                &CanonicalAlter::Promote {
+                    column: column(sql, id, from),
+                    to,
+                },
+            )
             .unwrap();
-        let next = iceberg_schema_after_alter(
-            &current,
-            &SchemaAlterOp::Drop {
-                column: "note".into(),
-            },
-            8,
-        )
-        .unwrap();
-        assert!(next.field_by_name("note").is_none());
-        assert_eq!(next.field_by_name("n_float").unwrap().id, 8);
+            let field = next.field_by_name(sql).unwrap();
+            assert_eq!(field.id, id);
+            assert_eq!(field.field_type.as_ref(), &Type::Primitive(want));
+        }
     }
 
     #[test]
-    fn drop_uses_field_id_not_name() {
-        let current = Schema::builder()
-            .with_schema_id(0)
-            .with_fields(vec![Arc::new(NestedField::new(
-                9,
-                "other",
-                Type::Primitive(PrimitiveType::String),
-                false,
-            ))])
-            .build()
-            .unwrap();
-        let next = iceberg_schema_after_alter(
-            &current,
-            &SchemaAlterOp::Drop {
-                column: "price_string".into(),
-            },
-            9,
-        )
-        .unwrap();
-        assert!(next.field_by_name("other").is_none());
-        assert!(next.as_struct().fields().is_empty());
+    fn id_and_name_must_agree() {
+        assert_eq!(
+            iceberg_schema_after_alter(
+                &trips(),
+                &CanonicalAlter::Drop {
+                    column: column("price", 3, SkipprDataType::String),
+                },
+            ),
+            Err(SchemaAlterError::IdNameMismatch {
+                id: 3,
+                name: "price".into()
+            })
+        );
+        assert_eq!(
+            iceberg_schema_after_alter(
+                &trips(),
+                &CanonicalAlter::Drop {
+                    column: column("missing", 9, SkipprDataType::String),
+                },
+            ),
+            Err(SchemaAlterError::ColumnNotFound("missing".into()))
+        );
+        assert_eq!(
+            iceberg_schema_after_alter(
+                &trips(),
+                &CanonicalAlter::Rename {
+                    column: column("price_string", 9, SkipprDataType::String),
+                    to_leaf: "price".into(),
+                },
+            ),
+            Err(SchemaAlterError::ColumnExists("price".into()))
+        );
     }
 
     #[test]
-    fn drop_omits_column_keeps_other_id() {
+    fn flat_names_are_top_level_columns() {
+        let flat = schema(vec![prim(4, "detail_truck_reg", PrimitiveType::String)]);
         let next = iceberg_schema_after_alter(
-            &two_cols(),
-            &SchemaAlterOp::Drop {
-                column: "price_string".into(),
+            &flat,
+            &CanonicalAlter::Rename {
+                column: AlterColumn {
+                    name: OutputName::parse_sql(FlattenMode::Flat, "detail_truck_reg").unwrap(),
+                    id: 4,
+                    ty: SkipprDataType::String,
+                },
+                to_leaf: "truck_registration".into(),
             },
-            9,
-        )
-        .unwrap();
-        assert!(next.field_by_name("price_string").is_none());
-        assert_eq!(next.field_by_name("price").unwrap().id, 7);
-    }
-
-    #[test]
-    fn merge_omits_src_does_not_rewrite_dst_id() {
-        let next = iceberg_schema_after_alter(
-            &two_cols(),
-            &SchemaAlterOp::Merge {
-                src: "price_string".into(),
-                dst: "price".into(),
-            },
-            9,
-        )
-        .unwrap();
-        assert!(next.field_by_name("price_string").is_none());
-        assert_eq!(next.field_by_name("price").unwrap().id, 7);
-    }
-
-    #[test]
-    fn rename_matches_iceberg_name_when_skippr_field_id_diverges() {
-        let current = Schema::builder()
-            .with_schema_id(0)
-            .with_fields(vec![Arc::new(NestedField::new(
-                21,
-                "region",
-                Type::Primitive(PrimitiveType::String),
-                false,
-            ))])
-            .build()
-            .unwrap();
-        let next = iceberg_schema_after_alter(
-            &current,
-            &SchemaAlterOp::Rename {
-                from: "region".into(),
-                to: "region_code".into(),
-            },
-            575921751,
-        )
-        .unwrap();
-        let field = next.field_by_name("region_code").unwrap();
-        assert_eq!(field.id, 21);
-        assert!(next.field_by_name("region").is_none());
-    }
-
-    #[test]
-    fn rename_to_nested_path_writes_flatten_name() {
-        let current = Schema::builder()
-            .with_schema_id(0)
-            .with_fields(vec![
-                Arc::new(NestedField::new(
-                    21,
-                    "region",
-                    Type::Primitive(PrimitiveType::String),
-                    false,
-                )),
-                Arc::new(NestedField::new(
-                    4,
-                    "detail_truck_reg",
-                    Type::Primitive(PrimitiveType::String),
-                    false,
-                )),
-            ])
-            .build()
-            .unwrap();
-        let next = iceberg_schema_after_alter(
-            &current,
-            &SchemaAlterOp::Rename {
-                from: "region".into(),
-                to: "detail.region".into(),
-            },
-            575921751,
-        )
-        .unwrap();
-        assert_eq!(next.field_by_name("detail_region").unwrap().id, 21);
-        assert!(next.field_by_name("region").is_none());
-        assert_eq!(next.field_by_name("detail_truck_reg").unwrap().id, 4);
-    }
-
-    #[test]
-    fn rename_matches_flattened_iceberg_name_from_dotted_skippr_path() {
-        let current = Schema::builder()
-            .with_schema_id(0)
-            .with_fields(vec![Arc::new(NestedField::new(
-                4,
-                "detail_truck_reg",
-                Type::Primitive(PrimitiveType::String),
-                false,
-            ))])
-            .build()
-            .unwrap();
-        let next = iceberg_schema_after_alter(
-            &current,
-            &SchemaAlterOp::Rename {
-                from: "detail.truck_reg".into(),
-                to: "truck_registration".into(),
-            },
-            1642008034,
         )
         .unwrap();
         assert_eq!(next.field_by_name("truck_registration").unwrap().id, 4);
-        assert!(next.field_by_name("detail_truck_reg").is_none());
-    }
-
-    #[test]
-    fn promote_matches_iceberg_name_when_skippr_field_id_diverges() {
-        let current = Schema::builder()
-            .with_schema_id(0)
-            .with_fields(vec![Arc::new(NestedField::new(
-                25,
-                "version",
-                Type::Primitive(PrimitiveType::Int),
-                false,
-            ))])
-            .build()
-            .unwrap();
-        let next = iceberg_schema_after_alter(
-            &current,
-            &SchemaAlterOp::Promote {
-                column: "version".into(),
-                to: SkipprDataType::Long,
-            },
-            298041464,
-        )
-        .unwrap();
-        let field = next.field_by_name("version").unwrap();
-        assert_eq!(field.id, 25);
-        assert_eq!(
-            field.field_type.as_ref(),
-            &Type::Primitive(PrimitiveType::Long)
-        );
-    }
-
-    #[test]
-    fn drop_matches_flattened_iceberg_name() {
-        let current = Schema::builder()
-            .with_schema_id(0)
-            .with_fields(vec![
-                Arc::new(NestedField::new(
-                    23,
-                    "detail_geofence_id",
-                    Type::Primitive(PrimitiveType::String),
-                    false,
-                )),
-                Arc::new(NestedField::new(
-                    12,
-                    "detail_record_geofence_id",
-                    Type::Primitive(PrimitiveType::String),
-                    false,
-                )),
-            ])
-            .build()
-            .unwrap();
-        let next = iceberg_schema_after_alter(
-            &current,
-            &SchemaAlterOp::Merge {
-                src: "detail_record.geofence_id".into(),
-                dst: "detail.geofence_id".into(),
-            },
-            370859891,
-        )
-        .unwrap();
-        assert!(next.field_by_name("detail_record_geofence_id").is_none());
-        assert_eq!(next.field_by_name("detail_geofence_id").unwrap().id, 23);
-    }
-
-    #[test]
-    fn promote_keeps_field_id() {
-        let current = Schema::builder()
-            .with_schema_id(0)
-            .with_fields(vec![Arc::new(NestedField::new(
-                3,
-                "n",
-                Type::Primitive(PrimitiveType::Int),
-                false,
-            ))])
-            .build()
-            .unwrap();
-        let next = iceberg_schema_after_alter(
-            &current,
-            &SchemaAlterOp::Promote {
-                column: "n".into(),
-                to: SkipprDataType::Long,
-            },
-            3,
-        )
-        .unwrap();
-        let field = next.field_by_name("n").unwrap();
-        assert_eq!(field.id, 3);
-        assert_eq!(
-            field.field_type.as_ref(),
-            &Type::Primitive(PrimitiveType::Long)
-        );
-        let already = iceberg_schema_after_alter(
-            &next,
-            &SchemaAlterOp::Promote {
-                column: "n".into(),
-                to: SkipprDataType::Long,
-            },
-            3,
-        )
-        .unwrap();
-        assert_eq!(already.field_by_name("n").unwrap().id, 3);
     }
 }

@@ -33,7 +33,7 @@ fn f_rename_column() {
 }
 
 #[test]
-fn f_rename_dotted_creates_parent() {
+fn f_rename_dotted_to_path() {
     assert_eq!(
         alter_op("ALTER TABLE bikehire.rides RENAME COLUMN region TO detail.region"),
         SchemaAlterOp::Rename {
@@ -44,7 +44,7 @@ fn f_rename_dotted_creates_parent() {
 }
 
 #[test]
-fn f_flattened_and_dotted_resolve() {
+fn f_rename_sql_token_forms_parse() {
     assert_eq!(
         alter_op("ALTER TABLE bikehire.rides RENAME COLUMN detail_region TO region_code"),
         SchemaAlterOp::Rename {
@@ -156,6 +156,83 @@ fn f_alter_column_type_widen() {
 }
 
 #[test]
+fn f_dst_alter_uses_production_apply_log() {
+    use crate::discover::schema_alter::{apply_alter, canonicalize, FlattenMode, SchemaAlterOp};
+    use crate::discover::Metadata;
+    use crate::sqlrt::dst::{apply, batch_from_row, Op, UserRow, World};
+    let batch = batch_from_row(&UserRow {
+        id: 1,
+        name: "a".into(),
+        amount: 10,
+    });
+    let op = SchemaAlterOp::Promote {
+        column: "amount".into(),
+        to: SkipprDataType::Long,
+    };
+    let mut meta = Metadata::new().unwrap();
+    let mut amount = Metadata::new_with_type(SkipprDataType::Long, "amount");
+    amount.field_id = 3;
+    meta.fields.insert("amount".into(), amount);
+    let alter = canonicalize(FlattenMode::Nested, &meta, &op, &[]).unwrap();
+    let out = apply_alter(batch, &alter).unwrap();
+    assert!(out.schema().field_with_name("amount").is_ok());
+
+    let mut world = World::new();
+    apply(
+        &mut world,
+        Op::IngestLake(UserRow {
+            id: 1,
+            name: "a".into(),
+            amount: 10,
+        }),
+    );
+    apply(&mut world, Op::Alter(op));
+    assert_eq!(world.snapshots.last().unwrap().rows.len(), 1);
+    assert!(world.alter_error.is_none());
+}
+
+#[test]
+fn f_dst_alter_records_canonicalize_and_keeps_rewritten_rows() {
+    use crate::discover::schema_alter::SchemaAlterOp;
+    use crate::sqlrt::dst::{apply, Op, UserRow, World};
+    let mut world = World::new();
+    apply(
+        &mut world,
+        Op::IngestLake(UserRow {
+            id: 1,
+            name: "a".into(),
+            amount: 10,
+        }),
+    );
+    apply(
+        &mut world,
+        Op::Alter(SchemaAlterOp::Drop {
+            column: "leftover".into(),
+        }),
+    );
+    assert!(world.alter_error.is_some(), "{:?}", world.alter_error);
+    assert_eq!(world.snapshots.last().unwrap().rows[0].amount, 10);
+
+    let mut drop_amount = World::new();
+    apply(
+        &mut drop_amount,
+        Op::IngestLake(UserRow {
+            id: 1,
+            name: "a".into(),
+            amount: 10,
+        }),
+    );
+    apply(
+        &mut drop_amount,
+        Op::Alter(SchemaAlterOp::Drop {
+            column: "amount".into(),
+        }),
+    );
+    assert!(drop_amount.alter_error.is_none());
+    assert_eq!(drop_amount.snapshots.last().unwrap().rows[0].amount, 0);
+}
+
+#[test]
 fn f_illegal_type_fail_closed() {
     assert!(!crate::discover::schema_alter::is_iceberg_legal_promote(
         &SkipprDataType::String,
@@ -214,7 +291,7 @@ fn f_query_sql_alter_journals_query_checksum() {
 }
 
 #[test]
-fn f_down_only_rename_promote() {
+fn f_down_only_rename() {
     let sql = "\
 ALTER TABLE bikehire.trips RENAME COLUMN region TO region_code;
 -- migrate:down
@@ -226,26 +303,28 @@ ALTER TABLE bikehire.trips RENAME COLUMN region_code TO region;
 
 #[test]
 fn f_down_drop_merge_fail_closed() {
-    let err = load_sql_file(
-        "bad_drop",
-        "ALTER TABLE p.ns DROP COLUMN leftover;\n-- migrate:down\nALTER TABLE p.ns RENAME COLUMN a TO b;\n",
-    )
-    .unwrap_err();
-    assert!(
-        format!("{err}").contains("down() is only valid for Rename or Promote"),
-        "{err}"
-    );
+    for (id, sql) in [
+        (
+            "bad_drop",
+            "ALTER TABLE p.ns DROP COLUMN leftover;\n-- migrate:down\nALTER TABLE p.ns RENAME COLUMN a TO b;\n",
+        ),
+        (
+            "bad_promote",
+            "ALTER TABLE p.ns ALTER COLUMN n TYPE BIGINT;\n-- migrate:down\nALTER TABLE p.ns RENAME COLUMN a TO b;\n",
+        ),
+    ] {
+        let err = load_sql_file(id, sql).unwrap_err();
+        assert!(
+            format!("{err}").contains("down() is only valid for Rename"),
+            "{id}: {err}"
+        );
+    }
 }
 
 #[test]
 fn f_glue_hive_clickhouse_alter_fail_closed() {
-    let err =
-        crate::migration::require_native_alter_support(AlterSupport::Unsupported).unwrap_err();
-    assert!(
-        err.contains("schema sink does not support migrations"),
-        "{err}"
-    );
-    assert!(crate::migration::require_native_alter_support(AlterSupport::Native).is_ok());
+    assert!(!AlterSupport::Unsupported.is_table());
+    assert!(AlterSupport::Iceberg.is_table());
 }
 
 #[test]
@@ -302,7 +381,8 @@ fn f_iceberg_replace_schema_rename_field_id() {
 fn f_migrate_reuses_open_store() {
     use crate::helpers::configuration::{Pipeline, Skippr};
     use crate::helpers::wal_storage::ElStorageMode;
-    use crate::migration::{apply_pending_files, MigrationDirection};
+    use crate::migration::{apply_pending_on, MigrationDirection};
+    use std::sync::Arc;
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path()).unwrap();
     let mut config = crate::helpers::configuration::Config::new();
@@ -319,28 +399,16 @@ fn f_migrate_reuses_open_store() {
         },
     );
     let config = config.bind_pipeline("dst-migrate-reuse");
-    let offsets = crate::helpers::offsets::Offsets::init(&config).unwrap();
-    let store = offsets.skippr_kv().expect("skippr store");
-    let fence = offsets.writer_fence().expect("writer fence");
+    let offsets = Arc::new(crate::helpers::offsets::Offsets::init(&config).unwrap());
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     let first = rt
-        .block_on(apply_pending_files(
-            &config,
-            store.as_ref(),
-            fence,
-            MigrationDirection::Up,
-        ))
+        .block_on(apply_pending_on(&config, &offsets, MigrationDirection::Up))
         .unwrap();
     let second = rt
-        .block_on(apply_pending_files(
-            &config,
-            store.as_ref(),
-            fence,
-            MigrationDirection::Up,
-        ))
+        .block_on(apply_pending_on(&config, &offsets, MigrationDirection::Up))
         .unwrap();
     assert_eq!(first, second);
 }

@@ -117,11 +117,11 @@ skipprd query --sql "SCHEMA DUMP bikehire TO 'bikehire-schema.json'"
 skipprd query --sql "LOAD SCHEMA 'bikehire-schema.json' INTO bikehire"
 skipprd query --sql "ALTER TABLE bikehire.rides DROP COLUMN legacy_field"
 skipprd query --sql "ALTER TABLE bikehire.rides ALTER COLUMN n TYPE BIGINT"
-skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN region TO detail.region"
-skipprd query --sql "ALTER TABLE bikehire.rides MERGE COLUMN price_string INTO price"
+skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN region TO region_code"
+skipprd query --sql "ALTER TABLE bikehire.rides MERGE COLUMN price_cents INTO price"
 ```
 
-Flattened Iceberg names (`detail_truck_reg`) and skippr dotted paths (`detail.truck_reg`) both resolve. Iceberg sequential field ids are matched by name when they differ from skippr's hashed ids.
+SQL must match the pipeline output names. Nested pipelines use dotted paths (`detail.truck_reg`). Flattened pipelines use underscores (`detail_truck_reg`). Do not mix the two forms.
 
 `ALTER TABLE` applies in-stream; `DISABLE PIPELINE` is freeze-only. Prefer [`skipprd migrate`](/cli/migrate) for file-backed batches. See [ALTER operations](/operations/alter) for rename, merge, drop, type promote, and what fails closed.
 

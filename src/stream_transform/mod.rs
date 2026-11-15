@@ -9,6 +9,7 @@ use arrow::compute::{cast, filter_record_batch};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use datafusion::prelude::{SessionConfig, SessionContext};
 
+use crate::discover::schema_alter::{apply_log, cast_column, rename_columns, CommittedAlter};
 use crate::helpers::configuration::TransformOp;
 use crate::plugins::cdc::WalRowMeta;
 
@@ -35,7 +36,6 @@ pub fn dest_schema_for_ops(
     }
     let mut current = RecordBatch::new_empty(source);
     for op in ops {
-        op.validate()?;
         current = apply_one_filter_recording(op, current, &mut None)?;
     }
     Ok(current.schema())
@@ -43,7 +43,13 @@ pub fn dest_schema_for_ops(
 
 fn ops_change_schema(ops: &[TransformOp]) -> bool {
     ops.iter().any(|op| {
-        op.project.is_some() || op.derive.is_some() || op.rename.is_some() || op.cast.is_some()
+        matches!(
+            op,
+            TransformOp::Project(_)
+                | TransformOp::Derive(_)
+                | TransformOp::Rename(_)
+                | TransformOp::Cast(_)
+        )
     })
 }
 
@@ -69,10 +75,19 @@ pub fn dest_output_metadata_for_ops(
 }
 
 pub fn apply_configured_ops(
+    log: &[CommittedAlter],
     ops: &[TransformOp],
     batches: Vec<RecordBatch>,
     cdc_rows: Option<Vec<WalRowMeta>>,
 ) -> Result<(Vec<RecordBatch>, Option<Vec<WalRowMeta>>), String> {
+    let mut batches = batches;
+    if !log.is_empty() {
+        let mut next = Vec::with_capacity(batches.len());
+        for batch in batches {
+            next.push(apply_log(batch, log).map_err(|err| err.to_string())?);
+        }
+        batches = next;
+    }
     if ops.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
         return Ok((batches, cdc_rows));
     }
@@ -112,7 +127,6 @@ pub fn apply_ops(ops: &[TransformOp], batches: Vec<RecordBatch>) -> Result<Appli
     let mut kept: Option<Vec<usize>> = None;
     let mut current = merged;
     for op in ops {
-        op.validate()?;
         current = apply_one_filter_recording(op, current, &mut kept)?;
     }
     if let Some(indices) = kept.as_ref() {
@@ -149,22 +163,15 @@ fn compose_kept(previous: Option<Vec<usize>>, before: usize, mask: &[bool]) -> V
 }
 
 fn apply_one(op: &TransformOp, batch: RecordBatch) -> Result<RecordBatch, String> {
-    if op.filter.is_some() {
-        return Err("internal: filter ops must use apply_filter_with_mask".into());
+    match op {
+        TransformOp::Filter(_) => {
+            Err("internal: filter ops must use apply_filter_with_mask".into())
+        }
+        TransformOp::Project(columns) => apply_project(batch, columns),
+        TransformOp::Derive(derive) => apply_derive(batch, derive),
+        TransformOp::Rename(rename) => apply_yaml_rename(batch, rename),
+        TransformOp::Cast(cast_map) => apply_yaml_cast(batch, cast_map),
     }
-    if let Some(columns) = op.project.as_ref() {
-        return apply_project(batch, columns);
-    }
-    if let Some(derive) = op.derive.as_ref() {
-        return apply_derive(batch, derive);
-    }
-    if let Some(rename) = op.rename.as_ref() {
-        return apply_rename(batch, rename);
-    }
-    if let Some(cast_map) = op.cast.as_ref() {
-        return apply_cast(batch, cast_map);
-    }
-    Err("transform.ops entry must set exactly one of filter, project, derive, rename, cast".into())
 }
 
 fn apply_filter_with_mask(
@@ -214,52 +221,33 @@ fn apply_project(batch: RecordBatch, columns: &[String]) -> Result<RecordBatch, 
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(|err| err.to_string())
 }
 
-fn apply_rename(
+fn apply_yaml_rename(
     batch: RecordBatch,
     rename: &BTreeMap<String, String>,
 ) -> Result<RecordBatch, String> {
-    let mut fields = Vec::with_capacity(batch.num_columns());
-    for field in batch.schema().fields() {
-        if let Some(new_name) = rename.get(field.name()) {
-            if new_name.trim().is_empty() {
-                return Err(format!(
-                    "transform.ops rename target for '{}' must be non-empty",
-                    field.name()
-                ));
-            }
-            fields.push(Field::new(
-                new_name,
-                field.data_type().clone(),
-                field.is_nullable(),
+    let mut pairs = Vec::with_capacity(rename.len());
+    for (from, to) in rename {
+        if to.trim().is_empty() {
+            return Err(format!(
+                "transform.ops rename target for '{from}' must be non-empty"
             ));
-        } else {
-            fields.push(field.as_ref().clone());
         }
+        pairs.push((from.clone(), to.clone()));
     }
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), batch.columns().to_vec())
-        .map_err(|err| err.to_string())
+    rename_columns(batch, &pairs).map_err(|err| err.to_string())
 }
 
-fn apply_cast(batch: RecordBatch, casts: &BTreeMap<String, String>) -> Result<RecordBatch, String> {
-    let mut fields = Vec::with_capacity(batch.num_columns());
-    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(batch.num_columns());
-    for (idx, field) in batch.schema().fields().iter().enumerate() {
-        if let Some(type_name) = casts.get(field.name()) {
-            let dt = parse_arrow_type(type_name)?;
-            let casted = cast(batch.column(idx), &dt).map_err(|err| {
-                format!(
-                    "transform.ops cast '{}' to {type_name}: {err}",
-                    field.name()
-                )
-            })?;
-            fields.push(Field::new(field.name(), dt, field.is_nullable()));
-            arrays.push(casted);
-        } else {
-            fields.push(field.as_ref().clone());
-            arrays.push(batch.column(idx).clone());
-        }
+fn apply_yaml_cast(
+    batch: RecordBatch,
+    casts: &BTreeMap<String, String>,
+) -> Result<RecordBatch, String> {
+    let mut current = batch;
+    for (column, type_name) in casts {
+        let dt = parse_arrow_type(type_name)?;
+        current = cast_column(current, column, &dt)
+            .map_err(|err| format!("transform.ops cast '{column}' to {type_name}: {err}"))?;
     }
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(|err| err.to_string())
+    Ok(current)
 }
 
 fn apply_derive(
@@ -349,7 +337,7 @@ fn apply_one_filter_recording(
     batch: RecordBatch,
     kept: &mut Option<Vec<usize>>,
 ) -> Result<RecordBatch, String> {
-    if let Some(expr) = op.filter.as_deref() {
+    if let TransformOp::Filter(expr) = op {
         let before = batch.num_rows();
         let (filtered, mask) = apply_filter_with_mask(batch, expr)?;
         *kept = Some(compose_kept(kept.take(), before, &mask));
@@ -399,38 +387,23 @@ mod tests {
     fn filter_project_derive_rename_cast_compose() {
         let batch = batch_amounts(&["a", "b", "c"], &[0, 10, 20]);
         let ops = vec![
-            TransformOp {
-                filter: Some("amount > 0".into()),
-                ..Default::default()
-            },
-            TransformOp {
-                derive: Some(
-                    [("amount_gbp".into(), "amount * 0.8".into())]
-                        .into_iter()
-                        .collect(),
-                ),
-                ..Default::default()
-            },
-            TransformOp {
-                project: Some(vec!["id".into(), "amount".into(), "amount_gbp".into()]),
-                ..Default::default()
-            },
-            TransformOp {
-                rename: Some(
-                    [("amount".into(), "amount_usd".into())]
-                        .into_iter()
-                        .collect(),
-                ),
-                ..Default::default()
-            },
-            TransformOp {
-                cast: Some(
-                    [("amount_usd".into(), "float64".into())]
-                        .into_iter()
-                        .collect(),
-                ),
-                ..Default::default()
-            },
+            TransformOp::Filter("amount > 0".into()),
+            TransformOp::Derive(
+                [("amount_gbp".into(), "amount * 0.8".into())]
+                    .into_iter()
+                    .collect(),
+            ),
+            TransformOp::Project(vec!["id".into(), "amount".into(), "amount_gbp".into()]),
+            TransformOp::Rename(
+                [("amount".into(), "amount_usd".into())]
+                    .into_iter()
+                    .collect(),
+            ),
+            TransformOp::Cast(
+                [("amount_usd".into(), "float64".into())]
+                    .into_iter()
+                    .collect(),
+            ),
         ];
         let applied = apply_ops(&ops, vec![batch]).unwrap();
         assert_eq!(applied.kept.as_deref(), Some(&[1usize, 2][..]));
@@ -473,11 +446,8 @@ mod tests {
                 order_token: vec![3],
             },
         ];
-        let ops = vec![TransformOp {
-            filter: Some("amount > 0".into()),
-            ..Default::default()
-        }];
-        let (batches, cdc) = apply_configured_ops(&ops, vec![batch], Some(cdc)).unwrap();
+        let ops = vec![TransformOp::Filter("amount > 0".into())];
+        let (batches, cdc) = apply_configured_ops(&[], &ops, vec![batch], Some(cdc)).unwrap();
         assert_eq!(batches[0].num_rows(), 1);
         let cdc = cdc.unwrap();
         assert_eq!(cdc.len(), 1);
@@ -485,12 +455,48 @@ mod tests {
     }
 
     #[test]
+    fn yaml_rename_and_cast_keep_field_id() {
+        let mut id_meta = std::collections::HashMap::new();
+        id_meta.insert("PARQUET:field_id".into(), "7".to_string());
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("amount", DataType::Int64, false).with_metadata(id_meta),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(StringArray::from(vec!["a"])),
+                Arc::new(Int64Array::from(vec![10])),
+            ],
+        )
+        .unwrap();
+        let ops = vec![
+            TransformOp::Rename(
+                [("amount".into(), "amount_usd".into())]
+                    .into_iter()
+                    .collect(),
+            ),
+            TransformOp::Cast(
+                [("amount_usd".into(), "float64".into())]
+                    .into_iter()
+                    .collect(),
+            ),
+        ];
+        let applied = apply_ops(&ops, vec![batch]).unwrap();
+        let schema = applied.batches[0].schema();
+        let field = schema.field(1);
+        assert_eq!(field.name(), "amount_usd");
+        assert_eq!(field.data_type(), &DataType::Float64);
+        assert_eq!(
+            field.metadata().get("PARQUET:field_id"),
+            Some(&"7".to_string())
+        );
+    }
+
+    #[test]
     fn unknown_project_column_fails() {
         let batch = batch_amounts(&["a"], &[1]);
-        let ops = vec![TransformOp {
-            project: Some(vec!["missing".into()]),
-            ..Default::default()
-        }];
+        let ops = vec![TransformOp::Project(vec!["missing".into()])];
         let err = apply_ops(&ops, vec![batch]).unwrap_err();
         assert!(err.contains("unknown column"), "{err}");
     }
@@ -512,22 +518,13 @@ mod tests {
         )
         .unwrap();
         let ops = vec![
-            TransformOp {
-                filter: Some("amount > 0".into()),
-                ..Default::default()
-            },
-            TransformOp {
-                project: Some(vec!["id".into(), "name".into(), "amount".into()]),
-                ..Default::default()
-            },
-            TransformOp {
-                derive: Some(
-                    [("amount_gbp".into(), "amount * 0.8".into())]
-                        .into_iter()
-                        .collect(),
-                ),
-                ..Default::default()
-            },
+            TransformOp::Filter("amount > 0".into()),
+            TransformOp::Project(vec!["id".into(), "name".into(), "amount".into()]),
+            TransformOp::Derive(
+                [("amount_gbp".into(), "amount * 0.8".into())]
+                    .into_iter()
+                    .collect(),
+            ),
         ];
         let applied = apply_ops(&ops, vec![batch]).unwrap();
         let out = &applied.batches[0];
@@ -557,39 +554,24 @@ mod tests {
             Field::new("amount", DataType::Int32, true),
         ]));
         let ops = vec![
-            TransformOp {
-                filter: Some("amount > 0".into()),
-                ..Default::default()
-            },
-            TransformOp {
-                derive: Some(
-                    [("amount_gbp".into(), "amount * 0.8".into())]
-                        .into_iter()
-                        .collect(),
-                ),
-                ..Default::default()
-            },
-            TransformOp {
-                rename: Some(
-                    [("name".into(), "display_name".into())]
-                        .into_iter()
-                        .collect(),
-                ),
-                ..Default::default()
-            },
-            TransformOp {
-                cast: Some([("amount".into(), "float64".into())].into_iter().collect()),
-                ..Default::default()
-            },
-            TransformOp {
-                project: Some(vec![
-                    "id".into(),
-                    "display_name".into(),
-                    "amount".into(),
-                    "amount_gbp".into(),
-                ]),
-                ..Default::default()
-            },
+            TransformOp::Filter("amount > 0".into()),
+            TransformOp::Derive(
+                [("amount_gbp".into(), "amount * 0.8".into())]
+                    .into_iter()
+                    .collect(),
+            ),
+            TransformOp::Rename(
+                [("name".into(), "display_name".into())]
+                    .into_iter()
+                    .collect(),
+            ),
+            TransformOp::Cast([("amount".into(), "float64".into())].into_iter().collect()),
+            TransformOp::Project(vec![
+                "id".into(),
+                "display_name".into(),
+                "amount".into(),
+                "amount_gbp".into(),
+            ]),
         ];
         let dest = dest_schema_for_ops(&ops, source).unwrap();
         let names: Vec<_> = dest.fields().iter().map(|f| f.name().as_str()).collect();
@@ -608,10 +590,7 @@ mod tests {
             DataType::Int64,
             true,
         )]));
-        let ops = vec![TransformOp {
-            filter: Some("amount > 0".into()),
-            ..Default::default()
-        }];
+        let ops = vec![TransformOp::Filter("amount > 0".into())];
         let dest = dest_schema_for_ops(&ops, source.clone()).unwrap();
         assert!(Arc::ptr_eq(&dest, &source));
     }
@@ -619,14 +598,11 @@ mod tests {
     #[test]
     fn schema_change_adds_derived_column() {
         let batch = batch_amounts(&["a"], &[10]);
-        let ops = vec![TransformOp {
-            derive: Some(
-                [("amount_gbp".into(), "amount * 0.8".into())]
-                    .into_iter()
-                    .collect(),
-            ),
-            ..Default::default()
-        }];
+        let ops = vec![TransformOp::Derive(
+            [("amount_gbp".into(), "amount * 0.8".into())]
+                .into_iter()
+                .collect(),
+        )];
         let applied = apply_ops(&ops, vec![batch]).unwrap();
         let schema = applied.batches[0].schema();
         let names: Vec<_> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -646,10 +622,7 @@ mod tests {
         let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
         let amounts: Vec<i64> = (1..=n as i64).map(|i| i * 10).collect();
         let batch = batch_amounts(&id_refs, &amounts);
-        let ops = vec![TransformOp {
-            filter: Some("amount > 0".into()),
-            ..Default::default()
-        }];
+        let ops = vec![TransformOp::Filter("amount > 0".into())];
         let applied = apply_ops(&ops, vec![batch]).unwrap();
         assert_eq!(applied.batches[0].num_rows(), n);
         assert_eq!(applied.kept.as_ref().map(Vec::len), Some(n));
@@ -660,10 +633,7 @@ mod tests {
         let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
         let amounts: Vec<i64> = (1..=n as i64).map(|i| i * 10).collect();
         let batch = batch_amounts(&id_refs, &amounts);
-        let ops = vec![TransformOp {
-            filter: Some("amount > 50".into()),
-            ..Default::default()
-        }];
+        let ops = vec![TransformOp::Filter("amount > 50".into())];
         let applied = apply_ops(&ops, vec![batch]).unwrap();
         assert_eq!(applied.batches[0].num_rows(), n - 5);
         assert_eq!(
@@ -707,14 +677,11 @@ mod tests {
         let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
         let amounts: Vec<i64> = vec![10; n];
         let batch = batch_amounts(&id_refs, &amounts);
-        let ops = vec![TransformOp {
-            derive: Some(
-                [("amount_gbp".into(), "amount * 0.8".into())]
-                    .into_iter()
-                    .collect(),
-            ),
-            ..Default::default()
-        }];
+        let ops = vec![TransformOp::Derive(
+            [("amount_gbp".into(), "amount * 0.8".into())]
+                .into_iter()
+                .collect(),
+        )];
         let applied = apply_ops(&ops, vec![batch]).unwrap();
         assert_eq!(applied.batches[0].num_rows(), n);
         let gbp = applied.batches[0]
@@ -730,11 +697,8 @@ mod tests {
     #[test]
     fn ops_failure_returns_error_without_batches() {
         let batch = batch_amounts(&["a"], &[1]);
-        let ops = vec![TransformOp {
-            filter: Some("not_a_column > 0".into()),
-            ..Default::default()
-        }];
-        assert!(apply_configured_ops(&ops, vec![batch], None).is_err());
+        let ops = vec![TransformOp::Filter("not_a_column > 0".into())];
+        assert!(apply_configured_ops(&[], &ops, vec![batch], None).is_err());
     }
 
     #[test]

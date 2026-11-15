@@ -72,8 +72,71 @@ const SNAPSHOT_IDEMPOTENCY_KEY: &str = "skippr.idempotency-key";
 const SNAPSHOT_SCHEMA_FINGERPRINT: &str = "skippr.schema-fingerprint";
 const SNAPSHOT_WAL_FINGERPRINT: &str = "skippr.wal-refs-fingerprint-v2";
 const SNAPSHOT_WAL_REF_COUNT: &str = "skippr.wal-ref-count";
+const ALTER_SEQ: &str = "skippr.alter-seq";
 
-use skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp;
+use skippr_runtime_sdk::discover::schema_alter::{apply_alter, CanonicalAlter, CommittedAlter};
+
+#[cfg(test)]
+fn test_origin() -> skippr_runtime_sdk::discover::schema_alter::AlterOrigin {
+    use skippr_runtime_sdk::discover::schema_alter::{
+        AlterOrigin, MigrationDirection, MigrationId,
+    };
+    AlterOrigin {
+        migration: MigrationId::new("test"),
+        direction: MigrationDirection::Up,
+    }
+}
+
+#[cfg(test)]
+fn test_column(
+    name: &str,
+    id: i32,
+    ty: SkipprDataType,
+) -> skippr_runtime_sdk::discover::schema_alter::AlterColumn {
+    use skippr_runtime_sdk::discover::schema_alter::{AlterColumn, FlattenMode, OutputName};
+    AlterColumn {
+        name: OutputName::parse_sql(FlattenMode::Nested, name).expect("test column"),
+        id,
+        ty,
+    }
+}
+
+#[cfg(test)]
+fn committed_rename(
+    from: &str,
+    to_leaf: &str,
+    id: i32,
+    seq: u64,
+    ty: SkipprDataType,
+) -> CommittedAlter {
+    CommittedAlter {
+        origin: test_origin(),
+        seq,
+        alter: CanonicalAlter::Rename {
+            column: test_column(from, id, ty),
+            to_leaf: to_leaf.to_string(),
+        },
+    }
+}
+
+#[cfg(test)]
+fn committed_merge(
+    src: &str,
+    dst: &str,
+    src_id: i32,
+    dst_id: i32,
+    seq: u64,
+    ty: SkipprDataType,
+) -> CommittedAlter {
+    CommittedAlter {
+        origin: test_origin(),
+        seq,
+        alter: CanonicalAlter::Merge {
+            src: test_column(src, src_id, ty.clone()),
+            dst: test_column(dst, dst_id, ty),
+        },
+    }
+}
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::plugins::cdc::EffectiveGuarantee;
 use skippr_runtime_sdk::plugins::source_contract::{
@@ -390,7 +453,7 @@ pub struct IcebergSchemaSpec<S>(PhantomData<fn() -> S>);
 impl<S: SinkSpec> skippr_runtime_sdk::plugins::SchemaSinkSpec for IcebergSchemaSpec<S> {
     const NAME: &'static str = S::NAME;
     const ALTER_SUPPORT: skippr_runtime_sdk::plugins::AlterSupport =
-        skippr_runtime_sdk::plugins::AlterSupport::Native;
+        skippr_runtime_sdk::plugins::AlterSupport::Iceberg;
 }
 
 impl<S: SinkSpec> skippr_runtime_sdk::plugins::HasSchemaSinkSpec for IcebergWriter<S> {
@@ -723,32 +786,94 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
 #[async_trait]
 impl<S: SinkSpec> SchemaSink for IcebergWriter<S> {
     fn alter_support(&self) -> AlterSupport {
-        AlterSupport::Native
+        AlterSupport::Iceberg
     }
 
     async fn apply_alter(
         &self,
         namespace: &str,
         _metadata: &OutputMetadata,
-        op: &SchemaAlterOp,
-        field_id: i32,
+        alter: &CommittedAlter,
     ) -> Result<(), io::Error> {
+        use iceberg::ErrorKind;
         use skippr_runtime_sdk::discover::iceberg_schema::iceberg_schema_after_alter;
 
         let ident = self.table_ident(namespace)?;
-        let loaded = self
-            .catalog
-            .load_table(&ident)
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        let next = iceberg_schema_after_alter(loaded.metadata().current_schema(), op, field_id)
+        let loaded = match self.catalog.load_table(&ident).await {
+            Ok(table) => table,
+            Err(err) if err.kind() == ErrorKind::TableNotFound => return Ok(()),
+            Err(err) => return Err(io::Error::other(err.to_string())),
+        };
+        let current_seq = skippr_runtime_sdk::plugins::alter_ddl::parse_dest_high_water(
+            loaded
+                .metadata()
+                .properties()
+                .get(ALTER_SEQ)
+                .map(String::as_str),
+        )?;
+        if current_seq.is_some_and(|seq| seq >= alter.seq) {
+            return Ok(());
+        }
+        let next = iceberg_schema_after_alter(loaded.metadata().current_schema(), &alter.alter)
             .map_err(io::Error::other)?;
+        let (data_files, has_deletes) = live_alter_files(&loaded).await?;
+        if has_deletes {
+            return Err(io::Error::other(
+                "ALTER cannot run while delete files exist",
+            ));
+        }
+        let to_io = |err: iceberg::Error| io::Error::other(err.to_string());
         let tx = Transaction::new(&loaded);
+        let tx = tx.replace_schema(next.clone()).apply(tx).map_err(to_io)?;
+        let tx = if alter.alter.rewrites_data() && !data_files.is_empty() {
+            let starting_snapshot_id = loaded
+                .metadata()
+                .current_snapshot_id()
+                .ok_or_else(|| io::Error::other("ALTER rewrite requires a current snapshot"))?;
+            let receipt_key = format!("alter-{}-{starting_snapshot_id}", alter.seq);
+            let rewritten = self
+                .rewrite_table(
+                    namespace,
+                    &loaded,
+                    &data_files,
+                    Some(&alter.alter),
+                    next,
+                    &receipt_key,
+                )
+                .await?;
+            let added = rewritten
+                .iter()
+                .map(|file| {
+                    self.build_data_file(
+                        &loaded,
+                        DataContentType::Data,
+                        file.file_uri.clone(),
+                        file.rows,
+                        file.bytes,
+                        None,
+                        stored_partition_to_struct(&file.partition),
+                    )
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            let properties = HashMap::from([(
+                history::SNAPSHOT_PIPELINE.to_string(),
+                self.context.pipeline_name.clone(),
+            )]);
+            tx.rewrite_files()
+                .add_data_files(added)
+                .remove_files(data_files)
+                .set_snapshot_properties(properties)
+                .apply(tx)
+                .map_err(to_io)?
+        } else {
+            tx
+        };
         let tx = tx
-            .replace_schema(next)
+            .update_table_properties()
+            .set(ALTER_SEQ.to_string(), alter.seq.to_string())
             .apply(tx)
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        tx.commit(self.catalog.as_ref())
+            .map_err(to_io)?;
+        tx.commit_without_rebase(self.catalog.as_ref())
             .await
             .map_err(|err| io::Error::other(err.to_string()))?;
         self.table_cache.write().await.remove(namespace);
@@ -1557,6 +1682,92 @@ impl<S: SinkSpec> IcebergWriter<S> {
             serde_json::to_vec(&receipt).map_err(|err| io::Error::other(err.to_string()))?;
         self.put_object_bytes(&bucket, &key, bytes.into()).await?;
         Ok(receipt)
+    }
+
+    async fn rewrite_table(
+        &self,
+        namespace: &str,
+        table: &iceberg::table::Table,
+        inputs: &[iceberg::spec::DataFile],
+        transform: Option<&CanonicalAlter>,
+        out_schema: Schema,
+        identity_prefix: &str,
+    ) -> io::Result<Vec<PendingIcebergFile>> {
+        let to_io = |err: iceberg::Error| io::Error::other(err.to_string());
+        let (_, metadata) = self.namespace_schema_state(namespace).await?;
+        let outputs = MaintenanceOutputs {
+            namespace,
+            identity_prefix: identity_prefix.to_string(),
+            date_fields: Arc::new(iceberg_date_field_names(&metadata)),
+            iceberg_schema: Arc::new(out_schema),
+            partition_spec: Arc::clone(table.metadata().default_partition_spec()),
+            require_homogeneous: self.require_homogeneous_partitions(namespace),
+        };
+        let starting_snapshot_id = table
+            .metadata()
+            .current_snapshot_id()
+            .ok_or_else(|| io::Error::other("rewrite_table requires a current snapshot"))?;
+        let mut tasks: HashMap<String, iceberg::scan::FileScanTask> = table
+            .scan()
+            .snapshot_id(starting_snapshot_id)
+            .select_all()
+            .build()
+            .map_err(to_io)?
+            .plan_files()
+            .await
+            .map_err(to_io)?
+            .map_ok(|task| (task.data_file_path.clone(), task))
+            .try_collect()
+            .await
+            .map_err(to_io)?;
+        let mut roll_index = 0u64;
+        let mut files = Vec::new();
+        for input in inputs {
+            let task = tasks.remove(input.file_path()).ok_or_else(|| {
+                io::Error::other(format!(
+                    "ALTER input {} is not in the scan",
+                    input.file_path()
+                ))
+            })?;
+            let mut batches = iceberg::arrow::ArrowReaderBuilder::new(table.file_io().clone())
+                .with_data_file_concurrency_limit(1)
+                .build()
+                .read(Box::pin(futures::stream::iter(std::iter::once(Ok(task)))))
+                .map_err(to_io)?;
+            let mut pending_batches = Vec::new();
+            let mut pending_rows = 0usize;
+            let mut pending_bytes = 0usize;
+            while let Some(batch) = batches.try_next().await.map_err(to_io)? {
+                let mut batch = crate::parquet_util::coerce_timestamps_to_microseconds(batch)?;
+                if let Some(alter) = transform {
+                    batch = apply_alter(batch, alter)
+                        .map_err(|err| io::Error::other(err.to_string()))?;
+                }
+                pending_rows += batch.num_rows();
+                pending_bytes += record_batch_memory_size(&batch);
+                pending_batches.push(batch);
+                if pending_rows >= ICEBERG_FILE_MAX_ROWS
+                    || pending_bytes >= ICEBERG_FILE_MAX_INPUT_BYTES
+                {
+                    let rolls = roll_record_batches(std::mem::take(&mut pending_batches));
+                    files.extend(
+                        self.upload_maintenance_rolls(&outputs, rolls, &mut roll_index)
+                            .await?,
+                    );
+                    pending_rows = 0;
+                    pending_bytes = 0;
+                }
+            }
+            files.extend(
+                self.upload_maintenance_rolls(
+                    &outputs,
+                    roll_record_batches(pending_batches),
+                    &mut roll_index,
+                )
+                .await?,
+            );
+        }
+        Ok(files)
     }
 
     async fn upload_maintenance_rolls(
@@ -4317,6 +4528,39 @@ fn align_equality_delete_partitions(files: &mut [PendingIcebergFile]) {
     }
 }
 
+async fn live_alter_files(
+    table: &iceberg::table::Table,
+) -> io::Result<(Vec<iceberg::spec::DataFile>, bool)> {
+    let Some(snapshot) = table.metadata().current_snapshot() else {
+        return Ok((Vec::new(), false));
+    };
+    let to_io = |err: iceberg::Error| io::Error::other(err.to_string());
+    let list = snapshot
+        .load_manifest_list(table.file_io(), table.metadata())
+        .await
+        .map_err(to_io)?;
+    let mut data_files = Vec::new();
+    let mut has_deletes = false;
+    for manifest in list.entries() {
+        let loaded = manifest
+            .load_manifest(table.file_io())
+            .await
+            .map_err(to_io)?;
+        for entry in loaded.entries() {
+            if !entry.is_alive() {
+                continue;
+            }
+            match entry.content_type() {
+                DataContentType::PositionDeletes | DataContentType::EqualityDeletes => {
+                    has_deletes = true;
+                }
+                DataContentType::Data => data_files.push(entry.data_file().clone()),
+            }
+        }
+    }
+    Ok((data_files, has_deletes))
+}
+
 fn stored_partition_to_struct(values: &[Option<StoredPartitionValue>]) -> Struct {
     Struct::from_iter(values.iter().map(|value| {
         value.as_ref().map(|stored| match stored {
@@ -5956,11 +6200,7 @@ mod tests {
             &writer,
             "orders",
             &metadata,
-            &SchemaAlterOp::Rename {
-                from: "region".into(),
-                to: "region_code".into(),
-            },
-            field_id,
+            &committed_rename("region", "region_code", field_id, 0, SkipprDataType::String),
         )
         .await
         .unwrap();
@@ -5968,6 +6208,42 @@ mod tests {
         let schema = loaded.metadata().current_schema();
         assert_eq!(schema.field_by_name("region_code").unwrap().id, field_id);
         assert!(schema.field_by_name("region").is_none());
+        assert_eq!(
+            loaded
+                .metadata()
+                .properties()
+                .get(ALTER_SEQ)
+                .map(String::as_str),
+            Some("0")
+        );
+        <IcebergWriter<TestIcebergSpec> as SchemaSink>::apply_alter(
+            &writer,
+            "orders",
+            &metadata,
+            &committed_rename("region", "region_code", field_id, 0, SkipprDataType::String),
+        )
+        .await
+        .unwrap();
+        <IcebergWriter<TestIcebergSpec> as SchemaSink>::apply_alter(
+            &writer,
+            "orders",
+            &metadata,
+            &committed_rename("region_code", "zone", field_id, 1, SkipprDataType::String),
+        )
+        .await
+        .unwrap();
+        let loaded = catalog.load_table(&ident).await.unwrap();
+        let schema = loaded.metadata().current_schema();
+        assert_eq!(schema.field_by_name("zone").unwrap().id, field_id);
+        assert!(schema.field_by_name("region_code").is_none());
+        assert_eq!(
+            loaded
+                .metadata()
+                .properties()
+                .get(ALTER_SEQ)
+                .map(String::as_str),
+            Some("1")
+        );
     }
 
     #[tokio::test]

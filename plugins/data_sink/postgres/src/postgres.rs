@@ -213,17 +213,18 @@ impl DataSinkPostgresPlugin {
         &self,
         namespace: &str,
         _metadata: &OutputMetadata,
-        op: &skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp,
-        _field_id: i32,
+        alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
     ) -> Result<(), std::io::Error> {
         let table_name = Self::namespace_to_table_name(namespace);
         let fq_table = format!("\"{}\".\"{}\"", self.config.schema, table_name);
-        let sql = skippr_runtime_sdk::plugins::alter_ddl::warehouse_alter_sql(
+        skippr_runtime_sdk::plugins::alter_ddl::apply_warehouse_alter(
+            self,
             skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Postgres,
             &fq_table,
-            op,
-        )?;
-        self.execute_sql(&sql).await
+            namespace,
+            alter,
+        )
+        .await
     }
 
     fn namespace_to_table_name(namespace: &str) -> String {
@@ -846,5 +847,44 @@ impl DataSinkPostgresPlugin {
             total_rows, table_name
         );
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkPostgresPlugin {
+    async fn columns(&self, namespace: &str) -> std::io::Result<Vec<String>> {
+        let table_name = Self::namespace_to_table_name(namespace);
+        self.get_client().await?;
+        let guard = self.client.lock().await;
+        let client = guard.as_ref().unwrap();
+        let rows = client
+            .query(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
+                &[&self.config.schema, &table_name],
+            )
+            .await
+            .map_err(|err| std::io::Error::other(format!("Postgres columns: {err}")))?;
+        Ok(rows.iter().map(|row| row.get::<_, String>(0)).collect())
+    }
+
+    async fn execute(&self, sql: &str) -> std::io::Result<()> {
+        self.execute_sql(sql).await
+    }
+
+    async fn query_first(&self, sql: &str) -> std::io::Result<Option<String>> {
+        self.get_client().await?;
+        let guard = self.client.lock().await;
+        let client = guard.as_ref().unwrap();
+        let rows = client
+            .query(sql, &[])
+            .await
+            .map_err(|err| std::io::Error::other(format!("Postgres query: {err}")))?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        row.try_get::<_, String>(0)
+            .or_else(|_| row.try_get::<_, i64>(0).map(|value| value.to_string()))
+            .map(Some)
+            .map_err(|err| std::io::Error::other(format!("Postgres query cell: {err}")))
     }
 }

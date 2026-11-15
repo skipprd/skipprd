@@ -310,12 +310,8 @@ pub fn pipeline_metadata_for_fixture(fixture: BenchmarkFixture) -> PipelineMetad
 pub fn install_fixture_metadata(fixture: BenchmarkFixture) {
     let pipeline = pipeline_metadata_for_fixture(fixture);
     let namespace = fixture.namespace();
-    let _ = Ingest::prepare_arrow_schema_with_metadata(
-        &Config::new(),
-        namespace,
-        &pipeline.metadata,
-        false,
-    );
+    Ingest::prepare_arrow_schema_with_metadata(&Config::new(), namespace, &pipeline)
+        .expect("benchmark dest Arrow schema");
     METADATA.store(Arc::new(pipeline));
 }
 
@@ -408,7 +404,7 @@ pub fn run_local_fixture_benchmark_with_options(
         Arc::new(Box::new(NoopOutputPlugin));
 
     let start = Instant::now();
-    Ingest::run_process_batch_for_benchmark(&[batch], &offsets, output, 0);
+    Ingest::run_process_batch_for_benchmark(&config, &[batch], &offsets, output, 0);
     let duration = start.elapsed();
     let profile = ingest_profile::snapshot();
     let records_per_sec = row_count as f64 / duration.as_secs_f64().max(1e-9);

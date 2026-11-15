@@ -636,6 +636,12 @@ mod tests {
     use crate::discover::{DateCandidate, DateParserKind};
     use crate::helpers::configuration::Config;
     use crate::ingest::fast_ingest::fast_path_ingest;
+
+    fn identity_output(fields: &HashMap<String, Metadata>) -> Metadata {
+        let mut meta = Metadata::new().unwrap();
+        meta.fields = Box::new(fields.clone());
+        meta
+    }
     use crate::ingest::fast_ingest::DEFAULT_NESTED_MESSAGE;
     use crate::ingest_work::Ingest;
     use arrow::json::ReaderBuilder as ArrowJsonReaderBuilder;
@@ -703,13 +709,9 @@ mod tests {
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(namespace.to_string(), ns_meta);
-        let schema = Ingest::prepare_arrow_schema_with_metadata(
-            &Config::new(),
-            namespace,
-            &pipeline.metadata,
-            false,
-        )
-        .expect("schema");
+        let schema =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), namespace, &pipeline)
+                .expect("schema");
 
         let plan = plan_for_namespace(&fields, false, schema.clone()).expect("plan");
         let mut builders = ExactArrowBuilders::new(&plan, 4).expect("builders");
@@ -723,8 +725,15 @@ mod tests {
         for row in &rows {
             try_append_row(&plan, row, &fields, &mut builders).expect("append");
             legacy_values.push(
-                fast_path_ingest(&Config::new(), row, &fields, namespace, false)
-                    .expect("legacy normalize"),
+                fast_path_ingest(
+                    &Config::new(),
+                    row,
+                    &fields,
+                    namespace,
+                    false,
+                    &identity_output(&fields),
+                )
+                .expect("legacy normalize"),
             );
         }
 
@@ -747,13 +756,9 @@ mod tests {
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(namespace.to_string(), ns_meta);
-        let schema = Ingest::prepare_arrow_schema_with_metadata(
-            &Config::new(),
-            namespace,
-            &pipeline.metadata,
-            false,
-        )
-        .expect("schema");
+        let schema =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), namespace, &pipeline)
+                .expect("schema");
         let plan = plan_for_namespace(&fields, false, schema).expect("plan");
         let mut builders = ExactArrowBuilders::new(&plan, 1).expect("builders");
         let row =
@@ -772,13 +777,9 @@ mod tests {
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(namespace.to_string(), ns_meta);
-        let schema = Ingest::prepare_arrow_schema_with_metadata(
-            &Config::new(),
-            namespace,
-            &pipeline.metadata,
-            false,
-        )
-        .expect("schema");
+        let schema =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), namespace, &pipeline)
+                .expect("schema");
 
         ingest_profile::reset_profile_counters();
         let mut cache = HashMap::new();
@@ -802,13 +803,9 @@ mod tests {
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(namespace.to_string(), ns_meta);
-        let schema_v1 = Ingest::prepare_arrow_schema_with_metadata(
-            &Config::new(),
-            namespace,
-            &pipeline.metadata,
-            false,
-        )
-        .expect("schema");
+        let schema_v1 =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), namespace, &pipeline)
+                .expect("schema");
 
         let mut cache = HashMap::new();
         let p1 = resolve_cached_exact_plan(
@@ -829,13 +826,9 @@ mod tests {
         let mut ns_meta2 = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta2.fields = Box::new(fields.clone());
         pipeline2.metadata.insert(namespace.to_string(), ns_meta2);
-        let schema_v2 = Ingest::prepare_arrow_schema_with_metadata(
-            &Config::new(),
-            namespace,
-            &pipeline2.metadata,
-            false,
-        )
-        .expect("schema v2");
+        let schema_v2 =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), namespace, &pipeline2)
+                .expect("schema v2");
 
         let p2 = resolve_cached_exact_plan(&mut cache, namespace, "2", &fields, false, schema_v2)
             .expect("plan v2");
@@ -866,20 +859,10 @@ mod tests {
             ns_meta.fields = Box::new(fields.clone());
             pipeline.metadata.insert(ns.to_string(), ns_meta);
         }
-        let schema_a = Ingest::prepare_arrow_schema_with_metadata(
-            &Config::new(),
-            ns_a,
-            &pipeline.metadata,
-            false,
-        )
-        .unwrap();
-        let schema_b = Ingest::prepare_arrow_schema_with_metadata(
-            &Config::new(),
-            ns_b,
-            &pipeline.metadata,
-            false,
-        )
-        .unwrap();
+        let schema_a =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), ns_a, &pipeline).unwrap();
+        let schema_b =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), ns_b, &pipeline).unwrap();
 
         let mut cache = HashMap::new();
         let plan_a = resolve_cached_exact_plan(&mut cache, ns_a, "1", &fields_a, false, schema_a)
@@ -900,13 +883,8 @@ mod tests {
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, ns);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(ns.to_string(), ns_meta);
-        let schema_v1 = Ingest::prepare_arrow_schema_with_metadata(
-            &Config::new(),
-            ns,
-            &pipeline.metadata,
-            false,
-        )
-        .unwrap();
+        let schema_v1 =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), ns, &pipeline).unwrap();
         let mut cache = HashMap::new();
         let plan_v1 =
             resolve_cached_exact_plan(&mut cache, ns, "1", &fields, false, schema_v1).unwrap();
@@ -929,13 +907,8 @@ mod tests {
         let mut ns_meta2 = Metadata::new_with_type(SkipprDataType::Record, ns);
         ns_meta2.fields = Box::new(fields.clone());
         pipeline2.metadata.insert(ns.to_string(), ns_meta2);
-        let schema_v2 = Ingest::prepare_arrow_schema_with_metadata(
-            &Config::new(),
-            ns,
-            &pipeline2.metadata,
-            false,
-        )
-        .unwrap();
+        let schema_v2 =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), ns, &pipeline2).unwrap();
         let plan_v2 =
             resolve_cached_exact_plan(&mut cache, ns, "2", &fields, false, schema_v2).unwrap();
         append_row_to_exact_partition(
@@ -975,13 +948,8 @@ mod tests {
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, ns);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(ns.to_string(), ns_meta);
-        let _schema_v1 = Ingest::prepare_arrow_schema_with_metadata(
-            &Config::new(),
-            ns,
-            &pipeline.metadata,
-            false,
-        )
-        .unwrap();
+        let _schema_v1 =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), ns, &pipeline).unwrap();
 
         let mut snapshot = METADATA.load().clone();
         METADATA.store(Arc::new(pipeline));
@@ -1003,13 +971,9 @@ mod tests {
         ns_meta2.fields = Box::new(fields);
         pipeline2.metadata.insert(ns.to_string(), ns_meta2);
         METADATA.store(Arc::new(pipeline2));
-        let _schema_v2 = Ingest::prepare_arrow_schema_with_metadata(
-            &Config::new(),
-            ns,
-            &METADATA.load().metadata,
-            false,
-        )
-        .unwrap();
+        let _schema_v2 =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), ns, &METADATA.load())
+                .unwrap();
 
         let v2 = crate::ingest_work::namespace_schema_version(ns);
         assert!(v2 > v1);

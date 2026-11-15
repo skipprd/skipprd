@@ -4,7 +4,10 @@ pub mod source_contract;
 pub mod source_sync;
 pub mod traits;
 
-pub use alter_ddl::{warehouse_alter_sql, WarehouseDialect};
+pub use alter_ddl::{
+    apply_warehouse_alter, json_result_first, parse_dest_high_water, warehouse_alter_sql,
+    WarehouseDialect,
+};
 pub use source_contract::{
     apply_runtime_source_namespace_contracts, ensure_source_contract_for_policy,
     merge_source_contracts_into_pipeline, replace_source_contracts_authoritative,

@@ -377,9 +377,9 @@ fn metadata_from_runtime_output(output: &OutputMetadata) -> Metadata {
 fn pipeline_metadata_with_runtime_schema(
     pipeline_metadata: &PipelineMetadata,
     config: &Config,
-) -> PipelineMetadata {
+) -> Result<PipelineMetadata, String> {
     let mut updated_metadata = pipeline_metadata.clone();
-    for (namespace, output_metadata) in current_runtime_schema_state().namespaces {
+    for (namespace, output_metadata) in current_runtime_schema_state()?.namespaces {
         updated_metadata
             .metadata
             .entry(namespace)
@@ -389,7 +389,7 @@ fn pipeline_metadata_with_runtime_schema(
     for (_namespace, metadata) in updated_metadata.metadata.iter_mut() {
         metadata.finalize_field_types(config, flatten);
     }
-    updated_metadata
+    Ok(updated_metadata)
 }
 
 struct OutputRouter {
@@ -670,12 +670,10 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
     let shared_output = Arc::new(noop_output);
 
     {
-        let flatten = config.get_transform_flatten_events();
         for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
             match Ingest::prepare_arrow_schema_with_metadata_for_query(
                 &namespace,
-                &pipeline_metadata.metadata,
-                flatten,
+                &pipeline_metadata,
             ) {
                 Ok(_t) => {}
                 Err(e) => {
@@ -722,7 +720,8 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
 
     info!("Reached end of source data, persisting discovered metadata");
 
-    let updated_metadata = pipeline_metadata_with_runtime_schema(METADATA.load().as_ref(), config);
+    let updated_metadata = pipeline_metadata_with_runtime_schema(METADATA.load().as_ref(), config)
+        .map_err(io::Error::other)?;
     // Discover must not force-enable a DISABLED pipeline; DISABLE is freeze-only.
     METADATA.store(Arc::new(updated_metadata.clone()));
 
@@ -955,13 +954,9 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
     clear_runtime_source_schema_state();
     METADATA.store(Arc::new(pipeline_metadata.clone()));
     {
-        let flatten = config.get_transform_flatten_events();
-        crate::ingest_work::warm_output_schemas_for_metadata(
-            config,
-            &pipeline_metadata.metadata,
-            flatten,
-        )
-        .await;
+        crate::ingest_work::warm_output_schemas_for_metadata(config, &pipeline_metadata)
+            .await
+            .map_err(io::Error::other)?;
     }
     if config.get_pipeline_deadletters_ref().is_some() {
         deadletter::ensure_namespace_registered(config);
@@ -990,16 +985,9 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
         }
     }
 
-    let journal = offsets_db
-        .skippr_kv()
-        .ok_or_else(|| io::Error::other("migration journal requires a skippr store"))?;
-    let fence = offsets_db
-        .writer_fence()
-        .ok_or_else(|| io::Error::other("migration journal requires a skippr store"))?;
-    crate::migration::apply_pending_files(
+    crate::migration::apply_pending_on(
         config,
-        journal.as_ref(),
-        fence,
+        &offsets_db,
         crate::migration::MigrationDirection::Up,
     )
     .await
@@ -1179,12 +1167,10 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
     // local cache warmup only; it must not enqueue Glue/schema publication for
     // every persisted namespace on process start.
     {
-        let flatten = config.get_transform_flatten_events();
         for (namespace, _ns_metadata) in pipeline_metadata.metadata.iter() {
             match Ingest::prepare_arrow_schema_with_metadata_for_query(
                 namespace,
-                &pipeline_metadata.metadata,
-                flatten,
+                &pipeline_metadata,
             ) {
                 Ok(schema) => {
                     reporter.namespace_discovered(
@@ -1592,7 +1578,8 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
         return Err(std::io::Error::other(err));
     }
 
-    let updated_metadata = pipeline_metadata_with_runtime_schema(METADATA.load().as_ref(), config);
+    let updated_metadata = pipeline_metadata_with_runtime_schema(METADATA.load().as_ref(), config)
+        .map_err(std::io::Error::other)?;
     METADATA.store(Arc::new(updated_metadata.clone()));
     config.set_metadata(&updated_metadata, false).await;
 
@@ -2197,11 +2184,13 @@ mod runtime_schema_persist_tests {
                 namespaces: BTreeMap::from([("lineitem".to_string(), output)]),
                 namespace_versions: BTreeMap::from([("lineitem".to_string(), 1)]),
             },
-        );
+        )
+        .unwrap();
         let merged = pipeline_metadata_with_runtime_schema(
             &PipelineMetadata::new(&Config::new()),
             &Config::new(),
-        );
+        )
+        .unwrap();
         assert!(
             merged.metadata.contains_key("lineitem"),
             "TPC File parquet Arrow IPC must persist lineitem so skipprd query can register lineitem.lineitem"

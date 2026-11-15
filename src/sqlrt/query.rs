@@ -1,4 +1,4 @@
-use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
+use crate::discover::{Metadata, OutputMetadata, PipelineMetadata, SkipprDataType};
 use crate::helpers::configuration::Config;
 use crate::sqlrt::docs::{print_categorized_sql_docs, SqlDocListingKind};
 use crate::sqlrt::operators::drop_table::drop_table;
@@ -408,6 +408,25 @@ async fn query_collect_warm_body(
                 return Err(std::io::Error::other(format!(
                     "Session.query does not run {other:?}; use skipprd query for this statement"
                 )));
+            }
+        }
+    }
+    let mut _schema_admissions = Vec::new();
+    for name in config.get_pipelines() {
+        let bound = config.bind_pipeline(&name);
+        if let Ok(key) = skippr_lease::PipelineKey::new(
+            bound.get_tenant(),
+            bound.get_workspace_name(),
+            bound.get_pipeline_name(),
+        ) {
+            match crate::migration::gate::try_admit(&key) {
+                Ok(admission) => _schema_admissions.push(admission),
+                Err(crate::migration::gate::GateError::SchemaChangeInProgress) => {
+                    return Err(std::io::Error::other(format!(
+                        "schema migration in progress for pipeline '{name}'"
+                    )));
+                }
+                Err(err) => return Err(std::io::Error::other(err.to_string())),
             }
         }
     }
@@ -1268,20 +1287,10 @@ pub async fn query_with_options(
                     Ok(pm) => {
                         let _keys: Vec<String> = pm.metadata.keys().cloned().collect();
                         METADATA.store(Arc::new(pm.clone()));
-                        let flatten = config.get_transform_flatten_events();
                         if pm.metadata.contains_key(&namespace) {
                             match Ingest::prepare_arrow_schema_with_metadata_for_query(
-                                &namespace,
-                                &pm.metadata,
-                                flatten,
-                            )
-                            .and_then(|schema| {
-                                crate::stream_transform::dest_schema_for_ops(
-                                    &config.get_transform_ops(),
-                                    schema,
-                                )
-                                .map_err(|err| arrow::error::ArrowError::ComputeError(err))
-                            }) {
+                                &namespace, &pm,
+                            ) {
                                 Ok(schema) => {
                                     ARROW_SCHEMA
                                         .insert(namespace.clone(), ArcSwap::from(schema.clone()));
@@ -1811,6 +1820,38 @@ fn map_destination_type_to_skippr(type_str: &str) -> SkipprDataType {
     }
 }
 
+fn show_pipeline_fields(output: &OutputMetadata) -> Vec<serde_json::Value> {
+    output
+        .child_fields()
+        .map(|(key, field)| {
+            let name = if field.out_field_name().is_empty() {
+                key.clone()
+            } else {
+                field.out_field_name().to_string()
+            };
+            let source_field_name = if field.source_field_name().is_empty() {
+                key.clone()
+            } else {
+                field.source_field_name().to_string()
+            };
+            let type_name = if field.determined_type() == &SkipprDataType::Unknown {
+                "Unknown".to_string()
+            } else {
+                field.determined_type().as_str().to_string()
+            };
+            serde_json::json!({
+                "name": name,
+                "out_field_name": name,
+                "source_field_name": source_field_name,
+                "type": type_name,
+                "nullable": field.nullable(),
+                "field_id": field.field_id(),
+                "lineage_id": field.lineage_id(),
+            })
+        })
+        .collect()
+}
+
 async fn show_pipeline(config: &Config, pipeline_name: &str) {
     let pipeline_metadata = match config.get_metadata().await {
         Ok(m) => m,
@@ -1834,38 +1875,18 @@ async fn show_pipeline(config: &Config, pipeline_name: &str) {
     };
 
     let mut namespaces = Vec::new();
-    for (ns_name, ns_metadata) in pipeline_metadata.metadata.iter() {
-        let fields: Vec<serde_json::Value> = ns_metadata
-            .fields
-            .iter()
-            .map(|(key, field_metadata)| {
-                let name = if field_metadata.out_field_name.is_empty() {
-                    key.clone()
-                } else {
-                    field_metadata.out_field_name.clone()
-                };
-                let source_field_name = if field_metadata.source_field_name.is_empty() {
-                    key.clone()
-                } else {
-                    field_metadata.source_field_name.clone()
-                };
-                let type_name =
-                    if field_metadata.determined_type == crate::discover::SkipprDataType::Unknown {
-                        "Unknown".to_string()
-                    } else {
-                        field_metadata.determined_type.as_str().to_string()
-                    };
-                serde_json::json!({
-                    "name": name,
-                    "out_field_name": name,
-                    "source_field_name": source_field_name,
-                    "type": type_name,
-                    "nullable": field_metadata.nullable,
-                    "field_id": field_metadata.field_id,
-                    "lineage_id": field_metadata.lineage_id,
-                })
-            })
-            .collect();
+    for ns_name in pipeline_metadata.metadata.keys() {
+        let ns_metadata = match pipeline_metadata.output_metadata(ns_name) {
+            Ok(meta) => meta,
+            Err(err) => {
+                namespaces.push(serde_json::json!({
+                    "name": ns_name,
+                    "error": err.to_string(),
+                }));
+                continue;
+            }
+        };
+        let fields = show_pipeline_fields(&ns_metadata);
         namespaces.push(serde_json::json!({
             "name": ns_name,
             "enabled": true,
@@ -1940,6 +1961,65 @@ mod plain_query_document_tests {
         let doc = record_batches_to_plain_query(&batches).expect("doc");
         assert_eq!(doc.header, vec!["id"]);
         assert_eq!(doc.rows, vec![vec!["1".to_string()], vec!["2".to_string()]]);
+    }
+
+    #[test]
+    fn show_pipeline_fields_use_folded_output_metadata() {
+        use crate::discover::schema_alter::{
+            AlterColumn, AlterOrigin, CanonicalAlter, CommittedAlter, FlattenMode,
+            MigrationDirection, MigrationId, OutputName,
+        };
+        use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
+        use crate::helpers::configuration::Config;
+
+        let mut root = Metadata::new().unwrap();
+        let mut region = Metadata::new_with_type(SkipprDataType::String, "region");
+        region.field_id = 1;
+        root.fields.insert("region".into(), region);
+        let nested = OutputName::parse_sql(FlattenMode::Nested, "region").unwrap();
+        let mut pipeline = PipelineMetadata::new(&Config::new());
+        pipeline.flattened = false;
+        pipeline.metadata.insert("orders".into(), root);
+        pipeline.alters.insert(
+            "orders".into(),
+            vec![CommittedAlter {
+                origin: AlterOrigin {
+                    migration: MigrationId::new("m"),
+                    direction: MigrationDirection::Up,
+                },
+                seq: 0,
+                alter: CanonicalAlter::Rename {
+                    column: AlterColumn {
+                        name: nested,
+                        id: 1,
+                        ty: SkipprDataType::String,
+                    },
+                    to_leaf: "region_code".into(),
+                },
+            }],
+        );
+        let output = pipeline.output_metadata("orders").unwrap();
+        let fields = super::show_pipeline_fields(&output);
+        let names: Vec<_> = fields
+            .iter()
+            .filter_map(|field| field.get("name").and_then(|value| value.as_str()))
+            .collect();
+        assert!(names.contains(&"region_code"), "{names:?}");
+        assert!(!names.contains(&"region"), "{names:?}");
+    }
+
+    #[test]
+    fn show_pipeline_folds_via_output_metadata() {
+        let src = include_str!("query.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains("pipeline_metadata.output_metadata(ns_name)"),
+            "SHOW PIPELINE must publish dest names through output_metadata"
+        );
+        assert!(
+            !prod.contains(".output(ns_name)"),
+            "SHOW PIPELINE must not print unfolded Metadata keys"
+        );
     }
 
     #[test]

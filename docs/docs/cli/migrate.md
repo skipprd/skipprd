@@ -22,7 +22,7 @@ skipprd migrate --pipeline <NAME> [--down] [--config <path>] [--log [LEVEL]]
 | Flag | Default | Description |
 |---|---|---|
 | `-p`, `--pipeline <NAME>` | None | Pipeline whose `migrations/` apply. Required in practice when several pipelines share a config. |
-| `--down` | Off | Apply `-- migrate:down` instead of `-- migrate:up`. Only Rename and Promote may have a down section. |
+| `--down` | Off | Apply `-- migrate:down` instead of `-- migrate:up`. Only Rename may have a down section. |
 
 See [CLI overview](/cli/overview) for global flags (`--config`, `--store-type`, `--wal-storage`, …).
 
@@ -35,7 +35,7 @@ skipprd migrate --pipeline bikehire
 skipprd sync --pipeline bikehire --once
 ```
 
-Roll back a Rename or Promote with `--down`:
+Roll back a Rename with `--down`:
 
 ```bash
 skipprd migrate --pipeline bikehire --down
@@ -53,7 +53,7 @@ Migration(
 ).write("migrations")
 ```
 
-Files use `-- migrate:up` (optional) and `-- migrate:down` (optional, Rename/Promote only).
+Files use `-- migrate:up` (optional) and `-- migrate:down` (optional, Rename only).
 
 ```sql
 -- migrate:up
@@ -63,7 +63,7 @@ ALTER TABLE bikehire.trips RENAME COLUMN region TO region_code;
 ALTER TABLE bikehire.trips RENAME COLUMN region_code TO region;
 ```
 
-`down()` is only valid for Rename and Promote. Drop and Merge fail closed if a `-- migrate:down` section is present.
+`down()` is only valid for Rename. Promote, Drop, and Merge fail closed if a `-- migrate:down` section is present.
 
 ## Query ALTER
 
@@ -76,13 +76,13 @@ Prefer files in `migrations/` for anything you want in git. Use query ALTER for 
 For each pending file, Skipprd:
 
 1. Loads the journal from Skippr Store under the writer lock.
-2. Rewrites skippr metadata (`schema` family) and live WAL so later ingest uses the new names and types.
-3. Applies native DDL on destinations that advertise it (Iceberg: SkipprLake, Athena Iceberg, DuckDB; plus Snowflake, Postgres, BigQuery, Redshift, MotherDuck). Glue/Hive and ClickHouse fail closed.
-4. Commits the journal row (id, checksum, phase). A crash mid-apply resumes from that phase; it does not double-apply a finished file.
+2. Rewrites live WAL so later ingest uses the new names and types.
+3. Applies table DDL on destinations that advertise it (Iceberg: SkipprLake, Athena Iceberg, DuckDB; plus Snowflake, Postgres, BigQuery, Redshift, MotherDuck). Glue/Hive and ClickHouse fail closed.
+4. Appends the ALTER output log (`schema` family) and commits the journal row (id, checksum, phase). Source discover metadata is unchanged. A crash mid-apply resumes from that phase; it does not double-apply a finished file.
 
 Iceberg keeps the field id, so existing Parquet stays readable after rename.
 
-Statements: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, `ALTER COLUMN … TYPE`. Nested `TO` paths such as `detail.region` are valid. See [ALTER operations](/operations/alter) for the matrix and fail-closed cases.
+Statements: `RENAME COLUMN`, `MERGE COLUMN`, `DROP COLUMN`, `ALTER COLUMN … TYPE`. `TO` is one identifier; a dotted `TO` such as `detail.region` fails closed. See [ALTER operations](/operations/alter) for the matrix and fail-closed cases.
 
 ## Skippr Store
 

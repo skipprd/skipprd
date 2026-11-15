@@ -18,7 +18,7 @@ use std::task::{Context, Poll};
 pub use crate::buffer::compaction_transaction::SinkWriteSemantics;
 
 use crate::buffer::compaction_transaction::{SinkGroupingSupport, SinkRetrySemantics};
-use crate::discover::schema_alter::SchemaAlterOp;
+use crate::discover::schema_alter::CommittedAlter;
 use crate::discover::OutputMetadata;
 use crate::plugins::cdc::{SinkCapability, SourceCapability, SyncContext};
 use crate::plugins::source_contract::SourceNamespaceContract;
@@ -1517,10 +1517,20 @@ pub struct SchemaSyncRequest<'a> {
     pub source_contract: Option<&'a SourceNamespaceContract>,
 }
 
+/// What a schema sink does with `ALTER TABLE`. Table sinks (Iceberg family and
+/// warehouses) take migrations and forbid YAML `project`/`rename`/`cast`.
+/// Stream sinks (`Unsupported`) are the reverse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlterSupport {
-    Native,
     Unsupported,
+    Iceberg,
+    Warehouse(crate::plugins::alter_ddl::WarehouseDialect),
+}
+
+impl AlterSupport {
+    pub fn is_table(self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
 }
 
 #[async_trait]
@@ -1529,14 +1539,14 @@ pub trait SchemaSink: Send + Sync {
         AlterSupport::Unsupported
     }
 
+    /// Apply one committed alter. Must be idempotent per `alter.seq`.
     async fn apply_alter(
         &self,
         namespace: &str,
         metadata: &OutputMetadata,
-        op: &SchemaAlterOp,
-        field_id: i32,
+        alter: &CommittedAlter,
     ) -> Result<(), std::io::Error> {
-        let _ = (namespace, metadata, op, field_id);
+        let _ = (namespace, metadata, alter);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "schema sink does not support migrations",

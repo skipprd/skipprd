@@ -1,12 +1,13 @@
 //! Shredded `schema` family. Replaces whole-document `metadata.json` authority.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use sha2::{Digest, Sha256};
 use skippr_wal_catalog::{
     CatalogFence, KvOp, SkipprStore, SkipprStoreRead, StoreFamily, STORE_FORMAT_VERSION,
 };
 
+use crate::discover::schema_alter::CommittedAlter;
 use crate::discover::{Metadata, PipelineMetadata};
 
 const IMPORT_CURSOR: &[u8] = b"schema_import/cursor";
@@ -41,6 +42,10 @@ fn node_rest(pipeline: &str, namespace: &str, field_id: i32) -> Vec<u8> {
 
 fn root_rest(pipeline: &str, namespace: &str) -> Vec<u8> {
     format!("{pipeline}/ns/{namespace}/root").into_bytes()
+}
+
+fn alter_rest(pipeline: &str, namespace: &str) -> Vec<u8> {
+    format!("{pipeline}/ns/{namespace}/alters").into_bytes()
 }
 
 fn pack_node(meta: &Metadata) -> SchemaNode {
@@ -99,6 +104,21 @@ pub fn persist_pipeline_schema(
                 serde_json::to_vec(contract).map_err(|err| err.to_string())?,
             );
         }
+        if let Some(log) = metadata.alters.get(namespace) {
+            desired.insert(
+                StoreFamily::Schema.key(&alter_rest(pipeline, namespace)),
+                serde_json::to_vec(log).map_err(|err| err.to_string())?,
+            );
+        }
+    }
+    for (namespace, log) in &metadata.alters {
+        if metadata.metadata.contains_key(namespace) {
+            continue;
+        }
+        desired.insert(
+            StoreFamily::Schema.key(&alter_rest(pipeline, namespace)),
+            serde_json::to_vec(log).map_err(|err| err.to_string())?,
+        );
     }
     let prefix = StoreFamily::Schema.key(format!("{pipeline}/").as_bytes());
     let existing = store
@@ -158,6 +178,7 @@ pub fn load_pipeline_schema(
     let head: SchemaHead = serde_json::from_slice(&head_bytes).map_err(|err| err.to_string())?;
     let mut metadata = HashMap::new();
     let mut source_contracts = HashMap::new();
+    let mut alters = BTreeMap::new();
     for namespace in &head.namespaces {
         let root_bytes = store
             .get(&StoreFamily::Schema.key(&root_rest(pipeline, namespace)))
@@ -178,6 +199,14 @@ pub fn load_pipeline_schema(
             let contract = serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
             source_contracts.insert(namespace.clone(), contract);
         }
+        if let Some(bytes) = store
+            .get(&StoreFamily::Schema.key(&alter_rest(pipeline, namespace)))
+            .map_err(|err| err.to_string())?
+        {
+            let log: Vec<CommittedAlter> =
+                serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
+            alters.insert(namespace.clone(), log);
+        }
     }
     Ok(Some(PipelineMetadata {
         name: head.name,
@@ -187,6 +216,7 @@ pub fn load_pipeline_schema(
         metadata_version: head.metadata_version,
         schema_id: head.schema_id,
         source_contracts,
+        alters,
     }))
 }
 
@@ -262,6 +292,62 @@ mod tests {
                 .unwrap();
         assert!(page.iter().any(|(k, _)| k.ends_with(b"/head")));
         assert!(page.len() >= 3);
+    }
+
+    #[test]
+    fn shredded_schema_roundtrips_alters_without_mutating_source() {
+        use crate::discover::schema_alter::{
+            canonicalize, AlterOrigin, CommittedAlter, FlattenMode, SchemaAlterOp,
+        };
+        use crate::migration::journal::{MigrationDirection, MigrationId};
+        let fence = CatalogFence::local();
+        let store = skippr_wal_catalog::MemorySkipprStore::open(fence);
+        let mut md = PipelineMetadata::new(&Config::new());
+        md.name = "orders".into();
+        let mut root = Metadata::new().unwrap();
+        root.field_id = 0;
+        let mut region = Metadata::new().unwrap();
+        region.field_id = 7;
+        region.out_field_name = "region".into();
+        root.fields.insert("region".into(), region);
+        md.metadata.insert("trips".into(), root);
+        let alter = canonicalize(
+            FlattenMode::Nested,
+            &md.metadata["trips"],
+            &SchemaAlterOp::Rename {
+                from: "region".into(),
+                to: "region_code".into(),
+            },
+            &[],
+        )
+        .unwrap();
+        md.alters.insert(
+            "trips".into(),
+            vec![CommittedAlter {
+                origin: AlterOrigin {
+                    migration: MigrationId::new("mig-1"),
+                    direction: MigrationDirection::Up,
+                },
+                seq: 0,
+                alter,
+            }],
+        );
+        persist_pipeline_schema(&store, fence, &md).unwrap();
+        let loaded = load_pipeline_schema(&store, "orders").unwrap().unwrap();
+        assert!(loaded.metadata["trips"].fields.contains_key("region"));
+        assert!(!loaded.metadata["trips"].fields.contains_key("region_code"));
+        assert_eq!(loaded.alters["trips"][0].alter.column().id, 7);
+        let folded = loaded.output("trips").unwrap();
+        assert!(folded.fields.contains_key("region_code"));
+        assert!(!folded.fields.contains_key("region"));
+        assert!(loaded.metadata["trips"].fields.contains_key("region"));
+        let published = loaded.output_metadata("trips").unwrap();
+        let names: Vec<_> = published
+            .child_fields()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(names.contains(&"region_code"), "{names:?}");
+        assert!(!names.contains(&"region"), "{names:?}");
     }
 
     #[test]

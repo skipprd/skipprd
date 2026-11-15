@@ -26,7 +26,6 @@ use crate::adapters::storage::StorageAdapter;
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::helpers::plugin_config::{DataSinkEntry, PluginConfigEntry};
 use crate::helpers::wal_storage::{ElStorageMode, SkipprStore, SkipprStoreKind};
-use crate::METADATA;
 
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
@@ -380,7 +379,7 @@ pub struct Transform {
     /// Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_time_unit: Option<BatchTimeUnit>,
-    /// Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).
+    /// Flatten nested objects into underscore-separated columns (`contact_name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).
     #[serde(
         default,
         deserialize_with = "deserialize_flag",
@@ -430,57 +429,77 @@ pub struct Transform {
     pub aggregates: Option<Vec<TransformAggregate>>,
 }
 
-/// One in-memory Arrow op. Exactly one of the keys may be set.
-#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct TransformOp {
+/// One in-memory Arrow op. YAML/JSON is a one-key map (`filter:`, `project:`, …).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransformOp {
     /// DataFusion SQL boolean expression. Rows that do not match are dropped.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter: Option<String>,
+    Filter(String),
     /// Keep only these output column names, in this order.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<Vec<String>>,
+    Project(Vec<String>),
     /// Add derived columns. Map of new name to DataFusion SQL expression.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub derive: Option<BTreeMap<String, String>>,
+    Derive(BTreeMap<String, String>),
     /// Rename columns. Map of current name to new name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rename: Option<BTreeMap<String, String>>,
+    Rename(BTreeMap<String, String>),
     /// Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cast: Option<BTreeMap<String, String>>,
+    Cast(BTreeMap<String, String>),
 }
 
 impl TransformOp {
-    fn set_count(&self) -> usize {
-        [
-            self.filter.is_some(),
-            self.project.as_ref().is_some_and(|v| !v.is_empty()),
-            self.derive.as_ref().is_some_and(|v| !v.is_empty()),
-            self.rename.as_ref().is_some_and(|v| !v.is_empty()),
-            self.cast.as_ref().is_some_and(|v| !v.is_empty()),
-        ]
-        .into_iter()
-        .filter(|set| *set)
-        .count()
+    pub fn is_table_schema_op(&self) -> bool {
+        matches!(self, Self::Project(_) | Self::Rename(_) | Self::Cast(_))
     }
+}
 
-    pub fn is_empty(&self) -> bool {
-        self.set_count() == 0
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        match self.set_count() {
-            1 => Ok(()),
-            0 => Err(
-                "transform.ops entry must set exactly one of filter, project, derive, rename, cast"
-                    .into(),
-            ),
-            _ => Err(
-                "transform.ops entry must set exactly one of filter, project, derive, rename, cast"
-                    .into(),
-            ),
+impl serde::Serialize for TransformOp {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self {
+            TransformOp::Filter(expr) => map.serialize_entry("filter", expr)?,
+            TransformOp::Project(cols) => map.serialize_entry("project", cols)?,
+            TransformOp::Derive(exprs) => map.serialize_entry("derive", exprs)?,
+            TransformOp::Rename(names) => map.serialize_entry("rename", names)?,
+            TransformOp::Cast(types) => map.serialize_entry("cast", types)?,
         }
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TransformOp {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = TransformOp;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a transform op map with one of filter, project, derive, rename, cast")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<TransformOp, M::Error> {
+                let key: String = map
+                    .next_key()?
+                    .ok_or_else(|| serde::de::Error::custom("empty transform op"))?;
+                let op = match key.as_str() {
+                    "filter" => TransformOp::Filter(map.next_value()?),
+                    "project" => TransformOp::Project(map.next_value()?),
+                    "derive" => TransformOp::Derive(map.next_value()?),
+                    "rename" => TransformOp::Rename(map.next_value()?),
+                    "cast" => TransformOp::Cast(map.next_value()?),
+                    other => {
+                        return Err(serde::de::Error::unknown_field(
+                            other,
+                            &["filter", "project", "derive", "rename", "cast"],
+                        ))
+                    }
+                };
+                if map.next_key::<String>()?.is_some() {
+                    return Err(serde::de::Error::custom("transform op must have one key"));
+                }
+                Ok(op)
+            }
+        }
+        deserializer.deserialize_map(Visitor)
     }
 }
 
@@ -1539,6 +1558,11 @@ impl Config {
                 .clone()
         });
         let Some(schema_ref) = schema_sink_ref else {
+            if let Some(plugin) = Self::pipeline_output_plugin_name_for(self, pipeline) {
+                if crate::connect::DataSink::parse(&plugin).is_some_and(Self::is_table_data_sink) {
+                    return plugin;
+                }
+            }
             return Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
         };
         let Ok(schema_name) = Self::parse_registry_ref(&schema_ref, Registry::SchemaSinks) else {
@@ -1793,14 +1817,9 @@ impl Config {
         None
     }
 
-    /// Non-empty `transform.ops` after dropping empty entries.
+    /// Configured `transform.ops`.
     pub fn get_transform_ops(&self) -> Vec<TransformOp> {
-        self.get_transform_config()
-            .ops
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|op| !op.is_empty())
-            .collect()
+        self.get_transform_config().ops.unwrap_or_default()
     }
 
     /// Non-empty `transform.aggregates`.
@@ -1827,15 +1846,59 @@ impl Config {
         format!("{:x}", md5::compute(bytes))
     }
 
+    fn pipeline_output_plugin_name_for(config: &Config, pipeline: &Pipeline) -> Option<String> {
+        let data_sink_ref = pipeline.data_sink.as_ref()?;
+        let entry_name = Self::parse_registry_ref(data_sink_ref, Registry::DataSinks).ok()?;
+        config
+            .data_sinks
+            .as_ref()?
+            .get(&entry_name)?
+            .config
+            .plugin_name()
+            .filter(|name| !name.is_empty())
+    }
+
+    fn is_table_data_sink(kind: crate::connect::DataSink) -> bool {
+        use crate::connect::DataSink::*;
+        match kind {
+            SkipprLake | AthenaIceberg | Duckdb | Snowflake | Postgres | Bigquery | Redshift
+            | Motherduck => true,
+            Amqp | Athena | AzureBlob | Clickhouse | Databricks | File | Gcs | S3 | Sftp
+            | Stdout | Synapse => false,
+        }
+    }
+
+    fn table_ops_violations(
+        config: &Config,
+        pipeline_name: &str,
+        pipeline: &Pipeline,
+    ) -> Vec<String> {
+        let Some(plugin) = Self::pipeline_output_plugin_name_for(config, pipeline) else {
+            return Vec::new();
+        };
+        let Some(kind) = crate::connect::DataSink::parse(&plugin) else {
+            return Vec::new();
+        };
+        if !Self::is_table_data_sink(kind) {
+            return Vec::new();
+        }
+        let Some(ops) = pipeline
+            .transform
+            .as_ref()
+            .and_then(|transform| transform.ops.as_ref())
+        else {
+            return Vec::new();
+        };
+        if ops.iter().any(TransformOp::is_table_schema_op) {
+            return vec![format!(
+                "pipeline '{pipeline_name}' table sinks cannot set transform.ops project, rename, or cast; use ALTER TABLE"
+            )];
+        }
+        Vec::new()
+    }
+
     fn transform_shape_violations(pipeline_name: &str, transform: &Transform) -> Vec<String> {
         let mut out = Vec::new();
-        if let Some(ops) = transform.ops.as_ref() {
-            for (i, op) in ops.iter().enumerate() {
-                if let Err(err) = op.validate() {
-                    out.push(format!("pipeline '{pipeline_name}' {err} (index {i})"));
-                }
-            }
-        }
         if let Some(aggregates) = transform.aggregates.as_ref() {
             let mut seen = std::collections::BTreeSet::new();
             for agg in aggregates {
@@ -2211,6 +2274,7 @@ impl Config {
             if let Some(transform) = named_pipeline.transform.as_ref() {
                 violations.extend(Self::transform_shape_violations(name, transform));
             }
+            violations.extend(Self::table_ops_violations(self, name, named_pipeline));
             if let Ok(crate::pipeline_type::PipelineType::Copy) =
                 crate::pipeline_type::resolve_pipeline_type(
                     named_pipeline.r#type,
@@ -2511,15 +2575,20 @@ impl Config {
                 )
             })?;
 
-        let schema_ref = entry
-            .schema_sink
-            .as_ref()
-            .ok_or_else(|| {
-                format!(
+        let schema_ref = match entry.schema_sink.as_ref() {
+            Some(schema_ref) => schema_ref,
+            None => {
+                if crate::connect::DataSink::parse(&entry.config.plugin_name)
+                    .is_some_and(Self::is_table_data_sink)
+                {
+                    return Ok(entry.config.clone());
+                }
+                return Err(format!(
                     "Invalid configuration for pipeline '{}': data sink '{}' does not configure schema_sink.",
                     pipeline_name, sink_ref
-                )
-            })?;
+                ));
+            }
+        };
         let schema_name = Self::parse_registry_ref(schema_ref, Registry::SchemaSinks).map_err(|err| {
             format!(
                 "Invalid configuration for pipeline '{}': data sink '{}' schema_sink must reference schema_sinks.<name>. {}",
@@ -2910,8 +2979,8 @@ impl Config {
         }
     }
 
-    /// Persist pipeline metadata or return the storage error. ALTER uses this
-    /// so Iceberg and skippr metadata cannot silently diverge.
+    /// Persist pipeline metadata (source schemas plus the ALTER output log)
+    /// or return the storage error.
     pub async fn persist_pipeline_metadata(
         &self,
         pipeline_metadata: &PipelineMetadata,
@@ -3201,19 +3270,14 @@ impl Config {
                     let schema_version = request
                         .version
                         .max(Config::schema_publication_version(&request.config, &ns));
-                    let flatten = request.config.get_transform_flatten_events();
-                    let md_snapshot = { METADATA.load().metadata.clone() };
-                    let out_meta = if let Some(schema) = md_snapshot.get(&ns) {
-                        Some(if flatten {
-                            OutputMetadata::from_flatterened_metadata_for_namespace(&ns, schema)
-                        } else {
-                            let mut out_meta = OutputMetadata::from_metadata(schema);
-                            OutputMetadata::repair_field_identity(&ns, &mut out_meta);
-                            out_meta
-                        })
-                    } else {
-                        crate::runtime_plugins::schema_state::runtime_schema_output_metadata(&ns)
-                    };
+                    let out_meta =
+                        match crate::runtime_plugins::schema_state::published_output_metadata(&ns) {
+                            Ok(out_meta) => out_meta,
+                            Err(err) => {
+                                error!("Schema sync: published output for {ns}: {err}");
+                                break;
+                            }
+                        };
                     if let Some(out_meta) = out_meta {
 
                         let deadletter_namespace =
@@ -3579,25 +3643,8 @@ impl Config {
             return Ok(());
         }
 
-        let flatten = self.get_transform_flatten_events();
-        let md_snapshot = { METADATA.load().metadata.clone() };
-        let out_meta = if let Some(schema) = md_snapshot.get(ns) {
-            if flatten {
-                OutputMetadata::from_flatterened_metadata_for_namespace(ns, schema)
-            } else {
-                let mut out_meta = OutputMetadata::from_metadata(schema);
-                OutputMetadata::repair_field_identity(ns, &mut out_meta);
-                out_meta
-            }
-        } else {
-            crate::runtime_plugins::schema_state::runtime_schema_output_metadata(ns)
-                .ok_or_else(|| format!("Schema sync: namespace {} missing from metadata", ns))?
-        };
-        let out_meta = crate::stream_transform::dest_output_metadata_for_ops(
-            &self.get_transform_ops(),
-            out_meta,
-            ns,
-        )?;
+        let out_meta = crate::runtime_plugins::schema_state::published_output_metadata(ns)?
+            .ok_or_else(|| format!("Schema sync: namespace {ns} missing from metadata"))?;
 
         let sync_timeout = std::time::Duration::from_secs(
             Config::getenv("SCHEMA_SYNC_TIMEOUT_SECONDS", "120")
@@ -3758,6 +3805,33 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn schema_sync_fails_closed_on_published_output_error() {
+        let src = include_str!("configuration.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains("error!(\"Schema sync: published output for {ns}: {err}\")"),
+            "background schema sync must fail closed on dest fold errors"
+        );
+        assert!(
+            !prod.contains("warn!(\"Schema sync: published output for {ns}: {err}\")"),
+            "must not warn-and-continue past dest fold errors"
+        );
+        let sync = prod
+            .split("Schema sync: published output")
+            .nth(1)
+            .expect("published output arm");
+        let arm = &sync[..sync.find("if let Some(out_meta)").unwrap_or(200)];
+        assert!(
+            arm.contains("break;"),
+            "coalesced schema sync must stop the batch on dest fold error"
+        );
+        assert!(
+            !arm.contains("continue;"),
+            "must not skip a dest fold error and publish the rest of the batch"
+        );
+    }
+
     const AUTHORED_YAML: &str = r#"
 skippr:
   workspace: ws
@@ -3823,14 +3897,13 @@ aggregates:
         .unwrap();
         assert_eq!(transform.ops.as_ref().unwrap().len(), 5);
         assert_eq!(
-            transform.ops.as_ref().unwrap()[0].filter.as_deref(),
-            Some("amount > 0")
+            transform.ops.as_ref().unwrap()[0],
+            TransformOp::Filter("amount > 0".into())
         );
         let agg = &transform.aggregates.as_ref().unwrap()[0];
         assert_eq!(agg.id, "customer_invoice_totals");
         assert_eq!(agg.measures["invoice_total"].sum.as_deref(), Some("amount"));
         agg.validate().unwrap();
-        transform.ops.as_ref().unwrap()[0].validate().unwrap();
     }
 
     #[test]
@@ -3839,10 +3912,7 @@ aggregates:
         let mut ops_pipeline = Pipeline::default();
         ops_pipeline.r#type = Some(crate::pipeline_type::PipelineType::Copy);
         ops_pipeline.transform = Some(Transform {
-            ops: Some(vec![TransformOp {
-                filter: Some("amount > 0".into()),
-                ..Default::default()
-            }]),
+            ops: Some(vec![TransformOp::Filter("amount > 0".into())]),
             ..Default::default()
         });
         ops_config.pipelines.insert("p".to_string(), ops_pipeline);
@@ -3885,6 +3955,127 @@ aggregates:
                 .any(|v| v.contains("type: copy cannot set transform.aggregates")),
             "{agg_violations:?}"
         );
+    }
+
+    #[test]
+    fn native_table_sink_rejects_project_rename_cast() {
+        let lake_sinks = Some(
+            [(
+                "lake".into(),
+                DataSinkEntry {
+                    config: PluginConfigEntry {
+                        plugin_name: "SkipprLake".into(),
+                        config: json!({}),
+                    },
+                    schema_sink: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let table_ops = [
+            TransformOp::Project(vec!["id".into()]),
+            TransformOp::Rename(
+                [("region".into(), "region_code".into())]
+                    .into_iter()
+                    .collect(),
+            ),
+            TransformOp::Cast([("amount".into(), "float64".into())].into_iter().collect()),
+        ];
+        for op in table_ops {
+            let mut config = Config::new();
+            let mut pipeline = Pipeline::default();
+            pipeline.data_sink = Some("data_sinks.lake".into());
+            pipeline.transform = Some(Transform {
+                ops: Some(vec![op]),
+                ..Default::default()
+            });
+            config.pipelines.insert("p".into(), pipeline);
+            config.data_sinks = lake_sinks.clone();
+            let violations = config.bind_pipeline("p").get_config_dependency_violations();
+            assert!(
+                violations.iter().any(|v| v.contains("use ALTER TABLE")),
+                "{violations:?}"
+            );
+        }
+
+        let mut stream = Config::new();
+        let mut stream_pipeline = Pipeline::default();
+        stream_pipeline.data_sink = Some("data_sinks.out".into());
+        stream_pipeline.transform = Some(Transform {
+            ops: Some(vec![TransformOp::Rename(
+                [("region".into(), "region_code".into())]
+                    .into_iter()
+                    .collect(),
+            )]),
+            ..Default::default()
+        });
+        stream.pipelines.insert("p".into(), stream_pipeline);
+        stream.data_sinks = Some(
+            [(
+                "out".into(),
+                DataSinkEntry {
+                    config: PluginConfigEntry {
+                        plugin_name: "Kafka".into(),
+                        config: json!({}),
+                    },
+                    schema_sink: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let stream_violations = stream.bind_pipeline("p").get_config_dependency_violations();
+        assert!(
+            !stream_violations
+                .iter()
+                .any(|v| v.contains("use ALTER TABLE")),
+            "{stream_violations:?}"
+        );
+    }
+
+    #[test]
+    fn warehouse_without_schema_sink_rejects_table_ops() {
+        let rename = TransformOp::Rename(
+            [("region".into(), "region_code".into())]
+                .into_iter()
+                .collect(),
+        );
+        for plugin in [
+            "Postgres",
+            "Snowflake",
+            "Bigquery",
+            "Redshift",
+            "Motherduck",
+        ] {
+            let mut config = Config::new();
+            let mut pipeline = Pipeline::default();
+            pipeline.data_sink = Some("data_sinks.wh".into());
+            pipeline.transform = Some(Transform {
+                ops: Some(vec![rename.clone()]),
+                ..Default::default()
+            });
+            config.pipelines.insert("p".into(), pipeline);
+            config.data_sinks = Some(
+                [(
+                    "wh".into(),
+                    DataSinkEntry {
+                        config: PluginConfigEntry {
+                            plugin_name: plugin.into(),
+                            config: json!({}),
+                        },
+                        schema_sink: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            );
+            let violations = config.bind_pipeline("p").get_config_dependency_violations();
+            assert!(
+                violations.iter().any(|v| v.contains("use ALTER TABLE")),
+                "{plugin}: {violations:?}"
+            );
+        }
     }
 
     #[test]

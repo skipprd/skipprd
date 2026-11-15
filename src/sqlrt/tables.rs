@@ -84,11 +84,9 @@ pub(crate) async fn wal_table_for_namespace(
     let Ok(pipeline_metadata) = bound.get_metadata().await else {
         return Ok(None);
     };
-    let flatten = bound.get_transform_flatten_events();
     let schema = crate::ingest_work::Ingest::prepare_arrow_schema_with_metadata_for_query(
         namespace,
-        &pipeline_metadata.metadata,
-        flatten,
+        &pipeline_metadata,
     )
     .map_err(|err| DataFusionError::Plan(err.to_string()))?;
     let schema = crate::stream_transform::dest_schema_for_ops(&bound.get_transform_ops(), schema)
@@ -826,6 +824,10 @@ mod tests {
         assert!(
             prod.contains("prepare_arrow_schema_with_metadata_for_query"),
             "empty WAL after reclaim must still register the metadata schema so query/migrate work"
+        );
+        assert!(
+            prod.contains("&pipeline_metadata"),
+            "WAL-only SELECT must fold PipelineMetadata.alters via output(), not source discover names"
         );
         assert!(
             prod.contains("schema.fields().is_empty()")

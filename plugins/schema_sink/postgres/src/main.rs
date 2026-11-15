@@ -2,8 +2,9 @@ use std::io;
 
 use clap::Parser;
 use skippr_plugin_data_sink_postgres::{DataSinkPostgresPlugin, DataSinkPostgresPluginConfig};
-use skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp;
+use skippr_runtime_sdk::discover::schema_alter::CommittedAlter;
 use skippr_runtime_sdk::discover::OutputMetadata;
+use skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect;
 use skippr_runtime_sdk::plugins::{AlterSupport, SchemaSink};
 use skippr_runtime_sdk::sink_runtime_entry::{
     buffer_name_for_runtime_binding, run_runtime_schema_sink_plugin,
@@ -20,25 +21,24 @@ skippr_runtime_sdk::declare_schema_sink_spec!(
     PostgresSchemaSinkSpec,
     PostgresSchemaRuntimePlugin,
     "Postgres",
-    skippr_runtime_sdk::plugins::AlterSupport::Native
+    skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
+        skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Postgres
+    )
 );
 
 #[async_trait::async_trait]
 impl SchemaSink for PostgresSchemaRuntimePlugin {
     fn alter_support(&self) -> AlterSupport {
-        AlterSupport::Native
+        AlterSupport::Warehouse(WarehouseDialect::Postgres)
     }
 
     async fn apply_alter(
         &self,
         namespace: &str,
         metadata: &OutputMetadata,
-        op: &SchemaAlterOp,
-        field_id: i32,
+        alter: &CommittedAlter,
     ) -> Result<(), io::Error> {
-        self.inner
-            .apply_alter(namespace, metadata, op, field_id)
-            .await
+        self.inner.apply_alter(namespace, metadata, alter).await
     }
 
     async fn sync_schema(

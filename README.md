@@ -162,14 +162,14 @@ During `skipprd sync`:
 - **New fields** are appended to the pipeline schema and destination table automatically.
 - **Type conflicts** never fail the sync or drop data: if `price` was inferred as `double` and `"n/a"` arrives, Skippr creates a sibling column `price_string` and writes the value there.
 
-On Iceberg destinations (`SkipprLake`, `AthenaIceberg`, `Duckdb`) and native-DDL warehouses (`Snowflake`, `Postgres`, `Bigquery`, `Redshift`, `Motherduck`), you can fold sibling columns back, rename fields (including into nested structs), widen types, or drop columns **in-stream without stopping the pipeline**:
+On Iceberg destinations (`SkipprLake`, `AthenaIceberg`, `Duckdb`) and table warehouses (`Snowflake`, `Postgres`, `Bigquery`, `Redshift`, `Motherduck`), you can fold same-type sibling columns back, rename a leaf, widen types, or drop columns **in-stream without stopping the pipeline**:
 
 ```bash
-# Fold a type-conflict sibling column back into the target column
-skipprd query --sql "ALTER TABLE bikehire.rides MERGE COLUMN price_string INTO price"
+# Fold a same-type sibling column back into the target column
+skipprd query --sql "ALTER TABLE bikehire.rides MERGE COLUMN price_cents INTO price"
 
-# Move a top-level column into a nested record (preserves Iceberg field ID)
-skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN region TO detail.region"
+# Rename a column (TO is one identifier; a dotted TO fails closed)
+skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN region TO region_code"
 
 # Widen an integer column to 64-bit BIGINT
 skipprd query --sql "ALTER TABLE bikehire.rides ALTER COLUMN trip_seconds TYPE BIGINT"
@@ -601,8 +601,8 @@ SHOW STATS FOR bikehire.rides;                                     -- HyperLogLo
 SHOW CATALOG FOR bikehire.rides;                                   -- Catalog field definitions
 SCHEMA DUMP bikehire TO 'schema.json';                             -- Export schema to JSON file
 LOAD SCHEMA 'schema.json' INTO bikehire;                           -- Load schema from JSON file
-ALTER TABLE bikehire.rides RENAME COLUMN region TO detail.region;  -- Rename or nest column in-stream
-ALTER TABLE bikehire.rides MERGE COLUMN price_string INTO price;   -- Fold sibling column into target
+ALTER TABLE bikehire.rides RENAME COLUMN region TO region_code;    -- Rename a leaf in-stream
+ALTER TABLE bikehire.rides MERGE COLUMN price_cents INTO price;    -- Fold a same-type sibling into target
 ALTER TABLE bikehire.rides ALTER COLUMN n TYPE BIGINT;             -- Promote column type in-stream
 ALTER TABLE bikehire.rides DROP COLUMN legacy_field;               -- Drop column in-stream
 DISABLE PIPELINE bikehire;                                         -- Freeze pipeline ingestion

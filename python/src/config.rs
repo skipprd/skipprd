@@ -11,7 +11,9 @@ use ::skipprd::helpers::plugin_config::{DataSinkEntry, PluginConfigEntry};
 use ::skipprd::helpers::wal_storage::{ElStorageMode, SkipprStore, SkipprStoreKind};
 use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple};
+use pyo3::types::{
+    PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, PyTuple, PyType,
+};
 use serde::Serialize;
 
 use crate::value_to_py;

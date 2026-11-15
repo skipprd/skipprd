@@ -1033,39 +1033,28 @@ impl Buffers {
             .unwrap_or_default()
     }
 
-    pub(crate) fn map_live_arrow(
-        namespace: &str,
-        mut rewrite: impl FnMut(RecordBatch) -> Result<RecordBatch, String>,
-    ) -> Result<(), String> {
-        let mut seg = SEGMENT_LIVE
-            .lock()
-            .map_err(|_| "WAL live segment lock poisoned".to_string())?;
-        for (key, payload) in seg.batches.iter_mut() {
-            if key.namespace != namespace {
-                continue;
-            }
-            match payload {
-                WalPayload::Copy(_) => {
-                    return Err("copy/non-Arrow WAL parts cannot be rewritten".to_string());
-                }
-                WalPayload::Arrow(batches) => {
-                    for batch in batches.iter_mut() {
-                        *batch = rewrite(batch.clone())?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn reregister_disk_segment(
+    /// Register (or re-register) one catalog row's payload in the segment cache.
+    pub(crate) fn register_catalog_row(
+        handle: &crate::buffer::wal_handle::PipelineWalHandle,
         config: &Config,
-        path: PathBuf,
-        meta: SegmentFileMetadata,
-    ) {
-        let source = SegmentSource::Disk(path);
-        let id = source.segment_id().to_string();
-        Self::segment_cache_register(config, &id, source, meta);
+        row: &skippr_wal_catalog::SegmentRow,
+    ) -> Result<(), skippr_lease::DurableError> {
+        let meta = handle.load_or_build_index_meta(row)?;
+        let source = match &row.location {
+            skippr_wal_catalog::PayloadLocation::Disk { path } => {
+                SegmentSource::Disk(std::path::PathBuf::from(path))
+            }
+            skippr_wal_catalog::PayloadLocation::S3 { bucket, key } => {
+                s3_wal_body_cache::remove(row.segment_id.as_str());
+                SegmentSource::S3 {
+                    key: key.clone(),
+                    bucket: bucket.clone(),
+                    body: None,
+                }
+            }
+        };
+        Self::segment_cache_register(config, row.segment_id.as_str(), source, meta);
+        Ok(())
     }
 
     pub(crate) fn append_batches_to_live(batches: Vec<IngestBufferBatch>) -> Result<u64, String> {
@@ -1566,9 +1555,16 @@ impl Buffers {
         _offsets_db: Arc<Offsets>,
         mut control: Option<&mut CompactionCycleControl<'_>>,
     ) -> bool {
-        if crate::migration::schema_barrier_held() {
-            return true;
-        }
+        let _admission = match crate::pipeline_backend::pipeline_key(config)
+            .map_err(|err| err.to_string())
+            .and_then(|key| crate::migration::gate::try_admit(&key).map_err(|err| err.to_string()))
+        {
+            Ok(admission) => admission,
+            Err(err) => {
+                debug!(error = %err, "compaction cycle deferred");
+                return true;
+            }
+        };
         if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
             if let Err(err) = handle.redo_acked_compactions().await {
                 warn!(error = %err, "compaction cycle deferred catalog reclaim");
@@ -1877,21 +1873,8 @@ impl Buffers {
                 );
                 continue;
             }
-            match handle.load_or_build_index_meta(&row) {
-                Ok(meta) => {
-                    let source = match &row.location {
-                        skippr_wal_catalog::PayloadLocation::Disk { path } => {
-                            SegmentSource::Disk(std::path::PathBuf::from(path))
-                        }
-                        skippr_wal_catalog::PayloadLocation::S3 { bucket, key } => {
-                            SegmentSource::S3 {
-                                key: key.clone(),
-                                bucket: bucket.clone(),
-                                body: None,
-                            }
-                        }
-                    };
-                    Self::segment_cache_register(config, row.segment_id.as_str(), source, meta);
+            match Self::register_catalog_row(handle, config, &row) {
+                Ok(()) => {
                     admitted += 1;
                     if admitted % crate::buffer::wal_handle::WAL_CATALOG_PROGRESS_EVERY == 0 {
                         info!(
@@ -5363,12 +5346,12 @@ mod tests_wal_commit {
         let new_path = old_path.with_file_name("rewriteseg-migrating.seg");
         fs::copy(&old_path, &new_path).unwrap();
         handle
-            .replace_payload_location(
+            .replace_payload(
                 "rewriteseg",
                 skippr_wal_catalog::PayloadLocation::Disk {
                     path: new_path.to_string_lossy().into_owned(),
                 },
-                persisted.meta.total_bytes,
+                &persisted.meta,
                 persisted.sha256,
             )
             .unwrap();
@@ -5422,7 +5405,15 @@ mod tests_wal_commit {
             !body.contains("admit_payload"),
             "hydrate must use wal#idx# / read_index_path, not SHA admit"
         );
-        assert!(body.contains("load_or_build_index_meta"));
+        assert!(
+            body.contains("register_catalog_row"),
+            "hydrate registers catalog payloads through register_catalog_row"
+        );
+        let register = src
+            .split("fn register_catalog_row")
+            .nth(1)
+            .expect("register_catalog_row");
+        assert!(register.contains("load_or_build_index_meta"));
     }
 
     #[test]

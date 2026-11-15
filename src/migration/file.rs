@@ -9,7 +9,7 @@ use super::journal::{MigrationChecksum, MigrationId};
 pub enum MigrationFileError {
     #[error("{0}")]
     Parse(String),
-    #[error("down() is only valid for Rename or Promote; {id} includes {op}")]
+    #[error("down() is only valid for Rename; {id} includes {op}")]
     DownNotReversible { id: String, op: String },
     #[error("migration '{0}' has no ALTER TABLE statements")]
     Empty(String),
@@ -167,15 +167,13 @@ fn reject_irreversible_down(
     up: &[AlterStmt],
     down: &[AlterStmt],
 ) -> Result<(), MigrationFileError> {
-    let irreversible =
-        |op: &SchemaAlterOp| matches!(op, SchemaAlterOp::Drop { .. } | SchemaAlterOp::Merge { .. });
-    if up.iter().any(|stmt| irreversible(&stmt.op))
-        || down.iter().any(|stmt| irreversible(&stmt.op))
+    let reversible = |op: &SchemaAlterOp| matches!(op, SchemaAlterOp::Rename { .. });
+    if up.iter().any(|stmt| !reversible(&stmt.op)) || down.iter().any(|stmt| !reversible(&stmt.op))
     {
         let op = up
             .iter()
             .chain(down.iter())
-            .find(|stmt| irreversible(&stmt.op))
+            .find(|stmt| !reversible(&stmt.op))
             .map(|stmt| op_name(&stmt.op))
             .unwrap_or("Drop/Merge");
         return Err(MigrationFileError::DownNotReversible {

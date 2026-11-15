@@ -1659,12 +1659,7 @@ where
                     .or(deadletter_plugin.as_ref())
                     .ok_or_else(|| io::Error::other("schema sink is not installed"))?;
                 plugin
-                    .apply_alter(
-                        &request.namespace,
-                        &request.metadata,
-                        &request.op,
-                        request.field_id,
-                    )
+                    .apply_alter(&request.namespace, &request.metadata, &request.alter)
                     .await?;
                 control_writer
                     .write(&PluginFrame::SchemaAck(RuntimeRequestAck {

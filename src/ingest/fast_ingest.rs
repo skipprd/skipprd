@@ -9,6 +9,7 @@ use serde_json::Map;
 
 use crate::discover::date_formats::DateFormats;
 use crate::discover::evolution::Evolution;
+use crate::discover::schema_alter::IngestKeys;
 use crate::discover::{Metadata, SkipprDataType};
 
 use crate::helpers::Helpers;
@@ -107,6 +108,7 @@ pub fn fast_path_ingest(
     metadata: &HashMap<String, Metadata>,
     namespace: &str,
     flatten: bool,
+    output: &Metadata,
 ) -> Result<Value, Box<dyn Error>> {
     // Get the template message once
     let mut _message = match DEFAULT_NESTED_MESSAGE.get(namespace) {
@@ -126,25 +128,14 @@ pub fn fast_path_ingest(
     let field_count = object.len();
     let mut fields_to_process = Vec::with_capacity(field_count);
 
-    // First pass - collect field information to process
-    for (field, value) in object {
-        if let Some(meta_data) = metadata.get(field) {
-            // Skip disabled fields early (no functional change; mirrors deep handlers)
-            if !meta_data.enabled {
-                continue;
-            }
-            // Skip null or empty values early
-            if value.is_null()
-                || (value.is_string() && value.as_str().unwrap_or_default().is_empty())
-            {
-                continue;
-            }
-
-            // Use data_type() method instead of string determined_type
-            // Avoid recomputing out_field_name in insertion path; capture now
-            fields_to_process.push((field, value, meta_data.determined_type.clone()));
-        } else {
-            // Propose evolution for missing field under root
+    let mut source = Metadata::new().unwrap();
+    source.fields = Box::new(metadata.clone());
+    let mut object = object.clone();
+    IngestKeys::new(&source, output)
+        .rewrite(&mut object)
+        .map_err(|err| err.to_string())?;
+    for (field, value) in &object {
+        let Some(meta_data) = metadata.get(field) else {
             if crate::helpers::configuration::Config::debug_enabled() {
                 println!(
                     "fast_path_ingest: missing field in metadata: '{}' ns={}",
@@ -152,7 +143,18 @@ pub fn fast_path_ingest(
                 );
             }
             return Err(format!("Field '{}' not found in metadata", field).into());
+        };
+        if !meta_data.enabled {
+            continue;
         }
+        if value.is_null() || (value.is_string() && value.as_str().unwrap_or_default().is_empty()) {
+            continue;
+        }
+        fields_to_process.push((
+            field.clone(),
+            value.clone(),
+            meta_data.determined_type.clone(),
+        ));
     }
 
     // Second pass - process all fields
@@ -163,7 +165,7 @@ pub fn fast_path_ingest(
     for (field, value, data_type) in fields_to_process {
         // No need to convert string to enum since we already have the enum
         let resolved_value =
-            match fast_set_value(config, &data_type, field, value, metadata, None, flatten) {
+            match fast_set_value(config, &data_type, &field, &value, metadata, None, flatten) {
                 Ok(v) => v,
                 Err(e) => {
                     if crate::helpers::configuration::Config::log_wal_enabled() {
@@ -2123,6 +2125,12 @@ mod tests_fast_path_ingest {
     use super::*;
     use serde_json::json;
 
+    fn identity_output(fields: &HashMap<String, Metadata>) -> Metadata {
+        let mut meta = Metadata::new().unwrap();
+        meta.fields = Box::new(fields.clone());
+        meta
+    }
+
     // Helper function to create metadata for testing
     fn create_test_metadata() -> HashMap<String, Metadata> {
         let mut metadata = HashMap::new();
@@ -2219,7 +2227,14 @@ mod tests_fast_path_ingest {
             "active": true
         });
 
-        let result = fast_path_ingest(&Config::new(), &input, &metadata, namespace, false);
+        let result = fast_path_ingest(
+            &Config::new(),
+            &input,
+            &metadata,
+            namespace,
+            false,
+            &identity_output(&metadata),
+        );
         assert!(result.is_ok());
 
         let output = result.unwrap();
@@ -2242,7 +2257,14 @@ mod tests_fast_path_ingest {
             }
         });
 
-        let result = fast_path_ingest(&Config::new(), &input, &metadata, namespace, false);
+        let result = fast_path_ingest(
+            &Config::new(),
+            &input,
+            &metadata,
+            namespace,
+            false,
+            &identity_output(&metadata),
+        );
         assert!(result.is_ok());
 
         let output = result.unwrap();
@@ -2262,7 +2284,14 @@ mod tests_fast_path_ingest {
             "tags": ["developer", "rust", "data"]
         });
 
-        let result = fast_path_ingest(&Config::new(), &input, &metadata, namespace, false);
+        let result = fast_path_ingest(
+            &Config::new(),
+            &input,
+            &metadata,
+            namespace,
+            false,
+            &identity_output(&metadata),
+        );
         assert!(result.is_ok());
 
         let output = result.unwrap();
@@ -2282,7 +2311,14 @@ mod tests_fast_path_ingest {
             "active": null
         });
 
-        let result = fast_path_ingest(&Config::new(), &input, &metadata, namespace, false);
+        let result = fast_path_ingest(
+            &Config::new(),
+            &input,
+            &metadata,
+            namespace,
+            false,
+            &identity_output(&metadata),
+        );
         assert!(result.is_ok());
 
         let output = result.unwrap();
@@ -2303,7 +2339,14 @@ mod tests_fast_path_ingest {
             "unknown_field": "value"
         });
 
-        let result = fast_path_ingest(&Config::new(), &input, &metadata, namespace, false);
+        let result = fast_path_ingest(
+            &Config::new(),
+            &input,
+            &metadata,
+            namespace,
+            false,
+            &identity_output(&metadata),
+        );
         assert!(result.is_err());
 
         let err = result.unwrap_err().to_string();
@@ -2322,7 +2365,14 @@ mod tests_fast_path_ingest {
         });
 
         // The function actually returns an error when types don't match
-        let result = fast_path_ingest(&Config::new(), &input, &metadata, namespace, false);
+        let result = fast_path_ingest(
+            &Config::new(),
+            &input,
+            &metadata,
+            namespace,
+            false,
+            &identity_output(&metadata),
+        );
 
         // Check that the result is an error
         assert!(result.is_err());
@@ -2361,7 +2411,14 @@ mod tests_fast_path_ingest {
         // We need a mock for Helpers::flatten in this test
         // This is a complex test due to the external dependency on Helpers::flatten
         // For now, we'll expect it to return an error or be handled
-        let _result = fast_path_ingest(&Config::new(), &input, &metadata, namespace, true);
+        let _result = fast_path_ingest(
+            &Config::new(),
+            &input,
+            &metadata,
+            namespace,
+            true,
+            &identity_output(&metadata),
+        );
         // We'll skip assertion here since we can't easily mock Helpers::flatten
     }
 
@@ -2376,7 +2433,14 @@ mod tests_fast_path_ingest {
             "name": "John Doe"
         });
 
-        let result = fast_path_ingest(&Config::new(), &input, &metadata, namespace, false);
+        let result = fast_path_ingest(
+            &Config::new(),
+            &input,
+            &metadata,
+            namespace,
+            false,
+            &identity_output(&metadata),
+        );
         assert!(result.is_err());
 
         let err = result.unwrap_err().to_string();

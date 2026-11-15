@@ -994,30 +994,70 @@ impl PipelineWalHandle {
         Ok(seq)
     }
 
-    pub fn replace_payload_location(
+    /// Point a live segment at a rewritten payload. Segment and Index rows
+    /// change in one transaction; the slice layout (keys, ordinals, rows) must
+    /// be unchanged so the `done` bitmap and compaction refs stay aligned.
+    pub fn replace_payload(
         &self,
         segment_id: &str,
         location: PayloadLocation,
-        payload_len: u64,
+        meta: &crate::buffer::segment_file::SegmentFileMetadata,
         payload_sha256: [u8; 32],
     ) -> Result<(), DurableError> {
         let fence = self.fence();
         let id = SegmentId::new(segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
-        let Some(CatalogRow::Segment(mut row)) = self
-            .catalog
-            .get(&CatalogKey::Segment(id.clone()))
-            .map_err(|err| DurableError::Io(err.to_string()))?
-        else {
+        let get = |key: CatalogKey| {
+            self.catalog
+                .get(&key)
+                .map_err(|err| DurableError::Io(err.to_string()))
+        };
+        let Some(CatalogRow::Segment(mut row)) = get(CatalogKey::Segment(id.clone()))? else {
             return Err(DurableError::Io(format!(
                 "missing SegmentRow for payload replace {segment_id}"
             )));
         };
+        let entries = slice_dir_entries(meta);
+        let layout = |entries: &[SliceDirEntry]| {
+            entries
+                .iter()
+                .map(|e| {
+                    (
+                        e.ordinal,
+                        e.namespace.clone(),
+                        e.partition.clone(),
+                        e.event_time,
+                        e.sink_ref.clone(),
+                        e.row_count,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut txn = CatalogTxn::new();
+        match get(CatalogKey::Index(id.clone()))? {
+            Some(CatalogRow::Index(index)) => {
+                if layout(&index.entries) != layout(&entries) {
+                    return Err(DurableError::ProtocolMismatch(format!(
+                        "payload rewrite changed the slice layout of {segment_id}"
+                    )));
+                }
+                txn.put(
+                    CatalogKey::Index(id.clone()),
+                    CatalogRow::Index(SegmentIndexRow {
+                        segment_id: id.clone(),
+                        version: next_catalog_version(index.version)?,
+                        entries,
+                    }),
+                    PutCond::Version(index.version),
+                )
+                .map_err(|err| DurableError::Io(err.to_string()))?;
+            }
+            _ => put_slice_index(&mut txn, &id, meta)?,
+        }
         let version = row.version;
         row.location = location;
-        row.payload_len = payload_len;
+        row.payload_len = meta.total_bytes;
         row.payload_sha256 = payload_sha256;
         row.version = next_catalog_version(version)?;
-        let mut txn = CatalogTxn::new();
         txn.put(
             CatalogKey::Segment(id),
             CatalogRow::Segment(row),

@@ -146,11 +146,8 @@ fn g_filter_keeps_cdc_sidecar() {
             order_token: vec![3],
         },
     ];
-    let ops = vec![TransformOp {
-        filter: Some("amount > 0".into()),
-        ..Default::default()
-    }];
-    let (batches, cdc) = apply_configured_ops(&ops, vec![batch], Some(cdc)).unwrap();
+    let ops = vec![TransformOp::Filter("amount > 0".into())];
+    let (batches, cdc) = apply_configured_ops(&[], &ops, vec![batch], Some(cdc)).unwrap();
     assert_eq!(batches[0].num_rows(), 1);
     let cdc = cdc.unwrap();
     assert_eq!(cdc.len(), 1);
@@ -165,10 +162,9 @@ fn g_transform_error_does_not_advance_offsets() {
     use crate::helpers::offsets::OffsetTypes;
     use sha2::{Digest, Sha256};
     use skippr_lease::PublishMode;
-    let ops = vec![crate::helpers::configuration::TransformOp {
-        project: Some(vec!["missing".into()]),
-        ..Default::default()
-    }];
+    let ops = vec![crate::helpers::configuration::TransformOp::Project(vec![
+        "missing".into(),
+    ])];
     let batch = invoice_batch(&["a"], &[1], &["i1"]);
     let store = crate::helpers::offset_store::memory_offset_store();
     let sk = StoreOffsetStore::offset_key("ns", "p");
@@ -371,20 +367,11 @@ fn g_filter_project_derive_compose() {
     use std::collections::BTreeMap;
     let batch = invoice_batch(&["a", "b"], &[0, 5], &["i1", "i2"]);
     let ops = vec![
-        TransformOp {
-            filter: Some("amount > 0".into()),
-            ..Default::default()
-        },
-        TransformOp {
-            derive: Some(BTreeMap::from([("double".into(), "amount * 2".into())])),
-            ..Default::default()
-        },
-        TransformOp {
-            project: Some(vec!["customer_id".into(), "double".into()]),
-            ..Default::default()
-        },
+        TransformOp::Filter("amount > 0".into()),
+        TransformOp::Derive(BTreeMap::from([("double".into(), "amount * 2".into())])),
+        TransformOp::Project(vec!["customer_id".into(), "double".into()]),
     ];
-    let (batches, _) = apply_configured_ops(&ops, vec![batch], None).unwrap();
+    let (batches, _) = apply_configured_ops(&[], &ops, vec![batch], None).unwrap();
     assert_eq!(batches[0].num_rows(), 1);
     assert!(batches[0].schema().field_with_name("double").is_ok());
     assert!(batches[0].schema().field_with_name("amount").is_err());
@@ -392,10 +379,9 @@ fn g_filter_project_derive_compose() {
 
 #[test]
 fn g_unknown_project() {
-    let ops = vec![crate::helpers::configuration::TransformOp {
-        project: Some(vec!["missing".into()]),
-        ..Default::default()
-    }];
+    let ops = vec![crate::helpers::configuration::TransformOp::Project(vec![
+        "missing".into(),
+    ])];
     let batch = invoice_batch(&["a"], &[1], &["i1"]);
     assert!(crate::stream_transform::apply_ops(&ops, vec![batch]).is_err());
 }
@@ -406,11 +392,11 @@ fn g_schema_change_derived_column() {
     use crate::stream_transform::apply_configured_ops;
     use std::collections::BTreeMap;
     let batch = invoice_batch(&["a"], &[3], &["i1"]);
-    let ops = vec![TransformOp {
-        derive: Some(BTreeMap::from([("amount2".into(), "amount + 1".into())])),
-        ..Default::default()
-    }];
-    let (batches, _) = apply_configured_ops(&ops, vec![batch], None).unwrap();
+    let ops = vec![TransformOp::Derive(BTreeMap::from([(
+        "amount2".into(),
+        "amount + 1".into(),
+    )]))];
+    let (batches, _) = apply_configured_ops(&[], &ops, vec![batch], None).unwrap();
     assert!(batches[0].schema().field_with_name("amount2").is_ok());
     assert!(batches[0].schema().field_with_name("amount").is_ok());
 }

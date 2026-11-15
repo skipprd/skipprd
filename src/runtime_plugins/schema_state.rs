@@ -46,20 +46,31 @@ pub fn clear_runtime_source_schema_state() {
         .clear();
 }
 
-fn metadata_schema_state_namespaces() -> BTreeMap<String, OutputMetadata> {
-    let metadata = METADATA.load();
-    metadata
+fn metadata_schema_state_namespaces() -> Result<BTreeMap<String, OutputMetadata>, String> {
+    let pipeline = METADATA.load();
+    pipeline
         .metadata
-        .iter()
-        .map(|(namespace, schema)| {
-            let output = if metadata.flattened {
-                OutputMetadata::from_flatterened_metadata(schema)
-            } else {
-                OutputMetadata::from_metadata(schema)
-            };
-            (namespace.clone(), output)
+        .keys()
+        .map(|namespace| {
+            pipeline
+                .output_metadata(namespace)
+                .map(|output| (namespace.clone(), output))
+                .map_err(|err| err.to_string())
         })
         .collect()
+}
+
+/// Published dest shape: fold `PipelineMetadata.alters`, then project. Missing ns
+/// falls back to runtime source state. Flatten-mode mismatch fails closed.
+pub fn published_output_metadata(namespace: &str) -> Result<Option<OutputMetadata>, String> {
+    let pipeline = METADATA.load();
+    match pipeline.output_metadata(namespace) {
+        Ok(output) => Ok(Some(output)),
+        Err(crate::discover::schema_alter::SchemaAlterError::NamespaceNotFound(_)) => {
+            runtime_schema_output_metadata(namespace)
+        }
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 fn output_schema_equivalent(left: &OutputMetadata, right: &OutputMetadata) -> bool {
@@ -79,21 +90,18 @@ fn output_schema_equivalent(left: &OutputMetadata, right: &OutputMetadata) -> bo
 pub fn apply_runtime_source_schema_state(
     config: &Config,
     schema_state: RuntimeSchemaState,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let _guard = RUNTIME_SOURCE_SCHEMA_STATE_UPDATE_LOCK
         .lock()
         .expect("runtime source schema state update lock poisoned");
     let current = RUNTIME_SOURCE_SCHEMA_STATE.load();
     let mut namespaces = current.namespaces.clone();
     let mut namespace_versions = current.namespace_versions.clone();
-    let mut effective_namespaces = metadata_schema_state_namespaces();
-    for namespace in effective_namespaces.keys() {
+    let dest_namespaces = metadata_schema_state_namespaces()?;
+    for namespace in dest_namespaces.keys() {
         namespace_versions
             .entry(namespace.clone())
             .or_insert_with(|| crate::ingest_work::namespace_schema_version(namespace).max(1));
-    }
-    for (namespace, output) in current.namespaces.iter() {
-        effective_namespaces.insert(namespace.clone(), output.clone());
     }
     let mut changed_namespaces = Vec::new();
     let update_version = schema_state.version;
@@ -104,16 +112,19 @@ pub fn apply_runtime_source_schema_state(
             .get(&namespace)
             .copied()
             .unwrap_or(update_version);
-        if effective_namespaces
+        if dest_namespaces.contains_key(&namespace) {
+            continue;
+        }
+        if current
+            .namespaces
             .get(&namespace)
-            .is_some_and(|current| output_schema_equivalent(current, &output))
+            .is_some_and(|installed| output_schema_equivalent(installed, &output))
             && namespace_versions
                 .get(&namespace)
                 .is_some_and(|installed| *installed >= namespace_version)
         {
             continue;
         }
-        effective_namespaces.insert(namespace.clone(), output.clone());
         namespaces.insert(namespace.clone(), output);
         namespace_versions.insert(namespace.clone(), namespace_version);
         RUNTIME_SOURCE_SCHEMA_NAMESPACE_VERSIONS
@@ -129,7 +140,7 @@ pub fn apply_runtime_source_schema_state(
         namespace_versions,
     }));
     let _ = PIPELINE_SCHEMA_VERSION.fetch_max(version, Ordering::AcqRel);
-    changed_namespaces
+    Ok(changed_namespaces)
 }
 
 pub fn runtime_schema_namespace_version(namespace: &str) -> u64 {
@@ -141,8 +152,8 @@ pub fn runtime_schema_namespace_version(namespace: &str) -> u64 {
         .unwrap_or(0)
 }
 
-pub fn current_runtime_schema_state() -> RuntimeSchemaState {
-    let mut namespaces = metadata_schema_state_namespaces();
+pub fn current_runtime_schema_state() -> Result<RuntimeSchemaState, String> {
+    let mut namespaces = metadata_schema_state_namespaces()?;
     let mut namespace_versions = namespaces
         .keys()
         .map(|namespace| {
@@ -154,24 +165,28 @@ pub fn current_runtime_schema_state() -> RuntimeSchemaState {
         .collect::<BTreeMap<_, _>>();
     let runtime_source_schema_state = RUNTIME_SOURCE_SCHEMA_STATE.load();
     for (namespace, output) in runtime_source_schema_state.namespaces.iter() {
-        namespaces.insert(namespace.clone(), output.clone());
+        namespaces
+            .entry(namespace.clone())
+            .or_insert_with(|| output.clone());
     }
     for (namespace, version) in runtime_source_schema_state.namespace_versions.iter() {
-        namespace_versions.insert(namespace.clone(), *version);
+        namespace_versions
+            .entry(namespace.clone())
+            .or_insert(*version);
     }
 
-    RuntimeSchemaState {
+    Ok(RuntimeSchemaState {
         version: current_pipeline_schema_version().max(runtime_source_schema_state.version),
         namespaces,
         namespace_versions,
-    }
+    })
 }
 
-pub fn runtime_schema_output_metadata(namespace: &str) -> Option<OutputMetadata> {
-    current_runtime_schema_state()
+pub fn runtime_schema_output_metadata(namespace: &str) -> Result<Option<OutputMetadata>, String> {
+    Ok(current_runtime_schema_state()?
         .namespaces
         .get(namespace)
-        .cloned()
+        .cloned())
 }
 
 pub fn install_from_pipeline_metadata(
@@ -183,14 +198,10 @@ pub fn install_from_pipeline_metadata(
         if namespace.is_empty() || namespace.starts_with("_dl_") {
             continue;
         }
-        let _ = crate::ingest_work::Ingest::prepare_arrow_schema_with_metadata(
-            config,
-            namespace,
-            &metadata.metadata,
-            metadata.flattened,
-        );
+        crate::ingest_work::Ingest::prepare_arrow_schema_with_metadata(config, namespace, metadata)
+            .unwrap_or_else(|err| panic!("published dest Arrow schema for {namespace}: {err}"));
     }
-    let namespaces = metadata_schema_state_namespaces();
+    let namespaces = metadata_schema_state_namespaces().expect("published dest schema");
     let namespace_versions = namespaces
         .keys()
         .map(|namespace| {
@@ -208,7 +219,8 @@ pub fn install_from_pipeline_metadata(
             namespaces,
             namespace_versions,
         },
-    );
+    )
+    .expect("published dest schema");
     version
 }
 
@@ -262,7 +274,8 @@ mod tests {
                     namespaces: BTreeMap::from([("events".to_string(), output)]),
                     namespace_versions: BTreeMap::from([("events".to_string(), 1)]),
                 },
-            );
+            )
+            .unwrap();
 
             assert!(changed.is_empty());
         });
@@ -286,7 +299,8 @@ mod tests {
                     namespaces: BTreeMap::from([("events".to_string(), output)]),
                     namespace_versions: BTreeMap::from([("events".to_string(), 1)]),
                 },
-            );
+            )
+            .unwrap();
 
             assert!(changed.is_empty());
         });
@@ -315,7 +329,8 @@ mod tests {
                         ("users".to_string(), 1),
                     ]),
                 },
-            );
+            )
+            .unwrap();
 
             assert_eq!(changed, vec!["users".to_string()]);
         });
@@ -339,9 +354,132 @@ mod tests {
                 crate::ingest_work::namespace_schema_version("events").max(1)
             );
             assert!(current_runtime_schema_state()
+                .unwrap()
                 .namespaces
                 .contains_key("events"));
             assert!(crate::ARROW_SCHEMA.get("events").is_some());
         });
+    }
+
+    #[test]
+    #[serial]
+    fn dest_output_metadata_is_not_overwritten_by_source_schema_state() {
+        use crate::discover::schema_alter::{
+            AlterColumn, AlterOrigin, CanonicalAlter, CommittedAlter, FlattenMode,
+            MigrationDirection, MigrationId, OutputName,
+        };
+
+        with_metadata_test_lock(|| {
+            let mut root = Metadata::new().unwrap();
+            let mut region = Metadata::new_with_type(SkipprDataType::String, "region");
+            region.field_id = 1;
+            root.fields.insert("region".into(), region);
+            let nested = OutputName::parse_sql(FlattenMode::Nested, "region").unwrap();
+            let mut pipeline = PipelineMetadata::new(&Config::new());
+            pipeline.flattened = false;
+            pipeline.metadata.insert("orders".into(), root.clone());
+            pipeline.alters.insert(
+                "orders".into(),
+                vec![CommittedAlter {
+                    origin: AlterOrigin {
+                        migration: MigrationId::new("m"),
+                        direction: MigrationDirection::Up,
+                    },
+                    seq: 0,
+                    alter: CanonicalAlter::Rename {
+                        column: AlterColumn {
+                            name: nested,
+                            id: 1,
+                            ty: SkipprDataType::String,
+                        },
+                        to_leaf: "region_code".into(),
+                    },
+                }],
+            );
+            METADATA.store(Arc::new(pipeline));
+            PIPELINE_SCHEMA_VERSION.store(0, Ordering::Release);
+            clear_runtime_source_schema_state();
+
+            let source = OutputMetadata::from_metadata(&root);
+            let changed = apply_runtime_source_schema_state(
+                &Config::new(),
+                RuntimeSchemaState {
+                    version: 1,
+                    namespaces: BTreeMap::from([("orders".to_string(), source)]),
+                    namespace_versions: BTreeMap::from([("orders".to_string(), 1)]),
+                },
+            )
+            .unwrap();
+            assert!(changed.is_empty());
+
+            let published = current_runtime_schema_state().unwrap();
+            let names: Vec<_> = published.namespaces["orders"]
+                .child_fields()
+                .map(|(name, _)| name.as_str())
+                .collect();
+            assert!(names.contains(&"region_code"), "{names:?}");
+            assert!(!names.contains(&"region"), "{names:?}");
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn published_output_metadata_fails_closed_on_flatten_mismatch() {
+        use crate::discover::schema_alter::{
+            AlterColumn, AlterOrigin, CanonicalAlter, CommittedAlter, FlattenMode,
+            MigrationDirection, MigrationId, OutputName,
+        };
+
+        with_metadata_test_lock(|| {
+            let mut root = Metadata::new().unwrap();
+            let mut region = Metadata::new_with_type(SkipprDataType::String, "region");
+            region.field_id = 1;
+            root.fields.insert("region".into(), region);
+            let nested = OutputName::parse_sql(FlattenMode::Nested, "region").unwrap();
+            let mut pipeline = PipelineMetadata::new(&Config::new());
+            pipeline.flattened = true;
+            pipeline.metadata.insert("orders".into(), root);
+            pipeline.alters.insert(
+                "orders".into(),
+                vec![CommittedAlter {
+                    origin: AlterOrigin {
+                        migration: MigrationId::new("m"),
+                        direction: MigrationDirection::Up,
+                    },
+                    seq: 0,
+                    alter: CanonicalAlter::Rename {
+                        column: AlterColumn {
+                            name: nested,
+                            id: 1,
+                            ty: SkipprDataType::String,
+                        },
+                        to_leaf: "region_code".into(),
+                    },
+                }],
+            );
+            METADATA.store(Arc::new(pipeline));
+            PIPELINE_SCHEMA_VERSION.store(0, Ordering::Release);
+            clear_runtime_source_schema_state();
+            let err = published_output_metadata("orders").unwrap_err();
+            assert!(
+                err.to_lowercase().contains("flatten") || err.contains("Flatten"),
+                "{err}"
+            );
+        });
+    }
+
+    #[test]
+    fn install_from_pipeline_metadata_does_not_discard_dest_fold() {
+        let src = include_str!("schema_state.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !prod
+                .contains("let _ = crate::ingest_work::Ingest::prepare_arrow_schema_with_metadata"),
+            "install must not discard dest fold"
+        );
+        assert!(
+            prod.contains("unwrap_or_else(|err| panic!(\"published dest Arrow schema for {namespace}: {err}\"))"),
+            "install must fail closed on dest fold"
+        );
     }
 }
