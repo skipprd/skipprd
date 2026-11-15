@@ -4481,91 +4481,61 @@ impl Ingest {
         convert_skippr_to_arrow(output_metadata.fields).map(Arc::new)
     }
 
-    pub fn prepare_arrow_schema_with_metadata(
-        config: &Config,
+    /// Dest Arrow from `output()` is the published schema. ALTER rename/drop/merge
+    /// is not a field-name superset of source; the cache always takes the fold.
+    fn install_dest_arrow_schema(
         skpr_namespace: &str,
+        dest: &Arc<arrow::datatypes::Schema>,
         pipeline: &PipelineMetadata,
-    ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
-        let _schema_ref = Self::published_arrow_schema(pipeline, skpr_namespace)?;
-
-        // Compute new schema hash for change detection using a stable fingerprint
-        let new_hash = crate::converters::skippr_arrow::stable_schema_fingerprint(&_schema_ref);
-
-        // Publish schema via ArcSwap per-namespace
+    ) -> bool {
         use dashmap::mapref::entry::Entry;
+        let new_hash = crate::converters::skippr_arrow::stable_schema_fingerprint(dest);
         let mut did_update_schema = false;
         match ARROW_SCHEMA.entry(skpr_namespace.to_string()) {
             Entry::Occupied(o) => {
                 let prev = o.get().load();
                 let prev_hash = crate::converters::skippr_arrow::stable_schema_fingerprint(&prev);
                 if prev_hash != new_hash {
-                    // Only accept monotonic (superset) schema changes; ignore regressions
-                    if crate::converters::skippr_arrow::is_schema_superset(&_schema_ref, &prev) {
-                        o.get().store(_schema_ref.clone());
-                        did_update_schema = true;
-                        if Config::debug_enabled() {
-                            debug!(
-                                "Arrow schema updated for namespace {}: {} -> {}",
-                                skpr_namespace, prev_hash, new_hash
-                            );
-                        }
-                    } else if Config::debug_enabled() {
-                        warn!(
-                            "Arrow schema change rejected (non-superset) for namespace {}: {} !-> {}",
-                            skpr_namespace, prev_hash, new_hash
-                        );
-                    }
-                } else if Config::debug_enabled() {
-                    debug!(
-                        "Arrow schema unchanged for namespace {}: {}",
-                        skpr_namespace, new_hash
-                    );
+                    o.get().store(dest.clone());
+                    did_update_schema = true;
                 }
             }
             Entry::Vacant(v) => {
-                v.insert(arc_swap::ArcSwap::from(_schema_ref.clone()));
+                v.insert(arc_swap::ArcSwap::from(dest.clone()));
                 did_update_schema = true;
-                if Config::debug_enabled() {
-                    debug!(
-                        "Arrow schema initialized for namespace {}: {}",
-                        skpr_namespace, new_hash
-                    );
-                }
             }
         }
-
-        // Refresh default nested message template for fast ingest determinism.
-        // Templates stay on source field names; Arrow is the folded dest shape.
         if did_update_schema {
+            // Fast ingest fills source JSON keys (`IngestKeys` maps dest names
+            // back to source). `apply_log` is the dest fold after serialize.
             if let Some(ns_meta) = pipeline.metadata.get(skpr_namespace) {
                 let template = create_default_nested_message(&ns_meta.fields);
                 DEFAULT_NESTED_MESSAGE.insert(skpr_namespace.to_string(), Arc::new(template));
             }
-        }
-
-        // Bump schema version IMMEDIATELY after updating ARROW_SCHEMA and the
-        // template so that load_stable_schema_hash's seqlock never pairs the
-        // new schema with the old version number.  The output schema sync is
-        // fire-and-forget and must come *after* the version bump.
-        if did_update_schema {
             let entry = ARROW_SCHEMA_VERSION
                 .entry(skpr_namespace.to_string())
                 .or_insert_with(|| AtomicU64::new(0));
             entry.fetch_add(1, Ordering::Release);
             bump_pipeline_schema_version();
         }
+        did_update_schema
+    }
 
+    pub fn prepare_arrow_schema_with_metadata(
+        config: &Config,
+        skpr_namespace: &str,
+        pipeline: &PipelineMetadata,
+    ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
+        let dest = Self::published_arrow_schema(pipeline, skpr_namespace)?;
+        let did_update_schema = Self::install_dest_arrow_schema(skpr_namespace, &dest, pipeline);
         if did_update_schema {
             config.sync_output_schema_namespace(skpr_namespace);
         }
-
-        // Mark schema as ready deterministically for this namespace
         SCHEMA_READY
             .entry(skpr_namespace.to_string())
             .or_insert_with(|| AtomicBool::new(true))
             .store(true, Ordering::Relaxed);
-
-        Ok(_schema_ref)
+        Ok(dest)
     }
 
     // Version for read-only query context: builds/publishes Arrow schema without external side effects
@@ -4573,56 +4543,13 @@ impl Ingest {
         skpr_namespace: &str,
         pipeline: &PipelineMetadata,
     ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
-        let _schema_ref = Self::published_arrow_schema(pipeline, skpr_namespace)?;
-
-        // Compute new schema hash for change detection using a stable fingerprint
-        let new_hash = crate::converters::skippr_arrow::stable_schema_fingerprint(&_schema_ref);
-
-        // Publish schema via ArcSwap per-namespace
-        use dashmap::mapref::entry::Entry;
-        let mut did_update_schema = false;
-        match ARROW_SCHEMA.entry(skpr_namespace.to_string()) {
-            Entry::Occupied(o) => {
-                let prev = o.get().load();
-                let prev_hash = crate::converters::skippr_arrow::stable_schema_fingerprint(&prev);
-                if prev_hash != new_hash {
-                    if crate::converters::skippr_arrow::is_schema_superset(&_schema_ref, &prev) {
-                        o.get().store(_schema_ref.clone());
-                        did_update_schema = true;
-                    }
-                }
-            }
-            Entry::Vacant(v) => {
-                v.insert(arc_swap::ArcSwap::from(_schema_ref.clone()));
-                did_update_schema = true;
-            }
-        }
-
-        // Refresh default nested message template for fast ingest determinism.
-        // Templates stay on source field names; Arrow is the folded dest shape.
-        if did_update_schema {
-            if let Some(ns_meta) = pipeline.metadata.get(skpr_namespace) {
-                let template = create_default_nested_message(&ns_meta.fields);
-                DEFAULT_NESTED_MESSAGE.insert(skpr_namespace.to_string(), Arc::new(template));
-            }
-        }
-
-        // Bump schema version for this namespace AFTER updating schema and template
-        if did_update_schema {
-            let entry = ARROW_SCHEMA_VERSION
-                .entry(skpr_namespace.to_string())
-                .or_insert_with(|| AtomicU64::new(0));
-            entry.fetch_add(1, Ordering::Relaxed);
-            bump_pipeline_schema_version();
-        }
-
-        // Mark schema as ready deterministically for this namespace
+        let dest = Self::published_arrow_schema(pipeline, skpr_namespace)?;
+        Self::install_dest_arrow_schema(skpr_namespace, &dest, pipeline);
         SCHEMA_READY
             .entry(skpr_namespace.to_string())
             .or_insert_with(|| AtomicBool::new(true))
             .store(true, Ordering::Relaxed);
-
-        Ok(_schema_ref)
+        Ok(dest)
     }
 }
 
@@ -4730,12 +4657,80 @@ mod warm_output_schemas_tests {
     }
 
     #[test]
+    fn prepare_arrow_schema_replaces_cached_source_after_rename() {
+        use crate::discover::schema_alter::{
+            AlterColumn, AlterOrigin, CanonicalAlter, CommittedAlter, FlattenMode,
+            MigrationDirection, MigrationId, OutputName,
+        };
+
+        ARROW_SCHEMA.remove("orders");
+        DEFAULT_NESTED_MESSAGE.remove("orders");
+        let mut root = Metadata::new().unwrap();
+        let mut region = Metadata::new_with_type(SkipprDataType::String, "region");
+        region.field_id = 1;
+        root.fields.insert("region".into(), region);
+        let mut source = PipelineMetadata::new(&Config::new());
+        source.flattened = false;
+        source.metadata.insert("orders".into(), root.clone());
+        let before = Ingest::prepare_arrow_schema_with_metadata(&Config::new(), "orders", &source)
+            .expect("source schema");
+        let before_names: Vec<_> = before.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(before_names, vec!["region"]);
+
+        let nested = OutputName::parse_sql(FlattenMode::Nested, "region").unwrap();
+        source.alters.insert(
+            "orders".into(),
+            vec![CommittedAlter {
+                origin: AlterOrigin {
+                    migration: MigrationId::new("m"),
+                    direction: MigrationDirection::Up,
+                },
+                seq: 0,
+                alter: CanonicalAlter::Rename {
+                    column: AlterColumn {
+                        name: nested,
+                        id: 1,
+                        ty: SkipprDataType::String,
+                    },
+                    to_leaf: "region_code".into(),
+                },
+            }],
+        );
+        let after = Ingest::prepare_arrow_schema_with_metadata(&Config::new(), "orders", &source)
+            .expect("dest schema");
+        let after_names: Vec<_> = after.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(after_names, vec!["region_code"]);
+        let cached = ARROW_SCHEMA.get("orders").expect("cached dest").load();
+        let cached_names: Vec<_> = cached.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(cached_names, vec!["region_code"]);
+        let template = DEFAULT_NESTED_MESSAGE
+            .get("orders")
+            .expect("source ingest template");
+        let obj = template.as_object().expect("object template");
+        assert!(obj.contains_key("region"), "{obj:?}");
+        assert!(!obj.contains_key("region_code"), "{obj:?}");
+    }
+
+    #[test]
     fn dest_arrow_prepare_errors_are_not_discarded() {
         let src = include_str!("ingest_work.rs");
+        let prod = src
+            .split("#[cfg(test)]\nmod cdc_sidecar_tests")
+            .next()
+            .expect("production ingest_work");
         let discarded = format!("let _ = {}", "Ingest::prepare_arrow_schema_with_metadata");
         assert!(
-            !src.contains(&discarded),
+            !prod.contains(&discarded),
             "dest fold Result must not be discarded"
+        );
+        assert!(
+            !prod.contains("is_schema_superset"),
+            "ALTER dest Arrow is not a source-name superset; install the fold"
+        );
+        let arrow = include_str!("converters/skippr_arrow.rs");
+        assert!(
+            !arrow.contains("fn is_schema_superset"),
+            "superset gate is deleted; dest publish always installs the fold"
         );
         let warm = src
             .split("pub(crate) async fn warm_output_schemas_for_metadata")

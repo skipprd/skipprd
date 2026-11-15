@@ -25,8 +25,9 @@ pub struct AppliedBatches {
 
 /// Arrow schema after `transform.ops`, including on an empty batch.
 ///
-/// Iceberg schema sync and `skipprd query` publish this dest shape. Ingest
-/// mapping still uses the source schema, then `apply_ops` on live rows.
+/// ALTER dest names come from `PipelineMetadata::output()`. This fold is only
+/// YAML compose (filter/derive, and stream project/rename/cast) on top of that
+/// Arrow schema — used by the WAL query provider so UNION matches ingested batches.
 pub fn dest_schema_for_ops(
     ops: &[TransformOp],
     source: Arc<Schema>,
@@ -51,27 +52,6 @@ fn ops_change_schema(ops: &[TransformOp]) -> bool {
                 | TransformOp::Cast(_)
         )
     })
-}
-
-/// Dest `OutputMetadata` for schema_sink / Iceberg. Source field ids are not reused
-/// across rename/project; `repair_field_identity` assigns a stable dest set.
-pub fn dest_output_metadata_for_ops(
-    ops: &[TransformOp],
-    source: crate::discover::OutputMetadata,
-    namespace: &str,
-) -> Result<crate::discover::OutputMetadata, String> {
-    if ops.is_empty() || !ops_change_schema(ops) {
-        return Ok(source);
-    }
-    let arrow = Arc::new(
-        crate::converters::skippr_arrow::convert_skippr_to_arrow(source.fields)
-            .map_err(|err| err.to_string())?,
-    );
-    let dest = dest_schema_for_ops(ops, arrow)?;
-    let mut metadata = crate::ingest::schema_arrow::output_metadata_for_arrow_schema(&dest)
-        .map_err(|err| err.to_string())?;
-    crate::discover::OutputMetadata::repair_field_identity(namespace, &mut metadata);
-    Ok(metadata)
 }
 
 pub fn apply_configured_ops(

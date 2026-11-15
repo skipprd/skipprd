@@ -1559,7 +1559,9 @@ impl Config {
         });
         let Some(schema_ref) = schema_sink_ref else {
             if let Some(plugin) = Self::pipeline_output_plugin_name_for(self, pipeline) {
-                if crate::connect::DataSink::parse(&plugin).is_some_and(Self::is_table_data_sink) {
+                if crate::connect::DataSink::parse(&plugin)
+                    .is_some_and(crate::connect::DataSink::is_table)
+                {
                     return plugin;
                 }
             }
@@ -1858,16 +1860,6 @@ impl Config {
             .filter(|name| !name.is_empty())
     }
 
-    fn is_table_data_sink(kind: crate::connect::DataSink) -> bool {
-        use crate::connect::DataSink::*;
-        match kind {
-            SkipprLake | AthenaIceberg | Duckdb | Snowflake | Postgres | Bigquery | Redshift
-            | Motherduck => true,
-            Amqp | Athena | AzureBlob | Clickhouse | Databricks | File | Gcs | S3 | Sftp
-            | Stdout | Synapse => false,
-        }
-    }
-
     fn table_ops_violations(
         config: &Config,
         pipeline_name: &str,
@@ -1879,7 +1871,7 @@ impl Config {
         let Some(kind) = crate::connect::DataSink::parse(&plugin) else {
             return Vec::new();
         };
-        if !Self::is_table_data_sink(kind) {
+        if !kind.is_table() {
             return Vec::new();
         }
         let Some(ops) = pipeline
@@ -2579,7 +2571,7 @@ impl Config {
             Some(schema_ref) => schema_ref,
             None => {
                 if crate::connect::DataSink::parse(&entry.config.plugin_name)
-                    .is_some_and(Self::is_table_data_sink)
+                    .is_some_and(crate::connect::DataSink::is_table)
                 {
                     return Ok(entry.config.clone());
                 }

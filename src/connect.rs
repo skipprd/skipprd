@@ -883,10 +883,228 @@ pub fn prompt_if_tty(label: &str) -> Result<String, io::Error> {
 
 include!("connect_generated.rs");
 
+impl DataSink {
+    /// Catalog Table vs Stream. YAML `transform.ops` and schema-sink pairing
+    /// use this. Handshake `SchemaSink::alter_support()` must match `is_table()`.
+    pub fn alter_support(self) -> crate::plugins::AlterSupport {
+        use crate::plugins::alter_ddl::WarehouseDialect;
+        use crate::plugins::AlterSupport;
+        match self {
+            Self::SkipprLake | Self::AthenaIceberg | Self::Duckdb => AlterSupport::Iceberg,
+            Self::Snowflake => AlterSupport::Warehouse(WarehouseDialect::Snowflake),
+            Self::Postgres => AlterSupport::Warehouse(WarehouseDialect::Postgres),
+            Self::Bigquery => AlterSupport::Warehouse(WarehouseDialect::BigQuery),
+            Self::Redshift => AlterSupport::Warehouse(WarehouseDialect::Redshift),
+            Self::Motherduck => AlterSupport::Warehouse(WarehouseDialect::MotherDuck),
+            Self::Amqp
+            | Self::Athena
+            | Self::AzureBlob
+            | Self::Clickhouse
+            | Self::Databricks
+            | Self::File
+            | Self::Gcs
+            | Self::S3
+            | Self::Sftp
+            | Self::Stdout
+            | Self::Synapse => AlterSupport::Unsupported,
+        }
+    }
+
+    pub fn is_table(self) -> bool {
+        self.alter_support().is_table()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn data_sink_alter_support_is_the_table_vs_stream_catalog() {
+        use crate::plugins::alter_ddl::WarehouseDialect;
+        use crate::plugins::AlterSupport;
+        assert_eq!(DataSink::SkipprLake.alter_support(), AlterSupport::Iceberg);
+        assert_eq!(
+            DataSink::AthenaIceberg.alter_support(),
+            AlterSupport::Iceberg
+        );
+        assert_eq!(DataSink::Duckdb.alter_support(), AlterSupport::Iceberg);
+        assert_eq!(
+            DataSink::Snowflake.alter_support(),
+            AlterSupport::Warehouse(WarehouseDialect::Snowflake)
+        );
+        assert_eq!(
+            DataSink::Postgres.alter_support(),
+            AlterSupport::Warehouse(WarehouseDialect::Postgres)
+        );
+        assert_eq!(
+            DataSink::Bigquery.alter_support(),
+            AlterSupport::Warehouse(WarehouseDialect::BigQuery)
+        );
+        assert_eq!(
+            DataSink::Redshift.alter_support(),
+            AlterSupport::Warehouse(WarehouseDialect::Redshift)
+        );
+        assert_eq!(
+            DataSink::Motherduck.alter_support(),
+            AlterSupport::Warehouse(WarehouseDialect::MotherDuck)
+        );
+        for kind in [
+            DataSink::SkipprLake,
+            DataSink::AthenaIceberg,
+            DataSink::Duckdb,
+            DataSink::Snowflake,
+            DataSink::Postgres,
+            DataSink::Bigquery,
+            DataSink::Redshift,
+            DataSink::Motherduck,
+        ] {
+            assert!(kind.is_table(), "{kind:?}");
+        }
+        for kind in [
+            DataSink::Amqp,
+            DataSink::Athena,
+            DataSink::AzureBlob,
+            DataSink::Clickhouse,
+            DataSink::Databricks,
+            DataSink::File,
+            DataSink::Gcs,
+            DataSink::S3,
+            DataSink::Sftp,
+            DataSink::Stdout,
+            DataSink::Synapse,
+        ] {
+            assert!(!kind.is_table(), "{kind:?}");
+            assert_eq!(kind.alter_support(), AlterSupport::Unsupported);
+        }
+    }
+
+    #[test]
+    fn in_tree_schema_sinks_match_data_sink_alter_support() {
+        use crate::plugins::alter_ddl::WarehouseDialect;
+        use crate::plugins::AlterSupport;
+
+        fn iceberg_family(kind: DataSink, src: &str) {
+            assert_eq!(kind.alter_support(), AlterSupport::Iceberg, "{kind:?}");
+            assert!(src.contains("IcebergWriter"), "{kind:?}");
+        }
+        iceberg_family(
+            DataSink::SkipprLake,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/plugins/data_sink/skipprlake/src/lib.rs"
+            )),
+        );
+        iceberg_family(
+            DataSink::Duckdb,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/plugins/data_sink/duckdb/src/lib.rs"
+            )),
+        );
+        iceberg_family(
+            DataSink::AthenaIceberg,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/plugins/data_sink/athena_iceberg/src/lib.rs"
+            )),
+        );
+        assert!(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/crates/skippr-iceberg-writer/src/lib.rs"
+        ))
+        .contains("AlterSupport::Iceberg"));
+
+        fn warehouse(kind: DataSink, dialect: WarehouseDialect, src: &str) {
+            assert_eq!(
+                kind.alter_support(),
+                AlterSupport::Warehouse(dialect),
+                "{kind:?}"
+            );
+            let needle = match dialect {
+                WarehouseDialect::Snowflake => "WarehouseDialect::Snowflake",
+                WarehouseDialect::Postgres => "WarehouseDialect::Postgres",
+                WarehouseDialect::BigQuery => "WarehouseDialect::BigQuery",
+                WarehouseDialect::Redshift => "WarehouseDialect::Redshift",
+                WarehouseDialect::MotherDuck => "WarehouseDialect::MotherDuck",
+            };
+            assert!(src.contains(needle), "{kind:?} missing {needle}");
+        }
+        warehouse(
+            DataSink::Snowflake,
+            WarehouseDialect::Snowflake,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/plugins/data_sink/snowflake/src/snowflake.rs"
+            )),
+        );
+        warehouse(
+            DataSink::Postgres,
+            WarehouseDialect::Postgres,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/plugins/schema_sink/postgres/src/main.rs"
+            )),
+        );
+        warehouse(
+            DataSink::Bigquery,
+            WarehouseDialect::BigQuery,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/plugins/data_sink/bigquery/src/bigquery.rs"
+            )),
+        );
+        warehouse(
+            DataSink::Redshift,
+            WarehouseDialect::Redshift,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/plugins/data_sink/redshift/src/redshift.rs"
+            )),
+        );
+        warehouse(
+            DataSink::Motherduck,
+            WarehouseDialect::MotherDuck,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/plugins/data_sink/motherduck/src/motherduck.rs"
+            )),
+        );
+
+        fn stream_schema(kind: DataSink, src: &str) {
+            assert_eq!(kind.alter_support(), AlterSupport::Unsupported, "{kind:?}");
+            assert!(!src.contains("AlterSupport::Iceberg"), "{kind:?}");
+            assert!(!src.contains("AlterSupport::Warehouse"), "{kind:?}");
+        }
+        stream_schema(
+            DataSink::Clickhouse,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/plugins/data_sink/clickhouse/src/clickhouse.rs"
+            )),
+        );
+        stream_schema(
+            DataSink::Synapse,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/plugins/data_sink/synapse/src/synapse.rs"
+            )),
+        );
+        stream_schema(
+            DataSink::Athena,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/plugins/data_sink/athena/src/athena.rs"
+            )),
+        );
+        let glue = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/plugins/schema_sink/glue/src/main.rs"
+        ));
+        assert!(!glue.contains("AlterSupport::Iceberg"));
+        assert!(!glue.contains("AlterSupport::Warehouse"));
+    }
 
     #[test]
     fn write_document_roundtrips_and_drops_tmp() {
