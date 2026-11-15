@@ -1556,3 +1556,158 @@ async fn iceberg_recreate_when_live_spec_is_identity_calendar_ints() {
     };
     assert!(err.to_string().contains("recreate the table"), "{err}");
 }
+
+fn alter_field(name: &str, ty: &str, field_id: i32) -> serde_json::Value {
+    json!({
+        "out_field_name": name,
+        "determined_type": ty,
+        "determined_type_values": "",
+        "field_id": field_id,
+        "schema_id": 1,
+        "lineage_id": format!("orders:{name}"),
+        "nullable": false,
+        "default_value": null,
+        "fields": {}
+    })
+}
+
+fn alter_metadata(fields: serde_json::Value) -> OutputMetadata {
+    serde_json::from_value(json!({
+        "out_field_name": "",
+        "determined_type": "record",
+        "determined_type_values": "",
+        "fields": fields
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn apply_alter_renames_live_schema_without_rewrite() {
+    let harness = Harness::new().await;
+    harness.write("alter-src", 0..2).await;
+    let table = harness.table().await;
+    let field_id = table
+        .metadata()
+        .current_schema()
+        .field_by_name("id")
+        .unwrap()
+        .id;
+    let metadata = alter_metadata(json!({ "id": alter_field("id", "long", field_id) }));
+    <IcebergWriter<GroupedTestSpec> as SchemaSink>::apply_alter(
+        &harness.writer,
+        NAMESPACE,
+        &metadata,
+        &committed_rename("id", "order_id", field_id, 1, SkipprDataType::Long),
+    )
+    .await
+    .unwrap();
+    let renamed = harness.table().await;
+    let schema = renamed.metadata().current_schema();
+    assert_eq!(schema.field_by_name("order_id").unwrap().id, field_id);
+    assert!(schema.field_by_name("id").is_none());
+}
+
+#[tokio::test]
+async fn apply_alter_merge_rewrites_live_data_files() {
+    let harness = Harness::new().await;
+    let metadata = alter_metadata(json!({
+        "id": alter_field("id", "long", 1),
+        "extra": alter_field("extra", "long", 2)
+    }));
+    harness
+        .writer
+        .install_schema_snapshot(&RuntimeSchemaState {
+            version: 2,
+            namespaces: BTreeMap::from([(NAMESPACE.to_string(), metadata.clone())]),
+            namespace_versions: BTreeMap::from([(NAMESPACE.to_string(), 2)]),
+        })
+        .await
+        .unwrap();
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("extra", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1i64, 2])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![10i64, 20])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    harness
+        .native_write_batch(&format!("namespace={NAMESPACE}"), batch)
+        .await;
+    let table = harness.table().await;
+    let id = table
+        .metadata()
+        .current_schema()
+        .field_by_name("id")
+        .unwrap()
+        .id;
+    let extra = table
+        .metadata()
+        .current_schema()
+        .field_by_name("extra")
+        .unwrap()
+        .id;
+    let before = table
+        .metadata()
+        .current_snapshot()
+        .map(|snap| snap.snapshot_id());
+    <IcebergWriter<GroupedTestSpec> as SchemaSink>::apply_alter(
+        &harness.writer,
+        NAMESPACE,
+        &metadata,
+        &committed_merge("extra", "id", extra, id, 0, SkipprDataType::Long),
+    )
+    .await
+    .unwrap();
+    let merged = harness.table().await;
+    let schema = merged.metadata().current_schema();
+    assert_eq!(schema.field_by_name("id").unwrap().id, id);
+    assert!(schema.field_by_name("extra").is_none());
+    let after = merged
+        .metadata()
+        .current_snapshot()
+        .map(|snap| snap.snapshot_id());
+    assert_ne!(before, after);
+}
+
+#[tokio::test]
+async fn apply_alter_fails_closed_when_delete_files_exist() {
+    let harness = Harness::new().await;
+    let contract = SourceNamespaceContract {
+        namespace: NAMESPACE.to_string(),
+        primary_key: vec![FieldPath::single("id")],
+        cursor: None,
+        partition_key: Vec::new(),
+        write_policy: WritePolicy::MergeByKey,
+        refresh_window: None,
+        description: String::new(),
+        semantics: None,
+    };
+    harness
+        .write_rows(&harness.writer, "1", vec![1], None, Some(&contract), None)
+        .await;
+    harness
+        .write_rows(&harness.writer, "2", vec![1], None, Some(&contract), None)
+        .await;
+    let table = harness.table().await;
+    let field_id = table
+        .metadata()
+        .current_schema()
+        .field_by_name("id")
+        .unwrap()
+        .id;
+    let metadata = alter_metadata(json!({ "id": alter_field("id", "long", field_id) }));
+    let err = <IcebergWriter<GroupedTestSpec> as SchemaSink>::apply_alter(
+        &harness.writer,
+        NAMESPACE,
+        &metadata,
+        &committed_rename("id", "order_id", field_id, 0, SkipprDataType::Long),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("delete files"), "{err}");
+}

@@ -868,7 +868,7 @@ impl PyPipeline {
     }
 }
 
-#[doc = "One in-memory Arrow op. Exactly one of the keys may be set."]
+#[doc = "One in-memory Arrow op. YAML/JSON is a one-key map (`filter:`, `project:`, …)."]
 #[pyclass(frozen, from_py_object, name = "TransformOp", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyTransformOp {
@@ -896,22 +896,63 @@ pub struct PyTransformOp {
 
 #[pymethods]
 impl PyTransformOp {
-    #[new]
-    #[doc = "One in-memory Arrow op. Exactly one of the keys may be set.\n\nArgs:\n    filter: DataFusion SQL boolean expression. Rows that do not match are dropped.\n    project: Keep only these output column names, in this order.\n    derive: Add derived columns. Map of new name to DataFusion SQL expression.\n    rename: Rename columns. Map of current name to new name.\n    cast: Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`)."]
-    #[pyo3(signature = (*, filter = None, project = None, derive = None, rename = None, cast = None))]
-    fn new(
-        filter: Option<String>,
-        project: Option<Vec<String>>,
-        derive: Option<BTreeMap<String, String>>,
-        rename: Option<BTreeMap<String, String>>,
-        cast: Option<BTreeMap<String, String>>,
-    ) -> Self {
+    #[classmethod]
+    #[doc = "DataFusion SQL boolean expression. Rows that do not match are dropped.\n\nYAML key `filter`."]
+    fn filter(_cls: &Bound<'_, PyType>, filter: String) -> Self {
         Self {
-            filter,
-            project,
-            derive,
-            rename,
-            cast,
+            filter: Some(filter),
+            project: None,
+            derive: None,
+            rename: None,
+            cast: None,
+        }
+    }
+
+    #[classmethod]
+    #[doc = "Keep only these output column names, in this order.\n\nYAML key `project`."]
+    fn project(_cls: &Bound<'_, PyType>, project: Vec<String>) -> Self {
+        Self {
+            filter: None,
+            project: Some(project),
+            derive: None,
+            rename: None,
+            cast: None,
+        }
+    }
+
+    #[classmethod]
+    #[doc = "Add derived columns. Map of new name to DataFusion SQL expression.\n\nYAML key `derive`."]
+    fn derive(_cls: &Bound<'_, PyType>, derive: BTreeMap<String, String>) -> Self {
+        Self {
+            filter: None,
+            project: None,
+            derive: Some(derive),
+            rename: None,
+            cast: None,
+        }
+    }
+
+    #[classmethod]
+    #[doc = "Rename columns. Map of current name to new name.\n\nYAML key `rename`."]
+    fn rename(_cls: &Bound<'_, PyType>, rename: BTreeMap<String, String>) -> Self {
+        Self {
+            filter: None,
+            project: None,
+            derive: None,
+            rename: Some(rename),
+            cast: None,
+        }
+    }
+
+    #[classmethod]
+    #[doc = "Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`).\n\nYAML key `cast`."]
+    fn cast(_cls: &Bound<'_, PyType>, cast: BTreeMap<String, String>) -> Self {
+        Self {
+            filter: None,
+            project: None,
+            derive: None,
+            rename: None,
+            cast: Some(cast),
         }
     }
 
@@ -997,7 +1038,7 @@ pub struct PyTransform {
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_time_unit: Option<PyBatchTimeUnit>,
-    #[doc = "Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n\nYAML key `flatten_events`."]
+    #[doc = "Flatten nested objects into underscore-separated columns (`contact_name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n\nYAML key `flatten_events`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flatten_events: Option<bool>,
@@ -1050,7 +1091,7 @@ pub struct PyTransform {
 #[pymethods]
 impl PyTransform {
     #[new]
-    #[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink.\n\nArgs:\n    batch_time_fields: Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.\n    batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n    flatten_events: Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n    record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.\n    batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).\n    partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.\n    namespace_fields: Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.\n    time_partition_prefix: Prefix for time-partition folder names (`p_` → `p_2026-10-08`).\n    enable_single_quote_parsing: Accept JSON that uses single quotes around strings.\n    enable_unicode_parsing: Accept JSON with unescaped Unicode.\n    batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.\n    inject_fields: Static field names and JSON values merged onto each source record before ingest.\n    ops: Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.\n    aggregates: Keyed running aggregates maintained from committed WAL data in Skippr Store (`stream_state`)."]
+    #[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink.\n\nArgs:\n    batch_time_fields: Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.\n    batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n    flatten_events: Flatten nested objects into underscore-separated columns (`contact_name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n    record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.\n    batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).\n    partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.\n    namespace_fields: Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.\n    time_partition_prefix: Prefix for time-partition folder names (`p_` → `p_2026-10-08`).\n    enable_single_quote_parsing: Accept JSON that uses single quotes around strings.\n    enable_unicode_parsing: Accept JSON with unescaped Unicode.\n    batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.\n    inject_fields: Static field names and JSON values merged onto each source record before ingest.\n    ops: Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.\n    aggregates: Keyed running aggregates maintained from committed WAL data in Skippr Store (`stream_state`)."]
     #[pyo3(signature = (*, batch_time_fields = None, batch_time_unit = None, flatten_events = None, record_field_path = None, batch_partition_fields = None, partition_allowed_values = None, namespace_fields = None, time_partition_prefix = None, enable_single_quote_parsing = None, enable_unicode_parsing = None, batch_order_fields = None, inject_fields = None, ops = None, aggregates = None))]
     fn new(
         batch_time_fields: Option<String>,

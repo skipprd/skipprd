@@ -39,34 +39,21 @@ fn cdc_for(n: usize) -> Vec<WalRowMeta> {
 
 fn arb_op() -> impl Strategy<Value = TransformOp> {
     prop_oneof![
-        (0i64..20).prop_map(|n| TransformOp {
-            filter: Some(format!("amount > {n}")),
-            ..Default::default()
-        }),
-        Just(TransformOp {
-            project: Some(vec!["id".into(), "amount".into()]),
-            ..Default::default()
-        }),
-        (1i64..5).prop_map(|k| TransformOp {
-            derive: Some(
-                [("scaled".into(), format!("amount * {k}"))]
-                    .into_iter()
-                    .collect(),
-            ),
-            ..Default::default()
-        }),
-        Just(TransformOp {
-            rename: Some(
-                [("amount".into(), "amount_usd".into())]
-                    .into_iter()
-                    .collect()
-            ),
-            ..Default::default()
-        }),
-        Just(TransformOp {
-            cast: Some([("amount".into(), "float64".into())].into_iter().collect()),
-            ..Default::default()
-        }),
+        (0i64..20).prop_map(|n| TransformOp::Filter(format!("amount > {n}"))),
+        Just(TransformOp::Project(vec!["id".into(), "amount".into()])),
+        (1i64..5).prop_map(|k| TransformOp::Derive(
+            [("scaled".into(), format!("amount * {k}"))]
+                .into_iter()
+                .collect(),
+        )),
+        Just(TransformOp::Rename(
+            [("amount".into(), "amount_usd".into())]
+                .into_iter()
+                .collect()
+        )),
+        Just(TransformOp::Cast(
+            [("amount".into(), "float64".into())].into_iter().collect()
+        )),
     ]
 }
 
@@ -82,7 +69,7 @@ proptest! {
         let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
         let batch = batch_amounts(&id_refs, &amounts);
         let cdc = cdc_for(amounts.len());
-        match apply_configured_ops(&ops, vec![batch], Some(cdc.clone())) {
+        match apply_configured_ops(&[], &ops, vec![batch], Some(cdc.clone())) {
             Ok((batches, out_cdc)) => {
                 let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
                 if ops.is_empty() {
@@ -102,10 +89,7 @@ proptest! {
     ) {
         prop_assume!(name != "id" && name != "amount");
         let batch = batch_amounts(&["a"], &[1]);
-        let ops = vec![TransformOp {
-            project: Some(vec![name]),
-            ..Default::default()
-        }];
-        prop_assert!(apply_configured_ops(&ops, vec![batch], None).is_err());
+        let ops = vec![TransformOp::Project(vec![name])];
+        prop_assert!(apply_configured_ops(&[], &ops, vec![batch], None).is_err());
     }
 }

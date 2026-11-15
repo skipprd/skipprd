@@ -5,19 +5,19 @@ description: Rename, merge, drop, or widen columns with skipprd migrate or ALTER
 
 # ALTER operations
 
-After a pipeline has landed data, you sometimes need to change the table: fold a sibling column back, move a field into a nested record, drop a leftover, or widen a type. `ALTER TABLE` (and `skipprd migrate`) does that on Iceberg destinations and warehouses that advertise native DDL. Skipprd keeps the Iceberg field id, so existing files stay readable.
+After a pipeline has landed data, you sometimes need to change the table: fold a sibling column back, drop a leftover, or widen a type. `ALTER TABLE` (and `skipprd migrate`) does that on Iceberg destinations and warehouses that advertise table DDL. Skipprd keeps the Iceberg field id, so existing files stay readable.
 
 This is operator DDL. It is not the same as [schema discovery](/concepts/schema), which adds columns when new fields arrive during sync. Apply is in-stream: skipprd may pause ingest internally; you do not stop and start the pipeline. `DISABLE PIPELINE` still freezes ingest, but it is not the ALTER gate.
 
 ## Before you alter
 
-1. The schema sink must support migrations (`Native`): Iceberg ([SkipprLake](/connectors/outputs/skipprlake), [Athena Iceberg](/connectors/outputs/athenaiceberg), [DuckDB](/connectors/outputs/duckdb)) plus Snowflake, Postgres, BigQuery, Redshift, and MotherDuck. Glue/Hive and ClickHouse fail closed.
+1. The destination must be a table: Iceberg ([SkipprLake](/connectors/outputs/skipprlake), [Athena Iceberg](/connectors/outputs/athenaiceberg), [DuckDB](/connectors/outputs/duckdb)) plus Snowflake, Postgres, BigQuery, Redshift, and MotherDuck. Glue/Hive and ClickHouse fail closed. Stream destinations cannot run `ALTER TABLE`.
 2. Put SQL files in `migrations/` next to `skippr.yml`, or run `skipprd query --sql "ALTER TABLE …"`. Both use the same apply journal.
 3. Target `<pipeline>.<namespace>`. Quote names that contain hyphens.
 
 ```bash
 skipprd migrate --pipeline bikehire
-skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN region TO detail.region"
+skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN region TO region_code"
 ```
 
 Hyphenated pipeline or namespace:
@@ -32,31 +32,31 @@ Then run `skipprd sync` as usual. Later rows use the new names and types.
 
 | Statement | What it does |
 |---|---|
-| `RENAME COLUMN <from> TO <to>` | Renames a field. A dotted `TO` path moves it into that record. Iceberg flatten names use underscores (`detail.region` → `detail_region`). |
-| `MERGE COLUMN <src> INTO <dst>` | Drops the sibling and retargets type-conflict evolution so later values write to `dst`. Historical src-only rows are not copied. |
-| `DROP COLUMN <col>` | Removes the column from skippr metadata and the Iceberg table. |
+| `RENAME COLUMN <from> TO <to>` | Renames a field. `TO` is one identifier; the column keeps its parent. Iceberg flatten names use underscores (`detail.region` → `detail_region`). |
+| `MERGE COLUMN <src> INTO <dst>` | Rewrites historical rows with `COALESCE(dst, CAST(src AS dst_type))`, then drops `src`. CAST must be Iceberg-legal. |
+| `DROP COLUMN <col>` | Removes the column from the published table. Discover metadata stays; the alter log is the output shape. |
 | `ALTER COLUMN <col> TYPE <type>` | Widens a type. Illegal promotions fail closed. |
 
-Flattened Iceberg names (`detail_truck_reg`) and skippr dotted paths (`detail.truck_reg`) both resolve.
+SQL must match the pipeline output names. Nested pipelines use dotted paths (`detail.region`). Flattened pipelines use underscores (`detail_region`). Do not mix the two forms.
 
-### Rename, including nested moves
+### Rename
 
 ```bash
-skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN truck_reg TO detail.truck_reg"
-skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN region TO detail.region"
+skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN truck_reg TO vehicle_reg"
+skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN region TO region_code"
 ```
 
-`RENAME COLUMN region TO detail.region` is valid even when `detail.region` did not exist. Skipprd creates the parent record and the Iceberg column `detail_region`. Existing files keep the old field id.
+`RENAME COLUMN region TO detail.region` fails closed: `TO` is not a nested move. Nested `FROM` paths still rename a leaf in place (`detail.truck_reg TO vehicle_reg` stays under `detail`). Existing files keep the old field id.
 
 ### Merge a sibling column
 
-When a source starts sending a different type, Skipprd adds a sibling such as `price_string` next to `price`. Fold it back:
+When a source adds a same-type sibling, fold it back:
 
 ```bash
-skipprd query --sql "ALTER TABLE bikehire.rides MERGE COLUMN price_string INTO price"
+skipprd query --sql "ALTER TABLE bikehire.rides MERGE COLUMN price_cents INTO price"
 ```
 
-Later values that would have gone to `price_string` write to `price`. Rows that only ever had `price_string` are not copied into `price`.
+Historical rows are rewritten so `price` keeps its value, or the cast `price_cents` when `price` was null. Later source values that used the `price_cents` key write to `price`. String into long fails closed. To keep the value as text, MERGE the typed sibling into a string column.
 
 ### Drop a column
 
@@ -74,13 +74,14 @@ Only Iceberg-legal promotions:
 | byte, short | `INTEGER` |
 | float | `DOUBLE` |
 | timestamp_milli | `TIMESTAMP` |
+| date | `TIMESTAMP` |
 
 ```bash
 skipprd query --sql "ALTER TABLE bikehire.rides ALTER COLUMN n TYPE BIGINT"
 skipprd query --sql "ALTER TABLE bikehire.rides ALTER COLUMN n_byte TYPE BIGINT"
 ```
 
-Iceberg timestamps are already microseconds. Promoting milli → timestamp updates skippr metadata only.
+Iceberg timestamps are already microseconds. Promoting milli → timestamp records the output type in the ALTER log; Iceberg data files do not change. Date → timestamp rewrites data files.
 
 To widen to a string, `MERGE COLUMN` the typed sibling into a string field. There is no `ALTER COLUMN … TYPE STRING`.
 
@@ -88,24 +89,26 @@ To widen to a string, `MERGE COLUMN` the typed sibling into a string field. Ther
 
 Skipprd rejects the statement and leaves the table unchanged:
 
-- The destination is Glue/Hive or ClickHouse (no native ALTER).
+- The destination is Glue/Hive or ClickHouse (no table ALTER), or a stream.
 - The column does not exist, or the rename target already exists.
 - The promotion is not in the table above (`cannot promote decimal to double`).
 - Nested `DROP` or `MERGE` of a record that has no top-level Iceberg field.
-- A dotted `RENAME` target whose parent path is not a record.
+- A dotted `RENAME` `TO` (`RENAME COLUMN region TO detail.region`).
 
 Fix the statement, or pick a legal widen / merge, then retry. You do not need to restore files.
 
 ## Check the result
 
 ```bash
-skipprd schema --pipeline bikehire
+skipprd query --sql "SHOW PIPELINE bikehire"
 skipprd query --plain --sql "SELECT * FROM bikehire.rides LIMIT 5"
 ```
 
-`skipprd schema` shows the names and types after the alter. Query the table to confirm nested moves landed as `detail_region` (or the dotted path your warehouse exposes).
+`SHOW PIPELINE` prints the output names after the ALTER log. Query the table to confirm the new names.
 
 Run [`skipprd sql-help`](/cli/sql-help) or `skipprd query --sql "SHOW DOCS"` for the exact syntax of every statement.
+
+Table destinations (SkipprLake, Athena Iceberg, DuckDB Iceberg, Snowflake, Postgres, BigQuery, Redshift, MotherDuck) change published columns with these statements, not with YAML `transform.ops` `project` / `rename` / `cast`. Stream destinations keep those YAML ops; they cannot run `ALTER TABLE`.
 
 ## Next steps
 

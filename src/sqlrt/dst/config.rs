@@ -36,10 +36,9 @@ fn g_copy_cannot_set_ops_aggregates() {
     let mut pipeline = Pipeline::default();
     pipeline.r#type = Some(PipelineType::Copy);
     pipeline.transform = Some(Transform {
-        ops: Some(vec![crate::helpers::configuration::TransformOp {
-            filter: Some("amount > 0".into()),
-            ..Default::default()
-        }]),
+        ops: Some(vec![crate::helpers::configuration::TransformOp::Filter(
+            "amount > 0".into(),
+        )]),
         ..Default::default()
     });
     config.pipelines.insert("p".into(), pipeline);

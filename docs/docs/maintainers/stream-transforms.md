@@ -14,7 +14,7 @@ source → schema map → Arrow batch → transform.ops → WAL catalog commit
 
 - Stateless `ops` run after schema mapping and before `WalCommitUnit` submit, on both the JSON ingest path and the Arrow IPC runtime path.
 - Stateful `aggregates` consume **immutable** committed SEGF segments. There is no second processing WAL.
-- `type: copy` cannot set `ops` or `aggregates`.
+- `type: copy` cannot set `ops` or `aggregates`. Table sinks cannot set `project`, `rename`, or `cast`; use ALTER TABLE. Streams can set all five ops.
 
 ## Ops
 

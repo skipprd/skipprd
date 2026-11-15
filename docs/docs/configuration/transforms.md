@@ -61,7 +61,7 @@ pipelines:
 | `batch_time_fields` | `TRANSFORM_BATCH_TIME_FIELDS` | none | Timestamp fields used for time partitions. Comma-separated; Skipprd uses the first one present in each record. |
 | `batch_time_unit` | `TRANSFORM_BATCH_TIME_UNIT` | none | Time-partition depth: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`. |
 | `time_partition_prefix` | `TRANSFORM_TIME_PARTITION_PREFIX` | none | Text added before each time-partition folder name. |
-| `flatten_events` | `TRANSFORM_FLATTEN_EVENTS` | `false` | Turn nested objects into top-level columns with dotted names. |
+| `flatten_events` | `TRANSFORM_FLATTEN_EVENTS` | `false` | Turn nested objects into top-level columns with underscore names. |
 | `record_field_path` | `TRANSFORM_RECORD_FIELD_PATH` | none (each object is a record) | Path to an array of records inside each source object. |
 | `inject_fields` | none | none | Fixed field names and values added to every record. |
 | `batch_order_fields` | `TRANSFORM_BATCH_ORDER_FIELDS` | none (unsorted) | Columns to sort rows by inside each Parquet file. Comma-separated. |
@@ -97,7 +97,7 @@ With `flatten_events: true`, a record like:
 { "id": 7, "contact": { "name": "Ada", "email": "ada@example.com" } }
 ```
 
-lands with columns `id`, `contact.name`, and `contact.email` instead of an `id` column and a nested `contact` struct. Flatten when your destination or BI tool handles flat columns better than nested ones.
+lands with columns `id`, `contact_name`, and `contact_email` instead of an `id` column and a nested `contact` struct. Flatten when your destination or BI tool handles flat columns better than nested ones.
 
 Flattening does not type-split mixed values inside arrays. An array of objects still has one shared element type. If a later element’s leaf cannot coerce to that type, the row is deadlettered as `ARRAY_MIXED_TYPES`. See [Schema discovery and evolution](/concepts/schema).
 
@@ -150,7 +150,7 @@ transform:
         amount: float64
 ```
 
-`type: copy` cannot set `ops`. A transform error fails the batch and does not advance source offsets.
+`type: copy` cannot set `ops`. Table destinations (native Iceberg and warehouse ALTER) cannot set `project`, `rename`, or `cast`; use [`ALTER TABLE`](/operations/alter). Stream destinations can set all five ops. `filter` and `derive` stay valid on tables. A transform error fails the batch and does not advance source offsets.
 
 ## Running aggregates
 

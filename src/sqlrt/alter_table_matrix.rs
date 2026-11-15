@@ -4,11 +4,11 @@
 
 use std::sync::Arc;
 
-use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
+use iceberg::spec::{NestedField, PrimitiveType, Schema, StructType, Type};
 
 use crate::discover::iceberg_schema::iceberg_schema_after_alter;
 use crate::discover::schema_alter::{
-    apply, canonicalize_op, field_id_for_op, is_iceberg_legal_promote, SchemaAlterOp,
+    apply, canonicalize, is_iceberg_legal_promote, FlattenMode, SchemaAlterOp,
 };
 use crate::discover::{Metadata, SkipprDataType};
 use crate::sqlrt::parser::{SParser, Statement};
@@ -37,6 +37,7 @@ const LEGAL_PROMOTES: &[(SkipprDataType, SkipprDataType)] = &[
     (SkipprDataType::Integer, SkipprDataType::Long),
     (SkipprDataType::Float, SkipprDataType::Double),
     (SkipprDataType::TimestampMilli, SkipprDataType::Timestamp),
+    (SkipprDataType::Date, SkipprDataType::Timestamp),
 ];
 
 const ILLEGAL_PROMOTES: &[(SkipprDataType, SkipprDataType)] = &[
@@ -87,6 +88,7 @@ fn fixture_meta() -> Metadata {
         field("n_float", SkipprDataType::Float, 33),
         field("n_double", SkipprDataType::Double, 36),
         field("ts_milli", SkipprDataType::TimestampMilli, 34),
+        field("event_day", SkipprDataType::Date, 39),
         field("ts_micro", SkipprDataType::Timestamp, 37),
         field("already_long", SkipprDataType::Long, 35),
         field("flag", SkipprDataType::Boolean, 38),
@@ -108,6 +110,7 @@ fn iceberg_type(ty: &SkipprDataType) -> Type {
             scale: 9,
         },
         SkipprDataType::Timestamp | SkipprDataType::TimestampMilli => PrimitiveType::Timestamp,
+        SkipprDataType::Date => PrimitiveType::Date,
         SkipprDataType::Byte | SkipprDataType::Short | SkipprDataType::Integer => {
             PrimitiveType::Int
         }
@@ -116,37 +119,81 @@ fn iceberg_type(ty: &SkipprDataType) -> Type {
     })
 }
 
+fn field_id(mode: IdMode, skippr_id: i32, seq: i32) -> i32 {
+    match mode {
+        IdMode::Matching => skippr_id,
+        IdMode::Sequential => seq,
+    }
+}
+
+fn leaf(
+    mode: IdMode,
+    skippr_id: i32,
+    seq: i32,
+    name: &str,
+    ty: SkipprDataType,
+) -> Arc<NestedField> {
+    Arc::new(NestedField::new(
+        field_id(mode, skippr_id, seq),
+        name,
+        iceberg_type(&ty),
+        false,
+    ))
+}
+
 fn fixture_iceberg(mode: IdMode) -> Schema {
-    let cols: [(&str, i32, SkipprDataType); 17] = [
-        ("region", 575_921_751, SkipprDataType::String),
-        ("version", 298_041_464, SkipprDataType::Integer),
-        ("note", 8, SkipprDataType::String),
-        ("price", 7, SkipprDataType::Long),
-        ("price_string", 9, SkipprDataType::String),
-        ("n_byte", 31, SkipprDataType::Byte),
-        ("n_short", 32, SkipprDataType::Short),
-        ("n_float", 33, SkipprDataType::Float),
-        ("n_double", 36, SkipprDataType::Double),
-        ("ts_milli", 34, SkipprDataType::TimestampMilli),
-        ("ts_micro", 37, SkipprDataType::Timestamp),
-        ("already_long", 35, SkipprDataType::Long),
-        ("flag", 38, SkipprDataType::Boolean),
-        ("detail_truck_reg", 4, SkipprDataType::String),
-        ("detail_geofence_id", 23, SkipprDataType::String),
-        ("detail_record_geofence_id", 12, SkipprDataType::String),
-        ("detail_pour_location_latitude", 11, SkipprDataType::Decimal),
+    let pour = Type::Struct(StructType::new(vec![leaf(
+        mode,
+        11,
+        16,
+        "latitude",
+        SkipprDataType::Decimal,
+    )]));
+    let detail = Type::Struct(StructType::new(vec![
+        leaf(mode, 4, 14, "truck_reg", SkipprDataType::String),
+        leaf(mode, 23, 15, "geofence_id", SkipprDataType::String),
+        Arc::new(NestedField::new(
+            field_id(mode, 1_859_207_811, 17),
+            "pour_location",
+            pour,
+            false,
+        )),
+    ]));
+    let detail_record = Type::Struct(StructType::new(vec![leaf(
+        mode,
+        12,
+        18,
+        "geofence_id",
+        SkipprDataType::String,
+    )]));
+    let fields = vec![
+        leaf(mode, 575_921_751, 1, "region", SkipprDataType::String),
+        leaf(mode, 298_041_464, 2, "version", SkipprDataType::Integer),
+        leaf(mode, 8, 3, "note", SkipprDataType::String),
+        leaf(mode, 7, 4, "price", SkipprDataType::Long),
+        leaf(mode, 9, 5, "price_string", SkipprDataType::String),
+        leaf(mode, 31, 6, "n_byte", SkipprDataType::Byte),
+        leaf(mode, 32, 7, "n_short", SkipprDataType::Short),
+        leaf(mode, 33, 8, "n_float", SkipprDataType::Float),
+        leaf(mode, 36, 9, "n_double", SkipprDataType::Double),
+        leaf(mode, 34, 10, "ts_milli", SkipprDataType::TimestampMilli),
+        leaf(mode, 37, 11, "ts_micro", SkipprDataType::Timestamp),
+        leaf(mode, 35, 12, "already_long", SkipprDataType::Long),
+        leaf(mode, 38, 13, "flag", SkipprDataType::Boolean),
+        leaf(mode, 39, 21, "event_day", SkipprDataType::Date),
+        Arc::new(NestedField::new(
+            field_id(mode, 1, 19),
+            "detail",
+            detail,
+            false,
+        )),
+        Arc::new(NestedField::new(
+            field_id(mode, 2, 20),
+            "detail_record",
+            detail_record,
+            false,
+        )),
     ];
-    let fields: Vec<Arc<NestedField>> = cols
-        .iter()
-        .enumerate()
-        .map(|(idx, (name, skippr_id, ty))| {
-            let id = match mode {
-                IdMode::Matching => *skippr_id,
-                IdMode::Sequential => (idx + 1) as i32,
-            };
-            Arc::new(NestedField::new(id, *name, iceberg_type(ty), false))
-        })
-        .collect();
     Schema::builder()
         .with_schema_id(0)
         .with_fields(fields)
@@ -161,6 +208,7 @@ fn promote_column(from: &SkipprDataType) -> &'static str {
         SkipprDataType::Integer => "version",
         SkipprDataType::Float => "n_float",
         SkipprDataType::TimestampMilli => "ts_milli",
+        SkipprDataType::Date => "event_day",
         SkipprDataType::Long => "already_long",
         SkipprDataType::String => "region",
         SkipprDataType::Double => "n_double",
@@ -191,10 +239,10 @@ fn matrix() -> Vec<Case> {
                 to: "region_code".into(),
             },
             id_mode: IdMode::Sequential,
-            expect_ok: true,
-            err_contains: None,
-            iceberg_has: Some("region_code"),
-            iceberg_lacks: Some("region"),
+            expect_ok: false,
+            err_contains: Some("does not match"),
+            iceberg_has: None,
+            iceberg_lacks: None,
         },
         Case {
             name: "rename_dotted_nested_matching_ids",
@@ -205,8 +253,8 @@ fn matrix() -> Vec<Case> {
             id_mode: IdMode::Matching,
             expect_ok: true,
             err_contains: None,
-            iceberg_has: Some("truck_reg_x"),
-            iceberg_lacks: Some("detail_truck_reg"),
+            iceberg_has: Some("detail.truck_reg_x"),
+            iceberg_lacks: Some("detail.truck_reg"),
         },
         Case {
             name: "rename_flatten_name_sequential_ids",
@@ -215,10 +263,10 @@ fn matrix() -> Vec<Case> {
                 to: "truck_reg_x".into(),
             },
             id_mode: IdMode::Sequential,
-            expect_ok: true,
-            err_contains: None,
-            iceberg_has: Some("truck_reg_x"),
-            iceberg_lacks: Some("detail_truck_reg"),
+            expect_ok: false,
+            err_contains: Some("not found"),
+            iceberg_has: None,
+            iceberg_lacks: None,
         },
         Case {
             name: "rename_idempotent_same_name",
@@ -239,10 +287,10 @@ fn matrix() -> Vec<Case> {
                 to: "detail.region".into(),
             },
             id_mode: IdMode::Matching,
-            expect_ok: true,
-            err_contains: None,
-            iceberg_has: Some("detail_region"),
-            iceberg_lacks: Some("region"),
+            expect_ok: false,
+            err_contains: Some("one identifier"),
+            iceberg_has: None,
+            iceberg_lacks: None,
         },
         Case {
             name: "rename_into_nested_path_sequential_ids",
@@ -251,22 +299,22 @@ fn matrix() -> Vec<Case> {
                 to: "detail.region".into(),
             },
             id_mode: IdMode::Sequential,
-            expect_ok: true,
-            err_contains: None,
-            iceberg_has: Some("detail_region"),
-            iceberg_lacks: Some("region"),
+            expect_ok: false,
+            err_contains: Some("one identifier"),
+            iceberg_has: None,
+            iceberg_lacks: None,
         },
         Case {
             name: "rename_nested_leaf_same_parent",
             op: SchemaAlterOp::Rename {
                 from: "detail.truck_reg".into(),
-                to: "detail.vehicle_reg".into(),
+                to: "vehicle_reg".into(),
             },
             id_mode: IdMode::Matching,
             expect_ok: true,
             err_contains: None,
-            iceberg_has: Some("detail_vehicle_reg"),
-            iceberg_lacks: Some("detail_truck_reg"),
+            iceberg_has: Some("detail.vehicle_reg"),
+            iceberg_lacks: Some("detail.truck_reg"),
         },
         Case {
             name: "rename_dotted_target_missing_parent",
@@ -276,7 +324,7 @@ fn matrix() -> Vec<Case> {
             },
             id_mode: IdMode::Matching,
             expect_ok: false,
-            err_contains: Some("not found"),
+            err_contains: Some("one identifier"),
             iceberg_has: None,
             iceberg_lacks: None,
         },
@@ -311,10 +359,22 @@ fn matrix() -> Vec<Case> {
                 dst: "price".into(),
             },
             id_mode: IdMode::Matching,
+            expect_ok: false,
+            err_contains: Some("cannot promote"),
+            iceberg_has: None,
+            iceberg_lacks: None,
+        },
+        Case {
+            name: "merge_same_type_matching_ids",
+            op: SchemaAlterOp::Merge {
+                src: "detail_record.geofence_id".into(),
+                dst: "detail.geofence_id".into(),
+            },
+            id_mode: IdMode::Matching,
             expect_ok: true,
             err_contains: None,
-            iceberg_has: Some("price"),
-            iceberg_lacks: Some("price_string"),
+            iceberg_has: Some("detail.geofence_id"),
+            iceberg_lacks: Some("detail_record.geofence_id"),
         },
         Case {
             name: "merge_type_sibling_sequential_ids",
@@ -323,22 +383,22 @@ fn matrix() -> Vec<Case> {
                 dst: "price".into(),
             },
             id_mode: IdMode::Sequential,
-            expect_ok: true,
-            err_contains: None,
-            iceberg_has: Some("price"),
-            iceberg_lacks: Some("price_string"),
+            expect_ok: false,
+            err_contains: Some("cannot promote"),
+            iceberg_has: None,
+            iceberg_lacks: None,
         },
         Case {
             name: "merge_flatten_dotted_sequential_ids",
             op: SchemaAlterOp::Merge {
-                src: "detail_record.geofence_id".into(),
-                dst: "detail.geofence_id".into(),
+                src: "region".into(),
+                dst: "note".into(),
             },
             id_mode: IdMode::Sequential,
-            expect_ok: true,
-            err_contains: None,
-            iceberg_has: Some("detail_geofence_id"),
-            iceberg_lacks: Some("detail_record_geofence_id"),
+            expect_ok: false,
+            err_contains: Some("does not match"),
+            iceberg_has: None,
+            iceberg_lacks: None,
         },
         Case {
             name: "merge_flatten_iceberg_names",
@@ -347,10 +407,10 @@ fn matrix() -> Vec<Case> {
                 dst: "detail_geofence_id".into(),
             },
             id_mode: IdMode::Matching,
-            expect_ok: true,
-            err_contains: None,
-            iceberg_has: Some("detail_geofence_id"),
-            iceberg_lacks: Some("detail_record_geofence_id"),
+            expect_ok: false,
+            err_contains: Some("not found"),
+            iceberg_has: None,
+            iceberg_lacks: None,
         },
         Case {
             name: "merge_src_equals_dst",
@@ -396,7 +456,7 @@ fn matrix() -> Vec<Case> {
             },
             id_mode: IdMode::Sequential,
             expect_ok: false,
-            err_contains: Some("nested ALTER is not supported"),
+            err_contains: Some("cannot promote"),
             iceberg_has: None,
             iceberg_lacks: None,
         },
@@ -414,13 +474,13 @@ fn matrix() -> Vec<Case> {
         Case {
             name: "drop_top_level_sequential_ids",
             op: SchemaAlterOp::Drop {
-                column: "note".into(),
+                column: "region".into(),
             },
             id_mode: IdMode::Sequential,
-            expect_ok: true,
-            err_contains: None,
-            iceberg_has: Some("region"),
-            iceberg_lacks: Some("note"),
+            expect_ok: false,
+            err_contains: Some("does not match"),
+            iceberg_has: None,
+            iceberg_lacks: None,
         },
         Case {
             name: "drop_flatten_name",
@@ -428,10 +488,10 @@ fn matrix() -> Vec<Case> {
                 column: "detail_truck_reg".into(),
             },
             id_mode: IdMode::Sequential,
-            expect_ok: true,
-            err_contains: None,
-            iceberg_has: Some("region"),
-            iceberg_lacks: Some("detail_truck_reg"),
+            expect_ok: false,
+            err_contains: Some("not found"),
+            iceberg_has: None,
+            iceberg_lacks: None,
         },
         Case {
             name: "drop_dotted_nested",
@@ -442,7 +502,7 @@ fn matrix() -> Vec<Case> {
             expect_ok: true,
             err_contains: None,
             iceberg_has: Some("region"),
-            iceberg_lacks: Some("detail_truck_reg"),
+            iceberg_lacks: Some("truck_reg"),
         },
         Case {
             name: "drop_already_absent_is_idempotent",
@@ -462,7 +522,7 @@ fn matrix() -> Vec<Case> {
             },
             id_mode: IdMode::Sequential,
             expect_ok: false,
-            err_contains: Some("nested ALTER is not supported"),
+            err_contains: Some("does not match"),
             iceberg_has: None,
             iceberg_lacks: None,
         },
@@ -485,9 +545,9 @@ fn matrix() -> Vec<Case> {
                 to: SkipprDataType::Long,
             },
             id_mode: IdMode::Sequential,
-            expect_ok: true,
-            err_contains: None,
-            iceberg_has: Some("version"),
+            expect_ok: false,
+            err_contains: Some("does not match"),
+            iceberg_has: None,
             iceberg_lacks: None,
         },
         Case {
@@ -536,12 +596,12 @@ fn matrix() -> Vec<Case> {
 }
 
 fn run_case(case: &Case) -> Result<Schema, String> {
-    let mut meta = fixture_meta();
+    let meta = fixture_meta();
     let iceberg = fixture_iceberg(case.id_mode);
-    let op = canonicalize_op(&meta, &case.op).map_err(|err| err.to_string())?;
-    let field_id = field_id_for_op(&meta, &op).map_err(|err| err.to_string())?;
-    apply(&mut meta, &op).map_err(|err| err.to_string())?;
-    iceberg_schema_after_alter(&iceberg, &op, field_id)
+    let alter =
+        canonicalize(FlattenMode::Nested, &meta, &case.op, &[]).map_err(|err| err.to_string())?;
+    let _meta = apply(meta, &alter).map_err(|err| err.to_string())?;
+    iceberg_schema_after_alter(&iceberg, &alter).map_err(|err| err.to_string())
 }
 
 fn case_label(case: &Case, idx: usize) -> String {

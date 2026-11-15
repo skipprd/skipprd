@@ -978,17 +978,15 @@ fn write_format(
 pub fn gc_orphan_payloads(handle: &PipelineWalHandle, config: &Config) -> Result<(), DurableError> {
     let rows = query_all(handle.catalog(), CatalogPrefix::Segment)
         .map_err(|err| DurableError::Io(err.to_string()))?;
-    let mut live_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut live_disk: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut live_disk: std::collections::HashSet<PayloadTail> = std::collections::HashSet::new();
     let mut live_s3_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (_, row) in rows {
         let CatalogRow::Segment(seg) = row else {
             continue;
         };
-        live_ids.insert(seg.segment_id.as_str().to_string());
         match seg.location {
             PayloadLocation::Disk { path } => {
-                live_disk.insert(PathBuf::from(path));
+                live_disk.insert(payload_tail(std::path::Path::new(&path)));
             }
             PayloadLocation::S3 { key, .. } => {
                 live_s3_keys.insert(key);
@@ -997,30 +995,53 @@ pub fn gc_orphan_payloads(handle: &PipelineWalHandle, config: &Config) -> Result
     }
     let segs = &handle.paths().segs;
     if segs.exists() {
-        for entry in fs::read_dir(segs).map_err(DurableError::from)? {
-            let path = entry.map_err(DurableError::from)?.path();
-            let name = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default();
-            if name.ends_with(".seg.tmp") {
-                warn_drop_file(&path);
-                continue;
-            }
-            if path.extension().and_then(|s| s.to_str()) != Some("seg") {
-                continue;
-            }
-            let id = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default();
-            if !live_ids.contains(id) && !live_disk.contains(&path) {
-                warn_drop_file(&path);
-            }
-        }
+        gc_disk_dir(segs, &live_disk, true)?;
     }
     if matches!(config.get_wal_storage(), WalStorage::S3) {
         gc_orphan_s3_payloads(config, &live_s3_keys)?;
+    }
+    Ok(())
+}
+
+/// Payload identity under `segs/`: (parent dir name, file name). Independent
+/// of how the data dir prefix was spelled when the row was written.
+type PayloadTail = (std::ffi::OsString, std::ffi::OsString);
+
+fn payload_tail(path: &std::path::Path) -> PayloadTail {
+    let name = |p: Option<&std::path::Path>| {
+        p.and_then(|p| p.file_name())
+            .map(|n| n.to_os_string())
+            .unwrap_or_default()
+    };
+    (name(path.parent()), name(Some(path)))
+}
+
+/// Drop `.seg` payloads no catalog row points at. Liveness is the row's
+/// location, so ALTER rewrites under `alter-*/` keep their segment id stem.
+fn gc_disk_dir(
+    dir: &std::path::Path,
+    live: &std::collections::HashSet<PayloadTail>,
+    descend: bool,
+) -> Result<(), DurableError> {
+    for entry in fs::read_dir(dir).map_err(DurableError::from)? {
+        let path = entry.map_err(DurableError::from)?.path();
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if descend && name.starts_with("alter-") && path.is_dir() {
+            gc_disk_dir(&path, live, false)?;
+            continue;
+        }
+        if name.ends_with(".seg.tmp") {
+            warn_drop_file(&path);
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) == Some("seg")
+            && !live.contains(&payload_tail(&path))
+        {
+            warn_drop_file(&path);
+        }
     }
     Ok(())
 }

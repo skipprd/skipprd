@@ -59,24 +59,24 @@ FAIL_CLOSED = [
         False,
         "not found",
     ),
+    (
+        "fail_closed_rename_into_nested",
+        "ALTER TABLE s3_alter RENAME COLUMN region TO detail.region",
+        False,
+        "one identifier",
+    ),
+    (
+        "fail_closed_merge_string_into_long",
+        "ALTER TABLE s3_alter MERGE COLUMN price_string INTO price",
+        False,
+        "cannot promote",
+    ),
 ]
 
 SUCCESS = [
     (
         "idempotent_flatten_rename",
         "ALTER TABLE s3_alter RENAME COLUMN detail_truck_reg TO detail_truck_reg",
-        True,
-        None,
-    ),
-    (
-        "rename_region_into_nested",
-        "ALTER TABLE s3_alter RENAME COLUMN region TO detail.region",
-        True,
-        None,
-    ),
-    (
-        "rename_nested_region_back",
-        "ALTER TABLE s3_alter RENAME COLUMN detail.region TO region",
         True,
         None,
     ),
@@ -107,12 +107,6 @@ SUCCESS = [
     (
         "promote_n_byte_to_bigint",
         "ALTER TABLE s3_alter ALTER COLUMN n_byte TYPE BIGINT",
-        True,
-        None,
-    ),
-    (
-        "merge_price_string_into_price",
-        "ALTER TABLE s3_alter MERGE COLUMN price_string INTO price",
         True,
         None,
     ),

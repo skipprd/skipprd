@@ -67,7 +67,9 @@ skippr_runtime_sdk::declare_schema_sink_spec!(
     MotherduckSchemaSinkSpec,
     DataSinkMotherduckPlugin,
     "Motherduck",
-    skippr_runtime_sdk::plugins::AlterSupport::Native
+    skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
+        skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::MotherDuck
+    )
 );
 
 const MOTHERDUCK_SQL_ENDPOINT: &str = "https://api.motherduck.com/v1/sql";
@@ -657,26 +659,51 @@ impl DataSink for DataSinkMotherduckPlugin {
 }
 
 #[async_trait]
+impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkMotherduckPlugin {
+    async fn columns(&self, namespace: &str) -> std::io::Result<Vec<String>> {
+        let table_name = Self::namespace_to_table_name(namespace);
+        let sql = format!(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = '{}'",
+            table_name.replace('\'', "''"),
+        );
+        let body = self.execute_sql(&sql).await?;
+        skippr_runtime_sdk::plugins::alter_ddl::json_result_names(&body)
+    }
+
+    async fn execute(&self, sql: &str) -> std::io::Result<()> {
+        self.execute_sql(sql).await.map(|_| ())
+    }
+
+    async fn query_first(&self, sql: &str) -> std::io::Result<Option<String>> {
+        let body = self.execute_sql(sql).await?;
+        skippr_runtime_sdk::plugins::alter_ddl::json_result_first(&body)
+    }
+}
+
+#[async_trait]
 impl SchemaSink for DataSinkMotherduckPlugin {
     fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
-        skippr_runtime_sdk::plugins::AlterSupport::Native
+        skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
+            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::MotherDuck,
+        )
     }
 
     async fn apply_alter(
         &self,
         namespace: &str,
         _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
-        op: &skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp,
-        _field_id: i32,
+        alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
     ) -> Result<(), std::io::Error> {
         let table_name = Self::namespace_to_table_name(namespace);
         let fq_table = format!("\"{}\"", table_name);
-        let sql = skippr_runtime_sdk::plugins::alter_ddl::warehouse_alter_sql(
+        skippr_runtime_sdk::plugins::alter_ddl::apply_warehouse_alter(
+            self,
             skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::MotherDuck,
             &fq_table,
-            op,
-        )?;
-        self.execute_sql(&sql).await.map(|_| ())
+            namespace,
+            alter,
+        )
+        .await
     }
 
     async fn sync_schema(

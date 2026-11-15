@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
+// Protocol 26: SchemaAlterRequest carries CommittedAlter.
 // Protocol 25: RuntimeOutputLayout.batch_time_fields for Iceberg identity time columns.
 // Protocol 24: IngestBatch.data is bytes; prepared IPC ingest frames are gone.
 // Protocol 23: HostFrame::ApplyAlter for SchemaSink migrations.
@@ -34,7 +35,7 @@ use serde::{Deserialize, Serialize};
 // payload cannot steal the next length prefix (EU Staging COPY desync).
 // Bump every plugin crate patch when this constant changes so catalog paths
 // stay immutable.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 25;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 26;
 pub const COMMIT_RECEIPT_VERSION: u32 = 1;
 pub const CATALOG_INTENT_VERSION: u32 = 2;
 pub const GLUE_PARTITION_CATALOG_INTENT_VERSION: u32 = 1;
@@ -852,8 +853,7 @@ impl HostFrame {
 pub struct SchemaAlterRequest {
     pub request_id: u64,
     pub namespace: String,
-    pub op: crate::discover::schema_alter::SchemaAlterOp,
-    pub field_id: i32,
+    pub alter: crate::discover::schema_alter::CommittedAlter,
     pub metadata: OutputMetadata,
 }
 
@@ -1487,8 +1487,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_hard_cut_to_v25() {
-        assert_eq!(RUNTIME_PROTOCOL_VERSION, 25);
+    fn protocol_version_is_hard_cut_to_v26() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 26);
     }
 
     #[test]

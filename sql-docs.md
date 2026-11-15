@@ -12,7 +12,7 @@ ALTER TABLE <pipeline>[.<namespace>] ALTER COLUMN <column> TYPE <new_type>
 ```
 
 **Description:**
-Iceberg-legal promotion only (byte/short/integer→long, byte/short→integer, float→double, timestamp_milli→timestamp; Iceberg timestamp is already µs). Nested DROP/MERGE without a top-level Iceberg field id fails closed. Widen to string with MERGE COLUMN. Applied in-stream; DISABLE is freeze-only.
+Iceberg-legal promotion only (byte/short/integer→long, byte/short→integer, float→double, timestamp_milli→timestamp, date→timestamp; Iceberg timestamp is already µs). Nested DROP/MERGE without a top-level Iceberg field id fails closed. Widen to string with MERGE COLUMN. Applied in-stream; DISABLE is freeze-only.
 
 **Example:**
 ```sql
@@ -27,7 +27,7 @@ ALTER TABLE <pipeline>[.<namespace>] DROP COLUMN <column>
 ```
 
 **Description:**
-Drops a column from skippr metadata and the destination table (same field id on Iceberg). Applied in-stream; DISABLE is freeze-only.
+Drops a column from the output schema and the destination table (same field id on Iceberg). Applied in-stream; DISABLE is freeze-only.
 
 **Example:**
 ```sql
@@ -42,11 +42,11 @@ ALTER TABLE <pipeline>[.<namespace>] MERGE COLUMN <src> INTO <dst>
 ```
 
 **Description:**
-Drops src from metadata and the destination (same field id path as DROP on Iceberg). Retargets type-conflict evolution so later values write to dst. Historical src-only rows are not copied. Applied in-stream; DISABLE is freeze-only.
+Rewrites historical rows with COALESCE(dst, CAST(src AS dst_type)), drops src from the output schema and the destination, and keeps the Iceberg dest field id. CAST must be Iceberg-legal (string into long fails closed). Later source keys that used src write to dst. Applied in-stream; DISABLE is freeze-only.
 
 **Example:**
 ```sql
-ALTER TABLE bikehire.trips MERGE COLUMN price_string INTO price
+ALTER TABLE bikehire.trips MERGE COLUMN price_cents INTO price
 ```
 
 ### ALTER TABLE RENAME COLUMN
@@ -57,11 +57,11 @@ ALTER TABLE <pipeline>[.<namespace>] RENAME COLUMN <from> TO <to>
 ```
 
 **Description:**
-Renames a column, including nested paths (detail.truck_reg). A dotted TO path moves the field into that record; Iceberg flatten names use underscores (detail.region → detail_region). The Iceberg field id is unchanged so existing files stay readable. Applied in-stream; DISABLE is freeze-only.
+Renames a column. Nested pipelines use dotted paths (detail.truck_reg); flattened pipelines use underscores (detail_truck_reg). Do not mix the two. TO is one identifier; the column keeps its parent. A dotted TO path fails closed. The Iceberg field id is unchanged so existing files stay readable. Applied in-stream; DISABLE is freeze-only.
 
 **Example:**
 ```sql
-ALTER TABLE bikehire.trips RENAME COLUMN region TO detail.region
+ALTER TABLE bikehire.trips RENAME COLUMN region TO region_code
 ```
 
 ### DROP SCHEMA

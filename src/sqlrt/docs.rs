@@ -112,7 +112,7 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "ALTER TABLE DROP COLUMN".to_string(),
             syntax: "ALTER TABLE <pipeline>[.<namespace>] DROP COLUMN <column>".to_string(),
-            description: "Drops a column from skippr metadata and the destination table (same field id on Iceberg). Applied in-stream; DISABLE is freeze-only.".to_string(),
+            description: "Drops a column from the output schema and the destination table (same field id on Iceberg). Applied in-stream; DISABLE is freeze-only.".to_string(),
             example: "ALTER TABLE bikehire.trips DROP COLUMN user_id".to_string(),
         },
     );
@@ -121,7 +121,7 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "ALTER TABLE ALTER COLUMN".to_string(),
             syntax: "ALTER TABLE <pipeline>[.<namespace>] ALTER COLUMN <column> TYPE <new_type>".to_string(),
-            description: "Iceberg-legal promotion only (byte/short/integer→long, byte/short→integer, float→double, timestamp_milli→timestamp; Iceberg timestamp is already µs). Nested DROP/MERGE without a top-level Iceberg field id fails closed. Widen to string with MERGE COLUMN. Applied in-stream; DISABLE is freeze-only.".to_string(),
+            description: "Iceberg-legal promotion only (byte/short/integer→long, byte/short→integer, float→double, timestamp_milli→timestamp, date→timestamp; Iceberg timestamp is already µs). Nested DROP/MERGE without a top-level Iceberg field id fails closed. Widen to string with MERGE COLUMN. Applied in-stream; DISABLE is freeze-only.".to_string(),
             example: "ALTER TABLE bikehire.trips ALTER COLUMN n TYPE BIGINT".to_string(),
         },
     );
@@ -130,8 +130,8 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "ALTER TABLE RENAME COLUMN".to_string(),
             syntax: "ALTER TABLE <pipeline>[.<namespace>] RENAME COLUMN <from> TO <to>".to_string(),
-            description: "Renames a column, including nested paths (detail.truck_reg). A dotted TO path moves the field into that record; Iceberg flatten names use underscores (detail.region → detail_region). The Iceberg field id is unchanged so existing files stay readable. Applied in-stream; DISABLE is freeze-only.".to_string(),
-            example: "ALTER TABLE bikehire.trips RENAME COLUMN region TO detail.region".to_string(),
+            description: "Renames a column. Nested pipelines use dotted paths (detail.truck_reg); flattened pipelines use underscores (detail_truck_reg). Do not mix the two. TO is one identifier; the column keeps its parent. A dotted TO path fails closed. The Iceberg field id is unchanged so existing files stay readable. Applied in-stream; DISABLE is freeze-only.".to_string(),
+            example: "ALTER TABLE bikehire.trips RENAME COLUMN region TO region_code".to_string(),
         },
     );
     docs.insert(
@@ -139,8 +139,8 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "ALTER TABLE MERGE COLUMN".to_string(),
             syntax: "ALTER TABLE <pipeline>[.<namespace>] MERGE COLUMN <src> INTO <dst>".to_string(),
-            description: "Drops src from metadata and the destination (same field id path as DROP on Iceberg). Retargets type-conflict evolution so later values write to dst. Historical src-only rows are not copied. Applied in-stream; DISABLE is freeze-only.".to_string(),
-            example: "ALTER TABLE bikehire.trips MERGE COLUMN price_string INTO price".to_string(),
+            description: "Rewrites historical rows with COALESCE(dst, CAST(src AS dst_type)), drops src from the output schema and the destination, and keeps the Iceberg dest field id. CAST must be Iceberg-legal (string into long fails closed). Later source keys that used src write to dst. Applied in-stream; DISABLE is freeze-only.".to_string(),
+            example: "ALTER TABLE bikehire.trips MERGE COLUMN price_cents INTO price".to_string(),
         },
     );
 
@@ -464,6 +464,32 @@ mod tests {
                 "get_sql_docs() is the SQL-doc SoT and must include {name}"
             );
         }
+    }
+
+    #[test]
+    fn merge_docs_rewrite_history_not_evolution() {
+        let description = &get_sql_docs()["ALTER TABLE MERGE COLUMN"].description;
+        let lower = description.to_ascii_lowercase();
+        assert!(
+            description.contains("COALESCE"),
+            "MERGE must name COALESCE rewrite: {description}"
+        );
+        assert!(
+            description.contains("COALESCE(dst, CAST(src AS dst_type))"),
+            "MERGE must name dest-first CAST: {description}"
+        );
+        assert!(
+            !lower.contains("evolution"),
+            "MERGE must not teach evolution retarget: {description}"
+        );
+        assert!(
+            !lower.contains("not copied"),
+            "MERGE rewrites historical rows: {description}"
+        );
+        assert!(
+            !lower.contains("skippr metadata"),
+            "MERGE must not claim source metadata mutation: {description}"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::any::Any;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[allow(unused_imports)]
 use chrono::{DateTime, TimeZone, Utc};
@@ -250,6 +250,25 @@ impl OutputMetadata {
         flatterened_metadata
     }
 
+    /// The only published projection of one namespace's output metadata:
+    /// flatten per mode, then repair field identity.
+    pub fn project(
+        namespace: &str,
+        output: &Metadata,
+        mode: schema_alter::FlattenMode,
+    ) -> OutputMetadata {
+        match mode {
+            schema_alter::FlattenMode::Flat => {
+                Self::from_flatterened_metadata_for_namespace(namespace, output)
+            }
+            schema_alter::FlattenMode::Nested => {
+                let mut out = Self::from_metadata(output);
+                Self::repair_field_identity(namespace, &mut out);
+                out
+            }
+        }
+    }
+
     pub fn repair_field_identity(namespace: &str, metadata: &mut OutputMetadata) -> bool {
         let mut changed = false;
         let mut seen = HashMap::<i32, String>::new();
@@ -299,6 +318,9 @@ pub struct PipelineMetadata {
     pub schema_id: u64,
     #[serde(default)]
     pub source_contracts: HashMap<String, crate::plugins::source_contract::SourceNamespaceContract>,
+    /// Output-shape log. Source `metadata` is discover-owned and never mutated by ALTER.
+    #[serde(default)]
+    pub alters: BTreeMap<String, Vec<schema_alter::CommittedAlter>>,
 }
 
 impl crate::discover::PipelineMetadata {
@@ -316,6 +338,7 @@ impl crate::discover::PipelineMetadata {
             metadata_version: CURRENT_METADATA_VERSION,
             schema_id: DEFAULT_SCHEMA_ID,
             source_contracts: HashMap::new(),
+            alters: BTreeMap::new(),
         }
     }
 
@@ -334,7 +357,52 @@ impl crate::discover::PipelineMetadata {
             metadata_version: CURRENT_METADATA_VERSION,
             schema_id: DEFAULT_SCHEMA_ID,
             source_contracts: HashMap::new(),
+            alters: BTreeMap::new(),
         })
+    }
+
+    pub fn flatten_mode(&self) -> schema_alter::FlattenMode {
+        schema_alter::FlattenMode::from_flattened(self.flattened)
+    }
+
+    /// Committed alters of `ns`, oldest first.
+    pub fn alter_log(&self, ns: &str) -> &[schema_alter::CommittedAlter] {
+        self.alters.get(ns).map_or(&[], Vec::as_slice)
+    }
+
+    /// Fold committed alters onto a clone of source metadata. Source is unchanged.
+    /// A log recorded under a different flatten mode fails closed.
+    pub fn output(&self, ns: &str) -> Result<Metadata, schema_alter::SchemaAlterError> {
+        let source = self
+            .metadata
+            .get(ns)
+            .ok_or_else(|| schema_alter::SchemaAlterError::NamespaceNotFound(ns.to_string()))?
+            .clone();
+        let current = self.flatten_mode();
+        self.alter_log(ns)
+            .iter()
+            .try_fold(source, |meta, committed| {
+                let recorded = committed.alter.mode();
+                if recorded != current {
+                    return Err(schema_alter::SchemaAlterError::FlattenModeChanged {
+                        recorded,
+                        current,
+                    });
+                }
+                schema_alter::apply(meta, &committed.alter)
+            })
+    }
+
+    /// Published output projection of `ns`: fold, then [`OutputMetadata::project`].
+    pub fn output_metadata(
+        &self,
+        ns: &str,
+    ) -> Result<OutputMetadata, schema_alter::SchemaAlterError> {
+        Ok(OutputMetadata::project(
+            ns,
+            &self.output(ns)?,
+            self.flatten_mode(),
+        ))
     }
 
     pub fn migrate_persisted_metadata(&mut self) -> bool {
@@ -666,11 +734,7 @@ impl Metadata {
     /// Nested flatten names join with `_`. The root namespace node is a table,
     /// not a struct column: its `out_field_name` must not prefix leaves.
     fn flatten_child_path(field_path: &str, child_out: &str) -> String {
-        if field_path.is_empty() {
-            child_out.to_string()
-        } else {
-            format!("{}_{}", field_path, child_out)
-        }
+        schema_alter::flatten_child_path(field_path, child_out)
     }
 
     fn _flatten_metadata(metadata: &Metadata, flattened: &mut OutputMetadata, field_path: String) {
@@ -4002,6 +4066,101 @@ mod tests_roundtrip {
     use serde_json::json;
 
     #[test]
+    fn output_fails_closed_when_flatten_mode_changes() {
+        use crate::discover::schema_alter::{
+            AlterColumn, AlterOrigin, CanonicalAlter, CommittedAlter, FlattenMode,
+            MigrationDirection, MigrationId, OutputName,
+        };
+        let mut root = Metadata::new().unwrap();
+        root.fields.insert(
+            "region".into(),
+            Metadata::new_with_type(SkipprDataType::String, "region"),
+        );
+        let nested = OutputName::parse_sql(FlattenMode::Nested, "region").unwrap();
+        let pipeline = PipelineMetadata {
+            name: "pipeline".into(),
+            metadata: HashMap::from([("orders".into(), root)]),
+            enabled: true,
+            flattened: true,
+            metadata_version: CURRENT_METADATA_VERSION,
+            schema_id: DEFAULT_SCHEMA_ID,
+            source_contracts: HashMap::new(),
+            alters: BTreeMap::from([(
+                "orders".into(),
+                vec![CommittedAlter {
+                    origin: AlterOrigin {
+                        migration: MigrationId::new("m"),
+                        direction: MigrationDirection::Up,
+                    },
+                    seq: 0,
+                    alter: CanonicalAlter::Rename {
+                        column: AlterColumn {
+                            name: nested,
+                            id: 1,
+                            ty: SkipprDataType::String,
+                        },
+                        to_leaf: "region_code".into(),
+                    },
+                }],
+            )]),
+        };
+        match pipeline.output("orders") {
+            Err(schema_alter::SchemaAlterError::FlattenModeChanged { recorded, current }) => {
+                assert_eq!(recorded, FlattenMode::Nested);
+                assert_eq!(current, FlattenMode::Flat);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_metadata_publishes_folded_names() {
+        use crate::discover::schema_alter::{
+            AlterColumn, AlterOrigin, CanonicalAlter, CommittedAlter, FlattenMode,
+            MigrationDirection, MigrationId, OutputName,
+        };
+        let mut root = Metadata::new().unwrap();
+        let mut region = Metadata::new_with_type(SkipprDataType::String, "region");
+        region.field_id = 1;
+        root.fields.insert("region".into(), region);
+        let nested = OutputName::parse_sql(FlattenMode::Nested, "region").unwrap();
+        let pipeline = PipelineMetadata {
+            name: "pipeline".into(),
+            metadata: HashMap::from([("orders".into(), root)]),
+            enabled: true,
+            flattened: false,
+            metadata_version: CURRENT_METADATA_VERSION,
+            schema_id: DEFAULT_SCHEMA_ID,
+            source_contracts: HashMap::new(),
+            alters: BTreeMap::from([(
+                "orders".into(),
+                vec![CommittedAlter {
+                    origin: AlterOrigin {
+                        migration: MigrationId::new("m"),
+                        direction: MigrationDirection::Up,
+                    },
+                    seq: 0,
+                    alter: CanonicalAlter::Rename {
+                        column: AlterColumn {
+                            name: nested,
+                            id: 1,
+                            ty: SkipprDataType::String,
+                        },
+                        to_leaf: "region_code".into(),
+                    },
+                }],
+            )]),
+        };
+        let published = pipeline.output_metadata("orders").unwrap();
+        let names: Vec<_> = published
+            .child_fields()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(names.contains(&"region_code"), "{names:?}");
+        assert!(!names.contains(&"region"), "{names:?}");
+    }
+
+    #[test]
     fn persisted_metadata_migration_sets_ids_and_defaults() {
         let mut root = Metadata::new().unwrap();
         let mut field = Metadata::new_with_type(SkipprDataType::String, "customer_id");
@@ -4015,6 +4174,7 @@ mod tests_roundtrip {
             metadata_version: 0,
             schema_id: 0,
             source_contracts: HashMap::new(),
+            alters: BTreeMap::new(),
         };
 
         assert!(pipeline.migrate_persisted_metadata());
@@ -4055,6 +4215,7 @@ mod tests_roundtrip {
             metadata_version: 3,
             schema_id: 1,
             source_contracts: HashMap::new(),
+            alters: BTreeMap::new(),
         };
 
         assert!(pipeline.normalize_namespace("id_insert").unwrap());

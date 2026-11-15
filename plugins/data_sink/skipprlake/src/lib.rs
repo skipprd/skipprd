@@ -109,7 +109,11 @@ mod tests {
 
         use iceberg::memory::{MemoryCatalogBuilder, MEMORY_CATALOG_WAREHOUSE};
         use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableIdent};
-        use skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp;
+        use skippr_runtime_sdk::discover::schema_alter::{
+            AlterColumn, AlterOrigin, CanonicalAlter, CommittedAlter, FlattenMode,
+            MigrationDirection, MigrationId, OutputName,
+        };
+        use skippr_runtime_sdk::discover::SkipprDataType;
         use skippr_runtime_sdk::plugins::{AlterSupport, SchemaSink};
 
         let catalog: Arc<dyn Catalog> = Arc::new(
@@ -147,7 +151,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(writer.alter_support(), AlterSupport::Native);
+        assert_eq!(writer.alter_support(), AlterSupport::Iceberg);
 
         let metadata = region_metadata();
         writer.sync_schema("orders", &metadata).await.unwrap();
@@ -163,11 +167,21 @@ mod tests {
             .apply_alter(
                 "orders",
                 &metadata,
-                &SchemaAlterOp::Rename {
-                    from: "region".into(),
-                    to: "region_code".into(),
+                &CommittedAlter {
+                    origin: AlterOrigin {
+                        migration: MigrationId::new("mig-1"),
+                        direction: MigrationDirection::Up,
+                    },
+                    seq: 1,
+                    alter: CanonicalAlter::Rename {
+                        column: AlterColumn {
+                            name: OutputName::parse_sql(FlattenMode::Nested, "region").unwrap(),
+                            id: field_id,
+                            ty: SkipprDataType::String,
+                        },
+                        to_leaf: "region_code".into(),
+                    },
                 },
-                field_id,
             )
             .await
             .unwrap();

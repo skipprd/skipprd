@@ -735,6 +735,7 @@ fn apply_derived_runtime_schema(
     schema: &SchemaRef,
 ) -> io::Result<()> {
     if current_runtime_schema_state()
+        .map_err(io::Error::other)?
         .namespaces
         .contains_key(&namespace)
     {
@@ -751,7 +752,8 @@ fn apply_derived_runtime_schema(
             namespaces: BTreeMap::from([(namespace.clone(), metadata)]),
             namespace_versions: BTreeMap::from([(namespace, version)]),
         },
-    );
+    )
+    .map_err(io::Error::other)?;
     Ok(())
 }
 
@@ -1031,7 +1033,8 @@ pub async fn sync_runtime_input_plugin(
                     }
                     PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(schema_state)) => {
                         let namespace_count = schema_state.namespaces.len();
-                        let changed_namespaces = apply_runtime_source_schema_state(config, schema_state);
+                        let changed_namespaces = apply_runtime_source_schema_state(config, schema_state)
+                            .map_err(io::Error::other)?;
                         if namespace_count > 0 {
                             info!(
                                 "Runtime source schema state update: {} namespaces received, {} changed",
@@ -1063,8 +1066,9 @@ pub async fn sync_runtime_input_plugin(
                             .iter()
                             .map(|(namespace, entry)| (namespace.clone(), entry.version))
                             .collect();
-                        let changed_namespaces =
-                            apply_runtime_source_schema_state(config, RuntimeSchemaState {
+                        let changed_namespaces = apply_runtime_source_schema_state(
+                            config,
+                            RuntimeSchemaState {
                                 version: delta.version,
                                 namespaces: delta
                                     .namespaces
@@ -1072,7 +1076,9 @@ pub async fn sync_runtime_input_plugin(
                                     .map(|(namespace, entry)| (namespace, entry.metadata))
                                     .collect(),
                                 namespace_versions,
-                            });
+                            },
+                        )
+                        .map_err(io::Error::other)?;
                         if namespace_count > 0 {
                             info!(
                                 "Runtime source schema delta: {} namespaces received, {} changed",
@@ -2509,7 +2515,7 @@ async fn spawn_installed_runtime_sink_connection(
                 .send(&HostFrame::InstallSink(install_request.clone()))
                 .await?;
             expect_install_ack(&mut connection, "sink").await?;
-            let schema_state = current_runtime_schema_state();
+            let schema_state = current_runtime_schema_state().map_err(io::Error::other)?;
             connection
                 .send(&HostFrame::InstallSchemaState(
                     RuntimeSchemaStateInstallRequest {
@@ -3046,7 +3052,7 @@ impl RuntimeDataSinkPlugin {
         if namespace.is_empty() {
             return Ok(0);
         }
-        let schema_state = current_runtime_schema_state();
+        let schema_state = current_runtime_schema_state().map_err(io::Error::other)?;
         let required_version = schema_state
             .namespace_versions
             .get(namespace)
@@ -3809,8 +3815,9 @@ impl DataSink for RuntimeDataSinkPlugin {
                 namespaces: namespaces.clone(),
                 namespace_versions,
             },
-        );
-        let current = current_runtime_schema_state();
+        )
+        .map_err(io::Error::other)?;
+        let current = current_runtime_schema_state().map_err(io::Error::other)?;
         for namespace in changed {
             let metadata = current.namespaces.get(&namespace).cloned().ok_or_else(|| {
                 io::Error::other(format!(
@@ -3966,7 +3973,7 @@ impl RuntimeSchemaSinkPlugin {
             crate::metrics::counters::add_runtime_schema_state_publication_skipped(1);
             return Ok(());
         }
-        let schema_state = current_runtime_schema_state();
+        let schema_state = current_runtime_schema_state().map_err(io::Error::other)?;
         connection
             .send(&HostFrame::InstallSchemaDelta(SchemaDelta {
                 version: schema_state.version,
@@ -3990,7 +3997,7 @@ impl RuntimeSchemaSinkPlugin {
         &self,
         connection: &mut RuntimeChildConnection,
     ) -> io::Result<()> {
-        let schema_state = current_runtime_schema_state();
+        let schema_state = current_runtime_schema_state().map_err(io::Error::other)?;
         self.send_schema_state_install(connection, &schema_state)
             .await
     }
@@ -4118,14 +4125,12 @@ impl SchemaSink for RuntimeSchemaSinkPlugin {
         &self,
         namespace: &str,
         metadata: &crate::discover::OutputMetadata,
-        op: &crate::discover::schema_alter::SchemaAlterOp,
-        field_id: i32,
+        alter: &crate::discover::schema_alter::CommittedAlter,
     ) -> Result<(), io::Error> {
         let request = crate::runtime_plugins::protocol::SchemaAlterRequest {
             request_id: next_runtime_request_id(),
             namespace: namespace.to_string(),
-            op: op.clone(),
-            field_id,
+            alter: alter.clone(),
             metadata: metadata.clone(),
         };
         let mut retried = false;
@@ -4692,8 +4697,9 @@ mod tests {
             .find("impl SchemaSink for RuntimeSchemaSinkPlugin")
             .expect("RuntimeSchemaSinkPlugin SchemaSink");
         let body = src[start..].split("async fn apply_alter").next().unwrap();
+        let forbidden = concat!("AlterSupport::", "Native");
         assert!(
-            !body.contains("AlterSupport::Native"),
+            !body.contains(forbidden),
             "host must not hardcode Native; guest handshake is SoT"
         );
         assert!(

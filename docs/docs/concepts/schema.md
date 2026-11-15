@@ -68,17 +68,17 @@ Sibling columns keep every value without breaking existing queries. Watch for th
 
 ### Fold a sibling column back
 
-For Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB) and warehouses with native DDL, you can merge a sibling column into the original:
+For Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB) and warehouses with table DDL, you can merge a same-type sibling into the original:
 
 ```bash
-skipprd query --sql "ALTER TABLE bikehire.trips MERGE COLUMN price_string INTO price"
+skipprd query --sql "ALTER TABLE bikehire.trips MERGE COLUMN price_cents INTO price"
 ```
 
-`MERGE COLUMN` drops the sibling and retargets evolution so later values write to the target. Historical src-only rows are not copied. The same `ALTER TABLE` family also renames (including nested `TO` paths such as `detail.region`), drops, and widens types. Prefer `migrations/*.sql` and [`skipprd migrate`](/cli/migrate). See [ALTER operations](/operations/alter) for the full matrix and fail-closed cases.
+`MERGE COLUMN` rewrites historical rows with COALESCE(dst, CAST(src AS dst_type)), drops the sibling from the output schema, and later source values that used the sibling key write to the target. CAST must be Iceberg-legal (string into long fails closed). The same `ALTER TABLE` family also renames a leaf (`TO` is one identifier), drops, and widens types. Prefer `migrations/*.sql` and [`skipprd migrate`](/cli/migrate). See [ALTER operations](/operations/alter) for the full matrix and fail-closed cases.
 
 ## Flatten nested fields
 
-Skipprd keeps nested structure by default. To write every nested field as its own dot-separated column (`contact.name`, `location.start_geo.lat`), set `flatten_events` on the pipeline's transform.
+Skipprd keeps nested structure by default. To write every nested field as its own underscore-separated column (`contact_name`, `location_start_geo_lat`), set `flatten_events` on the pipeline's transform.
 
 ::: code-group
 

@@ -5,19 +5,16 @@
 
 mod apply;
 mod file;
+pub mod gate;
 pub(crate) mod journal;
 mod wal;
 
-pub use apply::{
-    apply_migration, apply_pending, apply_pending_files, apply_query_alter,
-    require_native_alter_support, schema_barrier_held,
-};
+pub use apply::{apply_pending, apply_pending_on, apply_query_alter, MigrationError};
 pub use file::{load_sql_file, write_sql_file, LoadedMigration, MigrationFileError};
 pub use journal::{
     journal_key, MigrationApply, MigrationChecksum, MigrationDirection, MigrationId,
     MigrationPhase, MigrationRecord,
 };
-pub use wal::rewrite_record_batch;
 
 use crate::helpers::configuration::Config;
 use std::path::PathBuf;
@@ -35,7 +32,6 @@ pub fn migrations_dir(_config: &Config) -> PathBuf {
 mod tests {
     use super::*;
     use crate::discover::schema_alter::SchemaAlterOp;
-    use crate::plugins::AlterSupport;
 
     #[test]
     fn sql_file_parses_up_and_optional_down() {
@@ -57,6 +53,20 @@ ALTER TABLE bikehire.trips RENAME COLUMN region_code TO region;
     }
 
     #[test]
+    fn down_promote_fails_closed() {
+        let sql = "\
+ALTER TABLE p.ns ALTER COLUMN n TYPE BIGINT;
+-- migrate:down
+ALTER TABLE p.ns RENAME COLUMN n TO n;
+";
+        let err = load_sql_file("bad_promote_down", sql).unwrap_err();
+        assert!(
+            format!("{err}").contains("down() is only valid for Rename"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn down_after_drop_or_merge_fails_closed() {
         let drop_down = "\
 ALTER TABLE p.ns DROP COLUMN leftover;
@@ -65,7 +75,7 @@ ALTER TABLE p.ns RENAME COLUMN a TO b;
 ";
         let err = load_sql_file("bad_drop_down", drop_down).unwrap_err();
         assert!(
-            format!("{err}").contains("down() is only valid for Rename or Promote"),
+            format!("{err}").contains("down() is only valid for Rename"),
             "{err}"
         );
 
@@ -76,7 +86,7 @@ ALTER TABLE p.ns RENAME COLUMN a TO b;
 ";
         let err = load_sql_file("bad_merge_down", merge_down).unwrap_err();
         assert!(
-            format!("{err}").contains("down() is only valid for Rename or Promote"),
+            format!("{err}").contains("down() is only valid for Rename"),
             "{err}"
         );
     }
@@ -100,11 +110,6 @@ ALTER TABLE p.ns RENAME COLUMN a TO b;
             actual: b,
         };
         assert!(format!("{err}").contains("checksum mismatch"));
-    }
-
-    #[test]
-    fn alter_support_native_is_distinct_from_unsupported() {
-        assert_ne!(AlterSupport::Native, AlterSupport::Unsupported);
     }
 
     #[test]

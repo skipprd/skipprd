@@ -1157,24 +1157,36 @@ class Pipeline:
 
 @final
 class TransformOp:
-    """One in-memory Arrow op. Exactly one of the keys may be set."""
-    def __new__(
-        cls,
-        *,
-        filter: str | None = None,
-        project: list[str] | None = None,
-        derive: dict[str, str] | None = None,
-        rename: dict[str, str] | None = None,
-        cast: dict[str, str] | None = None,
-    ) -> TransformOp:
-        """One in-memory Arrow op. Exactly one of the keys may be set.
+    """One in-memory Arrow op. YAML/JSON is a one-key map (`filter:`, `project:`, …)."""
+    @classmethod
+    def filter(cls, filter: str) -> TransformOp:
+        """DataFusion SQL boolean expression. Rows that do not match are dropped.
 
-        Args:
-            filter: DataFusion SQL boolean expression. Rows that do not match are dropped.
-            project: Keep only these output column names, in this order.
-            derive: Add derived columns. Map of new name to DataFusion SQL expression.
-            rename: Rename columns. Map of current name to new name.
-            cast: Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`)."""
+        YAML key `filter`."""
+        ...
+    @classmethod
+    def project(cls, project: list[str]) -> TransformOp:
+        """Keep only these output column names, in this order.
+
+        YAML key `project`."""
+        ...
+    @classmethod
+    def derive(cls, derive: dict[str, str]) -> TransformOp:
+        """Add derived columns. Map of new name to DataFusion SQL expression.
+
+        YAML key `derive`."""
+        ...
+    @classmethod
+    def rename(cls, rename: dict[str, str]) -> TransformOp:
+        """Rename columns. Map of current name to new name.
+
+        YAML key `rename`."""
+        ...
+    @classmethod
+    def cast(cls, cast: dict[str, str]) -> TransformOp:
+        """Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`).
+
+        YAML key `cast`."""
         ...
     @property
     def filter(self) -> str | None:
@@ -1297,7 +1309,7 @@ class Transform:
         Args:
             batch_time_fields: Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.
             batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.
-            flatten_events: Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).
+            flatten_events: Flatten nested objects into underscore-separated columns (`contact_name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).
             record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.
             batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).
             partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.
@@ -1324,7 +1336,7 @@ class Transform:
         ...
     @property
     def flatten_events(self) -> bool | None:
-        """Flatten nested objects into dot-separated columns (`contact.name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).
+        """Flatten nested objects into underscore-separated columns (`contact_name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).
 
         YAML key `flatten_events`."""
         ...

@@ -1,42 +1,59 @@
-use crate::discover::schema_alter;
+use crate::discover::schema_alter::{
+    self, AlterOrigin, CommittedAlter, FlattenMode, OutputName, SchemaAlterError,
+};
+use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::Offsets;
-use crate::migration::file::{list_sql_files, AlterStmt, LoadedMigration};
+use crate::migration::file::{list_sql_files, AlterStmt, LoadedMigration, MigrationFileError};
+use crate::migration::gate::{self, GateError};
 use crate::migration::journal::{
-    self, journal_key, MigrationApply, MigrationDirection, MigrationId, MigrationPhase,
+    self, journal_key, JournalError, MigrationApply, MigrationDirection, MigrationId,
+    MigrationPhase,
 };
 use crate::migration::migrations_dir;
-use crate::plugins::{AlterSupport, SchemaSink};
+use crate::plugins::SchemaSink;
 use crate::sqlrt::parser::AlterTableStatement;
 use crate::METADATA;
+use skippr_lease::DurableError;
 use skippr_wal_catalog::{CatalogFence, SkipprStore};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-static SCHEMA_BARRIER: AtomicBool = AtomicBool::new(false);
-
-pub fn schema_barrier_held() -> bool {
-    SCHEMA_BARRIER.load(Ordering::SeqCst)
-}
-
-pub fn set_schema_barrier(held: bool) {
-    SCHEMA_BARRIER.store(held, Ordering::SeqCst);
-}
-
-pub fn require_native_alter_support(support: AlterSupport) -> Result<(), String> {
-    if support != AlterSupport::Native {
-        return Err(format!(
-            "schema sink does not support migrations ({support:?})"
-        ));
-    }
-    Ok(())
+#[derive(Debug, thiserror::Error)]
+pub enum MigrationError {
+    #[error(transparent)]
+    Alter(#[from] SchemaAlterError),
+    #[error(transparent)]
+    Journal(#[from] JournalError),
+    #[error(transparent)]
+    Gate(#[from] GateError),
+    #[error(transparent)]
+    File(#[from] MigrationFileError),
+    #[error("WAL catalog: {0}")]
+    Durable(#[from] DurableError),
+    #[error("WAL payload: {0}")]
+    Arrow(#[from] arrow::error::ArrowError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("type: copy cannot ALTER TABLE")]
+    CopyPipeline,
+    #[error("copy/non-Arrow WAL parts cannot be rewritten")]
+    CopyPayload,
+    #[error("WAL part exceeds its payload")]
+    TruncatedPayload,
+    #[error("migration {0} has no down()")]
+    NoDown(MigrationId),
+    #[error("migration journal requires a skippr store")]
+    NoJournalStore,
+    #[error("pipeline: {0}")]
+    Pipeline(String),
 }
 
 pub async fn apply_query_alter(
     config: &Config,
     stmt: &AlterTableStatement,
     sql: &str,
-) -> Result<String, String> {
+) -> Result<String, MigrationError> {
     let pipeline = format!("{}", stmt.pipeline).replace('"', "");
     let namespace = stmt
         .namespace
@@ -45,248 +62,306 @@ pub async fn apply_query_alter(
         .unwrap_or_else(|| pipeline.clone());
     let bound = config.bind_pipeline(&pipeline);
     bound.init().await;
-    let offsets = Arc::new(Offsets::init(&bound).map_err(|err| err.to_string())?);
-    let (store, fence) = journal_store(offsets.as_ref())?;
-    crate::buffer::wal_store::ensure_disk_wal_handle(&bound, offsets)
-        .map_err(|err| err.to_string())?;
+    let offsets =
+        Arc::new(Offsets::init(&bound).map_err(|err| MigrationError::Pipeline(err.to_string()))?);
     let loaded = crate::migration::file::load_sql_file(
         MigrationId::query(crate::migration::MigrationChecksum::of(sql)).as_str(),
         sql,
-    )
-    .map_err(|err| err.to_string())?;
-    apply_loaded(
-        &bound,
-        store.as_ref(),
-        fence,
-        &loaded,
-        MigrationDirection::Up,
-    )
-    .await?;
+    )?;
+    apply_loaded(&bound, &offsets, &loaded, MigrationDirection::Up).await?;
     Ok(format!("ALTER TABLE {pipeline}.{namespace} {:?}", stmt.op))
 }
 
-pub async fn apply_pending_files(
+pub async fn apply_pending(
     config: &Config,
-    store: &dyn SkipprStore,
-    fence: CatalogFence,
     direction: MigrationDirection,
-) -> Result<Vec<String>, String> {
-    let dir = migrations_dir(config);
-    let files = list_sql_files(&dir).map_err(|err| err.to_string())?;
+) -> Result<Vec<String>, MigrationError> {
+    let offsets =
+        Arc::new(Offsets::init(config).map_err(|err| MigrationError::Pipeline(err.to_string()))?);
+    apply_pending_on(config, &offsets, direction).await
+}
+
+pub async fn apply_pending_on(
+    config: &Config,
+    offsets: &Arc<Offsets>,
+    direction: MigrationDirection,
+) -> Result<Vec<String>, MigrationError> {
+    let files = list_sql_files(&migrations_dir(config))?;
     let pipeline = config.get_pipeline_name();
     let mut applied = Vec::new();
     for file in files {
         if file.up.iter().all(|stmt| stmt.pipeline != pipeline) {
             continue;
         }
-        apply_loaded(config, store, fence, &file, direction).await?;
+        apply_loaded(config, offsets, &file, direction).await?;
         applied.push(file.id.as_str().to_string());
     }
     Ok(applied)
 }
 
-pub async fn apply_pending(
-    config: &Config,
-    direction: MigrationDirection,
-) -> Result<Vec<String>, String> {
-    let offsets = Arc::new(Offsets::init(config).map_err(|err| err.to_string())?);
-    let (store, fence) = journal_store(offsets.as_ref())?;
-    crate::buffer::wal_store::ensure_disk_wal_handle(config, offsets)
-        .map_err(|err| err.to_string())?;
-    apply_pending_files(config, store.as_ref(), fence, direction).await
-}
-
-pub async fn apply_migration(
-    config: &Config,
-    store: &dyn SkipprStore,
-    fence: CatalogFence,
-    apply: &MigrationApply,
-    stmts: &[AlterStmt],
-) -> Result<(), String> {
-    let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name())
-        .map_err(|err| err.to_string())?;
-    let log = journal::load(store, &key).map_err(|err| err.to_string())?;
-    if journal::latest_phase(&log, apply).map_err(|err| err.to_string())?
-        == Some(MigrationPhase::Committed)
-    {
-        return Ok(());
-    }
-    let plugin = config.primary_schema_sink().await?;
-    apply_with(config, store, fence, plugin.as_ref(), apply, stmts).await
-}
-
-fn journal_store(offsets: &Offsets) -> Result<(Arc<dyn SkipprStore>, CatalogFence), String> {
-    let store = offsets
-        .skippr_kv()
-        .ok_or_else(|| "migration journal requires a skippr store".to_string())?;
-    let fence = offsets
-        .writer_fence()
-        .ok_or_else(|| "migration journal requires a skippr store".to_string())?;
-    Ok((store, fence))
-}
-
-async fn apply_with(
-    config: &Config,
-    store: &dyn SkipprStore,
-    fence: CatalogFence,
-    plugin: &dyn SchemaSink,
-    apply: &MigrationApply,
-    stmts: &[AlterStmt],
-) -> Result<(), String> {
-    let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name())
-        .map_err(|err| err.to_string())?;
-    let log = journal::load(store, &key).map_err(|err| err.to_string())?;
-    let phase = journal::latest_phase(&log, apply).map_err(|err| err.to_string())?;
-    if phase == Some(MigrationPhase::Committed) {
-        return Ok(());
-    }
-
-    set_schema_barrier(true);
-    let _release = SchemaBarrierGuard;
-    wait_sink_idle().await;
-    require_native_alter_support(plugin.alter_support())?;
-
-    let mut metadata = config
-        .get_metadata()
-        .await
-        .map_err(|_| format!("No existing schema for {}", config.get_pipeline_name()))?;
-    let flatten = config.get_transform_flatten_events();
-
-    if phase != Some(MigrationPhase::DestApplied) {
-        let mut dest_ops = Vec::new();
-        for stmt in stmts {
-            let ns_meta = metadata.metadata.get_mut(&stmt.namespace).ok_or_else(|| {
-                format!(
-                    "Schema '{}' not found for pipeline '{}'",
-                    stmt.namespace, stmt.pipeline
-                )
-            })?;
-            let op = schema_alter::canonicalize_op(ns_meta, &stmt.op).map_err(|e| e.to_string())?;
-            let field_id =
-                schema_alter::field_id_for_op(ns_meta, &op).map_err(|e| e.to_string())?;
-            schema_alter::apply(ns_meta, &op).map_err(|e| e.to_string())?;
-            crate::ingest_work::Ingest::replace_arrow_schema(
-                config,
-                &stmt.namespace,
-                ns_meta,
-                flatten,
-            )
-            .map_err(|err| err.to_string())?;
-            if phase != Some(MigrationPhase::WalRewritten) {
-                crate::migration::wal::rewrite_live_wal(config, &stmt.namespace, &op, field_id)?;
-            }
-            dest_ops.push((
-                stmt.namespace.clone(),
-                crate::discover::OutputMetadata::from_metadata(ns_meta),
-                op,
-                field_id,
-            ));
-        }
-        if phase != Some(MigrationPhase::WalRewritten) {
-            journal::commit(store, fence, &key, apply, MigrationPhase::WalRewritten)
-                .map_err(|err| err.to_string())?;
-        }
-        for (namespace, output, op, field_id) in dest_ops {
-            plugin
-                .apply_alter(&namespace, &output, &op, field_id)
-                .await
-                .map_err(|err| err.to_string())?;
-        }
-        journal::commit(store, fence, &key, apply, MigrationPhase::DestApplied)
-            .map_err(|err| err.to_string())?;
-    }
-
-    METADATA.store(Arc::new(metadata.clone()));
-    config.persist_pipeline_metadata(&metadata).await?;
-    journal::commit(store, fence, &key, apply, MigrationPhase::Committed)
-        .map_err(|err| err.to_string())?;
-    Ok(())
-}
-
-async fn wait_sink_idle() {
-    for _ in 0..1_000 {
-        let sink_busy = crate::buffer::compaction_progress::sink_work_in_flight_count() > 0;
-        let compact_busy = crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
-            .load(std::sync::atomic::Ordering::Relaxed)
-            > 0;
-        if !sink_busy && !compact_busy {
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
-}
-
 async fn apply_loaded(
     config: &Config,
-    store: &dyn SkipprStore,
-    fence: CatalogFence,
+    offsets: &Arc<Offsets>,
     loaded: &LoadedMigration,
     direction: MigrationDirection,
-) -> Result<(), String> {
+) -> Result<(), MigrationError> {
     let stmts = match direction {
         MigrationDirection::Up => &loaded.up,
         MigrationDirection::Down => loaded
             .down
             .as_ref()
-            .ok_or_else(|| format!("migration {} has no down()", loaded.id))?,
+            .ok_or_else(|| MigrationError::NoDown(loaded.id.clone()))?,
     };
     let apply = MigrationApply {
         id: loaded.id.clone(),
         checksum: loaded.checksum.clone(),
         direction,
     };
-    apply_migration(config, store, fence, &apply, stmts).await
+    let plugin = config
+        .primary_schema_sink()
+        .await
+        .map_err(MigrationError::Pipeline)?;
+    apply_with(config, offsets, plugin.as_ref(), &apply, stmts).await
 }
 
-struct SchemaBarrierGuard;
+fn journal_store(
+    offsets: &Offsets,
+) -> Result<(Arc<dyn SkipprStore>, CatalogFence), MigrationError> {
+    let store = offsets.skippr_kv().ok_or(MigrationError::NoJournalStore)?;
+    let fence = offsets
+        .writer_fence()
+        .ok_or(MigrationError::NoJournalStore)?;
+    Ok((store, fence))
+}
 
-impl Drop for SchemaBarrierGuard {
-    fn drop(&mut self) {
-        set_schema_barrier(false);
+/// One statement resolved for this apply.
+struct Planned {
+    namespace: String,
+    output: OutputMetadata,
+    committed: CommittedAlter,
+}
+
+async fn apply_with(
+    config: &Config,
+    offsets: &Arc<Offsets>,
+    plugin: &dyn SchemaSink,
+    apply: &MigrationApply,
+    stmts: &[AlterStmt],
+) -> Result<(), MigrationError> {
+    let (store, fence) = journal_store(offsets)?;
+    let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name())?;
+    let phase = journal::latest_phase(&journal::load(store.as_ref(), &key)?, apply)?;
+    if phase == Some(MigrationPhase::Committed) {
+        return Ok(());
     }
+    if matches!(
+        config.pipeline_type().map_err(MigrationError::Pipeline)?,
+        crate::pipeline_type::PipelineType::Copy
+    ) {
+        return Err(MigrationError::CopyPipeline);
+    }
+    let support = plugin.alter_support();
+    if !support.is_table() {
+        return Err(SchemaAlterError::DestRejects(schema_alter::DestRejection::NotTable).into());
+    }
+    let pipeline =
+        crate::pipeline_backend::pipeline_key(config).map_err(MigrationError::Pipeline)?;
+    let _exclusive = gate::exclusive(&pipeline).await?;
+    let _metadata_writes = crate::ingest_work::exclusive_metadata_writes().await;
+    let mut metadata = config.get_metadata().await.map_err(|_| {
+        MigrationError::Pipeline(format!("no schema for {}", config.get_pipeline_name()))
+    })?;
+    let origin = AlterOrigin {
+        migration: apply.id.clone(),
+        direction: apply.direction,
+    };
+
+    let already_logged = phase == Some(MigrationPhase::DestApplied)
+        && metadata
+            .alters
+            .values()
+            .any(|log| log.last().is_some_and(|tail| tail.origin == origin));
+    if !already_logged {
+        let planned = plan(config, &metadata, support, &origin, stmts)?;
+        if phase.is_none() {
+            let wal = alter_wal_handle(config, offsets, &pipeline).await?;
+            crate::buffer::wal_writer::flush_and_drain(config, offsets.clone()).await?;
+            for p in &planned {
+                crate::migration::wal::rewrite_live_wal(
+                    config,
+                    &wal,
+                    &p.namespace,
+                    &p.committed.alter,
+                    p.committed.seq,
+                )?;
+            }
+            journal::commit(
+                store.as_ref(),
+                fence,
+                &key,
+                apply,
+                MigrationPhase::WalRewritten,
+            )?;
+        }
+        if phase != Some(MigrationPhase::DestApplied) {
+            for p in &planned {
+                plugin
+                    .apply_alter(&p.namespace, &p.output, &p.committed)
+                    .await?;
+            }
+            journal::commit(
+                store.as_ref(),
+                fence,
+                &key,
+                apply,
+                MigrationPhase::DestApplied,
+            )?;
+        }
+        for p in planned {
+            metadata
+                .alters
+                .entry(p.namespace)
+                .or_default()
+                .push(p.committed);
+        }
+        METADATA.store(Arc::new(metadata.clone()));
+        config
+            .persist_pipeline_metadata(&metadata)
+            .await
+            .map_err(MigrationError::Pipeline)?;
+    }
+    journal::commit(
+        store.as_ref(),
+        fence,
+        &key,
+        apply,
+        MigrationPhase::Committed,
+    )?;
+    Ok(())
+}
+
+/// Canonicalize every statement against the running output (log fold plus
+/// earlier statements of this migration). No I/O.
+fn plan(
+    config: &Config,
+    metadata: &PipelineMetadata,
+    support: crate::plugins::AlterSupport,
+    origin: &AlterOrigin,
+    stmts: &[AlterStmt],
+) -> Result<Vec<Planned>, MigrationError> {
+    let mode = metadata.flatten_mode();
+    let in_use = config_columns(config, mode)?;
+    let mut working: HashMap<String, (Metadata, u64)> = HashMap::new();
+    let mut planned = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        let (current, seq) = match working.remove(&stmt.namespace) {
+            Some(entry) => entry,
+            None => (
+                metadata.output(&stmt.namespace)?,
+                metadata.alter_log(&stmt.namespace).len() as u64,
+            ),
+        };
+        let alter = schema_alter::canonicalize(mode, &current, &stmt.op, &in_use)?;
+        schema_alter::dest_accepts(support, &alter)?;
+        let folded = schema_alter::apply(current, &alter)?;
+        planned.push(Planned {
+            namespace: stmt.namespace.clone(),
+            output: OutputMetadata::project(&stmt.namespace, &folded, mode),
+            committed: CommittedAlter {
+                origin: origin.clone(),
+                seq,
+                alter,
+            },
+        });
+        working.insert(stmt.namespace.clone(), (folded, seq + 1));
+    }
+    Ok(planned)
+}
+
+/// Columns the pipeline config names: time fields, partition fields, and
+/// aggregate keys. ALTER must not rename, drop, or merge them away.
+fn config_columns(config: &Config, mode: FlattenMode) -> Result<Vec<OutputName>, SchemaAlterError> {
+    let listed = [
+        config.get_transform_batch_time_fields(),
+        config.get_transform_batch_partition_fields(),
+    ];
+    let aggregate_keys = config
+        .get_pipeline_config()
+        .transform
+        .and_then(|transform| transform.aggregates)
+        .into_iter()
+        .flatten()
+        .flat_map(|aggregate| aggregate.key_fields);
+    listed
+        .iter()
+        .flat_map(|list| list.split(','))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .chain(aggregate_keys)
+        .map(|name| OutputName::parse_sql(mode, &name))
+        .collect()
+}
+
+/// The pipeline's WAL handle. A CLI apply with no running pipeline opens it
+/// and replays startup so every live segment is in the catalog.
+async fn alter_wal_handle(
+    config: &Config,
+    offsets: &Arc<Offsets>,
+    pipeline: &skippr_lease::PipelineKey,
+) -> Result<Arc<crate::buffer::wal_handle::PipelineWalHandle>, MigrationError> {
+    if let Some(handle) = crate::buffer::wal_handle::wal_handle_for(pipeline) {
+        return Ok(handle);
+    }
+    let handle = crate::buffer::wal_store::ensure_disk_wal_handle(config, offsets.clone())?;
+    crate::buffer::wal_startup::wal_startup(&handle, config, false).await?;
+    Ok(handle)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::buffer::segment_file::{PartitionKey, SegmentFile, WalPayload};
-    use crate::discover::schema_alter::SchemaAlterOp;
-    use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
-    use crate::helpers::configuration::{Pipeline, Skippr};
+    use crate::discover::schema_alter::CanonicalAlter;
+    use crate::discover::SkipprDataType;
+    use crate::helpers::configuration::{Pipeline, Skippr, Transform};
     use crate::helpers::wal_storage::ElStorageMode;
     use crate::migration::file::load_sql_file;
-    use crate::migration::journal;
+    use crate::plugins::alter_ddl::WarehouseDialect;
+    use crate::plugins::AlterSupport;
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::ipc::reader::StreamReader;
     use async_trait::async_trait;
     use serial_test::serial;
-    use skippr_wal_catalog::MemorySkipprStore;
-    use std::collections::HashMap;
     use std::io::{Read, Seek};
     use std::sync::Mutex;
     use std::time::SystemTime;
 
     struct RecordingSink {
         support: AlterSupport,
-        calls: Mutex<Vec<(String, SchemaAlterOp, i32)>>,
-        saw_barrier: Mutex<bool>,
+        fail_dest: bool,
+        calls: Mutex<Vec<(String, CommittedAlter)>>,
+        dest_names: Mutex<Vec<Vec<String>>>,
+        saw_gate: Mutex<bool>,
     }
 
     impl RecordingSink {
-        fn native() -> Self {
+        fn new(support: AlterSupport) -> Self {
             Self {
-                support: AlterSupport::Native,
+                support,
+                fail_dest: false,
                 calls: Mutex::new(Vec::new()),
-                saw_barrier: Mutex::new(false),
+                dest_names: Mutex::new(Vec::new()),
+                saw_gate: Mutex::new(false),
             }
         }
 
-        fn unsupported() -> Self {
-            Self {
-                support: AlterSupport::Unsupported,
-                calls: Mutex::new(Vec::new()),
-                saw_barrier: Mutex::new(false),
-            }
+        fn iceberg() -> Self {
+            Self::new(AlterSupport::Iceberg)
+        }
+
+        fn calls(&self) -> Vec<(String, CommittedAlter)> {
+            self.calls.lock().unwrap().clone()
         }
     }
 
@@ -299,22 +374,31 @@ mod tests {
         async fn apply_alter(
             &self,
             namespace: &str,
-            _metadata: &crate::discover::OutputMetadata,
-            op: &SchemaAlterOp,
-            field_id: i32,
+            dest_meta: &OutputMetadata,
+            alter: &CommittedAlter,
         ) -> Result<(), std::io::Error> {
-            *self.saw_barrier.lock().unwrap() = schema_barrier_held();
+            let key = skippr_lease::PipelineKey::new("default", "migtest", "trips").unwrap();
+            *self.saw_gate.lock().unwrap() = gate::is_exclusive(&key);
+            if self.fail_dest {
+                return Err(std::io::Error::other("warehouse unavailable"));
+            }
+            self.dest_names.lock().unwrap().push(
+                dest_meta
+                    .child_fields()
+                    .map(|(key, _)| key.clone())
+                    .collect(),
+            );
             self.calls
                 .lock()
                 .unwrap()
-                .push((namespace.to_string(), op.clone(), field_id));
+                .push((namespace.to_string(), alter.clone()));
             Ok(())
         }
 
         async fn sync_schema(
             &self,
             _namespace: &str,
-            _metadata: &crate::discover::OutputMetadata,
+            _metadata: &OutputMetadata,
         ) -> Result<(), std::io::Error> {
             Ok(())
         }
@@ -344,51 +428,78 @@ mod tests {
             },
         );
         let config = config.bind_pipeline("trips");
-        assert_eq!(
-            config.get_storage_mode(),
-            ElStorageMode::Local,
-            "migration tests must not touch S3"
-        );
+        assert_eq!(config.get_storage_mode(), ElStorageMode::Local);
         config
     }
 
-    fn memory_kv() -> (Arc<dyn SkipprStore>, CatalogFence) {
-        let fence = CatalogFence::local();
-        (Arc::new(MemorySkipprStore::open(fence)), fence)
+    fn loaded(id: &str, sql: &str) -> LoadedMigration {
+        load_sql_file(id, sql).unwrap()
     }
 
-    fn rename_apply() -> (MigrationApply, Vec<AlterStmt>) {
-        let loaded = load_sql_file(
+    fn rename_region() -> LoadedMigration {
+        loaded(
             "20261020_rename_region",
-            "ALTER TABLE trips RENAME COLUMN region TO region_code;",
-        )
-        .unwrap();
-        (
-            MigrationApply {
-                id: loaded.id.clone(),
-                checksum: loaded.checksum.clone(),
-                direction: MigrationDirection::Up,
-            },
-            loaded.up,
+            "ALTER TABLE trips RENAME COLUMN region TO region_code;\n-- migrate:down\nALTER TABLE trips RENAME COLUMN region_code TO region;",
         )
     }
 
-    async fn seed_metadata(config: &Config) {
+    fn apply_of(loaded: &LoadedMigration, direction: MigrationDirection) -> MigrationApply {
+        MigrationApply {
+            id: loaded.id.clone(),
+            checksum: loaded.checksum.clone(),
+            direction,
+        }
+    }
+
+    async fn run(
+        config: &Config,
+        offsets: &Arc<Offsets>,
+        sink: &RecordingSink,
+        loaded: &LoadedMigration,
+        direction: MigrationDirection,
+    ) -> Result<(), MigrationError> {
+        let stmts = match direction {
+            MigrationDirection::Up => &loaded.up,
+            MigrationDirection::Down => loaded.down.as_ref().unwrap(),
+        };
+        apply_with(config, offsets, sink, &apply_of(loaded, direction), stmts).await
+    }
+
+    async fn seed(config: &Config) -> Arc<Offsets> {
+        crate::buffer::wal_handle::clear_wal_handles();
         let mut metadata = PipelineMetadata::new(config);
         metadata.metadata.insert("trips".into(), ns_meta());
         config.persist_pipeline_metadata(&metadata).await.unwrap();
+        Arc::new(Offsets::init(config).unwrap())
     }
 
-    fn write_region_wal(config: &Config) -> std::path::PathBuf {
-        crate::buffer::wal_handle::clear_wal_handles();
-        let segs = std::path::PathBuf::from(config.get_data_dir()).join("segment_buffer/segs");
-        let seg = SegmentFile::new(&segs, "live1").unwrap();
-        let mut field_meta = HashMap::new();
-        field_meta.insert("PARQUET:field_id".into(), "7".into());
-        let field = Field::new("region", DataType::Utf8, true).with_metadata(field_meta);
-        let schema = Schema::new(vec![field]);
+    fn phase(config: &Config, offsets: &Offsets, apply: &MigrationApply) -> Option<MigrationPhase> {
+        let (store, _) = journal_store(offsets).unwrap();
+        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
+        journal::latest_phase(&journal::load(store.as_ref(), &key).unwrap(), apply).unwrap()
+    }
+
+    fn commit_phase(
+        config: &Config,
+        offsets: &Offsets,
+        apply: &MigrationApply,
+        phase: MigrationPhase,
+    ) {
+        let (store, fence) = journal_store(offsets).unwrap();
+        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
+        journal::commit(store.as_ref(), fence, &key, apply, phase).unwrap();
+    }
+
+    /// Host-shaped WAL: no field ids on the Arrow fields.
+    async fn write_region_wal(config: &Config, offsets: &Arc<Offsets>) -> std::path::PathBuf {
+        let handle =
+            crate::buffer::wal_store::ensure_disk_wal_handle(config, offsets.clone()).unwrap();
         let batch = arrow::array::RecordBatch::try_new(
-            Arc::new(schema),
+            Arc::new(Schema::new(vec![Field::new(
+                "region",
+                DataType::Utf8,
+                true,
+            )])),
             vec![Arc::new(arrow::array::StringArray::from(vec!["west"]))],
         )
         .unwrap();
@@ -399,66 +510,19 @@ mod tests {
             time: Some(0),
             schema_fingerprint: "schema".into(),
         };
-        let mut batches = HashMap::new();
-        batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
-        let mut parts_meta = HashMap::new();
-        parts_meta.insert(key, (0, SystemTime::now()));
-        let (meta, _, sha) = seg
-            .write_snapshot(
+        handle
+            .persist_segment(
+                "live1",
                 &HashMap::new(),
-                &batches,
-                &parts_meta,
+                &HashMap::from([(key, WalPayload::Arrow(vec![batch]))]),
                 &HashMap::new(),
-                std::time::SystemTime::UNIX_EPOCH,
+                &HashMap::new(),
+                &HashMap::new(),
+                SystemTime::UNIX_EPOCH,
             )
+            .await
             .unwrap();
-        let key = skippr_lease::PipelineKey::new(
-            config.get_tenant(),
-            &config.get_workspace_name(),
-            &config.get_pipeline_name(),
-        )
-        .unwrap();
-        let paths =
-            skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(&config.get_data_dir()));
-        let fence = skippr_wal_catalog::CatalogFence::local();
-        let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
-        let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-            crate::helpers::offset_store::memory_offset_store();
-        let handle =
-            crate::buffer::wal_handle::PipelineWalHandle::new(key, paths, catalog, offsets, fence);
-        let seq = skippr_wal_catalog::CatalogSeq::new(1);
-        let row = skippr_wal_catalog::SegmentRow {
-            segment_id: skippr_lease::SegmentId::new("live1").unwrap(),
-            seq,
-            location: skippr_wal_catalog::PayloadLocation::Disk {
-                path: seg.path.to_string_lossy().into_owned(),
-            },
-            payload_len: meta.total_bytes,
-            payload_sha256: sha,
-            slice_count: meta.num_partitions.max(1),
-            done: skippr_wal_catalog::SliceBitmap::new(meta.num_partitions.max(1)),
-            offsets: Vec::new(),
-            checkpoints: Vec::new(),
-            epoch: fence.epoch,
-            version: 0,
-        };
-        let mut txn = skippr_wal_catalog::CatalogTxn::new();
-        txn.put(
-            skippr_wal_catalog::CatalogKey::Segment(row.segment_id.clone()),
-            skippr_wal_catalog::CatalogRow::Segment(row),
-            skippr_wal_catalog::PutCond::NotExists,
-        )
-        .unwrap();
-        txn.put(
-            skippr_wal_catalog::CatalogKey::Seq,
-            skippr_wal_catalog::CatalogRow::Seq(skippr_wal_catalog::SeqRow { max_seq: seq }),
-            skippr_wal_catalog::PutCond::SeqAdvance,
-        )
-        .unwrap();
-        handle.catalog().commit(&txn, fence).unwrap();
-        crate::buffer::wal_handle::ensure_format_clean(handle.catalog(), fence).unwrap();
-        crate::buffer::wal_handle::install_wal_handle(handle);
-        seg.path.clone()
+        handle.live_disk_payload_paths().unwrap()[0].clone()
     }
 
     fn wal_field_name(path: &std::path::Path) -> String {
@@ -466,90 +530,207 @@ mod tests {
         let mut file = std::fs::File::open(path).unwrap();
         file.seek(std::io::SeekFrom::Start(admitted.index[0].start))
             .unwrap();
-        let mut take = (&mut file).take(admitted.index[0].len);
-        let reader = StreamReader::try_new(&mut take, None).unwrap();
+        let take = (&mut file).take(admitted.index[0].len);
+        let reader = StreamReader::try_new(take, None).unwrap();
         let batch = reader.into_iter().next().unwrap().unwrap();
         batch.schema().field(0).name().to_string()
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn apply_uses_the_open_store_instead_of_reopening_sled() {
-        let root = tempfile::tempdir().unwrap();
-        let config = fixture_config(root.path());
-        seed_metadata(&config).await;
-        let offsets = Offsets::init(&config).expect("offset store");
-        let store = offsets.skippr_kv().expect("skippr store");
-        let fence = offsets.writer_fence().expect("writer fence");
-        let sink = RecordingSink::native();
-        let (apply, stmts) = rename_apply();
-        apply_with(&config, store.as_ref(), fence, &sink, &apply, &stmts)
-            .await
-            .unwrap();
-        assert_eq!(sink.calls.lock().unwrap().len(), 1);
-        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
-        assert_eq!(
-            journal::latest_phase(&journal::load(store.as_ref(), &key).unwrap(), &apply).unwrap(),
-            Some(MigrationPhase::Committed)
-        );
+    fn live_wal(config: &Config) -> std::path::PathBuf {
+        crate::buffer::wal_handle::wal_handle_for(
+            &crate::pipeline_backend::pipeline_key(config).unwrap(),
+        )
+        .unwrap()
+        .live_disk_payload_paths()
+        .unwrap()[0]
+            .clone()
     }
 
     #[tokio::test]
     #[serial]
-    async fn apply_rename_rewrites_wal_calls_dest_and_commits_journal() {
+    async fn rename_rewrites_host_wal_calls_dest_and_commits() {
         let root = tempfile::tempdir().unwrap();
         let config = fixture_config(root.path());
-        seed_metadata(&config).await;
-        let wal = write_region_wal(&config);
-        let (store, fence) = memory_kv();
-        let sink = RecordingSink::native();
-        let (apply, stmts) = rename_apply();
+        let offsets = seed(&config).await;
+        let wal = write_region_wal(&config, &offsets).await;
+        let sink = RecordingSink::iceberg();
+        let migration = rename_region();
 
-        apply_with(&config, store.as_ref(), fence, &sink, &apply, &stmts)
+        run(&config, &offsets, &sink, &migration, MigrationDirection::Up)
             .await
             .unwrap();
 
-        let calls = sink.calls.lock().unwrap().clone();
+        let calls = sink.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "trips");
-        assert_eq!(calls[0].2, 7);
+        assert_eq!(calls[0].1.seq, 0);
+        let CanonicalAlter::Rename { column, to_leaf } = &calls[0].1.alter else {
+            panic!("{calls:?}");
+        };
+        assert_eq!(
+            (column.name.column(), column.id, to_leaf.as_str()),
+            ("region", 7, "region_code")
+        );
         assert!(
-            *sink.saw_barrier.lock().unwrap(),
-            "dest apply_alter must run under SchemaBarrier"
+            *sink.saw_gate.lock().unwrap(),
+            "dest apply must run under the gate"
         );
-        let live = crate::buffer::wal_handle::wal_handle_for(
-            &skippr_lease::PipelineKey::new(
-                config.get_tenant(),
-                &config.get_workspace_name(),
-                &config.get_pipeline_name(),
-            )
-            .unwrap(),
-        )
-        .expect("wal handle after apply")
-        .live_disk_payload_paths()
-        .expect("live payload paths")
-        .into_iter()
-        .next()
-        .expect("rewritten segment");
-        assert_ne!(
-            live, wal,
-            "crash-safe rewrite must leave a new catalog payload path"
-        );
+
+        let live = live_wal(&config);
+        assert_ne!(live, wal);
         assert_eq!(wal_field_name(&live), "region_code");
-        crate::buffer::wal_handle::clear_wal_handles();
 
         let persisted = config.get_metadata().await.unwrap();
-        assert!(persisted.metadata["trips"]
+        assert!(persisted.metadata["trips"].fields.contains_key("region"));
+        assert_eq!(persisted.alters["trips"][0].alter, calls[0].1.alter);
+        assert!(persisted
+            .output("trips")
+            .unwrap()
             .fields
             .contains_key("region_code"));
-        assert!(!persisted.metadata["trips"].fields.contains_key("region"));
-
-        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
         assert_eq!(
-            journal::latest_phase(&journal::load(store.as_ref(), &key).unwrap(), &apply).unwrap(),
+            phase(
+                &config,
+                &offsets,
+                &apply_of(&migration, MigrationDirection::Up)
+            ),
             Some(MigrationPhase::Committed)
         );
-        assert!(!schema_barrier_held());
+        let key = crate::pipeline_backend::pipeline_key(&config).unwrap();
+        assert!(!gate::is_exclusive(&key));
+        crate::buffer::wal_handle::clear_wal_handles();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cli_apply_opens_the_wal_when_no_pipeline_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let config = fixture_config(root.path());
+        let offsets = seed(&config).await;
+        write_region_wal(&config, &offsets).await;
+        crate::buffer::wal_handle::clear_wal_handles();
+        let sink = RecordingSink::iceberg();
+        run(
+            &config,
+            &offsets,
+            &sink,
+            &rename_region(),
+            MigrationDirection::Up,
+        )
+        .await
+        .unwrap();
+        assert_eq!(wal_field_name(&live_wal(&config)), "region_code");
+        crate::buffer::wal_handle::clear_wal_handles();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn up_down_up_logs_every_apply() {
+        let root = tempfile::tempdir().unwrap();
+        let config = fixture_config(root.path());
+        let offsets = seed(&config).await;
+        let sink = RecordingSink::iceberg();
+        let migration = rename_region();
+        let directions = [
+            MigrationDirection::Up,
+            MigrationDirection::Down,
+            MigrationDirection::Up,
+        ];
+        for direction in directions {
+            run(&config, &offsets, &sink, &migration, direction)
+                .await
+                .unwrap();
+        }
+        let persisted = config.get_metadata().await.unwrap();
+        let log = &persisted.alters["trips"];
+        assert_eq!(
+            log.iter()
+                .map(|c| (c.seq, c.origin.direction))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, MigrationDirection::Up),
+                (1, MigrationDirection::Down),
+                (2, MigrationDirection::Up)
+            ]
+        );
+        let output = persisted.output("trips").unwrap();
+        assert!(output.fields.contains_key("region_code"));
+        assert!(!output.fields.contains_key("region"));
+        assert_eq!(sink.calls().len(), 3);
+        crate::buffer::wal_handle::clear_wal_handles();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn second_statement_binds_the_first_statements_output() {
+        let root = tempfile::tempdir().unwrap();
+        let config = fixture_config(root.path());
+        let offsets = seed(&config).await;
+        let sink = RecordingSink::iceberg();
+        let migration = loaded(
+            "20261020_rename_then_drop",
+            "ALTER TABLE trips RENAME COLUMN region TO region_code;\nALTER TABLE trips DROP COLUMN region_code;",
+        );
+        run(&config, &offsets, &sink, &migration, MigrationDirection::Up)
+            .await
+            .unwrap();
+        let persisted = config.get_metadata().await.unwrap();
+        assert_eq!(
+            persisted.alters["trips"]
+                .iter()
+                .map(|c| c.seq)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(persisted.output("trips").unwrap().fields.is_empty());
+        assert_eq!(sink.calls().len(), 2);
+        crate::buffer::wal_handle::clear_wal_handles();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn flattened_dest_metadata_uses_underscore_names() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = fixture_config(root.path());
+        let mut pipeline = config.pipelines.get("trips").cloned().unwrap();
+        pipeline.transform = Some(Transform {
+            flatten_events: Some(true),
+            ..Default::default()
+        });
+        config.pipelines.insert("trips".into(), pipeline);
+        let config = config.bind_pipeline("trips");
+        crate::buffer::wal_handle::clear_wal_handles();
+        let mut metadata = PipelineMetadata::new(&config);
+        let mut detail = Metadata::new_with_type(SkipprDataType::Record, "detail");
+        detail.field_id = 1;
+        let mut truck = Metadata::new_with_type(SkipprDataType::String, "truck_reg");
+        truck.field_id = 4;
+        detail.fields.insert("truck_reg".into(), truck);
+        let mut ns = Metadata::new().unwrap();
+        ns.fields.insert("detail".into(), detail);
+        metadata.metadata.insert("trips".into(), ns);
+        config.persist_pipeline_metadata(&metadata).await.unwrap();
+        let offsets = Arc::new(Offsets::init(&config).unwrap());
+        let sink = RecordingSink::iceberg();
+        let migration = loaded(
+            "20261020_flatten_rename",
+            "ALTER TABLE trips RENAME COLUMN detail_truck_reg TO truck_registration;",
+        );
+        run(&config, &offsets, &sink, &migration, MigrationDirection::Up)
+            .await
+            .unwrap();
+        let dest = sink.dest_names.lock().unwrap();
+        assert!(
+            dest.iter()
+                .any(|names| names.iter().any(|n| n == "truck_registration")),
+            "{dest:?}"
+        );
+        assert!(
+            dest.iter()
+                .all(|names| !names.iter().any(|n| n == "detail")),
+            "{dest:?}"
+        );
+        crate::buffer::wal_handle::clear_wal_handles();
     }
 
     #[tokio::test]
@@ -557,89 +738,270 @@ mod tests {
     async fn committed_apply_is_idempotent() {
         let root = tempfile::tempdir().unwrap();
         let config = fixture_config(root.path());
-        seed_metadata(&config).await;
-        let (store, fence) = memory_kv();
-        let sink = RecordingSink::native();
-        let (apply, stmts) = rename_apply();
-        apply_with(&config, store.as_ref(), fence, &sink, &apply, &stmts)
+        let offsets = seed(&config).await;
+        let sink = RecordingSink::iceberg();
+        for _ in 0..2 {
+            run(
+                &config,
+                &offsets,
+                &sink,
+                &rename_region(),
+                MigrationDirection::Up,
+            )
             .await
             .unwrap();
-        apply_with(&config, store.as_ref(), fence, &sink, &apply, &stmts)
-            .await
-            .unwrap();
-        assert_eq!(sink.calls.lock().unwrap().len(), 1);
+        }
+        assert_eq!(sink.calls().len(), 1);
+        crate::buffer::wal_handle::clear_wal_handles();
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn unsupported_sink_fail_closes_before_wal_or_dest() {
-        let root = tempfile::tempdir().unwrap();
-        let config = fixture_config(root.path());
-        seed_metadata(&config).await;
-        let wal = write_region_wal(&config);
-        let (store, fence) = memory_kv();
-        let sink = RecordingSink::unsupported();
-        let (apply, stmts) = rename_apply();
-
-        let err = apply_with(&config, store.as_ref(), fence, &sink, &apply, &stmts)
-            .await
-            .unwrap_err();
-        assert!(err.contains("does not support migrations"), "{err}");
-        assert!(sink.calls.lock().unwrap().is_empty());
-        assert_eq!(wal_field_name(&wal), "region");
-        crate::buffer::wal_handle::clear_wal_handles();
-
+    async fn assert_untouched(
+        config: &Config,
+        offsets: &Offsets,
+        wal: &std::path::Path,
+        sink: &RecordingSink,
+    ) {
+        assert!(sink.calls().is_empty());
+        assert_eq!(wal_field_name(wal), "region");
         let persisted = config.get_metadata().await.unwrap();
-        assert!(persisted.metadata["trips"].fields.contains_key("region"));
-        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
+        assert!(persisted.alters.is_empty());
         assert_eq!(
-            journal::latest_phase(&journal::load(store.as_ref(), &key).unwrap(), &apply).unwrap(),
+            phase(
+                config,
+                offsets,
+                &apply_of(&rename_region(), MigrationDirection::Up)
+            ),
             None
         );
+        crate::buffer::wal_handle::clear_wal_handles();
     }
 
     #[tokio::test]
     #[serial]
-    async fn dest_applied_resume_skips_dest_and_commits() {
+    async fn stream_sink_fails_before_wal_or_dest() {
         let root = tempfile::tempdir().unwrap();
         let config = fixture_config(root.path());
-        seed_metadata(&config).await;
-        let (store, fence) = memory_kv();
-        let sink = RecordingSink::native();
-        let (apply, stmts) = rename_apply();
-        let key = journal_key(&config.get_workspace_name(), &config.get_pipeline_name()).unwrap();
-        journal::commit(
-            store.as_ref(),
-            fence,
-            &key,
-            &apply,
-            MigrationPhase::DestApplied,
+        let offsets = seed(&config).await;
+        let wal = write_region_wal(&config, &offsets).await;
+        let sink = RecordingSink::new(AlterSupport::Unsupported);
+        let err = run(
+            &config,
+            &offsets,
+            &sink,
+            &rename_region(),
+            MigrationDirection::Up,
         )
-        .unwrap();
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            MigrationError::Alter(SchemaAlterError::DestRejects(
+                schema_alter::DestRejection::NotTable
+            ))
+        ));
+        assert_untouched(&config, &offsets, &wal, &sink).await;
+    }
 
-        apply_with(&config, store.as_ref(), fence, &sink, &apply, &stmts)
+    #[tokio::test]
+    #[serial]
+    async fn dest_rejection_fails_before_wal_or_dest() {
+        let root = tempfile::tempdir().unwrap();
+        let config = fixture_config(root.path());
+        let offsets = seed(&config).await;
+        let wal = write_region_wal(&config, &offsets).await;
+        let sink = RecordingSink::new(AlterSupport::Warehouse(WarehouseDialect::Redshift));
+        let migration = loaded(
+            "20261020_promote",
+            "ALTER TABLE trips ALTER COLUMN region TYPE VARCHAR;",
+        );
+        let err = run(&config, &offsets, &sink, &migration, MigrationDirection::Up)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MigrationError::Alter(_)), "{err}");
+        assert!(sink.calls().is_empty());
+        assert_eq!(wal_field_name(&wal), "region");
+        crate::buffer::wal_handle::clear_wal_handles();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn copy_pipeline_fails_before_wal_or_dest() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = fixture_config(root.path());
+        config.pipelines.get_mut("trips").unwrap().r#type =
+            Some(crate::pipeline_type::PipelineType::Copy);
+        let config = config.bind_pipeline("trips");
+        let offsets = seed(&config).await;
+        let wal = write_region_wal(&config, &offsets).await;
+        let sink = RecordingSink::iceberg();
+        let err = run(
+            &config,
+            &offsets,
+            &sink,
+            &rename_region(),
+            MigrationDirection::Up,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, MigrationError::CopyPipeline));
+        assert_untouched(&config, &offsets, &wal, &sink).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn dest_failure_after_wal_resumes_from_wal_rewritten() {
+        let root = tempfile::tempdir().unwrap();
+        let config = fixture_config(root.path());
+        let offsets = seed(&config).await;
+        write_region_wal(&config, &offsets).await;
+        let migration = rename_region();
+        let up = apply_of(&migration, MigrationDirection::Up);
+        let mut failing = RecordingSink::iceberg();
+        failing.fail_dest = true;
+        let err = run(
+            &config,
+            &offsets,
+            &failing,
+            &migration,
+            MigrationDirection::Up,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, MigrationError::Io(_)));
+        assert_eq!(
+            phase(&config, &offsets, &up),
+            Some(MigrationPhase::WalRewritten)
+        );
+        assert_eq!(wal_field_name(&live_wal(&config)), "region_code");
+        assert!(config.get_metadata().await.unwrap().alters.is_empty());
+
+        let sink = RecordingSink::iceberg();
+        run(&config, &offsets, &sink, &migration, MigrationDirection::Up)
             .await
             .unwrap();
+        assert_eq!(sink.calls().len(), 1);
+        assert_eq!(
+            phase(&config, &offsets, &up),
+            Some(MigrationPhase::Committed)
+        );
+        assert_eq!(wal_field_name(&live_wal(&config)), "region_code");
+        assert_eq!(
+            config.get_metadata().await.unwrap().alters["trips"].len(),
+            1
+        );
+        crate::buffer::wal_handle::clear_wal_handles();
+    }
 
+    #[tokio::test]
+    #[serial]
+    async fn dest_applied_resume_appends_once_and_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let config = fixture_config(root.path());
+        let offsets = seed(&config).await;
+        let migration = rename_region();
+        let up = apply_of(&migration, MigrationDirection::Up);
+        commit_phase(&config, &offsets, &up, MigrationPhase::DestApplied);
+        let sink = RecordingSink::iceberg();
+        run(&config, &offsets, &sink, &migration, MigrationDirection::Up)
+            .await
+            .unwrap();
         assert!(
-            sink.calls.lock().unwrap().is_empty(),
+            sink.calls().is_empty(),
             "DestApplied resume must not re-run dest DDL"
         );
         assert_eq!(
-            journal::latest_phase(&journal::load(store.as_ref(), &key).unwrap(), &apply).unwrap(),
+            phase(&config, &offsets, &up),
             Some(MigrationPhase::Committed)
         );
-        let persisted = config.get_metadata().await.unwrap();
-        assert!(persisted.metadata["trips"].fields.contains_key("region"));
+        assert_eq!(
+            config.get_metadata().await.unwrap().alters["trips"].len(),
+            1
+        );
+        crate::buffer::wal_handle::clear_wal_handles();
     }
 
-    #[test]
-    fn apply_uses_skippr_store_not_offset_store() {
-        let src = include_str!("apply.rs");
-        let prod = src.split("#[cfg(test)]").next().unwrap();
-        assert!(prod.contains("SkipprStore"));
-        assert!(!prod.contains("OffsetStore"));
-        assert!(!prod.contains("bytes_store"));
-        assert!(!prod.contains("get_journal"));
+    #[tokio::test]
+    #[serial]
+    async fn dest_applied_resume_after_persist_does_not_append_twice() {
+        let root = tempfile::tempdir().unwrap();
+        let config = fixture_config(root.path());
+        let offsets = seed(&config).await;
+        let migration = rename_region();
+        let up = apply_of(&migration, MigrationDirection::Up);
+        let sink = RecordingSink::iceberg();
+        run(&config, &offsets, &sink, &migration, MigrationDirection::Up)
+            .await
+            .unwrap();
+        commit_phase(&config, &offsets, &up, MigrationPhase::DestApplied);
+        run(&config, &offsets, &sink, &migration, MigrationDirection::Up)
+            .await
+            .unwrap();
+        assert_eq!(
+            config.get_metadata().await.unwrap().alters["trips"].len(),
+            1
+        );
+        assert_eq!(sink.calls().len(), 1);
+        crate::buffer::wal_handle::clear_wal_handles();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn config_referenced_column_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = fixture_config(root.path());
+        let mut pipeline = config.pipelines.get("trips").cloned().unwrap();
+        pipeline.transform = Some(Transform {
+            batch_partition_fields: Some("region".into()),
+            ..Default::default()
+        });
+        config.pipelines.insert("trips".into(), pipeline);
+        let config = config.bind_pipeline("trips");
+        let offsets = seed(&config).await;
+        let sink = RecordingSink::iceberg();
+        let err = run(
+            &config,
+            &offsets,
+            &sink,
+            &rename_region(),
+            MigrationDirection::Up,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            MigrationError::Alter(SchemaAlterError::ColumnInUse(ref column)) if column == "region"
+        ));
+        crate::buffer::wal_handle::clear_wal_handles();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn flattened_dotted_config_column_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = fixture_config(root.path());
+        let mut pipeline = config.pipelines.get("trips").cloned().unwrap();
+        pipeline.transform = Some(Transform {
+            flatten_events: Some(true),
+            batch_partition_fields: Some("detail.region".into()),
+            ..Default::default()
+        });
+        config.pipelines.insert("trips".into(), pipeline);
+        let config = config.bind_pipeline("trips");
+        let offsets = seed(&config).await;
+        let sink = RecordingSink::iceberg();
+        let err = run(
+            &config,
+            &offsets,
+            &sink,
+            &rename_region(),
+            MigrationDirection::Up,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            MigrationError::Alter(SchemaAlterError::SqlFormMismatch { .. })
+        ));
+        crate::buffer::wal_handle::clear_wal_handles();
     }
 }

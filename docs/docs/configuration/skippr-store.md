@@ -28,7 +28,7 @@ WAL payloads are **not** in the KV. Optional store snapshots (`SKIPPR_S3_BUCKET`
 
 **Materialised views.** After WAL commit, the processor updates `stream_state` in the same Skippr Store transaction as its cursor. Compact waits on that cursor. See [Materialised views](/concepts/materialised-views).
 
-**Migrations.** `skipprd migrate` and `skipprd query --sql "ALTER TABLE …"` apply in-stream. The `journal` family records each file (or query checksum) so a retry is idempotent. Schema shreds into `schema/`. Live WAL and the destination follow. See [skipprd migrate](/cli/migrate).
+**Migrations.** `skipprd migrate` and `skipprd query --sql "ALTER TABLE …"` apply in-stream. The `journal` family records each file (or query checksum) so a retry is idempotent. Apply rewrites live WAL, applies destination DDL, then appends the ALTER log in `schema/`. See [skipprd migrate](/cli/migrate).
 
 **Realtime SQL.** `skipprd query` pins a flushed snapshot of the store (`query_pin`) so SELECT can union Iceberg with the WAL slices that were live at that pin. A second process may **read** while ingest holds the writer. It must not take `writer.lock` or commit. See [Stream SQL](/concepts/stream-sql).
 

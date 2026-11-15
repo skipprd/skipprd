@@ -1,195 +1,99 @@
+//! Rewrite live WAL payloads onto the next output schema. Runs under the
+//! schema gate after the WAL writer flushed, so catalog rows are the whole WAL.
+
 use crate::buffer::segment_file::{
-    is_copy_codec, CopyPart, SegmentFile, WalPayload, PART_CODEC_ARROW,
+    is_copy_codec, CopyPart, EncodedSnapshot, SegmentFile, WalPayload, PART_CODEC_ARROW,
 };
-use crate::discover::schema_alter::SchemaAlterOp;
-use arrow::array::RecordBatch;
-use arrow::datatypes::{Field, Schema};
+use crate::buffer::wal_handle::{payload_bytes, PipelineWalHandle};
+use crate::discover::schema_alter::{apply_alter, CanonicalAlter};
+use crate::helpers::configuration::Config;
+use crate::migration::MigrationError;
 use arrow::ipc::reader::StreamReader;
+use skippr_wal_catalog::{PayloadLocation, SegmentRow};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-const FIELD_ID_KEYS: [&str; 2] = ["PARQUET:field_id", "iceberg.field-id"];
-
-pub fn rewrite_record_batch(
-    batch: RecordBatch,
-    op: &SchemaAlterOp,
-    field_id: i32,
-) -> Result<RecordBatch, String> {
-    let schema = rewrite_schema(batch.schema_ref().as_ref(), op, field_id)?;
-    RecordBatch::try_new(Arc::new(schema), batch.columns().to_vec()).map_err(|err| err.to_string())
-}
-
-pub fn rewrite_schema(
-    schema: &Schema,
-    op: &SchemaAlterOp,
-    field_id: i32,
-) -> Result<Schema, String> {
-    let id_token = field_id.to_string();
-    let fields: Vec<Field> = schema
-        .fields()
-        .iter()
-        .map(|field| rewrite_field(field.as_ref(), op, &id_token))
-        .collect();
-    Ok(Schema::new_with_metadata(fields, schema.metadata().clone()))
-}
-
-fn rewrite_field(field: &Field, op: &SchemaAlterOp, id_token: &str) -> Field {
-    let matches = field_has_id(field, id_token) || field.name() == lookup_name(op);
-    if !matches {
-        return field.clone();
-    }
-    match op {
-        SchemaAlterOp::Rename { to, .. } => field.clone().with_name(iceberg_flatten(to)),
-        SchemaAlterOp::Promote { .. } => field.clone(),
-        SchemaAlterOp::Drop { .. } | SchemaAlterOp::Merge { .. } => field.clone(),
-    }
-}
-
-fn lookup_name(op: &SchemaAlterOp) -> &str {
-    match op {
-        SchemaAlterOp::Rename { from, .. } => from.as_str(),
-        SchemaAlterOp::Merge { src, .. } => src.as_str(),
-        SchemaAlterOp::Drop { column } | SchemaAlterOp::Promote { column, .. } => column.as_str(),
-    }
-}
-
-fn iceberg_flatten(name: &str) -> String {
-    name.replace('.', "_").replace('-', "_")
-}
-
-fn field_has_id(field: &Field, id_token: &str) -> bool {
-    FIELD_ID_KEYS
-        .iter()
-        .any(|key| field.metadata().get(*key).map(String::as_str) == Some(id_token))
-}
-
-/// Rewrite live Arrow WAL parts onto schema N+1. Copy/non-Arrow parts fail closed.
-pub fn rewrite_live_wal(
-    config: &crate::helpers::configuration::Config,
+/// Rewrite every live payload that carries `namespace`. Each rewritten payload
+/// lands at a new content-addressed location; the catalog swap is atomic and
+/// the old payload is left for `gc_orphan_payloads`.
+pub(super) fn rewrite_live_wal(
+    config: &Config,
+    handle: &PipelineWalHandle,
     namespace: &str,
-    op: &SchemaAlterOp,
-    field_id: i32,
-) -> Result<(), String> {
-    crate::buffer::ingest_buffer::Buffers::map_live_arrow(namespace, |batch| {
-        rewrite_record_batch(batch, op, field_id)
-    })?;
-    let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() else {
-        return Ok(());
-    };
-    for seg in handle.live_segment_rows().map_err(|err| err.to_string())? {
-        rewrite_segment_row(config, &seg, namespace, op, field_id)?;
+    alter: &CanonicalAlter,
+    seq: u64,
+) -> Result<(), MigrationError> {
+    for row in handle.live_segment_rows()? {
+        let bytes = payload_bytes(&row.location, &row.payload_sha256)?;
+        let Some(encoded) = rewrite_wal_bytes(&bytes, namespace, alter)? else {
+            continue;
+        };
+        let location = write_alter_payload(&row, &encoded, seq)?;
+        handle.replace_payload(
+            row.segment_id.as_str(),
+            location.clone(),
+            &encoded.meta,
+            encoded.sha256,
+        )?;
+        crate::buffer::ingest_buffer::Buffers::register_catalog_row(
+            handle,
+            config,
+            &SegmentRow { location, ..row },
+        )?;
     }
     Ok(())
-}
-
-fn rewrite_segment_row(
-    config: &crate::helpers::configuration::Config,
-    seg: &skippr_wal_catalog::SegmentRow,
-    namespace: &str,
-    op: &SchemaAlterOp,
-    field_id: i32,
-) -> Result<(), String> {
-    match &seg.location {
-        skippr_wal_catalog::PayloadLocation::Disk { path } => rewrite_segment_file(
-            config,
-            std::path::Path::new(path),
-            seg.segment_id.as_str(),
-            namespace,
-            op,
-            field_id,
-        ),
-        skippr_wal_catalog::PayloadLocation::S3 { .. } => {
-            let bytes =
-                crate::buffer::wal_handle::payload_bytes(&seg.location, &seg.payload_sha256)
-                    .map_err(|err| err.to_string())?;
-            let Some(encoded) = rewrite_wal_bytes(&bytes, namespace, op, field_id)? else {
-                return Ok(());
-            };
-            persist_rewritten_payload(config, &seg.location, seg.segment_id.as_str(), encoded)
-        }
-    }
-}
-
-fn rewrite_segment_file(
-    config: &crate::helpers::configuration::Config,
-    path: &Path,
-    segment_id: &str,
-    namespace: &str,
-    op: &SchemaAlterOp,
-    field_id: i32,
-) -> Result<(), String> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(_) => return Ok(()),
-    };
-    let Some(encoded) = rewrite_wal_bytes(&bytes, namespace, op, field_id)? else {
-        return Ok(());
-    };
-    persist_rewritten_payload(
-        config,
-        &skippr_wal_catalog::PayloadLocation::Disk {
-            path: path.to_string_lossy().into_owned(),
-        },
-        segment_id,
-        encoded,
-    )
 }
 
 fn rewrite_wal_bytes(
     bytes: &[u8],
     namespace: &str,
-    op: &SchemaAlterOp,
-    field_id: i32,
-) -> Result<Option<crate::buffer::segment_file::EncodedSnapshot>, String> {
-    let meta = SegmentFile::read_metadata_from_bytes(bytes).map_err(|err| err.to_string())?;
+    alter: &CanonicalAlter,
+) -> Result<Option<EncodedSnapshot>, MigrationError> {
+    let meta = SegmentFile::read_metadata_from_bytes(bytes)?;
     let mut batches: HashMap<_, WalPayload> = HashMap::new();
     let mut partitions_meta = HashMap::new();
     let mut part_meta_blobs = HashMap::new();
     let mut mutated = false;
     for idx in &meta.index {
         if is_copy_codec(idx.codec) && idx.key.namespace == namespace {
-            return Err("copy/non-Arrow WAL parts cannot be rewritten".to_string());
+            return Err(MigrationError::CopyPayload);
         }
         let start = idx.start as usize;
-        let end = start.saturating_add(idx.len as usize);
-        if end > bytes.len() {
-            return Err("WAL part exceeds payload length".to_string());
-        }
-        let slice = &bytes[start..end];
+        let slice = bytes
+            .get(start..start.saturating_add(idx.len as usize))
+            .ok_or(MigrationError::TruncatedPayload)?;
         let payload = if idx.codec == PART_CODEC_ARROW {
-            let mut cursor = std::io::Cursor::new(slice);
-            let reader = StreamReader::try_new(&mut cursor, None).map_err(|err| err.to_string())?;
+            let reader = StreamReader::try_new(std::io::Cursor::new(slice), None)?;
             let mut arrow_batches = Vec::new();
             for batch in reader {
-                let batch = batch.map_err(|err| err.to_string())?;
-                if idx.key.namespace == namespace {
-                    arrow_batches.push(rewrite_record_batch(batch, op, field_id)?);
-                    mutated = true;
-                } else {
+                let batch = batch?;
+                if idx.key.namespace != namespace {
                     arrow_batches.push(batch);
+                    continue;
                 }
+                let before = batch.schema();
+                let after = apply_alter(batch, alter)?;
+                mutated |= after.schema() != before;
+                arrow_batches.push(after);
             }
             WalPayload::Arrow(arrow_batches)
         } else {
-            let records = crate::buffer::segment_file::decode_copy_part(idx.codec, slice)
-                .map_err(|err| err.to_string())?;
-            WalPayload::Copy(CopyPart::encode(&records).map_err(|err| err.to_string())?)
+            let records = crate::buffer::segment_file::decode_copy_part(idx.codec, slice)?;
+            WalPayload::Copy(CopyPart::encode(&records)?)
         };
         if idx.part_meta_len > 0 {
-            let meta_start = idx.part_meta_start as usize;
-            let meta_end = meta_start.saturating_add(idx.part_meta_len as usize);
-            if meta_end > bytes.len() {
-                return Err("WAL part metadata exceeds payload length".to_string());
-            }
-            part_meta_blobs.insert(idx.key.clone(), bytes[meta_start..meta_end].to_vec());
+            let start = idx.part_meta_start as usize;
+            let blob = bytes
+                .get(start..start.saturating_add(idx.part_meta_len as usize))
+                .ok_or(MigrationError::TruncatedPayload)?;
+            part_meta_blobs.insert(idx.key.clone(), blob.to_vec());
         }
         partitions_meta.insert(
             idx.key.clone(),
             (
                 idx.bytes,
-                SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(idx.updated_at_secs),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(idx.updated_at_secs),
             ),
         );
         batches.insert(idx.key.clone(), payload);
@@ -197,45 +101,57 @@ fn rewrite_wal_bytes(
     if !mutated {
         return Ok(None);
     }
-    crate::buffer::segment_file::encode_snapshot(
+    Ok(Some(crate::buffer::segment_file::encode_snapshot(
         &meta.offsets,
         &batches,
         &partitions_meta,
         &part_meta_blobs,
-        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(meta.created_at_secs),
-    )
-    .map(Some)
-    .map_err(|err| err.to_string())
+        SystemTime::UNIX_EPOCH + Duration::from_secs(meta.created_at_secs),
+    )?))
 }
 
-fn persist_rewritten_payload(
-    config: &crate::helpers::configuration::Config,
-    old_location: &skippr_wal_catalog::PayloadLocation,
-    segment_id: &str,
-    encoded: crate::buffer::segment_file::EncodedSnapshot,
-) -> Result<(), String> {
-    let handle = crate::buffer::wal_store::ingest_wal_handle()
-        .ok_or_else(|| "WAL rewrite requires an installed catalog handle".to_string())?;
-    let new_location = match old_location {
-        skippr_wal_catalog::PayloadLocation::Disk { path } => {
-            let path = std::path::Path::new(path);
-            let dir = path
+/// `…/segs/alter-{seq}/{segment}.seg` beside the current payload: the file stem
+/// stays the segment id and identical bytes land on the same path.
+fn write_alter_payload(
+    row: &SegmentRow,
+    encoded: &EncodedSnapshot,
+    seq: u64,
+) -> Result<PayloadLocation, MigrationError> {
+    let dir = format!("alter-{seq}");
+    let file = format!("{}.seg", row.segment_id.as_str());
+    match &row.location {
+        PayloadLocation::Disk { path } => {
+            let parent = Path::new(path)
                 .parent()
-                .ok_or_else(|| "WAL segment has no parent".to_string())?;
-            let tmp = SegmentFile::new(dir, &format!("{segment_id}-migrating"))
-                .map_err(|err| err.to_string())?;
-            crate::buffer::segment_file::write_payload_atomically(&tmp.path, &encoded.bytes)
-                .map_err(|err| err.to_string())?;
-            crate::helpers::fsync::fsync_dir(dir).map_err(|err| err.to_string())?;
-            skippr_wal_catalog::PayloadLocation::Disk {
-                path: tmp.path.to_string_lossy().into_owned(),
-            }
+                .ok_or(MigrationError::TruncatedPayload)?;
+            let segs = match parent.file_name().and_then(|name| name.to_str()) {
+                Some(name) if name.starts_with("alter-") => parent.parent().unwrap_or(parent),
+                _ => parent,
+            };
+            let dir = segs.join(dir);
+            std::fs::create_dir_all(&dir)?;
+            let target = dir.join(file);
+            crate::buffer::segment_file::write_payload_atomically(&target, &encoded.bytes)?;
+            crate::helpers::fsync::fsync_dir(&dir)?;
+            crate::helpers::fsync::fsync_dir(segs)?;
+            Ok(PayloadLocation::Disk {
+                path: target.to_string_lossy().into_owned(),
+            })
         }
-        skippr_wal_catalog::PayloadLocation::S3 { bucket, key } => {
-            let new_key = format!("{key}-migrating");
-            let put_bucket = bucket.clone();
-            let put_key = new_key.clone();
-            let body = encoded.bytes.clone();
+        PayloadLocation::S3 { bucket, key } => {
+            let prefix = key.rsplit_once('/').map_or("", |(prefix, _)| prefix);
+            let prefix = match prefix.rsplit_once('/') {
+                Some((up, last)) if last.starts_with("alter-") => up,
+                None if prefix.starts_with("alter-") => "",
+                _ => prefix,
+            };
+            let new_key = [prefix, dir.as_str(), file.as_str()]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("/");
+            let (put_bucket, put_key, body) =
+                (bucket.clone(), new_key.clone(), encoded.bytes.clone());
             crate::buffer::wal_store::block_on_async(async move {
                 crate::helpers::s3::put_bytes(
                     &put_bucket,
@@ -245,135 +161,63 @@ fn persist_rewritten_payload(
                 )
                 .await
                 .map_err(|err| std::io::Error::other(err.to_string()))
-            })
-            .map_err(|err| err.to_string())?;
-            skippr_wal_catalog::PayloadLocation::S3 {
+            })?;
+            Ok(PayloadLocation::S3 {
                 bucket: bucket.clone(),
                 key: new_key,
-            }
-        }
-    };
-    handle
-        .replace_payload_location(
-            segment_id,
-            new_location.clone(),
-            encoded.meta.total_bytes,
-            encoded.sha256,
-        )
-        .map_err(|err| err.to_string())?;
-    match old_location {
-        skippr_wal_catalog::PayloadLocation::Disk { path } => {
-            let old = std::path::Path::new(path);
-            if let skippr_wal_catalog::PayloadLocation::Disk { path: ref new_path } = new_location {
-                if old != std::path::Path::new(new_path) {
-                    if let Err(err) = std::fs::remove_file(old) {
-                        if err.kind() != std::io::ErrorKind::NotFound {
-                            tracing::warn!(
-                                path = %old.display(),
-                                error = %err,
-                                "WAL rewrite drop of old payload failed; gc_orphan_payloads is the backstop"
-                            );
-                        }
-                    }
-                }
-                let admitted = SegmentFile::read_index_path(std::path::Path::new(new_path))
-                    .map_err(|err| err.to_string())?;
-                crate::buffer::ingest_buffer::Buffers::reregister_disk_segment(
-                    config,
-                    std::path::PathBuf::from(new_path),
-                    admitted,
-                );
-            }
-        }
-        skippr_wal_catalog::PayloadLocation::S3 { bucket, key } => {
-            let bucket = bucket.clone();
-            let key = key.clone();
-            if let Err(err) = crate::buffer::wal_store::block_on_async({
-                let bucket = bucket.clone();
-                let key = key.clone();
-                async move {
-                    crate::helpers::s3::delete_object(&bucket, &key)
-                        .await
-                        .map_err(|err| std::io::Error::other(err.to_string()))
-                }
-            }) {
-                tracing::warn!(
-                    bucket,
-                    key,
-                    error = %err,
-                    "WAL rewrite drop of old S3 payload failed; gc_orphan_payloads is the backstop"
-                );
-            }
+            })
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::buffer::segment_file::PartitionKey;
-    use arrow::array::Int64Array;
-    use arrow::datatypes::DataType;
-    use std::collections::HashMap;
+    use crate::discover::schema_alter::{AlterColumn, FlattenMode, OutputName};
+    use crate::discover::SkipprDataType;
+    use arrow::array::{Int64Array, RecordBatch};
+    use arrow::datatypes::{DataType, Field, Schema};
     use std::io::{Read, Seek};
+    use std::sync::Arc;
 
-    #[test]
-    fn rename_rewrites_arrow_name_and_keeps_field_id() {
-        let mut meta = HashMap::new();
-        meta.insert("PARQUET:field_id".into(), "7".into());
-        let field = Field::new("price", DataType::Int64, true).with_metadata(meta);
-        let schema = Schema::new(vec![field]);
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(Int64Array::from(vec![1, 2]))],
-        )
-        .unwrap();
-        let rewritten = rewrite_record_batch(
-            batch,
-            &SchemaAlterOp::Rename {
-                from: "price".into(),
-                to: "amount".into(),
+    fn rename_price() -> CanonicalAlter {
+        CanonicalAlter::Rename {
+            column: AlterColumn {
+                name: OutputName::parse_sql(FlattenMode::Nested, "price").unwrap(),
+                id: 7,
+                ty: SkipprDataType::Long,
             },
-            7,
-        )
-        .unwrap();
-        assert_eq!(rewritten.schema().field(0).name(), "amount");
-        assert_eq!(
-            rewritten
-                .schema()
-                .field(0)
-                .metadata()
-                .get("PARQUET:field_id"),
-            Some(&"7".to_string())
-        );
+            to_leaf: "amount".into(),
+        }
     }
 
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn rewrite_segment_persists_renamed_field() {
-        let dir = std::env::temp_dir().join(format!("skippr_mig_wal_{}", rand::random::<u64>()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let pipeline_key = skippr_lease::PipelineKey::new("t", "w", "p").unwrap();
-        let paths = skippr_lease::PipelinePaths::legacy_disk(&dir);
+    fn first_field_name(path: &Path) -> String {
+        let admitted = SegmentFile::read_index_path(path).unwrap();
+        let mut file = std::fs::File::open(path).unwrap();
+        file.seek(std::io::SeekFrom::Start(admitted.index[0].start))
+            .unwrap();
+        let take = (&mut file).take(admitted.index[0].len);
+        let reader = StreamReader::try_new(take, None).unwrap();
+        let batch = reader.into_iter().next().unwrap().unwrap();
+        batch.schema().field(0).name().to_string()
+    }
+
+    async fn disk_handle(dir: &Path) -> Arc<PipelineWalHandle> {
         let fence = skippr_wal_catalog::CatalogFence::local();
-        let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
-        let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-            crate::helpers::offset_store::memory_offset_store();
-        let handle = crate::buffer::wal_handle::PipelineWalHandle::new(
-            pipeline_key.clone(),
-            paths,
-            catalog,
-            offsets,
+        let handle = PipelineWalHandle::new(
+            skippr_lease::PipelineKey::new("t", "w", "p").unwrap(),
+            skippr_lease::PipelinePaths::legacy_disk(dir),
+            crate::buffer::wal_handle::memory_catalog_for_test(fence),
+            crate::helpers::offset_store::memory_offset_store(),
             fence,
         );
-        crate::buffer::wal_handle::install_wal_handle(handle.clone());
-        let mut field_meta = HashMap::new();
-        field_meta.insert("PARQUET:field_id".into(), "7".into());
-        let field = Field::new("price", DataType::Int64, true).with_metadata(field_meta);
-        let schema = Schema::new(vec![field]);
         let batch = RecordBatch::try_new(
-            Arc::new(schema),
+            Arc::new(Schema::new(vec![Field::new(
+                "price",
+                DataType::Int64,
+                true,
+            )])),
             vec![Arc::new(Int64Array::from(vec![1, 2]))],
         )
         .unwrap();
@@ -384,47 +228,19 @@ mod tests {
             time: Some(0),
             schema_fingerprint: "schema".into(),
         };
-        let mut batches = HashMap::new();
-        batches.insert(key.clone(), WalPayload::Arrow(vec![batch]));
         handle
             .persist_segment(
                 "t1",
                 &HashMap::new(),
-                &batches,
+                &HashMap::from([(key, WalPayload::Arrow(vec![batch]))]),
                 &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
-                std::time::SystemTime::UNIX_EPOCH,
+                SystemTime::UNIX_EPOCH,
             )
             .await
             .unwrap();
-        let path = handle.live_disk_payload_paths().unwrap()[0].clone();
-
-        let config = crate::helpers::configuration::Config::new();
-        rewrite_segment_file(
-            &config,
-            &path,
-            "t1",
-            "trips",
-            &SchemaAlterOp::Rename {
-                from: "price".into(),
-                to: "amount".into(),
-            },
-            7,
-        )
-        .unwrap();
-
-        let rewritten_path = handle.live_disk_payload_paths().unwrap()[0].clone();
-        let admitted = SegmentFile::read_index_path(&rewritten_path).unwrap();
-        let mut file = std::fs::File::open(&rewritten_path).unwrap();
-        file.seek(std::io::SeekFrom::Start(admitted.index[0].start))
-            .unwrap();
-        let mut take = (&mut file).take(admitted.index[0].len);
-        let reader = StreamReader::try_new(&mut take, None).unwrap();
-        let rewritten = reader.into_iter().next().unwrap().unwrap();
-        assert_eq!(rewritten.schema().field(0).name(), "amount");
-        crate::buffer::wal_handle::remove_wal_handle(&pipeline_key);
-        let _ = std::fs::remove_dir_all(&dir);
+        handle
     }
 
     #[test]
@@ -436,87 +252,56 @@ mod tests {
         );
     }
 
-    #[test]
+    #[tokio::test]
     #[serial_test::serial]
-    fn rewrite_live_wal_does_not_skip_s3_rows() {
-        let src = include_str!("wal.rs");
-        assert!(
-            !src.contains(concat!("PayloadLocation::S3 { .. } => con", "tinue")),
-            "S3 live rows must be rewritten, not skipped"
+    async fn rewrite_keeps_segment_id_and_swaps_catalog_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = disk_handle(dir.path()).await;
+        let before = handle.live_disk_payload_paths().unwrap()[0].clone();
+        let config = Config::new();
+
+        rewrite_live_wal(&config, &handle, "trips", &rename_price(), 0).unwrap();
+
+        let after = handle.live_disk_payload_paths().unwrap()[0].clone();
+        assert_ne!(after, before);
+        assert_eq!(after.file_stem().unwrap(), "t1");
+        assert_eq!(
+            after
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            "alter-0"
         );
-        let rewrite = src.find("fn rewrite_wal_bytes").expect("rewrite_wal_bytes");
-        let persist = src
-            .find("fn persist_rewritten_payload")
-            .expect("persist_rewritten_payload");
-        let rewrite_body = &src[rewrite..persist];
-        assert!(
-            !rewrite_body.contains("SystemTime::now()"),
-            "migration encode must use snapshot created_at, not wall clock"
+        assert_eq!(first_field_name(&after), "amount");
+        let row = handle.live_segment_rows().unwrap().remove(0);
+        let catalog_index = handle.load_or_build_index_meta(&row).unwrap().index;
+        let file_index = SegmentFile::read_index_path(&after).unwrap().index;
+        assert_eq!(
+            catalog_index
+                .iter()
+                .map(|idx| (idx.start, idx.len))
+                .collect::<Vec<_>>(),
+            file_index
+                .iter()
+                .map(|idx| (idx.start, idx.len))
+                .collect::<Vec<_>>()
         );
-        assert!(rewrite_body.contains("meta.created_at_secs"));
-        assert!(rewrite_body.contains("idx.updated_at_secs"));
-        let persist_end = src[persist..]
-            .find("#[cfg(test)]")
-            .map(|off| persist + off)
-            .unwrap_or(src.len());
-        let persist_body = &src[persist..persist_end];
-        assert!(persist_body.contains("write_payload_atomically"));
-        assert!(!persist_body.contains("write_path_sync"));
-        assert!(persist_body.contains("tracing::warn!"));
-        let dir = std::env::temp_dir().join(format!("skippr_mig_s3_{}", rand::random::<u64>()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let pipeline_key = skippr_lease::PipelineKey::new("t", "w", "p").unwrap();
-        let paths = skippr_lease::PipelinePaths::legacy_disk(&dir);
-        let fence = skippr_wal_catalog::CatalogFence::local();
-        let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
-        let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
-            crate::helpers::offset_store::memory_offset_store();
-        let handle = crate::buffer::wal_handle::PipelineWalHandle::new(
-            pipeline_key.clone(),
-            paths,
-            catalog,
-            offsets,
-            fence,
-        );
-        crate::buffer::wal_handle::install_wal_handle(handle.clone());
-        let seq = skippr_wal_catalog::CatalogSeq::new(1);
-        let row = skippr_wal_catalog::SegmentRow {
-            segment_id: skippr_lease::SegmentId::new("s3live").unwrap(),
-            seq,
-            location: skippr_wal_catalog::PayloadLocation::S3 {
-                bucket: "wal-bucket".into(),
-                key: "wal/s3live.seg".into(),
-            },
-            payload_len: 1,
-            payload_sha256: [0u8; 32],
-            slice_count: 1,
-            done: skippr_wal_catalog::SliceBitmap::new(1),
-            offsets: Vec::new(),
-            checkpoints: Vec::new(),
-            epoch: fence.epoch,
-            version: 0,
-        };
-        let mut txn = skippr_wal_catalog::CatalogTxn::new();
-        txn.put(
-            skippr_wal_catalog::CatalogKey::Segment(row.segment_id.clone()),
-            skippr_wal_catalog::CatalogRow::Segment(row),
-            skippr_wal_catalog::PutCond::NotExists,
-        )
-        .unwrap();
-        handle.catalog().commit(&txn, fence).unwrap();
-        let config = crate::helpers::configuration::Config::new();
-        let err = rewrite_live_wal(
-            &config,
-            "trips",
-            &SchemaAlterOp::Rename {
-                from: "price".into(),
-                to: "amount".into(),
-            },
-            7,
-        )
-        .expect_err("S3 rewrite must fail closed, not skip");
-        crate::buffer::wal_handle::remove_wal_handle(&pipeline_key);
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(!err.is_empty(), "{err}");
+
+        rewrite_live_wal(&config, &handle, "trips", &rename_price(), 0).unwrap();
+        assert_eq!(handle.live_disk_payload_paths().unwrap()[0], after);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn unreadable_payload_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = disk_handle(dir.path()).await;
+        std::fs::remove_file(&handle.live_disk_payload_paths().unwrap()[0]).unwrap();
+        assert!(matches!(
+            rewrite_live_wal(&Config::new(), &handle, "trips", &rename_price(), 0),
+            Err(MigrationError::Durable(_))
+        ));
     }
 }

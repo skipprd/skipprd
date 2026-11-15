@@ -468,7 +468,7 @@ def test_pipeline_transform_ops_and_aggregates():
         Pipeline(
             data_source=src,
             transform=Transform(
-                ops=[TransformOp(filter="amount > 0")],
+                ops=[TransformOp.filter("amount > 0")],
                 aggregates=[
                     TransformAggregate(
                         id="customer_invoice_totals",

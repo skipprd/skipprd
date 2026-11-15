@@ -67,11 +67,11 @@ See [Skippr Store](/configuration/skippr-store).
 
 ## Transforms and aggregates on the query path
 
-In-memory `transform.ops` (`filter`, `project`, `derive`, `rename`, `cast`) run **before** WAL commit. SQL sees the transformed rows, not the raw source batch.
+In-memory `transform.ops` (`filter`, `project`, `derive`, `rename`, `cast`) run **before** WAL commit on stream destinations. Table destinations cannot set `project`, `rename`, or `cast`; use [`ALTER TABLE`](/operations/alter). `filter` and `derive` stay valid on tables. SQL sees the transformed rows, not the raw source batch.
 
 Keyed `transform.aggregates` are materialised in the Skippr Store `stream_state` family as ingest commits WAL. They are not a second SQL table name in this engine. You still `SELECT` the pipeline namespace. See [Materialised views](/concepts/materialised-views) and [Transforms](/configuration/transforms).
 
-DDL (`ALTER TABLE`, `skipprd migrate`) rewrites skippr metadata, live WAL, and the destination in-stream. Later SELECTs use the new names. See [ALTER operations](/operations/alter).
+DDL (`ALTER TABLE`, `skipprd migrate`) rewrites live WAL, applies destination DDL, then appends the ALTER log. Source discover metadata is unchanged. Later SELECTs use the new names. See [ALTER operations](/operations/alter).
 
 ## Other tools
 

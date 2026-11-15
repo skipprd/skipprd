@@ -65,7 +65,7 @@ Query the tables in your warehouse with its own SQL client. For Iceberg destinat
 skipprd migrate --pipeline bikehire
 ```
 
-When a table already has data and you need to rename, merge, drop, or widen a column, put SQL in `migrations/` next to `skippr.yml` (or run `skipprd query --sql "ALTER TABLE …"`). Skipprd applies the change to its schema, the live WAL, and the destination, and records the file in the Skippr Store journal so a retry is idempotent. You do not stop the pipeline. `DISABLE PIPELINE` still freezes ingest; it is not required to alter. See [ALTER operations](/operations/alter) and [`skipprd migrate`](/cli/migrate).
+When a table already has data and you need to rename, merge, drop, or widen a column, put SQL in `migrations/` next to `skippr.yml` (or run `skipprd query --sql "ALTER TABLE …"`). Skipprd rewrites the live WAL, applies destination DDL, then appends the ALTER log, and records the file in the Skippr Store journal so a retry is idempotent. You do not stop the pipeline. `DISABLE PIPELINE` still freezes ingest; it is not required to alter. See [ALTER operations](/operations/alter) and [`skipprd migrate`](/cli/migrate).
 
 ## What the WAL guarantees
 

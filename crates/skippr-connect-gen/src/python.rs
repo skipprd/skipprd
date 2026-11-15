@@ -122,6 +122,7 @@ struct ClassSpec {
     py: String,
     doc: String,
     frozen: bool,
+    exclusive_variants: bool,
     fields: Vec<ClassField>,
 }
 
@@ -225,6 +226,7 @@ impl<'a> Scope<'a> {
             py,
             doc: doc.to_string(),
             frozen,
+            exclusive_variants: false,
             fields: out,
         })
     }
@@ -305,9 +307,32 @@ impl<'a> Scope<'a> {
                 }
                 return Ok(PyTy::UnitEnum { rust, alias });
             }
+            if spec.is_externally_tagged_newtype() {
+                if self.done.insert(leaf.to_string()) {
+                    let mut fields = Vec::new();
+                    for variant in &spec.variants {
+                        let field = variant
+                            .fields
+                            .as_ref()
+                            .and_then(|f| f.first())
+                            .cloned()
+                            .ok_or_else(|| {
+                                format!(
+                                    "enum {leaf} variant {} is not a newtype",
+                                    variant.rust_name
+                                )
+                            })?;
+                        fields.push(field);
+                    }
+                    let mut class = self.class(alias.clone(), &spec.doc, leaf, &fields, true)?;
+                    class.exclusive_variants = true;
+                    self.classes.push(class);
+                }
+                return Ok(PyTy::Class { rust, py: alias });
+            }
             let Some(tag) = spec.tag.clone() else {
                 return Err(format!(
-                    "enum {leaf} must be a string enum or #[serde(tag = ...)]"
+                    "enum {leaf} must be a string enum, #[serde(tag = ...)], or an externally tagged newtype"
                 ));
             };
             if self.done.insert(leaf.to_string()) {
@@ -520,42 +545,65 @@ fn emit_rust_class(out: &mut String, class: &ClassSpec) {
         out.push_str(&format!("    pub {}: {ty},\n", ident_ok(&field.ident)));
     }
     out.push_str("}\n\n#[pymethods]\n");
-    out.push_str(&format!("impl {} {{\n    #[new]\n", class.rust));
-    let ctor_doc = constructor_doc(class);
-    if !ctor_doc.is_empty() {
-        out.push_str(&format!("    #[doc = {ctor_doc:?}]\n"));
-    }
-    let signature = class
-        .fields
-        .iter()
-        .map(|f| {
-            if f.optional {
-                format!("{} = None", ident_ok(&f.ident))
-            } else {
-                ident_ok(&f.ident)
+    out.push_str(&format!("impl {} {{\n", class.rust));
+    if class.exclusive_variants {
+        for field in &class.fields {
+            let ident = ident_ok(&field.ident);
+            let inner = field.ty.rust();
+            out.push_str(&format!(
+                "    #[classmethod]\n    #[doc = {:?}]\n    fn {ident}(_cls: &Bound<'_, PyType>, {ident}: {inner}) -> Self {{\n        Self {{\n",
+                field_doc(field)
+            ));
+            for other in &class.fields {
+                let other_ident = ident_ok(&other.ident);
+                if other_ident == ident {
+                    out.push_str(&format!(
+                        "            {other_ident}: Some({other_ident}),\n"
+                    ));
+                } else {
+                    out.push_str(&format!("            {other_ident}: None,\n"));
+                }
             }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    if class.fields.is_empty() {
-        out.push_str("    fn new() -> Self {\n        Self {}\n    }\n");
+            out.push_str("        }\n    }\n\n");
+        }
     } else {
-        out.push_str(&format!(
-            "    #[pyo3(signature = (*, {signature}))]\n    fn new(\n"
-        ));
-        for field in &class.fields {
-            let ty = if field.optional {
-                format!("Option<{}>", field.ty.rust())
-            } else {
-                field.ty.rust()
-            };
-            out.push_str(&format!("        {}: {ty},\n", ident_ok(&field.ident)));
+        out.push_str("    #[new]\n");
+        let ctor_doc = constructor_doc(class);
+        if !ctor_doc.is_empty() {
+            out.push_str(&format!("    #[doc = {ctor_doc:?}]\n"));
         }
-        out.push_str("    ) -> Self {\n        Self {\n");
-        for field in &class.fields {
-            out.push_str(&format!("            {},\n", ident_ok(&field.ident)));
+        let signature = class
+            .fields
+            .iter()
+            .map(|f| {
+                if f.optional {
+                    format!("{} = None", ident_ok(&f.ident))
+                } else {
+                    ident_ok(&f.ident)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if class.fields.is_empty() {
+            out.push_str("    fn new() -> Self {\n        Self {}\n    }\n");
+        } else {
+            out.push_str(&format!(
+                "    #[pyo3(signature = (*, {signature}))]\n    fn new(\n"
+            ));
+            for field in &class.fields {
+                let ty = if field.optional {
+                    format!("Option<{}>", field.ty.rust())
+                } else {
+                    field.ty.rust()
+                };
+                out.push_str(&format!("        {}: {ty},\n", ident_ok(&field.ident)));
+            }
+            out.push_str("    ) -> Self {\n        Self {\n");
+            for field in &class.fields {
+                out.push_str(&format!("            {},\n", ident_ok(&field.ident)));
+            }
+            out.push_str("        }\n    }\n");
         }
-        out.push_str("        }\n    }\n");
     }
     out.push_str(&format!(
         "\n    fn __repr__(&self) -> PyResult<String> {{\n        config_repr(\"{}\", self)\n    }}\n}}\n\n",
@@ -740,41 +788,54 @@ fn py_docstring(doc: &str, indent: &str) -> String {
 fn emit_stub_class(out: &mut String, class: &ClassSpec) {
     out.push_str(&format!("@final\nclass {}:\n", class.py));
     out.push_str(&py_docstring(&class.doc, "    "));
-    let params = class
-        .fields
-        .iter()
-        .map(|f| {
-            if f.optional {
-                format!("{}: {} | None = None", f.ident, f.ty.py())
-            } else {
-                format!("{}: {}", f.ident, f.ty.py())
-            }
-        })
-        .collect::<Vec<_>>();
-    let ctor_doc = constructor_doc(class);
-    let one_line = if params.is_empty() {
-        format!("    def __new__(cls) -> {}: ...\n", class.py)
-    } else {
-        format!(
-            "    def __new__(cls, *, {}) -> {}: ...\n",
-            params.join(", "),
-            class.py
-        )
-    };
-    if ctor_doc.is_empty() && one_line.len() <= STUB_LINE_WIDTH {
-        out.push_str(&one_line);
-    } else if params.is_empty() {
-        out.push_str(&format!("    def __new__(cls) -> {}:\n", class.py));
-        out.push_str(&py_docstring(&ctor_doc, "        "));
-        out.push_str("        ...\n");
-    } else {
-        out.push_str("    def __new__(\n        cls,\n        *,\n");
-        for param in &params {
-            out.push_str(&format!("        {param},\n"));
+    if class.exclusive_variants {
+        for field in &class.fields {
+            out.push_str(&format!(
+                "    @classmethod\n    def {}(cls, {}: {}) -> {}:\n{}        ...\n",
+                field.ident,
+                field.ident,
+                field.ty.py(),
+                class.py,
+                py_docstring(&field_doc(field), "        ")
+            ));
         }
-        out.push_str(&format!("    ) -> {}:\n", class.py));
-        out.push_str(&py_docstring(&ctor_doc, "        "));
-        out.push_str("        ...\n");
+    } else {
+        let params = class
+            .fields
+            .iter()
+            .map(|f| {
+                if f.optional {
+                    format!("{}: {} | None = None", f.ident, f.ty.py())
+                } else {
+                    format!("{}: {}", f.ident, f.ty.py())
+                }
+            })
+            .collect::<Vec<_>>();
+        let ctor_doc = constructor_doc(class);
+        let one_line = if params.is_empty() {
+            format!("    def __new__(cls) -> {}: ...\n", class.py)
+        } else {
+            format!(
+                "    def __new__(cls, *, {}) -> {}: ...\n",
+                params.join(", "),
+                class.py
+            )
+        };
+        if ctor_doc.is_empty() && one_line.len() <= STUB_LINE_WIDTH {
+            out.push_str(&one_line);
+        } else if params.is_empty() {
+            out.push_str(&format!("    def __new__(cls) -> {}:\n", class.py));
+            out.push_str(&py_docstring(&ctor_doc, "        "));
+            out.push_str("        ...\n");
+        } else {
+            out.push_str("    def __new__(\n        cls,\n        *,\n");
+            for param in &params {
+                out.push_str(&format!("        {param},\n"));
+            }
+            out.push_str(&format!("    ) -> {}:\n", class.py));
+            out.push_str(&py_docstring(&ctor_doc, "        "));
+            out.push_str("        ...\n");
+        }
     }
     for field in &class.fields {
         let optional = |ty: String| {

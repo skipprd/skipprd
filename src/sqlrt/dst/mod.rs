@@ -139,6 +139,7 @@ pub enum Op {
     DiskResume,
     DeadletterSkip,
     EvolveAddColumn(String),
+    Alter(crate::discover::schema_alter::SchemaAlterOp),
 }
 
 const OPS_MAGIC: &[u8; 4] = b"DST1";
@@ -179,6 +180,7 @@ pub struct World {
     pub disk_paused: bool,
     pub deadletter_skip: bool,
     pub field_ids: BTreeMap<String, i32>,
+    pub alter_error: Option<String>,
 }
 
 impl Default for World {
@@ -205,16 +207,23 @@ impl World {
             held_pin: None,
             disk_paused: false,
             deadletter_skip: false,
-            field_ids: BTreeMap::new(),
+            field_ids: BTreeMap::from([("id".into(), 1), ("name".into(), 2), ("amount".into(), 3)]),
+            alter_error: None,
         }
     }
 }
 
+fn parquet_id(field: Field, id: i32) -> Field {
+    let mut meta = field.metadata().clone();
+    meta.insert("PARQUET:field_id".into(), id.to_string());
+    field.with_metadata(meta)
+}
+
 pub fn user_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int64, true),
-        Field::new("name", DataType::Utf8, true),
-        Field::new("amount", DataType::Int64, true),
+        parquet_id(Field::new("id", DataType::Int64, true), 1),
+        parquet_id(Field::new("name", DataType::Utf8, true), 2),
+        parquet_id(Field::new("amount", DataType::Int64, true), 3),
     ]))
 }
 
@@ -358,6 +367,54 @@ pub fn apply(world: &mut World, op: Op) {
         Op::EvolveAddColumn(name) => {
             let id = crate::lineage::deterministic_field_id("dst", std::slice::from_ref(&name));
             world.field_ids.entry(name).or_insert(id);
+        }
+        Op::Alter(op) => apply_dst_alter(world, &op),
+    }
+}
+
+fn apply_dst_alter(world: &mut World, op: &crate::discover::schema_alter::SchemaAlterOp) {
+    use crate::discover::schema_alter::{
+        apply_log, canonicalize, AlterOrigin, CommittedAlter, FlattenMode, MigrationDirection,
+        MigrationId,
+    };
+    use crate::discover::{Metadata, SkipprDataType};
+    let mut meta = Metadata::new().unwrap();
+    for (name, ty, id) in [
+        ("id", SkipprDataType::Long, 1),
+        ("name", SkipprDataType::String, 2),
+        ("amount", SkipprDataType::Long, 3),
+    ] {
+        let mut field = Metadata::new_with_type(ty, name);
+        field.field_id = *world.field_ids.get(name).unwrap_or(&id);
+        meta.fields.insert(name.into(), field);
+    }
+    let alter = match canonicalize(FlattenMode::Nested, &meta, op, &[]) {
+        Ok(alter) => alter,
+        Err(err) => {
+            world.alter_error = Some(err.to_string());
+            return;
+        }
+    };
+    let log = [CommittedAlter {
+        origin: AlterOrigin {
+            migration: MigrationId::new("dst"),
+            direction: MigrationDirection::Up,
+        },
+        seq: 0,
+        alter,
+    }];
+    for snap in &mut world.snapshots {
+        let batches: Vec<RecordBatch> = snap.rows.iter().map(batch_from_row).collect();
+        if batches.is_empty() {
+            continue;
+        }
+        let schema = batches[0].schema();
+        let merged = arrow::compute::concat_batches(&schema, &batches).expect("DST Alter concat");
+        match apply_log(merged, &log) {
+            Ok(rewritten) => snap.rows = rows_from_batches(&[rewritten]),
+            Err(err) => {
+                world.alter_error = Some(err.to_string());
+            }
         }
     }
 }
@@ -624,10 +681,7 @@ fn rows_from_batches(batches: &[RecordBatch]) -> Vec<UserRow> {
             .unwrap();
         let amounts = batch
             .column_by_name("amount")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
+            .and_then(|col| col.as_any().downcast_ref::<Int64Array>());
         for i in 0..batch.num_rows() {
             if ids.is_null(i) {
                 continue;
@@ -635,7 +689,7 @@ fn rows_from_batches(batches: &[RecordBatch]) -> Vec<UserRow> {
             rows.push(UserRow {
                 id: ids.value(i),
                 name: names.value(i).to_string(),
-                amount: amounts.value(i),
+                amount: amounts.map(|col| col.value(i)).unwrap_or(0),
             });
         }
     }
@@ -736,6 +790,13 @@ fn encode_op(out: &mut Vec<u8>, op: &Op) {
             let len = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
             out.extend_from_slice(&len.to_le_bytes());
             out.extend_from_slice(&bytes[..len as usize]);
+        }
+        Op::Alter(op) => {
+            out.push(12);
+            let encoded = serde_json::to_vec(op).unwrap_or_default();
+            let len = u16::try_from(encoded.len()).unwrap_or(u16::MAX);
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&encoded[..len as usize]);
         }
     }
 }
@@ -863,6 +924,12 @@ fn decode_op(bytes: &[u8], i: &mut usize) -> Option<Op> {
             let len = take_u16(bytes, i)? as usize;
             let name = String::from_utf8(take_n(bytes, i, len)?.to_vec()).ok()?;
             Some(Op::EvolveAddColumn(name))
+        }
+        12 => {
+            let len = take_u16(bytes, i)? as usize;
+            let payload = take_n(bytes, i, len)?;
+            let op = serde_json::from_slice(payload).ok()?;
+            Some(Op::Alter(op))
         }
         _ => None,
     }

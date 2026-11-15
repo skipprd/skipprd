@@ -79,7 +79,9 @@ skippr_runtime_sdk::declare_schema_sink_spec!(
     RedshiftSchemaSinkSpec,
     DataSinkRedshiftPlugin,
     "Redshift",
-    skippr_runtime_sdk::plugins::AlterSupport::Native
+    skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
+        skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Redshift
+    )
 );
 
 impl DataSinkRedshiftPlugin {
@@ -766,17 +768,88 @@ impl DataSink for DataSinkRedshiftPlugin {
 }
 
 #[async_trait]
+impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkRedshiftPlugin {
+    async fn columns(&self, namespace: &str) -> std::io::Result<Vec<String>> {
+        let table_name = self
+            .config
+            .table
+            .clone()
+            .unwrap_or_else(|| Self::namespace_to_table_name(namespace));
+        let sql = match &self.config.schema {
+            Some(schema) => format!(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = '{}' AND table_name = '{}'",
+                schema.replace('\'', "''"),
+                table_name.replace('\'', "''"),
+            ),
+            None => format!(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = '{}'",
+                table_name.replace('\'', "''"),
+            ),
+        };
+        let statement_id = self.execute_statement(&sql).await?;
+        let page = self
+            .redshift_client
+            .get_statement_result()
+            .id(&statement_id)
+            .send()
+            .await
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        page.records()
+            .iter()
+            .map(|row| redshift_row_text(row))
+            .collect::<std::io::Result<Vec<_>>>()
+    }
+
+    async fn execute(&self, sql: &str) -> std::io::Result<()> {
+        self.execute_statement(sql).await.map(|_| ())
+    }
+
+    async fn query_first(&self, sql: &str) -> std::io::Result<Option<String>> {
+        let statement_id = self.execute_statement(sql).await?;
+        let page = self
+            .redshift_client
+            .get_statement_result()
+            .id(&statement_id)
+            .send()
+            .await
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let Some(row) = page.records().first() else {
+            return Ok(None);
+        };
+        redshift_row_text(row).map(Some)
+    }
+}
+
+fn redshift_row_text(row: &[aws_sdk_redshiftdata::types::Field]) -> std::io::Result<String> {
+    let Some(field) = row.first() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Redshift result row has no cell",
+        ));
+    };
+    match field {
+        aws_sdk_redshiftdata::types::Field::StringValue(value) => Ok(value.clone()),
+        aws_sdk_redshiftdata::types::Field::LongValue(value) => Ok(value.to_string()),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Redshift cell is not text or long: {other:?}"),
+        )),
+    }
+}
+
+#[async_trait]
 impl SchemaSink for DataSinkRedshiftPlugin {
     fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
-        skippr_runtime_sdk::plugins::AlterSupport::Native
+        skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
+            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Redshift,
+        )
     }
 
     async fn apply_alter(
         &self,
         namespace: &str,
         _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
-        op: &skippr_runtime_sdk::discover::schema_alter::SchemaAlterOp,
-        _field_id: i32,
+        alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
     ) -> Result<(), std::io::Error> {
         let table_name = self
             .config
@@ -787,12 +860,14 @@ impl SchemaSink for DataSinkRedshiftPlugin {
             Some(schema) => format!("\"{}\".\"{}\"", schema, table_name),
             None => format!("\"{}\"", table_name),
         };
-        let sql = skippr_runtime_sdk::plugins::alter_ddl::warehouse_alter_sql(
+        skippr_runtime_sdk::plugins::alter_ddl::apply_warehouse_alter(
+            self,
             skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Redshift,
             &fq_table,
-            op,
-        )?;
-        self.execute_statement(&sql).await.map(|_| ())
+            namespace,
+            alter,
+        )
+        .await
     }
 
     async fn sync_schema(
@@ -916,5 +991,20 @@ mod tests {
         .unwrap();
         assert_eq!(guarded.len(), 15_001);
         assert!(super::REDSHIFT_CDC_S3_STAGE_BLOCKER.contains("target-only"));
+    }
+
+    #[test]
+    fn redshift_row_text_fails_closed_on_empty_or_unexpected_cells() {
+        use aws_sdk_redshiftdata::types::Field;
+        assert_eq!(
+            super::redshift_row_text(&[Field::StringValue("region".into())]).unwrap(),
+            "region"
+        );
+        assert_eq!(
+            super::redshift_row_text(&[Field::LongValue(7)]).unwrap(),
+            "7"
+        );
+        assert!(super::redshift_row_text(&[]).is_err());
+        assert!(super::redshift_row_text(&[Field::IsNull(true)]).is_err());
     }
 }

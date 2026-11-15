@@ -84,6 +84,18 @@ impl EnumSpec {
         self.tag.is_none() && !self.untagged && self.variants.iter().all(|v| v.fields.is_none())
     }
 
+    /// Externally tagged newtype enum (`filter: "…"`, `project: […]`). Python
+    /// emits one class whose optional fields are the variant wire names.
+    pub fn is_externally_tagged_newtype(&self) -> bool {
+        self.tag.is_none()
+            && !self.untagged
+            && !self.variants.is_empty()
+            && self
+                .variants
+                .iter()
+                .all(|v| v.fields.as_ref().is_some_and(|f| f.len() == 1))
+    }
+
     /// Every variant's named fields, first occurrence wins. Used by the CLI,
     /// which flattens tagged enums into `<field>.<tag>` plus variant fields.
     fn merged_fields(&self) -> Vec<FieldSpec> {
@@ -356,20 +368,49 @@ fn reflect_crate(crate_dir: &Path) -> Result<Option<ReflectedConfig>, String> {
     Ok(None)
 }
 
+fn deserialize_impl_targets(file: &syn::File) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for item in &file.items {
+        let Item::Impl(item) = item else {
+            continue;
+        };
+        let Some((_, path, _)) = &item.trait_ else {
+            continue;
+        };
+        if !path_ends_with(path, "Deserialize") {
+            continue;
+        }
+        let Type::Path(ty) = &*item.self_ty else {
+            continue;
+        };
+        if let Some(ident) = ty.path.segments.last() {
+            names.insert(ident.ident.to_string());
+        }
+    }
+    names
+}
+
 /// Reflect every deserializable struct and enum in one source file.
 pub fn reflect_source_file(path: &Path) -> Result<TypeCatalog, String> {
     let text = fs::read_to_string(path).map_err(|err| format!("read {}: {err}", path.display()))?;
     let parsed =
         syn::parse_file(&text).map_err(|err| format!("parse {}: {err}", path.display()))?;
+    let deserialize_impls = deserialize_impl_targets(&parsed);
     let mut types = TypeCatalog::default();
     for item in parsed.items {
         match item {
-            Item::Struct(item) if has_deserialize(&item.attrs) => {
+            Item::Struct(item)
+                if has_deserialize(&item.attrs)
+                    || deserialize_impls.contains(&item.ident.to_string()) =>
+            {
                 types
                     .structs
                     .insert(item.ident.to_string(), reflect_struct(&item)?);
             }
-            Item::Enum(item) if has_deserialize(&item.attrs) => {
+            Item::Enum(item)
+                if has_deserialize(&item.attrs)
+                    || deserialize_impls.contains(&item.ident.to_string()) =>
+            {
                 types
                     .enums
                     .insert(item.ident.to_string(), reflect_enum(&item)?);
@@ -390,7 +431,18 @@ fn reflect_struct(item: &syn::ItemStruct) -> Result<StructSpec, String> {
 }
 
 fn reflect_enum(item: &syn::ItemEnum) -> Result<EnumSpec, String> {
-    let rename_all = serde_str(&item.attrs, "rename_all");
+    let tag = serde_str(&item.attrs, "tag");
+    let untagged = serde_flag(&item.attrs, "untagged");
+    let newtype_variants = item.variants.iter().all(
+        |variant| matches!(&variant.fields, Fields::Unnamed(fields) if fields.unnamed.len() == 1),
+    );
+    let rename_all = serde_str(&item.attrs, "rename_all").or_else(|| {
+        if tag.is_none() && !untagged && newtype_variants {
+            Some("snake_case".into())
+        } else {
+            None
+        }
+    });
     let mut variants = Vec::new();
     for variant in &item.variants {
         let rust_name = variant.ident.to_string();
@@ -402,6 +454,23 @@ fn reflect_enum(item: &syn::ItemEnum) -> Result<EnumSpec, String> {
         let variant_rename_all = serde_str(&variant.attrs, "rename_all");
         let fields = match &variant.fields {
             Fields::Unit => None,
+            Fields::Unnamed(unnamed) if tag.is_none() && !untagged => {
+                if unnamed.unnamed.len() != 1 {
+                    return Err(format!(
+                        "{}::{rust_name}: externally tagged tuple variants must have exactly one field",
+                        item.ident
+                    ));
+                }
+                let field = &unnamed.unnamed[0];
+                Some(vec![FieldSpec {
+                    ident: ident_ok(&wire),
+                    yaml_path: wire.clone(),
+                    optional: true,
+                    secret: parse_secret_attr(&field.attrs),
+                    rust_ty: type_to_string(&field.ty),
+                    doc: doc_string(&variant.attrs),
+                }])
+            }
             fields => Some(struct_fields(fields, variant_rename_all.as_deref(), false)?),
         };
         variants.push(VariantSpec {
@@ -413,8 +482,8 @@ fn reflect_enum(item: &syn::ItemEnum) -> Result<EnumSpec, String> {
     }
     Ok(EnumSpec {
         doc: doc_string(&item.attrs),
-        tag: serde_str(&item.attrs, "tag"),
-        untagged: serde_flag(&item.attrs, "untagged"),
+        tag,
+        untagged,
         variants,
     })
 }
@@ -2000,6 +2069,33 @@ mod tests {
         assert!(stub.contains("Config for the `SkipprLake` data sink and schema sink."));
         assert!(rs.contains("#[doc = \"Config for the `SkipprLake` data sink and schema sink."));
         assert!(stub.contains("YAML key `object_store`."));
+        assert!(
+            stub.contains(
+                "Flatten nested objects into underscore-separated columns (`contact_name`)."
+            ),
+            "flatten dest names are underscores, not dots"
+        );
+        assert!(
+            !stub.contains("dot-separated columns (`contact.name`)"),
+            "dotted flatten dest names are illegal"
+        );
+        assert!(
+            rs.contains("pub struct PyTransformOp {"),
+            "externally tagged TransformOp must generate a Python class"
+        );
+        assert!(rs.contains("pub filter: Option<String>"));
+        assert!(
+            rs.contains("#[classmethod]"),
+            "TransformOp must emit per-variant constructors"
+        );
+        assert!(
+            stub.contains("    def filter(cls, filter: str) -> TransformOp:"),
+            "TransformOp.filter is the Python constructor"
+        );
+        assert!(
+            !rs.contains("fn new(\n        filter: Option<String>"),
+            "TransformOp bag constructor is illegal"
+        );
     }
 
     #[test]

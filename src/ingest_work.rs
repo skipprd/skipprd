@@ -38,8 +38,21 @@ static DATA_DIR_MIN_FREE_TUNE_LOGGED: AtomicBool = AtomicBool::new(false);
 use crate::metrics::counters as metrics_hot;
 use crate::metrics::ingest_profile;
 // Bounded concurrency for background metadata writes and Glue schema syncs
+const METADATA_WRITE_PERMITS: u32 = 2;
 static METADATA_WRITE_SEM: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
-    once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+    once_cell::sync::Lazy::new(|| {
+        Arc::new(tokio::sync::Semaphore::new(METADATA_WRITE_PERMITS as usize))
+    });
+
+/// Held by ALTER while it reads and persists pipeline metadata: waits out
+/// detached evolve persists and blocks new ones until dropped.
+pub(crate) async fn exclusive_metadata_writes() -> tokio::sync::SemaphorePermit<'static> {
+    let sem: &'static tokio::sync::Semaphore = &METADATA_WRITE_SEM;
+    match sem.acquire_many(METADATA_WRITE_PERMITS).await {
+        Ok(permit) => permit,
+        Err(_) => unreachable!("METADATA_WRITE_SEM is never closed"),
+    }
+}
 pub(crate) static INGEST_RT: once_cell::sync::Lazy<runtime::Runtime> =
     once_cell::sync::Lazy::new(|| {
         runtime::Builder::new_multi_thread()
@@ -85,7 +98,6 @@ use crate::serdes::copy::CopyWalRecord;
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::DataSink;
 use arrow::compute::concat_batches;
-use arrow::datatypes;
 use arrow::error::ArrowError;
 use arrow::json::ReaderBuilder as ArrowJsonReaderBuilder;
 use arrow::record_batch::RecordBatch;
@@ -173,11 +185,37 @@ fn ensure_slow_ingest_worker(config: &Config) {
                     .insert(task.namespace.clone(), Metadata::new().unwrap());
             }
             let mut updated = "no".to_string();
+            let mut payload = task.record.inner().clone();
+            if let Some(ns_meta) = md_local.metadata.get(&task.namespace) {
+                match md_local.output(&task.namespace) {
+                    Ok(output) => {
+                        if let Some(obj) = payload.as_object_mut() {
+                            if let Err(err) =
+                                crate::discover::schema_alter::IngestKeys::new(ns_meta, &output)
+                                    .rewrite(obj)
+                            {
+                                let _ = task.resp_tx.send(Err(SlowIngestError {
+                                    code: "INGEST_KEY".to_string(),
+                                    message: err.to_string(),
+                                }));
+                                continue;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let _ = task.resp_tx.send(Err(SlowIngestError {
+                            code: "INGEST_KEY".to_string(),
+                            message: err.to_string(),
+                        }));
+                        continue;
+                    }
+                }
+            }
             let ingest_result = match std::panic::catch_unwind(AssertUnwindSafe(|| {
                 if let Some(ns_meta) = md_local.metadata.get_mut(&task.namespace) {
                     ingest(
                         &worker_config,
-                        task.record.inner(),
+                        &payload,
                         &mut ns_meta.fields,
                         &task.namespace,
                         &mut updated,
@@ -206,14 +244,16 @@ fn ensure_slow_ingest_worker(config: &Config) {
                         match md_local.normalize_namespace(&task.namespace) {
                             Ok(_) => {
                                 METADATA.store(Arc::new(md_local.clone()));
-                                let _ = Ingest::prepare_arrow_schema_with_metadata(
+                                if let Err(err) = Ingest::prepare_arrow_schema_with_metadata(
                                     &worker_config,
                                     &task.namespace,
-                                    &md_local.metadata,
-                                    task.flatten,
-                                );
-
-                                if let Err(err) = worker_config
+                                    &md_local,
+                                ) {
+                                    Err(slow_ingest_evolution_error(
+                                        &task.namespace,
+                                        &err.to_string(),
+                                    ))
+                                } else if let Err(err) = worker_config
                                     .sync_output_schema_namespace_blocking(&task.namespace)
                                     .await
                                 {
@@ -692,7 +732,6 @@ fn track_partition_offset(
     buf: &mut HashMap<IngestPartitionKey, IngestBufferBatch>,
     primary_sink_ref: &str,
     schema_hash_cache: &mut HashMap<String, SchemaHash>,
-    flatten: bool,
     ns: &str,
     part: &str,
     time_b: &Option<i64>,
@@ -701,7 +740,7 @@ fn track_partition_offset(
     cdc_meta: Option<crate::plugins::cdc::WalRowMeta>,
     cdc_row_buf: &mut HashMap<IngestPartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
 ) -> IngestPartitionKey {
-    let schema_hash = resolve_partition_schema(config, ns, flatten, schema_hash_cache);
+    let schema_hash = resolve_partition_schema(config, ns, schema_hash_cache);
     track_partition_offset_with_schema(
         buf,
         primary_sink_ref,
@@ -723,7 +762,6 @@ fn enqueue_legacy_record(
     cdc_row_buf: &mut HashMap<IngestPartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
     schema_hash_cache: &mut HashMap<String, SchemaHash>,
     primary_sink_ref: &str,
-    flatten: bool,
     ns: &str,
     part: &str,
     time_b: &Option<i64>,
@@ -738,7 +776,6 @@ fn enqueue_legacy_record(
         buf,
         primary_sink_ref,
         schema_hash_cache,
-        flatten,
         ns,
         part,
         time_b,
@@ -775,7 +812,6 @@ fn enqueue_legacy_record(
 fn resolve_partition_schema(
     config: &Config,
     ns: &str,
-    flatten: bool,
     cache: &mut HashMap<String, SchemaHash>,
 ) -> SchemaHash {
     let version = ARROW_SCHEMA_VERSION
@@ -789,7 +825,7 @@ fn resolve_partition_schema(
         }
     }
     let md_snapshot = METADATA.load();
-    let sh = Ingest::load_stable_schema_hash(config, ns, &md_snapshot.metadata, flatten);
+    let sh = Ingest::load_stable_schema_hash(config, ns, md_snapshot.as_ref());
     drop(md_snapshot);
     cache.insert(ns.to_string(), sh.clone());
     sh
@@ -807,21 +843,19 @@ pub(crate) fn namespace_schema_version(ns: &str) -> u64 {
 /// template found" on namespaces that have not yet flushed a successful batch.
 pub(crate) async fn warm_output_schemas_for_metadata(
     config: &Config,
-    metadata: &HashMap<String, Metadata>,
-    flatten: bool,
-) {
-    for ns in metadata.keys() {
+    pipeline: &PipelineMetadata,
+) -> Result<(), String> {
+    for ns in pipeline.metadata.keys() {
         if ns.is_empty() || ns.starts_with("_dl_") {
             continue;
         }
-        let _ = Ingest::prepare_arrow_schema_with_metadata(config, ns, metadata, flatten);
-        if let Err(err) = config
+        Ingest::prepare_arrow_schema_with_metadata(config, ns, pipeline)
+            .map_err(|err| err.to_string())?;
+        config
             .sync_output_schema_namespace_blocking(ns.as_str())
-            .await
-        {
-            warn!("Schema pre-warm sync failed for namespace {}: {}", ns, err);
-        }
+            .await?;
     }
+    Ok(())
 }
 
 fn ensure_output_schema_synced_for_namespace(config: &Config, ns: &str) -> Result<(), String> {
@@ -1042,8 +1076,7 @@ fn ingest_schema_arrow_batches(
             }
             crate::buffer::BufferChunker::event_time_bucket(config, event_time)
         });
-        let schema_hash =
-            resolve_partition_schema(config, &skpr_namespace, false, schema_hash_cache);
+        let schema_hash = resolve_partition_schema(config, &skpr_namespace, schema_hash_cache);
         let key = track_partition_offset_with_schema(
             buf,
             primary_sink_ref,
@@ -2342,8 +2375,7 @@ impl Ingest {
     fn load_stable_schema_hash(
         config: &Config,
         skpr_namespace: &str,
-        metadata: &HashMap<String, Metadata>,
-        flatten: bool,
+        pipeline: &PipelineMetadata,
     ) -> SchemaHash {
         const MAX_ITERS: u32 = 50; // ~500ms
         let mut iters = 0u32;
@@ -2363,12 +2395,10 @@ impl Ingest {
                     .clone();
                 let _guard = lock.lock().unwrap();
                 if ARROW_SCHEMA.get(skpr_namespace).is_none() {
-                    let _ = Ingest::prepare_arrow_schema_with_metadata(
-                        config,
-                        skpr_namespace,
-                        metadata,
-                        flatten,
-                    );
+                    Ingest::prepare_arrow_schema_with_metadata(config, skpr_namespace, pipeline)
+                        .unwrap_or_else(|err| {
+                            panic!("published dest Arrow schema for {skpr_namespace}: {err}")
+                        });
                 }
             }
             let schema: SchemaRef = ARROW_SCHEMA
@@ -3404,6 +3434,18 @@ impl Ingest {
             return;
         }
         let _guard = handle.enter();
+        let _admission = match crate::pipeline_backend::pipeline_key(config) {
+            Ok(key) => crate::migration::gate::admit(&key),
+            Err(err) => {
+                if submit_id != 0 {
+                    crate::buffer::wal_writer::fail_request(
+                        submit_id,
+                        format!("ingest needs a pipeline key: {err}"),
+                    );
+                }
+                return;
+            }
+        };
 
         if offset_db_clone.is_remote() {
             panic!(
@@ -3881,7 +3923,6 @@ impl Ingest {
                                     let schema_hash = resolve_partition_schema(
                                         config,
                                         skpr_namespace,
-                                        flatten,
                                         &mut schema_hash_cache,
                                     );
                                     if let Some(plan) = resolve_cached_exact_plan(
@@ -3964,13 +4005,17 @@ impl Ingest {
                             let source = SourceRecord::new(record);
                             let fast_started = Instant::now();
                             let msg = match metadata_snapshot.metadata.get(skpr_namespace) {
-                                Some(metadata) => fast_path_ingest(
-                                    config,
-                                    source.inner(),
-                                    metadata.fields.as_ref(),
-                                    &skpr_namespace,
-                                    flatten,
-                                ),
+                                Some(metadata) => match metadata_snapshot.output(skpr_namespace) {
+                                    Ok(output) => fast_path_ingest(
+                                        config,
+                                        source.inner(),
+                                        metadata.fields.as_ref(),
+                                        &skpr_namespace,
+                                        flatten,
+                                        &output,
+                                    ),
+                                    Err(err) => Err(err.into()),
+                                },
                                 None => Err(format!(
                                     "Failed to find metadata for namespace: {}",
                                     skpr_namespace
@@ -4053,7 +4098,6 @@ impl Ingest {
                                 &mut cdc_row_buf,
                                 &mut schema_hash_cache,
                                 &primary_sink_ref,
-                                flatten,
                                 &skpr_namespace,
                                 &skpr_partition,
                                 &skpr_time_bucket,
@@ -4224,7 +4268,15 @@ impl Ingest {
             match merge_record_batches(entry.schema.clone(), batches) {
                 Ok(merged) => {
                     let ops = config.get_transform_ops();
+                    let snapshot = METADATA.load();
+                    let empty = Vec::new();
+                    let log = snapshot
+                        .alters
+                        .get(&entry._namespace)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&empty);
                     match crate::stream_transform::apply_configured_ops(
+                        log,
                         &ops,
                         merged,
                         take_cdc_sidecar(entry.cdc_rows.take(), cdc_row_buf.remove(k)),
@@ -4385,6 +4437,7 @@ impl Ingest {
     /// Benchmark/test entrypoint for local ingest profiling.
     #[cfg(test)]
     pub fn run_process_batch_for_benchmark(
+        config: &Config,
         datas: &[IngestBatch],
         offset_db: &Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
@@ -4395,10 +4448,10 @@ impl Ingest {
             .enable_all()
             .build()
             .expect("benchmark runtime");
-        crate::buffer::wal_writer::start(&Config::new(), 1);
+        crate::buffer::wal_writer::start(config, 1);
         let handle = rt.handle().clone();
         Self::process_batch(
-            &Config::new(),
+            config,
             &Arc::new(datas.to_vec()),
             offset_db,
             handle,
@@ -4406,36 +4459,34 @@ impl Ingest {
             submit_id,
         );
         rt.block_on(async {
-            let _ =
-                crate::buffer::wal_writer::flush_and_drain(&Config::new(), offset_db.clone()).await;
+            let _ = crate::buffer::wal_writer::flush_and_drain(config, offset_db.clone()).await;
         });
+    }
+
+    fn published_arrow_schema(
+        pipeline: &PipelineMetadata,
+        skpr_namespace: &str,
+    ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
+        let output_metadata = match pipeline.output_metadata(skpr_namespace) {
+            Ok(output) => output,
+            Err(crate::discover::schema_alter::SchemaAlterError::NamespaceNotFound(_)) => {
+                OutputMetadata::new()
+            }
+            Err(err) => {
+                return Err(ArrowError::ExternalError(Box::new(std::io::Error::other(
+                    err.to_string(),
+                ))))
+            }
+        };
+        convert_skippr_to_arrow(output_metadata.fields).map(Arc::new)
     }
 
     pub fn prepare_arrow_schema_with_metadata(
         config: &Config,
         skpr_namespace: &str,
-        metadata: &HashMap<String, Metadata>,
-        flatten: bool,
+        pipeline: &PipelineMetadata,
     ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
-        let mut _arrow_schema: Result<datatypes::Schema, ArrowError> =
-            Ok(datatypes::Schema::empty());
-        let mut _schema_ref = Arc::new(datatypes::Schema::empty());
-
-        let skpr_metadata = metadata.get(skpr_namespace);
-
-        let mut output_metadata: OutputMetadata = OutputMetadata::new();
-
-        if let Some(metadata_for_namespace) = skpr_metadata {
-            if flatten {
-                output_metadata = OutputMetadata::from_flatterened_metadata(metadata_for_namespace);
-            } else {
-                output_metadata = OutputMetadata::from_metadata(metadata_for_namespace);
-            }
-        }
-
-        _arrow_schema = convert_skippr_to_arrow(output_metadata.fields);
-
-        _schema_ref = Arc::new(_arrow_schema.unwrap());
+        let _schema_ref = Self::published_arrow_schema(pipeline, skpr_namespace)?;
 
         // Compute new schema hash for change detection using a stable fingerprint
         let new_hash = crate::converters::skippr_arrow::stable_schema_fingerprint(&_schema_ref);
@@ -4483,9 +4534,10 @@ impl Ingest {
             }
         }
 
-        // Refresh default nested message template for fast ingest determinism
+        // Refresh default nested message template for fast ingest determinism.
+        // Templates stay on source field names; Arrow is the folded dest shape.
         if did_update_schema {
-            if let Some(ns_meta) = metadata.get(skpr_namespace) {
+            if let Some(ns_meta) = pipeline.metadata.get(skpr_namespace) {
                 let template = create_default_nested_message(&ns_meta.fields);
                 DEFAULT_NESTED_MESSAGE.insert(skpr_namespace.to_string(), Arc::new(template));
             }
@@ -4516,61 +4568,12 @@ impl Ingest {
         Ok(_schema_ref)
     }
 
-    /// The only non-superset `ARROW_SCHEMA` writer. Ingest stays `is_schema_superset`.
-    pub fn replace_arrow_schema(
-        config: &Config,
-        namespace: &str,
-        ns_meta: &Metadata,
-        flatten: bool,
-    ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
-        let output = if flatten {
-            OutputMetadata::from_flatterened_metadata(ns_meta)
-        } else {
-            OutputMetadata::from_metadata(ns_meta)
-        };
-        let schema = Arc::new(convert_skippr_to_arrow(output.fields)?);
-        ARROW_SCHEMA.insert(
-            namespace.to_string(),
-            arc_swap::ArcSwap::from(schema.clone()),
-        );
-        let template = create_default_nested_message(&ns_meta.fields);
-        DEFAULT_NESTED_MESSAGE.insert(namespace.to_string(), Arc::new(template));
-        {
-            let entry = ARROW_SCHEMA_VERSION
-                .entry(namespace.to_string())
-                .or_insert_with(|| AtomicU64::new(0));
-            entry.fetch_add(1, Ordering::Release);
-        }
-        bump_pipeline_schema_version();
-        config.sync_output_schema_namespace(namespace);
-        Ok(schema)
-    }
-
     // Version for read-only query context: builds/publishes Arrow schema without external side effects
     pub fn prepare_arrow_schema_with_metadata_for_query(
         skpr_namespace: &str,
-        metadata: &HashMap<String, Metadata>,
-        flatten: bool,
+        pipeline: &PipelineMetadata,
     ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
-        let mut _arrow_schema: Result<datatypes::Schema, ArrowError> =
-            Ok(datatypes::Schema::empty());
-        let mut _schema_ref = Arc::new(datatypes::Schema::empty());
-
-        let skpr_metadata = metadata.get(skpr_namespace);
-
-        let mut output_metadata: OutputMetadata = OutputMetadata::new();
-
-        if let Some(metadata_for_namespace) = skpr_metadata {
-            if flatten {
-                output_metadata = OutputMetadata::from_flatterened_metadata(metadata_for_namespace);
-            } else {
-                output_metadata = OutputMetadata::from_metadata(metadata_for_namespace);
-            }
-        }
-
-        _arrow_schema = convert_skippr_to_arrow(output_metadata.fields);
-
-        _schema_ref = Arc::new(_arrow_schema.unwrap());
+        let _schema_ref = Self::published_arrow_schema(pipeline, skpr_namespace)?;
 
         // Compute new schema hash for change detection using a stable fingerprint
         let new_hash = crate::converters::skippr_arrow::stable_schema_fingerprint(&_schema_ref);
@@ -4595,9 +4598,10 @@ impl Ingest {
             }
         }
 
-        // Refresh default nested message template for fast ingest determinism
+        // Refresh default nested message template for fast ingest determinism.
+        // Templates stay on source field names; Arrow is the folded dest shape.
         if did_update_schema {
-            if let Some(ns_meta) = metadata.get(skpr_namespace) {
+            if let Some(ns_meta) = pipeline.metadata.get(skpr_namespace) {
                 let template = create_default_nested_message(&ns_meta.fields);
                 DEFAULT_NESTED_MESSAGE.insert(skpr_namespace.to_string(), Arc::new(template));
             }
@@ -4679,7 +4683,123 @@ mod warm_output_schemas_tests {
         }
         METADATA.store(Arc::new(pipeline));
 
-        warm_output_schemas_for_metadata(&Config::new(), &METADATA.load().metadata, false).await;
+        warm_output_schemas_for_metadata(&Config::new(), &METADATA.load())
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn prepare_arrow_schema_publishes_folded_alter_names() {
+        use crate::discover::schema_alter::{
+            AlterColumn, AlterOrigin, CanonicalAlter, CommittedAlter, FlattenMode,
+            MigrationDirection, MigrationId, OutputName,
+        };
+
+        let mut root = Metadata::new().unwrap();
+        let mut region = Metadata::new_with_type(SkipprDataType::String, "region");
+        region.field_id = 1;
+        root.fields.insert("region".into(), region);
+        let nested = OutputName::parse_sql(FlattenMode::Nested, "region").unwrap();
+        let mut pipeline = PipelineMetadata::new(&Config::new());
+        pipeline.flattened = false;
+        pipeline.metadata.insert("orders".into(), root);
+        pipeline.alters.insert(
+            "orders".into(),
+            vec![CommittedAlter {
+                origin: AlterOrigin {
+                    migration: MigrationId::new("m"),
+                    direction: MigrationDirection::Up,
+                },
+                seq: 0,
+                alter: CanonicalAlter::Rename {
+                    column: AlterColumn {
+                        name: nested,
+                        id: 1,
+                        ty: SkipprDataType::String,
+                    },
+                    to_leaf: "region_code".into(),
+                },
+            }],
+        );
+        let schema =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), "orders", &pipeline)
+                .expect("schema");
+        let names: Vec<_> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(names.contains(&"region_code"), "{names:?}");
+        assert!(!names.contains(&"region"), "{names:?}");
+    }
+
+    #[test]
+    fn dest_arrow_prepare_errors_are_not_discarded() {
+        let src = include_str!("ingest_work.rs");
+        let discarded = format!("let _ = {}", "Ingest::prepare_arrow_schema_with_metadata");
+        assert!(
+            !src.contains(&discarded),
+            "dest fold Result must not be discarded"
+        );
+        let warm = src
+            .split("pub(crate) async fn warm_output_schemas_for_metadata")
+            .nth(1)
+            .expect("warm");
+        let body = &warm[..warm.find("fn ensure_output_schema_synced").unwrap()];
+        assert!(
+            body.contains("-> Result<(), String>"),
+            "warm must fail closed"
+        );
+        assert!(
+            body.contains("map_err(|err| err.to_string())?"),
+            "warm must surface dest fold errors"
+        );
+        assert!(
+            body.contains(".await?;"),
+            "warm must surface dest publish errors"
+        );
+        assert!(
+            !body.contains("warn!"),
+            "must not warn-and-continue past dest fold or dest publish errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn warm_output_schemas_fails_closed_on_flatten_mismatch() {
+        use crate::discover::schema_alter::{
+            AlterColumn, AlterOrigin, CanonicalAlter, CommittedAlter, FlattenMode,
+            MigrationDirection, MigrationId, OutputName,
+        };
+
+        let mut root = Metadata::new().unwrap();
+        let mut region = Metadata::new_with_type(SkipprDataType::String, "region");
+        region.field_id = 1;
+        root.fields.insert("region".into(), region);
+        let nested = OutputName::parse_sql(FlattenMode::Nested, "region").unwrap();
+        let mut pipeline = PipelineMetadata::new(&Config::new());
+        pipeline.flattened = true;
+        pipeline.metadata.insert("orders".into(), root);
+        pipeline.alters.insert(
+            "orders".into(),
+            vec![CommittedAlter {
+                origin: AlterOrigin {
+                    migration: MigrationId::new("m"),
+                    direction: MigrationDirection::Up,
+                },
+                seq: 0,
+                alter: CanonicalAlter::Rename {
+                    column: AlterColumn {
+                        name: nested,
+                        id: 1,
+                        ty: SkipprDataType::String,
+                    },
+                    to_leaf: "region_code".into(),
+                },
+            }],
+        );
+        let err = warm_output_schemas_for_metadata(&Config::new(), &pipeline)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("flatten") || err.contains("Flatten"),
+            "{err}"
+        );
     }
 }
 
