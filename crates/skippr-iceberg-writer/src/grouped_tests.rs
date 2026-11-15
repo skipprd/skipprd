@@ -6,7 +6,10 @@ use arrow::datatypes::{DataType, Field};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use futures::TryStreamExt;
 use iceberg::io::FileIO;
-use iceberg::spec::{NestedField, PrimitiveType, Schema, Transform, Type, UnboundPartitionSpec};
+use iceberg::spec::{
+    ManifestListWriter, ManifestWriterBuilder, NestedField, PrimitiveType, Schema, Transform, Type,
+    UnboundPartitionSpec,
+};
 use iceberg::TableCreation;
 use serde_json::json;
 use skippr_iceberg_catalog_fs::FsCatalog;
@@ -1675,7 +1678,7 @@ async fn apply_alter_merge_rewrites_live_data_files() {
 }
 
 #[tokio::test]
-async fn apply_alter_fails_closed_when_delete_files_exist() {
+async fn apply_alter_rename_keeps_equality_deletes() {
     let harness = Harness::new().await;
     let contract = SourceNamespaceContract {
         namespace: NAMESPACE.to_string(),
@@ -1701,6 +1704,81 @@ async fn apply_alter_fails_closed_when_delete_files_exist() {
         .unwrap()
         .id;
     let metadata = alter_metadata(json!({ "id": alter_field("id", "long", field_id) }));
+    <IcebergWriter<GroupedTestSpec> as SchemaSink>::apply_alter(
+        &harness.writer,
+        NAMESPACE,
+        &metadata,
+        &committed_rename("id", "order_id", field_id, 0, SkipprDataType::Long),
+    )
+    .await
+    .unwrap();
+    let renamed = harness.table().await;
+    let schema = renamed.metadata().current_schema();
+    assert_eq!(schema.field_by_name("order_id").unwrap().id, field_id);
+    assert!(schema.field_by_name("id").is_none());
+}
+
+async fn append_position_delete_manifest(table: &iceberg::table::Table) {
+    let snapshot = table.metadata().current_snapshot().unwrap();
+    let schema = table.metadata().current_schema().clone();
+    let spec = table.metadata().default_partition_spec().as_ref().clone();
+    let file_io = table.file_io();
+    let delete_manifest_path = format!(
+        "{}/metadata/alter-pos-del-manifest.avro",
+        table.metadata().location()
+    );
+    let mut writer = ManifestWriterBuilder::new(
+        file_io.new_output(&delete_manifest_path).unwrap(),
+        Some(snapshot.snapshot_id()),
+        None,
+        schema,
+        spec,
+    )
+    .build_v2_deletes();
+    let pos = DataFileBuilder::default()
+        .content(DataContentType::PositionDeletes)
+        .file_path(format!(
+            "{}/data/alter-pos-del.parquet",
+            table.metadata().location()
+        ))
+        .file_format(DataFileFormat::Parquet)
+        .file_size_in_bytes(100)
+        .record_count(1)
+        .partition_spec_id(table.metadata().default_partition_spec_id())
+        .partition(Struct::empty())
+        .build()
+        .unwrap();
+    writer.add_file(pos, snapshot.sequence_number()).unwrap();
+    let delete_manifest = writer.write_manifest_file().await.unwrap();
+    let list = snapshot
+        .load_manifest_list(file_io, table.metadata())
+        .await
+        .unwrap();
+    let mut entries = list.entries().to_vec();
+    entries.push(delete_manifest);
+    let mut list_writer = ManifestListWriter::v2(
+        file_io.new_output(snapshot.manifest_list()).unwrap(),
+        snapshot.snapshot_id(),
+        snapshot.parent_snapshot_id(),
+        snapshot.sequence_number(),
+    );
+    list_writer.add_manifests(entries.into_iter()).unwrap();
+    list_writer.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn apply_alter_rename_rejects_position_deletes() {
+    let harness = Harness::new().await;
+    harness.write("1", 0..2).await;
+    let table = harness.table().await;
+    append_position_delete_manifest(&table).await;
+    let field_id = table
+        .metadata()
+        .current_schema()
+        .field_by_name("id")
+        .unwrap()
+        .id;
+    let metadata = alter_metadata(json!({ "id": alter_field("id", "long", field_id) }));
     let err = <IcebergWriter<GroupedTestSpec> as SchemaSink>::apply_alter(
         &harness.writer,
         NAMESPACE,
@@ -1709,5 +1787,5 @@ async fn apply_alter_fails_closed_when_delete_files_exist() {
     )
     .await
     .unwrap_err();
-    assert!(err.to_string().contains("delete files"), "{err}");
+    assert!(err.to_string().contains("position delete"), "{err}");
 }

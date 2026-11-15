@@ -816,16 +816,16 @@ impl<S: SinkSpec> SchemaSink for IcebergWriter<S> {
         }
         let next = iceberg_schema_after_alter(loaded.metadata().current_schema(), &alter.alter)
             .map_err(io::Error::other)?;
-        let (data_files, has_deletes) = live_alter_files(&loaded).await?;
-        if has_deletes {
+        let files = live_alter_files(&loaded).await?;
+        if files.has_position_deletes {
             return Err(io::Error::other(
-                "ALTER cannot run while delete files exist",
+                "ALTER cannot run while position delete files exist",
             ));
         }
         let to_io = |err: iceberg::Error| io::Error::other(err.to_string());
         let tx = Transaction::new(&loaded);
         let tx = tx.replace_schema(next.clone()).apply(tx).map_err(to_io)?;
-        let tx = if alter.alter.rewrites_data() && !data_files.is_empty() {
+        let tx = if alter.alter.rewrites_data() && !files.data.is_empty() {
             let starting_snapshot_id = loaded
                 .metadata()
                 .current_snapshot_id()
@@ -835,7 +835,7 @@ impl<S: SinkSpec> SchemaSink for IcebergWriter<S> {
                 .rewrite_table(
                     namespace,
                     &loaded,
-                    &data_files,
+                    &files.data,
                     Some(&alter.alter),
                     next,
                     &receipt_key,
@@ -859,9 +859,11 @@ impl<S: SinkSpec> SchemaSink for IcebergWriter<S> {
                 history::SNAPSHOT_PIPELINE.to_string(),
                 self.context.pipeline_name.clone(),
             )]);
+            let mut removed = files.data;
+            removed.extend(files.equality_deletes);
             tx.rewrite_files()
                 .add_data_files(added)
-                .remove_files(data_files)
+                .remove_files(removed)
                 .set_snapshot_properties(properties)
                 .apply(tx)
                 .map_err(to_io)?
@@ -4528,19 +4530,30 @@ fn align_equality_delete_partitions(files: &mut [PendingIcebergFile]) {
     }
 }
 
-async fn live_alter_files(
-    table: &iceberg::table::Table,
-) -> io::Result<(Vec<iceberg::spec::DataFile>, bool)> {
+struct LiveAlterFiles {
+    data: Vec<iceberg::spec::DataFile>,
+    equality_deletes: Vec<iceberg::spec::DataFile>,
+    has_position_deletes: bool,
+}
+
+async fn live_alter_files(table: &iceberg::table::Table) -> io::Result<LiveAlterFiles> {
     let Some(snapshot) = table.metadata().current_snapshot() else {
-        return Ok((Vec::new(), false));
+        return Ok(LiveAlterFiles {
+            data: Vec::new(),
+            equality_deletes: Vec::new(),
+            has_position_deletes: false,
+        });
     };
     let to_io = |err: iceberg::Error| io::Error::other(err.to_string());
     let list = snapshot
         .load_manifest_list(table.file_io(), table.metadata())
         .await
         .map_err(to_io)?;
-    let mut data_files = Vec::new();
-    let mut has_deletes = false;
+    let mut files = LiveAlterFiles {
+        data: Vec::new(),
+        equality_deletes: Vec::new(),
+        has_position_deletes: false,
+    };
     for manifest in list.entries() {
         let loaded = manifest
             .load_manifest(table.file_io())
@@ -4551,14 +4564,15 @@ async fn live_alter_files(
                 continue;
             }
             match entry.content_type() {
-                DataContentType::PositionDeletes | DataContentType::EqualityDeletes => {
-                    has_deletes = true;
+                DataContentType::PositionDeletes => files.has_position_deletes = true,
+                DataContentType::EqualityDeletes => {
+                    files.equality_deletes.push(entry.data_file().clone());
                 }
-                DataContentType::Data => data_files.push(entry.data_file().clone()),
+                DataContentType::Data => files.data.push(entry.data_file().clone()),
             }
         }
     }
-    Ok((data_files, has_deletes))
+    Ok(files)
 }
 
 fn stored_partition_to_struct(values: &[Option<StoredPartitionValue>]) -> Struct {

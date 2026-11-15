@@ -264,53 +264,6 @@ pub fn stable_schema_fingerprint(schema: &Schema) -> String {
     format!("{:x}", md5::compute(s))
 }
 
-fn is_datatype_equal_recursive(new_dt: &DataType, old_dt: &DataType) -> bool {
-    use DataType::*;
-    if new_dt == old_dt {
-        return true;
-    }
-    match (new_dt, old_dt) {
-        // Exact timestamp equality must include unit (timezone ignored for our usage since we never set it)
-        (Timestamp(u1, _), Timestamp(u2, _)) if u1 == u2 => true,
-        // Lists: element types must be exactly equal
-        (List(new_field), List(old_field)) => {
-            is_datatype_equal_recursive(new_field.data_type(), old_field.data_type())
-        }
-        // Structs: all old fields must exist and be exactly equal in the new struct
-        (Struct(new_fields), Struct(old_fields)) => {
-            for old_f in old_fields.iter() {
-                if let Some(new_f) = new_fields.iter().find(|f| f.name() == old_f.name()) {
-                    if !is_datatype_equal_recursive(new_f.data_type(), old_f.data_type()) {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
-            }
-            true
-        }
-        _ => false,
-    }
-}
-
-pub fn is_schema_superset(new_schema: &Schema, old_schema: &Schema) -> bool {
-    // Every old field must be present in new with an exactly equal datatype (types are immutable)
-    for old_field in old_schema.fields().iter() {
-        if let Some(new_field) = new_schema
-            .fields()
-            .iter()
-            .find(|f| f.name() == old_field.name())
-        {
-            if !is_datatype_equal_recursive(new_field.data_type(), old_field.data_type()) {
-                return false;
-            }
-        } else {
-            return false;
-        }
-    }
-    true
-}
-
 #[allow(dead_code)]
 fn convert_skippr_to_arrow_field_types(
     metadata: &HashMap<String, OutputMetadata>,
