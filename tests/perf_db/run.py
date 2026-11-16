@@ -614,7 +614,7 @@ def write_cdc_skippr_yml(path: Path, warehouse: Path, source: str = "pg") -> Non
         keys = '["id", "rmc"]'
         extra_transform = """
     transform:
-      batch_time_fields: _skippr_event_time
+      batch_time_fields: skippr_event_time
       batch_time_unit: day"""
     else:
         raise perf_run.PerfError(f"unknown cdc_source {source!r}")
@@ -741,7 +741,7 @@ def start_cdc_postgres() -> None:
             "-d",
             "skippr_cdc",
             "-c",
-            "CREATE TABLE IF NOT EXISTS orders (id integer PRIMARY KEY, name text NOT NULL, amount integer NOT NULL DEFAULT 0); INSERT INTO orders (id, name, amount) VALUES (1, 'alpha', 100), (2, 'beta', 50) ON CONFLICT (id) DO NOTHING;",
+            "CREATE TABLE IF NOT EXISTS orders (id integer PRIMARY KEY, name text NOT NULL, amount integer NOT NULL DEFAULT 0); ALTER TABLE orders REPLICA IDENTITY FULL; INSERT INTO orders (id, name, amount) VALUES (1, 'alpha', 100), (2, 'beta', 50) ON CONFLICT (id) DO NOTHING;",
         ],
         check=True,
     )

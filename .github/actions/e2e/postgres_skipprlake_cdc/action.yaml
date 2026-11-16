@@ -44,6 +44,7 @@ runs:
         fi
         docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c \
           "CREATE TABLE IF NOT EXISTS orders (id integer PRIMARY KEY, name text NOT NULL, amount integer NOT NULL DEFAULT 0);
+           ALTER TABLE orders REPLICA IDENTITY FULL;
            INSERT INTO orders (id, name, amount) VALUES (1, 'alpha', 100), (2, 'beta', 50)
            ON CONFLICT (id) DO NOTHING;"
     - name: Start DynamoDB Local
