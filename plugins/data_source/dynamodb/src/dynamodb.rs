@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::Client;
-use aws_sdk_dynamodbstreams::types::{OperationType, ShardIteratorType};
+use aws_sdk_dynamodbstreams::types::{OperationType, Shard, ShardIteratorType};
 use aws_sdk_dynamodbstreams::Client as StreamsClient;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use num_cpus;
@@ -523,15 +523,14 @@ impl DataSourceDynamodbPlugin {
             .stream_description()
             .ok_or_else(|| std::io::Error::other("describe_stream returned no description"))?;
 
-        let shards: Vec<String> = stream_desc
-            .shards()
-            .iter()
-            .filter_map(|s| s.shard_id().map(|id| id.to_string()))
-            .collect();
-
+        let shards = stream_desc.shards();
         if shards.is_empty() {
             info!("DynamoDB CDC: no shards found in stream, snapshot only");
             return Ok(());
+        }
+
+        for shard in shards {
+            pin_shard_tip_if_unopened(ctx.as_ref(), stream_arn, table_name, shard)?;
         }
 
         info!(
@@ -539,7 +538,10 @@ impl DataSourceDynamodbPlugin {
             shards.len()
         );
 
-        for shard_id in &shards {
+        for shard in shards {
+            let Some(shard_id) = shard.shard_id() else {
+                continue;
+            };
             self.consume_shard(
                 stream_arn,
                 shard_id,
@@ -568,7 +570,7 @@ impl DataSourceDynamodbPlugin {
             partition: "0".to_string(),
         };
 
-        let shard_ckpt_key = format!("dynamodb-stream:{}:{}:seq", table_name, shard_id);
+        let shard_ckpt_key = shard_checkpoint_key(table_name, shard_id);
         let stored_seq =
             load_checkpoint_payload::<DynamodbCheckpoint>(ctx.as_ref(), &shard_ckpt_key)?
                 .map(|checkpoint| checkpoint.sequence_number);
@@ -801,6 +803,46 @@ impl DataSourceDynamodbPlugin {
         })?;
         Ok(numeric.to_be_bytes().to_vec())
     }
+}
+
+fn shard_checkpoint_key(table_name: &str, shard_id: &str) -> String {
+    format!("dynamodb-stream:{table_name}:{shard_id}:seq")
+}
+
+fn shard_tip_sequence(shard: &Shard) -> Option<String> {
+    shard
+        .sequence_number_range()
+        .and_then(|range| range.ending_sequence_number())
+        .filter(|seq| !seq.is_empty())
+        .map(str::to_string)
+}
+
+fn pin_shard_tip_if_unopened(
+    ctx: &dyn SourceSyncContext,
+    stream_arn: &str,
+    table_name: &str,
+    shard: &Shard,
+) -> Result<(), io::Error> {
+    let Some(shard_id) = shard.shard_id() else {
+        return Ok(());
+    };
+    let key = shard_checkpoint_key(table_name, shard_id);
+    if load_checkpoint_payload::<DynamodbCheckpoint>(ctx, &key)?.is_some() {
+        return Ok(());
+    }
+    let Some(sequence_number) = shard_tip_sequence(shard) else {
+        return Ok(());
+    };
+    store_checkpoint_payload(
+        ctx,
+        &key,
+        &DynamodbCheckpoint {
+            table_name: table_name.to_string(),
+            stream_arn: stream_arn.to_string(),
+            shard_id: shard_id.to_string(),
+            sequence_number,
+        },
+    )
 }
 
 fn initial_shard_iterator_type(_mode: SourceCdcMode) -> ShardIteratorType {
@@ -1166,5 +1208,24 @@ mod tests {
         assert!(full[0].cdc_rows.as_ref().unwrap()[0]
             .source_transaction_id
             .is_none());
+    }
+
+    #[test]
+    fn shard_tip_sequence_reads_the_ending_number() {
+        use aws_sdk_dynamodbstreams::types::SequenceNumberRange;
+        let range = SequenceNumberRange::builder()
+            .ending_sequence_number("42")
+            .build();
+        let shard = Shard::builder()
+            .shard_id("shard-1")
+            .sequence_number_range(range)
+            .build();
+        assert_eq!(shard_tip_sequence(&shard).as_deref(), Some("42"));
+        assert_eq!(
+            shard_checkpoint_key("skippr_dynamo_cdc", "shard-1"),
+            "dynamodb-stream:skippr_dynamo_cdc:shard-1:seq"
+        );
+        let empty = Shard::builder().shard_id("shard-1").build();
+        assert_eq!(shard_tip_sequence(&empty), None);
     }
 }
