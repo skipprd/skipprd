@@ -853,7 +853,7 @@ impl<S: SinkSpec> SchemaSink for IcebergWriter<S> {
     async fn apply_alter(
         &self,
         namespace: &str,
-        _metadata: &OutputMetadata,
+        metadata: &OutputMetadata,
         alter: &CommittedAlter,
     ) -> Result<(), io::Error> {
         use iceberg::ErrorKind;
@@ -900,6 +900,7 @@ impl<S: SinkSpec> SchemaSink for IcebergWriter<S> {
                     Some(&alter.alter),
                     next,
                     &receipt_key,
+                    metadata,
                 )
                 .await?;
             let added = rewritten
@@ -1731,9 +1732,9 @@ impl<S: SinkSpec> IcebergWriter<S> {
         transform: Option<&CanonicalAlter>,
         out_schema: Schema,
         identity_prefix: &str,
+        metadata: &OutputMetadata,
     ) -> io::Result<Vec<PendingIcebergFile>> {
         let to_io = |err: iceberg::Error| io::Error::other(err.to_string());
-        let (_, metadata) = self.namespace_schema_state(namespace).await?;
         let outputs = MaintenanceOutputs {
             namespace,
             identity_prefix: identity_prefix.to_string(),

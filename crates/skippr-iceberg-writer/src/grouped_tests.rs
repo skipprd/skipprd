@@ -159,36 +159,16 @@ impl Harness {
         Self::writer_for(&self.dir, Arc::clone(&self.catalog)).await
     }
 
+    /// A new migrate process: catalog is on disk, schema_state is empty.
+    pub async fn migrate_writer(&self) -> IcebergWriter<GroupedTestSpec> {
+        Self::bare_writer(&self.dir, Arc::clone(&self.catalog)).await
+    }
+
     async fn writer_for(
         dir: &tempfile::TempDir,
         catalog: Arc<dyn Catalog>,
     ) -> IcebergWriter<GroupedTestSpec> {
-        let warehouse = Self::warehouse_of(dir);
-        let writer = IcebergWriter::<GroupedTestSpec>::new(
-            RuntimeExecutionContext {
-                pipeline_name: "p".to_string(),
-                workspace_name: "w".to_string(),
-                data_dir: dir.path().display().to_string(),
-                execution_mode: Default::default(),
-                output_layout: Default::default(),
-                inject_fields: BTreeMap::new(),
-                pipeline_type: Default::default(),
-            },
-            RuntimeBinding::Primary,
-            "lake".to_string(),
-            catalog,
-            IcebergWriterConfig {
-                policies: SinkWritePolicySupport {
-                    supports_merge_by_key: true,
-                    supports_replace_partition: true,
-                    supports_replace_table: true,
-                },
-                table_namespace: "lake".to_string(),
-                location_root: format!("{warehouse}/lake"),
-            },
-        )
-        .await
-        .unwrap();
+        let writer = Self::bare_writer(dir, catalog).await;
         let metadata: OutputMetadata = serde_json::from_value(json!({
             "out_field_name": "",
             "determined_type": "record",
@@ -217,6 +197,38 @@ impl Harness {
             .await
             .unwrap();
         writer
+    }
+
+    async fn bare_writer(
+        dir: &tempfile::TempDir,
+        catalog: Arc<dyn Catalog>,
+    ) -> IcebergWriter<GroupedTestSpec> {
+        let warehouse = Self::warehouse_of(dir);
+        IcebergWriter::<GroupedTestSpec>::new(
+            RuntimeExecutionContext {
+                pipeline_name: "p".to_string(),
+                workspace_name: "w".to_string(),
+                data_dir: dir.path().display().to_string(),
+                execution_mode: Default::default(),
+                output_layout: Default::default(),
+                inject_fields: BTreeMap::new(),
+                pipeline_type: Default::default(),
+            },
+            RuntimeBinding::Primary,
+            "lake".to_string(),
+            catalog,
+            IcebergWriterConfig {
+                policies: SinkWritePolicySupport {
+                    supports_merge_by_key: true,
+                    supports_replace_partition: true,
+                    supports_replace_table: true,
+                },
+                table_namespace: "lake".to_string(),
+                location_root: format!("{warehouse}/lake"),
+            },
+        )
+        .await
+        .unwrap()
     }
 
     pub fn ident(&self) -> TableIdent {
@@ -1658,8 +1670,9 @@ async fn apply_alter_merge_rewrites_live_data_files() {
         .metadata()
         .current_snapshot()
         .map(|snap| snap.snapshot_id());
+    let migrate = harness.migrate_writer().await;
     <IcebergWriter<GroupedTestSpec> as SchemaSink>::apply_alter(
-        &harness.writer,
+        &migrate,
         NAMESPACE,
         &metadata,
         &committed_merge("extra", "id", extra, id, 0, SkipprDataType::Long),
