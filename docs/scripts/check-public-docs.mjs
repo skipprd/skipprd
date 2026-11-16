@@ -17,7 +17,7 @@ export const BANNED = [
   { pattern: /runtime protocol/i, why: 'plugin protocol is internal' },
   { pattern: /compaction[_ ]ids?\b/i, why: 'compaction identity is internal' },
   { pattern: /host[- ]owned|host process/i, why: 'say "Skipprd", not "the host"' },
-  { pattern: /offsets are a materiali[sz]ed/i, why: 'offsets are resume state; materialised views are transform.aggregates' },
+  { pattern: /offsets are a materiali[sz]ed/i, why: 'offsets are resume state; materialised views are declared CREATE TABLE' },
   { pattern: /materiali[sz]ed index/i, why: 'storage internals' },
   { pattern: /\bBallista\b/, why: 'query engine internals' },
   { pattern: /schema sync worker/i, why: 'internal component name' },

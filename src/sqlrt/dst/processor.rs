@@ -1,16 +1,18 @@
-use crate::helpers::configuration::AggregateMeasure;
 use crate::plugins::cdc::MutationKind;
-use crate::processor::test_support::{insert_meta, invoice_batch, open_db, DiskFixture, SimEvent};
+use crate::processor::test_support::{insert_meta, invoice_batch, DiskFixture, SimEvent};
 use crate::processor::{
     allows_reclaim, reset_reclaim_hold, set_min_unconsumed_seq, CrashPoint, WalCursor,
 };
 
 #[test]
 fn c_reclaim_vs_stream_processor_cursor() {
-    set_min_unconsumed_seq(5);
-    assert!(!allows_reclaim(5), "must not delete seq still held");
-    assert!(allows_reclaim(4));
-    set_min_unconsumed_seq(u64::MAX);
+    set_min_unconsumed_seq("events", 5);
+    assert!(
+        !allows_reclaim("events", 5),
+        "must not delete seq still held"
+    );
+    assert!(allows_reclaim("events", 4));
+    set_min_unconsumed_seq("events", u64::MAX);
 }
 
 #[test]
@@ -34,7 +36,7 @@ fn g_multi_row_batch_atomicity() {
 }
 
 #[test]
-fn g_config_hash_mismatch_rebuilds() {
+fn g_incompatible_ir_wipe_clears_measures() {
     let fixture = DiskFixture::new();
     let spec = fixture.spec.clone();
     let batch = invoice_batch(&["A"], &[9], &["inv"]);
@@ -53,23 +55,13 @@ fn g_config_hash_mismatch_rebuilds() {
             .unwrap(),
         9.0
     );
-    let (dir, db_path) = fixture.release();
-    let mut rebuilt = spec;
-    rebuilt.measures.insert(
-        "other".into(),
-        AggregateMeasure {
-            count: Some("*".into()),
-            ..Default::default()
-        },
-    );
-    let (_db, state) = open_db(&db_path, rebuilt);
+    fixture.wipe_compute("customer_invoice_totals");
     assert_eq!(
-        state
+        fixture
             .measure("customer_invoice_totals", "A", "invoice_total")
             .unwrap(),
         0.0
     );
-    let _keep = dir;
 }
 
 #[test]
@@ -124,10 +116,9 @@ fn g_crash_after_txn() {
 
 #[test]
 fn g_filter_keeps_cdc_sidecar() {
-    use crate::helpers::configuration::TransformOp;
+    use crate::compute::{apply_stateless, StatelessSelect};
     use crate::plugins::cdc::WalRowMeta;
     use crate::processor::test_support::invoice_batch;
-    use crate::stream_transform::apply_configured_ops;
     let batch = invoice_batch(&["a", "b", "c"], &[0, 5, 0], &["i1", "i2", "i3"]);
     let cdc = vec![
         WalRowMeta {
@@ -146,10 +137,13 @@ fn g_filter_keeps_cdc_sidecar() {
             order_token: vec![3],
         },
     ];
-    let ops = vec![TransformOp::Filter("amount > 0".into())];
-    let (batches, cdc) = apply_configured_ops(&[], &ops, vec![batch], Some(cdc)).unwrap();
-    assert_eq!(batches[0].num_rows(), 1);
-    let cdc = cdc.unwrap();
+    let select = StatelessSelect {
+        filter: Some("amount > 0".into()),
+        derive: Vec::new(),
+    };
+    let aligned = apply_stateless(&[], Some(&select), batch, Some(cdc)).unwrap();
+    assert_eq!(aligned.batch.num_rows(), 1);
+    let cdc = aligned.cdc.unwrap();
     assert_eq!(cdc.len(), 1);
     assert_eq!(cdc[0].event_id, b"b");
 }
@@ -162,9 +156,10 @@ fn g_transform_error_does_not_advance_offsets() {
     use crate::helpers::offsets::OffsetTypes;
     use sha2::{Digest, Sha256};
     use skippr_lease::PublishMode;
-    let ops = vec![crate::helpers::configuration::TransformOp::Project(vec![
-        "missing".into(),
-    ])];
+    let select = crate::compute::StatelessSelect {
+        filter: Some("not_a_column > 0".into()),
+        derive: Vec::new(),
+    };
     let batch = invoice_batch(&["a"], &[1], &["i1"]);
     let store = crate::helpers::offset_store::memory_offset_store();
     let sk = StoreOffsetStore::offset_key("ns", "p");
@@ -173,7 +168,7 @@ fn g_transform_error_does_not_advance_offsets() {
     store
         .publish_wal_commit(&sk, &before, 1, 1, &sha, PublishMode::Fresh)
         .unwrap();
-    assert!(crate::stream_transform::apply_ops(&ops, vec![batch]).is_err());
+    assert!(crate::compute::apply_stateless(&[], Some(&select), batch, None).is_err());
     assert_eq!(
         store.get_bytes(&sk).unwrap().as_deref(),
         Some(before.as_slice())
@@ -193,15 +188,15 @@ fn g_reclaim_hold_restore_from_disk_cursor() {
     };
     cursor = fixture.apply(&event, cursor).unwrap();
     assert_eq!(cursor.seq, 4);
-    assert!(!allows_reclaim(4));
-    assert!(allows_reclaim(3));
+    assert!(!allows_reclaim("events", 4));
+    assert!(allows_reclaim("events", 3));
     let fixture = fixture.reopen();
     let meta = fixture
         .load_meta("customer_invoice_totals")
         .unwrap()
         .unwrap();
     assert_eq!(meta.cursor.seq, 4);
-    assert!(!allows_reclaim(4));
+    assert!(!allows_reclaim("events", 4));
     reset_reclaim_hold();
 }
 
@@ -238,7 +233,7 @@ fn g_running_sum_count() {
 }
 
 #[test]
-fn g_cdc_update_delta() {
+fn g_keyed_update() {
     let fixture = DiskFixture::new();
     fixture
         .apply(
@@ -264,7 +259,7 @@ fn g_cdc_update_delta() {
 }
 
 #[test]
-fn g_delete_subtract() {
+fn g_keyed_delete() {
     let fixture = DiskFixture::new();
     fixture
         .apply(
@@ -307,7 +302,7 @@ fn g_missing_last_row_as_insert() {
 }
 
 #[test]
-fn g_pk_change_pending_index() {
+fn g_keyed_pk_change() {
     let fixture = DiskFixture::new();
     fixture
         .apply(
@@ -361,42 +356,218 @@ fn g_already_applied_slice_skip() {
 }
 
 #[test]
-fn g_filter_project_derive_compose() {
-    use crate::helpers::configuration::TransformOp;
-    use crate::stream_transform::apply_configured_ops;
-    use std::collections::BTreeMap;
+fn g_stateless_filter_derive() {
+    use crate::compute::{apply_stateless, StatelessSelect};
     let batch = invoice_batch(&["a", "b"], &[0, 5], &["i1", "i2"]);
-    let ops = vec![
-        TransformOp::Filter("amount > 0".into()),
-        TransformOp::Derive(BTreeMap::from([("double".into(), "amount * 2".into())])),
-        TransformOp::Project(vec!["customer_id".into(), "double".into()]),
-    ];
-    let (batches, _) = apply_configured_ops(&[], &ops, vec![batch], None).unwrap();
-    assert_eq!(batches[0].num_rows(), 1);
-    assert!(batches[0].schema().field_with_name("double").is_ok());
-    assert!(batches[0].schema().field_with_name("amount").is_err());
+    let select = StatelessSelect {
+        filter: Some("amount > 0".into()),
+        derive: vec![("double".into(), "amount * 2".into())],
+    };
+    let aligned = apply_stateless(&[], Some(&select), batch, None).unwrap();
+    assert_eq!(aligned.batch.num_rows(), 1);
+    assert!(aligned.batch.schema().field_with_name("double").is_ok());
 }
 
 #[test]
-fn g_unknown_project() {
-    let ops = vec![crate::helpers::configuration::TransformOp::Project(vec![
-        "missing".into(),
-    ])];
+fn g_stateless_unknown_filter() {
+    let select = crate::compute::StatelessSelect {
+        filter: Some("missing > 0".into()),
+        derive: Vec::new(),
+    };
     let batch = invoice_batch(&["a"], &[1], &["i1"]);
-    assert!(crate::stream_transform::apply_ops(&ops, vec![batch]).is_err());
+    assert!(crate::compute::apply_stateless(&[], Some(&select), batch, None).is_err());
 }
 
 #[test]
-fn g_schema_change_derived_column() {
-    use crate::helpers::configuration::TransformOp;
-    use crate::stream_transform::apply_configured_ops;
-    use std::collections::BTreeMap;
+fn g_stateless_derived_column() {
+    use crate::compute::{apply_stateless, StatelessSelect};
     let batch = invoice_batch(&["a"], &[3], &["i1"]);
-    let ops = vec![TransformOp::Derive(BTreeMap::from([(
-        "amount2".into(),
-        "amount + 1".into(),
-    )]))];
-    let (batches, _) = apply_configured_ops(&[], &ops, vec![batch], None).unwrap();
-    assert!(batches[0].schema().field_with_name("amount2").is_ok());
-    assert!(batches[0].schema().field_with_name("amount").is_ok());
+    let select = StatelessSelect {
+        filter: None,
+        derive: vec![("amount2".into(), "amount + 1".into())],
+    };
+    let aligned = apply_stateless(&[], Some(&select), batch, None).unwrap();
+    assert!(aligned.batch.schema().field_with_name("amount2").is_ok());
+    assert!(aligned.batch.schema().field_with_name("amount").is_ok());
+}
+
+#[test]
+fn g_create_compute_journals() {
+    use super::{apply, Op, World};
+    use crate::compute::{bind_statement, desugar_create, ir_hash, BindCatalog, FieldId, Fqn};
+    let unbound = desugar_create(
+        Fqn::from_parts("invoices", "customer_totals").unwrap(),
+        "SELECT customer_id, SUM(amount) AS invoice_total FROM invoices.orders GROUP BY customer_id",
+        false,
+    )
+    .unwrap();
+    let mut ingest = std::collections::BTreeMap::new();
+    ingest.insert(
+        ("invoices".into(), "orders".into()),
+        std::collections::BTreeMap::from([
+            ("customer_id".into(), FieldId::new(1).unwrap()),
+            ("amount".into(), FieldId::new(2).unwrap()),
+        ]),
+    );
+    let catalog = BindCatalog {
+        ingest,
+        ingest_namespaces: ["orders".into()].into_iter().collect(),
+        existing: Vec::new(),
+        event_time: None,
+        watermark_delay: None,
+    };
+    let kind = bind_statement(&catalog, unbound).unwrap();
+    let mut world = World::new();
+    apply(&mut world, Op::CreateCompute(kind.clone()));
+    let key = crate::compute::journal_key("dst", "dst").unwrap();
+    let log = crate::compute::load_journal(&world.catalog, &key).unwrap();
+    assert_eq!(log.kinds(), vec![kind.clone()]);
+    assert_eq!(
+        log.get(kind.name()).unwrap().hash,
+        crate::compute::ir_hash_kind(&kind).unwrap()
+    );
+}
+
+#[test]
+fn g_keyed_insert() {
+    let fixture = DiskFixture::new();
+    fixture
+        .apply(
+            &SimEvent::new(MutationKind::Insert, "A", 40, "inv", "e1"),
+            WalCursor::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .measure("customer_invoice_totals", "A", "invoice_total")
+            .unwrap(),
+        40.0
+    );
+}
+
+#[test]
+fn g_keyed_snapshot() {
+    let fixture = DiskFixture::new();
+    fixture
+        .apply(
+            &SimEvent::new(MutationKind::Insert, "A", 10, "inv", "e1"),
+            WalCursor::default(),
+        )
+        .unwrap();
+    fixture
+        .apply(
+            &SimEvent::new(MutationKind::Snapshot, "A", 4, "inv", "e2"),
+            WalCursor {
+                seq: 1,
+                ..WalCursor::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .measure("customer_invoice_totals", "A", "invoice_total")
+            .unwrap(),
+        14.0
+    );
+}
+
+#[test]
+fn g_window_retract_on_time_change() {
+    use crate::processor::test_support::{hourly_kind, window_batch, window_store_key};
+    let fixture = DiskFixture::with_spec(hourly_kind());
+    let t12 = "2026-11-15T12:10:00Z";
+    let t13 = "2026-11-15T13:10:00Z";
+    fixture
+        .apply_events(
+            &fixture.spec,
+            WalCursor::default(),
+            &window_batch(&["A"], &[10], &["inv"], &[t12]),
+            Some(&[insert_meta("e1")]),
+            0,
+        )
+        .unwrap();
+    fixture
+        .apply_events(
+            &fixture.spec,
+            WalCursor {
+                seq: 1,
+                ..WalCursor::default()
+            },
+            &window_batch(&["A"], &[10], &["inv"], &[t13]),
+            Some(&[crate::processor::test_support::meta(
+                MutationKind::Update,
+                "e2",
+            )]),
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .measure(
+                "hourly_totals",
+                &window_store_key("A", t12),
+                "invoice_total"
+            )
+            .unwrap(),
+        0.0
+    );
+    assert_eq!(
+        fixture
+            .measure(
+                "hourly_totals",
+                &window_store_key("A", t13),
+                "invoice_total"
+            )
+            .unwrap(),
+        10.0
+    );
+}
+
+#[test]
+fn g_window_late_after_compact() {
+    use crate::processor::test_support::{hourly_kind, window_batch, window_store_key};
+    let fixture = DiskFixture::with_spec(hourly_kind());
+    let t13 = "2026-11-15T13:10:00Z";
+    let t12 = "2026-11-15T12:10:00Z";
+    fixture
+        .apply_events(
+            &fixture.spec,
+            WalCursor::default(),
+            &window_batch(&["A"], &[5], &["inv-1"], &[t13]),
+            Some(&[insert_meta("e1")]),
+            0,
+        )
+        .unwrap();
+    fixture
+        .apply_events(
+            &fixture.spec,
+            WalCursor {
+                seq: 1,
+                ..WalCursor::default()
+            },
+            &window_batch(&["A"], &[7], &["inv-2"], &[t12]),
+            Some(&[insert_meta("e2")]),
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .measure(
+                "hourly_totals",
+                &window_store_key("A", t13),
+                "invoice_total"
+            )
+            .unwrap(),
+        5.0
+    );
+    assert_eq!(
+        fixture
+            .measure(
+                "hourly_totals",
+                &window_store_key("A", t12),
+                "invoice_total"
+            )
+            .unwrap(),
+        7.0
+    );
 }

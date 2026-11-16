@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use Result;
 
@@ -7,7 +8,6 @@ use crate::plugins::cdc::CheckpointEnvelope;
 use serde_derive::{Deserialize, Serialize};
 use skippr_wal_catalog::SkipprStoreRead;
 use thiserror::Error;
-use tracing::info;
 use {
     byteorder::LittleEndian,
     zerocopy::{byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned},
@@ -136,52 +136,75 @@ impl From<OffsetsError> for std::io::Error {
     }
 }
 
+fn reject_leftover_sled_db(data_dir: &str) -> Result<(), OffsetsError> {
+    let sled_path = std::path::PathBuf::from(format!("{data_dir}/{SLED_NAME}"));
+    if sled_path.exists() {
+        return Err(OffsetsError::Store(format!(
+            "leftover {SLED_NAME} at {} is not migrated",
+            sled_path.display()
+        )));
+    }
+    Ok(())
+}
+
+type LiveKvMap = HashMap<
+    String,
+    (
+        Arc<dyn skippr_wal_catalog::SkipprStore>,
+        skippr_wal_catalog::CatalogFence,
+    ),
+>;
+
 #[cfg(test)]
 thread_local! {
-    static LIVE_KV: std::cell::RefCell<
-        Option<(
-            Arc<dyn skippr_wal_catalog::SkipprStore>,
-            skippr_wal_catalog::CatalogFence,
-        )>,
-    > = const { std::cell::RefCell::new(None) };
+    static LIVE_KV: std::cell::RefCell<LiveKvMap> = std::cell::RefCell::new(HashMap::new());
 }
 
 #[cfg(not(test))]
-static LIVE_KV: std::sync::Mutex<
-    Option<(
-        Arc<dyn skippr_wal_catalog::SkipprStore>,
-        skippr_wal_catalog::CatalogFence,
-    )>,
-> = std::sync::Mutex::new(None);
+static LIVE_KV: std::sync::LazyLock<std::sync::Mutex<LiveKvMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 pub fn install_live_kv(
+    store_dir: impl Into<String>,
     kv: Arc<dyn skippr_wal_catalog::SkipprStore>,
     fence: skippr_wal_catalog::CatalogFence,
 ) {
+    let store_dir = store_dir.into();
     #[cfg(test)]
-    LIVE_KV.with(|slot| *slot.borrow_mut() = Some((kv, fence)));
+    LIVE_KV.with(|slot| {
+        slot.borrow_mut().insert(store_dir, (kv, fence));
+    });
     #[cfg(not(test))]
     {
-        *LIVE_KV.lock().expect("live skippr store") = Some((kv, fence));
+        LIVE_KV
+            .lock()
+            .expect("live skippr store")
+            .insert(store_dir, (kv, fence));
     }
 }
 
 #[cfg(test)]
 pub fn reset_live_kv() {
-    LIVE_KV.with(|slot| *slot.borrow_mut() = None);
+    LIVE_KV.with(|slot| slot.borrow_mut().clear());
 }
 
-pub fn live_kv() -> Option<(
+pub fn live_kv_for(
+    store_dir: &str,
+) -> Option<(
     Arc<dyn skippr_wal_catalog::SkipprStore>,
     skippr_wal_catalog::CatalogFence,
 )> {
     #[cfg(test)]
     {
-        LIVE_KV.with(|slot| slot.borrow().clone())
+        LIVE_KV.with(|slot| slot.borrow().get(store_dir).cloned())
     }
     #[cfg(not(test))]
     {
-        LIVE_KV.lock().expect("live skippr store").clone()
+        LIVE_KV
+            .lock()
+            .expect("live skippr store")
+            .get(store_dir)
+            .cloned()
     }
 }
 
@@ -194,15 +217,15 @@ pub fn store_for_config(
     ),
     String,
 > {
-    if let Some(live) = live_kv() {
+    let dir = config.skippr_store_dir();
+    if let Some(live) = live_kv_for(&dir) {
         return Ok(live);
     }
     let fence = skippr_wal_catalog::CatalogFence::local();
-    let dir = format!("{}/skippr-store", config.get_data_dir());
     let kv =
         skippr_wal_catalog::FjallSkipprStore::open(&dir, fence).map_err(|err| err.to_string())?;
     let kv: Arc<dyn skippr_wal_catalog::SkipprStore> = Arc::new(kv);
-    install_live_kv(Arc::clone(&kv), fence);
+    install_live_kv(dir, Arc::clone(&kv), fence);
     Ok((kv, fence))
 }
 
@@ -253,33 +276,9 @@ impl Offsets {
     pub fn init(config: &Config) -> Result<Offsets, OffsetsError> {
         crate::pipeline_backend::configured_kind(config).map_err(OffsetsError::AlreadyOpenError)?;
         let data_dir = config.get_data_dir();
+        reject_leftover_sled_db(&data_dir)?;
         let (kv, fence) = store_for_config(config).map_err(OffsetsError::AlreadyOpenError)?;
-        let sled_path = std::path::PathBuf::from(format!("{data_dir}/{SLED_NAME}"));
-        loop {
-            match skippr_wal_catalog::migrate_sled_db(&kv, fence, &sled_path, 1) {
-                Ok(skippr_wal_catalog::MigrateStatus::InProgress {
-                    tree,
-                    remaining_hint,
-                }) => {
-                    info!(
-                        tree,
-                        remaining_hint, "sled → fjall migrate running under live store"
-                    );
-                }
-                Ok(skippr_wal_catalog::MigrateStatus::Complete { archived_to }) => {
-                    info!(archived = %archived_to.display(), "sled → fjall migrate complete");
-                    break;
-                }
-                Ok(skippr_wal_catalog::MigrateStatus::NoSled) => break,
-                Err(err) => {
-                    return Err(OffsetsError::AlreadyOpenError(err.to_string()));
-                }
-            }
-        }
-        let mut offsets_backend = StoreOffsetStore::new(Arc::clone(&kv), fence);
-        if sled_path.exists() {
-            offsets_backend = offsets_backend.with_sled_fallback(&sled_path);
-        }
+        let offsets_backend = StoreOffsetStore::new(Arc::clone(&kv), fence);
         let backend: Arc<dyn OffsetStore> = Arc::new(offsets_backend);
         Ok(Offsets {
             kv: Some(kv),
@@ -372,7 +371,6 @@ impl Offsets {
         let kv: Arc<dyn skippr_wal_catalog::SkipprStore> =
             Arc::new(skippr_wal_catalog::MemorySkipprStore::open(fence));
         let backend: Arc<dyn OffsetStore> = Arc::new(StoreOffsetStore::new(Arc::clone(&kv), fence));
-        install_live_kv(Arc::clone(&kv), fence);
         Self {
             kv: Some(kv),
             fence: Some(fence),
@@ -692,6 +690,16 @@ mod tests {
         fn call(&self, _operation: RuntimeOffsetOperation) -> Result<RuntimeOffsetValue, String> {
             Err("transport disconnected".to_string())
         }
+    }
+
+    #[test]
+    fn leftover_sled_db_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(crate::helpers::offsets::SLED_NAME)).unwrap();
+        let err = super::reject_leftover_sled_db(dir.path().to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("leftover db"), "{err}");
+        let empty = tempfile::tempdir().unwrap();
+        super::reject_leftover_sled_db(empty.path().to_str().unwrap()).unwrap();
     }
 
     #[test]

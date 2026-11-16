@@ -207,7 +207,7 @@ mod tests {
         let fence = skippr_wal_catalog::CatalogFence::local();
         let handle = PipelineWalHandle::new(
             skippr_lease::PipelineKey::new("t", "w", "p").unwrap(),
-            skippr_lease::PipelinePaths::legacy_disk(dir),
+            skippr_lease::PipelinePaths::disk(dir),
             crate::buffer::wal_handle::memory_catalog_for_test(fence),
             crate::helpers::offset_store::memory_offset_store(),
             fence,

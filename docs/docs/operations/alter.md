@@ -7,7 +7,7 @@ description: Rename, merge, drop, or widen columns with skipprd migrate or ALTER
 
 After a pipeline has landed data, you sometimes need to change the table: fold a sibling column back, drop a leftover, or widen a type. `ALTER TABLE` (and `skipprd migrate`) does that on Iceberg destinations and warehouses that advertise table DDL. Skipprd keeps the Iceberg field id, so existing files stay readable.
 
-This is operator DDL. It is not the same as [schema discovery](/concepts/schema), which adds columns when new fields arrive during sync. Apply is in-stream: skipprd may pause ingest internally; you do not stop and start the pipeline. `DISABLE PIPELINE` still freezes ingest, but it is not the ALTER gate.
+This is operator DDL. It is not the same as [schema discovery](/concepts/schema), which adds columns when new fields arrive during sync. Apply is in-stream: skipprd may pause ingest internally; you do not stop and start the pipeline. `DISABLE PIPELINE` still freezes ingest, but it is not the ALTER gate. Declared compute is `skipprd query --sql "ALTER COMPUTE …"` (View accepts `SET FILTER`; keyed and windowed accept `SET MEASURE`; Latest and stream-table joins are `DROP` then `CREATE`). Those statements are not `migrations/*.sql`. Stateless requires `ALTER COMPUTE`. Bare `ALTER COMPUTE` names need a bound pipeline; otherwise use `pipeline.ident`.
 
 ## Before you alter
 
@@ -108,7 +108,7 @@ skipprd query --plain --sql "SELECT * FROM bikehire.rides LIMIT 5"
 
 Run [`skipprd sql-help`](/cli/sql-help) or `skipprd query --sql "SHOW DOCS"` for the exact syntax of every statement.
 
-Table destinations (SkipprLake, Athena Iceberg, DuckDB Iceberg, Snowflake, Postgres, BigQuery, Redshift, MotherDuck) change published columns with these statements, not with YAML `transform.ops` `project` / `rename` / `cast`. Stream destinations keep those YAML ops; they cannot run `ALTER TABLE`.
+Published columns change with these statements. Stateless compute is filter and derive only; schema is `ALTER TABLE` on every destination. Stream destinations cannot run `ALTER TABLE`.
 
 ## Next steps
 

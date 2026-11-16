@@ -307,7 +307,7 @@ impl DataSink for DataSinkS3Plugin {
 
     async fn sync_grouped(
         &self,
-        mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
+        reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, std::io::Error> {
         let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
@@ -330,10 +330,9 @@ impl DataSink for DataSinkS3Plugin {
             return Ok(SinkWriteOutcome::AlreadyApplied);
         }
         if self.legacy_chunk_state_exists(&ctx, 0).await? {
-            let receipt = self.sync_grouped_legacy_chunks(&mut reader, &ctx).await?;
-            self.write_receipt(&manifest_key, &expected_manifest, &receipt)
-                .await?;
-            return Ok(SinkWriteOutcome::Applied);
+            return Err(std::io::Error::other(
+                "legacy grouped compaction objects are not replayed; compact again",
+            ));
         }
         let final_key =
             self.object_key_for_filename(ObjectBody::Grouped, &ctx.filename, &object_stem);
@@ -494,94 +493,6 @@ impl DataSinkS3Plugin {
             Err(error) if is_s3_sdk_not_found(&error) => Ok(false),
             Err(error) => Err(io::Error::other(format!("{error:?}"))),
         }
-    }
-
-    async fn sync_grouped_legacy_chunks(
-        &self,
-        reader: &mut skippr_runtime_sdk::plugins::GroupedBatchReader,
-        ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
-    ) -> io::Result<ObjectWriteReceipt> {
-        let schema = reader.schema();
-        let mut object_key = None;
-        let mut rows = 0_u64;
-        let mut bytes = 0_u64;
-        let mut transport_chunk_count = 0_u32;
-        let mut etag = None;
-        let mut checksum = None;
-
-        while let Some(chunk) = reader.next_chunk().await? {
-            let (object_stem, manifest_key, expected) =
-                self.legacy_chunk_manifest(ctx, chunk.chunk_index)?;
-            let chunk_filename = ctx.chunk_filename(chunk.chunk_index, false);
-            let final_key =
-                self.object_key_for_filename(ObjectBody::Grouped, &chunk_filename, &object_stem);
-            let chunk_rows = chunk.rows;
-            let (chunk_bytes, chunk_transport_count, chunk_etag, chunk_checksum) = if self
-                .manifest_matches(&manifest_key, &expected)
-                .await?
-            {
-                let head = self
-                    .s3_client
-                    .head_object()
-                    .bucket(&self.config.s3_bucket)
-                    .key(&final_key)
-                    .send()
-                    .await
-                    .map_err(|error| io::Error::other(format!("{error:?}")))?;
-                (
-                    u64::try_from(head.content_length().unwrap_or_default()).unwrap_or_default(),
-                    1,
-                    head.e_tag().map(str::to_string),
-                    head.checksum_sha256().map(str::to_string),
-                )
-            } else {
-                let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
-                let stream = chunk.into_stream(schema.clone());
-                let stream = match chunk_cdc.as_ref() {
-                    Some(cdc) => {
-                        super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta)
-                    }
-                    None => stream,
-                };
-                let receipt = self.write_stream(stream, &final_key).await?;
-                (
-                    receipt.bytes,
-                    receipt.transport_chunk_count,
-                    receipt.etag,
-                    receipt.checksum,
-                )
-            };
-            object_key.get_or_insert(final_key);
-            rows = rows
-                .checked_add(chunk_rows)
-                .ok_or_else(|| io::Error::other("legacy grouped row count overflow"))?;
-            bytes = bytes
-                .checked_add(chunk_bytes)
-                .ok_or_else(|| io::Error::other("legacy grouped byte count overflow"))?;
-            transport_chunk_count = transport_chunk_count
-                .checked_add(chunk_transport_count)
-                .ok_or_else(|| io::Error::other("legacy grouped chunk count overflow"))?;
-            etag = chunk_etag;
-            checksum = chunk_checksum;
-        }
-
-        Ok(ObjectWriteReceipt {
-            version: 1,
-            object_key: object_key
-                .ok_or_else(|| io::Error::other("No rows to write to parquet"))?,
-            upload_id: "legacy-chunk-replay".to_string(),
-            rows,
-            bytes,
-            transport_chunk_count,
-            parts: Vec::new(),
-            etag,
-            checksum,
-            version_id: None,
-            backend_metadata: BTreeMap::from([(
-                "compatibility".to_string(),
-                "legacy-read-only-chunks".to_string(),
-            )]),
-        })
     }
 
     async fn write_stream(

@@ -1,6 +1,6 @@
 ---
 title: Transforms
-description: Split records into tables, partition output, flatten nested objects, run in-memory Arrow ops, and maintain keyed aggregates in Skippr Store.
+description: Split records into tables, partition output, flatten nested objects, and declare compute SQL that Skipprd journals in Skippr Store.
 ---
 
 # Transforms
@@ -67,8 +67,9 @@ pipelines:
 | `batch_order_fields` | `TRANSFORM_BATCH_ORDER_FIELDS` | none (unsorted) | Columns to sort rows by inside each Parquet file. Comma-separated. |
 | `enable_single_quote_parsing` | none | `false` | Accept JSON that wraps strings in single quotes. |
 | `enable_unicode_parsing` | none | `false` | Accept JSON with unescaped Unicode. |
-| `ops` | none | none | Ordered in-memory Arrow ops (`filter`, `project`, `derive`, `rename`, `cast`) applied after schema mapping and before WAL commit. DataFusion SQL expressions. See [Filter, project, and derive](#filter-project-and-derive). |
-| `aggregates` | none | none | Keyed running aggregates maintained from committed WAL data in Skippr Store. See [Running aggregates](#running-aggregates). |
+| `event_time` | `TRANSFORM_BATCH_TIME_FIELDS` | none | Event-time column (YAML alias `batch_time_fields`). File/Iceberg partitions use it. Required for windowed `CREATE TABLE`. |
+| `watermark_delay` | none | none | Event-time delay (`5 minutes`). Required for windowed `CREATE TABLE`. |
+| `compute` | none | none | Declared compute: named `{name, type: sql\|sdl, value}` items. See [Declared compute](#declared-compute). |
 
 A key in `skippr.yml` beats its environment fallback. Flags accept `true`/`false`, `yes`/`no`, or `1`/`0`.
 
@@ -133,40 +134,25 @@ transform:
 
 While sorting is on, Skipprd sizes row groups automatically, between about 16 MiB and 64 MiB uncompressed (25,000 to 500,000 rows), based on row width and how many distinct values the leading sort column has. You do not need to tune it.
 
-## Filter, project, and derive
+## Declared compute
 
-`ops` is an ordered list of in-memory Arrow operations. They run after schema mapping and before the write-ahead log (WAL) commit, so the lake sees the transformed rows. Each list entry sets exactly one of `filter`, `project`, `derive`, `rename`, or `cast`. Expressions are DataFusion SQL over the current batch columns. Changing `ops` affects new ingest only; committed WAL segments are not rewritten.
-
-```yaml
-transform:
-  ops:
-    - filter: "amount > 0"
-    - project: [id, customer_id, amount]
-    - derive:
-        amount_gbp: "amount * 0.8"
-    - rename:
-        amount: amount_usd
-    - cast:
-        amount: float64
-```
-
-`type: copy` cannot set `ops`. Table destinations (native Iceberg and warehouse ALTER) cannot set `project`, `rename`, or `cast`; use [`ALTER TABLE`](/operations/alter). Stream destinations can set all five ops. `filter` and `derive` stay valid on tables. A transform error fails the batch and does not advance source offsets.
-
-## Running aggregates
-
-`aggregates` are Skipprd's materialised views: keyed running totals over committed WAL, stored in the Skippr Store `stream_state` family. CDC inserts add, updates apply the delta from the previous row for that key, and deletes subtract. This is independent of source offsets: compaction does not drop a WAL segment until the processor has passed it.
+`compute` is a list of named items. Each item is `{name, type, value}` with `type: sql` (Skippr SQL) or `type: sdl` (typed Skipper Definition Language). SQL is `CREATE VIEW` / `CREATE TABLE AS SELECT` (GROUP BY, `date_trunc`, `DISTINCT ON`) or ingest `SELECT` filter/derive. Skipprd binds both lanes to `ComputeKind` and journals them in Skippr Store, keyed by `name`. `skipprd query` and `skipprd serve` register `pipeline.compute_name`. View / keyed / windowed accept [`ALTER TABLE`](/operations/alter) sugar; Latest and stream-table joins are `DROP` then `CREATE`. Stateless requires `ALTER COMPUTE`. Ad-hoc `CREATE` / `DROP` in `skipprd query` is supported; Git `transform.compute` is the usual way to ship.
 
 ```yaml
 transform:
-  aggregates:
-    - id: customer_invoice_totals
-      key_fields: [customer_id]
-      measures:
-        invoice_total: { sum: amount }
-        invoice_count: { count: "*" }
+  event_time: created_at
+  watermark_delay: 5 minutes
+  compute:
+    - name: invoices.customer_totals
+      type: sql
+      value: |
+        CREATE TABLE invoices.customer_totals AS
+        SELECT customer_id, SUM(amount) AS invoice_total, COUNT(*) AS invoice_count
+        FROM invoices.orders
+        GROUP BY customer_id
 ```
 
-Changing an aggregate's id, keys, or measures rebuilds that aggregate by replaying the WAL. `type: copy` cannot set `aggregates`. Measures stay in Skippr Store. They are not published as extra sink tables, and they are not extra names in `skipprd query`. You still `SELECT` the pipeline namespace (Iceberg ∪ WAL after `ops`). See [Materialised views](/concepts/materialised-views).
+`type: copy` cannot set `compute`. Editing an existing name without `ALTER COMPUTE` fails closed. See [Materialised views](/concepts/materialised-views).
 
 ## Next steps
 

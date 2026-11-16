@@ -23,15 +23,12 @@ use std::{fs, io};
 
 /// Arrow IPC PART (SEGF v3 payload and v4 codec 0).
 pub const PART_CODEC_ARROW: u8 = 0;
-/// One gzip member of bincode `Vec<LegacyCopyWalFrame>` (v4 codec 1). Read-only.
-pub const PART_CODEC_COPY: u8 = 1;
-/// Concatenated gzip members, each bincode `Vec<CopyFrame>` (v4 codec 2). Hosts
-/// without codec 2 reject the PART instead of reading only the first member.
+/// Concatenated gzip members, each bincode `Vec<CopyFrame>` (v4 codec 2).
 pub const PART_CODEC_COPY_CHUNKED: u8 = 2;
 const SEGF_VERSION_V3: u32 = 3;
 
 pub fn is_copy_codec(codec: u8) -> bool {
-    matches!(codec, PART_CODEC_COPY | PART_CODEC_COPY_CHUNKED)
+    codec == PART_CODEC_COPY_CHUNKED
 }
 
 /// Copy WAL rows encoded by the ingest worker that admitted them. The WAL
@@ -199,7 +196,7 @@ pub struct SegmentPartitionIndexEntry {
     pub part_meta_start: u64,
     pub part_meta_len: u64,
     pub part_meta_summary: SegmentPartMetaSummary,
-    /// `PART_CODEC_ARROW` or `PART_CODEC_COPY`. v3 segments are Arrow.
+    /// `PART_CODEC_ARROW` or `PART_CODEC_COPY_CHUNKED`. v3 segments are Arrow.
     pub codec: u8,
     pub start: u64,
     pub len: u64,
@@ -325,12 +322,6 @@ fn read_part_codec_and_len<R: Read>(reader: &mut R, version: u32) -> io::Result<
     Ok((codec, u64::from_le_bytes(len_buf)))
 }
 
-#[derive(serde::Deserialize)]
-struct LegacyCopyWalFrame {
-    value: Vec<u8>,
-    identity: Option<Vec<u8>>,
-}
-
 /// Each record is stored once: NDJSON identity lines keep their source bytes.
 /// `IdentityBatch` is concatenated NDJSON (added after Identity/Json so old WAL still decodes).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -435,21 +426,7 @@ pub fn decode_copy_part(codec: u8, bytes: &[u8]) -> io::Result<Vec<CopyWalRecord
 pub fn decode_copy_part_payload(codec: u8, bytes: &[u8]) -> io::Result<CopyPartDecode> {
     let mut raw = Vec::new();
     match codec {
-        PART_CODEC_COPY => {
-            GzDecoder::new(bytes).read_to_end(&mut raw)?;
-            let frames: Vec<LegacyCopyWalFrame> = bincode::deserialize(&raw)
-                .map_err(|err| invalid_data(format!("decode copy WAL: {err}")))?;
-            let records = frames
-                .into_iter()
-                .map(|frame| {
-                    Ok(CopyWalRecord {
-                        value: parse_copy_json(&frame.value)?,
-                        identity: frame.identity,
-                    })
-                })
-                .collect::<io::Result<Vec<_>>>()?;
-            Ok(CopyPartDecode::Records(records))
-        }
+        1 => Err(invalid_data("copy WAL codec 1 is not replayed")),
         PART_CODEC_COPY_CHUNKED => {
             MultiGzDecoder::new(bytes).read_to_end(&mut raw)?;
             let mut cursor = Cursor::new(raw.as_slice());
@@ -1500,25 +1477,13 @@ mod tests_wal_writer {
     }
 
     #[test]
-    fn legacy_copy_codec_still_decodes() {
-        #[derive(serde::Serialize)]
-        struct Frame {
-            value: Vec<u8>,
-            identity: Option<Vec<u8>>,
-        }
-        let raw = bincode::serialize(&vec![Frame {
-            value: b"{\"id\":7}".to_vec(),
-            identity: Some(b"{\"id\":7}\n".to_vec()),
-        }])
-        .unwrap();
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-        encoder.write_all(&raw).unwrap();
-        let legacy = encoder.finish().unwrap();
-        let decoded = decode_copy_part(PART_CODEC_COPY, &legacy).unwrap();
-        assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].value["id"], 7);
-        assert_eq!(decoded[0].identity.as_deref(), Some(&b"{\"id\":7}\n"[..]));
-        assert!(decode_copy_part(PART_CODEC_ARROW, &legacy).is_err());
+    fn copy_codec_1_is_not_replayed() {
+        let err = decode_copy_part(1, b"leftover").unwrap_err();
+        assert!(
+            err.to_string().contains("copy WAL codec 1 is not replayed"),
+            "{err}"
+        );
+        assert!(decode_copy_part(PART_CODEC_ARROW, b"leftover").is_err());
     }
 
     #[test]

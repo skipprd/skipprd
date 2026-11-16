@@ -90,7 +90,7 @@ skipprd query --sql "STREAM * FROM bikehire.rides LIMIT 100"
 
 `SELECT` is a snapshot of Iceberg plus the WAL slices Skippr Store pinned for that statement. `STREAM` follows new live rows on that same table. A second query process can run while `sync` holds the writer. It pins a flushed Skippr Store snapshot and does not take `writer.lock`. See [Stream SQL](/concepts/stream-sql) and [Skippr Store](/configuration/skippr-store).
 
-`skipprd serve` Flight SQL reads committed Iceberg only. Live WAL stays on `skipprd query`.
+`skipprd serve` Flight SQL uses the same Iceberg ∪ WAL registration as `skipprd query`. If WAL is absent on that node it falls through to Iceberg history.
 
 ### Inspect a pipeline
 
@@ -119,6 +119,7 @@ skipprd query --sql "ALTER TABLE bikehire.rides DROP COLUMN legacy_field"
 skipprd query --sql "ALTER TABLE bikehire.rides ALTER COLUMN n TYPE BIGINT"
 skipprd query --sql "ALTER TABLE bikehire.rides RENAME COLUMN region TO region_code"
 skipprd query --sql "ALTER TABLE bikehire.rides MERGE COLUMN price_cents INTO price"
+skipprd query --sql "ALTER COMPUTE bikehire.station_totals ALTER COLUMN ride_count SET MEASURE COUNT(*)"
 ```
 
 SQL must match the pipeline output names. Nested pipelines use dotted paths (`detail.truck_reg`). Flattened pipelines use underscores (`detail_truck_reg`). Do not mix the two forms.
@@ -131,8 +132,7 @@ Run [`skipprd sql-help`](/cli/sql-help) for the syntax of every statement, or `s
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Error: All tables must be referenced as <pipeline>.<namespace>` | The interactive view needs a fully qualified table name. The message lists the allowed tables. | Use `<pipeline>.<namespace>`, for example `bikehire.rides`. |
-| `ERROR: Unqualified table name detected` | A table in the query has no pipeline prefix. | Qualify every table. |
+| `ERROR: Unqualified table name detected` | A table in the query has no pipeline prefix. | Qualify every table as `<pipeline>.<namespace>`, for example `bikehire.rides`. Journaled compute names use the same two-part form. |
 | `query failed: ... table ... not found` with `--plain` | The table name is wrong, or the pipeline has not been discovered or synced yet. | Run `skipprd metadata show --pipeline <name>` to list namespaces. |
 | `Pipeline '<name>' not found` | The pipeline in a management statement has no saved schema yet. | Run `skipprd discover --pipeline <name>` first. |
 | Fewer rows than in your warehouse | Non-Iceberg destinations only expose data still in the WAL. | Query the warehouse directly for full history. |

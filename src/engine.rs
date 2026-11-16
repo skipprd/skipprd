@@ -993,6 +993,15 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
     .await
     .map_err(io::Error::other)?;
 
+    if config.transform_compute_configured() {
+        let store = offsets_db.open_stream_state().map_err(io::Error::other)?;
+        let fence = offsets_db
+            .writer_fence()
+            .unwrap_or_else(skippr_wal_catalog::CatalogFence::local);
+        crate::compute::admit_config(config, store.as_ref(), fence, &pipeline_metadata)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+    }
+
     {
         METRICS.write().status = MetricsStatus::Running;
     }
@@ -1133,8 +1142,8 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
 
         validate_pipeline_source_contracts_at_startup(config, &output_plugin_name).await;
         Buffers::start_compactor_service(config, shared_output.clone(), offsets_db.clone());
-        crate::processor::start_processor_service(config, offsets_db.clone());
     }
+    crate::processor::start_processor_service(config, offsets_db.clone());
 
     let shared_output_clone = shared_output.clone();
 
@@ -1344,7 +1353,7 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
     let _ = heartbeat_tx.send(true);
 
     // Summary and integrity check: dest parquet rows vs WAL write rows (post
-    // transform.ops). Source decode (MESSAGES_TOTAL) is higher when a filter drops rows.
+    // Stateless compute). Source decode (MESSAGES_TOTAL) is higher when a filter drops rows.
     {
         use std::sync::atomic::Ordering as AO;
         let uploaded_rows =

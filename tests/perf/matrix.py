@@ -1,15 +1,16 @@
 """Permutation SoT for skippr-perf and skippr-perf-db transform / migrate cells.
 
-Historical ingest is File `sync --once`. Stream ingest is Stdin (ops/aggregates)
-or a compaction hold (migrate + query). Copy pipelines cannot set ops or aggregates.
+Historical ingest is File `sync --once`. Stream ingest is Stdin (SQL filter/derive
+and CREATE TABLE) or a compaction hold (migrate + query). Copy pipelines cannot
+set transform.compute.
 """
 
 from __future__ import annotations
 
-OPS = ("filter", "project", "derive", "rename", "cast", "compose")
-# Iceberg dest schema is discovered from source columns. Ops that add, drop,
-# rename, or recast fields write File parquet so dest_has matches the folded batch.
-SCHEMA_CHANGING_OPS = ("project", "derive", "rename", "cast", "compose")
+OPS = ("filter", "derive", "compose")
+# Iceberg dest schema is discovered from source columns. Derive/compose add
+# columns, so those cells write File parquet so dest_has matches the folded batch.
+SCHEMA_CHANGING_OPS = ("derive", "compose")
 INGEST_MODES = ("historical", "stream")
 AGG_MEASURES = ("sum", "count", "both")
 ALTERS = ("rename", "merge", "drop", "promote")
@@ -71,40 +72,49 @@ def expected_amount_sum_range(start_index: int, rows: int) -> int:
     return 10 * n * (start_index + rows) // 2
 
 
-OPS_YAML = {
-    "filter": '        - filter: "amount > 50"\n',
-    "project": "        - project: [id, amount]\n",
-    "derive": '        - derive:\n            amount_gbp: "amount * 0.8"\n',
-    "rename": "        - rename:\n            name: display_name\n",
-    "cast": "        - cast:\n            amount: float64\n",
+SQL_YAML = {
+    "filter": (
+        "        - name: positive_amount\n"
+        "          type: sql\n"
+        "          value: |\n"
+        "            SELECT * FROM perf_cell.perf_cell WHERE amount > 50\n"
+    ),
+    "derive": (
+        "        - name: amount_gbp\n"
+        "          type: sql\n"
+        "          value: |\n"
+        "            SELECT *, amount * 0.8 AS amount_gbp FROM perf_cell.perf_cell\n"
+    ),
     "compose": (
-        '        - filter: "amount > 0"\n'
-        '        - derive:\n            amount_gbp: "amount * 0.8"\n'
-        "        - rename:\n            name: display_name\n"
-        "        - cast:\n            amount: float64\n"
-        "        - project: [id, display_name, amount, amount_gbp]\n"
+        "        - name: amount_gbp_positive\n"
+        "          type: sql\n"
+        "          value: |\n"
+        "            SELECT *, amount * 0.8 AS amount_gbp FROM perf_cell.perf_cell WHERE amount > 0\n"
     ),
 }
 
-AGG_YAML = {
+COMPUTE_YAML = {
     "sum": (
-        "        - id: name_totals\n"
-        "          key_fields: [name]\n"
-        "          measures:\n"
-        "            amount_total: { sum: amount }\n"
+        "        - name: perf_cell.name_totals\n"
+        "          type: sql\n"
+        "          value: |\n"
+        "            CREATE TABLE perf_cell.name_totals AS\n"
+        "            SELECT name, SUM(amount) AS amount_total FROM perf_cell.perf_cell GROUP BY name\n"
     ),
     "count": (
-        "        - id: name_totals\n"
-        "          key_fields: [name]\n"
-        "          measures:\n"
-        '            row_count: { count: "*" }\n'
+        "        - name: perf_cell.name_totals\n"
+        "          type: sql\n"
+        "          value: |\n"
+        "            CREATE TABLE perf_cell.name_totals AS\n"
+        "            SELECT name, COUNT(*) AS row_count FROM perf_cell.perf_cell GROUP BY name\n"
     ),
     "both": (
-        "        - id: name_totals\n"
-        "          key_fields: [name]\n"
-        "          measures:\n"
-        "            amount_total: { sum: amount }\n"
-        '            row_count: { count: "*" }\n'
+        "        - name: perf_cell.name_totals\n"
+        "          type: sql\n"
+        "          value: |\n"
+        "            CREATE TABLE perf_cell.name_totals AS\n"
+        "            SELECT name, SUM(amount) AS amount_total, COUNT(*) AS row_count\n"
+        "            FROM perf_cell.perf_cell GROUP BY name\n"
     ),
 }
 

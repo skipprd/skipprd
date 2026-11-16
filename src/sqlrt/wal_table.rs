@@ -615,7 +615,7 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
         let key = PipelineKey::new("t", "w", "wal-pin-plan").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let paths = PipelinePaths::legacy_disk(dir.path());
+        let paths = PipelinePaths::disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let offsets: StdArc<dyn OffsetStore> =
@@ -712,7 +712,7 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
         let key = PipelineKey::new("t", "w", "wal-reclaim").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let paths = PipelinePaths::legacy_disk(dir.path());
+        let paths = PipelinePaths::disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let offsets: StdArc<dyn OffsetStore> =
@@ -896,7 +896,7 @@ mod tests {
         use crate::helpers::offset_store::{memory_offset_store, OffsetStore};
         use std::sync::Arc as StdArc;
 
-        let paths = PipelinePaths::legacy_disk(dir);
+        let paths = PipelinePaths::disk(dir);
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let offsets: StdArc<dyn OffsetStore> =

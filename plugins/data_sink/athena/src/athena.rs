@@ -851,17 +851,16 @@ impl DataSink for DataSinkAthenaPlugin {
 
     async fn sync_grouped(
         &self,
-        mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
+        reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, std::io::Error> {
         ctx.to_sink_write_context()
             .validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
         if self.should_use_legacy_grouped_chunks(&ctx).await? {
-            return self
-                .sync_grouped_legacy_chunks(&mut reader, ctx)
-                .await
-                .map(|result| result.outcome);
+            return Err(io::Error::other(
+                "legacy grouped compaction objects are not replayed; compact again",
+            ));
         }
         self.sync_grouped_single_object(reader, ctx)
             .await
@@ -870,14 +869,16 @@ impl DataSink for DataSinkAthenaPlugin {
 
     async fn sync_grouped_call_result(
         &self,
-        mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
+        reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkCallResult, std::io::Error> {
         ctx.to_sink_write_context()
             .validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
         if self.should_use_legacy_grouped_chunks(&ctx).await? {
-            return self.sync_grouped_legacy_chunks(&mut reader, ctx).await;
+            return Err(io::Error::other(
+                "legacy grouped compaction objects are not replayed; compact again",
+            ));
         }
         self.sync_grouped_single_object(reader, ctx).await
     }
@@ -953,40 +954,6 @@ impl SchemaSink for DataSinkAthenaPlugin {
 }
 
 impl DataSinkAthenaPlugin {
-    async fn sync_grouped_legacy_chunks(
-        &self,
-        reader: &mut skippr_runtime_sdk::plugins::GroupedBatchReader,
-        ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
-    ) -> Result<SinkCallResult, std::io::Error> {
-        let schema = reader.schema();
-        let mut applied = false;
-        let mut result = SinkCallResult::outcome(SinkWriteOutcome::AlreadyApplied);
-        while let Some(chunk) = reader.next_chunk().await? {
-            let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
-            let chunk_ctx = ctx.chunk_sink_write_context_with_cdc(
-                chunk.chunk_index,
-                chunk.chunk_index == 0 && chunk.final_chunk,
-                chunk_cdc.as_ref(),
-            );
-            let chunk_result = self
-                .sync_with_context_call_result(chunk.into_stream(schema.clone()), chunk_ctx)
-                .await?;
-            if chunk_result.outcome == SinkWriteOutcome::Applied {
-                applied = true;
-            }
-            result.stats.rows = sum_optional(result.stats.rows, chunk_result.stats.rows);
-            result.stats.bytes = sum_optional(result.stats.bytes, chunk_result.stats.bytes);
-            result.stats.objects = sum_optional(result.stats.objects, chunk_result.stats.objects);
-            result.catalog_intents.extend(chunk_result.catalog_intents);
-        }
-        result.outcome = if applied {
-            SinkWriteOutcome::Applied
-        } else {
-            SinkWriteOutcome::AlreadyApplied
-        };
-        Ok(result)
-    }
-
     async fn sync_grouped_single_object(
         &self,
         reader: skippr_runtime_sdk::plugins::GroupedBatchReader,

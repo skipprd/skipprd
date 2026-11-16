@@ -118,8 +118,7 @@ pub struct WalPartRef {
     pub len: u64,
     pub key: PartitionKey,
     pub cdc_meta_hash: Option<[u8; 32]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ordinal: Option<u32>,
+    pub ordinal: u32,
 }
 
 impl WalPartRef {
@@ -310,7 +309,7 @@ mod tests {
                 schema_fingerprint: "schema".to_string(),
             },
             cdc_meta_hash: None,
-            ordinal: None,
+            ordinal: 0,
         }
     }
 
@@ -391,14 +390,14 @@ mod tests {
     #[test]
     fn ordinal_is_not_part_of_wal_ref_identity() {
         let mut with_ordinal = ref_for("s", 1);
-        with_ordinal.ordinal = Some(7);
+        with_ordinal.ordinal = 7;
         let without = ref_for("s", 1);
         assert_eq!(with_ordinal.identity_bytes(), without.identity_bytes());
         let runtime = with_ordinal.to_runtime_ref();
         assert_eq!(runtime.segment_id, "s");
         let encoded = serde_json::to_value(&with_ordinal).unwrap();
         assert_eq!(encoded["ordinal"], 7);
-        let legacy: WalPartRef = serde_json::from_value(serde_json::json!({
+        let err = serde_json::from_value::<WalPartRef>(serde_json::json!({
             "segment_id": "s",
             "source": {"Disk": {"path": "/tmp/s.seg"}},
             "start": 1,
@@ -412,7 +411,7 @@ mod tests {
             },
             "cdc_meta_hash": null
         }))
-        .unwrap();
-        assert_eq!(legacy.ordinal, None);
+        .unwrap_err();
+        assert!(err.to_string().contains("ordinal"), "{err}");
     }
 }

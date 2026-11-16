@@ -884,7 +884,7 @@ pub fn prompt_if_tty(label: &str) -> Result<String, io::Error> {
 include!("connect_generated.rs");
 
 impl DataSink {
-    /// Catalog Table vs Stream. YAML `transform.ops` and schema-sink pairing
+    /// Catalog Table vs Stream. Schema-sink pairing
     /// use this. Handshake `SchemaSink::alter_support()` must match `is_table()`.
     pub fn alter_support(self) -> crate::plugins::AlterSupport {
         use crate::plugins::alter_ddl::WarehouseDialect;

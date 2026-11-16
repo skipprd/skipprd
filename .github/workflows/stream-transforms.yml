@@ -45,4 +45,4 @@ jobs:
           access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
           secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       - name: Full stream-transform suite (local FS Sled)
-        run: "cargo test -p skipprd --lib -- processor:: stream_transform::"
+        run: "cargo test -p skipprd --lib -- processor:: compute::"

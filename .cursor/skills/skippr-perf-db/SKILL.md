@@ -63,7 +63,7 @@ Mail: `python3 tests/perf/memo.py --mail` → sibling `cloud/scripts/send-afk-ma
 
 ```
 skippr-perf-db:
-- [ ] Local smoke A (q-wal-count-iceberg, q-wal-point-iceberg) and B (q-union-count-duckdb, q-union-overlap-duckdb); ops/aggregates/migrate historical (DuckDB drained) and stream (SkipprLake STREAM + live WAL pin); CDC smoke when Docker is up
+- [ ] Local smoke A (q-wal-count-iceberg, q-wal-point-iceberg) and B (q-union-count-duckdb, q-union-overlap-duckdb); SQL compose / CREATE TABLE / migrate historical (DuckDB drained) and stream (SkipprLake STREAM + live WAL pin); CDC smoke when Docker is up
 - [ ] PERF logs parsed; query_collect present; counts match ingest rows; point returns id 1; warehouse has parquet
 - [ ] Commit harness/skill with hooks (never --no-verify)
 - [ ] gh workflow run perf-db.yml --ref this branch
@@ -115,7 +115,7 @@ GitHub-hosted Linux x86 (`ubuntu-latest`). Profiling cells: flamegraph and
 perf-stat on `q-wal-count-iceberg`, `q-wal-point-iceberg`, `q-union-count-duckdb`;
 flamegraph on `q-cdc-union-update-pg`, `q-ops-count-duckdb`, `q-ops-stream-iceberg`,
 `q-migrate-rename-duckdb`, `q-migrate-rename-stream-iceberg`; heaptrack on the two count cells.
-`linux_matrix` also queries after compose ops, both aggregates, and every ALTER
+`linux_matrix` also queries after SQL compose, CREATE TABLE both-measures, and every ALTER
 (`rename`, `merge`, `drop`, `promote`) on historical (drained DuckDB) and stream
 (SkipprLake STREAM with a live WAL pin). Hottest frames must not be `admit_payload` /
 whole-seg `read_to_end` after the catalog slice index lands. skipprd and wrap

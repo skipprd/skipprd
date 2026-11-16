@@ -158,7 +158,7 @@ mod tests {
     async fn pin_ignores_later_compact_bits_and_new_segments() {
         let key = PipelineKey::new("t", "w", "rb-pin-later").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let paths = PipelinePaths::legacy_disk(dir.path());
+        let paths = PipelinePaths::disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let offsets: Arc<dyn OffsetStore> =
@@ -190,7 +190,7 @@ mod tests {
     async fn exclude_set_hides_segment_not_slice_done_bits() {
         let key = PipelineKey::new("t", "w", "rb-exclude").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let paths = PipelinePaths::legacy_disk(dir.path());
+        let paths = PipelinePaths::disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let offsets: Arc<dyn OffsetStore> =
@@ -210,7 +210,7 @@ mod tests {
     async fn slice_done_ordinal_stays_in_pin_until_exclude() {
         let key = PipelineKey::new("t", "w", "rb-slice-done").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let paths = PipelinePaths::legacy_disk(dir.path());
+        let paths = PipelinePaths::disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let offsets: Arc<dyn OffsetStore> =
@@ -266,7 +266,7 @@ mod tests {
     async fn exclude_one_slice_keeps_other_slice_of_same_segment() {
         let key = PipelineKey::new("t", "w", "rb-slice-exclude").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let paths = PipelinePaths::legacy_disk(dir.path());
+        let paths = PipelinePaths::disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let offsets: Arc<dyn OffsetStore> =

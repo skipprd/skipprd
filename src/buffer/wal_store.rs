@@ -219,8 +219,7 @@ pub fn ensure_disk_wal_handle(
     let key =
         skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
             .map_err(|err| io::Error::other(err.to_string()))?;
-    let paths =
-        skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(&config.get_data_dir()));
+    let paths = skippr_lease::PipelinePaths::disk(std::path::Path::new(&config.get_data_dir()));
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog =
         crate::pipeline_backend::open_wal_catalog_for_config(config, Some(offsets.as_ref()), fence)
@@ -417,7 +416,7 @@ mod tests {
         let key = PipelineKey::new("ten-reuse", "ws-reuse", "orders").unwrap();
         remove_wal_handle(&key);
         clear_query_readers();
-        let paths = PipelinePaths::legacy_disk(dir.path());
+        let paths = PipelinePaths::disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let offsets: Arc<dyn OffsetStore> =

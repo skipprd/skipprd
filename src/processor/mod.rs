@@ -1,33 +1,38 @@
 //! Skippr Store `stream_state` family: keyed aggregates over committed WAL.
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use arrow::array::{Array, RecordBatch};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, TimeUnit};
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
 use crate::buffer::segment_file::SegmentFile;
-use crate::helpers::configuration::{AggregateMeasure, Config, TransformAggregate};
+use crate::compute::{name_for_field_id, ComputeKind, Measure, MeasureKind};
+use crate::helpers::configuration::Config;
 use crate::plugins::cdc::{MutationKind, WalRowMeta};
 use skippr_wal_catalog::{
     CatalogFence, KvOp, SegmentRow, SkipprStore, SkipprStoreRead, StoreFamily,
 };
 
-/// Next unconsumed catalog seq. `u64::MAX` means no processor is holding reclaim.
+/// Next unconsumed catalog seq per pipeline. Missing key means no processor is holding reclaim (`u64::MAX`).
 #[cfg(not(test))]
-static MIN_UNCONSUMED_SEQ: AtomicU64 = AtomicU64::new(u64::MAX);
+static MIN_UNCONSUMED_SEQ: LazyLock<Mutex<HashMap<String, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 #[cfg(test)]
 thread_local! {
-    static MIN_UNCONSUMED_SEQ: AtomicU64 = const { AtomicU64::new(u64::MAX) };
+    static MIN_UNCONSUMED_SEQ: std::cell::RefCell<HashMap<String, u64>> =
+        std::cell::RefCell::new(HashMap::new());
 }
-static PROCESSOR_STARTED: AtomicBool = AtomicBool::new(false);
+static PROCESSOR_STARTED: LazyLock<Mutex<HashMap<String, bool>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static PROCESSOR_STOP: AtomicBool = AtomicBool::new(false);
-static PROCESSOR_HANDLE: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
+static PROCESSOR_HANDLE: LazyLock<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrashPoint {
@@ -81,45 +86,61 @@ impl WalCursor {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct ProcessorMeta {
     pub(crate) cursor: WalCursor,
-    pub(crate) config_hash: String,
 }
 
-pub fn min_unconsumed_seq() -> u64 {
+pub fn min_unconsumed_seq(pipeline: &str) -> u64 {
     #[cfg(test)]
     {
-        return MIN_UNCONSUMED_SEQ.with(|slot| slot.load(Ordering::Relaxed));
+        return MIN_UNCONSUMED_SEQ
+            .with(|slot| slot.borrow().get(pipeline).copied().unwrap_or(u64::MAX));
     }
     #[cfg(not(test))]
     {
-        MIN_UNCONSUMED_SEQ.load(Ordering::Relaxed)
+        MIN_UNCONSUMED_SEQ
+            .lock()
+            .ok()
+            .and_then(|map| map.get(pipeline).copied())
+            .unwrap_or(u64::MAX)
     }
 }
 
-pub fn allows_reclaim(segment_seq: u64) -> bool {
-    segment_seq < min_unconsumed_seq()
+pub fn allows_reclaim(pipeline: &str, segment_seq: u64) -> bool {
+    segment_seq < min_unconsumed_seq(pipeline)
 }
 
-pub fn set_min_unconsumed_seq(seq: u64) {
+pub fn set_min_unconsumed_seq(pipeline: &str, seq: u64) {
     #[cfg(test)]
     {
-        MIN_UNCONSUMED_SEQ.with(|slot| slot.store(seq, Ordering::Relaxed));
+        MIN_UNCONSUMED_SEQ.with(|slot| {
+            slot.borrow_mut().insert(pipeline.to_string(), seq);
+        });
     }
     #[cfg(not(test))]
     {
-        MIN_UNCONSUMED_SEQ.store(seq, Ordering::Relaxed);
+        if let Ok(mut map) = MIN_UNCONSUMED_SEQ.lock() {
+            map.insert(pipeline.to_string(), seq);
+        }
     }
 }
 
 pub fn reset_reclaim_hold() {
-    set_min_unconsumed_seq(u64::MAX);
+    #[cfg(test)]
+    {
+        MIN_UNCONSUMED_SEQ.with(|slot| slot.borrow_mut().clear());
+    }
+    #[cfg(not(test))]
+    {
+        if let Ok(mut map) = MIN_UNCONSUMED_SEQ.lock() {
+            map.clear();
+        }
+    }
 }
 
 pub struct StreamState {
     store: Arc<dyn SkipprStore>,
     fence: CatalogFence,
     pipeline: String,
-    aggregates: Vec<TransformAggregate>,
-    config_hash: String,
+    kinds: Vec<ComputeKind>,
 }
 
 impl StreamState {
@@ -127,18 +148,16 @@ impl StreamState {
         store: Arc<dyn SkipprStore>,
         fence: CatalogFence,
         pipeline: impl Into<String>,
-        aggregates: Vec<TransformAggregate>,
+        kinds: Vec<ComputeKind>,
     ) -> Result<Self, String> {
         let pipeline = pipeline.into();
-        let config_hash = Config::aggregates_config_hash(&aggregates);
         let state = Self {
             store,
             fence,
             pipeline,
-            aggregates,
-            config_hash: config_hash.clone(),
+            kinds,
         };
-        state.ensure_config(&config_hash)?;
+        state.ensure_cursors()?;
         Ok(state)
     }
 
@@ -186,73 +205,35 @@ impl StreamState {
         format!("{kind}/{}/{id}/", self.pipeline).into_bytes()
     }
 
-    fn ensure_config(&self, hash: &str) -> Result<(), String> {
-        for agg in &self.aggregates {
-            let key = self.meta_key(&agg.id);
-            match self.get_raw(&key)? {
-                Some(bytes) => {
-                    let meta: ProcessorMeta =
-                        serde_json::from_slice(&bytes).map_err(|err| err.to_string())?;
-                    if meta.config_hash != hash {
-                        self.rebuild(&agg.id, hash)?;
-                    }
-                }
-                None => {
-                    self.write_meta(
-                        &agg.id,
-                        &ProcessorMeta {
-                            cursor: WalCursor::default(),
-                            config_hash: hash.to_string(),
-                        },
-                    )?;
-                }
+    fn ensure_cursors(&self) -> Result<(), String> {
+        for kind in self.kinds.iter().filter(|k| k.is_store_table()) {
+            let Some(id) = kind.store_id() else {
+                continue;
+            };
+            if self.load_meta(id)?.is_none() {
+                self.write_meta(
+                    id,
+                    &ProcessorMeta {
+                        cursor: WalCursor::default(),
+                    },
+                )?;
             }
         }
         if let Some(min_seq) = self
-            .aggregates
+            .kinds
             .iter()
-            .filter_map(|agg| {
-                self.load_meta(&agg.id)
-                    .ok()
-                    .flatten()
-                    .map(|meta| meta.cursor.seq)
+            .filter_map(|kind| {
+                kind.store_id().and_then(|id| {
+                    self.load_meta(id)
+                        .ok()
+                        .flatten()
+                        .map(|meta| meta.cursor.seq)
+                })
             })
             .min()
         {
-            set_min_unconsumed_seq(min_seq);
+            set_min_unconsumed_seq(&self.pipeline, min_seq);
         }
-        Ok(())
-    }
-
-    fn rebuild(&self, id: &str, hash: &str) -> Result<(), String> {
-        info!(
-            aggregate = id,
-            "stream processor rebuilding state after config hash change"
-        );
-        for prefix in [
-            self.prefix("agg", id),
-            self.prefix("row", id),
-            self.prefix("dedup", id),
-            self.prefix("ent", id),
-        ] {
-            let page = self
-                .store
-                .query_prefix(&self.family_key(&prefix), None, usize::MAX)
-                .map_err(|err| err.to_string())?;
-            let ops: Vec<KvOp> = page
-                .into_iter()
-                .map(|(key, _)| KvOp::Delete { key })
-                .collect();
-            self.commit_ops(ops)?;
-        }
-        self.write_meta(
-            id,
-            &ProcessorMeta {
-                cursor: WalCursor::default(),
-                config_hash: hash.to_string(),
-            },
-        )?;
-        set_min_unconsumed_seq(0);
         Ok(())
     }
 
@@ -262,6 +243,10 @@ impl StreamState {
             key: self.family_key(&self.meta_key(id)),
             value: bytes,
         }])
+    }
+
+    pub fn pipeline(&self) -> &str {
+        &self.pipeline
     }
 
     pub(crate) fn load_meta(&self, id: &str) -> Result<Option<ProcessorMeta>, String> {
@@ -283,7 +268,7 @@ impl StreamState {
 
     pub fn apply_events(
         &self,
-        agg: &TransformAggregate,
+        agg: &ComputeKind,
         cursor: WalCursor,
         batch: &RecordBatch,
         cdc_rows: Option<&[WalRowMeta]>,
@@ -304,7 +289,7 @@ impl StreamState {
             let meta = cdc_rows.and_then(|rows| rows.get(row));
             if let Some(meta) = meta {
                 if !meta.event_id.is_empty() {
-                    let dkey = self.dedup_key(&agg.id, &meta.event_id);
+                    let dkey = self.dedup_key(store_id(agg)?, &meta.event_id);
                     if self.get_raw(&dkey)?.is_some() || dedup.iter().any(|k| k == &dkey) {
                         next_cursor.row_index = (row as u64) + 1;
                         continue;
@@ -313,16 +298,22 @@ impl StreamState {
                 }
             }
             let new_row = row_values(batch, row)?;
-            let key = encode_key(&agg.key_fields, &new_row)?;
+            let key = encode_key_ids(agg, batch.schema().as_ref(), &new_row)?;
             let mutation = meta.map(|m| m.mutation).unwrap_or(MutationKind::Insert);
             let old_row = match mutation {
                 MutationKind::Insert | MutationKind::Snapshot => None,
-                MutationKind::Update | MutationKind::Delete => {
-                    self.load_previous_row(agg, &key, &new_row, &last_rows, &entity_index)?
-                }
+                MutationKind::Update | MutationKind::Delete => self.load_previous_row(
+                    agg,
+                    batch.schema().as_ref(),
+                    &key,
+                    &new_row,
+                    &last_rows,
+                    &entity_index,
+                )?,
             };
             apply_mutation(
                 agg,
+                batch.schema().as_ref(),
                 mutation,
                 &key,
                 old_row.as_ref(),
@@ -330,7 +321,7 @@ impl StreamState {
                 &mut measures,
                 &mut last_rows,
             )?;
-            if let Some(entity) = entity_identity(agg, &new_row) {
+            if let Some(entity) = entity_identity(agg, batch.schema().as_ref(), &new_row) {
                 match mutation {
                     MutationKind::Delete => {
                         entity_index.remove(&entity);
@@ -361,36 +352,35 @@ impl StreamState {
             serde_json::json!({
                 "elapsed_ms": started.elapsed().as_millis() as u64,
                 "rows": batch.num_rows() - start_row,
-                "aggregate": agg.id
+                "aggregate": store_id(agg).unwrap_or("")
             }),
         );
 
         let meta = ProcessorMeta {
             cursor: next_cursor.clone(),
-            config_hash: self.config_hash.clone(),
         };
         let meta_bytes = serde_json::to_vec(&meta).map_err(|err| err.to_string())?;
-        let meta_key = self.meta_key(&agg.id);
+        let meta_key = self.meta_key(store_id(agg)?);
         let mut puts: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         puts.push((meta_key, meta_bytes));
         for (key, values) in &measures {
-            let mut current = self.load_measures(&agg.id, key)?;
+            let mut current = self.load_measures(store_id(agg)?, key)?;
             for (name, delta) in values {
                 *current.entry(name.clone()).or_insert(0.0) += *delta;
             }
             puts.push((
-                self.agg_key(&agg.id, key),
+                self.agg_key(store_id(agg)?, key),
                 serde_json::to_vec(&current).map_err(|err| err.to_string())?,
             ));
         }
         for (key, row) in &last_rows {
             puts.push((
-                self.row_key(&agg.id, key),
+                self.row_key(store_id(agg)?, key),
                 serde_json::to_vec(row).map_err(|err| err.to_string())?,
             ));
-            if let Some(entity) = entity_identity(agg, row) {
+            if let Some(entity) = entity_identity(agg, batch.schema().as_ref(), row) {
                 puts.push((
-                    self.entity_key_bytes(&agg.id, &entity),
+                    self.entity_key_bytes(store_id(agg)?, &entity),
                     key.as_bytes().to_vec(),
                 ));
             }
@@ -413,7 +403,7 @@ impl StreamState {
             return Err(format!("stream processor transaction failed: {err}"));
         }
         maybe_crash(CrashPoint::AfterTxn);
-        set_min_unconsumed_seq(next_cursor.seq);
+        set_min_unconsumed_seq(&self.pipeline, next_cursor.seq);
         Ok(next_cursor)
     }
 
@@ -427,24 +417,25 @@ impl StreamState {
 
     fn load_previous_row(
         &self,
-        agg: &TransformAggregate,
+        agg: &ComputeKind,
+        schema: &arrow_schema::Schema,
         new_key: &str,
         new_row: &BTreeMap<String, Value>,
         pending: &BTreeMap<String, BTreeMap<String, Value>>,
         entity_index: &BTreeMap<String, String>,
     ) -> Result<Option<BTreeMap<String, Value>>, String> {
-        if let Some(entity) = entity_identity(agg, new_row) {
+        if let Some(entity) = entity_identity(agg, schema, new_row) {
             if let Some(old_key) = entity_index.get(&entity) {
                 if let Some(row) = pending.get(old_key).cloned().filter(|row| !row.is_empty()) {
                     return Ok(Some(row));
                 }
             }
-            if let Some(bytes) = self.get_raw(&self.entity_key_bytes(&agg.id, &entity))? {
+            if let Some(bytes) = self.get_raw(&self.entity_key_bytes(store_id(agg)?, &entity))? {
                 let old_key = String::from_utf8_lossy(&bytes).into_owned();
                 if let Some(row) = pending.get(&old_key).cloned().filter(|row| !row.is_empty()) {
                     return Ok(Some(row));
                 }
-                if let Some(row) = self.load_last_row(&agg.id, &old_key)? {
+                if let Some(row) = self.load_last_row(store_id(agg)?, &old_key)? {
                     return Ok(Some(row));
                 }
             }
@@ -452,7 +443,7 @@ impl StreamState {
         if let Some(row) = pending.get(new_key).cloned().filter(|row| !row.is_empty()) {
             return Ok(Some(row));
         }
-        self.load_last_row(&agg.id, new_key)
+        self.load_last_row(store_id(agg)?, new_key)
     }
 
     #[cfg(test)]
@@ -486,7 +477,8 @@ impl StreamState {
 }
 
 fn apply_mutation(
-    agg: &TransformAggregate,
+    agg: &ComputeKind,
+    schema: &arrow_schema::Schema,
     mutation: MutationKind,
     new_key: &str,
     old_row: Option<&BTreeMap<String, Value>>,
@@ -495,7 +487,7 @@ fn apply_mutation(
     last_rows: &mut BTreeMap<String, BTreeMap<String, Value>>,
 ) -> Result<(), String> {
     let old_key = old_row
-        .map(|row| encode_key(&agg.key_fields, row))
+        .map(|row| encode_key_ids(agg, schema, row))
         .transpose()?;
     let pk_changed = old_key.as_deref().is_some_and(|old| old != new_key);
 
@@ -504,6 +496,7 @@ fn apply_mutation(
             if let Some(old) = old_row {
                 add_deltas(
                     agg,
+                    schema,
                     old_key.as_deref().unwrap_or(new_key),
                     old,
                     -1.0,
@@ -518,20 +511,20 @@ fn apply_mutation(
             }
         }
         MutationKind::Insert | MutationKind::Snapshot => {
-            add_deltas(agg, new_key, new_row, 1.0, measures)?;
+            add_deltas(agg, schema, new_key, new_row, 1.0, measures)?;
             last_rows.insert(new_key.to_string(), new_row.clone());
         }
         MutationKind::Update => {
             if pk_changed {
                 if let Some(old) = old_row {
-                    add_deltas(agg, old_key.as_ref().unwrap(), old, -1.0, measures)?;
+                    add_deltas(agg, schema, old_key.as_ref().unwrap(), old, -1.0, measures)?;
                     last_rows.insert(old_key.unwrap(), BTreeMap::new());
                 }
-                add_deltas(agg, new_key, new_row, 1.0, measures)?;
+                add_deltas(agg, schema, new_key, new_row, 1.0, measures)?;
             } else if let Some(old) = old_row {
-                add_measure_delta(agg, new_key, old, new_row, measures)?;
+                add_measure_delta(agg, schema, new_key, old, new_row, measures)?;
             } else {
-                add_deltas(agg, new_key, new_row, 1.0, measures)?;
+                add_deltas(agg, schema, new_key, new_row, 1.0, measures)?;
             }
             last_rows.insert(new_key.to_string(), new_row.clone());
         }
@@ -540,42 +533,51 @@ fn apply_mutation(
 }
 
 fn add_deltas(
-    agg: &TransformAggregate,
+    agg: &ComputeKind,
+    schema: &arrow_schema::Schema,
     key: &str,
     row: &BTreeMap<String, Value>,
     sign: f64,
     measures: &mut BTreeMap<String, BTreeMap<String, f64>>,
 ) -> Result<(), String> {
     let slot = measures.entry(key.to_string()).or_default();
-    for (name, measure) in &agg.measures {
-        *slot.entry(name.clone()).or_insert(0.0) += sign * measure_value(measure, row)?;
+    for measure in agg.measures() {
+        *slot.entry(measure.name.as_str().to_string()).or_insert(0.0) +=
+            sign * measure_value(measure, schema, row)?;
     }
     Ok(())
 }
 
 fn add_measure_delta(
-    agg: &TransformAggregate,
+    agg: &ComputeKind,
+    schema: &arrow_schema::Schema,
     key: &str,
     old_row: &BTreeMap<String, Value>,
     new_row: &BTreeMap<String, Value>,
     measures: &mut BTreeMap<String, BTreeMap<String, f64>>,
 ) -> Result<(), String> {
     let slot = measures.entry(key.to_string()).or_default();
-    for (name, measure) in &agg.measures {
-        let delta = measure_value(measure, new_row)? - measure_value(measure, old_row)?;
-        *slot.entry(name.clone()).or_insert(0.0) += delta;
+    for measure in agg.measures() {
+        let delta =
+            measure_value(measure, schema, new_row)? - measure_value(measure, schema, old_row)?;
+        *slot.entry(measure.name.as_str().to_string()).or_insert(0.0) += delta;
     }
     Ok(())
 }
 
-fn measure_value(measure: &AggregateMeasure, row: &BTreeMap<String, Value>) -> Result<f64, String> {
-    if measure.count.is_some() {
-        return Ok(1.0);
+fn measure_value(
+    measure: &Measure,
+    schema: &arrow_schema::Schema,
+    row: &BTreeMap<String, Value>,
+) -> Result<f64, String> {
+    match measure.kind {
+        MeasureKind::Count => Ok(1.0),
+        MeasureKind::Sum(id) | MeasureKind::Min(id) | MeasureKind::Max(id) => {
+            let name = name_for_field_id(schema, id)
+                .ok_or_else(|| format!("FieldId {} missing from batch", id.get()))?;
+            Ok(json_f64(row.get(name).unwrap_or(&Value::Null)))
+        }
     }
-    let Some(column) = measure.sum.as_deref() else {
-        return Err("measure has neither sum nor count".into());
-    };
-    Ok(json_f64(row.get(column).unwrap_or(&Value::Null)))
 }
 
 fn json_f64(value: &Value) -> f64 {
@@ -587,12 +589,85 @@ fn json_f64(value: &Value) -> f64 {
     }
 }
 
-fn encode_key(fields: &[String], row: &BTreeMap<String, Value>) -> Result<String, String> {
-    let mut parts = Vec::with_capacity(fields.len());
-    for field in fields {
-        parts.push(json_key_part(row.get(field).unwrap_or(&Value::Null)));
+fn store_id(kind: &ComputeKind) -> Result<&str, String> {
+    kind.store_id()
+        .ok_or_else(|| "compute has no Store name".into())
+}
+
+fn encode_key_ids(
+    kind: &ComputeKind,
+    schema: &arrow_schema::Schema,
+    row: &BTreeMap<String, Value>,
+) -> Result<String, String> {
+    let ids = kind
+        .keys()
+        .ok_or_else(|| "compute has no keys".to_string())?;
+    let mut parts = Vec::with_capacity(ids.len() + 1);
+    for id in ids {
+        let name = name_for_field_id(schema, *id)
+            .ok_or_else(|| format!("FieldId {} missing from batch", id.get()))?;
+        parts.push(json_key_part(row.get(name).unwrap_or(&Value::Null)));
+    }
+    if let ComputeKind::WindowedTable { window, .. } = kind {
+        parts.push(tumble_bucket(window, schema, row)?);
     }
     Ok(parts.join("\u{1f}"))
+}
+
+fn tumble_bucket(
+    window: &crate::compute::Tumble,
+    schema: &arrow_schema::Schema,
+    row: &BTreeMap<String, Value>,
+) -> Result<String, String> {
+    let name = name_for_field_id(schema, window.on.field_id()).ok_or_else(|| {
+        format!(
+            "EventTimeCol FieldId {} missing from batch",
+            window.on.field_id().get()
+        )
+    })?;
+    let ts = event_time_unix(row.get(name).unwrap_or(&Value::Null))?;
+    let size = window.size.as_secs();
+    if size == 0 {
+        return Err("Tumble size must be non-zero".into());
+    }
+    Ok((ts.div_euclid(size as i64) * size as i64).to_string())
+}
+
+fn event_time_unix(value: &Value) -> Result<i64, String> {
+    match value {
+        Value::String(s) => chrono::DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.timestamp())
+            .map_err(|err| err.to_string()),
+        Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| "event_time number is not i64".into()),
+        Value::Null => Err("event_time is null".into()),
+        other => Err(format!("event_time value {other}")),
+    }
+}
+
+fn skip_identity_names(kind: &ComputeKind, schema: &arrow_schema::Schema) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(keys) = kind.keys() {
+        for id in keys {
+            if let Some(name) = name_for_field_id(schema, *id) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    for measure in kind.measures() {
+        if let MeasureKind::Sum(id) | MeasureKind::Min(id) | MeasureKind::Max(id) = measure.kind {
+            if let Some(name) = name_for_field_id(schema, id) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    if let ComputeKind::WindowedTable { window, .. } = kind {
+        if let Some(name) = name_for_field_id(schema, window.on.field_id()) {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 fn json_key_part(value: &Value) -> String {
@@ -621,22 +696,20 @@ fn take_entity_identity_calls() -> u64 {
 
 /// Identity of one business entity using leftover columns (not key or measure sources).
 /// Lets a CDC update find the previous row after a key-field change.
-fn entity_identity(agg: &TransformAggregate, row: &BTreeMap<String, Value>) -> Option<String> {
+fn entity_identity(
+    agg: &ComputeKind,
+    schema: &arrow_schema::Schema,
+    row: &BTreeMap<String, Value>,
+) -> Option<String> {
     #[cfg(test)]
     ENTITY_IDENTITY_CALLS.with(|cell| cell.set(cell.get() + 1));
     if row.is_empty() {
         return None;
     }
+    let skip = skip_identity_names(agg, schema);
     let mut parts = Vec::new();
     for (name, value) in row {
-        if agg.key_fields.iter().any(|field| field == name) {
-            continue;
-        }
-        if agg
-            .measures
-            .values()
-            .any(|measure| measure.sum.as_deref() == Some(name.as_str()))
-        {
+        if skip.iter().any(|field| field == name) {
             continue;
         }
         parts.push(format!("{name}={}", json_key_part(value)));
@@ -759,10 +832,51 @@ fn array_value(array: &dyn Array, row: usize) -> Result<Value, String> {
                 .ok_or("bool")?
                 .value(row),
         )),
+        DataType::Timestamp(unit, _) => {
+            let raw = timestamp_value(array, *unit, row)?;
+            let secs = timestamp_secs(raw, *unit);
+            let dt = chrono::DateTime::from_timestamp(secs, 0)
+                .ok_or_else(|| "timestamp out of range".to_string())?;
+            Ok(Value::String(dt.to_rfc3339()))
+        }
         other => Err(format!(
             "stream processor cannot read {} values",
             format_data_type(other)
         )),
+    }
+}
+
+fn timestamp_value(array: &dyn Array, unit: TimeUnit, row: usize) -> Result<i64, String> {
+    match unit {
+        TimeUnit::Second => Ok(array
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampSecondArray>()
+            .ok_or("timestamp[s]")?
+            .value(row)),
+        TimeUnit::Millisecond => Ok(array
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+            .ok_or("timestamp[ms]")?
+            .value(row)),
+        TimeUnit::Microsecond => Ok(array
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .ok_or("timestamp[us]")?
+            .value(row)),
+        TimeUnit::Nanosecond => Ok(array
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampNanosecondArray>()
+            .ok_or("timestamp[ns]")?
+            .value(row)),
+    }
+}
+
+fn timestamp_secs(raw: i64, unit: TimeUnit) -> i64 {
+    match unit {
+        TimeUnit::Second => raw,
+        TimeUnit::Millisecond => raw.div_euclid(1_000),
+        TimeUnit::Microsecond => raw.div_euclid(1_000_000),
+        TimeUnit::Nanosecond => raw.div_euclid(1_000_000_000),
     }
 }
 
@@ -782,26 +896,27 @@ fn already_applied_slice(
 }
 
 pub fn start_processor_service(config: &Config, offsets: Arc<crate::helpers::offsets::Offsets>) {
-    if !config.transform_aggregates_configured() {
-        reset_reclaim_hold();
-        return;
-    }
-    if PROCESSOR_STARTED
-        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-        .is_err()
+    let pipeline = config.get_pipeline_name();
     {
-        return;
+        let mut started = PROCESSOR_STARTED.lock().unwrap_or_else(|e| e.into_inner());
+        if started.get(&pipeline).copied().unwrap_or(false) {
+            return;
+        }
+        started.insert(pipeline.clone(), true);
     }
     PROCESSOR_STOP.store(false, Ordering::Relaxed);
     let config = config.clone();
+    let pipeline_key = pipeline.clone();
     let handle = tokio::spawn(async move {
         if let Err(err) = run_processor_loop(config, offsets).await {
             error!("stream processor stopped: {err}");
         }
-        PROCESSOR_STARTED.store(false, Ordering::Relaxed);
+        if let Ok(mut started) = PROCESSOR_STARTED.lock() {
+            started.insert(pipeline_key, false);
+        }
     });
     if let Ok(mut guard) = PROCESSOR_HANDLE.lock() {
-        *guard = Some(handle);
+        guard.insert(pipeline, handle);
     }
 }
 
@@ -811,11 +926,28 @@ async fn run_processor_loop(
 ) -> Result<(), String> {
     let store = offsets.open_stream_state()?;
     let fence = offsets.writer_fence().unwrap_or_else(CatalogFence::local);
-    let aggregates = config.get_transform_aggregates();
-    let state = StreamState::open(store, fence, config.get_pipeline_name(), aggregates)?;
+    let metadata = config.get_metadata().await.map_err(|err| err.to_string())?;
+    if config.transform_compute_configured() {
+        crate::compute::admit_config(&config, store.as_ref(), fence, &metadata)
+            .map_err(|err| err.to_string())?;
+    }
+    let key =
+        crate::compute::journal_key(&config.get_workspace_name(), &config.get_pipeline_name())
+            .map_err(|err| err.to_string())?;
+    let log = crate::compute::load_journal(store.as_ref(), &key).map_err(|err| err.to_string())?;
+    let kinds: Vec<ComputeKind> = log
+        .kinds()
+        .into_iter()
+        .filter(|k| k.is_store_table())
+        .collect();
+    if kinds.is_empty() {
+        reset_reclaim_hold();
+        return Ok(());
+    }
+    let state = StreamState::open(store, fence, config.get_pipeline_name(), kinds)?;
     info!(
         pipeline = %config.get_pipeline_name(),
-        aggregates = state.aggregates.len(),
+        kinds = state.kinds.len(),
         "stream processor started"
     );
     loop {
@@ -839,11 +971,13 @@ async fn process_available(config: &Config, state: &StreamState) -> Result<usize
     rows.sort_by_key(|row| row.seq.get());
     let max_seq = rows.last().map(|row| row.seq.get()).unwrap_or(0);
     let mut processed = 0usize;
-    for agg in &state.aggregates {
+    for agg in &state.kinds {
+        let Some(id) = agg.store_id() else {
+            continue;
+        };
         for seg in &rows {
-            let meta = state.load_meta(&agg.id)?.unwrap_or_else(|| ProcessorMeta {
+            let meta = state.load_meta(id)?.unwrap_or_else(|| ProcessorMeta {
                 cursor: WalCursor::default(),
-                config_hash: state.config_hash.clone(),
             });
             let lag = max_seq.saturating_sub(meta.cursor.seq);
             crate::metrics::counters::set_stream_processor_wal_lag(lag);
@@ -856,7 +990,7 @@ async fn process_available(config: &Config, state: &StreamState) -> Result<usize
 
 async fn process_segment(
     state: &StreamState,
-    agg: &TransformAggregate,
+    agg: &ComputeKind,
     cursor: &WalCursor,
     seg: &SegmentRow,
 ) -> Result<usize, String> {
@@ -939,12 +1073,15 @@ async fn process_segment(
     }
     if processed > 0 {
         if finished_last {
-            set_min_unconsumed_seq(seg.seq.get().saturating_add(1));
+            set_min_unconsumed_seq(&state.pipeline, seg.seq.get().saturating_add(1));
         } else {
-            set_min_unconsumed_seq(seg.seq.get());
+            set_min_unconsumed_seq(&state.pipeline, seg.seq.get());
         }
         if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
-            if let Err(err) = handle.reclaim_fully_done_before(min_unconsumed_seq()).await {
+            if let Err(err) = handle
+                .reclaim_fully_done_before(min_unconsumed_seq(&state.pipeline))
+                .await
+            {
                 debug!("stream processor delayed reclaim: {err}");
             }
         }
@@ -962,68 +1099,38 @@ mod tests_fuzz;
 mod tests_sim;
 
 pub async fn drain_and_stop_processor() -> bool {
-    if !PROCESSOR_STARTED.load(Ordering::Relaxed) {
+    PROCESSOR_STOP.store(true, Ordering::Relaxed);
+    let handles: Vec<tokio::task::JoinHandle<()>> = PROCESSOR_HANDLE
+        .lock()
+        .ok()
+        .map(|mut g| g.drain().map(|(_, h)| h).collect())
+        .unwrap_or_default();
+    if handles.is_empty() {
+        if let Ok(mut started) = PROCESSOR_STARTED.lock() {
+            started.clear();
+        }
         return true;
     }
-    PROCESSOR_STOP.store(true, Ordering::Relaxed);
-    let handle = PROCESSOR_HANDLE.lock().ok().and_then(|mut g| g.take());
-    if let Some(handle) = handle {
+    let mut ok = true;
+    for handle in handles {
         if let Err(err) = handle.await {
             warn!("stream processor join failed: {err}");
-            return false;
+            ok = false;
         }
     }
-    PROCESSOR_STARTED.store(false, Ordering::Relaxed);
-    true
+    if let Ok(mut started) = PROCESSOR_STARTED.lock() {
+        started.clear();
+    }
+    ok
 }
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::{invoice_batch, invoice_kind};
     use super::*;
-    use arrow::array::{Int64Array, StringArray};
-    use arrow_schema::{Field, Schema};
-    use std::sync::Arc;
 
-    fn invoice_batch(customers: &[&str], amounts: &[i64], ids: &[&str]) -> RecordBatch {
-        let schema = Schema::new(vec![
-            Field::new("customer_id", DataType::Utf8, false),
-            Field::new("amount", DataType::Int64, false),
-            Field::new("invoice_id", DataType::Utf8, false),
-        ]);
-        RecordBatch::try_new(
-            Arc::new(schema),
-            vec![
-                Arc::new(StringArray::from(customers.to_vec())),
-                Arc::new(Int64Array::from(amounts.to_vec())),
-                Arc::new(StringArray::from(ids.to_vec())),
-            ],
-        )
-        .unwrap()
-    }
-
-    fn agg() -> TransformAggregate {
-        TransformAggregate {
-            id: "customer_invoice_totals".into(),
-            key_fields: vec!["customer_id".into()],
-            measures: [
-                (
-                    "invoice_total".into(),
-                    AggregateMeasure {
-                        sum: Some("amount".into()),
-                        ..Default::default()
-                    },
-                ),
-                (
-                    "invoice_count".into(),
-                    AggregateMeasure {
-                        count: Some("*".into()),
-                        ..Default::default()
-                    },
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        }
+    fn agg() -> crate::compute::ComputeKind {
+        invoice_kind()
     }
 
     fn state() -> super::test_support::DiskFixture {
@@ -1331,7 +1438,7 @@ mod tests {
     }
 
     #[test]
-    fn config_hash_rebuilds_state() {
+    fn incompatible_ir_wipe_clears_measures() {
         let fixture = super::test_support::DiskFixture::new();
         let spec = fixture.spec.clone();
         let batch = invoice_batch(&["A"], &[9], &["inv"]);
@@ -1350,23 +1457,13 @@ mod tests {
                 .unwrap(),
             9.0
         );
-        let (dir, db_path) = fixture.release();
-        let mut rebuilt = spec;
-        rebuilt.measures.insert(
-            "other".into(),
-            AggregateMeasure {
-                count: Some("*".into()),
-                ..Default::default()
-            },
-        );
-        let (_db, state2) = super::test_support::open_db(&db_path, rebuilt);
+        fixture.wipe_compute("customer_invoice_totals");
         assert_eq!(
-            state2
+            fixture
                 .measure("customer_invoice_totals", "A", "invoice_total")
                 .unwrap(),
             0.0
         );
-        let _keep = dir;
     }
 
     #[test]
@@ -1505,11 +1602,11 @@ mod tests {
     #[test]
     fn reclaim_hold_blocks_current_seq() {
         reset_reclaim_hold();
-        assert!(allows_reclaim(0));
-        set_min_unconsumed_seq(4);
-        assert!(allows_reclaim(3));
-        assert!(!allows_reclaim(4));
+        assert!(allows_reclaim("events", 0));
+        set_min_unconsumed_seq("events", 4);
+        assert!(allows_reclaim("events", 3));
+        assert!(!allows_reclaim("events", 4));
         reset_reclaim_hold();
-        assert!(allows_reclaim(4));
+        assert!(allows_reclaim("events", 4));
     }
 }

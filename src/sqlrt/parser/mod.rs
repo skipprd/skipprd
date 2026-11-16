@@ -1,7 +1,10 @@
+use crate::compute::{ComputeAlteration, Fqn, UnboundMeasureKind};
 use crate::discover::schema_alter::SchemaAlterOp;
 use crate::discover::SkipprDataType;
 use core::fmt;
-use datafusion::sql::sqlparser::ast::{DataType, Ident, ObjectName, ObjectNamePart};
+use datafusion::sql::sqlparser::ast::{
+    DataType, Ident, ObjectName, ObjectNamePart, SetExpr, Statement as StdStatement, TableFactor,
+};
 use datafusion::sql::sqlparser::dialect::{Dialect, GenericDialect};
 use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
@@ -230,6 +233,22 @@ pub enum Statement {
     PipelineToggle(PipelineToggleStatement),
     AlterTable(AlterTableStatement),
     TableDrop(TableDropStatement),
+    CreateView {
+        name: Fqn,
+        as_select: String,
+    },
+    CreateTableAs {
+        name: Fqn,
+        as_select: String,
+    },
+    DropCompute {
+        name: Fqn,
+    },
+    AlterCompute {
+        name: Fqn,
+        alterations: Vec<ComputeAlteration>,
+    },
+    Stream(StreamStatement),
     /// Extension: `SHOW DOCS`
     ShowDocs,
     /// Extension: `SHOW STATS FOR <pipeline>.<namespace>` (namespace optional)
@@ -259,20 +278,30 @@ pub enum Statement {
 /// Skipprs type inference and backwards compatible evolution rules.
 pub struct SParser<'a> {
     parser: Parser<'a>,
+    source: &'a str,
+}
+
+/// `STREAM <select> FROM <pipeline>.<namespace> [WINDOW <seconds>]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamStatement {
+    pub select_sql: String,
+    pub from: String,
+    pub window_secs: Option<i64>,
 }
 
 impl<'a> SParser<'a> {
-    pub fn new(sql: &str) -> Result<Self, ParserError> {
+    pub fn new(sql: &'a str) -> Result<Self, ParserError> {
         let dialect = &GenericDialect {};
         SParser::new_with_dialect(sql, dialect)
     }
 
-    pub fn new_with_dialect(sql: &str, dialect: &'a dyn Dialect) -> Result<Self, ParserError> {
+    pub fn new_with_dialect(sql: &'a str, dialect: &'a dyn Dialect) -> Result<Self, ParserError> {
         let mut tokenizer = Tokenizer::new(dialect, sql);
         let tokens = tokenizer.tokenize()?;
 
         Ok(SParser {
             parser: Parser::new(dialect).with_tokens(tokens),
+            source: sql,
         })
     }
 
@@ -315,6 +344,13 @@ impl<'a> SParser<'a> {
     pub fn parse_statement(&mut self) -> Result<Statement, ParserError> {
         return match self.parser.peek_token().token {
             Token::Word(w) => {
+                if w.value.eq_ignore_ascii_case("STREAM") {
+                    return self.parse_stream();
+                }
+                if w.value.to_uppercase() == "CREATE" {
+                    self.parser.next_token();
+                    return self.parse_create();
+                }
                 if w.value.to_uppercase() == "SHOW" {
                     self.parser.next_token(); // SHOW
                     if let Token::Word(w) = self.parser.peek_token().token {
@@ -449,6 +485,13 @@ impl<'a> SParser<'a> {
                                                         self.parser.next_token(); // TABLE
                                                         self.parse_alter_table()
                                                     }
+                                                    _ if w3
+                                                        .value
+                                                        .eq_ignore_ascii_case("COMPUTE") =>
+                                                    {
+                                                        self.parser.next_token();
+                                                        self.parse_alter_compute()
+                                                    }
                                                     _ => Err(ParserError::ParserError(
                                                         "Not implemented".to_string(),
                                                     )),
@@ -475,6 +518,66 @@ impl<'a> SParser<'a> {
 
     // This is a simplified sketch and needs to be integrated with your existing parsing logic.
 
+    fn parse_stream(&mut self) -> Result<Statement, ParserError> {
+        self.parser.next_token();
+        let trimmed = self.source.trim();
+        let upper_sql = trimmed.to_ascii_uppercase();
+        if !upper_sql.starts_with("STREAM ") {
+            return Err(ParserError::ParserError(
+                "STREAM requires a select and FROM <pipeline>.<namespace>".into(),
+            ));
+        }
+        let mut body = trimmed[6..].trim().to_string();
+        let mut window_secs = None;
+        let upper = body.to_ascii_uppercase();
+        if let Some(idx) = upper.find(" WINDOW ") {
+            let start = idx + 8;
+            let bytes = body.as_bytes();
+            let mut j = start;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            let num_start = j;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > num_start {
+                window_secs = body[num_start..j].parse::<i64>().ok();
+                let left = body[..idx].trim_end().to_string();
+                let right = body[j..].trim_start().to_string();
+                body = if right.is_empty() {
+                    left
+                } else {
+                    format!("{left} {right}")
+                };
+            }
+        }
+        let select_sql = format!("SELECT {body}");
+        let dialect = GenericDialect {};
+        let ast = Parser::parse_sql(&dialect, &select_sql)
+            .map_err(|err| ParserError::ParserError(format!("STREAM select: {err}")))?;
+        let mut from = None;
+        for stmt in ast {
+            if let StdStatement::Query(query) = stmt {
+                if let SetExpr::Select(select) = &*query.body {
+                    if let Some(table) = select.from.first() {
+                        if let TableFactor::Table { name, .. } = &table.relation {
+                            from = Some(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let from = from.ok_or_else(|| {
+            ParserError::ParserError("STREAM requires a FROM <pipeline>.<namespace>".into())
+        })?;
+        Ok(Statement::Stream(StreamStatement {
+            select_sql,
+            from,
+            window_secs,
+        }))
+    }
+
     pub fn parse_alter_table(&mut self) -> Result<Statement, ParserError> {
         let pipeline = token_ident(&self.parser.next_token().token);
 
@@ -488,6 +591,20 @@ impl<'a> SParser<'a> {
             }
             _ => None,
         };
+
+        if self.peek_compute_alter() {
+            let name = match &namespace {
+                Some(ns) => Fqn::from_parts(&pipeline, &token_ident_from_object(ns)?)
+                    .map_err(ParserError::ParserError)?,
+                None => {
+                    return Err(ParserError::ParserError(
+                        "ALTER TABLE compute sugar requires pipeline.name".into(),
+                    ))
+                }
+            };
+            let alterations = self.parse_compute_alterations()?;
+            return Ok(Statement::AlterCompute { name, alterations });
+        }
 
         match self.parser.next_token().token {
             Token::Word(w) => {
@@ -553,6 +670,93 @@ impl<'a> SParser<'a> {
             _ => Err(ParserError::ParserError(
                 "Expected keyword after ALTER TABLE".to_string(),
             )),
+        }
+    }
+
+    fn parse_alter_compute(&mut self) -> Result<Statement, ParserError> {
+        let name = parse_compute_name(&self.parser.parse_object_name(true)?)?;
+        let alterations = self.parse_compute_alterations()?;
+        Ok(Statement::AlterCompute { name, alterations })
+    }
+
+    fn peek_compute_alter(&mut self) -> bool {
+        match &self.parser.peek_nth_token(0).token {
+            Token::Word(w) if w.keyword == Keyword::ALTER => {
+                word_eq(&self.parser.peek_nth_token(1).token, "COLUMN")
+                    && word_eq(&self.parser.peek_nth_token(3).token, "SET")
+                    && (word_eq(&self.parser.peek_nth_token(4).token, "MEASURE")
+                        || word_eq(&self.parser.peek_nth_token(4).token, "FILTER"))
+            }
+            Token::Word(w) if w.keyword == Keyword::ADD => {
+                word_eq(&self.parser.peek_nth_token(1).token, "COLUMN")
+                    && word_eq(&self.parser.peek_nth_token(3).token, "MEASURE")
+            }
+            _ => false,
+        }
+    }
+
+    fn parse_compute_alterations(&mut self) -> Result<Vec<ComputeAlteration>, ParserError> {
+        let mut out = Vec::new();
+        loop {
+            out.push(self.parse_one_compute_alteration()?);
+            match self.parser.peek_token().token {
+                Token::Comma => {
+                    self.parser.next_token();
+                }
+                Token::EOF | Token::SemiColon => break,
+                _ => break,
+            }
+        }
+        if out.is_empty() {
+            return Err(ParserError::ParserError(
+                "ALTER COMPUTE requires at least one alteration".into(),
+            ));
+        }
+        Ok(out)
+    }
+
+    fn parse_one_compute_alteration(&mut self) -> Result<ComputeAlteration, ParserError> {
+        match self.parser.next_token().token {
+            Token::Word(w) if w.keyword == Keyword::DROP => {
+                self.parser.expect_keyword(Keyword::COLUMN)?;
+                let column = object_name_to_column(&self.parser.parse_object_name(false)?)?;
+                Ok(ComputeAlteration::DropColumn { column })
+            }
+            Token::Word(w) if w.keyword == Keyword::RENAME => {
+                self.parser.expect_keyword(Keyword::COLUMN)?;
+                let from = object_name_to_column(&self.parser.parse_object_name(false)?)?;
+                self.parser.expect_keyword(Keyword::TO)?;
+                let to = object_name_to_column(&self.parser.parse_object_name(false)?)?;
+                Ok(ComputeAlteration::RenameColumn { from, to })
+            }
+            Token::Word(w) if w.keyword == Keyword::ADD => {
+                self.parser.expect_keyword(Keyword::COLUMN)?;
+                let name = object_name_to_column(&self.parser.parse_object_name(false)?)?;
+                expect_word(&mut self.parser, "MEASURE")?;
+                let kind = parse_measure_kind(&mut self.parser)?;
+                Ok(ComputeAlteration::AddMeasure { name, kind })
+            }
+            Token::Word(w) if w.keyword == Keyword::ALTER => {
+                self.parser.expect_keyword(Keyword::COLUMN)?;
+                let column = object_name_to_column(&self.parser.parse_object_name(false)?)?;
+                expect_word(&mut self.parser, "SET")?;
+                match self.parser.next_token().token {
+                    Token::Word(w) if w.value.eq_ignore_ascii_case("MEASURE") => {
+                        let kind = parse_measure_kind(&mut self.parser)?;
+                        Ok(ComputeAlteration::SetMeasure { column, kind })
+                    }
+                    Token::Word(w) if w.value.eq_ignore_ascii_case("FILTER") => {
+                        let expr = self.parser.parse_expr()?.to_string();
+                        Ok(ComputeAlteration::SetFilter { expr })
+                    }
+                    other => Err(ParserError::ParserError(format!(
+                        "expected SET MEASURE or SET FILTER, got {other:?}"
+                    ))),
+                }
+            }
+            other => Err(ParserError::ParserError(format!(
+                "expected ALTER COMPUTE alteration, got {other:?}"
+            ))),
         }
     }
 
@@ -695,28 +899,9 @@ impl<'a> SParser<'a> {
                 match SkipprKeyword::from_str(&w.value) {
                     // Support both DUMP SCHEMA ... and DUMP TABLE ...
                     Some(SkipprKeyword::TABLE) => {
-                        self.parser.next_token(); // SCHEMA/TABLE
-
-                        let pipeline = self.parser.next_token().token.to_string();
-
-                        let schema = match self.parser.peek_token().token.to_string().as_str() {
-                            "." => {
-                                self.parser.next_token(); // .
-                                let schema = self.parser.next_token().token.to_string();
-                                Some(schema)
-                            }
-                            _ => None,
-                        };
-
-                        Ok(Statement::TableDrop(TableDropStatement {
-                            schema: schema.map(|s| {
-                                ObjectName(vec![ObjectNamePart::Identifier(Ident::new(s))])
-                            }),
-                            table: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
-                                pipeline,
-                            ))]),
-                        }))
-                        // }
+                        self.parser.next_token();
+                        let name = parse_fqn_object(&self.parser.parse_object_name(true)?)?;
+                        Ok(Statement::DropCompute { name })
                     }
                     Some(SkipprKeyword::PIPELINE) => {
                         self.parser.next_token(); // PIPELINE
@@ -743,6 +928,143 @@ impl<'a> SParser<'a> {
             }
             _ => Err(ParserError::ParserError("Unknown error".to_string())),
         };
+    }
+
+    fn parse_create(&mut self) -> Result<Statement, ParserError> {
+        match self.parser.peek_token().token {
+            Token::Word(w) => match w.value.to_uppercase().as_str() {
+                "INDEX" => Err(ParserError::ParserError(
+                    "CREATE INDEX is not Skippr SQL; use DISTINCT ON or GROUP BY".into(),
+                )),
+                "SINK" => Err(ParserError::ParserError(
+                    "CREATE SINK is not Skippr SQL".into(),
+                )),
+                "VIEW" => {
+                    self.parser.next_token();
+                    let name = parse_fqn_object(&self.parser.parse_object_name(true)?)?;
+                    self.parser.expect_keyword(Keyword::AS)?;
+                    let as_select = self.rest_sql()?;
+                    if as_select.trim().is_empty() {
+                        return Err(ParserError::ParserError(
+                            "CREATE VIEW requires AS SELECT".into(),
+                        ));
+                    }
+                    Ok(Statement::CreateView { name, as_select })
+                }
+                "TABLE" => {
+                    self.parser.next_token();
+                    let name = parse_fqn_object(&self.parser.parse_object_name(true)?)?;
+                    match self.parser.peek_token().token {
+                        Token::Word(w) if w.keyword == Keyword::AS => {
+                            self.parser.next_token();
+                            let as_select = self.rest_sql()?;
+                            if as_select.trim().is_empty() {
+                                return Err(ParserError::ParserError(
+                                    "CREATE TABLE requires AS SELECT".into(),
+                                ));
+                            }
+                            Ok(Statement::CreateTableAs { name, as_select })
+                        }
+                        _ => Err(ParserError::ParserError(
+                            "empty CREATE TABLE is not Skippr SQL; use CREATE TABLE AS SELECT"
+                                .into(),
+                        )),
+                    }
+                }
+                other => Err(ParserError::ParserError(format!(
+                    "CREATE {other} is not Skippr SQL"
+                ))),
+            },
+            _ => Err(ParserError::ParserError(
+                "CREATE requires VIEW or TABLE".into(),
+            )),
+        }
+    }
+
+    fn rest_sql(&mut self) -> Result<String, ParserError> {
+        let query = self.parser.parse_query()?;
+        Ok(query.to_string())
+    }
+}
+
+fn parse_fqn_object(name: &ObjectName) -> Result<Fqn, ParserError> {
+    let parts: Vec<String> = name
+        .0
+        .iter()
+        .filter_map(|p| p.as_ident().map(|id| id.value.clone()))
+        .collect();
+    match parts.as_slice() {
+        [pipeline, ident] => Fqn::from_parts(pipeline, ident).map_err(ParserError::ParserError),
+        _ => Err(ParserError::ParserError(
+            "name must be pipeline.name".into(),
+        )),
+    }
+}
+
+fn parse_compute_name(name: &ObjectName) -> Result<Fqn, ParserError> {
+    let parts: Vec<String> = name
+        .0
+        .iter()
+        .filter_map(|p| p.as_ident().map(|id| id.value.clone()))
+        .collect();
+    match parts.as_slice() {
+        [pipeline, ident] => Fqn::from_parts(pipeline, ident).map_err(ParserError::ParserError),
+        [ident] => Fqn::from_parts(Fqn::BARE, ident).map_err(ParserError::ParserError),
+        _ => Err(ParserError::ParserError(
+            "ALTER COMPUTE name must be ident or pipeline.ident".into(),
+        )),
+    }
+}
+
+fn token_ident_from_object(name: &ObjectName) -> Result<String, ParserError> {
+    object_name_to_column(name)
+}
+
+fn word_eq(token: &Token, want: &str) -> bool {
+    match token {
+        Token::Word(w) => w.value.eq_ignore_ascii_case(want),
+        _ => false,
+    }
+}
+
+fn expect_word(parser: &mut Parser<'_>, word: &str) -> Result<(), ParserError> {
+    match parser.next_token().token {
+        Token::Word(w) if w.value.eq_ignore_ascii_case(word) => Ok(()),
+        other => Err(ParserError::ParserError(format!(
+            "expected {word}, got {other:?}"
+        ))),
+    }
+}
+
+fn parse_measure_kind(parser: &mut Parser<'_>) -> Result<UnboundMeasureKind, ParserError> {
+    match parser.next_token().token {
+        Token::Word(w) if w.value.eq_ignore_ascii_case("COUNT") => {
+            parser.expect_token(&Token::LParen)?;
+            match parser.next_token().token {
+                Token::Mul | Token::Word(_) => {}
+                other => {
+                    return Err(ParserError::ParserError(format!(
+                        "COUNT expects * or a column, got {other:?}"
+                    )))
+                }
+            }
+            parser.expect_token(&Token::RParen)?;
+            Ok(UnboundMeasureKind::Count)
+        }
+        Token::Word(w) => {
+            parser.expect_token(&Token::LParen)?;
+            let col = object_name_to_column(&parser.parse_object_name(false)?)?;
+            parser.expect_token(&Token::RParen)?;
+            match w.value.to_ascii_uppercase().as_str() {
+                "SUM" => Ok(UnboundMeasureKind::Sum(col)),
+                "MIN" => Ok(UnboundMeasureKind::Min(col)),
+                "MAX" => Ok(UnboundMeasureKind::Max(col)),
+                other => Err(ParserError::ParserError(format!("unknown measure {other}"))),
+            }
+        }
+        other => Err(ParserError::ParserError(format!(
+            "expected measure function, got {other:?}"
+        ))),
     }
 }
 
@@ -923,5 +1245,218 @@ mod tests {
             }
             other => panic!("expected AlterTable, got {other:?}"),
         }
+    }
+
+    fn parse_ok(sql: &str) -> Statement {
+        let mut parser = SParser::new(sql).unwrap();
+        parser.parse_statement().unwrap()
+    }
+
+    fn parse_err(sql: &str) -> String {
+        let mut parser = SParser::new(sql).unwrap();
+        parser.parse_statement().unwrap_err().to_string()
+    }
+
+    #[test]
+    fn create_view_parses_fqn() {
+        match parse_ok(
+            "CREATE VIEW invoices.positive AS SELECT * FROM invoices.orders WHERE amount > 0",
+        ) {
+            Statement::CreateView { name, as_select } => {
+                assert_eq!(name.to_string(), "invoices.positive");
+                assert!(as_select.to_uppercase().contains("SELECT"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_parses_from_and_window() {
+        match parse_ok("STREAM customer_id FROM invoices.orders WINDOW 30") {
+            Statement::Stream(stream) => {
+                assert_eq!(stream.from, "invoices.orders");
+                assert_eq!(stream.window_secs, Some(30));
+                assert!(stream.select_sql.to_uppercase().starts_with("SELECT "));
+                assert!(!stream.select_sql.to_uppercase().contains(" WINDOW "));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_from_pipeline_without_window() {
+        match parse_ok("STREAM count(*) FROM shop") {
+            Statement::Stream(stream) => {
+                assert_eq!(stream.from, "shop");
+                assert_eq!(stream.window_secs, None);
+                assert!(stream.select_sql.to_ascii_uppercase().contains("COUNT"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_requires_from() {
+        let err = parse_err("STREAM 1");
+        assert!(err.to_ascii_uppercase().contains("FROM"), "{err}");
+    }
+
+    #[test]
+    fn create_view_quoted_fqn() {
+        match parse_ok(r#"CREATE VIEW "invoices"."positive" AS SELECT * FROM invoices.orders"#) {
+            Statement::CreateView { name, as_select } => {
+                assert_eq!(name.to_string(), "invoices.positive");
+                assert!(as_select.to_uppercase().contains("SELECT"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_view_requires_as_select() {
+        let err = parse_err("CREATE VIEW invoices.positive");
+        assert!(
+            err.to_uppercase().contains("AS") || err.to_uppercase().contains("SELECT"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn create_view_rejects_one_part_name() {
+        let err = parse_err("CREATE VIEW positive AS SELECT * FROM invoices.orders");
+        assert!(err.contains("pipeline.name"), "{err}");
+    }
+
+    #[test]
+    fn empty_create_view_is_parse_fail() {
+        let err = parse_err("CREATE VIEW invoices.positive AS");
+        assert!(
+            !err.is_empty(),
+            "empty CREATE VIEW AS must fail closed: {err}"
+        );
+    }
+
+    #[test]
+    fn create_table_as_parses_group_by() {
+        match parse_ok(
+            "CREATE TABLE invoices.customer_totals AS SELECT customer_id, SUM(amount) AS invoice_total FROM invoices.orders GROUP BY customer_id",
+        ) {
+            Statement::CreateTableAs { name, .. } => {
+                assert_eq!(name.to_string(), "invoices.customer_totals")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_index_is_parse_fail() {
+        let err = parse_err("CREATE INDEX foo ON invoices.orders (customer_id)");
+        assert!(err.contains("CREATE INDEX"), "{err}");
+    }
+
+    #[test]
+    fn create_sink_is_parse_fail() {
+        let err = parse_err("CREATE SINK lake FROM invoices.orders");
+        assert!(err.contains("CREATE SINK"), "{err}");
+    }
+
+    #[test]
+    fn empty_create_table_is_parse_fail() {
+        let err = parse_err("CREATE TABLE invoices.customer_totals");
+        assert!(err.to_uppercase().contains("AS SELECT"), "{err}");
+    }
+
+    #[test]
+    fn drop_table_compute_is_drop_compute() {
+        match parse_ok("DROP TABLE invoices.customer_totals") {
+            Statement::DropCompute { name } => {
+                assert_eq!(name.to_string(), "invoices.customer_totals")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn alter_compute_set_measure() {
+        match parse_ok(
+            "ALTER COMPUTE invoices.customer_totals ALTER COLUMN invoice_total SET MEASURE SUM(amount)",
+        ) {
+            Statement::AlterCompute { name, alterations } => {
+                assert_eq!(name.to_string(), "invoices.customer_totals");
+                assert_eq!(
+                    alterations,
+                    vec![ComputeAlteration::SetMeasure {
+                        column: "invoice_total".into(),
+                        kind: UnboundMeasureKind::Sum("amount".into()),
+                    }]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn alter_table_set_measure_is_alter_compute() {
+        match parse_ok(
+            "ALTER TABLE invoices.customer_totals ALTER COLUMN invoice_total SET MEASURE SUM(amount)",
+        ) {
+            Statement::AlterCompute { name, alterations } => {
+                assert_eq!(name.to_string(), "invoices.customer_totals");
+                assert!(matches!(
+                    alterations[0],
+                    ComputeAlteration::SetMeasure { .. }
+                ));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn alter_compute_stateless_set_filter() {
+        match parse_ok("ALTER COMPUTE positive_orders ALTER COLUMN amount SET FILTER amount > 10") {
+            Statement::AlterCompute { name, alterations } => {
+                assert!(name.is_bare(), "{name}");
+                assert_eq!(name.name.as_str(), "positive_orders");
+                assert!(matches!(
+                    alterations[0],
+                    ComputeAlteration::SetFilter { .. }
+                ));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn alter_table_type_is_not_compute_sugar() {
+        match parse_ok("ALTER TABLE invoices.orders ALTER COLUMN n TYPE BIGINT") {
+            Statement::AlterTable(stmt) => {
+                assert!(matches!(
+                    stmt.op,
+                    crate::discover::schema_alter::SchemaAlterOp::Promote { .. }
+                ));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn peek_compute_alter_does_not_scan_source() {
+        let src = include_str!("mod.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let peek = prod
+            .split("fn peek_compute_alter")
+            .nth(1)
+            .expect("peek_compute_alter")
+            .split("fn parse_compute_alterations")
+            .next()
+            .expect("peek body");
+        assert!(
+            !peek.contains("self.source"),
+            "ALTER TABLE compute sugar must peek tokens, not scan the source string"
+        );
+        assert!(
+            !peek.contains("contains("),
+            "ALTER TABLE compute sugar must peek tokens, not scan the source string"
+        );
     }
 }

@@ -22,7 +22,7 @@ class StreamTransformsCiTests(unittest.TestCase):
         self.assertIn("pull_request:", header)
         self.assertIn("workflow_dispatch:", header)
         self.assertIn(
-            'run: "cargo test -p skipprd --lib -- processor:: stream_transform::"',
+            'run: "cargo test -p skipprd --lib -- processor:: compute::"',
             text,
         )
         self.assertIn("protobuf-compiler", text)

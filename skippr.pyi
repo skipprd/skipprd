@@ -561,6 +561,15 @@ DataSinkSkipprLakeWarehouseObjectStore: TypeAlias = (
     | DataSinkSkipprLakeWarehouseObjectStoreS3
     | DataSinkSkipprLakeWarehouseObjectStoreR2
 )
+SdlDoc: TypeAlias = (
+    SdlDocStateless
+    | SdlDocView
+    | SdlDocLatest
+    | SdlDocKeyedTable
+    | SdlDocWindowedTable
+    | SdlDocStreamTableJoin
+)
+ComputeItem: TypeAlias = ComputeItemSql | ComputeItemSdl
 DataSourceConfig: TypeAlias = (
     DataSourceAdRollAds
     | DataSourceAmqp
@@ -1047,6 +1056,282 @@ class DataSinkSkipprLakeWarehouseObjectStoreR2:
         ...
 
 @final
+class SdlDocStateless:
+    """Skipper Definition Language document. `type` is the `ComputeKind` discriminant."""
+    def __new__(
+        cls,
+        *,
+        target: str,
+        name: str | None = None,
+        filter: str | None = None,
+        derive: list[SdlDerive] | None = None,
+    ) -> SdlDocStateless:
+        """Skipper Definition Language document. `type` is the `ComputeKind` discriminant.
+
+        Args:
+            target: YAML key `target`.
+            name: YAML key `name`.
+            filter: YAML key `filter`.
+            derive: YAML key `derive`."""
+        ...
+    @property
+    def target(self) -> str:
+        """YAML key `target`."""
+        ...
+    @property
+    def name(self) -> str | None:
+        """YAML key `name`."""
+        ...
+    @property
+    def filter(self) -> str | None:
+        """YAML key `filter`."""
+        ...
+    @property
+    def derive(self) -> Sequence[SdlDerive] | None:
+        """YAML key `derive`."""
+        ...
+
+@final
+class SdlDocView:
+    """Skipper Definition Language document. `type` is the `ComputeKind` discriminant."""
+    def __new__(
+        cls,
+        *,
+        input: str,
+        name: str | None = None,
+        filter: str | None = None,
+        derive: list[SdlDerive] | None = None,
+    ) -> SdlDocView:
+        """Skipper Definition Language document. `type` is the `ComputeKind` discriminant.
+
+        Args:
+            input: YAML key `input`.
+            name: YAML key `name`.
+            filter: YAML key `filter`.
+            derive: YAML key `derive`."""
+        ...
+    @property
+    def input(self) -> str:
+        """YAML key `input`."""
+        ...
+    @property
+    def name(self) -> str | None:
+        """YAML key `name`."""
+        ...
+    @property
+    def filter(self) -> str | None:
+        """YAML key `filter`."""
+        ...
+    @property
+    def derive(self) -> Sequence[SdlDerive] | None:
+        """YAML key `derive`."""
+        ...
+
+@final
+class SdlDocLatest:
+    """Skipper Definition Language document. `type` is the `ComputeKind` discriminant."""
+    def __new__(
+        cls,
+        *,
+        input: str,
+        keys: list[str],
+        name: str | None = None,
+        order: list[str] | None = None,
+    ) -> SdlDocLatest:
+        """Skipper Definition Language document. `type` is the `ComputeKind` discriminant.
+
+        Args:
+            input: YAML key `input`.
+            keys: YAML key `keys`.
+            name: YAML key `name`.
+            order: YAML key `order`."""
+        ...
+    @property
+    def input(self) -> str:
+        """YAML key `input`."""
+        ...
+    @property
+    def keys(self) -> Sequence[str]:
+        """YAML key `keys`."""
+        ...
+    @property
+    def name(self) -> str | None:
+        """YAML key `name`."""
+        ...
+    @property
+    def order(self) -> Sequence[str] | None:
+        """YAML key `order`."""
+        ...
+
+@final
+class SdlDocKeyedTable:
+    """Skipper Definition Language document. `type` is the `ComputeKind` discriminant."""
+    def __new__(
+        cls,
+        *,
+        input: str,
+        keys: list[str],
+        measures: list[SdlMeasure],
+        name: str | None = None,
+    ) -> SdlDocKeyedTable:
+        """Skipper Definition Language document. `type` is the `ComputeKind` discriminant.
+
+        Args:
+            input: YAML key `input`.
+            keys: YAML key `keys`.
+            measures: YAML key `measures`.
+            name: YAML key `name`."""
+        ...
+    @property
+    def input(self) -> str:
+        """YAML key `input`."""
+        ...
+    @property
+    def keys(self) -> Sequence[str]:
+        """YAML key `keys`."""
+        ...
+    @property
+    def measures(self) -> Sequence[SdlMeasure]:
+        """YAML key `measures`."""
+        ...
+    @property
+    def name(self) -> str | None:
+        """YAML key `name`."""
+        ...
+
+@final
+class SdlDocWindowedTable:
+    """Skipper Definition Language document. `type` is the `ComputeKind` discriminant."""
+    def __new__(
+        cls,
+        *,
+        input: str,
+        keys: list[str],
+        window: str,
+        event_time: str,
+        measures: list[SdlMeasure],
+        name: str | None = None,
+    ) -> SdlDocWindowedTable:
+        """Skipper Definition Language document. `type` is the `ComputeKind` discriminant.
+
+        Args:
+            input: YAML key `input`.
+            keys: YAML key `keys`.
+            window: YAML key `window`.
+            event_time: YAML key `event_time`.
+            measures: YAML key `measures`.
+            name: YAML key `name`."""
+        ...
+    @property
+    def input(self) -> str:
+        """YAML key `input`."""
+        ...
+    @property
+    def keys(self) -> Sequence[str]:
+        """YAML key `keys`."""
+        ...
+    @property
+    def window(self) -> str:
+        """YAML key `window`."""
+        ...
+    @property
+    def event_time(self) -> str:
+        """YAML key `event_time`."""
+        ...
+    @property
+    def measures(self) -> Sequence[SdlMeasure]:
+        """YAML key `measures`."""
+        ...
+    @property
+    def name(self) -> str | None:
+        """YAML key `name`."""
+        ...
+
+@final
+class SdlDocStreamTableJoin:
+    """Skipper Definition Language document. `type` is the `ComputeKind` discriminant."""
+    def __new__(
+        cls,
+        *,
+        stream: str,
+        table: str,
+        on: list[str],
+        name: str | None = None,
+    ) -> SdlDocStreamTableJoin:
+        """Skipper Definition Language document. `type` is the `ComputeKind` discriminant.
+
+        Args:
+            stream: YAML key `stream`.
+            table: YAML key `table`.
+            on: YAML key `on`.
+            name: YAML key `name`."""
+        ...
+    @property
+    def stream(self) -> str:
+        """YAML key `stream`."""
+        ...
+    @property
+    def table(self) -> str:
+        """YAML key `table`."""
+        ...
+    @property
+    def on(self) -> Sequence[str]:
+        """YAML key `on`."""
+        ...
+    @property
+    def name(self) -> str | None:
+        """YAML key `name`."""
+        ...
+
+@final
+class ComputeItemSql:
+    """One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`)."""
+    def __new__(
+        cls,
+        *,
+        name: str,
+        value: str,
+    ) -> ComputeItemSql:
+        """One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`).
+
+        Args:
+            name: YAML key `name`.
+            value: YAML key `value`."""
+        ...
+    @property
+    def name(self) -> str:
+        """YAML key `name`."""
+        ...
+    @property
+    def value(self) -> str:
+        """YAML key `value`."""
+        ...
+
+@final
+class ComputeItemSdl:
+    """One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`)."""
+    def __new__(
+        cls,
+        *,
+        name: str,
+        value: SdlDoc,
+    ) -> ComputeItemSdl:
+        """One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`).
+
+        Args:
+            name: YAML key `name`.
+            value: YAML key `value`."""
+        ...
+    @property
+    def name(self) -> str:
+        """YAML key `name`."""
+        ...
+    @property
+    def value(self) -> SdlDoc:
+        """YAML key `value`."""
+        ...
+
+@final
 class Pipeline:
     """One skipprd pipeline: a source, optional sinks, and how sync runs.
 
@@ -1156,131 +1441,63 @@ class Pipeline:
     YAML key `cdc`."""
 
 @final
-class TransformOp:
-    """One in-memory Arrow op. YAML/JSON is a one-key map (`filter:`, `project:`, …)."""
-    @classmethod
-    def filter(cls, filter: str) -> TransformOp:
-        """DataFusion SQL boolean expression. Rows that do not match are dropped.
-
-        YAML key `filter`."""
-        ...
-    @classmethod
-    def project(cls, project: list[str]) -> TransformOp:
-        """Keep only these output column names, in this order.
-
-        YAML key `project`."""
-        ...
-    @classmethod
-    def derive(cls, derive: dict[str, str]) -> TransformOp:
-        """Add derived columns. Map of new name to DataFusion SQL expression.
-
-        YAML key `derive`."""
-        ...
-    @classmethod
-    def rename(cls, rename: dict[str, str]) -> TransformOp:
-        """Rename columns. Map of current name to new name.
-
-        YAML key `rename`."""
-        ...
-    @classmethod
-    def cast(cls, cast: dict[str, str]) -> TransformOp:
-        """Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`).
-
-        YAML key `cast`."""
-        ...
-    @property
-    def filter(self) -> str | None:
-        """DataFusion SQL boolean expression. Rows that do not match are dropped.
-
-        YAML key `filter`."""
-        ...
-    @property
-    def project(self) -> Sequence[str] | None:
-        """Keep only these output column names, in this order.
-
-        YAML key `project`."""
-        ...
-    @property
-    def derive(self) -> Mapping[str, str] | None:
-        """Add derived columns. Map of new name to DataFusion SQL expression.
-
-        YAML key `derive`."""
-        ...
-    @property
-    def rename(self) -> Mapping[str, str] | None:
-        """Rename columns. Map of current name to new name.
-
-        YAML key `rename`."""
-        ...
-    @property
-    def cast(self) -> Mapping[str, str] | None:
-        """Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`).
-
-        YAML key `cast`."""
-        ...
-
-@final
-class AggregateMeasure:
-    """One aggregate measure. Exactly one of `sum` or `count` may be set."""
+class SdlDerive:
     def __new__(
         cls,
         *,
+        name: str,
+        expr: str,
+    ) -> SdlDerive:
+        """Args:
+            name: YAML key `name`.
+            expr: YAML key `expr`."""
+        ...
+    @property
+    def name(self) -> str:
+        """YAML key `name`."""
+        ...
+    @property
+    def expr(self) -> str:
+        """YAML key `expr`."""
+        ...
+
+@final
+class SdlMeasure:
+    def __new__(
+        cls,
+        *,
+        name: str,
         sum: str | None = None,
         count: str | None = None,
-    ) -> AggregateMeasure:
-        """One aggregate measure. Exactly one of `sum` or `count` may be set.
-
-        Args:
-            sum: Column to sum. CDC updates apply the delta from the previous row.
-            count: Count rows. Use `"*"` for every row."""
+        min: str | None = None,
+        max: str | None = None,
+    ) -> SdlMeasure:
+        """Args:
+            name: YAML key `name`.
+            sum: YAML key `sum`.
+            count: YAML key `count`.
+            min: YAML key `min`.
+            max: YAML key `max`."""
+        ...
+    @property
+    def name(self) -> str:
+        """YAML key `name`."""
         ...
     @property
     def sum(self) -> str | None:
-        """Column to sum. CDC updates apply the delta from the previous row.
-
-        YAML key `sum`."""
+        """YAML key `sum`."""
         ...
     @property
     def count(self) -> str | None:
-        """Count rows. Use `"*"` for every row.
-
-        YAML key `count`."""
-        ...
-
-@final
-class TransformAggregate:
-    """One keyed running aggregate maintained from committed WAL records."""
-    def __new__(
-        cls,
-        *,
-        id: str,
-        key_fields: list[str],
-        measures: dict[str, AggregateMeasure],
-    ) -> TransformAggregate:
-        """One keyed running aggregate maintained from committed WAL records.
-
-        Args:
-            id: Stable processor id used in Skippr Store `stream_state` key namespaces.
-            key_fields: Columns that form the aggregate key, in order.
-            measures: Named measures. Each value is `{ sum: column }` or `{ count: "*" }`."""
+        """YAML key `count`."""
         ...
     @property
-    def id(self) -> str:
-        """Stable processor id used in Skippr Store `stream_state` key namespaces.
-
-        YAML key `id`."""
+    def min(self) -> str | None:
+        """YAML key `min`."""
         ...
     @property
-    def key_fields(self) -> Sequence[str]:
-        """Columns that form the aggregate key, in order.
-
-        YAML key `key_fields`."""
-        ...
-    @property
-    def measures(self) -> Mapping[str, AggregateMeasure]:
-        """Named measures. Each value is `{ sum: column }` or `{ count: "*" }`.
-
-        YAML key `measures`."""
+    def max(self) -> str | None:
+        """YAML key `max`."""
         ...
 
 @final
@@ -1289,7 +1506,9 @@ class Transform:
     def __new__(
         cls,
         *,
-        batch_time_fields: str | None = None,
+        event_time: str | None = None,
+        watermark_delay: str | None = None,
+        compute: list[ComputeItem] | None = None,
         batch_time_unit: BatchTimeUnit | None = None,
         flatten_events: bool | None = None,
         record_field_path: str | None = None,
@@ -1301,13 +1520,13 @@ class Transform:
         enable_unicode_parsing: bool | None = None,
         batch_order_fields: str | None = None,
         inject_fields: dict[str, Any] | None = None,
-        ops: list[TransformOp] | None = None,
-        aggregates: list[TransformAggregate] | None = None,
     ) -> Transform:
         """How source records are namespaced, partitioned, flattened, and ordered before the sink.
 
         Args:
-            batch_time_fields: Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.
+            event_time: Event-time column (FieldId after bind). YAML alias `batch_time_fields`.
+            watermark_delay: Watermark delay parsed at the edge to Duration (`5 minutes`).
+            compute: Declared compute. Each item is `{name, type: sql|sdl, value}`. Journaled as `ComputeKind`.
             batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.
             flatten_events: Flatten nested objects into underscore-separated columns (`contact_name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).
             record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.
@@ -1318,15 +1537,25 @@ class Transform:
             enable_single_quote_parsing: Accept JSON that uses single quotes around strings.
             enable_unicode_parsing: Accept JSON with unescaped Unicode.
             batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.
-            inject_fields: Static field names and JSON values merged onto each source record before ingest.
-            ops: Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.
-            aggregates: Keyed running aggregates maintained from committed WAL data in Skippr Store (`stream_state`)."""
+            inject_fields: Static field names and JSON values merged onto each source record before ingest."""
         ...
     @property
-    def batch_time_fields(self) -> str | None:
-        """Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.
+    def event_time(self) -> str | None:
+        """Event-time column (FieldId after bind). YAML alias `batch_time_fields`.
 
-        YAML key `batch_time_fields`."""
+        YAML key `event_time`."""
+        ...
+    @property
+    def watermark_delay(self) -> str | None:
+        """Watermark delay parsed at the edge to Duration (`5 minutes`).
+
+        YAML key `watermark_delay`."""
+        ...
+    @property
+    def compute(self) -> Sequence[ComputeItem] | None:
+        """Declared compute. Each item is `{name, type: sql|sdl, value}`. Journaled as `ComputeKind`.
+
+        YAML key `compute`."""
         ...
     @property
     def batch_time_unit(self) -> BatchTimeUnit | None:
@@ -1393,18 +1622,6 @@ class Transform:
         """Static field names and JSON values merged onto each source record before ingest.
 
         YAML key `inject_fields`."""
-        ...
-    @property
-    def ops(self) -> Sequence[TransformOp] | None:
-        """Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.
-
-        YAML key `ops`."""
-        ...
-    @property
-    def aggregates(self) -> Sequence[TransformAggregate] | None:
-        """Keyed running aggregates maintained from committed WAL data in Skippr Store (`stream_state`).
-
-        YAML key `aggregates`."""
         ...
 
 @final

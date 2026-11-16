@@ -1789,3 +1789,29 @@ async fn apply_alter_rename_rejects_position_deletes() {
     .unwrap_err();
     assert!(err.to_string().contains("position delete"), "{err}");
 }
+
+#[tokio::test]
+async fn leftover_legacy_grouped_object_is_not_replayed() {
+    let harness = Harness::new().await;
+    let table_location = format!("file://{}/lake/{}", harness.dir.path().display(), NAMESPACE);
+    let (bucket, table_prefix) = super::parse_object_location(&table_location)
+        .unwrap()
+        .parts();
+    assert!(bucket.is_empty(), "{bucket}");
+    let keys = super::legacy_grouped_object_keys(&table_prefix, "apply-legacy");
+    let leftover = std::path::PathBuf::from(&keys[0]);
+    if let Some(parent) = leftover.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&leftover, b"leftover-grouped").unwrap();
+    let err = harness
+        .try_write_rows(&harness.writer, "legacy", vec![1], None, None, None)
+        .await
+        .unwrap_err();
+    let _ = std::fs::remove_file(&leftover);
+    assert!(
+        err.to_string()
+            .contains("legacy grouped compaction objects are not replayed"),
+        "{err}"
+    );
+}

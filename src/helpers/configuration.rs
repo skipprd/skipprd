@@ -373,9 +373,19 @@ impl PairedSink {
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Transform {
-    /// Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.
+    /// Event-time column (FieldId after bind). YAML alias `batch_time_fields`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "batch_time_fields"
+    )]
+    pub event_time: Option<String>,
+    /// Watermark delay parsed at the edge to Duration (`5 minutes`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub batch_time_fields: Option<String>,
+    pub watermark_delay: Option<String>,
+    /// Declared compute. Each item is `{name, type: sql|sdl, value}`. Journaled as `ComputeKind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<Vec<ComputeItem>>,
     /// Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_time_unit: Option<BatchTimeUnit>,
@@ -421,146 +431,98 @@ pub struct Transform {
     /// Static field names and JSON values merged onto each source record before ingest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inject_fields: Option<BTreeMap<String, Value>>,
-    /// Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ops: Option<Vec<TransformOp>>,
-    /// Keyed running aggregates maintained from committed WAL data in Skippr Store (`stream_state`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aggregates: Option<Vec<TransformAggregate>>,
 }
 
-/// One in-memory Arrow op. YAML/JSON is a one-key map (`filter:`, `project:`, …).
-#[derive(Debug, Clone, PartialEq)]
-pub enum TransformOp {
-    /// DataFusion SQL boolean expression. Rows that do not match are dropped.
-    Filter(String),
-    /// Keep only these output column names, in this order.
-    Project(Vec<String>),
-    /// Add derived columns. Map of new name to DataFusion SQL expression.
-    Derive(BTreeMap<String, String>),
-    /// Rename columns. Map of current name to new name.
-    Rename(BTreeMap<String, String>),
-    /// Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`).
-    Cast(BTreeMap<String, String>),
+/// One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`).
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ComputeItem {
+    Sql { name: String, value: String },
+    Sdl { name: String, value: SdlDoc },
 }
 
-impl TransformOp {
-    pub fn is_table_schema_op(&self) -> bool {
-        matches!(self, Self::Project(_) | Self::Rename(_) | Self::Cast(_))
-    }
-}
-
-impl serde::Serialize for TransformOp {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(1))?;
+impl ComputeItem {
+    pub fn name(&self) -> &str {
         match self {
-            TransformOp::Filter(expr) => map.serialize_entry("filter", expr)?,
-            TransformOp::Project(cols) => map.serialize_entry("project", cols)?,
-            TransformOp::Derive(exprs) => map.serialize_entry("derive", exprs)?,
-            TransformOp::Rename(names) => map.serialize_entry("rename", names)?,
-            TransformOp::Cast(types) => map.serialize_entry("cast", types)?,
+            Self::Sql { name, .. } | Self::Sdl { name, .. } => name,
         }
-        map.end()
     }
 }
 
-impl<'de> serde::Deserialize<'de> for TransformOp {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor;
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = TransformOp;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a transform op map with one of filter, project, derive, rename, cast")
-            }
-            fn visit_map<M: serde::de::MapAccess<'de>>(
-                self,
-                mut map: M,
-            ) -> Result<TransformOp, M::Error> {
-                let key: String = map
-                    .next_key()?
-                    .ok_or_else(|| serde::de::Error::custom("empty transform op"))?;
-                let op = match key.as_str() {
-                    "filter" => TransformOp::Filter(map.next_value()?),
-                    "project" => TransformOp::Project(map.next_value()?),
-                    "derive" => TransformOp::Derive(map.next_value()?),
-                    "rename" => TransformOp::Rename(map.next_value()?),
-                    "cast" => TransformOp::Cast(map.next_value()?),
-                    other => {
-                        return Err(serde::de::Error::unknown_field(
-                            other,
-                            &["filter", "project", "derive", "rename", "cast"],
-                        ))
-                    }
-                };
-                if map.next_key::<String>()?.is_some() {
-                    return Err(serde::de::Error::custom("transform op must have one key"));
-                }
-                Ok(op)
-            }
-        }
-        deserializer.deserialize_map(Visitor)
-    }
+/// Skipper Definition Language document. `type` is the `ComputeKind` discriminant.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SdlDoc {
+    Stateless {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        target: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        derive: Option<Vec<SdlDerive>>,
+    },
+    View {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        input: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        derive: Option<Vec<SdlDerive>>,
+    },
+    Latest {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        input: String,
+        keys: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order: Option<Vec<String>>,
+    },
+    KeyedTable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        input: String,
+        keys: Vec<String>,
+        measures: Vec<SdlMeasure>,
+    },
+    WindowedTable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        input: String,
+        keys: Vec<String>,
+        window: String,
+        event_time: String,
+        measures: Vec<SdlMeasure>,
+    },
+    StreamTableJoin {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        stream: String,
+        table: String,
+        on: Vec<String>,
+    },
 }
 
-/// One keyed running aggregate maintained from committed WAL records.
-#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TransformAggregate {
-    /// Stable processor id used in Skippr Store `stream_state` key namespaces.
-    pub id: String,
-    /// Columns that form the aggregate key, in order.
-    pub key_fields: Vec<String>,
-    /// Named measures. Each value is `{ sum: column }` or `{ count: "*" }`.
-    pub measures: BTreeMap<String, AggregateMeasure>,
+pub struct SdlDerive {
+    pub name: String,
+    pub expr: String,
 }
 
-impl TransformAggregate {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.id.trim().is_empty() {
-            return Err("transform.aggregates[].id must be non-empty".into());
-        }
-        if self.key_fields.is_empty() || self.key_fields.iter().any(|f| f.trim().is_empty()) {
-            return Err(format!(
-                "transform.aggregates id '{}' requires at least one key_fields entry",
-                self.id
-            ));
-        }
-        if self.measures.is_empty() {
-            return Err(format!(
-                "transform.aggregates id '{}' requires at least one measure",
-                self.id
-            ));
-        }
-        for (name, measure) in &self.measures {
-            measure.validate(name)?;
-        }
-        Ok(())
-    }
-}
-
-/// One aggregate measure. Exactly one of `sum` or `count` may be set.
-#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct AggregateMeasure {
-    /// Column to sum. CDC updates apply the delta from the previous row.
+pub struct SdlMeasure {
+    pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sum: Option<String>,
-    /// Count rows. Use `"*"` for every row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<String>,
-}
-
-impl AggregateMeasure {
-    pub fn validate(&self, name: &str) -> Result<(), String> {
-        match (self.sum.as_deref(), self.count.as_deref()) {
-            (Some(sum), None) if !sum.trim().is_empty() => Ok(()),
-            (None, Some(count)) if !count.trim().is_empty() => Ok(()),
-            _ => Err(format!(
-                "transform.aggregates measure '{name}' must set exactly one of sum or count"
-            )),
-        }
-    }
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<String>,
 }
 
 /// Namespace cardinality and histogram collection during ingest.
@@ -1806,46 +1768,14 @@ impl Config {
         {
             return Some("type: copy cannot set transform.batch_order_fields".into());
         }
-        if transform.ops.as_ref().is_some_and(|ops| !ops.is_empty()) {
-            return Some("type: copy cannot set transform.ops".into());
-        }
         if transform
-            .aggregates
+            .compute
             .as_ref()
-            .is_some_and(|aggregates| !aggregates.is_empty())
+            .is_some_and(|items| !items.is_empty())
         {
-            return Some("type: copy cannot set transform.aggregates".into());
+            return Some("type: copy cannot set transform.compute".into());
         }
         None
-    }
-
-    /// Configured `transform.ops`.
-    pub fn get_transform_ops(&self) -> Vec<TransformOp> {
-        self.get_transform_config().ops.unwrap_or_default()
-    }
-
-    /// Non-empty `transform.aggregates`.
-    pub fn get_transform_aggregates(&self) -> Vec<TransformAggregate> {
-        self.get_transform_config()
-            .aggregates
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|agg| !agg.id.trim().is_empty())
-            .collect()
-    }
-
-    pub fn transform_aggregates_configured(&self) -> bool {
-        !self.get_transform_aggregates().is_empty()
-    }
-
-    /// Stable hash of the aggregate config used to detect rebuilds.
-    pub fn transform_aggregates_config_hash(&self) -> String {
-        Self::aggregates_config_hash(&self.get_transform_aggregates())
-    }
-
-    pub fn aggregates_config_hash(aggregates: &[TransformAggregate]) -> String {
-        let bytes = serde_json::to_vec(aggregates).unwrap_or_default();
-        format!("{:x}", md5::compute(bytes))
     }
 
     fn pipeline_output_plugin_name_for(config: &Config, pipeline: &Pipeline) -> Option<String> {
@@ -1874,35 +1804,15 @@ impl Config {
         if !kind.is_table() {
             return Vec::new();
         }
-        let Some(ops) = pipeline
-            .transform
-            .as_ref()
-            .and_then(|transform| transform.ops.as_ref())
-        else {
-            return Vec::new();
-        };
-        if ops.iter().any(TransformOp::is_table_schema_op) {
-            return vec![format!(
-                "pipeline '{pipeline_name}' table sinks cannot set transform.ops project, rename, or cast; use ALTER TABLE"
-            )];
-        }
+        let _ = (config, pipeline, pipeline_name);
         Vec::new()
     }
 
     fn transform_shape_violations(pipeline_name: &str, transform: &Transform) -> Vec<String> {
         let mut out = Vec::new();
-        if let Some(aggregates) = transform.aggregates.as_ref() {
-            let mut seen = std::collections::BTreeSet::new();
-            for agg in aggregates {
-                if let Err(err) = agg.validate() {
-                    out.push(format!("pipeline '{pipeline_name}' {err}"));
-                }
-                if !agg.id.trim().is_empty() && !seen.insert(agg.id.clone()) {
-                    out.push(format!(
-                        "pipeline '{pipeline_name}' duplicate transform.aggregates id '{}'",
-                        agg.id
-                    ));
-                }
+        if let Some(delay) = transform.watermark_delay.as_deref() {
+            if let Err(err) = crate::compute::parse_watermark_delay(delay) {
+                out.push(format!("pipeline '{pipeline_name}' {err}"));
             }
         }
         out
@@ -1963,11 +1873,23 @@ impl Config {
     }
 
     pub fn get_transform_batch_time_fields(&self) -> String {
+        self.get_transform_event_time()
+    }
+
+    pub fn get_transform_event_time(&self) -> String {
         Self::yaml_or_env(
-            self.get_transform_config().batch_time_fields.as_ref(),
+            self.get_transform_config().event_time.as_ref(),
             "TRANSFORM_BATCH_TIME_FIELDS",
             DEFAULT_CONFIG,
         )
+    }
+
+    pub fn get_transform_compute(&self) -> Vec<ComputeItem> {
+        self.get_transform_config().compute.unwrap_or_default()
+    }
+
+    pub fn transform_compute_configured(&self) -> bool {
+        !self.get_transform_compute().is_empty()
     }
 
     /// Lowercase granularity name, or empty when unset. YAML is typed; the
@@ -2770,6 +2692,10 @@ impl Config {
         }
     }
 
+    pub fn skippr_store_dir(&self) -> String {
+        format!("{}/skippr-store", self.get_data_dir())
+    }
+
     /// The pipeline's data directory, created if missing.
     pub fn try_data_dir(&self) -> Result<String, String> {
         let mut data_dir = self.get_pipeline_data_dir();
@@ -2849,10 +2775,10 @@ impl Config {
         info!("get_metadata: pipeline='{pipeline}' schema=skippr-store:schema/{pipeline}");
         let leftover_json = self.pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
 
-        let loaded = if let Some((store, _)) = crate::helpers::offsets::live_kv() {
+        let store_dir = self.skippr_store_dir();
+        let loaded = if let Some((store, _)) = crate::helpers::offsets::live_kv_for(&store_dir) {
             crate::helpers::schema_store::load_pipeline_schema(store.as_ref(), &pipeline)
         } else {
-            let store_dir = format!("{}/skippr-store", self.get_data_dir());
             match skippr_wal_catalog::FjallReadStore::open(&store_dir) {
                 Ok(reader) => {
                     crate::helpers::schema_store::load_pipeline_schema(&reader, &pipeline)
@@ -2866,7 +2792,7 @@ impl Config {
         match loaded {
             Ok(Some(mut pipeline_metadata)) => {
                 self.inject_flatten_flag(&mut pipeline_metadata);
-                if crate::helpers::offsets::live_kv().is_some()
+                if crate::helpers::offsets::live_kv_for(&store_dir).is_some()
                     && pipeline_metadata.migrate_persisted_metadata()
                 {
                     info!(
@@ -3866,208 +3792,96 @@ pipelines:
 "#;
 
     #[test]
-    fn transform_ops_and_aggregates_parse_from_yaml() {
+    fn transform_ops_and_aggregates_are_unknown_fields() {
+        for key in ["ops: []", "aggregates: []"] {
+            let err = serde_yaml::from_str::<Transform>(key)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("unknown field"), "{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn transform_compute_parses_sql_and_sdl() {
         let transform: Transform = serde_yaml::from_str(
             r#"
-ops:
-  - filter: "amount > 0"
-  - project: [id, customer_id, amount]
-  - derive:
-      amount_gbp: "amount * 0.8"
-  - rename:
-      amount: amount_usd
-  - cast:
-      amount: float64
-aggregates:
-  - id: customer_invoice_totals
-    key_fields: [customer_id]
-    measures:
-      invoice_total: { sum: amount }
-      invoice_count: { count: "*" }
+event_time: created_at
+watermark_delay: 5 minutes
+compute:
+  - name: invoices.customer_totals
+    type: sql
+    value: |
+      CREATE TABLE invoices.customer_totals AS
+      SELECT customer_id, SUM(amount) AS invoice_total, COUNT(*) AS invoice_count
+      FROM invoices.orders
+      GROUP BY customer_id
+  - name: positive_orders
+    type: sdl
+    value:
+      type: stateless
+      target: invoices.orders
+      filter: amount > 0
 "#,
         )
         .unwrap();
-        assert_eq!(transform.ops.as_ref().unwrap().len(), 5);
-        assert_eq!(
-            transform.ops.as_ref().unwrap()[0],
-            TransformOp::Filter("amount > 0".into())
-        );
-        let agg = &transform.aggregates.as_ref().unwrap()[0];
-        assert_eq!(agg.id, "customer_invoice_totals");
-        assert_eq!(agg.measures["invoice_total"].sum.as_deref(), Some("amount"));
-        agg.validate().unwrap();
+        assert_eq!(transform.event_time.as_deref(), Some("created_at"));
+        assert_eq!(transform.watermark_delay.as_deref(), Some("5 minutes"));
+        let items = transform.compute.as_ref().unwrap();
+        assert_eq!(items[0].name(), "invoices.customer_totals");
+        match &items[1] {
+            ComputeItem::Sdl { value, .. } => {
+                assert!(matches!(value, SdlDoc::Stateless { .. }));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
-    fn copy_pipeline_rejects_ops_and_aggregates() {
-        let mut ops_config = Config::new();
-        let mut ops_pipeline = Pipeline::default();
-        ops_pipeline.r#type = Some(crate::pipeline_type::PipelineType::Copy);
-        ops_pipeline.transform = Some(Transform {
-            ops: Some(vec![TransformOp::Filter("amount > 0".into())]),
-            ..Default::default()
-        });
-        ops_config.pipelines.insert("p".to_string(), ops_pipeline);
-        let ops_violations = ops_config
-            .bind_pipeline("p")
-            .get_config_dependency_violations();
-        assert!(
-            ops_violations
-                .iter()
-                .any(|v| v.contains("type: copy cannot set transform.ops")),
-            "{ops_violations:?}"
-        );
+    fn transform_sql_is_unknown_field() {
+        let err = serde_yaml::from_str::<Transform>("sql: [SELECT 1]")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown field"), "{err}");
+    }
 
-        let mut agg_config = Config::new();
-        let mut agg_pipeline = Pipeline::default();
-        agg_pipeline.r#type = Some(crate::pipeline_type::PipelineType::Copy);
-        agg_pipeline.transform = Some(Transform {
-            aggregates: Some(vec![TransformAggregate {
-                id: "customer_invoice_totals".into(),
-                key_fields: vec!["customer_id".into()],
-                measures: [(
-                    "invoice_count".into(),
-                    AggregateMeasure {
-                        count: Some("*".into()),
-                        ..Default::default()
-                    },
-                )]
-                .into_iter()
-                .collect(),
+    #[test]
+    fn compute_item_and_sdl_deny_unknown_fields() {
+        let item = serde_yaml::from_str::<ComputeItem>(
+            "type: sql\nname: invoices.customer_totals\nvalue: SELECT 1\nkind: view\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(item.contains("unknown field"), "{item}");
+        let sdl = serde_yaml::from_str::<SdlDoc>(
+            "type: stateless\ntarget: invoices.orders\nkind: view\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(sdl.contains("unknown field"), "{sdl}");
+    }
+
+    #[test]
+    fn copy_pipeline_rejects_compute() {
+        let mut sql_config = Config::new();
+        let mut sql_pipeline = Pipeline::default();
+        sql_pipeline.r#type = Some(crate::pipeline_type::PipelineType::Copy);
+        sql_pipeline.transform = Some(Transform {
+            compute: Some(vec![ComputeItem::Sql {
+                name: "p.t".into(),
+                value: "CREATE TABLE p.t AS SELECT customer_id, SUM(amount) AS n FROM p.o GROUP BY customer_id".into(),
             }]),
             ..Default::default()
         });
-        agg_config.pipelines.insert("p".to_string(), agg_pipeline);
-        let agg_violations = agg_config
+        sql_config.pipelines.insert("p".to_string(), sql_pipeline);
+        let sql_violations = sql_config
             .bind_pipeline("p")
             .get_config_dependency_violations();
         assert!(
-            agg_violations
+            sql_violations
                 .iter()
-                .any(|v| v.contains("type: copy cannot set transform.aggregates")),
-            "{agg_violations:?}"
+                .any(|v| v.contains("type: copy cannot set transform.compute")),
+            "{sql_violations:?}"
         );
-    }
-
-    #[test]
-    fn native_table_sink_rejects_project_rename_cast() {
-        let lake_sinks = Some(
-            [(
-                "lake".into(),
-                DataSinkEntry {
-                    config: PluginConfigEntry {
-                        plugin_name: "SkipprLake".into(),
-                        config: json!({}),
-                    },
-                    schema_sink: None,
-                },
-            )]
-            .into_iter()
-            .collect(),
-        );
-        let table_ops = [
-            TransformOp::Project(vec!["id".into()]),
-            TransformOp::Rename(
-                [("region".into(), "region_code".into())]
-                    .into_iter()
-                    .collect(),
-            ),
-            TransformOp::Cast([("amount".into(), "float64".into())].into_iter().collect()),
-        ];
-        for op in table_ops {
-            let mut config = Config::new();
-            let mut pipeline = Pipeline::default();
-            pipeline.data_sink = Some("data_sinks.lake".into());
-            pipeline.transform = Some(Transform {
-                ops: Some(vec![op]),
-                ..Default::default()
-            });
-            config.pipelines.insert("p".into(), pipeline);
-            config.data_sinks = lake_sinks.clone();
-            let violations = config.bind_pipeline("p").get_config_dependency_violations();
-            assert!(
-                violations.iter().any(|v| v.contains("use ALTER TABLE")),
-                "{violations:?}"
-            );
-        }
-
-        let mut stream = Config::new();
-        let mut stream_pipeline = Pipeline::default();
-        stream_pipeline.data_sink = Some("data_sinks.out".into());
-        stream_pipeline.transform = Some(Transform {
-            ops: Some(vec![TransformOp::Rename(
-                [("region".into(), "region_code".into())]
-                    .into_iter()
-                    .collect(),
-            )]),
-            ..Default::default()
-        });
-        stream.pipelines.insert("p".into(), stream_pipeline);
-        stream.data_sinks = Some(
-            [(
-                "out".into(),
-                DataSinkEntry {
-                    config: PluginConfigEntry {
-                        plugin_name: "Kafka".into(),
-                        config: json!({}),
-                    },
-                    schema_sink: None,
-                },
-            )]
-            .into_iter()
-            .collect(),
-        );
-        let stream_violations = stream.bind_pipeline("p").get_config_dependency_violations();
-        assert!(
-            !stream_violations
-                .iter()
-                .any(|v| v.contains("use ALTER TABLE")),
-            "{stream_violations:?}"
-        );
-    }
-
-    #[test]
-    fn warehouse_without_schema_sink_rejects_table_ops() {
-        let rename = TransformOp::Rename(
-            [("region".into(), "region_code".into())]
-                .into_iter()
-                .collect(),
-        );
-        for plugin in [
-            "Postgres",
-            "Snowflake",
-            "Bigquery",
-            "Redshift",
-            "Motherduck",
-        ] {
-            let mut config = Config::new();
-            let mut pipeline = Pipeline::default();
-            pipeline.data_sink = Some("data_sinks.wh".into());
-            pipeline.transform = Some(Transform {
-                ops: Some(vec![rename.clone()]),
-                ..Default::default()
-            });
-            config.pipelines.insert("p".into(), pipeline);
-            config.data_sinks = Some(
-                [(
-                    "wh".into(),
-                    DataSinkEntry {
-                        config: PluginConfigEntry {
-                            plugin_name: plugin.into(),
-                            config: json!({}),
-                        },
-                        schema_sink: None,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-            );
-            let violations = config.bind_pipeline("p").get_config_dependency_violations();
-            assert!(
-                violations.iter().any(|v| v.contains("use ALTER TABLE")),
-                "{plugin}: {violations:?}"
-            );
-        }
     }
 
     #[test]
@@ -5117,8 +4931,8 @@ schema_sinks:
             "query schema load must pin a reader snapshot without writer.lock"
         );
         assert!(
-            body.contains("live_kv()"),
-            "in-process ingest still loads schema from the live writer"
+            body.contains("live_kv_for"),
+            "in-process ingest still loads schema from this pipeline's live writer"
         );
     }
 

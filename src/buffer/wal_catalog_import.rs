@@ -1088,7 +1088,7 @@ mod tests {
         Arc<skippr_wal_catalog::MemoryWalCatalog>,
     ) {
         let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::legacy_disk(dir);
+        let paths = PipelinePaths::disk(dir);
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =

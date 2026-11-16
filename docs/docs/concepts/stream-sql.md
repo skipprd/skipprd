@@ -7,7 +7,7 @@ description: One Skippr SQL query is Iceberg plus the live WAL together. STREAM 
 
 Skipprd is a Streamhouse engine: ingest writes a write-ahead log (WAL), compact lands Apache Iceberg on your object store, and SQL reads both. You query Skippr once. The engine returns live stream plus history together. You do not choose a live view or a history view, and you do not wait for a warehouse load to ask what just arrived. CDC ingest is the same contract: current stream plus current history in one result.
 
-[`skipprd query`](/cli/query) is the SQL client on the machine that holds `DATA_DIR`. [`skipprd serve`](/cli/serve) is for other tools that should see committed Iceberg only.
+[`skipprd query`](/cli/query) is the SQL client on the machine that holds `DATA_DIR`. [`skipprd serve`](/cli/serve) is for other tools; Flight SQL uses the same Iceberg ∪ WAL registration. WAL-absent falls through to Iceberg history.
 
 ## What a table is
 
@@ -67,15 +67,15 @@ See [Skippr Store](/configuration/skippr-store).
 
 ## Transforms and aggregates on the query path
 
-In-memory `transform.ops` (`filter`, `project`, `derive`, `rename`, `cast`) run **before** WAL commit on stream destinations. Table destinations cannot set `project`, `rename`, or `cast`; use [`ALTER TABLE`](/operations/alter). `filter` and `derive` stay valid on tables. SQL sees the transformed rows, not the raw source batch.
+Stateless compute (filter and derive) runs **before** WAL commit. Schema is [`ALTER TABLE`](/operations/alter). SQL sees the transformed rows, not the raw source batch.
 
-Keyed `transform.aggregates` are materialised in the Skippr Store `stream_state` family as ingest commits WAL. They are not a second SQL table name in this engine. You still `SELECT` the pipeline namespace. See [Materialised views](/concepts/materialised-views) and [Transforms](/configuration/transforms).
+Declared `CREATE TABLE … GROUP BY` / `DISTINCT ON` journals in Skippr Store and registers `pipeline.compute_name` in `skipprd query`. See [Materialised views](/concepts/materialised-views) and [Transforms](/configuration/transforms).
 
 DDL (`ALTER TABLE`, `skipprd migrate`) rewrites live WAL, applies destination DDL, then appends the ALTER log. Source discover metadata is unchanged. Later SELECTs use the new names. See [ALTER operations](/operations/alter).
 
 ## Other tools
 
-`skipprd serve` exposes Iceberg REST and read-only Flight SQL. Flight reads **committed Iceberg**. For live WAL, stay on `skipprd query`.
+`skipprd serve` exposes Iceberg REST and read-only Flight SQL. Flight SQL uses the same Iceberg ∪ WAL registration as `skipprd query`; WAL-absent falls through to Iceberg history.
 
 Grammar for every statement: [`skipprd sql-help`](/cli/sql-help) or `skipprd query --sql "SHOW DOCS"`.
 

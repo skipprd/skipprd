@@ -442,14 +442,14 @@ impl QueryFlightServer {
 match &self.engine {
     FlightEngine::Clustered { .. } => { /* existing: ensure_started + plan_clustered_select */ }
     FlightEngine::Local => {
-        let ctx = crate::sqlrt::query::new_context_iceberg_namespaces(&self.app_config).await?;
+        let ctx = crate::sqlrt::query::new_context_all_namespaces(&self.app_config).await?;
         let df = ctx.sql(sql).await?;
         (df.schema().inner().clone(), Box::pin(df.execute_stream().await?...))
     }
 }
 ```
 
-Local serve Flight registers Iceberg `namespace.table` only (`register_user_namespaces`). It does not call `new_context_all_namespaces` (that is `skipprd query` Iceberg ∪ WAL). Clustered HLA Flight user SQL is `CommandStatementQuery`; live WAL is `LiveWalTicket` DoGet, not a classified SQL TVF.
+Local serve Flight shares `new_context_all_namespaces` with `skipprd query` (Iceberg ∪ WAL; WAL-absent falls through to Iceberg history). Clustered HLA Flight user SQL is `CommandStatementQuery`; live WAL is `LiveWalTicket` DoGet, not a classified SQL TVF.
 
 Tests first:
 
@@ -504,14 +504,12 @@ async fn register_views(ctx: &SessionContext, views: &dyn ViewCatalog, namespace
 
 `collect_skipprlake_view_sql` picks the representation with `type == "sql"` and `dialect == "skipprlake"` from `current-version-id`. Views with no such representation are skipped with a `tracing::warn!`.
 
-`skipprd query` uses `new_context_all_namespaces` (`register_namespace_view` Iceberg ∪ WAL ingest alias plus `register_user_namespaces`). `skipprd serve` Flight uses `new_context_iceberg_namespaces` (`register_user_namespaces` only) so lake clients see Iceberg `namespace.table`, not `pipeline.namespace`.
+`skipprd query` and `skipprd serve` Flight share `new_context_all_namespaces` (`register_namespace_view` Iceberg ∪ WAL ingest alias plus `register_user_namespaces`). WAL-absent falls through to Iceberg history.
 
 ```text
-skipprd query:
-  for each pipeline: register_namespace_view (Iceberg ∪ WAL, or WAL only)
+skipprd query and skipprd serve Flight:
+  for each pipeline: register_namespace_view (Iceberg ∪ WAL, or Iceberg history if WAL is absent)
   if any pipeline is Iceberg: register_user_namespaces
-skipprd serve Flight:
-  register_user_namespaces only  # Iceberg namespace.table
 ```
 
 Clustered QueryRuntime (`plan_clustered_select`) gets the same two calls. `IcebergScanTableProvider` already serializes the catalog JSON for executors; it now serializes `IcebergCatalogSpec` (`SkipprLakeOpen` includes backend and object store).
@@ -1196,7 +1194,7 @@ Smoke (progressive, local `file://` lake, DynamoDB-local):
 P0 spec lock, PyIceberg and DuckDB read checks
   → P1 catalog: ViewCatalog + view metadata + TableCommit::from_rest
     → P2 skippr-iceberg-rest (tables, namespaces, views) + contract tests
-      → P3 query: user namespaces on serve Flight; ∪WAL stays on skipprd query
+      → P3 query: serve Flight and skipprd query share Iceberg ∪ WAL
         → P4 Flight: bearer auth + local engine
           → P5 skipprd serve + ready file + e2e with PyIceberg
             → P6 dbt-skipprlake repo (M1..M5 below)

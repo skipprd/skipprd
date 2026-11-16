@@ -33,6 +33,11 @@ class SkipprLakeE2eHarnessTests(unittest.TestCase):
         self.assertEqual(expected["record_count"], 12)
         self.assertEqual(expected["distinct_shop_count"], 12)
         self.assertEqual(expected["amount_sum"], 780)
+        self.assertEqual(expected["all_shop_count"], 12)
+        self.assertEqual(expected["positive_count"], 7)
+        self.assertEqual(expected["doubled_count"], 12)
+        self.assertEqual(expected["doubled_sum"], 1560)
+        self.assertEqual(expected["positive_doubled_sum"], 1260)
         self.assertEqual(expected["day_2026_11_07"], 6)
         self.assertEqual(expected["day_2026_11_08"], 6)
         self.assertEqual(expected["day_missing"], 0)
@@ -60,6 +65,27 @@ class SkipprLakeE2eHarnessTests(unittest.TestCase):
             self.assertIn("batch_time_fields: event_ts", text)
             self.assertIn("batch_time_unit: day", text)
             self.assertNotIn("time_partition_prefix", text)
+            self.assertIn("CREATE TABLE shop.name_totals", text)
+            self.assertNotIn("aggregates:", text)
+            self.assertNotIn("ops:", text)
+
+    def test_harness_streams_wal_snapshot(self) -> None:
+        text = (Path(__file__).resolve().parent / "run.py").read_text(encoding="utf-8")
+        self.assertIn("STREAM count(*) FROM shop", text)
+
+    def test_compute_yaml_declares_views(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "skippr.yml"
+            harness.write_skippr_yml(config, Path(tmp) / "source", Path(tmp) / "warehouse")
+            text = config.read_text(encoding="utf-8")
+            self.assertIn("name: shop.all_shop", text)
+            self.assertIn("CREATE VIEW shop.all_shop AS SELECT * FROM shop.shop", text)
+            self.assertIn("WHERE amount > 50", text)
+            self.assertIn("amount * 2 AS doubled", text)
+            self.assertIn("name: shop.positive_doubled", text)
+            self.assertIn("bumped", text)
+            self.assertIn("name: shop.positive_two", text)
+            self.assertFalse((config.parent / "compute").exists())
 
     def test_date_partition_sql_filters_event_ts_day_window(self) -> None:
         self.assertEqual(

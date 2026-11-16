@@ -23,6 +23,7 @@ from skippr import (
     Pipeline,
     S3Storage,
     SchemaSinkGlue,
+    ComputeItemSql,
     Transform,
 )
 
@@ -44,6 +45,8 @@ def test_removed_names_are_gone():
         "workspace",
         "tenant",
         "storage_mode",
+        "TransformOp",
+        "TransformAggregate",
     ]:
         assert not hasattr(skippr, name), name
     for field in ["reset_offsets", "reset_metadata", "buffer_disk_threshold_bytes"]:
@@ -458,9 +461,7 @@ def test_pipeline_transform_is_typed():
     assert "flatten_events: true" in cfg.to_yaml()
 
 
-def test_pipeline_transform_ops_and_aggregates():
-    from skippr import AggregateMeasure, TransformAggregate, TransformOp
-
+def test_pipeline_transform_compute():
     cfg = Config()
     src = cfg.data_source("src", _s3())
     cfg.pipeline(
@@ -468,24 +469,30 @@ def test_pipeline_transform_ops_and_aggregates():
         Pipeline(
             data_source=src,
             transform=Transform(
-                ops=[TransformOp.filter("amount > 0")],
-                aggregates=[
-                    TransformAggregate(
-                        id="customer_invoice_totals",
-                        key_fields=["customer_id"],
-                        measures={
-                            "invoice_total": AggregateMeasure(sum="amount"),
-                            "invoice_count": AggregateMeasure(count="*"),
-                        },
-                    )
+                compute=[
+                    ComputeItemSql(
+                        name="p.customer_totals",
+                        value="CREATE TABLE p.customer_totals AS SELECT customer_id, SUM(amount) AS invoice_total FROM p.orders GROUP BY customer_id",
+                    ),
+                    ComputeItemSql(
+                        name="p.positive",
+                        value="CREATE VIEW p.positive AS SELECT * FROM p.orders WHERE amount > 0",
+                    ),
+                    ComputeItemSql(
+                        name="p.doubled",
+                        value="CREATE VIEW p.doubled AS SELECT *, amount * 2 AS doubled FROM p.orders",
+                    ),
                 ],
             ),
         ),
     )
     yaml = cfg.to_yaml()
-    assert "filter: amount > 0" in yaml
-    assert "customer_invoice_totals" in yaml
-    assert "invoice_total:" in yaml
+    assert "compute:" in yaml
+    assert "CREATE TABLE" in yaml
+    assert "customer_totals" in yaml
+    assert "CREATE VIEW" in yaml
+    assert "p.positive" in yaml
+    assert "p.doubled" in yaml
 
 
 def test_getters_return_refs_or_raise_key_error():

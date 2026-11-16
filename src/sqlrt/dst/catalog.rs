@@ -196,7 +196,7 @@ fn c_import_leftover_once() {
     use std::sync::Arc;
     let dir = tempfile::tempdir().unwrap();
     let key = PipelineKey::new("t", "w", "p").unwrap();
-    let paths = PipelinePaths::legacy_disk(dir.path());
+    let paths = PipelinePaths::disk(dir.path());
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
@@ -323,7 +323,7 @@ fn c_format_imported_resume() {
     use std::sync::Arc;
     let dir = tempfile::tempdir().unwrap();
     let key = PipelineKey::new("t", "w", "imported").unwrap();
-    let paths = PipelinePaths::legacy_disk(dir.path());
+    let paths = PipelinePaths::disk(dir.path());
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
@@ -473,7 +473,7 @@ fn wal_handle(
     use crate::helpers::offset_store::{memory_offset_store, StoreOffsetStore};
     use std::sync::Arc;
     let key = PipelineKey::new("t", "w", pipeline).unwrap();
-    let paths = PipelinePaths::legacy_disk(dir);
+    let paths = PipelinePaths::disk(dir);
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =

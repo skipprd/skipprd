@@ -54,7 +54,7 @@ Do not add a `leases` family, membership rows, or cluster ids. Single writer + `
 
 **Reads** (many, overlapping):
 
-- Instream transforms (stateless ops) and aggregations / MV (`stream_state` + WAL catalog)
+- Instream transforms (stateless SQL) and keyed compute (`stream_state` + WAL catalog)
 - Client SQL (`skipprd query`, Flight SQL live-WAL tickets, Iceberg ∪ WAL)
 - Later: extra **reader processes** against the same catalog, MV, and other families (not writes)
 

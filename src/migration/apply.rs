@@ -285,20 +285,12 @@ fn config_columns(config: &Config, mode: FlattenMode) -> Result<Vec<OutputName>,
         config.get_transform_batch_time_fields(),
         config.get_transform_batch_partition_fields(),
     ];
-    let aggregate_keys = config
-        .get_pipeline_config()
-        .transform
-        .and_then(|transform| transform.aggregates)
-        .into_iter()
-        .flatten()
-        .flat_map(|aggregate| aggregate.key_fields);
     listed
         .iter()
         .flat_map(|list| list.split(','))
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_string)
-        .chain(aggregate_keys)
         .map(|name| OutputName::parse_sql(mode, &name))
         .collect()
 }

@@ -141,6 +141,38 @@ pipelines:
     transform:
       batch_time_fields: event_ts
       batch_time_unit: day
+      compute:
+        - name: shop.name_totals
+          type: sql
+          value: |
+            CREATE TABLE shop.name_totals AS
+            SELECT name, SUM(amount) AS amount_total
+            FROM shop.shop
+            GROUP BY name
+        - name: shop.all_shop
+          type: sql
+          value: |
+            CREATE VIEW shop.all_shop AS SELECT * FROM shop.shop
+        - name: shop.positive
+          type: sql
+          value: |
+            CREATE VIEW shop.positive AS SELECT * FROM shop.shop WHERE amount > 50
+        - name: shop.doubled
+          type: sql
+          value: |
+            CREATE VIEW shop.doubled AS SELECT *, amount * 2 AS doubled FROM shop.shop
+        - name: shop.positive_doubled
+          type: sql
+          value: |
+            CREATE VIEW shop.positive_doubled AS SELECT *, amount * 2 AS doubled FROM shop.shop WHERE amount > 50
+        - name: shop.two_derives
+          type: sql
+          value: |
+            CREATE VIEW shop.two_derives AS SELECT *, amount * 2 AS doubled, amount + 1 AS bumped FROM shop.shop
+        - name: shop.positive_two
+          type: sql
+          value: |
+            CREATE VIEW shop.positive_two AS SELECT *, amount * 2 AS doubled, amount + 1 AS bumped FROM shop.shop WHERE amount > 50
 
 data_sources:
   orders:
@@ -630,6 +662,73 @@ def main() -> int:
             lambda sql: skipprd_query_count(skipprd, config, env, sql),
             QUERY_TABLE,
         )
+        log("stage skipprd STREAM WAL snapshot")
+        skipprd_query_count(skipprd, config, env, "STREAM count(*) FROM shop")
+        log("stage skipprd query keyed compute")
+        totals = skipprd_query_count(
+            skipprd, config, env, "SELECT sum(amount_total) FROM shop.name_totals"
+        )
+        if totals != EXPECTED["amount_sum"]:
+            raise HarnessError(
+                f"skipprd query shop.name_totals sum {totals} != {EXPECTED['amount_sum']}"
+            )
+        log("stage skipprd query declared views")
+        all_shop = skipprd_query_count(
+            skipprd, config, env, "SELECT count(*) FROM shop.all_shop"
+        )
+        if all_shop != EXPECTED["all_shop_count"]:
+            raise HarnessError(
+                f"skipprd query shop.all_shop count {all_shop} != {EXPECTED['all_shop_count']}"
+            )
+        positive = skipprd_query_count(
+            skipprd, config, env, "SELECT count(*) FROM shop.positive"
+        )
+        if positive != EXPECTED["positive_count"]:
+            raise HarnessError(
+                f"skipprd query shop.positive count {positive} != {EXPECTED['positive_count']}"
+            )
+        doubled = skipprd_query_count(
+            skipprd, config, env, "SELECT count(*) FROM shop.doubled"
+        )
+        if doubled != EXPECTED["doubled_count"]:
+            raise HarnessError(
+                f"skipprd query shop.doubled count {doubled} != {EXPECTED['doubled_count']}"
+            )
+        doubled_sum = skipprd_query_count(
+            skipprd, config, env, "SELECT sum(doubled) FROM shop.doubled"
+        )
+        if doubled_sum != EXPECTED["doubled_sum"]:
+            raise HarnessError(
+                f"skipprd query shop.doubled sum {doubled_sum} != {EXPECTED['doubled_sum']}"
+            )
+        positive_doubled = skipprd_query_count(
+            skipprd, config, env, "SELECT count(*) FROM shop.positive_doubled"
+        )
+        if positive_doubled != EXPECTED["positive_count"]:
+            raise HarnessError(
+                f"skipprd query shop.positive_doubled count {positive_doubled} != {EXPECTED['positive_count']}"
+            )
+        two_derives = skipprd_query_count(
+            skipprd, config, env, "SELECT count(*) FROM shop.two_derives"
+        )
+        if two_derives != EXPECTED["doubled_count"]:
+            raise HarnessError(
+                f"skipprd query shop.two_derives count {two_derives} != {EXPECTED['doubled_count']}"
+            )
+        positive_two = skipprd_query_count(
+            skipprd, config, env, "SELECT count(*) FROM shop.positive_two"
+        )
+        if positive_two != EXPECTED["positive_count"]:
+            raise HarnessError(
+                f"skipprd query shop.positive_two count {positive_two} != {EXPECTED['positive_count']}"
+            )
+        positive_doubled_sum = skipprd_query_count(
+            skipprd, config, env, "SELECT sum(doubled) FROM shop.positive_doubled"
+        )
+        if positive_doubled_sum != EXPECTED["positive_doubled_sum"]:
+            raise HarnessError(
+                f"skipprd query shop.positive_doubled sum {positive_doubled_sum} != {EXPECTED['positive_doubled_sum']}"
+            )
         if use_published_plugins():
             assert_published_file_lake_plugins(env["SKIPPR_RUNTIME_PLUGIN_DIR"])
         serve, endpoints = start_serve(skipprd, config, env, workdir)

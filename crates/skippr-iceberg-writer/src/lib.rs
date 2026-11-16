@@ -315,8 +315,6 @@ struct GroupedCommitResult {
 #[derive(Default)]
 struct CdcStateSession {
     loaded_shards: HashMap<u8, LoadedCdcStateShard>,
-    legacy_state: Option<HashMap<String, String>>,
-    legacy_checked: bool,
     delta: BTreeMap<String, String>,
 }
 
@@ -645,10 +643,9 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
                     ctx.compaction_id
                 )));
             }
-            return self
-                .sync_grouped_legacy_chunks(reader, ctx)
-                .await
-                .map(SinkCallResult::outcome);
+            return Err(io::Error::other(
+                "legacy grouped compaction objects are not replayed; compact again",
+            ));
         }
 
         let pending_key = grouped_pending_key(&manifest_key);
@@ -1267,35 +1264,6 @@ impl<S: SinkSpec> IcebergWriter<S> {
             .await
             .map_err(|err| io::Error::other(err.to_string()))?;
         Ok(())
-    }
-
-    async fn sync_grouped_legacy_chunks(
-        &self,
-        mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
-        ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
-    ) -> Result<SinkWriteOutcome, io::Error> {
-        let schema = reader.schema();
-        let mut applied = false;
-        while let Some(chunk) = reader.next_chunk().await? {
-            let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
-            let chunk_ctx = ctx.chunk_sink_write_context_with_cdc(
-                chunk.chunk_index,
-                chunk.chunk_index == 0 && chunk.final_chunk,
-                chunk_cdc.as_ref(),
-            );
-            if self
-                .sync_with_context_result(chunk.into_stream(schema.clone()), chunk_ctx)
-                .await?
-                == SinkWriteOutcome::Applied
-            {
-                applied = true;
-            }
-        }
-        Ok(if applied {
-            SinkWriteOutcome::Applied
-        } else {
-            SinkWriteOutcome::AlreadyApplied
-        })
     }
 
     async fn read_grouped_pending(
@@ -2283,27 +2251,17 @@ impl<S: SinkSpec> IcebergWriter<S> {
         state: &mut CdcStateSession,
         shards: &[u8],
     ) -> Result<(), io::Error> {
+        self.reject_leftover_monolithic_cdc_state(namespace).await?;
         for shard in shards {
             if state.loaded_shards.contains_key(shard) {
                 continue;
             }
             let values = match self.load_cdc_state_shard(namespace, *shard).await? {
                 Some(state) => state,
-                None => {
-                    if !state.legacy_checked {
-                        state.legacy_state = Some(self.load_cdc_state(namespace).await?);
-                        state.legacy_checked = true;
-                    }
-                    let values = state
-                        .legacy_state
-                        .as_ref()
-                        .into_iter()
-                        .flat_map(|values| values.iter())
-                        .filter(|(key, _)| cdc_state_shard(key) == *shard)
-                        .map(|(key, token)| (key.clone(), token.clone()))
-                        .collect::<BTreeMap<_, _>>();
-                    LoadedCdcStateShard { values, etag: None }
-                }
+                None => LoadedCdcStateShard {
+                    values: BTreeMap::new(),
+                    etag: None,
+                },
             };
             state.loaded_shards.insert(*shard, values);
         }
@@ -2385,14 +2343,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
                     loaded = match self.load_cdc_state_shard(namespace, shard).await? {
                         Some(loaded) => loaded,
                         None => LoadedCdcStateShard {
-                            values: state
-                                .legacy_state
-                                .as_ref()
-                                .into_iter()
-                                .flat_map(|values| values.iter())
-                                .filter(|(key, _)| cdc_state_shard(key) == shard)
-                                .map(|(key, token)| (key.clone(), token.clone()))
-                                .collect(),
+                            values: BTreeMap::new(),
                             etag: None,
                         },
                     };
@@ -2470,6 +2421,21 @@ impl<S: SinkSpec> IcebergWriter<S> {
             "{}/metadata/skippr-cdc-state-v2/{shard:02}.json",
             table_location.trim_end_matches('/')
         ))
+    }
+
+    async fn reject_leftover_monolithic_cdc_state(&self, namespace: &str) -> Result<(), io::Error> {
+        let table_location = self.table_location(namespace);
+        let state_uri = format!(
+            "{}/metadata/skippr-cdc-state.json",
+            table_location.trim_end_matches('/')
+        );
+        let (bucket, key) = parse_object_location(&state_uri)?.parts();
+        if self.object_exists(&bucket, &key).await? {
+            return Err(io::Error::other(
+                "legacy skippr-cdc-state.json is not replayed; CDC winners live in skippr-cdc-state-v2 shards",
+            ));
+        }
+        Ok(())
     }
 
     async fn native_append(
@@ -2602,7 +2568,8 @@ impl<S: SinkSpec> IcebergWriter<S> {
             .commit_append_with_retries(catalog.as_ref(), table.identifier().clone(), commit_files)
             .await?;
         if !state_updates.is_empty() {
-            self.persist_cdc_state(&namespace, state_updates).await?;
+            self.persist_cdc_state_delta(&namespace, &state_updates.into_iter().collect())
+                .await?;
         }
         info!(
             "Committed Iceberg append namespace={} table={} rows={}",
@@ -3015,10 +2982,16 @@ impl<S: SinkSpec> IcebergWriter<S> {
                 namespace
             ))
         })?;
-        let committed = self.load_cdc_state(namespace).await?;
         let batches = collect_record_batches(stream).await?;
+        let mut session = CdcStateSession::default();
+        self.load_cdc_shards_for(namespace, contract, &batches, &mut session)
+            .await?;
         let final_state = final_state_cdc_batches(contract, &batches, |key| {
-            committed.get(key).map(String::as_str)
+            session
+                .loaded_shards
+                .get(&cdc_state_shard(key))
+                .and_then(|shard| shard.values.get(key))
+                .map(String::as_str)
         })?;
         let upsert_rows = final_state
             .upserts
@@ -3036,50 +3009,6 @@ impl<S: SinkSpec> IcebergWriter<S> {
             state_updates: final_state.tokens.into_iter().collect(),
             upsert_rows,
         })
-    }
-
-    async fn load_cdc_state(&self, namespace: &str) -> Result<HashMap<String, String>, io::Error> {
-        let state_uri = self.cdc_state_uri(namespace)?;
-        let (bucket, key) = parse_object_location(&state_uri)?.parts();
-        match self.get_object_bytes(&bucket, &key).await? {
-            Some(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|err| io::Error::other(err.to_string()))
-            }
-            None => Ok(HashMap::new()),
-        }
-    }
-
-    async fn persist_cdc_state(
-        &self,
-        namespace: &str,
-        updates: HashMap<String, String>,
-    ) -> Result<(), io::Error> {
-        let mut state = self.load_cdc_state(namespace).await?;
-        for (key, token) in updates {
-            let should_update = state
-                .get(&key)
-                .map(|seen| {
-                    compare_cdc_order_tokens(seen, &token).map(|is_seen_newer| !is_seen_newer)
-                })
-                .transpose()?
-                .unwrap_or(true);
-            if should_update {
-                state.insert(key, token);
-            }
-        }
-        let state_uri = self.cdc_state_uri(namespace)?;
-        let (bucket, key) = parse_object_location(&state_uri)?.parts();
-        let bytes = serde_json::to_vec(&state).map_err(|err| io::Error::other(err.to_string()))?;
-        self.put_object_bytes(&bucket, &key, bytes.into()).await?;
-        Ok(())
-    }
-
-    fn cdc_state_uri(&self, namespace: &str) -> Result<String, io::Error> {
-        let table_location = self.table_location(namespace);
-        Ok(format!(
-            "{}/metadata/skippr-cdc-state.json",
-            table_location.trim_end_matches('/')
-        ))
     }
 
     async fn write_parquet_file(
@@ -5721,7 +5650,25 @@ mod tests {
     }
 
     #[test]
-    fn legacy_grouped_file_names_remain_replay_discoverable() {
+    fn legacy_grouped_manifest_is_not_replayed() {
+        let src = include_str!("lib.rs");
+        let prod = src.split("mod tests").next().unwrap_or(src);
+        assert!(prod.contains("legacy grouped compaction objects are not replayed"));
+        assert!(!prod.contains("fn sync_grouped_legacy_chunks"));
+    }
+
+    #[test]
+    fn leftover_monolithic_cdc_state_is_not_replayed() {
+        let src = include_str!("lib.rs");
+        let prod = src.split("mod tests").next().unwrap_or(src);
+        assert!(prod.contains("legacy skippr-cdc-state.json is not replayed"));
+        assert!(!prod.contains("fn load_cdc_state("));
+        assert!(!prod.contains("fn persist_cdc_state("));
+        assert!(!prod.contains("legacy_state"));
+    }
+
+    #[test]
+    fn legacy_grouped_file_names_remain_the_fail_closed_probe() {
         assert_eq!(
             legacy_grouped_object_keys("/warehouse/orders/", "apply-1"),
             vec![

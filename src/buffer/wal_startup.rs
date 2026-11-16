@@ -41,10 +41,6 @@ pub async fn wal_startup(
     Ok(())
 }
 
-pub fn wal_attach_replica(handle: &PipelineWalHandle) -> Result<bool, DurableError> {
-    handle.payload_ready()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,7 +63,7 @@ mod tests {
 
     fn test_handle(dir: &std::path::Path) -> Arc<PipelineWalHandle> {
         let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::legacy_disk(dir);
+        let paths = PipelinePaths::disk(dir);
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
@@ -133,7 +129,7 @@ mod tests {
                 len: idx.len,
                 key: idx.key.clone(),
                 cdc_meta_hash: None,
-                ordinal: Some(idx.slice_ordinal),
+                ordinal: idx.slice_ordinal,
             }],
             "out.parquet".into(),
         )

@@ -1271,19 +1271,15 @@ pub fn set_date(
                 ))),
             }
         }
-        None => {
-            // Handle the value error applying the Evolution Strategy
-            // No direct evolution here; return error so caller can propose via sequencer
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Field: {} => {} value: {} mismatched",
-                    parent_field.unwrap_or("root"),
-                    field,
-                    value
-                ),
-            )))
-        }
+        None => Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Field: {} => {} value: {} mismatched",
+                parent_field.unwrap_or("root"),
+                field,
+                value
+            ),
+        ))),
     }
 }
 

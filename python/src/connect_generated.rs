@@ -214,6 +214,20 @@ config_union!(PyDataSinkSkipprLakeWarehouseObjectStore, "DataSinkSkipprLakeWareh
     R2(PyDataSinkSkipprLakeWarehouseObjectStoreR2) = "r2",
 });
 
+config_union!(PySdlDoc, "SdlDoc", "type", {
+    Stateless(PySdlDocStateless) = "stateless",
+    View(PySdlDocView) = "view",
+    Latest(PySdlDocLatest) = "latest",
+    KeyedTable(PySdlDocKeyedTable) = "keyed_table",
+    WindowedTable(PySdlDocWindowedTable) = "windowed_table",
+    StreamTableJoin(PySdlDocStreamTableJoin) = "stream_table_join",
+});
+
+config_union!(PyComputeItem, "ComputeItem", "type", {
+    Sql(PyComputeItemSql) = "sql",
+    Sdl(PyComputeItemSdl) = "sdl",
+});
+
 #[pyclass(
     frozen,
     from_py_object,
@@ -757,6 +771,336 @@ impl PyDataSinkSkipprLakeWarehouseObjectStoreR2 {
     }
 }
 
+#[doc = "Skipper Definition Language document. `type` is the `ComputeKind` discriminant."]
+#[pyclass(frozen, from_py_object, name = "SdlDocStateless", module = "skippr")]
+#[derive(Clone, Serialize)]
+pub struct PySdlDocStateless {
+    #[doc = "YAML key `target`."]
+    #[pyo3(get)]
+    pub target: String,
+    #[doc = "YAML key `name`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[doc = "YAML key `filter`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    #[doc = "YAML key `derive`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derive: Option<Vec<PySdlDerive>>,
+}
+
+#[pymethods]
+impl PySdlDocStateless {
+    #[new]
+    #[doc = "Skipper Definition Language document. `type` is the `ComputeKind` discriminant.\n\nArgs:\n    target: YAML key `target`.\n    name: YAML key `name`.\n    filter: YAML key `filter`.\n    derive: YAML key `derive`."]
+    #[pyo3(signature = (*, target, name = None, filter = None, derive = None))]
+    fn new(
+        target: String,
+        name: Option<String>,
+        filter: Option<String>,
+        derive: Option<Vec<PySdlDerive>>,
+    ) -> Self {
+        Self {
+            target,
+            name,
+            filter,
+            derive,
+        }
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        config_repr("SdlDocStateless", self)
+    }
+}
+
+#[doc = "Skipper Definition Language document. `type` is the `ComputeKind` discriminant."]
+#[pyclass(frozen, from_py_object, name = "SdlDocView", module = "skippr")]
+#[derive(Clone, Serialize)]
+pub struct PySdlDocView {
+    #[doc = "YAML key `input`."]
+    #[pyo3(get)]
+    pub input: String,
+    #[doc = "YAML key `name`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[doc = "YAML key `filter`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    #[doc = "YAML key `derive`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derive: Option<Vec<PySdlDerive>>,
+}
+
+#[pymethods]
+impl PySdlDocView {
+    #[new]
+    #[doc = "Skipper Definition Language document. `type` is the `ComputeKind` discriminant.\n\nArgs:\n    input: YAML key `input`.\n    name: YAML key `name`.\n    filter: YAML key `filter`.\n    derive: YAML key `derive`."]
+    #[pyo3(signature = (*, input, name = None, filter = None, derive = None))]
+    fn new(
+        input: String,
+        name: Option<String>,
+        filter: Option<String>,
+        derive: Option<Vec<PySdlDerive>>,
+    ) -> Self {
+        Self {
+            input,
+            name,
+            filter,
+            derive,
+        }
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        config_repr("SdlDocView", self)
+    }
+}
+
+#[doc = "Skipper Definition Language document. `type` is the `ComputeKind` discriminant."]
+#[pyclass(frozen, from_py_object, name = "SdlDocLatest", module = "skippr")]
+#[derive(Clone, Serialize)]
+pub struct PySdlDocLatest {
+    #[doc = "YAML key `input`."]
+    #[pyo3(get)]
+    pub input: String,
+    #[doc = "YAML key `keys`."]
+    #[pyo3(get)]
+    pub keys: Vec<String>,
+    #[doc = "YAML key `name`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[doc = "YAML key `order`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<String>>,
+}
+
+#[pymethods]
+impl PySdlDocLatest {
+    #[new]
+    #[doc = "Skipper Definition Language document. `type` is the `ComputeKind` discriminant.\n\nArgs:\n    input: YAML key `input`.\n    keys: YAML key `keys`.\n    name: YAML key `name`.\n    order: YAML key `order`."]
+    #[pyo3(signature = (*, input, keys, name = None, order = None))]
+    fn new(
+        input: String,
+        keys: Vec<String>,
+        name: Option<String>,
+        order: Option<Vec<String>>,
+    ) -> Self {
+        Self {
+            input,
+            keys,
+            name,
+            order,
+        }
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        config_repr("SdlDocLatest", self)
+    }
+}
+
+#[doc = "Skipper Definition Language document. `type` is the `ComputeKind` discriminant."]
+#[pyclass(frozen, from_py_object, name = "SdlDocKeyedTable", module = "skippr")]
+#[derive(Clone, Serialize)]
+pub struct PySdlDocKeyedTable {
+    #[doc = "YAML key `input`."]
+    #[pyo3(get)]
+    pub input: String,
+    #[doc = "YAML key `keys`."]
+    #[pyo3(get)]
+    pub keys: Vec<String>,
+    #[doc = "YAML key `measures`."]
+    #[pyo3(get)]
+    pub measures: Vec<PySdlMeasure>,
+    #[doc = "YAML key `name`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[pymethods]
+impl PySdlDocKeyedTable {
+    #[new]
+    #[doc = "Skipper Definition Language document. `type` is the `ComputeKind` discriminant.\n\nArgs:\n    input: YAML key `input`.\n    keys: YAML key `keys`.\n    measures: YAML key `measures`.\n    name: YAML key `name`."]
+    #[pyo3(signature = (*, input, keys, measures, name = None))]
+    fn new(
+        input: String,
+        keys: Vec<String>,
+        measures: Vec<PySdlMeasure>,
+        name: Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            keys,
+            measures,
+            name,
+        }
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        config_repr("SdlDocKeyedTable", self)
+    }
+}
+
+#[doc = "Skipper Definition Language document. `type` is the `ComputeKind` discriminant."]
+#[pyclass(
+    frozen,
+    from_py_object,
+    name = "SdlDocWindowedTable",
+    module = "skippr"
+)]
+#[derive(Clone, Serialize)]
+pub struct PySdlDocWindowedTable {
+    #[doc = "YAML key `input`."]
+    #[pyo3(get)]
+    pub input: String,
+    #[doc = "YAML key `keys`."]
+    #[pyo3(get)]
+    pub keys: Vec<String>,
+    #[doc = "YAML key `window`."]
+    #[pyo3(get)]
+    pub window: String,
+    #[doc = "YAML key `event_time`."]
+    #[pyo3(get)]
+    pub event_time: String,
+    #[doc = "YAML key `measures`."]
+    #[pyo3(get)]
+    pub measures: Vec<PySdlMeasure>,
+    #[doc = "YAML key `name`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[pymethods]
+impl PySdlDocWindowedTable {
+    #[new]
+    #[doc = "Skipper Definition Language document. `type` is the `ComputeKind` discriminant.\n\nArgs:\n    input: YAML key `input`.\n    keys: YAML key `keys`.\n    window: YAML key `window`.\n    event_time: YAML key `event_time`.\n    measures: YAML key `measures`.\n    name: YAML key `name`."]
+    #[pyo3(signature = (*, input, keys, window, event_time, measures, name = None))]
+    fn new(
+        input: String,
+        keys: Vec<String>,
+        window: String,
+        event_time: String,
+        measures: Vec<PySdlMeasure>,
+        name: Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            keys,
+            window,
+            event_time,
+            measures,
+            name,
+        }
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        config_repr("SdlDocWindowedTable", self)
+    }
+}
+
+#[doc = "Skipper Definition Language document. `type` is the `ComputeKind` discriminant."]
+#[pyclass(
+    frozen,
+    from_py_object,
+    name = "SdlDocStreamTableJoin",
+    module = "skippr"
+)]
+#[derive(Clone, Serialize)]
+pub struct PySdlDocStreamTableJoin {
+    #[doc = "YAML key `stream`."]
+    #[pyo3(get)]
+    pub stream: String,
+    #[doc = "YAML key `table`."]
+    #[pyo3(get)]
+    pub table: String,
+    #[doc = "YAML key `on`."]
+    #[pyo3(get)]
+    pub on: Vec<String>,
+    #[doc = "YAML key `name`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[pymethods]
+impl PySdlDocStreamTableJoin {
+    #[new]
+    #[doc = "Skipper Definition Language document. `type` is the `ComputeKind` discriminant.\n\nArgs:\n    stream: YAML key `stream`.\n    table: YAML key `table`.\n    on: YAML key `on`.\n    name: YAML key `name`."]
+    #[pyo3(signature = (*, stream, table, on, name = None))]
+    fn new(stream: String, table: String, on: Vec<String>, name: Option<String>) -> Self {
+        Self {
+            stream,
+            table,
+            on,
+            name,
+        }
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        config_repr("SdlDocStreamTableJoin", self)
+    }
+}
+
+#[doc = "One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`)."]
+#[pyclass(frozen, from_py_object, name = "ComputeItemSql", module = "skippr")]
+#[derive(Clone, Serialize)]
+pub struct PyComputeItemSql {
+    #[doc = "YAML key `name`."]
+    #[pyo3(get)]
+    pub name: String,
+    #[doc = "YAML key `value`."]
+    #[pyo3(get)]
+    pub value: String,
+}
+
+#[pymethods]
+impl PyComputeItemSql {
+    #[new]
+    #[doc = "One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`).\n\nArgs:\n    name: YAML key `name`.\n    value: YAML key `value`."]
+    #[pyo3(signature = (*, name, value))]
+    fn new(name: String, value: String) -> Self {
+        Self { name, value }
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        config_repr("ComputeItemSql", self)
+    }
+}
+
+#[doc = "One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`)."]
+#[pyclass(frozen, from_py_object, name = "ComputeItemSdl", module = "skippr")]
+#[derive(Clone, Serialize)]
+pub struct PyComputeItemSdl {
+    #[doc = "YAML key `name`."]
+    #[pyo3(get)]
+    pub name: String,
+    #[doc = "YAML key `value`."]
+    #[pyo3(get)]
+    pub value: PySdlDoc,
+}
+
+#[pymethods]
+impl PyComputeItemSdl {
+    #[new]
+    #[doc = "One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`).\n\nArgs:\n    name: YAML key `name`.\n    value: YAML key `value`."]
+    #[pyo3(signature = (*, name, value))]
+    fn new(name: String, value: PySdlDoc) -> Self {
+        Self { name, value }
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        config_repr("ComputeItemSdl", self)
+    }
+}
+
 #[doc = "One skipprd pipeline: a source, optional sinks, and how sync runs.\n\nRegister it with `Config.pipeline(name, Pipeline(...))`, then pass the\nreturned `PipelineRef` to `Session`."]
 #[pyclass(from_py_object, name = "Pipeline", module = "skippr")]
 #[derive(Clone, Serialize)]
@@ -868,161 +1212,78 @@ impl PyPipeline {
     }
 }
 
-#[doc = "One in-memory Arrow op. YAML/JSON is a one-key map (`filter:`, `project:`, …)."]
-#[pyclass(frozen, from_py_object, name = "TransformOp", module = "skippr")]
+#[pyclass(frozen, from_py_object, name = "SdlDerive", module = "skippr")]
 #[derive(Clone, Serialize)]
-pub struct PyTransformOp {
-    #[doc = "DataFusion SQL boolean expression. Rows that do not match are dropped.\n\nYAML key `filter`."]
+pub struct PySdlDerive {
+    #[doc = "YAML key `name`."]
     #[pyo3(get)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter: Option<String>,
-    #[doc = "Keep only these output column names, in this order.\n\nYAML key `project`."]
+    pub name: String,
+    #[doc = "YAML key `expr`."]
     #[pyo3(get)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub project: Option<Vec<String>>,
-    #[doc = "Add derived columns. Map of new name to DataFusion SQL expression.\n\nYAML key `derive`."]
-    #[pyo3(get)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub derive: Option<BTreeMap<String, String>>,
-    #[doc = "Rename columns. Map of current name to new name.\n\nYAML key `rename`."]
-    #[pyo3(get)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rename: Option<BTreeMap<String, String>>,
-    #[doc = "Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`).\n\nYAML key `cast`."]
-    #[pyo3(get)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cast: Option<BTreeMap<String, String>>,
+    pub expr: String,
 }
 
 #[pymethods]
-impl PyTransformOp {
-    #[classmethod]
-    #[doc = "DataFusion SQL boolean expression. Rows that do not match are dropped.\n\nYAML key `filter`."]
-    fn filter(_cls: &Bound<'_, PyType>, filter: String) -> Self {
-        Self {
-            filter: Some(filter),
-            project: None,
-            derive: None,
-            rename: None,
-            cast: None,
-        }
-    }
-
-    #[classmethod]
-    #[doc = "Keep only these output column names, in this order.\n\nYAML key `project`."]
-    fn project(_cls: &Bound<'_, PyType>, project: Vec<String>) -> Self {
-        Self {
-            filter: None,
-            project: Some(project),
-            derive: None,
-            rename: None,
-            cast: None,
-        }
-    }
-
-    #[classmethod]
-    #[doc = "Add derived columns. Map of new name to DataFusion SQL expression.\n\nYAML key `derive`."]
-    fn derive(_cls: &Bound<'_, PyType>, derive: BTreeMap<String, String>) -> Self {
-        Self {
-            filter: None,
-            project: None,
-            derive: Some(derive),
-            rename: None,
-            cast: None,
-        }
-    }
-
-    #[classmethod]
-    #[doc = "Rename columns. Map of current name to new name.\n\nYAML key `rename`."]
-    fn rename(_cls: &Bound<'_, PyType>, rename: BTreeMap<String, String>) -> Self {
-        Self {
-            filter: None,
-            project: None,
-            derive: None,
-            rename: Some(rename),
-            cast: None,
-        }
-    }
-
-    #[classmethod]
-    #[doc = "Cast columns. Map of column name to Arrow type name (`int64`, `float64`, `utf8`).\n\nYAML key `cast`."]
-    fn cast(_cls: &Bound<'_, PyType>, cast: BTreeMap<String, String>) -> Self {
-        Self {
-            filter: None,
-            project: None,
-            derive: None,
-            rename: None,
-            cast: Some(cast),
-        }
+impl PySdlDerive {
+    #[new]
+    #[doc = "Args:\n    name: YAML key `name`.\n    expr: YAML key `expr`."]
+    #[pyo3(signature = (*, name, expr))]
+    fn new(name: String, expr: String) -> Self {
+        Self { name, expr }
     }
 
     fn __repr__(&self) -> PyResult<String> {
-        config_repr("TransformOp", self)
+        config_repr("SdlDerive", self)
     }
 }
 
-#[doc = "One aggregate measure. Exactly one of `sum` or `count` may be set."]
-#[pyclass(frozen, from_py_object, name = "AggregateMeasure", module = "skippr")]
+#[pyclass(frozen, from_py_object, name = "SdlMeasure", module = "skippr")]
 #[derive(Clone, Serialize)]
-pub struct PyAggregateMeasure {
-    #[doc = "Column to sum. CDC updates apply the delta from the previous row.\n\nYAML key `sum`."]
+pub struct PySdlMeasure {
+    #[doc = "YAML key `name`."]
+    #[pyo3(get)]
+    pub name: String,
+    #[doc = "YAML key `sum`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sum: Option<String>,
-    #[doc = "Count rows. Use `\"*\"` for every row.\n\nYAML key `count`."]
+    #[doc = "YAML key `count`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<String>,
+    #[doc = "YAML key `min`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<String>,
+    #[doc = "YAML key `max`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<String>,
 }
 
 #[pymethods]
-impl PyAggregateMeasure {
+impl PySdlMeasure {
     #[new]
-    #[doc = "One aggregate measure. Exactly one of `sum` or `count` may be set.\n\nArgs:\n    sum: Column to sum. CDC updates apply the delta from the previous row.\n    count: Count rows. Use `\"*\"` for every row."]
-    #[pyo3(signature = (*, sum = None, count = None))]
-    fn new(sum: Option<String>, count: Option<String>) -> Self {
-        Self { sum, count }
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
-        config_repr("AggregateMeasure", self)
-    }
-}
-
-#[doc = "One keyed running aggregate maintained from committed WAL records."]
-#[pyclass(frozen, from_py_object, name = "TransformAggregate", module = "skippr")]
-#[derive(Clone, Serialize)]
-pub struct PyTransformAggregate {
-    #[doc = "Stable processor id used in Skippr Store `stream_state` key namespaces.\n\nYAML key `id`."]
-    #[pyo3(get)]
-    pub id: String,
-    #[doc = "Columns that form the aggregate key, in order.\n\nYAML key `key_fields`."]
-    #[pyo3(get)]
-    pub key_fields: Vec<String>,
-    #[doc = "Named measures. Each value is `{ sum: column }` or `{ count: \"*\" }`.\n\nYAML key `measures`."]
-    #[pyo3(get)]
-    pub measures: BTreeMap<String, PyAggregateMeasure>,
-}
-
-#[pymethods]
-impl PyTransformAggregate {
-    #[new]
-    #[doc = "One keyed running aggregate maintained from committed WAL records.\n\nArgs:\n    id: Stable processor id used in Skippr Store `stream_state` key namespaces.\n    key_fields: Columns that form the aggregate key, in order.\n    measures: Named measures. Each value is `{ sum: column }` or `{ count: \"*\" }`."]
-    #[pyo3(signature = (*, id, key_fields, measures))]
+    #[doc = "Args:\n    name: YAML key `name`.\n    sum: YAML key `sum`.\n    count: YAML key `count`.\n    min: YAML key `min`.\n    max: YAML key `max`."]
+    #[pyo3(signature = (*, name, sum = None, count = None, min = None, max = None))]
     fn new(
-        id: String,
-        key_fields: Vec<String>,
-        measures: BTreeMap<String, PyAggregateMeasure>,
+        name: String,
+        sum: Option<String>,
+        count: Option<String>,
+        min: Option<String>,
+        max: Option<String>,
     ) -> Self {
         Self {
-            id,
-            key_fields,
-            measures,
+            name,
+            sum,
+            count,
+            min,
+            max,
         }
     }
 
     fn __repr__(&self) -> PyResult<String> {
-        config_repr("TransformAggregate", self)
+        config_repr("SdlMeasure", self)
     }
 }
 
@@ -1030,10 +1291,18 @@ impl PyTransformAggregate {
 #[pyclass(frozen, from_py_object, name = "Transform", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyTransform {
-    #[doc = "Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.\n\nYAML key `batch_time_fields`."]
+    #[doc = "Event-time column (FieldId after bind). YAML alias `batch_time_fields`.\n\nYAML key `event_time`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub batch_time_fields: Option<String>,
+    pub event_time: Option<String>,
+    #[doc = "Watermark delay parsed at the edge to Duration (`5 minutes`).\n\nYAML key `watermark_delay`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watermark_delay: Option<String>,
+    #[doc = "Declared compute. Each item is `{name, type: sql|sdl, value}`. Journaled as `ComputeKind`.\n\nYAML key `compute`."]
+    #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute: Option<Vec<PyComputeItem>>,
     #[doc = "Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n\nYAML key `batch_time_unit`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1078,23 +1347,17 @@ pub struct PyTransform {
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inject_fields: Option<BTreeMap<String, PyAnyValue>>,
-    #[doc = "Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.\n\nYAML key `ops`."]
-    #[pyo3(get)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ops: Option<Vec<PyTransformOp>>,
-    #[doc = "Keyed running aggregates maintained from committed WAL data in Skippr Store (`stream_state`).\n\nYAML key `aggregates`."]
-    #[pyo3(get)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aggregates: Option<Vec<PyTransformAggregate>>,
 }
 
 #[pymethods]
 impl PyTransform {
     #[new]
-    #[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink.\n\nArgs:\n    batch_time_fields: Timestamp field(s) for time partitions. Comma-separated; first field found in the record is used.\n    batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n    flatten_events: Flatten nested objects into underscore-separated columns (`contact_name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n    record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.\n    batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).\n    partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.\n    namespace_fields: Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.\n    time_partition_prefix: Prefix for time-partition folder names (`p_` → `p_2026-10-08`).\n    enable_single_quote_parsing: Accept JSON that uses single quotes around strings.\n    enable_unicode_parsing: Accept JSON with unescaped Unicode.\n    batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.\n    inject_fields: Static field names and JSON values merged onto each source record before ingest.\n    ops: Ordered in-memory Arrow ops applied after schema mapping and before WAL commit.\n    aggregates: Keyed running aggregates maintained from committed WAL data in Skippr Store (`stream_state`)."]
-    #[pyo3(signature = (*, batch_time_fields = None, batch_time_unit = None, flatten_events = None, record_field_path = None, batch_partition_fields = None, partition_allowed_values = None, namespace_fields = None, time_partition_prefix = None, enable_single_quote_parsing = None, enable_unicode_parsing = None, batch_order_fields = None, inject_fields = None, ops = None, aggregates = None))]
+    #[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink.\n\nArgs:\n    event_time: Event-time column (FieldId after bind). YAML alias `batch_time_fields`.\n    watermark_delay: Watermark delay parsed at the edge to Duration (`5 minutes`).\n    compute: Declared compute. Each item is `{name, type: sql|sdl, value}`. Journaled as `ComputeKind`.\n    batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n    flatten_events: Flatten nested objects into underscore-separated columns (`contact_name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n    record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.\n    batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).\n    partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.\n    namespace_fields: Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.\n    time_partition_prefix: Prefix for time-partition folder names (`p_` → `p_2026-10-08`).\n    enable_single_quote_parsing: Accept JSON that uses single quotes around strings.\n    enable_unicode_parsing: Accept JSON with unescaped Unicode.\n    batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.\n    inject_fields: Static field names and JSON values merged onto each source record before ingest."]
+    #[pyo3(signature = (*, event_time = None, watermark_delay = None, compute = None, batch_time_unit = None, flatten_events = None, record_field_path = None, batch_partition_fields = None, partition_allowed_values = None, namespace_fields = None, time_partition_prefix = None, enable_single_quote_parsing = None, enable_unicode_parsing = None, batch_order_fields = None, inject_fields = None))]
     fn new(
-        batch_time_fields: Option<String>,
+        event_time: Option<String>,
+        watermark_delay: Option<String>,
+        compute: Option<Vec<PyComputeItem>>,
         batch_time_unit: Option<PyBatchTimeUnit>,
         flatten_events: Option<bool>,
         record_field_path: Option<String>,
@@ -1106,11 +1369,11 @@ impl PyTransform {
         enable_unicode_parsing: Option<bool>,
         batch_order_fields: Option<String>,
         inject_fields: Option<BTreeMap<String, PyAnyValue>>,
-        ops: Option<Vec<PyTransformOp>>,
-        aggregates: Option<Vec<PyTransformAggregate>>,
     ) -> Self {
         Self {
-            batch_time_fields,
+            event_time,
+            watermark_delay,
+            compute,
             batch_time_unit,
             flatten_events,
             record_field_path,
@@ -1122,8 +1385,6 @@ impl PyTransform {
             enable_unicode_parsing,
             batch_order_fields,
             inject_fields,
-            ops,
-            aggregates,
         }
     }
 
@@ -6625,10 +6886,17 @@ pub fn register_generated_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataSinkSkipprLakeWarehouseObjectStoreFile>()?;
     m.add_class::<PyDataSinkSkipprLakeWarehouseObjectStoreS3>()?;
     m.add_class::<PyDataSinkSkipprLakeWarehouseObjectStoreR2>()?;
+    m.add_class::<PySdlDocStateless>()?;
+    m.add_class::<PySdlDocView>()?;
+    m.add_class::<PySdlDocLatest>()?;
+    m.add_class::<PySdlDocKeyedTable>()?;
+    m.add_class::<PySdlDocWindowedTable>()?;
+    m.add_class::<PySdlDocStreamTableJoin>()?;
+    m.add_class::<PyComputeItemSql>()?;
+    m.add_class::<PyComputeItemSdl>()?;
     m.add_class::<PyPipeline>()?;
-    m.add_class::<PyTransformOp>()?;
-    m.add_class::<PyAggregateMeasure>()?;
-    m.add_class::<PyTransformAggregate>()?;
+    m.add_class::<PySdlDerive>()?;
+    m.add_class::<PySdlMeasure>()?;
     m.add_class::<PyTransform>()?;
     m.add_class::<PyStats>()?;
     m.add_class::<PySemanticLayerSettings>()?;
@@ -6754,6 +7022,8 @@ pub fn register_generated_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "DataSinkSkipprLakeWarehouseObjectStore",
         PyDataSinkSkipprLakeWarehouseObjectStore::type_alias(m.py())?,
     )?;
+    m.add("SdlDoc", PySdlDoc::type_alias(m.py())?)?;
+    m.add("ComputeItem", PyComputeItem::type_alias(m.py())?)?;
     m.add(
         "DataSourceConfig",
         union_alias([

@@ -6,7 +6,7 @@ use crate::helpers::wal_storage::{ConfigError, WalStorage};
 use crate::plugins::cdc::SinkCapability;
 use crate::sqlrt::iceberg_lake::{FsCatalogConfig, GlueCatalogConfig, IcebergLake};
 use skippr_iceberg_catalog::SkipprLakeConfig;
-use skippr_lease::{PipelineKey, PipelinePaths};
+use skippr_lease::PipelineKey;
 
 /// How `skipprd query` reads one pipeline. Resolved once at `PipelineConfigView::for_name`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -136,11 +136,6 @@ impl PipelineConfigView {
 
     pub fn key(&self) -> &PipelineKey {
         &self.key
-    }
-
-    pub fn paths(&self) -> Result<PipelinePaths, ConfigError> {
-        PipelinePaths::new(&self.data_root, &self.key)
-            .map_err(|err| ConfigError::InvalidIdentity(err.to_string()))
     }
 
     pub fn sink_capability(&self) -> Option<&'static SinkCapability> {

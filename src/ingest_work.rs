@@ -3916,7 +3916,7 @@ impl Ingest {
                             );
 
                             let mut used_exact_arrow = false;
-                            if use_exact_arrow && !is_cdc_batch {
+                            if use_exact_arrow {
                                 if let Some(ns_metadata) =
                                     metadata_snapshot.metadata.get(skpr_namespace)
                                 {
@@ -4267,7 +4267,6 @@ impl Ingest {
 
             match merge_record_batches(entry.schema.clone(), batches) {
                 Ok(merged) => {
-                    let ops = config.get_transform_ops();
                     let snapshot = METADATA.load();
                     let empty = Vec::new();
                     let log = snapshot
@@ -4275,31 +4274,95 @@ impl Ingest {
                         .get(&entry._namespace)
                         .map(Vec::as_slice)
                         .unwrap_or(&empty);
-                    match crate::stream_transform::apply_configured_ops(
-                        log,
-                        &ops,
-                        merged,
-                        take_cdc_sidecar(entry.cdc_rows.take(), cdc_row_buf.remove(k)),
+                    let select = match crate::helpers::offsets::live_kv_for(
+                        &config.skippr_store_dir(),
                     ) {
-                        Ok((batches, cdc_rows)) => {
-                            if let Some(batch) = batches.first() {
-                                entry.schema = batch.schema();
-                                entry._schema_fingerprint =
-                                    crate::converters::skippr_arrow::stable_schema_fingerprint(
-                                        &entry.schema,
+                        Some((kv, _)) => {
+                            match crate::compute::stateless_for_namespace(
+                                kv.as_ref(),
+                                &config.get_workspace_name(),
+                                &config.get_pipeline_name(),
+                                &entry._namespace,
+                            ) {
+                                Ok(select) => select,
+                                Err(err) => {
+                                    warn!(
+                                        "compute journal load failed for ns={}: {err}; skipping batch",
+                                        entry._namespace
                                     );
+                                    continue;
+                                }
                             }
-                            entry.payload = crate::buffer::segment_file::WalPayload::Arrow(batches);
-                            entry.cdc_rows = cdc_rows;
+                        }
+                        None => None,
+                    };
+                    let cdc = take_cdc_sidecar(entry.cdc_rows.take(), cdc_row_buf.remove(k));
+                    let merged = if merged.len() == 1 {
+                        merged.into_iter().next().unwrap()
+                    } else {
+                        match arrow::compute::concat_batches(&entry.schema, &merged) {
+                            Ok(batch) => batch,
+                            Err(err) => {
+                                warn!(
+                                    "Failed to concat record batches for ns={}: {}",
+                                    entry._namespace, err
+                                );
+                                continue;
+                            }
+                        }
+                    };
+                    let event_time = config.get_transform_event_time();
+                    let (merged, cdc) = if event_time.trim().is_empty() {
+                        (merged, cdc)
+                    } else {
+                        let col = event_time.split(',').next().unwrap_or("").trim();
+                        match crate::compute::drop_invalid_event_times(merged, cdc, col) {
+                            Ok((aligned, dropped)) => {
+                                if dropped > 0 {
+                                    dl_records.push(DeadletterRecord {
+                                        namespace: entry._namespace.clone(),
+                                        record: format!("{dropped} rows"),
+                                        error: "null or unparsable event_time".into(),
+                                        failure_code: "EVENT_TIME".into(),
+                                        event_time: None,
+                                        source_uri: String::new(),
+                                        offset_key: String::new(),
+                                        offset_pos: 0,
+                                    });
+                                }
+                                (aligned.batch, aligned.cdc)
+                            }
+                            Err(err) => {
+                                warn!(
+                                    "event_time filter failed for ns={}: {}",
+                                    entry._namespace, err
+                                );
+                                continue;
+                            }
+                        }
+                    };
+                    match crate::compute::apply_stateless(log, select.as_ref(), merged, cdc) {
+                        Ok(aligned) => {
+                            entry.schema = aligned.batch.schema();
+                            entry._schema_fingerprint =
+                                crate::converters::skippr_arrow::stable_schema_fingerprint(
+                                    &entry.schema,
+                                );
+                            entry.payload =
+                                crate::buffer::segment_file::WalPayload::Arrow(vec![aligned.batch]);
+                            entry.cdc_rows = aligned.cdc;
                         }
                         Err(err) => {
                             crate::metrics::counters::add_stream_transform_failure(1);
-                            warn!("transform.ops failed for ns={}: {}", entry._namespace, err);
+                            warn!(
+                                "stateless compute failed for ns={}: {}",
+                                entry._namespace, err
+                            );
                             if submit_id != 0 {
                                 crate::buffer::wal_writer::fail_request(
                                     submit_id,
                                     format!(
-                                        "transform.ops failed for namespace {}: {}",
+                                        "stateless compute failed for namespace {}: {}",
                                         entry._namespace, err
                                     ),
                                 );
@@ -4578,6 +4641,43 @@ mod cdc_sidecar_tests {
         let leftover = Some(vec![update_meta()]);
         let got = take_cdc_sidecar(None, leftover).expect("sidecar");
         assert_eq!(got[0].mutation, MutationKind::Update);
+    }
+
+    #[test]
+    fn exact_arrow_success_still_tracks_cdc_sidecar() {
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut buf = HashMap::new();
+        let mut cdc_row_buf = HashMap::new();
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let schema_hash = SchemaHash {
+            schema,
+            hash: "1".into(),
+        };
+        let key = (
+            "sink".to_string(),
+            "ns".to_string(),
+            "p".to_string(),
+            None,
+            "1".to_string(),
+        );
+        track_partition_offset_with_key(
+            &mut buf,
+            "sink",
+            &key,
+            &schema_hash,
+            "ns",
+            "p",
+            &None,
+            &OffsetKey::new("ns", "p"),
+            1,
+            Some(update_meta()),
+            &mut cdc_row_buf,
+        );
+        assert_eq!(cdc_row_buf[&key][0].mutation, MutationKind::Update);
+        assert!(buf.contains_key(&key));
     }
 }
 

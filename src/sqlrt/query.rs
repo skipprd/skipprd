@@ -6,30 +6,23 @@ use crate::sqlrt::operators::dump_schema::dump_schema;
 use crate::sqlrt::parser::{PipelineToggle, SParser, Statement};
 use crate::sqlrt::session::collect_user_sql;
 use crate::METADATA;
-use arrow::array::{Array, ArrayRef, Int32Array, StringArray};
+use arrow::array::{ArrayRef, StringArray};
 use arrow_schema::DataType;
 use datafusion::prelude::SessionContext;
 use std::fs::OpenOptions;
 use std::io::BufReader;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use std::{fs, process};
 
 use crate::ingest_work::Ingest;
-use crate::sqlrt::doc_parser::SqlDocParser;
-use crate::sqlrt::docs::SqlStatementDoc;
 use crate::sqlrt::tui::{QueryEditorConfig, QueryEditorView};
 use crate::ARROW_SCHEMA;
 use arc_swap::ArcSwap;
-use chrono::DateTime;
 use datafusion::arrow::array::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::sql::sqlparser::ast::{
-    Expr as StdExpr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
-    FunctionArguments, GroupByExpr, Ident, ObjectName as SqlObjectName, OrderByKind,
-    Query as StdQuery, Select as StdSelect, SelectItem as StdSelectItem, SetExpr,
-    Statement as StdStatement, TableFactor,
+    ObjectName as SqlObjectName, SetExpr, Statement as StdStatement, TableFactor,
 };
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::Parser as StdSqlParser;
@@ -79,25 +72,71 @@ async fn apply_pipeline_toggle(
     ))
 }
 
+fn skippr_statement(sql: &str) -> Option<Statement> {
+    let mut parser = SParser::new(sql).ok()?;
+    parser.parse_statement().ok()
+}
+
+fn alter_table_compute_name(
+    stmt: &crate::sqlrt::parser::AlterTableStatement,
+) -> Option<crate::compute::Fqn> {
+    let pipeline = format!("{}", stmt.pipeline).replace('"', "");
+    let namespace = stmt
+        .namespace
+        .as_ref()
+        .map(|ns| format!("{ns}").replace('"', ""))?;
+    crate::compute::Fqn::from_parts(&pipeline, &namespace).ok()
+}
+
+fn ingest_op_to_compute(
+    op: &crate::discover::schema_alter::SchemaAlterOp,
+) -> Result<Vec<crate::compute::ComputeAlteration>, String> {
+    use crate::compute::ComputeAlteration;
+    use crate::discover::schema_alter::SchemaAlterOp;
+    match op {
+        SchemaAlterOp::Drop { column } => Ok(vec![ComputeAlteration::DropColumn {
+            column: column.clone(),
+        }]),
+        SchemaAlterOp::Rename { from, to } => Ok(vec![ComputeAlteration::RenameColumn {
+            from: from.clone(),
+            to: to.clone(),
+        }]),
+        SchemaAlterOp::Merge { .. } | SchemaAlterOp::Promote { .. } => Err(
+            "MERGE COLUMN / ALTER COLUMN TYPE are ingest schema ops; ALTER COMPUTE for measures"
+                .into(),
+        ),
+    }
+}
+
 pub fn sql_uses_record_batch_collect(sql: &str) -> bool {
-    let upper = sql.trim().to_uppercase();
-    !(upper.starts_with("SHOW ")
-        || upper.starts_with("STREAM ")
-        || upper.starts_with("ENABLE ")
-        || upper.starts_with("DISABLE ")
-        || upper.starts_with("SCHEMA ")
-        || upper.starts_with("PIPELINE ")
-        || upper.starts_with("DROP ")
-        || upper.starts_with("ALTER ")
-        || upper.starts_with("RESET ")
-        || upper.starts_with("DESCRIBE ")
-        || upper.starts_with("DESC ")
-        || upper.starts_with("LOAD "))
+    if skippr_statement(sql).is_some() {
+        return false;
+    }
+    let upper = sql.trim().to_ascii_uppercase();
+    // DESCRIBE is an AdHoc mode SParser does not admit. STREAM is Statement::Stream.
+    !(upper.starts_with("DESCRIBE ") || upper.starts_with("DESC "))
+}
+
+pub(crate) fn parsed_stream(sql: &str) -> Option<crate::sqlrt::parser::StreamStatement> {
+    let mut parser = SParser::new(sql).ok()?;
+    match parser.parse_statement().ok()? {
+        Statement::Stream(stream) => Some(stream),
+        _ => None,
+    }
 }
 
 pub fn sql_uses_shared_extension_collect(sql: &str) -> bool {
-    let upper = sql.trim().to_uppercase();
-    upper.starts_with("ALTER ") || upper.starts_with("ENABLE ") || upper.starts_with("DISABLE ")
+    matches!(
+        skippr_statement(sql),
+        Some(
+            Statement::AlterTable(_)
+                | Statement::CreateView { .. }
+                | Statement::CreateTableAs { .. }
+                | Statement::DropCompute { .. }
+                | Statement::AlterCompute { .. }
+                | Statement::PipelineToggle(_)
+        )
+    )
 }
 
 impl Default for QueryExecutionOptions {
@@ -119,24 +158,15 @@ pub async fn new_context_all_namespaces(
     let ctx = crate::sqlrt::session::coordinating_query_context().await?;
     let pipelines = crate::sqlrt::registry::list_pipelines(&config).await;
     for pipeline in pipelines {
-        let mut namespaces = crate::sqlrt::registry::list_namespaces(&config, &pipeline).await;
+        let bound = config.bind_pipeline(&pipeline);
+        let mut namespaces = crate::sqlrt::registry::list_namespaces(&bound, &pipeline).await;
         namespaces.sort();
         for ns in namespaces {
-            // Keep sqlrt self-contained: register DataFusion views directly via sqlrt tables.
-            crate::sqlrt::tables::register_namespace_view(&ctx, config, &pipeline, &ns).await?;
+            crate::sqlrt::tables::register_namespace_view(&ctx, &bound, &pipeline, &ns).await?;
         }
-        let _ = crate::sqlrt::tables::register_deadletters(&ctx, config, &pipeline).await;
+        crate::sqlrt::tables::register_compute_tables(&ctx, &bound, &pipeline).await?;
+        let _ = crate::sqlrt::tables::register_deadletters(&ctx, &bound, &pipeline).await;
     }
-    crate::sqlrt::tables::register_user_namespaces(&ctx, config).await?;
-    Ok(ctx)
-}
-
-/// Iceberg `namespace.table` only — the lake contract for `skipprd serve` Flight.
-/// Does not register `pipeline.namespace` Iceberg ∪ WAL ingest aliases.
-pub async fn new_context_iceberg_namespaces(
-    config: &Config,
-) -> Result<SessionContext, DataFusionError> {
-    let ctx = crate::sqlrt::session::coordinating_query_context().await?;
     crate::sqlrt::tables::register_user_namespaces(&ctx, config).await?;
     Ok(ctx)
 }
@@ -144,62 +174,6 @@ pub async fn new_context_iceberg_namespaces(
 pub async fn register_catalog(config: &Config, ctx: &SessionContext) {
     // Delegate to S3-only registry-backed builder
     crate::sqlrt::metadata::register_catalog(&config, ctx).await;
-}
-
-#[allow(dead_code)]
-fn datediff(args: &[ArrayRef]) -> Result<ArrayRef, DataFusionError> {
-    let start = as_string_array(&args[0])?;
-    let end = as_string_array(&args[1])?;
-
-    // println!("Start: {:?}", start);
-    // println!("End: {:?}", end);
-    //
-    // let start_format = AnalyseSchema::is_valid_date(&start.value(0));
-    // let end_format = AnalyseSchema::is_valid_date(&end.value(0));
-
-    let result: Int32Array = (0..start.len())
-        .map(|i| {
-            if start.is_null(i) || end.is_null(i) {
-                None
-            } else {
-                // let start_date = Helpers::parse_date_from_string(&start.value(i), start_format.unwrap());
-                let start_date = DateTime::parse_from_rfc3339(start.value(i))
-                    .ok()
-                    .map(|dt| dt.naive_utc().date());
-
-                // let end_date = Helpers::parse_date_from_string(&end.value(i), end_format.unwrap());
-                let end_date = DateTime::parse_from_rfc3339(end.value(i))
-                    .ok()
-                    .map(|dt| dt.naive_utc().date());
-
-                let _diff = end_date.clone().unwrap() - start_date.clone().unwrap();
-                // println!("Diff: {:?}", diff);
-
-                match (start_date, end_date) {
-                    (Some(start_date), Some(end_date)) => {
-                        Some((end_date - start_date).num_days() as i32)
-                    }
-                    // (Ok(start_date), Ok(end_date)) => Some(diff.num_days() as i32),
-                    _ => None,
-                }
-            }
-        })
-        .collect();
-
-    // println!("Result: {:?}", result);
-
-    Ok(Arc::new(result) as ArrayRef)
-}
-
-#[allow(dead_code)]
-fn as_string_array(array: &ArrayRef) -> Result<&StringArray, DataFusionError> {
-    if let DataType::Utf8 = array.data_type() {
-        Ok(array.as_any().downcast_ref::<StringArray>().unwrap())
-    } else {
-        Err(DataFusionError::Internal(
-            "Expected StringArray".to_string(),
-        ))
-    }
 }
 
 fn print_sql_error_plain<E: std::fmt::Display>(err: &E) {
@@ -253,34 +227,6 @@ fn print_sql_error_plain<E: std::fmt::Display>(err: &E) {
         }
     } else {
         eprintln!("ERROR: {}", msg);
-    }
-}
-
-/// Documents a SQL query, returning information about what it does
-#[allow(dead_code)]
-pub async fn document_query(sql_str: &str) -> Result<Option<SqlStatementDoc>, String> {
-    SqlDocParser::parse_and_document(sql_str)
-}
-
-/// Function to explain a SQL query in plain English before executing it
-#[allow(dead_code)]
-pub async fn explain_query(sql_str: &str) -> String {
-    match document_query(sql_str).await {
-        Ok(Some(doc)) => {
-            format!(
-                "This query is a {} statement.\n\n\
-                 What it does: {}\n\n\
-                 The correct syntax is: {}\n\n\
-                 Example usage: {}", 
-                doc.name, doc.description, doc.syntax, doc.example
-            )
-        },
-        Ok(None) => {
-            "I couldn't identify this type of SQL query. It might be a standard SQL query that's not specifically documented.".to_string()
-        },
-        Err(e) => {
-            format!("Error analyzing query: {}", e)
-        }
     }
 }
 
@@ -388,9 +334,57 @@ async fn query_collect_warm_body(
                 let bound = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
                 bound.init().await;
                 let started = Instant::now();
-                let message = crate::migration::apply_query_alter(&bound, &stmt, sql_str)
+                let compute_name = alter_table_compute_name(&stmt);
+                let message = if let Some(name) = compute_name {
+                    if crate::sqlrt::tables::journal_has_table(
+                        &bound,
+                        name.pipeline.as_str(),
+                        name.name.as_str(),
+                    )
+                    .map_err(|err| std::io::Error::other(err.to_string()))?
+                    {
+                        let alterations =
+                            ingest_op_to_compute(&stmt.op).map_err(std::io::Error::other)?;
+                        crate::compute::apply_query_statement(
+                            &bound,
+                            &Statement::AlterCompute { name, alterations },
+                        )
+                        .await
+                        .map_err(|err| std::io::Error::other(err.to_string()))?
+                    } else {
+                        crate::migration::apply_query_alter(&bound, &stmt, sql_str)
+                            .await
+                            .map_err(std::io::Error::other)?
+                    }
+                } else {
+                    crate::migration::apply_query_alter(&bound, &stmt, sql_str)
+                        .await
+                        .map_err(std::io::Error::other)?
+                };
+                let batches = extension_message_batch(&message);
+                emit_query_collect(started, &batches);
+                return Ok(batches);
+            }
+            stmt @ (Statement::CreateView { .. }
+            | Statement::CreateTableAs { .. }
+            | Statement::DropCompute { .. }
+            | Statement::AlterCompute { .. }) => {
+                let name = match &stmt {
+                    Statement::CreateView { name, .. }
+                    | Statement::CreateTableAs { name, .. }
+                    | Statement::DropCompute { name }
+                    | Statement::AlterCompute { name, .. } => name,
+                    _ => unreachable!(),
+                };
+                let pipeline =
+                    crate::compute::resolve_ddl_pipeline(&config.get_pipeline_name(), name)
+                        .map_err(|err| std::io::Error::other(err.to_string()))?;
+                let bound = config.bind_pipeline(&pipeline);
+                bound.init().await;
+                let started = Instant::now();
+                let message = crate::compute::apply_query_statement(&bound, &stmt)
                     .await
-                    .map_err(std::io::Error::other)?;
+                    .map_err(|err| std::io::Error::other(err.to_string()))?;
                 let batches = extension_message_batch(&message);
                 emit_query_collect(started, &batches);
                 return Ok(batches);
@@ -542,108 +536,11 @@ pub async fn query_with_options(
         }
         return;
     }
-    // Enforce fully-qualified table names: require <pipeline>.<namespace>, forbid default.*
-    {
-        let is_extension = !sql_uses_record_batch_collect(sql_trim);
-        if !is_extension {
-            let lower = sql_trim.to_lowercase();
-            if lower.contains(" default.") {
-                println!("Error: default.* schema is not allowed. Use <pipeline>.<namespace> (e.g., picnic.screen).");
-                return;
-            }
-            // Require at least one fully-qualified <pipeline>.<namespace> present
-            let mut allowed: Vec<String> = Vec::new();
-            let pipes = crate::sqlrt::registry::list_pipelines(&config).await;
-            for p in pipes {
-                let nss = crate::sqlrt::registry::list_namespaces(&config, &p).await;
-                for ns in nss {
-                    allowed.push(format!("{}.{}", p, ns));
-                }
-            }
-            let has_any_allowed = allowed.iter().any(|fqn| lower.contains(fqn));
-            if !has_any_allowed {
-                println!("Error: All tables must be referenced as <pipeline>.<namespace> (e.g., picnic.screen).\nAllowed datasets: {}", allowed.join(", "));
-                return;
-            }
-        }
-    }
-    // STREAM: WAL-only, 2s refresh, table name equals pipeline name
-    if sql_trim.to_uppercase().starts_with("STREAM ") {
-        // Support optional WINDOW <seconds> anywhere after the projection; remove just that clause
-        let mut raw_after = sql_trim[7..].trim().to_string();
-        let mut window_secs_opt: Option<i64> = None;
-        {
-            let upper = raw_after.to_uppercase();
-            if let Some(idx) = upper.find(" WINDOW ") {
-                let start = idx + 8; // after ' WINDOW '
-                let bytes = raw_after.as_bytes();
-                let mut j = start;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                let num_start = j;
-                while j < bytes.len() && bytes[j].is_ascii_digit() {
-                    j += 1;
-                }
-                if j > num_start {
-                    if let Ok(sec) = raw_after[num_start..j].parse::<i64>() {
-                        window_secs_opt = Some(sec);
-                    }
-                    // remove the WINDOW <n> segment only, preserving a space boundary
-                    let left = raw_after[..idx].trim_end();
-                    let right = raw_after[j..].trim_start();
-                    raw_after = if right.is_empty() {
-                        left.to_string()
-                    } else {
-                        format!("{} {}", left, right)
-                    };
-                }
-            }
-        }
-        let mut select_sql = format!("SELECT {}", raw_after);
-        let dialect = GenericDialect {};
-        let mut table_opt: Option<String> = None;
-        if let Ok(ast) = StdSqlParser::parse_sql(&dialect, &select_sql) {
-            for stmt in ast {
-                if let StdStatement::Query(q) = stmt {
-                    match &*q.body {
-                        SetExpr::Select(sel) => {
-                            if let Some(twj) = sel.from.get(0) {
-                                if let TableFactor::Table { name, .. } = &twj.relation {
-                                    table_opt = Some(name.to_string());
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        // Fallback: simple FROM parser if sqlparser fails on WINDOW syntax
-        if table_opt.is_none() {
-            let up = select_sql.to_uppercase();
-            if let Some(fi) = up.find(" FROM ") {
-                let rest = &select_sql[fi + 6..];
-                let mut name = String::new();
-                for ch in rest.chars() {
-                    if ch.is_alphanumeric() || ch == '_' || ch == '-' {
-                        name.push(ch);
-                    } else {
-                        break;
-                    }
-                }
-                if !name.is_empty() {
-                    table_opt = Some(name);
-                }
-            }
-        }
-        let pipeline = match table_opt {
-            Some(t) => t,
-            None => {
-                println!("STREAM requires a FROM <pipeline_name>");
-                return;
-            }
-        };
+    // STREAM: WAL-only, 2s refresh. Admission is Statement::Stream.
+    if let Some(stream) = parsed_stream(sql_trim) {
+        let pipeline = stream.from.clone();
+        let mut select_sql = stream.select_sql.clone();
+        let window_secs_opt = stream.window_secs;
 
         // If WINDOW provided, append a time predicate using best-known time column
         if let Some(win_s) = window_secs_opt {
@@ -718,50 +615,8 @@ pub async fn query_with_options(
             // helper to build (pipeline, select_sql) from either STREAM ... or SELECT ...
             let build_plan = |input: &str| -> Option<(String, String)> {
                 let s = input.trim();
-                if s.to_uppercase().starts_with("STREAM ") {
-                    // derive FROM and optional WINDOW, then build SELECT
-                    let mut raw_after = s[7..].trim().to_string();
-                    // WINDOW parsing
-                    let upper = raw_after.to_uppercase();
-                    if let Some(idx) = upper.find(" WINDOW ") {
-                        // remove just the WINDOW clause (value used only to filter by now)
-                        let start = idx + 8;
-                        let bytes = raw_after.as_bytes();
-                        let mut j = start;
-                        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                            j += 1;
-                        }
-                        let num_start = j;
-                        while j < bytes.len() && bytes[j].is_ascii_digit() {
-                            j += 1;
-                        }
-                        if j > num_start {
-                            let left = raw_after[..idx].trim_end().to_string();
-                            let right = raw_after[j..].trim_start().to_string();
-                            raw_after = if right.is_empty() {
-                                left
-                            } else {
-                                format!("{} {}", left, right)
-                            };
-                        }
-                    }
-                    let select_sql = format!("SELECT {}", raw_after);
-                    let dialect = GenericDialect {};
-                    let mut table_opt: Option<String> = None;
-                    if let Ok(ast) = StdSqlParser::parse_sql(&dialect, &select_sql) {
-                        for stmt in ast {
-                            if let StdStatement::Query(q) = stmt {
-                                if let SetExpr::Select(sel) = &*q.body {
-                                    if let Some(twj) = sel.from.get(0) {
-                                        if let TableFactor::Table { name, .. } = &twj.relation {
-                                            table_opt = Some(name.to_string());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    table_opt.map(|p| (p, select_sql))
+                if let Some(stream) = parsed_stream(s) {
+                    Some((stream.from, stream.select_sql))
                 } else {
                     // SELECT ...; extract table for WAL scope
                     let dialect = GenericDialect {};
@@ -1068,6 +923,12 @@ pub async fn query_with_options(
         Ok(Statement::AlterTable(_)) => {
             unreachable!("ALTER TABLE routed through query_collect");
         }
+        Ok(Statement::CreateView { .. })
+        | Ok(Statement::CreateTableAs { .. })
+        | Ok(Statement::DropCompute { .. })
+        | Ok(Statement::AlterCompute { .. }) => {
+            unreachable!("CREATE/DROP/ALTER compute routed through query_collect");
+        }
         Ok(Statement::TableDrop(stmt)) => {
             // Get the schema and table names
             let table_str = format!("{}", stmt.table);
@@ -1234,15 +1095,15 @@ pub async fn query_with_options(
                     }
                 }
             }
-            if table_refs.is_empty() {
-                println!(
-                    "Could not infer table name from query; expected FROM <pipeline>.<namespace>"
-                );
-                process::exit(1);
-            }
-            // Enforce fully-qualified references only
             if table_refs.iter().any(|t| t.pipeline.is_empty()) {
                 println!("ERROR: Unqualified table name detected. Use fully-qualified <pipeline>.<namespace> (e.g., picnic.screen).");
+                process::exit(1);
+            }
+            if table_refs
+                .iter()
+                .any(|t| t.pipeline.eq_ignore_ascii_case("default"))
+            {
+                println!("Error: default.* schema is not allowed. Use <pipeline>.<namespace> (e.g., picnic.screen).");
                 process::exit(1);
             }
             // dedup
@@ -1264,25 +1125,24 @@ pub async fn query_with_options(
                 );
             }
 
-            // Strict mode: no special-cases (e.g., deadletters). All tables must be fully-qualified and pre-registered.
-            let mut first = true;
+            let ctx = match new_context_all_namespaces(&config).await {
+                Ok(ctx) => ctx,
+                Err(err) => {
+                    println!("{err}");
+                    process::exit(1);
+                }
+            };
             for TableRef {
                 pipeline,
                 namespace,
             } in table_refs
             {
-                // Switch pipeline context for correct local WAL dir and config resolution
                 config = config.bind_pipeline(&pipeline);
                 config.init().await;
                 if !plain {
                     println!("Context: pipeline='{}' namespace='{}'", pipeline, namespace);
                 }
-                if first {
-                    register_catalog(&config, &ctx).await;
-                    first = false;
-                }
 
-                // Bootstrap METADATA and ARROW_SCHEMA like main sync
                 match config.get_metadata().await {
                     Ok(pm) => {
                         let _keys: Vec<String> = pm.metadata.keys().cloned().collect();
@@ -1335,159 +1195,10 @@ pub async fn query_with_options(
                         }
                     }
                 }
-
-                if let Err(e) = crate::sqlrt::tables::register_namespace_view(
-                    &ctx, &config, &pipeline, &namespace,
-                )
-                .await
-                {
-                    if !plain {
-                        println!(
-                            "Failed to register namespace view for {}.{}: {}",
-                            pipeline, namespace, e
-                        );
-                    }
-                    return;
-                }
             }
             // Restore original pipeline context
             config = config.bind_pipeline(&original_pipeline);
 
-            // Execute the query
-            // Build whitelist of timestamp paths from ARROW_SCHEMA for all referenced tables
-            let _ts_whitelist: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-            // Rewrite SQL: wrap referenced dotted paths in to_timestamp_millis where in whitelist
-            #[allow(dead_code)]
-            fn needs_cast_path(
-                idents: &Vec<Ident>,
-                whitelist: &std::collections::HashSet<String>,
-            ) -> bool {
-                if idents.is_empty() {
-                    return false;
-                }
-                let path = idents
-                    .iter()
-                    .map(|i| i.value.clone())
-                    .collect::<Vec<String>>()
-                    .join(".");
-                whitelist.contains(&path)
-            }
-            #[allow(dead_code)]
-            fn rewrite_expr(expr: &mut StdExpr, whitelist: &std::collections::HashSet<String>) {
-                match expr {
-                    StdExpr::CompoundIdentifier(idents) => {
-                        if needs_cast_path(idents, whitelist) {
-                            let arg = StdExpr::CompoundIdentifier(idents.clone());
-                            *expr = StdExpr::Function(Function {
-                                name: SqlObjectName::from(Ident::new("to_timestamp_millis")),
-                                uses_odbc_syntax: false,
-                                parameters: FunctionArguments::None,
-                                args: FunctionArguments::List(FunctionArgumentList {
-                                    duplicate_treatment: None,
-                                    args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))],
-                                    clauses: vec![],
-                                }),
-                                filter: None,
-                                null_treatment: None,
-                                over: None,
-                                within_group: vec![],
-                            });
-                        }
-                    }
-                    StdExpr::Identifier(_) | StdExpr::Value(_) | StdExpr::Wildcard(_) => {}
-                    StdExpr::BinaryOp { left, right, .. } => {
-                        rewrite_expr(left, whitelist);
-                        rewrite_expr(right, whitelist);
-                    }
-                    StdExpr::UnaryOp { expr: inner, .. } => {
-                        rewrite_expr(inner, whitelist);
-                    }
-                    StdExpr::Nested(inner) => {
-                        rewrite_expr(inner, whitelist);
-                    }
-                    StdExpr::Function(f) => {
-                        if let FunctionArguments::List(list) = &mut f.args {
-                            for a in list.args.iter_mut() {
-                                if let FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) = a {
-                                    rewrite_expr(e, whitelist);
-                                }
-                            }
-                        }
-                    }
-                    StdExpr::Cast { expr: inner, .. } => {
-                        rewrite_expr(inner, whitelist);
-                    }
-                    _ => {}
-                }
-            }
-            #[allow(dead_code)]
-            fn rewrite_statement(
-                stmt: &mut StdStatement,
-                whitelist: &std::collections::HashSet<String>,
-            ) {
-                if let StdStatement::Query(q) = stmt {
-                    let StdQuery { body, order_by, .. } = q.as_mut();
-                    {
-                        match &mut **body {
-                            SetExpr::Select(sel) => {
-                                let StdSelect {
-                                    projection,
-                                    selection,
-                                    group_by,
-                                    having,
-                                    from,
-                                    ..
-                                } = sel.as_mut();
-                                // Rewrite two-part table names (pipeline.namespace) -> namespace
-                                for twj in from.iter_mut() {
-                                    if let TableFactor::Table { name, .. } = &mut twj.relation {
-                                        if name.0.len() > 1 {
-                                            if let Some(last) = name.0.last().cloned() {
-                                                name.0 = vec![last];
-                                            }
-                                        }
-                                    }
-                                }
-                                for item in projection.iter_mut() {
-                                    match item {
-                                        StdSelectItem::UnnamedExpr(e) => rewrite_expr(e, whitelist),
-                                        StdSelectItem::ExprWithAlias { expr, .. } => {
-                                            rewrite_expr(expr, whitelist)
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                if let Some(e) = selection.as_mut() {
-                                    rewrite_expr(e, whitelist);
-                                }
-                                // group by
-                                match group_by {
-                                    GroupByExpr::Expressions(exprs, _) => {
-                                        for e in exprs.iter_mut() {
-                                            rewrite_expr(e, whitelist);
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                if let Some(h) = having.as_mut() {
-                                    rewrite_expr(h, whitelist);
-                                }
-                            }
-                            _ => {}
-                        }
-                        if let Some(order_by) = order_by.as_mut() {
-                            if let OrderByKind::Expressions(exprs) = &mut order_by.kind {
-                                for ob in exprs.iter_mut() {
-                                    rewrite_expr(&mut ob.expr, whitelist);
-                                }
-                            }
-                        }
-                        // limit is an Expr in this parser version; nothing to rewrite here
-                    }
-                }
-            }
-            // Use SQL as-is (no legacy rewrite). Tables must be fully-qualified and registered accordingly.
             let rewritten_sql = sql_str.to_string();
 
             // Short-circuit for non-TUI plain mode
@@ -1520,61 +1231,16 @@ pub async fn query_with_options(
                 loop {
                     // Decide between STREAM (WAL-only) and SELECT (ctx_clone)
                     let trimmed = current.trim();
-                    if trimmed.to_uppercase().starts_with("STREAM ") {
-                        // Build SELECT from STREAM and execute against WAL-only context
-                        let mut raw_after = trimmed[7..].trim().to_string();
-                        // Strip optional WINDOW <n>
-                        let upper = raw_after.to_uppercase();
-                        if let Some(idx) = upper.find(" WINDOW ") {
-                            let start = idx + 8;
-                            let bytes = raw_after.as_bytes();
-                            let mut j = start;
-                            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                                j += 1;
+                    if let Some(stream) = parsed_stream(trimmed) {
+                        match execute_stream_sql(&mut config, &stream.from, &stream.select_sql)
+                            .await
+                        {
+                            Ok(b) => {
+                                let _ = tx_res.send(b);
                             }
-                            let num_start = j;
-                            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                                j += 1;
+                            Err(_) => {
+                                let _ = tx_res.send(Vec::new());
                             }
-                            if j > num_start {
-                                let left = raw_after[..idx].trim_end().to_string();
-                                let right = raw_after[j..].trim_start().to_string();
-                                raw_after = if right.is_empty() {
-                                    left
-                                } else {
-                                    format!("{} {}", left, right)
-                                };
-                            }
-                        }
-                        let select_sql = format!("SELECT {}", raw_after);
-                        // Extract pipeline name
-                        let dialect = GenericDialect {};
-                        let mut table_opt: Option<String> = None;
-                        if let Ok(ast) = StdSqlParser::parse_sql(&dialect, &select_sql) {
-                            for stmt in ast {
-                                if let StdStatement::Query(q) = stmt {
-                                    if let SetExpr::Select(sel) = &*q.body {
-                                        if let Some(twj) = sel.from.get(0) {
-                                            if let TableFactor::Table { name, .. } = &twj.relation {
-                                                table_opt = Some(name.to_string());
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(pipeline_name) = table_opt {
-                            match execute_stream_sql(&mut config, &pipeline_name, &select_sql).await
-                            {
-                                Ok(b) => {
-                                    let _ = tx_res.send(b);
-                                }
-                                Err(_) => {
-                                    let _ = tx_res.send(Vec::new());
-                                }
-                            }
-                        } else {
-                            let _ = tx_res.send(Vec::new());
                         }
                     } else {
                         // SELECT: run against prepared context (S3/union already registered earlier)
@@ -1637,29 +1303,6 @@ pub async fn query_with_options(
 
             // TUI mode already handled earlier when --watch/editor is active; here we simply pretty print if not plain
             // Nothing else to do; run already printed results in TUI
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn recurse_paths(
-    output_dir: &str,
-    table_name: &str,
-    ctx: &SessionContext,
-    paths: &mut Vec<PathBuf>,
-) {
-    // itterate over output_dir and fine any dir paths that include p_year=2023
-    for entry in fs::read_dir(&output_dir).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if path.is_dir() {
-            let path_str = path.to_str().unwrap();
-            if path_str.contains("p_year=2023") {
-                println!("Found data for table: {} in dir: {}", table_name, path_str);
-                paths.push(path);
-            } else {
-                recurse_paths(&path_str, table_name, ctx, paths);
-            }
         }
     }
 }
@@ -2057,6 +1700,25 @@ mod plain_query_document_tests {
         assert!(!super::sql_uses_shared_extension_collect(
             "SHOW PIPELINE bikehire"
         ));
+        assert!(!super::sql_uses_record_batch_collect(
+            "STREAM count(*) FROM shop"
+        ));
+        assert!(super::parsed_stream("STREAM count(*) FROM shop").is_some());
+        assert!(super::parsed_stream("SELECT count(*) FROM shop").is_none());
+        assert!(!super::sql_uses_record_batch_collect(
+            "CREATE TABLE invoices.customer_totals AS SELECT customer_id, SUM(amount) AS n FROM invoices.orders GROUP BY customer_id"
+        ));
+        assert!(super::sql_uses_shared_extension_collect(
+            "CREATE VIEW invoices.positive AS SELECT * FROM invoices.orders WHERE amount > 0"
+        ));
+        let prod = include_str!("query.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(
+            !prod.contains("starts_with(\"CREATE \")"),
+            "CREATE must route through Statement, not a string prefix"
+        );
     }
 
     #[test]
@@ -2162,6 +1824,32 @@ mod plain_query_document_tests {
             "STREAM --plain must collect one WAL snapshot, not the TUI"
         );
         assert!(
+            body.contains("parsed_stream"),
+            "STREAM must route through Statement::Stream"
+        );
+        assert!(
+            body.contains("new_context_all_namespaces"),
+            "ad-hoc SELECT must use the same Iceberg ∪ WAL context as skipprd serve"
+        );
+        assert!(
+            !body.contains("journal_has_table"),
+            "ad-hoc SELECT must not dual-register ingest WAL for a journaled compute name"
+        );
+        assert!(
+            !body.contains("Could not infer table name"),
+            "SELECT after Iceberg ∪ WAL registration must not require a FROM gate"
+        );
+        assert!(
+            !body.contains("fn needs_cast_path"),
+            "dead SQL rewrite helpers must be deleted"
+        );
+        assert!(
+            !prod.contains("fn datediff"),
+            "datediff UDF was never on the SELECT path"
+        );
+        assert!(!body.contains("starts_with(\"STREAM \")"));
+        assert!(!body.contains("Allowed datasets"));
+        assert!(
             prod.contains("list_namespaces"),
             "STREAM FROM <pipeline> must scan a real namespace, not assume namespace==pipeline"
         );
@@ -2251,37 +1939,34 @@ mod plain_query_document_tests {
             "Iceberg catalog/scan failure must fail the query, not leave tables unregistered"
         );
         assert!(
-            body.contains("register_namespace_view(&ctx, config, &pipeline, &ns).await?"),
+            body.contains("let bound = config.bind_pipeline(&pipeline)"),
+            "query context must bind each pipeline so Skippr Store uses DATA_DIR/workspace_pipeline"
+        );
+        assert!(
+            body.contains("register_namespace_view(&ctx, &bound, &pipeline, &ns).await?"),
             "query context must propagate Iceberg catalog register errors"
         );
         assert!(
             body.contains("register_user_namespaces(&ctx, config).await?"),
             "user Iceberg namespaces must register as DataFusion schemas"
         );
+        assert!(
+            body.contains("register_compute_tables(&ctx, &bound, &pipeline).await?"),
+            "query context must register journaled pipeline.compute_name tables"
+        );
     }
 
     #[test]
-    fn iceberg_namespace_context_skips_wal_ingest_alias() {
+    fn serve_and_query_share_iceberg_union_context() {
         let src = include_str!("query.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
-        let start = prod
-            .find("pub async fn new_context_iceberg_namespaces")
-            .expect("new_context_iceberg_namespaces");
-        let body = prod[start..]
-            .split("pub async fn ")
-            .nth(1)
-            .expect("function body after signature");
         assert!(
-            body.contains("register_user_namespaces(&ctx, config).await?"),
-            "serve Flight must register Iceberg namespace.table"
+            prod.contains("pub async fn new_context_all_namespaces"),
+            "one query context for skipprd query and skipprd serve"
         );
         assert!(
-            !body.contains("register_namespace_view"),
-            "serve Flight must not register pipeline.namespace Iceberg ∪ WAL"
-        );
-        assert!(
-            !body.contains("register_deadletters"),
-            "serve Flight must not register WAL deadletters"
+            !prod.contains("new_context_iceberg_namespaces"),
+            "Iceberg-only serve context is deleted; WAL-absent falls through to history"
         );
     }
 }
