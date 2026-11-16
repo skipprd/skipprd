@@ -437,6 +437,12 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         run = perf_db_run()
         scenario = {"asserts": {"query_name": "alpha-prime"}}
         run.assert_query_doc("cell", scenario, 0, {"header": ["name"], "rows": [["alpha-prime"]]})
+        run.assert_query_doc(
+            "cell",
+            scenario,
+            0,
+            {"header": ["id", "name"], "rows": [["1", "alpha-prime"]]},
+        )
         with self.assertRaisesRegex(run.perf_run.PerfError, "expected 1 row"):
             run.assert_query_doc(
                 "cell",

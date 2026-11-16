@@ -127,6 +127,7 @@ impl DataSourceDynamodbPlugin {
         offset_key: OffsetKey,
         json_str: String,
         source_uri: String,
+        namespace: Option<String>,
         cdc_rows: Option<Vec<WalRowMeta>>,
     ) -> IngestBatch {
         let bytes = json_str.len();
@@ -136,7 +137,7 @@ impl DataSourceDynamodbPlugin {
             bytes,
             offset_pos: None,
             source_uri,
-            namespace: None,
+            namespace,
             cdc_rows,
         }
     }
@@ -160,6 +161,7 @@ impl DataSourceDynamodbPlugin {
             shard_offset_key,
             json_str,
             format!("dynamodb-stream://{}/{}", table_name, shard_id),
+            Some(format!("dynamodb:{}", table_name)),
             Some(vec![meta]),
         ))
     }
@@ -362,6 +364,7 @@ impl DataSourceDynamodbPlugin {
                             offset_key.clone(),
                             json_str,
                             format!("dynamodb://{}", table_name),
+                            Some(format!("dynamodb:{}", table_name)),
                             cdc_rows,
                         ));
 
@@ -1057,12 +1060,13 @@ mod tests {
             .collect();
         assert_eq!(page.len(), 2);
         assert!(page.iter().all(|batch| {
-            batch
-                .cdc_rows
-                .as_ref()
-                .unwrap()
-                .iter()
-                .all(|row| row.source_transaction_id.is_none() && row.before.is_none())
+            batch.namespace.as_deref() == Some("dynamodb:orders")
+                && batch
+                    .cdc_rows
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .all(|row| row.source_transaction_id.is_none() && row.before.is_none())
         }));
     }
 
@@ -1149,6 +1153,7 @@ mod tests {
             OffsetKey::new("table", "seg"),
             "{\"id\":1}".into(),
             "dynamodb://table".into(),
+            Some("dynamodb:table".into()),
             Some(vec![WalRowMeta::new(
                 MutationKind::Snapshot,
                 b"k".to_vec(),
@@ -1157,6 +1162,7 @@ mod tests {
         )];
         let full = take_row_count_batch(&mut current, 1).unwrap();
         assert_eq!(full.len(), 1);
+        assert_eq!(full[0].namespace.as_deref(), Some("dynamodb:table"));
         assert!(full[0].cdc_rows.as_ref().unwrap()[0]
             .source_transaction_id
             .is_none());
