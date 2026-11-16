@@ -551,9 +551,9 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("--log", cli)
         self.assertIn("PERF_EVENT", (ROOT / "src" / "helpers" / "perf.rs").read_text(encoding="utf-8"))
         self.assertIn("skipprd::perf=info", (ROOT / "src" / "helpers" / "logging.rs").read_text(encoding="utf-8"))
-        skill = ROOT / ".cursor" / "skills" / "skippr-perf" / "SKILL.md"
+        skill = ROOT / ".cursor" / "skills" / "skippr-regression" / "SKILL.md"
         skill_text = skill.read_text(encoding="utf-8")
-        self.assertIn("name: skippr-perf", skill_text)
+        self.assertIn("name: skippr-regression", skill_text)
         self.assertIn("Local smoke", skill_text)
         self.assertIn("ubuntu-latest", skill_text)
         self.assertNotIn("skippr-darwin-arm64", skill_text)
@@ -645,9 +645,9 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("--warmup", runner)
         self.assertIn("--repeat", runner)
         self.assertIn("PROFILE_QUERY_REPEAT", runner)
-        skill = ROOT / ".cursor" / "skills" / "skippr-perf-db" / "SKILL.md"
+        skill = ROOT / ".cursor" / "skills" / "skippr-regression" / "SKILL.md"
         skill_text = skill.read_text(encoding="utf-8")
-        self.assertIn("name: skippr-perf-db", skill_text)
+        self.assertIn("name: skippr-regression", skill_text)
         self.assertIn("Local smoke", skill_text)
         self.assertIn("ubuntu-latest", skill_text)
         self.assertNotIn("skippr-darwin-arm64", skill_text)
@@ -662,7 +662,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("heaptrack", skill_text)
         self.assertIn("--warmup", skill_text)
         self.assertIn("query time", skill_text.lower())
-        self.assertNotIn("ingest-a-duckdb", skill_text)
+        self.assertIn("ingest-a-duckdb", skill_text)
         self.assertNotIn("q-wal-count-file", skill_text)
 
 

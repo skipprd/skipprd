@@ -466,9 +466,9 @@ mod tests {
             "SHOW PIPELINE docs must not claim a live offsets dump"
         );
         assert!(
-            !include_str!("../../.cursor/skills/skippr-perf-db/SKILL.md")
+            !include_str!("../../.cursor/skills/skippr-regression/SKILL.md")
                 .contains("DynamoDB Local Skippr Store"),
-            "perf-db skill must not use DynamoDB as Skippr Store"
+            "skippr-regression skill must not use DynamoDB as Skippr Store"
         );
         assert!(
             !include_str!("../../src/helpers/configuration.rs").contains("in Sled"),

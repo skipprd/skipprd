@@ -542,7 +542,7 @@ class StreamTransformPerfTests(unittest.TestCase):
         self.assertNotIn("compute:", copy_text)
 
     def test_skill_smoke_includes_stream_transform_cells(self) -> None:
-        skill = (REPO_ROOT / ".cursor" / "skills" / "skippr-perf" / "SKILL.md").read_text(
+        skill = (REPO_ROOT / ".cursor" / "skills" / "skippr-regression" / "SKILL.md").read_text(
             encoding="utf-8"
         )
         self.assertIn("ingest-ops-duckdb", skill)
@@ -579,10 +579,10 @@ PERF_EVENT {"phase":"sync","elapsed_ms":40,"rows":10,"bytes":100}
 
 class PerfSkillTests(unittest.TestCase):
     def test_skill_mentions_smoke_first_custom_runner_and_no_docs(self) -> None:
-        skill = REPO_ROOT / ".cursor" / "skills" / "skippr-perf" / "SKILL.md"
+        skill = REPO_ROOT / ".cursor" / "skills" / "skippr-regression" / "SKILL.md"
         self.assertTrue(skill.is_file(), skill)
         text = skill.read_text(encoding="utf-8")
-        self.assertIn("name: skippr-perf", text)
+        self.assertIn("name: skippr-regression", text)
         self.assertIn("disable-model-invocation: true", text)
         self.assertIn("Local smoke", text)
         self.assertIn("ubuntu-latest", text)
