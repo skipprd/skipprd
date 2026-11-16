@@ -510,6 +510,16 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         helper = text.split("def _mysql_cli")[1].split("def start_cdc_mysql")[0]
         self.assertIn("127.0.0.1", helper)
 
+    def test_cdc_ddb_follows_the_stream_before_the_mutation(self) -> None:
+        text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        cdc = text.split("def run_query_after_cdc")[1]
+        ddb = cdc.split('source == "ddb" and case')[1].split("else:")[0]
+        self.assertIn("once=False", ddb)
+        self.assertIn("wait_log_contains", ddb)
+        self.assertIn("Syncing pipeline", ddb)
+        self.assertLess(ddb.find("wait_log_contains"), ddb.find("apply_cdc_case"))
+        self.assertLess(ddb.find("apply_cdc_case"), ddb.find("peek_until"))
+
     def test_cdc_ddb_query_fqn_is_storage_namespace(self) -> None:
         self.assertEqual(
             CDC_TABLES["ddb"],

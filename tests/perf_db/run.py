@@ -157,6 +157,55 @@ def peek_until(
     )
 
 
+def wait_log_contains(
+    log_path: Path, needle: str, ingest: subprocess.Popen, *, seconds: int, scenario_id: str
+) -> None:
+    deadline = time.time() + seconds
+    while time.time() < deadline and ingest.poll() is None:
+        text = log_path.read_text(encoding="utf-8") if log_path.is_file() else ""
+        if needle in text:
+            return
+        time.sleep(0.2)
+    detail = log_path.read_text(encoding="utf-8") if log_path.is_file() else ""
+    raise perf_run.PerfError(
+        f"{scenario_id}: follow sync never logged {needle!r}\n{detail[-2000:]}"
+    )
+
+
+def start_logged_ingest(
+    sync_cmd: list[str], env: dict[str, str], log_path: Path
+) -> subprocess.Popen:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = log_path.open("w", encoding="utf-8")
+    return subprocess.Popen(
+        sync_cmd,
+        env=env,
+        cwd=REPO_ROOT,
+        stdout=handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+
+
+def cdc_query_done(scenario: dict[str, Any], doc: dict[str, Any]) -> bool:
+    asserts = scenario.get("asserts") or {}
+    rows = doc.get("rows") or []
+    if not rows:
+        return False
+    expect_count = asserts.get("query_count")
+    if expect_count not in (None, True, False):
+        return str(rows[0][0]) == str(expect_count)
+    expect_name = asserts.get("query_name")
+    if expect_name:
+        header = [str(col) for col in (doc.get("header") or [])]
+        name_idx = next(
+            (i for i, col in enumerate(header) if col in {"name", "display_name"}),
+            0,
+        )
+        return str(rows[0][name_idx]) == str(expect_name)
+    return True
+
+
 def parse_plain_query(captured: str) -> dict[str, Any]:
     for line in reversed(captured.splitlines()):
         stripped = line.strip()
@@ -1046,9 +1095,14 @@ def apply_cdc_case(source: str, case: str) -> None:
 
 
 def cdc_sync_cmd(
-    skipprd: Path, config: Path, env: dict[str, str], pipeline: str = PG_CDC_PIPELINE
+    skipprd: Path,
+    config: Path,
+    env: dict[str, str],
+    pipeline: str = PG_CDC_PIPELINE,
+    *,
+    once: bool = True,
 ) -> list[str]:
-    return [
+    cmd = [
         str(skipprd),
         *log_args(env),
         "--config",
@@ -1057,8 +1111,10 @@ def cdc_sync_cmd(
         "--log",
         "--pipeline",
         pipeline,
-        "--once",
     ]
+    if once:
+        cmd.append("--once")
+    return cmd
 
 
 def with_sync_perf(captured: str, wall_ms: int, rows: int = 0) -> str:
@@ -1159,14 +1215,23 @@ def run_query_after_cdc(
                 profile="none",
             )
         case = str(scenario.get("cdc_case") or "")
-        if case:
-            apply_cdc_case(source, case)
-        if scenario.get("overlap"):
-            hold = arm_compaction_hold(data_dir, CDC_WORKSPACE, pipeline)
-            overlap_proc = start_held_ingest(
-                cdc_sync_cmd(skipprd, config, env, pipeline), env
+        follow_log = work / "cdc-follow.log"
+        if source == "ddb" and case:
+            if scenario.get("overlap"):
+                hold = arm_compaction_hold(data_dir, CDC_WORKSPACE, pipeline)
+            overlap_proc = start_logged_ingest(
+                cdc_sync_cmd(skipprd, config, env, pipeline, once=False),
+                env,
+                follow_log,
             )
-            expect_name = str((scenario.get("asserts") or {}).get("query_name") or "")
+            wait_log_contains(
+                follow_log,
+                "Syncing pipeline",
+                overlap_proc,
+                seconds=60,
+                scenario_id=scenario_id,
+            )
+            apply_cdc_case(source, case)
             peek_until(
                 skipprd,
                 config,
@@ -1175,12 +1240,34 @@ def run_query_after_cdc(
                 sql,
                 overlap_proc,
                 seconds=OVERLAP_WAIT_SECONDS,
-                done=lambda doc: first_cell(doc) == expect_name,
+                done=lambda doc, spec=scenario: cdc_query_done(spec, doc),
                 scenario_id=scenario_id,
             )
-            require_hold_engaged(scenario_id, overlap_proc, hold)
+            if hold is not None:
+                require_hold_engaged(scenario_id, overlap_proc, hold)
         else:
-            logs += run_cdc_once(skipprd, config, env, pipeline)
+            if case:
+                apply_cdc_case(source, case)
+            if scenario.get("overlap"):
+                hold = arm_compaction_hold(data_dir, CDC_WORKSPACE, pipeline)
+                overlap_proc = start_held_ingest(
+                    cdc_sync_cmd(skipprd, config, env, pipeline), env
+                )
+                expect_name = str((scenario.get("asserts") or {}).get("query_name") or "")
+                peek_until(
+                    skipprd,
+                    config,
+                    env,
+                    work,
+                    sql,
+                    overlap_proc,
+                    seconds=OVERLAP_WAIT_SECONDS,
+                    done=lambda doc: first_cell(doc) == expect_name,
+                    scenario_id=scenario_id,
+                )
+                require_hold_engaged(scenario_id, overlap_proc, hold)
+            else:
+                logs += run_cdc_once(skipprd, config, env, pipeline)
         query_cmd = perf_run.time_prefix() + perf_run.wrap_profile(
             query_plain_args(skipprd, config, env, sql, profile),
             profile,
@@ -1191,11 +1278,19 @@ def run_query_after_cdc(
         disarm_compaction_hold(hold)
         hold = None
         if overlap_proc is not None:
+            overlap_proc.kill()
             try:
-                out, _ = overlap_proc.communicate(timeout=120)
-                logs += out or ""
+                overlap_proc.wait(timeout=30)
             except Exception:
-                overlap_proc.kill()
+                pass
+            handle = overlap_proc.stdout
+            if handle is not None and hasattr(handle, "close"):
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            if follow_log.is_file():
+                logs += follow_log.read_text(encoding="utf-8")
             overlap_proc = None
         perf_run.convert_flamegraph(work)
         perf_run.require_profile_outputs(work, profile)
