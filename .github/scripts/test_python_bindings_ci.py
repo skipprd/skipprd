@@ -49,6 +49,9 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("cargo test -p skipprd --lib", text)
         self.assertIn("skippr-connect-gen", text)
         self.assertNotIn("cargo test --workspace", text)
+        self.assertNotIn("if: ${{ secrets.", text)
+        self.assertIn("R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}", text)
+        self.assertIn("if: env.R2_ACCESS_KEY_ID != ''", text)
 
     def test_write_document_uses_posix_fsync_not_apple_fullfsync(self):
         text = (ROOT / "src" / "connect.rs").read_text(encoding="utf-8")

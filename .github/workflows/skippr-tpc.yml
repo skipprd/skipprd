@@ -29,6 +29,8 @@ jobs:
     needs: linux_contracts
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
     defaults:
       run:
         working-directory: skipprd
@@ -57,7 +59,7 @@ jobs:
           sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@1.94.1
       - name: R2 sccache
-        if: ${{ secrets.R2_ACCESS_KEY_ID != '' }}
+        if: env.R2_ACCESS_KEY_ID != ''
         uses: ./skipprd/.github/actions/configure-r2-sccache
         with:
           account_id: ${{ secrets.R2_ACCOUNT_ID }}
