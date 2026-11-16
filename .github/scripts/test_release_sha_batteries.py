@@ -190,6 +190,9 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
         self.assertIn("datafusion", text.lower())
         self.assertIn("skipprd query", text)
         self.assertNotIn("continue-on-error", text)
+        self.assertNotIn("if: ${{ secrets.", text)
+        self.assertIn("R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}", text)
+        self.assertIn("if: env.R2_ACCESS_KEY_ID != ''", text)
         self.assertNotIn("-s 1", text)
 
     def test_fuzz_timeout_fails(self) -> None:
@@ -215,6 +218,9 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
         self.assertIn("[patch.crates-io]", fuzz_toml)
         self.assertIn('iceberg = { path = "../third_party/iceberg" }', fuzz_toml)
         self.assertNotIn("continue-on-error", text)
+        self.assertNotIn("if: ${{ secrets.", text)
+        self.assertIn("R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}", text)
+        self.assertIn("if: env.R2_ACCESS_KEY_ID != ''", text)
         self.assertNotRegex(text, r"(?m)^          cargo fuzz run")
         self.assertEqual(text.count("cargo +nightly fuzz run"), 13)
         self.assertIn("rust-src", text)

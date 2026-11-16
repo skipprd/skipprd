@@ -34,6 +34,9 @@ class StreamTransformsCiTests(unittest.TestCase):
         )
         self.assertIn(f"dtolnay/rust-toolchain@{channel}", text)
         self.assertNotIn("secrets.AWS_ACCESS_KEY_ID", text)
+        self.assertNotIn("if: ${{ secrets.", text)
+        self.assertIn("R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}", text)
+        self.assertIn("if: env.R2_ACCESS_KEY_ID != ''", text)
         self.assertNotIn("WAL_STORAGE=clustered", text)
         self.assertNotIn("temporary(true)", text)
 
