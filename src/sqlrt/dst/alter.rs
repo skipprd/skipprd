@@ -435,3 +435,14 @@ fn oversized_sql_fails_closed() {
     assert!(!sql_is_within_ceiling(&sql));
     assert!(sql_is_within_ceiling("SELECT 1"));
 }
+
+#[test]
+fn f_migrate_rejects_alter_compute() {
+    for sql in [
+        "ALTER COMPUTE invoices.customer_totals ALTER COLUMN invoice_total SET MEASURE SUM(amount)",
+        "ALTER TABLE invoices.customer_totals ALTER COLUMN invoice_total SET MEASURE SUM(amount)",
+    ] {
+        let err = load_sql_file("compute_measure", sql).unwrap_err();
+        assert!(err.to_string().contains("ALTER TABLE"), "{sql}: {err}");
+    }
+}

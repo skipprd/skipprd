@@ -25,7 +25,7 @@ Mail: `python3 tests/perf/memo.py --mail` → sibling `cloud/scripts/send-afk-ma
 
 ```
 skippr-perf:
-- [ ] Local smoke A (File ingest exact-Arrow → Duckdb or SkipprLake), B (File copy json→json), JSON File → Parquet File ingest, Skipprd CSV → DuckDB, DuckDB NDJSON/CSV baselines, File and Stdin ingest for every transform.ops variant and every transform.aggregates measure, and File ingest then migrate for every ALTER (historical compact and in-stream WAL hold)
+- [ ] Local smoke A (File ingest exact-Arrow → Duckdb or SkipprLake), B (File copy json→json), JSON File → Parquet File ingest, Skipprd CSV → DuckDB, DuckDB NDJSON/CSV baselines, File and Stdin ingest for every transform.compute filter/derive/compose cell and every CREATE TABLE measure, and File ingest then migrate for every ALTER (historical compact and in-stream WAL hold)
 - [ ] PERF logs parsed; exact_arrow_rows == total on A; identity on B
 - [ ] Commit harness/skill with hooks (never --no-verify)
 - [ ] gh workflow run perf.yml --ref this branch
@@ -62,7 +62,7 @@ Duckdb Iceberg is enough for A on a laptop. SkipprLake needs DynamoDB Local (Doc
 
 ## GitHub
 
-`.github/workflows/perf.yml` is **`workflow_dispatch` only** (not every engine tag). GitHub jobs run on GitHub-hosted Linux x86 (`ubuntu-latest`) — not the Mac self-hosted runner. Local smoke stays on this Mac. Profiling cells on that same Linux runner: flamegraph (ingest-A, copy-B, json→parquet, flatten, ops compose File and Stdin, aggregates File and Stdin, migrate rename historical and in-stream), heaptrack (ingest-A, copy-B, json→parquet), perf-stat (ingest-A, copy-B, json→parquet). `linux_matrix` still runs every catalog cell: each `transform.ops` variant (`filter`, `project`, `derive`, `rename`, `cast`, `compose`) and each `transform.aggregates` measure (`sum`, `count`, `both`) on File (historical) and Stdin (stream), plus each ALTER (`rename`, `merge`, `drop`, `promote`) after compact and under a WAL compaction hold. The json→parquet cell is File ingest of a stable schema (including RFC3339 timestamps) into File parquet. `linux_analyze` ranks `perf.folded` leaves against `origin/main...HEAD` new code. One runner label, not a second harness. skipprd and wrap scripts fail closed after 10 minutes (`COMMAND_TIMEOUT_SECONDS`); kill the process group.
+`.github/workflows/perf.yml` is **`workflow_dispatch` only** (not every engine tag). GitHub jobs run on GitHub-hosted Linux x86 (`ubuntu-latest`) — not the Mac self-hosted runner. Local smoke stays on this Mac. Profiling cells on that same Linux runner: flamegraph (ingest-A, copy-B, json→parquet, flatten, SQL compose File and Stdin, CREATE TABLE File and Stdin, migrate rename historical and in-stream), heaptrack (ingest-A, copy-B, json→parquet), perf-stat (ingest-A, copy-B, json→parquet). `linux_matrix` still runs every catalog cell: each `transform.compute` ingest cell (`filter`, `derive`, `compose`) and each CREATE TABLE measure (`sum`, `count`, `both`) on File (historical) and Stdin (stream), plus each ALTER (`rename`, `merge`, `drop`, `promote`) after compact and under a WAL compaction hold. The json→parquet cell is File ingest of a stable schema (including RFC3339 timestamps) into File parquet. `linux_analyze` ranks `perf.folded` leaves against `origin/main...HEAD` new code. One runner label, not a second harness. skipprd and wrap scripts fail closed after 10 minutes (`COMMAND_TIMEOUT_SECONDS`); kill the process group.
 
 ```bash
 gh workflow run perf.yml --ref "$(git branch --show-current)"

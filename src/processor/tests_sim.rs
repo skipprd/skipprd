@@ -65,7 +65,7 @@ fn disk_store_scripts_match_golden_model() {
         let fixture = fixture.reopen();
         fixture.assert_matches(&model);
         let meta = fixture
-            .load_meta(&fixture.spec.id)
+            .load_meta(fixture.spec.store_id().unwrap())
             .unwrap()
             .expect("cursor committed");
         assert!(
@@ -95,7 +95,7 @@ fn serialized_commits_flush_each_event_to_disk() {
 }
 
 #[test]
-fn config_hash_rebuild_clears_disk_prefix() {
+fn incompatible_ir_wipe_clears_disk_prefix() {
     let event = SimEvent::new(MutationKind::Insert, "A", 9, "inv", "e1");
     let fixture = DiskFixture::new();
     fixture.apply(&event, WalCursor::default()).unwrap();
@@ -105,23 +105,13 @@ fn config_hash_rebuild_clears_disk_prefix() {
             .unwrap(),
         9.0
     );
-    let (dir, db_path) = fixture.release();
-    let mut rebuilt = invoice_agg();
-    rebuilt.measures.insert(
-        "other".into(),
-        AggregateMeasure {
-            count: Some("*".into()),
-            ..Default::default()
-        },
-    );
-    let (_db, state) = open_db(&db_path, rebuilt);
+    fixture.wipe_compute("customer_invoice_totals");
     assert_eq!(
-        state
+        fixture
             .measure("customer_invoice_totals", "A", "invoice_total")
             .unwrap(),
         0.0
     );
-    let _keep = dir;
 }
 
 #[test]
@@ -137,14 +127,14 @@ fn reclaim_hold_tracks_committed_cursor_after_reopen() {
     };
     cursor = fixture.apply(&event, cursor).unwrap();
     assert_eq!(cursor.seq, 4);
-    assert!(!allows_reclaim(4));
-    assert!(allows_reclaim(3));
+    assert!(!allows_reclaim("events", 4));
+    assert!(allows_reclaim("events", 3));
     let fixture = fixture.reopen();
     let meta = fixture
         .load_meta("customer_invoice_totals")
         .unwrap()
         .unwrap();
     assert_eq!(meta.cursor.seq, 4);
-    assert!(!allows_reclaim(4));
+    assert!(!allows_reclaim("events", 4));
     reset_reclaim_hold();
 }

@@ -108,6 +108,15 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
     );
 
     docs.insert(
+        "ALTER COMPUTE".to_string(),
+        SqlStatementDoc {
+            name: "ALTER COMPUTE".to_string(),
+            syntax: "ALTER COMPUTE <pipeline>.<name> ALTER COLUMN <column> SET MEASURE <fn>(<col>) | SET FILTER <expr> | ADD COLUMN <name> MEASURE <fn>(<col>) | DROP COLUMN <column> | RENAME COLUMN <from> TO <to>".to_string(),
+            description: "Rewrites a named compute catalog entry. View accepts SET FILTER. Keyed and windowed accept SET MEASURE / ADD COLUMN MEASURE. Latest and StreamTableJoin are DROP then CREATE. Stateless requires ALTER COMPUTE … SET FILTER. Applied in-stream; DISABLE is freeze-only.".to_string(),
+            example: "ALTER COMPUTE invoices.customer_totals ALTER COLUMN invoice_total SET MEASURE SUM(amount)".to_string(),
+        },
+    );
+    docs.insert(
         "ALTER TABLE DROP COLUMN".to_string(),
         SqlStatementDoc {
             name: "ALTER TABLE DROP COLUMN".to_string(),
@@ -188,17 +197,6 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         },
     );
 
-    // Date functions
-    docs.insert(
-        "DATEDIFF".to_string(),
-        SqlStatementDoc {
-            name: "DATEDIFF".to_string(),
-            syntax: "DATEDIFF(<start_date>, <end_date>)".to_string(),
-            description: "Calculates the difference in days between two dates. Accepts RFC3339 formatted date strings.".to_string(),
-            example: "SELECT id, DATEDIFF(start_date, end_date) AS duration FROM bike_hire".to_string(),
-        },
-    );
-
     docs.insert(
         "SHOW DOCS".to_string(),
         SqlStatementDoc {
@@ -268,7 +266,10 @@ pub fn categorized_sql_docs() -> Vec<SqlDocCategory> {
     let mut data = Vec::new();
     let mut query = Vec::new();
     for doc in get_sql_docs().into_values() {
-        if doc.name.contains("SCHEMA") || doc.name.starts_with("ALTER TABLE") {
+        if doc.name.contains("SCHEMA")
+            || doc.name.starts_with("ALTER TABLE")
+            || doc.name.starts_with("ALTER COMPUTE")
+        {
             schema.push(doc);
         } else if doc.name.contains("PIPELINE") {
             pipeline.push(doc);
@@ -454,6 +455,7 @@ mod tests {
             "SHOW SEMANTIC",
             "SHOW CATALOG",
             "SHOW PIPELINE",
+            "ALTER COMPUTE",
             "ALTER TABLE DROP COLUMN",
             "ALTER TABLE ALTER COLUMN",
             "ALTER TABLE RENAME COLUMN",

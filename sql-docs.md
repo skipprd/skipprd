@@ -4,6 +4,21 @@ This document describes all SQL statements supported by Skippr.
 
 ## Schema Operations
 
+### ALTER COMPUTE
+
+**Syntax:**
+```sql
+ALTER COMPUTE <pipeline>.<name> ALTER COLUMN <column> SET MEASURE <fn>(<col>) | SET FILTER <expr> | ADD COLUMN <name> MEASURE <fn>(<col>) | DROP COLUMN <column> | RENAME COLUMN <from> TO <to>
+```
+
+**Description:**
+Rewrites a named compute catalog entry. View accepts SET FILTER. Keyed and windowed accept SET MEASURE / ADD COLUMN MEASURE. Latest and StreamTableJoin are DROP then CREATE. Stateless requires ALTER COMPUTE … SET FILTER. Applied in-stream; DISABLE is freeze-only.
+
+**Example:**
+```sql
+ALTER COMPUTE invoices.customer_totals ALTER COLUMN invoice_total SET MEASURE SUM(amount)
+```
+
 ### ALTER TABLE ALTER COLUMN
 
 **Syntax:**
@@ -234,21 +249,6 @@ DROP TABLE analytics.user_events
 ```
 
 ## Query Operations
-
-### DATEDIFF
-
-**Syntax:**
-```sql
-DATEDIFF(<start_date>, <end_date>)
-```
-
-**Description:**
-Calculates the difference in days between two dates. Accepts RFC3339 formatted date strings.
-
-**Example:**
-```sql
-SELECT id, DATEDIFF(start_date, end_date) AS duration FROM bike_hire
-```
 
 ### SELECT
 

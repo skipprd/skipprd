@@ -89,8 +89,18 @@ pub(crate) async fn wal_table_for_namespace(
         &pipeline_metadata,
     )
     .map_err(|err| DataFusionError::Plan(err.to_string()))?;
-    let schema = crate::stream_transform::dest_schema_for_ops(&bound.get_transform_ops(), schema)
-        .map_err(DataFusionError::Plan)?;
+    let select = match skippr_store_read(config, pipeline)? {
+        Some(kv) => crate::compute::stateless_for_namespace(
+            kv.as_ref(),
+            &bound.get_workspace_name(),
+            pipeline,
+            namespace,
+        )
+        .map_err(|err| DataFusionError::Plan(err.to_string()))?,
+        None => None,
+    };
+    let schema =
+        crate::compute::dest_schema(&[], select.as_ref(), schema).map_err(DataFusionError::Plan)?;
     let key =
         skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
             .map_err(|err| DataFusionError::Plan(err.to_string()))?;
@@ -132,6 +142,83 @@ pub async fn register_namespace_view(
             register_wal_namespace_view(ctx, config, pipeline, namespace).await
         }
     }
+}
+
+pub fn journal_has_table(
+    config: &Config,
+    pipeline: &str,
+    name: &str,
+) -> Result<bool, DataFusionError> {
+    let Some(kv) = skippr_store_read(config, pipeline)? else {
+        return Ok(false);
+    };
+    let key = crate::compute::journal_key(&config.get_workspace_name(), pipeline)
+        .map_err(DataFusionError::Plan)?;
+    let log = crate::compute::load_journal(kv.as_ref(), &key).map_err(DataFusionError::Plan)?;
+    Ok(log
+        .kinds()
+        .iter()
+        .any(|kind| kind.name().pipeline.as_str() == pipeline && kind.name().name.as_str() == name))
+}
+
+fn skippr_store_read(
+    config: &Config,
+    pipeline: &str,
+) -> Result<Option<Arc<dyn skippr_wal_catalog::SkipprStoreRead>>, DataFusionError> {
+    let bound = config.bind_pipeline(pipeline);
+    let dir = bound.skippr_store_dir();
+    if let Some((kv, _)) = crate::helpers::offsets::live_kv_for(&dir) {
+        return Ok(Some(kv));
+    }
+    if !std::path::Path::new(&dir).exists() {
+        return Ok(None);
+    }
+    skippr_wal_catalog::FjallReadStore::open(&dir)
+        .map(|store| Some(Arc::new(store) as Arc<dyn skippr_wal_catalog::SkipprStoreRead>))
+        .map_err(|err| DataFusionError::Plan(err.to_string()))
+}
+
+pub async fn register_compute_tables(
+    ctx: &SessionContext,
+    config: &Config,
+    pipeline: &str,
+) -> Result<(), DataFusionError> {
+    let Some(kv) = skippr_store_read(config, pipeline)? else {
+        return Ok(());
+    };
+    let key = crate::compute::journal_key(&config.get_workspace_name(), pipeline)
+        .map_err(DataFusionError::Plan)?;
+    let log = crate::compute::load_journal(kv.as_ref(), &key).map_err(DataFusionError::Plan)?;
+    let mut views = Vec::new();
+    for kind in &log.kinds() {
+        let fqn = kind.name();
+        if kind.is_store_table() {
+            let provider =
+                crate::compute::ComputeTableProvider::from_store(kv.as_ref(), pipeline, kind)?;
+            register_table_under_pipeline_schema(ctx, pipeline, fqn.name.as_str(), provider)?;
+        } else if kind.is_table_backed() {
+            views.push(kind.clone());
+        }
+    }
+    for kind in views {
+        let fqn = kind.name();
+        let sql = match &kind {
+            crate::compute::ComputeKind::View { .. } => crate::compute::view_sql(&kind)?,
+            crate::compute::ComputeKind::StreamTableJoin { stream, .. } => {
+                let from = crate::compute::relation_sql(stream);
+                let stream_table = ctx.table(&from).await.map_err(|err| {
+                    DataFusionError::Plan(format!("StreamTableJoin missing input {from}: {err}"))
+                })?;
+                crate::compute::stream_join_sql(&kind, stream_table.schema().as_arrow())?
+            }
+            _ => continue,
+        };
+        let df = ctx.sql(&sql).await?;
+        let plan = df.into_unoptimized_plan();
+        let provider = Arc::new(datafusion::datasource::ViewTable::new(plan, Some(sql)));
+        register_table_under_pipeline_schema(ctx, pipeline, fqn.name.as_str(), provider)?;
+    }
+    Ok(())
 }
 
 fn register_table_under_pipeline_schema(
@@ -570,6 +657,10 @@ async fn register_iceberg_union_view(
     config: &Config,
 ) -> Result<(), DataFusionError> {
     let loaded = load_iceberg_scan_provider(view, namespace).await?;
+    if crate::buffer::wal_reader::wal_reader_for(&view.key).is_none() {
+        register_table_under_pipeline_schema(ctx, view.key.pipeline(), namespace, loaded.provider)?;
+        return Ok(());
+    }
     let schema = datafusion::datasource::TableProvider::schema(loaded.provider.as_ref());
     let pipeline_name = view.key.pipeline();
     let pipeline_cfg = config
@@ -595,12 +686,6 @@ async fn register_iceberg_union_view(
         catalog_ns: loaded.catalog_ns,
         table_name: loaded.table_name,
     };
-    if crate::buffer::wal_reader::wal_reader_for(&view.key).is_none() {
-        return Err(DataFusionError::Plan(format!(
-            "WAL catalog for pipeline {} is not open",
-            view.key.pipeline()
-        )));
-    }
     let table = IcebergWalTableProvider::local(schema, business_key_columns, pin);
     register_table_under_pipeline_schema(ctx, view.key.pipeline(), namespace, Arc::new(table))?;
     Ok(())
@@ -1205,5 +1290,97 @@ mod tests {
         assert!(!body.contains("get_json_opt"));
         assert!(!body.contains("ListingTable"));
         assert!(!body.contains("prefixes"));
+    }
+
+    #[tokio::test]
+    async fn view_sql_matches_source_select_for_every_legal_perm() {
+        use crate::compute::{
+            bind_statement, desugar_create, view_sql, BindCatalog, FieldId, Fqn, VIEW_LEGAL,
+        };
+        use datafusion::arrow::array::{Int64Array, StringArray};
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::datasource::ViewTable;
+        use std::collections::BTreeMap;
+        use std::collections::BTreeSet;
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("customer_id", DataType::Utf8, false),
+            Field::new("amount", DataType::Int64, false),
+            Field::new("created_at", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c"])) as _,
+                Arc::new(Int64Array::from(vec![-5, 10, 20])) as _,
+                Arc::new(StringArray::from(vec![Option::<&str>::None, None, None])) as _,
+            ],
+        )
+        .unwrap();
+        let mut ingest = BTreeMap::new();
+        ingest.insert(
+            ("invoices".into(), "orders".into()),
+            BTreeMap::from([
+                ("customer_id".into(), FieldId::new(1).unwrap()),
+                ("amount".into(), FieldId::new(2).unwrap()),
+                ("created_at".into(), FieldId::new(3).unwrap()),
+            ]),
+        );
+        let catalog = BindCatalog {
+            ingest,
+            ingest_namespaces: BTreeSet::from(["orders".into()]),
+            existing: Vec::new(),
+            event_time: None,
+            watermark_delay: None,
+        };
+        for case in VIEW_LEGAL {
+            let ctx = SessionContext::new();
+            let mem = MemTable::try_new(schema.clone(), vec![vec![batch.clone()]]).unwrap();
+            register_table_under_pipeline_schema(&ctx, "invoices", "orders", Arc::new(mem))
+                .unwrap();
+            let want = ctx
+                .sql(case.sql)
+                .await
+                .unwrap_or_else(|err| panic!("{} source select: {err}", case.name))
+                .collect()
+                .await
+                .unwrap();
+            let unbound = desugar_create(
+                Fqn::from_parts("invoices", "positive").unwrap(),
+                case.sql,
+                true,
+            )
+            .unwrap_or_else(|err| panic!("{} desugar: {err}", case.name));
+            let kind = bind_statement(&catalog, unbound)
+                .unwrap_or_else(|err| panic!("{} bind: {err}", case.name));
+            let sql = view_sql(&kind).unwrap();
+            let df = ctx
+                .sql(&sql)
+                .await
+                .unwrap_or_else(|err| panic!("{} view_sql {sql}: {err}", case.name));
+            let plan = df.into_unoptimized_plan();
+            let provider = Arc::new(ViewTable::new(plan, Some(sql)));
+            register_table_under_pipeline_schema(&ctx, "invoices", "positive", provider).unwrap();
+            let got = ctx
+                .sql("SELECT * FROM invoices.positive")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            assert_eq!(
+                got[0].num_rows(),
+                want[0].num_rows(),
+                "{} row count view vs source select",
+                case.name
+            );
+            assert_eq!(
+                got[0].num_columns(),
+                want[0].num_columns(),
+                "{} column count view vs source select",
+                case.name
+            );
+        }
     }
 }

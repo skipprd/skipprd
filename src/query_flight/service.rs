@@ -248,7 +248,7 @@ impl SkipprFlightSql {
     ) -> Result<SchemaRef, Status> {
         Self::check_sql(sql)?;
         let _ = scope;
-        let ctx = crate::sqlrt::query::new_context_iceberg_namespaces(config)
+        let ctx = crate::sqlrt::query::new_context_all_namespaces(config)
             .await
             .map_err(|err| Status::internal(err.to_string()))?;
         let df = ctx
@@ -292,7 +292,7 @@ impl SkipprFlightSql {
     > {
         Self::check_sql(sql)?;
         let _ = scope;
-        let ctx = crate::sqlrt::query::new_context_iceberg_namespaces(&self.app_config)
+        let ctx = crate::sqlrt::query::new_context_all_namespaces(&self.app_config)
             .await
             .map_err(|err| Status::internal(err.to_string()))?;
         let df = ctx
@@ -931,7 +931,7 @@ mod tests {
         crate::buffer::wal_reader::clear_query_readers();
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "pinlost").unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
+        let paths = skippr_lease::PipelinePaths::disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
         let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
@@ -1047,7 +1047,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "flightsqllive").unwrap();
-        let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
+        let paths = skippr_lease::PipelinePaths::disk(dir.path());
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = crate::buffer::wal_handle::memory_catalog_for_test(fence);
         let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
@@ -1147,16 +1147,16 @@ mod tests {
     }
 
     #[test]
-    fn local_flight_sql_uses_iceberg_namespace_context() {
+    fn local_flight_sql_uses_shared_query_context() {
         let src = include_str!("service.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(
-            prod.contains("new_context_iceberg_namespaces"),
-            "skipprd serve Flight must execute Iceberg namespace.table"
+            prod.contains("new_context_all_namespaces"),
+            "skipprd serve Flight shares Iceberg ∪ WAL with skipprd query"
         );
         assert!(
-            !prod.contains("new_context_all_namespaces"),
-            "skipprd serve Flight must not share skipprd query Iceberg ∪ WAL registration"
+            !prod.contains("new_context_iceberg_namespaces"),
+            "Iceberg-only serve context is deleted"
         );
     }
 

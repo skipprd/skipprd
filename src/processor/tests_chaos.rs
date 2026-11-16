@@ -84,7 +84,7 @@ fn crash_matrix_every_boundary_then_replay_matches_model() {
 
 #[test]
 fn multi_row_batch_is_atomic_across_crash() {
-    let spec = invoice_agg();
+    let spec = invoice_kind();
     let batch = invoice_batch(&["A", "B", "C"], &[10, 20, 30], &["i1", "i2", "i3"]);
     let cdc = vec![insert_meta("e1"), insert_meta("e2"), insert_meta("e3")];
     for &point in crash_points() {
@@ -167,7 +167,7 @@ fn after_txn_crash_restores_reclaim_hold_from_disk_cursor() {
         segment_id: "seg-9".into(),
         ..WalCursor::default()
     };
-    set_min_unconsumed_seq(u64::MAX);
+    set_min_unconsumed_seq("events", u64::MAX);
     let (fixture, panicked) = fixture.crash_one(&event, cursor, CrashPoint::AfterTxn);
     assert!(panicked);
     assert_eq!(
@@ -177,7 +177,7 @@ fn after_txn_crash_restores_reclaim_hold_from_disk_cursor() {
         3.0
     );
     assert!(
-        !allows_reclaim(9),
+        !allows_reclaim("events", 9),
         "reopen must restore reclaim hold from cursor"
     );
     reset_reclaim_hold();

@@ -380,7 +380,7 @@ impl DataSink for DataSinkSftpPlugin {
 
     async fn sync_grouped(
         &self,
-        mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
+        reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, std::io::Error> {
         let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
@@ -412,10 +412,9 @@ impl DataSink for DataSinkSftpPlugin {
             return Ok(SinkWriteOutcome::AlreadyApplied);
         }
         if self.legacy_chunk_state_exists(&ctx, 0).await? {
-            let receipt = self.sync_grouped_legacy_chunks(&mut reader, &ctx).await?;
-            self.write_remote_receipt(&remote_manifest_path, &expected_manifest, &receipt)
-                .await?;
-            return Ok(SinkWriteOutcome::Applied);
+            return Err(std::io::Error::other(
+                "legacy grouped compaction objects are not replayed; compact again",
+            ));
         }
         let (stream, _stream_progress) = reader.into_stream();
         let stream = match ctx.cdc_ctx {
@@ -530,76 +529,6 @@ impl DataSinkSftpPlugin {
             Err(error) if error.code() == ssh2::ErrorCode::SFTP(2) => Ok(false),
             Err(error) => Err(std::io::Error::other(error.to_string())),
         }
-    }
-
-    async fn sync_grouped_legacy_chunks(
-        &self,
-        reader: &mut skippr_runtime_sdk::plugins::GroupedBatchReader,
-        ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
-    ) -> std::io::Result<ObjectWriteReceipt> {
-        let schema = reader.schema();
-        let mut object_key = None;
-        let mut rows = 0_u64;
-        let mut bytes = 0_u64;
-        let mut transport_chunk_count = 0_u32;
-        let mut etag = None;
-
-        while let Some(chunk) = reader.next_chunk().await? {
-            let (remote_file_path, remote_manifest_path, expected) =
-                self.legacy_chunk_manifest(ctx, chunk.chunk_index)?;
-            let chunk_rows = chunk.rows;
-            let (chunk_bytes, chunk_transport_count, chunk_etag) = if self
-                .remote_manifest_matches(&remote_manifest_path, &expected)
-                .await?
-            {
-                let stat = self
-                    .connect()?
-                    .stat(std::path::Path::new(&remote_file_path))
-                    .map_err(|error| std::io::Error::other(error.to_string()))?;
-                let size = stat.size.unwrap_or_default();
-                (size, 1, Some(format!("sftp-{size}")))
-            } else {
-                let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
-                let stream = chunk.into_stream(schema.clone());
-                let stream = match chunk_cdc.as_ref() {
-                    Some(cdc) => {
-                        super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta)
-                    }
-                    None => stream,
-                };
-                let receipt = self.write_stream(stream, &remote_file_path).await?;
-                (receipt.bytes, receipt.transport_chunk_count, receipt.etag)
-            };
-            object_key.get_or_insert(remote_file_path);
-            rows = rows
-                .checked_add(chunk_rows)
-                .ok_or_else(|| std::io::Error::other("legacy grouped row count overflow"))?;
-            bytes = bytes
-                .checked_add(chunk_bytes)
-                .ok_or_else(|| std::io::Error::other("legacy grouped byte count overflow"))?;
-            transport_chunk_count = transport_chunk_count
-                .checked_add(chunk_transport_count)
-                .ok_or_else(|| std::io::Error::other("legacy grouped chunk count overflow"))?;
-            etag = chunk_etag;
-        }
-
-        Ok(ObjectWriteReceipt {
-            version: 1,
-            object_key: object_key
-                .ok_or_else(|| std::io::Error::other("No rows to write to parquet"))?,
-            upload_id: "legacy-chunk-replay".to_string(),
-            rows,
-            bytes,
-            transport_chunk_count,
-            parts: Vec::new(),
-            etag,
-            checksum: None,
-            version_id: None,
-            backend_metadata: BTreeMap::from([(
-                "compatibility".to_string(),
-                "legacy-read-only-chunks".to_string(),
-            )]),
-        })
     }
 
     fn connect(&self) -> Result<ssh2::Sftp, std::io::Error> {

@@ -5,14 +5,11 @@
 //! The Skippr Store `offsets` family is written only by startup `republish_all`.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::helpers::offsets::{OffsetTypes, OffsetValue};
 use skippr_lease::{decide_wal_publish, OffsetPublishError, PublishAction, PublishMode};
-use skippr_wal_catalog::{
-    lookup_miss_in_sled, CatalogFence, KvOp, SkipprStore, SkipprStoreRead, StoreFamily,
-};
+use skippr_wal_catalog::{CatalogFence, KvOp, SkipprStore, StoreFamily};
 use zerocopy::{byteorder::U64, AsBytes, LayoutVerified};
 
 pub trait OffsetStore: Send + Sync {
@@ -86,7 +83,6 @@ pub fn publish_committed(
 pub struct StoreOffsetStore {
     store: Arc<dyn SkipprStore>,
     fence: CatalogFence,
-    sled_fallback: Option<PathBuf>,
     live: Mutex<HashMap<String, Vec<u8>>>,
 }
 
@@ -95,14 +91,8 @@ impl StoreOffsetStore {
         Self {
             store,
             fence,
-            sled_fallback: None,
             live: Mutex::new(HashMap::new()),
         }
-    }
-
-    pub fn with_sled_fallback(mut self, path: impl AsRef<Path>) -> Self {
-        self.sled_fallback = Some(path.as_ref().to_path_buf());
-        self
     }
 
     pub fn kv(&self) -> Arc<dyn SkipprStore> {
@@ -144,14 +134,9 @@ impl StoreOffsetStore {
     }
 
     fn family_get(&self, family: StoreFamily, rest: &[u8]) -> Result<Option<Vec<u8>>, String> {
-        let key = family.key(rest);
-        if let Some(bytes) = self.store.get(&key).map_err(|err| err.to_string())? {
-            return Ok(Some(bytes));
-        }
-        let Some(sled_path) = self.sled_fallback.as_deref() else {
-            return Ok(None);
-        };
-        lookup_miss_in_sled(sled_path, family, rest).map_err(|err| err.to_string())
+        self.store
+            .get(&family.key(rest))
+            .map_err(|err| err.to_string())
     }
 }
 

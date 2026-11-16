@@ -43,7 +43,7 @@ fn tiny_slice_ns(segment: &str, start: u64, bytes: u64, namespace: &str) -> Inde
         len: bytes,
         key,
         cdc_meta_hash: index_entry.part_meta_summary.canonical_hash(),
-        ordinal: Some(index_entry.slice_ordinal),
+        ordinal: index_entry.slice_ordinal,
     };
     IndexedCompactionSlice {
         id: CompactionSliceId::from_wal_ref(&wal_ref),
@@ -231,7 +231,7 @@ fn a_slice_bitmap_partial_done_blocks_reclaim() {
     use std::sync::Arc;
     let dir = tempfile::tempdir().unwrap();
     let key = PipelineKey::new("t", "w", "partial-reclaim").unwrap();
-    let paths = PipelinePaths::legacy_disk(dir.path());
+    let paths = PipelinePaths::disk(dir.path());
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =

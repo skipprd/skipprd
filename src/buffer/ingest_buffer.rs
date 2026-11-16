@@ -27,7 +27,6 @@ use crate::buffer::wal_store::{SegmentWriteLocation, SegmentWriteResult};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets};
-use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
 use crate::metrics::counters as metrics_hot;
 use crate::plugins::cdc::SinkCapability;
@@ -132,10 +131,6 @@ fn is_s3_wal(config: &Config) -> bool {
         crate::helpers::wal_storage::WalStorage::S3
     )
 }
-
-#[allow(dead_code)]
-pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
-    Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
 
 // Lock-free WAL index and counters
 pub static WAL_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
@@ -1776,7 +1771,7 @@ impl Buffers {
                 len: idx.len,
                 key: idx.key.clone(),
                 cdc_meta_hash: idx.part_meta_summary.canonical_hash(),
-                ordinal: Some(idx.slice_ordinal),
+                ordinal: idx.slice_ordinal,
             };
             indexed_slices.push(IndexedCompactionSlice {
                 id: crate::buffer::compaction_index::CompactionSliceId {
@@ -4220,7 +4215,7 @@ mod tests_wal_commit {
 
         let key = PipelineKey::new("t", "w", "wal-commit").unwrap();
         let root = PathBuf::from(config.get_data_dir());
-        let paths = PipelinePaths::legacy_disk(&root);
+        let paths = PipelinePaths::disk(&root);
         let fence = skippr_wal_catalog::CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let store: Arc<dyn OffsetStore> =
@@ -4443,7 +4438,7 @@ mod tests_wal_commit {
                     len: idx.len,
                     key: idx.key.clone(),
                     cdc_meta_hash: None,
-                    ordinal: Some(idx.slice_ordinal),
+                    ordinal: idx.slice_ordinal,
                 };
                 CompactionEntry {
                     source: source.clone(),
@@ -5260,7 +5255,7 @@ mod tests_wal_commit {
             len: idx.len,
             key: idx.key.clone(),
             cdc_meta_hash: idx.part_meta_summary.canonical_hash(),
-            ordinal: Some(idx.slice_ordinal),
+            ordinal: idx.slice_ordinal,
         };
         let txn = CompactionTransaction::new(
             idx.key.sink_ref.clone(),
@@ -5367,7 +5362,7 @@ mod tests_wal_commit {
             len: idx.len,
             key: idx.key.clone(),
             cdc_meta_hash: idx.part_meta_summary.canonical_hash(),
-            ordinal: Some(idx.slice_ordinal),
+            ordinal: idx.slice_ordinal,
         };
         let txn = CompactionTransaction::new(
             idx.key.sink_ref.clone(),
@@ -5518,7 +5513,7 @@ mod compaction_semantics_tests {
             len: 100,
             key,
             cdc_meta_hash: None,
-            ordinal: Some(0),
+            ordinal: 0,
         };
         CompactionEntry {
             source: SegmentSource::Disk(PathBuf::from("/tmp/test.seg")),
@@ -5632,7 +5627,7 @@ mod compaction_semantics_tests {
                 schema_fingerprint: "fp".to_string(),
             },
             cdc_meta_hash: None,
-            ordinal: None,
+            ordinal: 0,
         }];
         let txn = CompactionTransaction::new(
             "deadletter_sinks.ds_deadletters".to_string(),

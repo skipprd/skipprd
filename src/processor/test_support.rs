@@ -1,9 +1,13 @@
 //! Shared local-FS Skippr Store fixture, golden model, and CDC event helpers.
 
 use super::*;
+use crate::compute::{
+    field_with_id, ComputeKind, EventTimeCol, EventWatermark, FieldId, Fqn, Ident, Measure,
+    MeasureKind, NonEmpty, PipelineName, Relation, Tumble,
+};
 use arrow::array::{Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::DataType;
-use arrow_schema::{Field, Schema};
+use arrow_schema::Schema;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,36 +20,89 @@ pub fn stream_test_cases() -> u32 {
     }
 }
 
-pub fn invoice_agg() -> TransformAggregate {
-    TransformAggregate {
-        id: "customer_invoice_totals".into(),
-        key_fields: vec!["customer_id".into()],
-        measures: [
-            (
-                "invoice_total".into(),
-                AggregateMeasure {
-                    sum: Some("amount".into()),
-                    ..Default::default()
-                },
-            ),
-            (
-                "invoice_count".into(),
-                AggregateMeasure {
-                    count: Some("*".into()),
-                    ..Default::default()
-                },
-            ),
-        ]
-        .into_iter()
-        .collect(),
+pub fn invoice_kind() -> ComputeKind {
+    ComputeKind::KeyedTable {
+        name: Fqn::from_parts("events", "customer_invoice_totals").unwrap(),
+        input: Relation::PipelineTable {
+            pipeline: PipelineName::new("events").unwrap(),
+            namespace: Ident::new("orders").unwrap(),
+        },
+        keys: NonEmpty::try_from_vec(vec![FieldId::new(1).unwrap()]).unwrap(),
+        measures: NonEmpty::try_from_vec(vec![
+            Measure {
+                name: Ident::new("invoice_total").unwrap(),
+                kind: MeasureKind::Sum(FieldId::new(2).unwrap()),
+            },
+            Measure {
+                name: Ident::new("invoice_count").unwrap(),
+                kind: MeasureKind::Count,
+            },
+        ])
+        .unwrap(),
     }
+}
+
+pub fn hourly_kind() -> ComputeKind {
+    ComputeKind::WindowedTable {
+        name: Fqn::from_parts("events", "hourly_totals").unwrap(),
+        input: Relation::PipelineTable {
+            pipeline: PipelineName::new("events").unwrap(),
+            namespace: Ident::new("orders").unwrap(),
+        },
+        keys: NonEmpty::try_from_vec(vec![FieldId::new(1).unwrap()]).unwrap(),
+        window: Tumble {
+            size: Duration::from_secs(3600),
+            on: EventTimeCol::new(FieldId::new(4).unwrap()),
+        },
+        watermark: EventWatermark::new(
+            EventTimeCol::new(FieldId::new(4).unwrap()),
+            Duration::from_secs(300),
+        ),
+        measures: NonEmpty::try_from_vec(vec![Measure {
+            name: Ident::new("invoice_total").unwrap(),
+            kind: MeasureKind::Sum(FieldId::new(2).unwrap()),
+        }])
+        .unwrap(),
+    }
+}
+
+pub fn window_batch(
+    customers: &[&str],
+    amounts: &[i64],
+    ids: &[&str],
+    times: &[&str],
+) -> RecordBatch {
+    let schema = Schema::new(vec![
+        field_with_id("customer_id", DataType::Utf8, false, 1),
+        field_with_id("amount", DataType::Int64, false, 2),
+        field_with_id("invoice_id", DataType::Utf8, false, 3),
+        field_with_id("created_at", DataType::Utf8, false, 4),
+    ]);
+    RecordBatch::try_new(
+        Arc::new(schema),
+        vec![
+            Arc::new(StringArray::from(customers.to_vec())),
+            Arc::new(Int64Array::from(amounts.to_vec())),
+            Arc::new(StringArray::from(ids.to_vec())),
+            Arc::new(StringArray::from(times.to_vec())),
+        ],
+    )
+    .unwrap()
+}
+
+pub fn window_store_key(customer: &str, rfc3339: &str) -> String {
+    let ts = chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .unwrap()
+        .timestamp();
+    let bucket = ts.div_euclid(3600) * 3600;
+    format!("{customer}\u{1f}{bucket}")
 }
 
 pub fn invoice_batch(customers: &[&str], amounts: &[i64], ids: &[&str]) -> RecordBatch {
     let schema = Schema::new(vec![
-        Field::new("customer_id", DataType::Utf8, false),
-        Field::new("amount", DataType::Int64, false),
-        Field::new("invoice_id", DataType::Utf8, false),
+        field_with_id("customer_id", DataType::Utf8, false, 1),
+        field_with_id("amount", DataType::Int64, false, 2),
+        field_with_id("invoice_id", DataType::Utf8, false, 3),
     ]);
     RecordBatch::try_new(
         Arc::new(schema),
@@ -126,17 +183,19 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn apply(&mut self, spec: &TransformAggregate, event: &SimEvent) {
+    pub fn apply(&mut self, spec: &ComputeKind, event: &SimEvent) {
         if !event.event_id.is_empty() && !self.seen.insert(event.event_id.clone()) {
             return;
         }
+        let schema = event.batch().schema();
         let new_row = event.row();
-        let new_key = encode_key(&spec.key_fields, &new_row).unwrap();
-        let old = self.load_previous(spec, &new_key, &new_row);
+        let new_key = encode_key_ids(spec, schema.as_ref(), &new_row).unwrap();
+        let old = self.load_previous(spec, schema.as_ref(), &new_key, &new_row);
         let mut deltas = BTreeMap::new();
         let mut last_rows = BTreeMap::new();
         apply_mutation(
             spec,
+            schema.as_ref(),
             event.mutation,
             &new_key,
             old.as_ref(),
@@ -155,7 +214,7 @@ impl Model {
             if row.is_empty() {
                 self.rows.remove(&key);
             } else {
-                if let Some(entity) = entity_identity(spec, &row) {
+                if let Some(entity) = entity_identity(spec, schema.as_ref(), &row) {
                     self.entity.insert(entity, key.clone());
                 }
                 self.rows.insert(key, row);
@@ -165,11 +224,12 @@ impl Model {
 
     fn load_previous(
         &self,
-        spec: &TransformAggregate,
+        spec: &ComputeKind,
+        schema: &arrow_schema::Schema,
         new_key: &str,
         new_row: &BTreeMap<String, Value>,
     ) -> Option<BTreeMap<String, Value>> {
-        if let Some(entity) = entity_identity(spec, new_row) {
+        if let Some(entity) = entity_identity(spec, schema, new_row) {
             if let Some(old_key) = self.entity.get(&entity) {
                 if let Some(row) = self
                     .rows
@@ -201,15 +261,15 @@ pub struct DiskFixture {
     pub db_path: PathBuf,
     kv: Option<Arc<dyn skippr_wal_catalog::SkipprStore>>,
     state: Option<StreamState>,
-    pub spec: TransformAggregate,
+    pub spec: ComputeKind,
 }
 
 impl DiskFixture {
     pub fn new() -> Self {
-        Self::with_spec(invoice_agg())
+        Self::with_spec(invoice_kind())
     }
 
-    pub fn with_spec(spec: TransformAggregate) -> Self {
+    pub fn with_spec(spec: ComputeKind) -> Self {
         let dir = tempfile::tempdir().expect("local tempdir");
         let db_path = dir.path().join("db");
         let (kv, state) = open_db(&db_path, spec.clone());
@@ -224,6 +284,19 @@ impl DiskFixture {
             kv: Some(kv),
             state: Some(state),
             spec,
+        }
+    }
+
+    pub fn kv_for_test(&self) -> Arc<dyn skippr_wal_catalog::SkipprStore> {
+        self.kv.clone().expect("test store")
+    }
+
+    pub fn wipe_compute(&self, id: &str) {
+        let fence = skippr_wal_catalog::CatalogFence::local();
+        let store = self.kv_for_test();
+        let ops = crate::compute::prefix_deletes(store.as_ref(), "events", id).unwrap();
+        if !ops.is_empty() {
+            store.commit(&ops, fence).unwrap();
         }
     }
 
@@ -301,7 +374,7 @@ impl DiskFixture {
                     .state
                     .as_ref()
                     .unwrap()
-                    .measure(&self.spec.id, &key, measure)
+                    .measure(self.spec.store_id().unwrap(), &key, measure)
                     .unwrap();
                 let expected = model.total(&key, measure);
                 assert!(
@@ -329,7 +402,7 @@ impl std::ops::Deref for DiskFixture {
 
 pub fn open_db(
     path: &Path,
-    spec: TransformAggregate,
+    spec: ComputeKind,
 ) -> (Arc<dyn skippr_wal_catalog::SkipprStore>, StreamState) {
     let fence = skippr_wal_catalog::CatalogFence::local();
     let kv: Arc<dyn skippr_wal_catalog::SkipprStore> = Arc::new(

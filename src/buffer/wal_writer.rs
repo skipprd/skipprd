@@ -590,7 +590,7 @@ mod tests {
         );
         assert!(
             finish_fn.contains("add_wal_write_rows"),
-            "persist success must count WAL rows after transform.ops"
+            "persist success must count WAL rows after Stateless compute"
         );
         assert!(finish_fn.contains("add_wal_write_bytes"));
     }

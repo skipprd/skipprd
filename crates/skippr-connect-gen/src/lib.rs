@@ -2052,9 +2052,6 @@ mod tests {
             "SemanticLayerSettings",
             "CdcPipelineConfig",
             "CdcNamespaceConfig",
-            "TransformOp",
-            "TransformAggregate",
-            "AggregateMeasure",
         ] {
             assert!(
                 stub.contains(&format!("class {class}:")),
@@ -2080,21 +2077,20 @@ mod tests {
             "dotted flatten dest names are illegal"
         );
         assert!(
-            rs.contains("pub struct PyTransformOp {"),
-            "externally tagged TransformOp must generate a Python class"
-        );
-        assert!(rs.contains("pub filter: Option<String>"));
-        assert!(
-            rs.contains("#[classmethod]"),
-            "TransformOp must emit per-variant constructors"
+            !rs.contains("pub struct PyTransformOp {"),
+            "TransformOp is deleted; Transform.compute is the skin"
         );
         assert!(
-            stub.contains("    def filter(cls, filter: str) -> TransformOp:"),
-            "TransformOp.filter is the Python constructor"
+            !stub.contains("class TransformOp:"),
+            "TransformOp is deleted; Transform.compute is the skin"
         );
         assert!(
-            !rs.contains("fn new(\n        filter: Option<String>"),
-            "TransformOp bag constructor is illegal"
+            rs.contains("pub compute:") || stub.contains("compute:"),
+            "Transform.compute is the compute skin"
+        );
+        assert!(
+            !rs.contains("pub sql: Option<Vec<String>>"),
+            "Transform.sql is deleted"
         );
     }
 

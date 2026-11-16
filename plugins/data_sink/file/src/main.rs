@@ -217,7 +217,7 @@ impl DataSink for FileSinkRuntimePlugin {
 
     async fn sync_grouped(
         &self,
-        mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
+        reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, io::Error> {
         let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
@@ -255,18 +255,9 @@ impl DataSink for FileSinkRuntimePlugin {
         if local_manifest_matches(&legacy_manifest_file, &legacy_manifest)?
             || legacy_output_file.exists()
         {
-            let receipt = sync_file_legacy_chunks(
-                &self.config,
-                &self.data_dir,
-                &self.output_layout.order_fields,
-                &self.output_layout,
-                self.object_backend.clone(),
-                &mut reader,
-                &ctx,
-            )
-            .await?;
-            write_local_receipt(&manifest_file, &expected_manifest, &receipt).await?;
-            return Ok(SinkWriteOutcome::Applied);
+            return Err(io::Error::other(
+                "legacy grouped compaction objects are not replayed; compact again",
+            ));
         }
         let (stream, _stream_progress) = reader.into_stream();
         let stream = match ctx.cdc_ctx {
@@ -484,86 +475,6 @@ fn local_manifest_matches(path: &Path, expected: &ObjectWriteManifest) -> io::Re
     persisted_object_write_matches(&bytes, expected)
 }
 
-async fn sync_file_legacy_chunks(
-    config: &DataSinkFilePluginConfig,
-    data_dir: &str,
-    order_fields: &[String],
-    output_layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
-    object_backend: Arc<AtomicFileBackend>,
-    reader: &mut skippr_runtime_sdk::plugins::GroupedBatchReader,
-    ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
-) -> io::Result<ObjectWriteReceipt> {
-    let schema = reader.schema();
-    let mut object_key = None;
-    let mut rows = 0_u64;
-    let mut bytes = 0_u64;
-    let mut transport_chunk_count = 0_u32;
-    let mut etag = None;
-
-    while let Some(chunk) = reader.next_chunk().await? {
-        let chunk_index = chunk.chunk_index;
-        let chunk_rows = chunk.rows;
-        let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
-        let chunk_filename = ctx.chunk_filename(chunk_index, false);
-        let (output_file, manifest_file, expected) =
-            legacy_file_chunk_manifest(data_dir, ctx, chunk_index, output_layout)?;
-        let (chunk_bytes, chunk_transport_count, chunk_etag) =
-            if local_manifest_matches(&manifest_file, &expected)? {
-                let metadata = fs::metadata(&output_file)?;
-                (metadata.len(), 1, Some(format!("local-{}", metadata.len())))
-            } else {
-                let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
-                let stream = chunk.into_stream(schema.clone());
-                let stream = match chunk_cdc.as_ref() {
-                    Some(cdc) => {
-                        cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta)
-                    }
-                    None => stream,
-                };
-                let receipt = sync_file_sink(
-                    config,
-                    data_dir,
-                    order_fields,
-                    output_layout,
-                    object_backend.clone(),
-                    stream,
-                    chunk_filename,
-                    Some(&object_stem),
-                )
-                .await?;
-                (receipt.bytes, receipt.transport_chunk_count, receipt.etag)
-            };
-        object_key.get_or_insert_with(|| output_file.to_string_lossy().into_owned());
-        rows = rows
-            .checked_add(chunk_rows)
-            .ok_or_else(|| io::Error::other("legacy grouped row count overflow"))?;
-        bytes = bytes
-            .checked_add(chunk_bytes)
-            .ok_or_else(|| io::Error::other("legacy grouped byte count overflow"))?;
-        transport_chunk_count = transport_chunk_count
-            .checked_add(chunk_transport_count)
-            .ok_or_else(|| io::Error::other("legacy grouped chunk count overflow"))?;
-        etag = chunk_etag;
-    }
-
-    Ok(ObjectWriteReceipt {
-        version: 1,
-        object_key: object_key.ok_or_else(|| io::Error::other("No rows to write to parquet"))?,
-        upload_id: "legacy-chunk-replay".to_string(),
-        rows,
-        bytes,
-        transport_chunk_count,
-        parts: Vec::new(),
-        etag,
-        checksum: None,
-        version_id: None,
-        backend_metadata: BTreeMap::from([(
-            "compatibility".to_string(),
-            "legacy-read-only-chunks".to_string(),
-        )]),
-    })
-}
-
 async fn write_local_receipt(
     manifest_file: &Path,
     manifest: &ObjectWriteManifest,
@@ -758,5 +669,87 @@ mod tests {
         assert_eq!(written.len(), 1);
         assert_eq!(fs::read(&written[0]).unwrap(), body);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn leftover_legacy_grouped_object_is_not_replayed() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use arrow::record_batch::RecordBatch;
+        use datafusion::execution::SendableRecordBatchStream;
+        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+        use skippr_runtime_sdk::plugins::{
+            GroupedBatchReader, GroupedBatchReaderConfig, GroupedSinkWriteContext,
+        };
+        use skippr_runtime_sdk::protocol::RuntimeWalPartRef;
+
+        let dir =
+            std::env::temp_dir().join(format!("skippr-file-legacy-grouped-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let plugin = FileSinkRuntimePlugin {
+            config: DataSinkFilePluginConfig {
+                format: Some("parquet".into()),
+                output_dir: None,
+            },
+            data_dir: dir.display().to_string(),
+            output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                format: Some(OutputFormat::Parquet),
+                ..skippr_runtime_sdk::protocol::RuntimeOutputLayout::default()
+            },
+            object_backend: Arc::new(AtomicFileBackend::new()),
+        };
+        let wal_refs = vec![RuntimeWalPartRef {
+            segment_id: "seg-legacy".to_string(),
+            source: "wal://seg-legacy".to_string(),
+            start: 0,
+            len: 1,
+            sink_ref: "data_sinks.file".to_string(),
+            namespace: "events".to_string(),
+            partition: String::new(),
+            time: None,
+            schema_fingerprint: "fp".to_string(),
+            cdc_meta_hash: None,
+        }];
+        let ctx = GroupedSinkWriteContext::try_from(SinkWriteContext {
+            filename: "namespace=events".to_string(),
+            compaction_id: "compaction-legacy".to_string(),
+            idempotency_key: "apply-legacy".to_string(),
+            wal_refs,
+            write_semantics: skippr_runtime_sdk::plugins::SinkWriteSemantics::IdempotentAtLeastOnce,
+            schema_fingerprint: "fp".to_string(),
+            cdc_ctx: None,
+            source_contract: None,
+        })
+        .unwrap();
+        let (legacy_output_file, _, _) =
+            legacy_file_chunk_manifest(&plugin.data_dir, &ctx, 0, &plugin.output_layout).unwrap();
+        if let Some(parent) = legacy_output_file.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&legacy_output_file, b"leftover-grouped").unwrap();
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1]))])
+            .unwrap();
+        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            futures::stream::iter(vec![Ok(batch)]),
+        ));
+        let reader = GroupedBatchReader::new(
+            stream,
+            ctx.grouping_key.clone(),
+            GroupedBatchReaderConfig::default(),
+        );
+        let err = plugin.sync_grouped(reader, ctx).await.unwrap_err();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            err.to_string()
+                .contains("legacy grouped compaction objects are not replayed"),
+            "{err}"
+        );
     }
 }

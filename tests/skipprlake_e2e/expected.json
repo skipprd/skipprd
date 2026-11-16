@@ -3,6 +3,11 @@
   "record_count": 12,
   "distinct_shop_count": 12,
   "amount_sum": 780,
+  "all_shop_count": 12,
+  "positive_count": 7,
+  "doubled_count": 12,
+  "doubled_sum": 1560,
+  "positive_doubled_sum": 1260,
   "day_2026_11_07": 6,
   "day_2026_11_08": 6,
   "day_missing": 0

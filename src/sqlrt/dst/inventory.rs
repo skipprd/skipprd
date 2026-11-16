@@ -19,7 +19,7 @@ use std::sync::Arc;
 fn a_orphan_gc() {
     let dir = tempfile::tempdir().unwrap();
     let key = PipelineKey::new("t", "w", "orphan").unwrap();
-    let paths = PipelinePaths::legacy_disk(dir.path());
+    let paths = PipelinePaths::disk(dir.path());
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
@@ -37,7 +37,7 @@ fn a_orphan_gc() {
 fn a_quarantine_dir_without_handle() {
     let dir = tempfile::tempdir().unwrap();
     let key = PipelineKey::new("t", "w", "quarantine").unwrap();
-    let paths = PipelinePaths::legacy_disk(dir.path());
+    let paths = PipelinePaths::disk(dir.path());
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
@@ -198,6 +198,32 @@ fn e_exact_arrow_nested_ineligible() {
     assert!(!is_exact_arrow_eligible(&fields, false));
 }
 
+#[test]
+fn e_exact_arrow_cdc_batches_use_exact_path() {
+    let src = include_str!("../../ingest_work.rs");
+    let prod = src
+        .split("#[cfg(test)]\nmod cdc_sidecar_tests")
+        .next()
+        .expect("production ingest_work");
+    let start = prod.find("if use_exact_arrow {").expect("exact Arrow gate");
+    let arm = prod[start..]
+        .split("if used_exact_arrow {")
+        .next()
+        .expect("exact Arrow arm");
+    assert!(
+        !arm.contains("!is_cdc_batch"),
+        "CDC batches must still take the exact Arrow append path"
+    );
+    assert!(
+        arm.contains("row_cdc_meta"),
+        "exact Arrow success must keep the CDC sidecar"
+    );
+    assert!(
+        arm.contains("track_partition_offset_with_key"),
+        "exact Arrow success must record partition offsets and CDC meta"
+    );
+}
+
 fn wal_handle(
     dir: &std::path::Path,
     pipeline: &str,
@@ -206,7 +232,7 @@ fn wal_handle(
     skippr_wal_catalog::CatalogFence,
 ) {
     let key = PipelineKey::new("t", "w", pipeline).unwrap();
-    let paths = PipelinePaths::legacy_disk(dir);
+    let paths = PipelinePaths::disk(dir);
     let fence = skippr_wal_catalog::CatalogFence::local();
     let catalog = memory_catalog_for_test(fence);
     let offsets: Arc<dyn crate::helpers::offset_store::OffsetStore> =
@@ -251,7 +277,7 @@ fn a_payload_unreadable() {
 #[test]
 fn c_complete_slices_and_reclaim() {
     use skippr_wal_catalog::{CatalogKey, CatalogRow, CatalogTxn, PutCond};
-    crate::processor::set_min_unconsumed_seq(u64::MAX);
+    crate::processor::reset_reclaim_hold();
     let dir = tempfile::tempdir().unwrap();
     let (handle, fence) = wal_handle(dir.path(), "complete-reclaim");
     let id = skippr_lease::SegmentId::new("done-seg").unwrap();

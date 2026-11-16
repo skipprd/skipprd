@@ -7,13 +7,21 @@ pub struct JournalKey(String);
 
 impl JournalKey {
     pub fn migration(workspace: &str, pipeline: &str) -> Result<Self, String> {
+        Self::namespaced("migration", workspace, pipeline)
+    }
+
+    pub fn compute(workspace: &str, pipeline: &str) -> Result<Self, String> {
+        Self::namespaced("compute", workspace, pipeline)
+    }
+
+    fn namespaced(kind: &str, workspace: &str, pipeline: &str) -> Result<Self, String> {
         if workspace.is_empty() || pipeline.is_empty() {
             return Err("journal identity must not be empty".into());
         }
         if workspace.contains('#') || pipeline.contains('#') {
             return Err("journal identity must not contain '#'".into());
         }
-        Ok(Self(format!("migration#{workspace}#{pipeline}")))
+        Ok(Self(format!("{kind}#{workspace}#{pipeline}")))
     }
 
     pub fn as_str(&self) -> &str {

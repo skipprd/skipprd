@@ -254,7 +254,7 @@ Each check prints `[ok]` or `[FAIL]`. Add `--output json` for machine-readable r
 
 - [Configuration overview](/configuration/overview) — how `skippr.yml`, environment variables, and flags combine.
 - [Pipelines](/configuration/pipeline) — every pipeline key.
-- [Transforms](/configuration/transforms) — ops, partitions, flattening, and aggregates.
+- [Transforms](/configuration/transforms) — partitions, flattening, and declared compute.
 - [Skippr Store](/configuration/skippr-store) — catalog, journal, schema, and stream state.
 - [Sources](/configuration/input) and [Destinations](/configuration/output) — wire connectors into a pipeline.
 - [skipprd connect](/cli/connect) — write `skippr.yml` from the command line.

@@ -290,8 +290,8 @@ def run_query_after_ingest(
         sink=sink,
         warehouse=warehouse,
         flatten=False,
-        ops=perf_run.transform_op_of(scenario) or False,
-        aggregates=perf_run.transform_aggregates_of(scenario) or False,
+        sql=perf_run.transform_sql_of(scenario) or False,
+        compute=perf_run.transform_compute_of(scenario) or False,
     )
     perf_run.start_ddb()
     tail_proc = None

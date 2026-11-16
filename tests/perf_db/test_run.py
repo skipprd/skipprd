@@ -105,8 +105,8 @@ class PerfDbCatalogTests(unittest.TestCase):
             ops = ids[query_ops_id(mode)]
             aggs = ids[query_agg_id(mode)]
             self.assertEqual(ops["kind"], "query_after_ingest")
-            self.assertEqual(ops.get("transform_op"), "compose")
-            self.assertEqual(aggs.get("transform_aggregates"), "both")
+            self.assertEqual(ops.get("transform_sql"), "compose")
+            self.assertEqual(aggs.get("transform_compute"), "both")
             if mode == "stream":
                 self.assertTrue(ops.get("wal_tail"))
                 self.assertEqual((ops.get("asserts") or {}).get("wal_pin"), "live")

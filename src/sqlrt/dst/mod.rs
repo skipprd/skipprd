@@ -12,6 +12,8 @@ mod catalog;
 #[cfg(test)]
 mod cdc;
 #[cfg(test)]
+mod compute_fixtures;
+#[cfg(test)]
 mod config;
 #[cfg(test)]
 mod copy_frames;
@@ -140,6 +142,7 @@ pub enum Op {
     DeadletterSkip,
     EvolveAddColumn(String),
     Alter(crate::discover::schema_alter::SchemaAlterOp),
+    CreateCompute(crate::compute::ComputeKind),
 }
 
 const OPS_MAGIC: &[u8; 4] = b"DST1";
@@ -369,7 +372,19 @@ pub fn apply(world: &mut World, op: Op) {
             world.field_ids.entry(name).or_insert(id);
         }
         Op::Alter(op) => apply_dst_alter(world, &op),
+        Op::CreateCompute(kind) => apply_dst_create_compute(world, kind),
     }
+}
+
+fn apply_dst_create_compute(world: &World, kind: crate::compute::ComputeKind) {
+    let Ok(key) = crate::compute::journal_key("dst", "dst") else {
+        return;
+    };
+    let Ok(mut log) = crate::compute::load_journal(&world.catalog, &key) else {
+        return;
+    };
+    let _ = log.insert(kind);
+    let _ = crate::compute::commit_log(&world.catalog, world.fence, &key, &log);
 }
 
 fn apply_dst_alter(world: &mut World, op: &crate::discover::schema_alter::SchemaAlterOp) {
@@ -798,6 +813,13 @@ fn encode_op(out: &mut Vec<u8>, op: &Op) {
             out.extend_from_slice(&len.to_le_bytes());
             out.extend_from_slice(&encoded[..len as usize]);
         }
+        Op::CreateCompute(kind) => {
+            out.push(13);
+            let encoded = serde_json::to_vec(kind).unwrap_or_default();
+            let len = u16::try_from(encoded.len()).unwrap_or(u16::MAX);
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&encoded[..len as usize]);
+        }
     }
 }
 
@@ -930,6 +952,12 @@ fn decode_op(bytes: &[u8], i: &mut usize) -> Option<Op> {
             let payload = take_n(bytes, i, len)?;
             let op = serde_json::from_slice(payload).ok()?;
             Some(Op::Alter(op))
+        }
+        13 => {
+            let len = take_u16(bytes, i)? as usize;
+            let payload = take_n(bytes, i, len)?;
+            let kind = serde_json::from_slice(payload).ok()?;
+            Some(Op::CreateCompute(kind))
         }
         _ => None,
     }

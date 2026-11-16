@@ -12,7 +12,7 @@ use crate::sqlrt::dst::{batch_from_row, UserRow};
 use std::collections::HashMap;
 
 #[test]
-fn d_copy_cannot_set_flatten_or_aggregates() {
+fn d_copy_cannot_set_flatten_or_sql() {
     let mut config = Config::new();
     let mut pipeline = Pipeline::default();
     pipeline.r#type = Some(PipelineType::Copy);
@@ -31,14 +31,15 @@ fn d_copy_cannot_set_flatten_or_aggregates() {
 }
 
 #[test]
-fn g_copy_cannot_set_ops_aggregates() {
+fn g_copy_cannot_set_compute() {
     let mut config = Config::new();
     let mut pipeline = Pipeline::default();
     pipeline.r#type = Some(PipelineType::Copy);
     pipeline.transform = Some(Transform {
-        ops: Some(vec![crate::helpers::configuration::TransformOp::Filter(
-            "amount > 0".into(),
-        )]),
+        compute: Some(vec![crate::helpers::configuration::ComputeItem::Sql {
+            name: "p.totals".into(),
+            value: "CREATE TABLE p.totals AS SELECT customer_id, SUM(amount) AS invoice_total FROM p.orders GROUP BY customer_id".into(),
+        }]),
         ..Default::default()
     });
     config.pipelines.insert("p".into(), pipeline);
@@ -46,7 +47,7 @@ fn g_copy_cannot_set_ops_aggregates() {
     assert!(
         violations
             .iter()
-            .any(|v| v.contains("type: copy cannot set transform.ops")),
+            .any(|v| v.contains("type: copy cannot set transform.compute")),
         "{violations:?}"
     );
 }

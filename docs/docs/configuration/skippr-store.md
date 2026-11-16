@@ -16,7 +16,7 @@ There is no remote table that other nodes consult. One process writes a `DATA_DI
 | `catalog` | Live WAL: segments, index, compaction, reclaim, sequence | Ingest, compact, [`skipprd query`](/cli/query) pin |
 | `offsets` | Source resume and CDC envelopes (rebuildable from catalog) | `skipprd sync` |
 | `schema` | Shredded pipeline metadata | Discover, evolution, [ALTER](/operations/alter) |
-| `journal` | DDL migrate SQL journal (id + checksum + phase) | [`skipprd migrate`](/cli/migrate), `ALTER TABLE` |
+| `journal` | DDL migrate SQL journal (id + checksum + phase) and declared compute (`compute#workspace#pipeline`, keyed by compute name) | [`skipprd migrate`](/cli/migrate), `ALTER TABLE` / `ALTER COMPUTE`, `transform.compute` |
 | `stream_state` | Materialised aggregate checkpoint and WAL cursor in one transaction | [Materialised views](/concepts/materialised-views) |
 | `store_meta` | Format version, leftover `sled` copy cursor, snapshot sequence | Open, recovery |
 
@@ -24,7 +24,7 @@ WAL payloads are **not** in the KV. Optional store snapshots (`SKIPPR_S3_BUCKET`
 
 ## How the jobs use it
 
-**Ingest and transforms.** Stateless `transform.ops` run in memory, then Skipprd commits the batch to the WAL catalog. Live resume is remembered in process. The `offsets` family is rebuilt from that catalog on start. The lake sees transformed rows.
+**Ingest and transforms.** Stateless compute (filter and derive) runs in memory, then Skipprd commits the batch to the WAL catalog. Live resume is remembered in process. The `offsets` family is rebuilt from that catalog on start. The lake sees transformed rows.
 
 **Materialised views.** After WAL commit, the processor updates `stream_state` in the same Skippr Store transaction as its cursor. Compact waits on that cursor. See [Materialised views](/concepts/materialised-views).
 

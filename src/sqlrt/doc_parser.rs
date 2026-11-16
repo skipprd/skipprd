@@ -57,7 +57,22 @@ impl SqlDocParser {
                     docs.get("ALTER TABLE MERGE COLUMN").unwrap().clone()
                 }
             },
-            Statement::TableDrop(_) => docs.get("DROP TABLE").unwrap().clone(),
+            Statement::TableDrop(_) | Statement::DropCompute { .. } => {
+                docs.get("DROP TABLE").unwrap().clone()
+            }
+            Statement::AlterCompute { .. } => docs.get("ALTER COMPUTE").unwrap().clone(),
+            Statement::CreateView { .. } => docs
+                .get("CREATE VIEW")
+                .cloned()
+                .unwrap_or_else(|| docs.get("SELECT").unwrap().clone()),
+            Statement::CreateTableAs { .. } => docs
+                .get("CREATE TABLE")
+                .cloned()
+                .unwrap_or_else(|| docs.get("SELECT").unwrap().clone()),
+            Statement::Stream(_) => docs
+                .get("STREAM")
+                .cloned()
+                .unwrap_or_else(|| docs.get("SELECT").unwrap().clone()),
             Statement::ShowDocs => docs.get("SHOW DOCS").unwrap().clone(),
             Statement::ShowStats { .. } => docs.get("SHOW STATS").unwrap().clone(),
             Statement::ShowSemantic { .. } => docs.get("SHOW SEMANTIC").unwrap().clone(),
@@ -73,8 +88,6 @@ impl SqlDocParser {
 
         if sql_lower.starts_with("select") {
             return Some(docs.get("SELECT").unwrap().clone());
-        } else if sql_lower.contains("datediff") {
-            return Some(docs.get("DATEDIFF").unwrap().clone());
         } else if sql_lower == "show docs" {
             return Some(docs.get("SHOW DOCS").unwrap().clone());
         }

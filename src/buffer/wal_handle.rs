@@ -134,20 +134,6 @@ impl PipelineWalHandle {
         }
     }
 
-    pub fn payload_ready(&self) -> Result<bool, DurableError> {
-        let rows = query_all(self.catalog.as_ref(), CatalogPrefix::Segment)
-            .map_err(|err| DurableError::Io(err.to_string()))?;
-        for (_, row) in rows {
-            let CatalogRow::Segment(seg) = row else {
-                continue;
-            };
-            if !payload_present(&seg.location) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
     pub fn payload_unreadable(&self, segment_id: &str) -> bool {
         let Ok(id) = SegmentId::new(segment_id) else {
             return true;
@@ -407,13 +393,10 @@ impl PipelineWalHandle {
         let mut grouped: HashMap<String, Vec<u32>> = HashMap::new();
         for txn in batch {
             for wal_ref in &txn.refs {
-                let Some(ordinal) = self.resolve_ordinal(wal_ref)? else {
-                    continue;
-                };
                 grouped
                     .entry(wal_ref.segment_id.clone())
                     .or_default()
-                    .push(ordinal);
+                    .push(wal_ref.ordinal);
             }
         }
         let mut last_conflict = DurableError::CatalogConflict;
@@ -519,63 +502,11 @@ impl PipelineWalHandle {
             return Ok(true);
         }
         for wal_ref in &txn.refs {
-            let Some(ordinal) = self.resolve_ordinal(wal_ref)? else {
-                return Ok(false);
-            };
-            if !self.slice_is_done(&wal_ref.segment_id, ordinal)? {
+            if !self.slice_is_done(&wal_ref.segment_id, wal_ref.ordinal)? {
                 return Ok(false);
             }
         }
         Ok(true)
-    }
-
-    fn resolve_ordinal(
-        &self,
-        wal_ref: &crate::buffer::compaction_transaction::WalPartRef,
-    ) -> Result<Option<u32>, DurableError> {
-        if let Some(ordinal) = wal_ref.ordinal {
-            return Ok(Some(ordinal));
-        }
-        let id =
-            SegmentId::new(&wal_ref.segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
-        if let Some(CatalogRow::Index(index)) = self
-            .catalog
-            .get(&CatalogKey::Index(id.clone()))
-            .map_err(|err| DurableError::Io(err.to_string()))?
-        {
-            for entry in &index.entries {
-                if entry.start == wal_ref.start
-                    && entry.len == wal_ref.len
-                    && entry.namespace == wal_ref.key.namespace
-                    && entry.partition == wal_ref.key.partition
-                {
-                    return Ok(Some(entry.ordinal));
-                }
-            }
-        }
-        let Some(CatalogRow::Segment(seg)) = self
-            .catalog
-            .get(&CatalogKey::Segment(id.clone()))
-            .map_err(|err| DurableError::Io(err.to_string()))?
-        else {
-            return Ok(None);
-        };
-        let PayloadLocation::Disk { path } = &seg.location else {
-            return Ok(None);
-        };
-        let meta = SegmentFile::read_index_path(std::path::Path::new(path))
-            .map_err(|err| DurableError::Io(err.to_string()))?;
-        self.persist_missing_index(&id, &meta)?;
-        for idx in &meta.index {
-            if idx.start == wal_ref.start
-                && idx.len == wal_ref.len
-                && idx.key.namespace == wal_ref.key.namespace
-                && idx.key.partition == wal_ref.key.partition
-            {
-                return Ok(Some(idx.slice_ordinal));
-            }
-        }
-        Ok(None)
     }
 
     fn persist_missing_index(
@@ -1120,7 +1051,8 @@ impl PipelineWalHandle {
             row.done.or_bits(ordinals);
             crate::metrics::counters::add_compaction_catalog_bit_write(ordinals.len() as u64);
             let all_done = row.done.all_done();
-            let can_reclaim = all_done && crate::processor::allows_reclaim(row.seq.get());
+            let can_reclaim =
+                all_done && crate::processor::allows_reclaim(self.key.pipeline(), row.seq.get());
             let version = row.version;
             row.version = next_catalog_version(version)?;
             let location = row.location.clone();
@@ -1540,20 +1472,6 @@ pub(crate) fn put_slice_index(
     Ok(())
 }
 
-fn payload_present(location: &PayloadLocation) -> bool {
-    match location {
-        PayloadLocation::Disk { path } => PathBuf::from(path).exists(),
-        PayloadLocation::S3 { bucket, key } => crate::buffer::wal_store::block_on_async(async {
-            match crate::helpers::s3::head_etag(bucket, key).await {
-                Ok(Some(_)) => Ok(true),
-                Ok(None) => Ok(false),
-                Err(err) => Err(std::io::Error::other(err.to_string())),
-            }
-        })
-        .unwrap_or(false),
-    }
-}
-
 pub(crate) fn admit_payload(
     location: &PayloadLocation,
     expected_sha: &[u8; 32],
@@ -1660,7 +1578,7 @@ mod tests {
 
     fn leased_handle(dir: &std::path::Path) -> Arc<PipelineWalHandle> {
         let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::legacy_disk(dir);
+        let paths = PipelinePaths::disk(dir);
         let fence = CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let offsets: Arc<dyn OffsetStore> = memory_offset_store();
@@ -1675,7 +1593,7 @@ mod tests {
         Arc<dyn skippr_wal_catalog::SkipprStore>,
     ) {
         let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::legacy_disk(dir);
+        let paths = PipelinePaths::disk(dir);
         let fence = CatalogFence::local();
         let catalog = memory_catalog_for_test(fence);
         let kv: Arc<dyn skippr_wal_catalog::SkipprStore> =
@@ -2177,7 +2095,7 @@ mod tests {
             .find("fn all_refs_already_done")
             .expect("all_refs_already_done");
         let already_body = src[already..]
-            .split("fn resolve_ordinal")
+            .split("fn persist_missing_index")
             .next()
             .expect("already body");
         assert!(
@@ -2192,7 +2110,8 @@ mod tests {
             .next()
             .unwrap_or(&src[redo..]);
         assert!(!redo_body.contains("admit_payload"));
-        assert!(src.contains("fn resolve_ordinal"));
+        assert!(!src.contains(concat!("fn resolve_", "ordinal")));
+        assert!(already_body.contains("wal_ref.ordinal"));
         assert!(!src.contains(concat!("fn catalog_slice_", "ordinal")));
     }
 
@@ -2353,7 +2272,7 @@ mod tests {
                 len: idx.len,
                 key: key.clone(),
                 cdc_meta_hash: None,
-                ordinal: Some(idx.slice_ordinal),
+                ordinal: idx.slice_ordinal,
             }],
             "out.parquet".into(),
         )
@@ -2436,7 +2355,7 @@ mod tests {
                     len: idx.len,
                     key: key.clone(),
                     cdc_meta_hash: None,
-                    ordinal: Some(idx.slice_ordinal),
+                    ordinal: idx.slice_ordinal,
                 }],
                 format!("{name}.parquet"),
             )
@@ -2477,73 +2396,6 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(!handle.paths().segs.join("partial-b.seg").exists());
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn legacy_wal_part_ref_without_ordinal_resolves_from_headers() {
-        use crate::buffer::compaction_transaction::{
-            CompactionTransaction, SegmentSourceDescriptor, SinkWriteSemantics, WalPartRef,
-        };
-        use crate::plugins::source_contract::WritePolicy;
-        let dir = tempfile::tempdir().unwrap();
-        let handle = leased_handle(dir.path());
-        let (batches, key) = one_arrow_part();
-        let result = handle
-            .persist_segment(
-                "legacy-ord",
-                &HashMap::new(),
-                &batches,
-                &HashMap::new(),
-                &HashMap::new(),
-                &HashMap::new(),
-                std::time::SystemTime::UNIX_EPOCH,
-            )
-            .await
-            .unwrap();
-        let idx = &result.meta.index[0];
-        let body = serde_json::to_vec(
-            &CompactionTransaction::new(
-                "out".into(),
-                "ns".into(),
-                "schema".into(),
-                WritePolicy::Append,
-                SinkWriteSemantics::AtLeastOnce,
-                vec![WalPartRef {
-                    segment_id: "legacy-ord".into(),
-                    source: SegmentSourceDescriptor::Disk {
-                        path: handle.paths().segs.join("legacy-ord.seg"),
-                    },
-                    start: idx.start,
-                    len: idx.len,
-                    key,
-                    cdc_meta_hash: None,
-                    ordinal: None,
-                }],
-                "out.parquet".into(),
-            )
-            .mark_acked(),
-        )
-        .unwrap();
-        let parsed: crate::buffer::compaction_transaction::CompactionTransaction =
-            serde_json::from_slice(&body).unwrap();
-        assert!(parsed.refs[0].ordinal.is_none());
-        handle
-            .put_compaction(&parsed.id, skippr_wal_catalog::CompactionState::Acked, body)
-            .await
-            .unwrap();
-        let ids = handle.apply_acked_in_memory().unwrap();
-        handle.redo_acked_durable_batches(&ids).await.unwrap();
-        assert!(handle
-            .slice_is_done("legacy-ord", idx.slice_ordinal)
-            .unwrap());
-        assert!(handle
-            .catalog
-            .get(&CatalogKey::Compaction(
-                skippr_wal_catalog::CompactionId::new(&parsed.id).unwrap()
-            ))
-            .unwrap()
-            .is_none());
     }
 
     #[test]
@@ -2724,7 +2576,7 @@ mod tests {
     async fn reclaim_condition_failed_exhausts_to_catalog_conflict() {
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "p").unwrap();
-        let paths = PipelinePaths::legacy_disk(dir.path());
+        let paths = PipelinePaths::disk(dir.path());
         let fence = CatalogFence::local();
         let inner = memory_catalog_for_test(fence);
         let failing = Arc::new(ConditionFailingCatalog {

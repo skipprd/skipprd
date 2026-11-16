@@ -36,9 +36,9 @@ from fixtures import (  # noqa: E402
     write_records,
 )
 from matrix import (  # noqa: E402
-    AGG_YAML,
     ALTER_SQL,
-    OPS_YAML,
+    COMPUTE_YAML,
+    SQL_YAML,
     expected_amount_sum_range,
     expected_filter_rows,
 )
@@ -272,8 +272,8 @@ def write_skippr_yml(
     warehouse: Path | None,
     flatten: bool,
     extra_source: dict[str, str] | None = None,
-    ops: bool | str = False,
-    aggregates: bool | str = False,
+    sql: bool | str = False,
+    compute: bool | str = False,
 ) -> None:
     """SkipprLake Iceberg catalog is `catalog_table`, never `skippr.store.type`."""
     if kind.startswith("copy"):
@@ -283,12 +283,15 @@ def write_skippr_yml(
     else:
         flatten_yaml = "      flatten_events: yes\n" if flatten else "      flatten_events: no\n"
         extra_transform = ""
-        op_key = "compose" if ops is True else (str(ops) if ops else "")
-        agg_key = "both" if aggregates is True else (str(aggregates) if aggregates else "")
-        if op_key:
-            extra_transform += "      ops:\n" + OPS_YAML[op_key]
-        if agg_key:
-            extra_transform += "      aggregates:\n" + AGG_YAML[agg_key]
+        sql_items: list[str] = []
+        sql_key = "compose" if sql is True else (str(sql) if sql else "")
+        compute_key = "both" if compute is True else (str(compute) if compute else "")
+        if sql_key:
+            sql_items.append(SQL_YAML[sql_key])
+        if compute_key:
+            sql_items.append(COMPUTE_YAML[compute_key])
+        if sql_items:
+            extra_transform += "      compute:\n" + "".join(sql_items)
         transform_yaml = f"    transform:\n{flatten_yaml}{extra_transform}"
         pipeline_type = ""
     if source_kind == "File":
@@ -502,17 +505,15 @@ def leftover_segs(data_dir: Path) -> int:
     return sum(1 for _ in data_dir.rglob("*.seg"))
 
 
-def transform_op_of(scenario: dict[str, Any]) -> str:
-    raw = scenario.get("transform_op")
+def transform_sql_of(scenario: dict[str, Any]) -> str:
+    raw = scenario.get("transform_sql")
     if raw:
         return str(raw)
-    if scenario.get("transform_ops"):
-        return "compose"
     return ""
 
 
-def transform_aggregates_of(scenario: dict[str, Any]) -> str:
-    raw = scenario.get("transform_aggregates")
+def transform_compute_of(scenario: dict[str, Any]) -> str:
+    raw = scenario.get("transform_compute")
     if raw is True:
         return "both"
     if raw:
@@ -521,16 +522,16 @@ def transform_aggregates_of(scenario: dict[str, Any]) -> str:
 
 
 def expected_dest_rows(scenario: dict[str, Any], rows: int, warmup: bool) -> int:
-    measured = expected_filter_rows(rows) if transform_op_of(scenario) == "filter" else rows
+    measured = expected_filter_rows(rows) if transform_sql_of(scenario) == "filter" else rows
     if not warmup:
         return measured
-    if transform_op_of(scenario) == "filter":
+    if transform_sql_of(scenario) == "filter":
         return measured
     return measured + 1
 
 
 def expected_dest_amount_sum(scenario: dict[str, Any], rows: int, warmup: bool) -> int:
-    if transform_op_of(scenario) == "filter":
+    if transform_sql_of(scenario) == "filter":
         return expected_amount_sum_range(6, rows)
     return expected_amount_sum(rows) + (10 if warmup else 0)
 
@@ -813,8 +814,8 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
     data_dir.mkdir(parents=True, exist_ok=True)
     fixture_kind = str(scenario.get("fixture", "exact_arrow"))
     flatten = bool(scenario.get("flatten_events"))
-    ops = transform_op_of(scenario)
-    aggregates = transform_aggregates_of(scenario)
+    ops = transform_sql_of(scenario)
+    aggregates = transform_compute_of(scenario)
     source_format = str(scenario.get("source_format") or "json")
     source_ext = "csv" if source_format == "csv" else "json"
     warmup = (
@@ -847,8 +848,8 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
             warehouse=warehouse,
             flatten=flatten,
             extra_source=extra_source,
-            ops=ops or False,
-            aggregates=aggregates or False,
+            sql=ops or False,
+            compute=aggregates or False,
         )
 
     write_ingest_yml("File" if source_kind == "Stdin" else source_kind)

@@ -385,7 +385,7 @@ class StreamTransformPerfTests(unittest.TestCase):
                     self.assertEqual(spec.get("sink_format"), "parquet", name)
                 else:
                     self.assertEqual(spec["sink"], "duckdb", name)
-                self.assertEqual(spec.get("transform_op"), op, name)
+                self.assertEqual(spec.get("transform_sql"), op, name)
                 if mode == "stream":
                     self.assertEqual(spec.get("source"), "stdin", name)
                 else:
@@ -396,7 +396,7 @@ class StreamTransformPerfTests(unittest.TestCase):
                 name = ingest_agg_id(measure, mode)
                 spec = ids[name]
                 self.assertEqual(spec["kind"], "ingest", name)
-                self.assertEqual(spec.get("transform_aggregates"), measure, name)
+                self.assertEqual(spec.get("transform_compute"), measure, name)
                 self.assertIn("stream_processor", required_perf_for(catalog, spec), name)
                 if mode == "stream":
                     self.assertEqual(spec.get("source"), "stdin", name)
@@ -413,7 +413,7 @@ class StreamTransformPerfTests(unittest.TestCase):
                     self.assertFalse((spec.get("asserts") or {}).get("bronze_count"), name)
                 else:
                     self.assertIn("wal_compact", phases, name)
-        self.assertEqual(len(OPS) * len(INGEST_MODES), 12)
+        self.assertEqual(len(OPS) * len(INGEST_MODES), 6)
         self.assertEqual(len(AGG_MEASURES) * len(INGEST_MODES), 6)
         self.assertEqual(len(ALTERS) * len(INGEST_MODES), 8)
         workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
@@ -473,7 +473,7 @@ class StreamTransformPerfTests(unittest.TestCase):
         self.assertIn("start_new_session=True", fn)
         self.assertIn("os.killpg", (HARNESS_DIR / "run.py").read_text(encoding="utf-8"))
 
-    def test_ingest_yaml_writes_ops_and_aggregates(self) -> None:
+    def test_ingest_yaml_writes_sql(self) -> None:
         from run import write_skippr_yml
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -486,7 +486,7 @@ class StreamTransformPerfTests(unittest.TestCase):
                 sink="duckdb",
                 warehouse=Path("/warehouse"),
                 flatten=False,
-                ops="compose",
+                sql="compose",
             )
             filter_path = Path(tmp) / "filter.yml"
             write_skippr_yml(
@@ -497,7 +497,7 @@ class StreamTransformPerfTests(unittest.TestCase):
                 sink="duckdb",
                 warehouse=Path("/warehouse"),
                 flatten=False,
-                ops="filter",
+                sql="filter",
             )
             aggs_path = Path(tmp) / "aggs.yml"
             write_skippr_yml(
@@ -508,7 +508,7 @@ class StreamTransformPerfTests(unittest.TestCase):
                 sink="duckdb",
                 warehouse=Path("/warehouse"),
                 flatten=False,
-                aggregates="both",
+                compute="both",
             )
             copy_path = Path(tmp) / "copy.yml"
             write_skippr_yml(
@@ -525,19 +525,21 @@ class StreamTransformPerfTests(unittest.TestCase):
             filter_text = filter_path.read_text(encoding="utf-8")
             aggs_text = aggs_path.read_text(encoding="utf-8")
             copy_text = copy_path.read_text(encoding="utf-8")
-        self.assertIn('filter: "amount > 0"', ops_text)
+        self.assertIn("compute:", ops_text)
         self.assertIn("amount_gbp", ops_text)
-        self.assertIn("display_name", ops_text)
+        self.assertIn("SELECT *", ops_text)
         self.assertIn("Stdin:", filter_text)
-        self.assertIn('filter: "amount > 50"', filter_text)
+        self.assertIn("WHERE amount > 50", filter_text)
         self.assertNotIn("type: copy", filter_text)
         self.assertNotIn("aggregates:", ops_text)
-        self.assertIn("name_totals", aggs_text)
-        self.assertIn("key_fields: [name]", aggs_text)
-        self.assertIn("{ sum: amount }", aggs_text)
+        self.assertNotIn("ops:", ops_text)
+        self.assertIn("CREATE TABLE perf_cell.name_totals", aggs_text)
+        self.assertIn("SUM(amount)", aggs_text)
         self.assertNotIn("ops:", aggs_text)
+        self.assertNotIn("aggregates:", aggs_text)
         self.assertNotIn("ops:", copy_text)
         self.assertNotIn("aggregates:", copy_text)
+        self.assertNotIn("compute:", copy_text)
 
     def test_skill_smoke_includes_stream_transform_cells(self) -> None:
         skill = (REPO_ROOT / ".cursor" / "skills" / "skippr-perf" / "SKILL.md").read_text(

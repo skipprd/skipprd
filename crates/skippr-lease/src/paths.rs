@@ -51,18 +51,6 @@ pub struct PipelinePaths {
 }
 
 impl PipelinePaths {
-    pub fn new(data_root: &Path, key: &PipelineKey) -> Result<Self, PathError> {
-        validate_path_component(key.tenant())?;
-        validate_path_component(key.workspace())?;
-        validate_path_component(key.pipeline())?;
-        let root = data_root
-            .join("clustered")
-            .join(encode_path_component(key.tenant()))
-            .join(encode_path_component(key.workspace()))
-            .join(encode_path_component(key.pipeline()));
-        Ok(Self::from_pipeline_root(root))
-    }
-
     /// Layout under an already-resolved pipeline root: `{root}/segment_buffer/...`.
     pub fn from_pipeline_root(root: PathBuf) -> Self {
         Self {
@@ -75,8 +63,8 @@ impl PipelinePaths {
         }
     }
 
-    /// Legacy `WAL_STORAGE=disk` layout: `{DATA_DIR}/segment_buffer/...`.
-    pub fn legacy_disk(data_root: &Path) -> Self {
+    /// Disk WAL layout: `{DATA_DIR}/segment_buffer/...`.
+    pub fn disk(data_root: &Path) -> Self {
         Self::from_pipeline_root(data_root.to_path_buf())
     }
 
@@ -102,14 +90,6 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn clustered_paths_are_tenant_scoped() {
-        let key = PipelineKey::new("acme", "prod", "events").unwrap();
-        let paths = PipelinePaths::new(Path::new("/data"), &key).unwrap();
-        assert_eq!(paths.root, Path::new("/data/clustered/acme/prod/events"));
-        assert!(paths.segs.ends_with("segment_buffer/segs"));
-    }
-
-    #[test]
     fn encode_preserves_safe_names_and_escapes_the_rest() {
         assert_eq!(encode_path_component("events"), "events");
         assert_eq!(encode_path_component("a b"), "a%20b");
@@ -128,13 +108,16 @@ mod tests {
     }
 
     #[test]
-    fn legacy_disk_keeps_workspace_pipeline_root() {
-        let paths = PipelinePaths::legacy_disk(Path::new("/data/acme/prod/events"));
+    fn disk_keeps_workspace_pipeline_root() {
+        let paths = PipelinePaths::disk(Path::new("/data/acme/prod/events"));
         assert_eq!(paths.root, Path::new("/data/acme/prod/events"));
         assert_eq!(
             paths.segs,
             Path::new("/data/acme/prod/events/segment_buffer/segs")
         );
-        assert!(!paths.root.starts_with("/data/clustered"));
+        assert_eq!(
+            paths.durable,
+            Path::new("/data/acme/prod/events/segment_buffer/durable")
+        );
     }
 }

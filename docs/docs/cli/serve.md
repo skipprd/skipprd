@@ -38,7 +38,7 @@ See [CLI overview](/cli/overview) for the other global flags.
 ### What clients see
 
 - **Iceberg REST** serves the catalog: namespaces, tables, and their metadata. Clients can create and update their own namespaces and tables through it. Namespaces that Skipprd pipelines write into are read-only.
-- **Flight SQL** is read-only. Tables are named by their Iceberg identity, `<namespace>.<table>`, for example `bronze.rides`. Listing tables returns every Iceberg namespace and table. Flight SQL reads committed Iceberg data; for live WAL data use [`skipprd query`](/cli/query).
+- **Flight SQL** is read-only. Tables are named by their Iceberg identity, `<namespace>.<table>`, for example `bronze.rides`. Listing tables returns every Iceberg namespace and table. Flight SQL uses the same Iceberg ∪ WAL registration as [`skipprd query`](/cli/query); if WAL is absent on this node it falls through to Iceberg history.
 
 ## Examples
 

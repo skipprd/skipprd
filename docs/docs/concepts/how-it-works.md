@@ -5,11 +5,11 @@ description: Follow a pipeline from discover to query, learn what the write-ahea
 
 # How Skipprd works
 
-You describe a **pipeline** in `skippr.yml`: one source, and optionally one destination. Then you discover the shape of the data, review the schema, sync the rows, and query them. Optional `transform.ops` reshape the batch before WAL commit. Optional `transform.aggregates` materialise keyed totals in Skippr Store. After data has landed, [`skipprd migrate`](/cli/migrate) applies `ALTER TABLE` without stopping the pipeline. Every batch is written to Skipprd's write-ahead log (WAL) first. A crash retries from the WAL. Whether a retry can duplicate a row depends on the destination. See [Exactly-once delivery](/concepts/exactly-once).
+You describe a **pipeline** in `skippr.yml`: one source, and optionally one destination. Then you discover the shape of the data, review the schema, sync the rows, and query them. Optional `transform.compute` (`CREATE VIEW` / `CREATE TABLE AS SELECT`, or SDL) declares compute that Skipprd journals in Skippr Store. After data has landed, [`skipprd migrate`](/cli/migrate) applies `ALTER TABLE` without stopping the pipeline. A compute name whose canonical hash changed requires `ALTER COMPUTE` (View / keyed / windowed also accept `ALTER TABLE` sugar; Latest and stream-table joins are `DROP` then `CREATE`). Every batch is written to Skipprd's write-ahead log (WAL) first. A crash retries from the WAL. Whether a retry can duplicate a row depends on the destination. See [Exactly-once delivery](/concepts/exactly-once).
 
 ```text
                 ┌──────────────────────── skipprd ────────────────────────┐
-  data source ──▶  ops ──▶ commit WAL ──▶ destination (Iceberg / warehouse)
+  data source ──▶  compute ──▶ commit WAL ──▶ destination (Iceberg / warehouse)
                 │           │                    │
                 │           ▼                    ▼
                 │     Skippr Store          deadletter sink
@@ -144,7 +144,7 @@ data_sources:
 - [Schema discovery and evolution](/concepts/schema): how types are inferred and how changes land.
 - [Stream SQL](/concepts/stream-sql): SELECT, STREAM, and Skippr Store pins.
 - [Materialised views](/concepts/materialised-views): keyed aggregates in `stream_state`.
-- [Transforms](/configuration/transforms): ops, partitions, aggregates.
+- [Transforms](/configuration/transforms): partitions, flatten, declared compute.
 - [Skippr Store](/configuration/skippr-store): the KV that backs catalog, journal, and stream state.
 - [WAL and buffering](/configuration/buffering): choose a WAL backend for production.
 - [skippr.yml](/configuration/skippr-yml): the full project file.

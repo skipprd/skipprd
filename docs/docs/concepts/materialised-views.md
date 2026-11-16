@@ -11,7 +11,7 @@ This is production ingest state. It is not a warehouse `CREATE MATERIALIZED VIEW
 
 ## Configure
 
-Set `transform.aggregates` on the pipeline. Each entry needs a stable `id`, key columns, and at least one measure (`sum` or `count`):
+Set `transform.compute` on the pipeline. `CREATE TABLE … GROUP BY` journals a keyed table:
 
 ```yaml
 pipelines:
@@ -19,24 +19,20 @@ pipelines:
     data_source: data_sources.pg
     data_sink: data_sinks.lake
     transform:
-      aggregates:
-        - id: customer_invoice_totals
-          key_fields: [customer_id]
-          measures:
-            invoice_total: { sum: amount }
-            invoice_count: { count: "*" }
+      compute:
+        - name: invoices.customer_totals
+          type: sql
+          value: |
+            CREATE TABLE invoices.customer_totals AS
+            SELECT customer_id, SUM(amount) AS invoice_total, COUNT(*) AS invoice_count
+            FROM invoices.orders
+            GROUP BY customer_id
 ```
 
 Python:
 
 ```python
-from skippr import (
-    AggregateMeasure,
-    Config,
-    Pipeline,
-    Transform,
-    TransformAggregate,
-)
+from skippr import ComputeItemSql, Config, Pipeline, Transform
 
 cfg = Config.load("skippr.yml")
 cfg.pipeline(
@@ -45,14 +41,13 @@ cfg.pipeline(
         data_source=cfg.get_data_source("pg"),
         data_sink=cfg.get_data_sink("lake"),
         transform=Transform(
-            aggregates=[
-                TransformAggregate(
-                    id="customer_invoice_totals",
-                    key_fields=["customer_id"],
-                    measures={
-                        "invoice_total": AggregateMeasure(sum="amount"),
-                        "invoice_count": AggregateMeasure(count="*"),
-                    },
+            compute=[
+                ComputeItemSql(
+                    name="invoices.customer_totals",
+                    value="""CREATE TABLE invoices.customer_totals AS
+                    SELECT customer_id, SUM(amount) AS invoice_total, COUNT(*) AS invoice_count
+                    FROM invoices.orders
+                    GROUP BY customer_id""",
                 )
             ],
         ),
@@ -61,7 +56,7 @@ cfg.pipeline(
 cfg.save()
 ```
 
-`type: copy` cannot set `aggregates`. A transform error fails the ingest batch and does not advance source offsets.
+`type: copy` cannot set `compute`. A transform error fails the ingest batch and does not advance source offsets.
 
 ## What Skipprd does
 
@@ -76,11 +71,11 @@ After a WAL segment is committed, a single-worker processor reads those immutabl
 
 One Skippr Store transaction writes measures, last-row images, the entity index, dedup keys, and the WAL cursor (`seq`, `segment_id`, `slice_ordinal`, `row_index`). Compaction does **not** drop a WAL segment until the processor's cursor has passed it. Ingest is not blocked; WAL retention waits on processor lag.
 
-Changing an aggregate's `id`, keys, or measures changes the config hash. Skipprd deletes that aggregate's prefix and rebuilds it by replaying the WAL from the start.
+Changing keys or measures is a new catalog object. `ALTER COMPUTE` (or View / keyed / windowed `ALTER TABLE` sugar) writes the new entry and rebuilds that item from Iceberg ∪ WAL. Latest and stream-table joins are `DROP` then `CREATE`.
 
 ## How this relates to SQL
 
-[`skipprd query`](/cli/query) `SELECT`s the pipeline namespace: Iceberg ∪ live WAL after `transform.ops`. Aggregates live in Skippr Store. They are not extra names in `skipprd query`. You do not `SELECT * FROM customer_invoice_totals` as a catalog name.
+[`skipprd query`](/cli/query) `SELECT`s the pipeline namespace (Iceberg ∪ live WAL) and registered `pipeline.compute_name` tables. You `SELECT * FROM invoices.customer_totals`.
 
 Query the stream as usual:
 

@@ -17,7 +17,7 @@ use skippr_wal_catalog::{CatalogFence, KvOp, SkipprStore, SkipprStoreRead, Store
 
 use crate::connect::{DataSink, DataSource, SchemaSink};
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::live_kv;
+use crate::helpers::offsets::live_kv_for;
 
 /// One hour must elapse between successful POSTs (scheduled or exit).
 pub const POST_INTERVAL_SECS: u64 = 3600;
@@ -339,7 +339,7 @@ pub fn maybe_post_from_config(config: &Config, command: Command, error_class: Er
     if !config.telemetry_enabled() {
         return;
     }
-    let Some((store, fence)) = live_kv() else {
+    let Some((store, fence)) = live_kv_for(&config.skippr_store_dir()) else {
         return;
     };
     let draft = TelemetryDraft::from_config(config, command, error_class);
