@@ -519,6 +519,8 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("Syncing pipeline", ddb)
         self.assertLess(ddb.find("wait_log_contains"), ddb.find("apply_cdc_case"))
         self.assertLess(ddb.find("apply_cdc_case"), ddb.find("peek_until"))
+        self.assertIn("query_sum", text.split("def cdc_query_done")[1].split("def parse_plain_query")[0])
+        self.assertGreater(ddb.find("run_cdc_once"), ddb.find("peek_until"))
 
     def test_cdc_ddb_query_fqn_is_storage_namespace(self) -> None:
         self.assertEqual(
