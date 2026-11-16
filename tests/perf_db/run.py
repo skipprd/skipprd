@@ -195,6 +195,8 @@ def cdc_query_done(scenario: dict[str, Any], doc: dict[str, Any]) -> bool:
     expect_count = asserts.get("query_count")
     if expect_count not in (None, True, False):
         return str(rows[0][0]) == str(expect_count)
+    if "query_sum" in asserts:
+        return int(float(rows[0][0])) == int(asserts["query_sum"])
     expect_name = asserts.get("query_name")
     if expect_name:
         header = [str(col) for col in (doc.get("header") or [])]
@@ -1245,6 +1247,22 @@ def run_query_after_cdc(
             )
             if hold is not None:
                 require_hold_engaged(scenario_id, overlap_proc, hold)
+            elif overlap_proc is not None:
+                overlap_proc.kill()
+                try:
+                    overlap_proc.wait(timeout=30)
+                except Exception:
+                    pass
+                handle = overlap_proc.stdout
+                if handle is not None and hasattr(handle, "close"):
+                    try:
+                        handle.close()
+                    except Exception:
+                        pass
+                if follow_log.is_file():
+                    logs += follow_log.read_text(encoding="utf-8")
+                overlap_proc = None
+                logs += run_cdc_once(skipprd, config, env, pipeline)
         else:
             if case:
                 apply_cdc_case(source, case)
