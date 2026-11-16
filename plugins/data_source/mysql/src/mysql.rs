@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 
 use crate::helpers::plugin_config::PluginConfigEntry;
 use skippr_runtime_sdk::plugins::cdc::{
-    source_capabilities, MutationKind, MysqlCheckpoint, WalRowMeta,
+    before_image, source_capabilities, BeforeImage, MutationKind, MysqlCheckpoint, WalRowMeta,
 };
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
@@ -21,8 +21,8 @@ use skippr_runtime_sdk::plugins::{
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, partition_already_closed, store_checkpoint_payload,
-    submit_payload_batch_groups_durable, submit_payload_batches_durable, IngestBatch,
-    SourceSyncContext,
+    submit_payload_batch_groups_durable, submit_payload_batches_durable, take_row_count_batch,
+    IngestBatch, SourceSyncContext,
 };
 
 #[derive(Debug, Deserialize, SkipprConfig, Clone)]
@@ -95,6 +95,25 @@ impl DataSourceMysqlPlugin {
 
     fn escape_ident(ident: &str) -> String {
         format!("`{}`", ident.replace('`', "``"))
+    }
+
+    fn json_ingest_batch(
+        offset_key: OffsetKey,
+        json_str: String,
+        source_uri: String,
+        namespace: Option<String>,
+        cdc_rows: Option<Vec<WalRowMeta>>,
+    ) -> IngestBatch {
+        let bytes = json_str.len();
+        IngestBatch {
+            offset_key,
+            data: json_str.into(),
+            bytes,
+            offset_pos: None,
+            source_uri,
+            namespace,
+            cdc_rows,
+        }
     }
 
     fn mysql_value_to_json(v: &MysqlValue) -> Value {
@@ -193,6 +212,101 @@ impl DataSourceMysqlPlugin {
         Ok(map)
     }
 
+    /// Primary-key column names keyed by `schema.table`, ordinal order.
+    async fn fetch_primary_key_columns(
+        conn: &mut mysql_async::Conn,
+    ) -> Result<HashMap<String, Vec<String>>, std::io::Error> {
+        let sql = "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME \
+                   FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
+                   WHERE CONSTRAINT_NAME = 'PRIMARY' \
+                     AND TABLE_SCHEMA NOT IN \
+                       ('information_schema','performance_schema','mysql','sys') \
+                   ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION";
+        let rows: Vec<Row> = conn
+            .query(sql)
+            .await
+            .map_err(|e| std::io::Error::other(format!("Primary key query: {}", e)))?;
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for row in &rows {
+            let schema: String = row.get(0).unwrap_or_default();
+            let table: String = row.get(1).unwrap_or_default();
+            let column: String = row.get(2).unwrap_or_default();
+            map.entry(format!("{}.{}", schema, table))
+                .or_default()
+                .push(column);
+        }
+        Ok(map)
+    }
+
+    fn binlog_row_to_map(
+        columns: Option<&Vec<String>>,
+        values: &mysql_async::binlog::row::BinlogRow,
+    ) -> Map<String, Value> {
+        let mut map = Map::new();
+        for i in 0..values.len() {
+            let col_name = columns
+                .and_then(|cols| cols.get(i))
+                .cloned()
+                .unwrap_or_else(|| format!("col_{}", i));
+            let json_val = values
+                .as_ref(i)
+                .and_then(|bv| MysqlValue::try_from(bv.clone()).ok())
+                .map(|v| Self::mysql_value_to_json(&v))
+                .unwrap_or(Value::Null);
+            map.insert(col_name, json_val);
+        }
+        map
+    }
+
+    fn json_scalar_bytes(value: &Value) -> Vec<u8> {
+        match value {
+            Value::Null => Vec::new(),
+            Value::Bool(true) => b"true".to_vec(),
+            Value::Bool(false) => b"false".to_vec(),
+            Value::Number(n) => n.to_string().into_bytes(),
+            Value::String(s) => s.as_bytes().to_vec(),
+            other => other.to_string().into_bytes(),
+        }
+    }
+
+    fn before_from_json_map(map: &Map<String, Value>, key_names: &[String]) -> Option<BeforeImage> {
+        if key_names.is_empty() {
+            return None;
+        }
+        let owned: Vec<(Vec<u8>, Vec<u8>)> = key_names
+            .iter()
+            .filter_map(|name| {
+                let value = map.get(name)?;
+                if value.is_null() {
+                    return None;
+                }
+                Some((name.as_bytes().to_vec(), Self::json_scalar_bytes(value)))
+            })
+            .collect();
+        if owned.is_empty() {
+            return None;
+        }
+        let parts: Vec<(&[u8], &[u8])> = owned
+            .iter()
+            .map(|(name, value)| (name.as_slice(), value.as_slice()))
+            .collect();
+        let row = serde_json::to_vec(&Value::Object(map.clone())).ok()?;
+        Some(before_image(&parts, row))
+    }
+
+    fn cdc_wal_rows(
+        mutation: MutationKind,
+        event_id: Vec<u8>,
+        order_token: Vec<u8>,
+        before: Option<BeforeImage>,
+    ) -> Vec<WalRowMeta> {
+        let mut meta = WalRowMeta::new(mutation, event_id, order_token);
+        if let Some(before) = before {
+            meta = meta.with_before(before);
+        }
+        vec![meta]
+    }
+
     /// Build a lexicographically-sortable order token from binlog
     /// timestamp (seconds since epoch, upper 32 bits) and log position
     /// (lower 32 bits).
@@ -241,6 +355,7 @@ impl DataSourceMysqlPlugin {
 
         // 2. Pre-fetch column names for binlog row → JSON conversion
         let column_map = Self::fetch_column_names(&mut conn).await?;
+        let pk_map = Self::fetch_primary_key_columns(&mut conn).await?;
 
         // 3. Discover tables
         let should_run_snapshot = mode.includes_initial_snapshot() && !resume_mode;
@@ -309,24 +424,21 @@ impl DataSourceMysqlPlugin {
 
             for row in &rows {
                 let json_str = Self::row_to_json(row);
-                let bytes = json_str.len();
 
-                current_batch.push(IngestBatch {
-                    offset_key: offset_key.clone(),
-                    data: json_str.into(),
-                    bytes,
-                    offset_pos: None,
-                    source_uri: format!("mysql://{}/{}", db_name, table_fq),
-                    namespace: Some(table.to_string()),
-                    cdc_rows: Some(vec![WalRowMeta {
-                        mutation: MutationKind::Snapshot,
-                        event_id: anchor_event_id.clone(),
-                        order_token: anchor_token.clone(),
-                    }]),
-                });
+                current_batch.push(Self::json_ingest_batch(
+                    offset_key.clone(),
+                    json_str,
+                    format!("mysql://{}/{}", db_name, table_fq),
+                    Some(table.to_string()),
+                    Some(vec![WalRowMeta::new(
+                        MutationKind::Snapshot,
+                        anchor_event_id.clone(),
+                        anchor_token.clone(),
+                    )]),
+                ));
 
-                if current_batch.len() >= SNAPSHOT_BATCH_ROWS {
-                    batch_groups.push(std::mem::take(&mut current_batch));
+                if let Some(full) = take_row_count_batch(&mut current_batch, SNAPSHOT_BATCH_ROWS) {
+                    batch_groups.push(full);
                 }
             }
 
@@ -470,42 +582,76 @@ impl DataSourceMysqlPlugin {
                     }
                 };
 
+                let pk_names = pk_map.get(&fq_table).cloned().unwrap_or_default();
+                let row_before = match mutation {
+                    MutationKind::Update => {
+                        let Some(old) = before.as_ref() else {
+                            return Err(std::io::Error::other(
+                                "MySQL CDC UPDATE is missing the binlog before-image (require binlog_row_image=FULL)",
+                            ));
+                        };
+                        let old_map = Self::binlog_row_to_map(columns, old);
+                        Some(
+                            Self::before_from_json_map(&old_map, &pk_names).ok_or_else(|| {
+                                std::io::Error::other(
+                                    "MySQL CDC UPDATE before-image has no primary key",
+                                )
+                            })?,
+                        )
+                    }
+                    MutationKind::Delete => {
+                        let Some(old) = before.as_ref() else {
+                            return Err(std::io::Error::other(
+                                "MySQL CDC DELETE is missing the binlog before-image (require binlog_row_image=FULL)",
+                            ));
+                        };
+                        Some(
+                            Self::before_from_json_map(
+                                &Self::binlog_row_to_map(columns, old),
+                                &pk_names,
+                            )
+                            .ok_or_else(|| {
+                                std::io::Error::other(
+                                    "MySQL CDC DELETE before-image has no primary key",
+                                )
+                            })?,
+                        )
+                    }
+                    _ => None,
+                };
+
                 // INSERT/UPDATE use the after-image; DELETE uses before-image.
                 let values = match mutation {
                     MutationKind::Delete => before,
                     _ => after,
                 };
-                let Some(values) = values else { continue };
-
-                let mut map = Map::new();
-                for i in 0..values.len() {
-                    let col_name = columns
-                        .and_then(|cols| cols.get(i))
-                        .cloned()
-                        .unwrap_or_else(|| format!("col_{}", i));
-                    let json_val = values
-                        .as_ref(i)
-                        .and_then(|bv| MysqlValue::try_from(bv.clone()).ok())
-                        .map(|v| Self::mysql_value_to_json(&v))
-                        .unwrap_or(Value::Null);
-                    map.insert(col_name, json_val);
-                }
-                let json_str = serde_json::to_string(&Value::Object(map)).unwrap_or_default();
-                let bytes = json_str.len();
-
-                let batch = IngestBatch {
-                    offset_key: offset_key.clone(),
-                    data: json_str.into(),
-                    bytes,
-                    offset_pos: None,
-                    source_uri: format!("mysql://{}/{}", db_name, fq_table),
-                    namespace: Some(tme_table.clone()),
-                    cdc_rows: Some(vec![WalRowMeta {
-                        mutation,
-                        event_id: event_id.clone(),
-                        order_token: order_token.clone(),
-                    }]),
+                let Some(values) = values else {
+                    return Err(std::io::Error::other(match mutation {
+                        MutationKind::Update => {
+                            "MySQL CDC UPDATE is missing the binlog after-image"
+                        }
+                        MutationKind::Delete => {
+                            "MySQL CDC DELETE is missing the binlog before-image"
+                        }
+                        _ => "MySQL CDC row event is missing the payload image",
+                    }));
                 };
+
+                let payload_map = Self::binlog_row_to_map(columns, &values);
+                let json_str =
+                    serde_json::to_string(&Value::Object(payload_map)).unwrap_or_default();
+                let batch = Self::json_ingest_batch(
+                    offset_key.clone(),
+                    json_str,
+                    format!("mysql://{}/{}", db_name, fq_table),
+                    Some(tme_table.clone()),
+                    Some(Self::cdc_wal_rows(
+                        mutation,
+                        event_id.clone(),
+                        order_token.clone(),
+                        row_before,
+                    )),
+                );
 
                 submit_payload_batches_durable(ctx.as_ref(), vec![batch])?;
             }
@@ -602,31 +748,28 @@ impl DataSourceMysqlPlugin {
 
             for (row_idx, row) in rows.iter().enumerate() {
                 let json_str = Self::row_to_json(row);
-                let bytes = json_str.len();
 
                 let cdc_rows = if cdc_tag {
                     let event_id = format!("{}:{}", table_fq, row_idx).into_bytes();
-                    Some(vec![WalRowMeta {
-                        mutation: MutationKind::Snapshot,
-                        event_id: event_id.clone(),
-                        order_token: event_id,
-                    }])
+                    Some(vec![WalRowMeta::new(
+                        MutationKind::Snapshot,
+                        event_id.clone(),
+                        event_id,
+                    )])
                 } else {
                     None
                 };
 
-                current_batch.push(IngestBatch {
-                    offset_key: offset_key.clone(),
-                    data: json_str.into(),
-                    bytes,
-                    offset_pos: None,
-                    source_uri: format!("mysql://{}/{}", db_name, table_fq),
-                    namespace: Some(table.to_string()),
+                current_batch.push(Self::json_ingest_batch(
+                    offset_key.clone(),
+                    json_str,
+                    format!("mysql://{}/{}", db_name, table_fq),
+                    Some(table.to_string()),
                     cdc_rows,
-                });
+                ));
 
-                if current_batch.len() >= batch_size {
-                    batch_groups.push(std::mem::take(&mut current_batch));
+                if let Some(full) = take_row_count_batch(&mut current_batch, batch_size) {
+                    batch_groups.push(full);
                 }
             }
 
@@ -718,5 +861,98 @@ mod tests {
         let token = DataSourceMysqlPlugin::binlog_order_token(1, 0);
         let expected: u64 = 1u64 << 32;
         assert_eq!(token, expected.to_be_bytes().to_vec());
+    }
+
+    #[test]
+    fn cdc_row_submit_is_one_batch_without_source_transaction_id() {
+        let batch = DataSourceMysqlPlugin::json_ingest_batch(
+            OffsetKey {
+                namespace: "mysql:db.s.t".into(),
+                partition: "s.t".into(),
+            },
+            "{\"id\":1}".into(),
+            "mysql://db/s.t".into(),
+            Some("t".into()),
+            Some(DataSourceMysqlPlugin::cdc_wal_rows(
+                MutationKind::Insert,
+                b"bin:1".to_vec(),
+                vec![0, 0, 0, 1],
+                None,
+            )),
+        );
+        let rows = batch.cdc_rows.as_ref().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].source_transaction_id.is_none());
+        assert!(rows[0].before.is_none());
+        let submit = vec![batch];
+        assert_eq!(submit.len(), 1);
+    }
+
+    #[test]
+    fn update_stamps_binlog_before_on_primary_key() {
+        let mut old = Map::new();
+        old.insert("id".into(), json!(1));
+        old.insert("name".into(), json!("alpha"));
+        let before = DataSourceMysqlPlugin::before_from_json_map(&old, &["id".into()]).unwrap();
+        let rows = DataSourceMysqlPlugin::cdc_wal_rows(
+            MutationKind::Update,
+            b"bin:9".to_vec(),
+            vec![0, 0, 0, 9],
+            Some(before.clone()),
+        );
+        assert_eq!(rows[0].mutation, MutationKind::Update);
+        let stamped = rows[0].before.as_ref().expect("UPDATE stamps before");
+        assert_eq!(stamped.key, before.key);
+        let row: Value = serde_json::from_slice(&stamped.row).unwrap();
+        assert_eq!(row["name"], "alpha");
+        assert_eq!(row["id"], 1);
+    }
+
+    #[test]
+    fn delete_stamps_binlog_before_on_primary_key() {
+        let mut old = Map::new();
+        old.insert("id".into(), json!(2));
+        old.insert("name".into(), json!("beta"));
+        let before = DataSourceMysqlPlugin::before_from_json_map(&old, &["id".into()]).unwrap();
+        let rows = DataSourceMysqlPlugin::cdc_wal_rows(
+            MutationKind::Delete,
+            b"bin:10".to_vec(),
+            vec![0, 0, 0, 10],
+            Some(before.clone()),
+        );
+        assert_eq!(rows[0].mutation, MutationKind::Delete);
+        assert_eq!(rows[0].before.as_ref().unwrap().key, before.key);
+    }
+
+    #[test]
+    fn before_from_json_map_without_primary_key_is_none() {
+        let mut old = Map::new();
+        old.insert("name".into(), json!("alpha"));
+        assert!(DataSourceMysqlPlugin::before_from_json_map(&old, &[]).is_none());
+        assert!(DataSourceMysqlPlugin::before_from_json_map(&old, &["id".into()]).is_none());
+    }
+
+    #[test]
+    fn snapshot_row_count_batches_do_not_invent_a_source_transaction_id() {
+        let mut current = vec![DataSourceMysqlPlugin::json_ingest_batch(
+            OffsetKey {
+                namespace: "mysql:db.s.t".into(),
+                partition: "s.t".into(),
+            },
+            "{\"id\":1}".into(),
+            "mysql://db/s.t".into(),
+            Some("t".into()),
+            Some(vec![WalRowMeta::new(
+                MutationKind::Snapshot,
+                b"snap".to_vec(),
+                vec![0; 8],
+            )]),
+        )];
+        let full = take_row_count_batch(&mut current, 1).unwrap();
+        assert_eq!(full.len(), 1);
+        assert!(full[0].cdc_rows.as_ref().unwrap()[0]
+            .source_transaction_id
+            .is_none());
+        assert!(current.is_empty());
     }
 }

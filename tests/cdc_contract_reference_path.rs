@@ -100,21 +100,21 @@ fn reference_path_wal_cdc_metadata_roundtrip() {
         kind: WalPartKind::Cdc,
         row_count: 3,
         rows: vec![
-            WalRowMeta {
-                mutation: MutationKind::Insert,
-                event_id: b"pg:lsn:0/16B3748".to_vec(),
-                order_token: 0x16B3748u64.to_be_bytes().to_vec(),
-            },
-            WalRowMeta {
-                mutation: MutationKind::Update,
-                event_id: b"pg:lsn:0/16B3750".to_vec(),
-                order_token: 0x16B3750u64.to_be_bytes().to_vec(),
-            },
-            WalRowMeta {
-                mutation: MutationKind::Delete,
-                event_id: b"pg:lsn:0/16B3760".to_vec(),
-                order_token: 0x16B3760u64.to_be_bytes().to_vec(),
-            },
+            WalRowMeta::new(
+                MutationKind::Insert,
+                b"pg:lsn:0/16B3748".to_vec(),
+                0x16B3748u64.to_be_bytes().to_vec(),
+            ),
+            WalRowMeta::new(
+                MutationKind::Update,
+                b"pg:lsn:0/16B3750".to_vec(),
+                0x16B3750u64.to_be_bytes().to_vec(),
+            ),
+            WalRowMeta::new(
+                MutationKind::Delete,
+                b"pg:lsn:0/16B3760".to_vec(),
+                0x16B3760u64.to_be_bytes().to_vec(),
+            ),
         ],
     };
     let mut blobs = HashMap::new();
@@ -215,26 +215,34 @@ fn reference_path_bootstrap_anchor_checkpoint() {
 }
 
 #[test]
-fn reference_path_mutation_to_action_mapping() {
-    let bk = vec![("id".to_string(), "1".to_string())];
-    let token = vec![0, 0, 0, 1];
-
-    assert!(matches!(
-        resolve_apply_action(MutationKind::Snapshot, bk.clone(), token.clone()),
-        SinkApplyAction::UpsertIfNewer { .. }
-    ));
-    assert!(matches!(
-        resolve_apply_action(MutationKind::Insert, bk.clone(), token.clone()),
-        SinkApplyAction::UpsertIfNewer { .. }
-    ));
-    assert!(matches!(
-        resolve_apply_action(MutationKind::Update, bk.clone(), token.clone()),
-        SinkApplyAction::UpsertIfNewer { .. }
-    ));
-    assert!(matches!(
-        resolve_apply_action(MutationKind::Delete, bk, token),
-        SinkApplyAction::DeleteIfNewer { .. }
-    ));
+fn reference_path_winner_of_set_keeps_row_when_delete_loses() {
+    let row = skippr_cdc::StoredWinner {
+        order: vec![10],
+        tie: skippr_cdc::Tie {
+            seq: 1,
+            ordinal: 0,
+            row: 0,
+        },
+    };
+    let tomb = skippr_cdc::StoredWinner {
+        order: vec![4],
+        tie: skippr_cdc::Tie {
+            seq: 1,
+            ordinal: 0,
+            row: 1,
+        },
+    };
+    let incoming = skippr_cdc::StoredWinner {
+        order: vec![7],
+        tie: skippr_cdc::Tie {
+            seq: 1,
+            ordinal: 0,
+            row: 2,
+        },
+    };
+    let winner = skippr_cdc::winner_of_set(Some(&row), Some(&tomb), &incoming);
+    assert_eq!(winner.order, vec![10]);
+    assert_eq!(winner.tie.row, 0);
 }
 
 #[test]
@@ -306,11 +314,7 @@ fn reference_path_wal_preserves_all_four_mutation_kinds() {
         rows: kinds
             .iter()
             .enumerate()
-            .map(|(i, &kind)| WalRowMeta {
-                mutation: kind,
-                event_id: vec![i as u8],
-                order_token: vec![0, 0, 0, i as u8],
-            })
+            .map(|(i, &kind)| WalRowMeta::new(kind, vec![i as u8], vec![0, 0, 0, i as u8]))
             .collect(),
     };
 

@@ -348,8 +348,26 @@ pub enum SourceOrderModel {
 // WAL row metadata
 // ---------------------------------------------------------------------------
 
+/// Old row the source already holds. The old key is this row's business key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BeforeImage {
+    pub key: Vec<u8>,
+    #[serde(default)]
+    pub row: Vec<u8>,
+}
+
+/// One `BeforeImage` constructor. Plugins pass source key parts and the old row bytes.
+pub fn before_image(parts: &[(&[u8], &[u8])], row: Vec<u8>) -> BeforeImage {
+    BeforeImage {
+        key: skippr_cdc::encode_business_key(parts),
+        row,
+    }
+}
+
 /// Per-row CDC metadata carried as a sidecar blob in each WAL `PART`.
 /// Aligned 1:1 with the Arrow IPC row order in the same partition.
+/// The source builds this with [`WalRowMeta::new`]. It cannot stamp
+/// `ingest_batch_id`; the WAL write does.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalRowMeta {
     pub mutation: MutationKind,
@@ -360,6 +378,128 @@ pub struct WalRowMeta {
     /// Must be lexicographically sortable within the source's declared
     /// `SourceOrderModel` scope.
     pub order_token: Vec<u8>,
+    /// Source transaction id, when the plugin sent one.
+    #[serde(default)]
+    pub source_transaction_id: Option<Vec<u8>>,
+    /// Old row, when the source sent one.
+    #[serde(default)]
+    pub before: Option<BeforeImage>,
+    /// Assigned by the WAL write. Sources leave this unset.
+    #[serde(default)]
+    ingest_batch_id: u64,
+}
+
+impl WalRowMeta {
+    pub fn new(mutation: MutationKind, event_id: Vec<u8>, order_token: Vec<u8>) -> Self {
+        Self {
+            mutation,
+            event_id,
+            order_token,
+            source_transaction_id: None,
+            before: None,
+            ingest_batch_id: 0,
+        }
+    }
+
+    pub fn stamp_source_transaction_id(&mut self, id: Vec<u8>) {
+        self.source_transaction_id = Some(id);
+    }
+
+    pub fn with_source_transaction_id(mut self, id: Vec<u8>) -> Self {
+        self.stamp_source_transaction_id(id);
+        self
+    }
+
+    pub fn with_before(mut self, before: BeforeImage) -> Self {
+        self.before = Some(before);
+        self
+    }
+
+    pub fn ingest_batch_id(&self) -> u64 {
+        self.ingest_batch_id
+    }
+
+    pub(crate) fn stamp_ingest_batch_id(&mut self, id: u64) {
+        self.ingest_batch_id = id;
+    }
+}
+
+/// `WalRowMeta` once the row has a WAL address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CdcEvent {
+    pub mutation: MutationKind,
+    pub event_id: Vec<u8>,
+    pub order: Vec<u8>,
+    pub tie: Option<skippr_cdc::Tie>,
+    pub ingest_batch_id: u64,
+    pub source_transaction_id: Option<Vec<u8>>,
+    pub before: Option<BeforeImage>,
+}
+
+impl CdcEvent {
+    /// Read/compact constructor. Ingest does not call this.
+    pub fn from_wal(meta: &WalRowMeta, tie: skippr_cdc::Tie) -> Self {
+        Self {
+            mutation: meta.mutation,
+            event_id: meta.event_id.clone(),
+            order: meta.order_token.clone(),
+            tie: Some(tie),
+            ingest_batch_id: meta.ingest_batch_id,
+            source_transaction_id: meta.source_transaction_id.clone(),
+            before: meta.before.clone(),
+        }
+    }
+
+    pub fn stored_winner(&self) -> Option<skippr_cdc::StoredWinner> {
+        Some(skippr_cdc::StoredWinner {
+            order: self.order.clone(),
+            tie: self.tie?,
+        })
+    }
+}
+
+/// Copy the update's tie onto both halves after `from_wal`. The delete keeps
+/// the parent event id. The insert id is `derived_insert_event_id`.
+pub fn project_pk_change(event: CdcEvent, new_key: &[u8]) -> Vec<CdcEvent> {
+    let Some(before) = event.before.as_ref() else {
+        return vec![event];
+    };
+    if event.mutation != MutationKind::Update || before.key == new_key {
+        return vec![event];
+    }
+    let tie = event.tie;
+    let parent = event.event_id.clone();
+    let mut delete = event.clone();
+    delete.mutation = MutationKind::Delete;
+    delete.tie = tie;
+    delete.before = None;
+    let mut insert = event;
+    insert.mutation = MutationKind::Insert;
+    insert.event_id = skippr_cdc::derived_insert_event_id(&parent);
+    insert.tie = tie;
+    insert.before = None;
+    vec![delete, insert]
+}
+
+/// Distinct reject log. Not an ordinary ingest error. No entity field.
+pub fn log_update_without_before(new_key: &[u8], event_id: &[u8]) {
+    tracing::error!(
+        target: "skippr.cdc.before_image",
+        new_key = %hex::encode(new_key),
+        event_id = %hex::encode(event_id),
+        reason = "no before-image",
+        "CDC update rejected: no before-image"
+    );
+}
+
+pub fn admit_wal_row(meta: &WalRowMeta, new_key: &[u8]) -> Result<(), WalPartMetaError> {
+    if meta.mutation == MutationKind::Update && meta.before.is_none() {
+        log_update_without_before(new_key, &meta.event_id);
+        return Err(WalPartMetaError::UpdateMissingBefore {
+            event_id: meta.event_id.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Per-partition CDC metadata blob written alongside each WAL `PART`.
@@ -375,6 +515,9 @@ pub enum WalPartMetaError {
     EmptyCdcRows,
     RowCountMismatch { expected: u64, actual: u64 },
     CdcRowsOnAppend,
+    EmptyOrderToken,
+    OrderTokenWidthChanged { expected: usize, actual: usize },
+    UpdateMissingBefore { event_id: Vec<u8> },
 }
 
 impl fmt::Display for WalPartMetaError {
@@ -386,6 +529,16 @@ impl fmt::Display for WalPartMetaError {
                 "CDC WAL metadata row count mismatch: expected {expected}, got {actual}"
             ),
             Self::CdcRowsOnAppend => write!(f, "append WAL partition must not carry CDC rows"),
+            Self::EmptyOrderToken => write!(f, "CDC order token must be non-empty"),
+            Self::OrderTokenWidthChanged { expected, actual } => write!(
+                f,
+                "CDC order token width changed from {expected} to {actual}"
+            ),
+            Self::UpdateMissingBefore { event_id } => write!(
+                f,
+                "CDC update rejected: no before-image event_id={}",
+                hex::encode(event_id)
+            ),
         }
     }
 }
@@ -404,11 +557,37 @@ impl WalPartMeta {
                 actual,
             });
         }
+        let width = rows[0].order_token.len();
+        if width == 0 {
+            return Err(WalPartMetaError::EmptyOrderToken);
+        }
+        for row in &rows {
+            if row.order_token.is_empty() {
+                return Err(WalPartMetaError::EmptyOrderToken);
+            }
+            if row.order_token.len() != width {
+                return Err(WalPartMetaError::OrderTokenWidthChanged {
+                    expected: width,
+                    actual: row.order_token.len(),
+                });
+            }
+        }
         Ok(Self {
             kind: WalPartKind::Cdc,
             row_count: arrow_row_count,
             rows,
         })
+    }
+
+    pub fn cdc_stamped(
+        mut rows: Vec<WalRowMeta>,
+        arrow_row_count: u64,
+        ingest_batch_id: u64,
+    ) -> Result<Self, WalPartMetaError> {
+        for row in &mut rows {
+            row.stamp_ingest_batch_id(ingest_batch_id);
+        }
+        Self::cdc(rows, arrow_row_count)
     }
 
     pub fn append(row_count: u64) -> Self {
@@ -724,51 +903,64 @@ pub struct SyncContext {
     /// `None` when the pipeline has not configured a CDC contract; sinks
     /// receiving CDC metadata without a contract should fall back to append.
     pub contract: Option<NamespaceContract>,
+    /// WAL address ties, 1:1 with `part_meta.rows`. Compact stamps these after
+    /// `from_wal`. `(seq, ordinal, row)`.
+    pub ties: Vec<(u64, u32, u64)>,
+}
+
+impl SyncContext {
+    pub fn row_tie(&self, idx: usize) -> Result<skippr_cdc::Tie, String> {
+        let (seq, ordinal, row) = self
+            .ties
+            .get(idx)
+            .copied()
+            .ok_or_else(|| format!("CDC tie missing at index {idx}"))?;
+        Ok(skippr_cdc::Tie { seq, ordinal, row })
+    }
+
+    pub fn decoded_ties(&self) -> Result<Vec<skippr_cdc::Tie>, String> {
+        if self.part_meta.kind == WalPartKind::Cdc && self.ties.len() != self.part_meta.rows.len() {
+            return Err(format!(
+                "CDC ties {} do not match rows {}",
+                self.ties.len(),
+                self.part_meta.rows.len()
+            ));
+        }
+        Ok(self
+            .ties
+            .iter()
+            .copied()
+            .map(|(seq, ordinal, row)| skippr_cdc::Tie { seq, ordinal, row })
+            .collect())
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Sink apply types
 // ---------------------------------------------------------------------------
 
-/// Describes how a CDC mutation should be applied to a target table and its
-/// companion tombstone table in a single transaction.
-#[derive(Debug, Clone)]
-pub enum SinkApplyAction {
-    /// Upsert the row into the target table if the incoming `order_token`
-    /// is newer than both the existing live-row token and any matching
-    /// tombstone token. If the upsert wins over a tombstone, remove the
-    /// stale tombstone in the same transaction.
-    UpsertIfNewer {
-        business_key: Vec<(String, String)>,
-        order_token: Vec<u8>,
-    },
-    /// Delete the live row if the incoming `order_token` is newer than the
-    /// live-row token, then upsert the tombstone-table row with the delete
-    /// token in the same transaction.
-    DeleteIfNewer {
-        business_key: Vec<(String, String)>,
-        order_token: Vec<u8>,
-    },
-}
+pub use skippr_cdc::{
+    beats, collapse, derived_insert_event_id, encode_business_key, stored_incumbent, winner_of_set,
+    Collapse, StoredWinner, Tie,
+};
 
-/// Resolve a WAL row mutation into a sink apply action.
-pub fn resolve_apply_action(
-    mutation: MutationKind,
-    business_key: Vec<(String, String)>,
-    order_token: Vec<u8>,
-) -> SinkApplyAction {
-    match mutation {
-        MutationKind::Delete => SinkApplyAction::DeleteIfNewer {
-            business_key,
-            order_token,
-        },
-        MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
-            SinkApplyAction::UpsertIfNewer {
-                business_key,
-                order_token,
-            }
-        }
-    }
+/// Fold a `from_wal` event against a stored incumbent.
+pub fn collapse_event(
+    event: CdcEvent,
+    incumbent: Option<&StoredWinner>,
+    incumbent_tombstone: bool,
+    key: Vec<u8>,
+) -> Collapse {
+    let incoming = event
+        .stored_winner()
+        .expect("from_wal assigns a tie before collapse");
+    collapse(
+        &incoming,
+        event.mutation == MutationKind::Delete,
+        incumbent,
+        incumbent_tombstone,
+        key,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1441,11 +1633,174 @@ mod tests {
     use super::*;
 
     fn row_meta(order: u8) -> WalRowMeta {
-        WalRowMeta {
-            mutation: MutationKind::Update,
-            event_id: vec![order],
-            order_token: vec![order],
+        WalRowMeta::new(MutationKind::Update, vec![order], vec![order])
+    }
+
+    fn winner(order: u8, row: u64) -> StoredWinner {
+        StoredWinner {
+            order: vec![order],
+            tie: Tie {
+                seq: 1,
+                ordinal: 0,
+                row,
+            },
         }
+    }
+
+    #[test]
+    fn later_tie_beats_committed_equal_token() {
+        let earlier = winner(7, 1);
+        let later = winner(7, 2);
+        assert!(beats(&later, &earlier));
+        assert!(!beats(&earlier, &later));
+        assert!(!beats(&earlier, &earlier));
+    }
+
+    #[test]
+    fn greater_token_beats_any_tie() {
+        let low = winner(4, 99);
+        let high = winner(10, 0);
+        assert!(beats(&high, &low));
+        assert!(!beats(&low, &high));
+    }
+
+    #[test]
+    fn row_ten_tombstone_four_delete_seven_keeps_the_row() {
+        let row = winner(10, 1);
+        let tombstone = winner(4, 1);
+        let delete = winner(7, 1);
+        let kept = winner_of_set(Some(&row), Some(&tombstone), &delete);
+        assert_eq!(kept, row);
+    }
+
+    #[test]
+    fn insert_event_id_is_parent_plus_suffix() {
+        let parent = b"pg:1".to_vec();
+        let insert = derived_insert_event_id(&parent);
+        assert_ne!(insert, parent);
+        assert!(insert.starts_with(&parent));
+        assert_eq!(derived_insert_event_id(&parent), insert);
+    }
+
+    fn tie(row: u64) -> Tie {
+        Tie {
+            seq: 9,
+            ordinal: 3,
+            row,
+        }
+    }
+
+    #[test]
+    fn from_wal_copies_before_batch_and_source_txn_and_sets_tie() {
+        let meta = WalRowMeta::new(MutationKind::Update, b"e".to_vec(), vec![1, 2])
+            .with_source_transaction_id(b"tx".to_vec())
+            .with_before(BeforeImage {
+                key: b"old".to_vec(),
+                row: b"row".to_vec(),
+            });
+        let mut stamped = meta;
+        stamped.stamp_ingest_batch_id(42);
+        let event = CdcEvent::from_wal(&stamped, tie(7));
+        assert_eq!(event.before.unwrap().key, b"old");
+        assert_eq!(event.ingest_batch_id, 42);
+        assert_eq!(event.source_transaction_id.as_deref(), Some(b"tx".as_ref()));
+        assert_eq!(event.tie, Some(tie(7)));
+    }
+
+    #[test]
+    fn wal_write_stamps_one_ingest_batch_id_and_sources_cannot_set_it() {
+        let a = WalRowMeta::new(MutationKind::Insert, vec![1], vec![1]);
+        let b = WalRowMeta::new(MutationKind::Insert, vec![2], vec![1]);
+        assert_eq!(a.ingest_batch_id(), 0);
+        let part = WalPartMeta::cdc_stamped(vec![a, b], 2, 7).unwrap();
+        assert!(part.rows.iter().all(|row| row.ingest_batch_id() == 7));
+        let next = WalPartMeta::cdc_stamped(
+            vec![WalRowMeta::new(MutationKind::Insert, vec![3], vec![1])],
+            1,
+            8,
+        )
+        .unwrap();
+        assert_eq!(next.rows[0].ingest_batch_id(), 8);
+    }
+
+    #[test]
+    fn wal_part_cdc_rejects_empty_token_and_width_change() {
+        let empty = WalRowMeta::new(MutationKind::Insert, vec![1], vec![]);
+        assert_eq!(
+            WalPartMeta::cdc(vec![empty], 1).unwrap_err(),
+            WalPartMetaError::EmptyOrderToken
+        );
+        let mixed = vec![
+            WalRowMeta::new(MutationKind::Insert, vec![1], vec![1]),
+            WalRowMeta::new(MutationKind::Insert, vec![2], vec![1, 2]),
+        ];
+        assert_eq!(
+            WalPartMeta::cdc(mixed, 2).unwrap_err(),
+            WalPartMetaError::OrderTokenWidthChanged {
+                expected: 1,
+                actual: 2
+            }
+        );
+    }
+
+    #[test]
+    fn update_without_before_is_rejected_and_log_names_key_event_and_reason() {
+        let meta = WalRowMeta::new(MutationKind::Update, b"eid".to_vec(), vec![1]);
+        let err = admit_wal_row(&meta, b"new-key").unwrap_err();
+        assert!(matches!(err, WalPartMetaError::UpdateMissingBefore { .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("no before-image"));
+        assert!(msg.contains("eid") || msg.contains(&hex::encode(b"eid")));
+        assert!(!msg.contains("entity"));
+        assert!(admit_wal_row(
+            &WalRowMeta::new(MutationKind::Insert, b"e".to_vec(), vec![1]),
+            b"k"
+        )
+        .is_ok());
+        assert!(admit_wal_row(
+            &WalRowMeta::new(MutationKind::Snapshot, b"e".to_vec(), vec![1]),
+            b"k"
+        )
+        .is_ok());
+        let with_before = WalRowMeta::new(MutationKind::Update, b"e".to_vec(), vec![1])
+            .with_before(before_image(&[(b"id", b"1")], b"{\"id\":1}".to_vec()));
+        assert!(admit_wal_row(&with_before, b"id=1").is_ok());
+    }
+
+    #[test]
+    fn before_image_encodes_the_business_key() {
+        let image = before_image(&[(b"id", b"1"), (b"rmc", b"eu")], b"{\"id\":1}".to_vec());
+        assert_eq!(
+            image.key,
+            skippr_cdc::encode_business_key(&[(b"id", b"1"), (b"rmc", b"eu")])
+        );
+        assert_eq!(image.row, b"{\"id\":1}");
+    }
+
+    #[test]
+    fn pk_projection_copies_update_tie_and_derives_insert_id() {
+        let meta = WalRowMeta::new(MutationKind::Update, b"parent".to_vec(), vec![9]).with_before(
+            BeforeImage {
+                key: b"old".to_vec(),
+                row: vec![],
+            },
+        );
+        let mut stamped = meta;
+        stamped.stamp_ingest_batch_id(3);
+        let event = CdcEvent::from_wal(&stamped, tie(1));
+        let halves = project_pk_change(event, b"new");
+        assert_eq!(halves.len(), 2);
+        assert_eq!(halves[0].mutation, MutationKind::Delete);
+        assert_eq!(halves[1].mutation, MutationKind::Insert);
+        assert_eq!(halves[0].event_id, b"parent");
+        assert_eq!(halves[1].event_id, derived_insert_event_id(b"parent"));
+        assert_eq!(halves[0].tie, Some(tie(1)));
+        assert_eq!(halves[1].tie, Some(tie(1)));
+        assert_eq!(halves[0].order, vec![9]);
+        assert_eq!(halves[1].order, vec![9]);
+        assert_eq!(halves[0].ingest_batch_id, 3);
+        assert_eq!(halves[1].ingest_batch_id, 3);
+        assert_ne!(halves[0].event_id, halves[1].event_id);
     }
 
     #[test]
@@ -2026,51 +2381,13 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_apply_action_upsert() {
-        let action = resolve_apply_action(
-            MutationKind::Insert,
-            vec![("id".to_string(), "123".to_string())],
-            vec![0, 0, 0, 1],
-        );
-        assert!(matches!(action, SinkApplyAction::UpsertIfNewer { .. }));
-    }
-
-    #[test]
-    fn test_resolve_apply_action_delete() {
-        let action = resolve_apply_action(
-            MutationKind::Delete,
-            vec![("id".to_string(), "123".to_string())],
-            vec![0, 0, 0, 2],
-        );
-        assert!(matches!(action, SinkApplyAction::DeleteIfNewer { .. }));
-    }
-
-    #[test]
-    fn test_resolve_apply_action_snapshot_is_upsert() {
-        let action = resolve_apply_action(
-            MutationKind::Snapshot,
-            vec![("id".to_string(), "1".to_string())],
-            vec![0],
-        );
-        assert!(matches!(action, SinkApplyAction::UpsertIfNewer { .. }));
-    }
-
-    #[test]
     fn test_wal_part_meta_serialization_roundtrip() {
         let meta = WalPartMeta {
             kind: WalPartKind::Cdc,
             row_count: 2,
             rows: vec![
-                WalRowMeta {
-                    mutation: MutationKind::Insert,
-                    event_id: vec![1, 2, 3],
-                    order_token: vec![0, 0, 0, 1],
-                },
-                WalRowMeta {
-                    mutation: MutationKind::Delete,
-                    event_id: vec![4, 5, 6],
-                    order_token: vec![0, 0, 0, 2],
-                },
+                WalRowMeta::new(MutationKind::Insert, vec![1, 2, 3], vec![0, 0, 0, 1]),
+                WalRowMeta::new(MutationKind::Delete, vec![4, 5, 6], vec![0, 0, 0, 2]),
             ],
         };
         let bytes = bincode::serialize(&meta).unwrap();

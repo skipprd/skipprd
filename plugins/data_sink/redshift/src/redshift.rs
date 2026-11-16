@@ -464,7 +464,7 @@ impl DataSinkRedshiftPlugin {
         ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
-            append_record_batch_to_cdc_apply, ddl_add_order_token_column,
+            append_record_batch_to_cdc_apply, collapse_apply_batch, ddl_add_order_token_column,
             ddl_create_tombstone_table, guarded_warehouse_cdc_row_sql, tombstone_table_name,
             warehouse_bulk_cdc_sql, CdcApplyBatch, CdcApplyColumn, CdcWarehouseDialect,
         };
@@ -611,6 +611,7 @@ impl DataSinkRedshiftPlugin {
                 &mut apply_batch,
                 &batch,
                 &ctx.part_meta.rows,
+                &ctx.decoded_ties().map_err(std::io::Error::other)?,
                 row_offset,
             )
             .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -640,12 +641,13 @@ impl DataSinkRedshiftPlugin {
                         "CDC chunk exceeds Data API 100 KiB/40-statement envelope; using guarded row apply: {}",
                         error
                     );
-                    for row in &apply_batch.rows {
+                    let collapsed = collapse_apply_batch(&apply_batch);
+                    for row in &collapsed.rows {
                         let statement = guarded_warehouse_cdc_row_sql::<RedshiftCdcBackend>(
                             CdcWarehouseDialect::Redshift,
                             &fq_table,
                             &tombstone_table,
-                            &apply_batch,
+                            &collapsed,
                             row,
                         )
                         .map_err(|error| std::io::Error::other(error.to_string()))?;

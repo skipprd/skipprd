@@ -318,6 +318,13 @@ def put_stream_items() -> None:
             "name": {"S": "alpha-prime"},
         },
     )
+    client.delete_item(
+        TableName=SOURCE_TABLE,
+        Key={
+            "id": {"S": "2"},
+            "rmc": {"S": "us"},
+        },
+    )
 
 
 def run_skipprlake(work: Path) -> None:
@@ -358,8 +365,15 @@ def run_skipprlake(work: Path) -> None:
         ns,
         "SELECT count(DISTINCT id) FROM iceberg_scan('{scan}')",
     )
-    if count.splitlines()[-1].strip() != "3":
-        fail(f"expected 3 distinct keys in SkipprLake Iceberg, got {count!r}")
+    if count.splitlines()[-1].strip() != "2":
+        fail(f"expected 2 distinct keys in SkipprLake Iceberg after late delete, got {count!r}")
+    deleted = iceberg_scan(
+        warehouse,
+        ns,
+        "SELECT count(*) FROM iceberg_scan('{scan}') WHERE id = '2'",
+    )
+    if deleted.splitlines()[-1].strip() != "0":
+        fail(f"expected id=2 absent after DynamoDB Remove, got {deleted!r}")
     token_sql = (
         "SELECT _skippr_order_token, skippr_event_time, name "
         "FROM iceberg_scan('{scan}') WHERE id = '1'"
@@ -394,26 +408,38 @@ def run_duckdb(work: Path) -> None:
     pipeline = "dynamodb_duckdb_cdc"
     stage_plugins(config, pipeline, manifests)
     bin_path = skipprd_bin()
-    proc = run(
-        [bin_path, "--config", str(config), "sync", "--log", "--pipeline", pipeline, "--once"],
-        cwd=REPO,
-        env=skipprd_env(data_dir),
-        timeout=120,
+    snapshot, _ = spawn_sync(bin_path, config, pipeline, data_dir)
+    try:
+        wait_sync(snapshot, "DuckDB snapshot sync")
+    except Exception:
+        snapshot.kill()
+        raise
+    stream, logs = spawn_sync(bin_path, config, pipeline, data_dir)
+    try:
+        wait_sync_log(stream, logs, "Starting with", time.time() + 60)
+        time.sleep(0.5)
+        put_stream_items()
+        wait_sync(stream, "DuckDB stream sync")
+    except Exception:
+        stream.kill()
+        raise
+    token_sql = (
+        "SELECT _skippr_order_token, skippr_event_time, name "
+        "FROM iceberg_scan('{scan}') WHERE id = '1'"
     )
-    if proc.returncode != 0:
-        fail(f"DuckDB sync exited {proc.returncode}")
-    scan_out = iceberg_scan(
-        warehouse,
-        bronze_namespace(warehouse),
-        "SELECT _skippr_order_token, skippr_event_time FROM iceberg_scan('{scan}') LIMIT 5",
-    )
+    scan_out = iceberg_scan(warehouse, bronze_namespace(warehouse), token_sql)
     data = csv_data_rows(scan_out)
     if not data:
         fail(f"DuckDB iceberg_scan had no rows: {scan_out!r}")
-    token, event_time = data[-1].split(",")[:2]
+    body = data[-1].split(",")
+    token, event_time, name = body[0], body[1], body[2]
     assert_hex_token(token)
+    if token == "0" * len(token):
+        fail("winning DuckDB token is still the snapshot zeros")
     if not event_time or event_time in ("",):
         fail(f"DuckDB _skippr_event_time missing: {scan_out!r}")
+    if name != "alpha-prime":
+        fail(f"DuckDB name={name!r}")
 
 
 def main() -> None:

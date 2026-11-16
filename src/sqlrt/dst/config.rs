@@ -7,7 +7,7 @@ use crate::plugins::cdc::{
     derive_and_validate, sink_capabilities, source_capabilities, CompatibilityResult,
     EffectiveGuarantee, SourceOrderModel,
 };
-use crate::sqlrt::cdc_reconcile::{anti_join_lake, attach_cdc_sidecar, collapse_wal_batches};
+use crate::sqlrt::cdc_reconcile::{attach_cdc_sidecar, reconcile_cdc};
 use crate::sqlrt::dst::{batch_from_row, UserRow};
 use std::collections::HashMap;
 
@@ -87,7 +87,7 @@ fn b_missing_cdc_keys_fail_closed() {
     let cdc = CdcPipelineConfig::default();
     let keys = query_namespace_business_keys(PipelineType::Cdc, Some(&cdc), &HashMap::new(), "ns");
     assert!(keys.is_empty());
-    let err = collapse_wal_batches(&[], &keys).unwrap_err();
+    let err = reconcile_cdc(&[], &[], &Default::default(), &keys).unwrap_err();
     assert!(
         err.to_string().contains("requires business_key_columns"),
         "{err}"
@@ -158,14 +158,12 @@ fn b_composite_business_keys() {
         )
         .unwrap(),
     ];
-    let collapsed = collapse_wal_batches(&batches, &keys).unwrap();
-    let lake = anti_join_lake(&[], &collapsed.changed_keys, &keys).unwrap();
-    let n: usize = lake.iter().map(|batch| batch.num_rows()).sum::<usize>()
-        + collapsed
-            .survivor_batches
-            .iter()
-            .map(|batch| batch.num_rows())
-            .sum::<usize>();
+    let collapsed = reconcile_cdc(&[], &batches, &Default::default(), &keys).unwrap();
+    let n: usize = collapsed
+        .batches
+        .iter()
+        .map(|batch| batch.num_rows())
+        .sum::<usize>();
     assert_eq!(n, 2, "composite keys keep both (id,name) identities");
 }
 

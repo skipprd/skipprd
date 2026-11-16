@@ -1,8 +1,10 @@
-"""Permutation SoT for skippr-perf and skippr-perf-db transform / migrate cells.
+"""Permutation SoT for skippr-perf and skippr-perf-db transform / migrate / CDC cells.
 
 Historical ingest is File `sync --once`. Stream ingest is Stdin (SQL filter/derive
 and CREATE TABLE) or a compaction hold (migrate + query). Copy pipelines cannot
-set transform.compute.
+set transform.compute. CDC query cells are SnapshotThenLogExactOnce for every
+GitHub-local source (Postgres, MySQL, DynamoDB). File and CDC migrate cells
+ALTER already-ingested data, ingest more, then query.
 """
 
 from __future__ import annotations
@@ -14,6 +16,36 @@ SCHEMA_CHANGING_OPS = ("derive", "compose")
 INGEST_MODES = ("historical", "stream")
 AGG_MEASURES = ("sum", "count", "both")
 ALTERS = ("rename", "merge", "drop", "promote")
+CDC_SOURCES = ("pg", "mysql", "ddb")
+CDC_CASES = ("count", "update", "delete", "reinsert", "sum", "overlap", "iceberg-only")
+# MERGE needs amount_string; CDC orders tables do not have that column.
+CDC_ALTERS = ("rename", "drop", "promote")
+
+CDC_PIPELINES = {
+    "pg": "postgres_skipprlake_cdc",
+    "mysql": "mysql_skipprlake_cdc",
+    "ddb": "dynamodb_skipprlake_cdc",
+}
+CDC_TABLES = {
+    "pg": "postgres_skipprlake_cdc.postgres_orders",
+    "mysql": "mysql_skipprlake_cdc.orders",
+    "ddb": "dynamodb_skipprlake_cdc.skippr_dynamo_cdc",
+}
+CDC_CASE_SQL = {
+    "count": "INSERT INTO orders (id, name, amount) VALUES (3, 'gamma', 30);",
+    "update": "UPDATE orders SET name = 'alpha-prime' WHERE id = 1;",
+    "delete": "DELETE FROM orders WHERE id = 2;",
+    "reinsert": (
+        "DELETE FROM orders WHERE id = 2; "
+        "INSERT INTO orders (id, name, amount) VALUES (2, 'beta-new', 50);"
+    ),
+    "sum": (
+        "INSERT INTO orders (id, name, amount) VALUES (3, 'gamma', 30); "
+        "UPDATE orders SET amount = 120 WHERE id = 1;"
+    ),
+    "overlap": "UPDATE orders SET name = 'alpha-wal' WHERE id = 1;",
+    "iceberg-only": "INSERT INTO orders (id, name, amount) VALUES (3, 'gamma', 30);",
+}
 
 FILTER_AMOUNT_GT = 50
 
@@ -58,6 +90,30 @@ def query_migrate_id(alter: str, mode: str) -> str:
     if mode == "historical":
         return f"q-migrate-{alter}-duckdb"
     return f"q-migrate-{alter}-stream-iceberg"
+
+
+def query_cdc_id(case: str, source: str) -> str:
+    if case == "overlap":
+        return f"q-cdc-overlap-{source}"
+    if case == "iceberg-only":
+        return f"q-cdc-iceberg-only-{source}"
+    return f"q-cdc-union-{case}-{source}"
+
+
+def query_cdc_migrate_id(alter: str, source: str) -> str:
+    return f"q-cdc-migrate-{alter}-{source}"
+
+
+def alter_sql(alter: str, table: str = "perf_cell.perf_cell") -> str:
+    templates = {
+        "rename": "ALTER TABLE {table} RENAME COLUMN name TO display_name",
+        "merge": "ALTER TABLE {table} MERGE COLUMN amount_string INTO amount",
+        "drop": "ALTER TABLE {table} DROP COLUMN name",
+        "promote": "ALTER TABLE {table} ALTER COLUMN id TYPE BIGINT",
+    }
+    if alter not in templates:
+        raise ValueError(f"unknown alter {alter!r}")
+    return templates[alter].format(table=table)
 
 
 def expected_filter_rows(rows: int) -> int:
@@ -118,9 +174,4 @@ COMPUTE_YAML = {
     ),
 }
 
-ALTER_SQL = {
-    "rename": "ALTER TABLE perf_cell.perf_cell RENAME COLUMN name TO display_name",
-    "merge": "ALTER TABLE perf_cell.perf_cell MERGE COLUMN amount_string INTO amount",
-    "drop": "ALTER TABLE perf_cell.perf_cell DROP COLUMN name",
-    "promote": "ALTER TABLE perf_cell.perf_cell ALTER COLUMN id TYPE BIGINT",
-}
+ALTER_SQL = {alter: alter_sql(alter) for alter in ALTERS}

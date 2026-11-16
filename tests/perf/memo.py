@@ -79,6 +79,11 @@ QUERY_LABELS = {
     "q-aggregates-stream-iceberg": "STREAM after aggregates (live WAL)",
     "q-migrate-rename-duckdb": "Query after rename (historical)",
     "q-migrate-rename-stream-iceberg": "STREAM after rename (live WAL)",
+    "q-cdc-union-update-pg": "CDC update (Postgres)",
+    "q-cdc-union-update-mysql": "CDC update (MySQL)",
+    "q-cdc-union-update-ddb": "CDC update (DynamoDB)",
+    "q-cdc-union-delete-pg": "CDC late-delete (Postgres)",
+    "q-cdc-migrate-rename-pg": "CDC migrate rename then continue (Postgres)",
 }
 
 

@@ -25,6 +25,7 @@ sys.path.insert(0, str(HARNESS_DIR))
 
 from catalog import load_catalog, required_perf_for, scenario_kind  # noqa: E402
 from fixtures import write_ndjson  # noqa: E402
+from matrix import CDC_CASE_SQL, CDC_PIPELINES, CDC_TABLES  # noqa: E402
 from parse import parse_perf_events  # noqa: E402
 from skipprd_cli import log_args  # noqa: E402
 
@@ -323,6 +324,7 @@ def run_query_after_ingest(
         ]
         sql = str(scenario["sql"])
         measured_sync = ""
+        original_rows = rows
         if scenario.get("wal_tail"):
             hold = arm_compaction_hold(data_dir, INGEST_WORKSPACE, PIPELINE)
             tail_proc = start_held_ingest(sync_cmd, env)
@@ -347,6 +349,28 @@ def run_query_after_ingest(
                     raise perf_run.PerfError(
                         f"{scenario_id}: stream migrate expected leftover WAL"
                     )
+                if scenario.get("continue_ingest"):
+                    (source / "events.json").unlink(missing_ok=True)
+                    write_ndjson(
+                        source / "events_b.json",
+                        fixture_kind,
+                        original_rows,
+                        start=original_rows + 1,
+                    )
+                    tail_proc = start_held_ingest(sync_cmd, env)
+                    expect = stream_limit_rows(scenario)
+                    peek_until(
+                        skipprd,
+                        config,
+                        env,
+                        work,
+                        sql,
+                        tail_proc,
+                        seconds=90,
+                        done=lambda doc: len(doc.get("rows") or []) == expect,
+                        scenario_id=scenario_id,
+                    )
+                    require_hold_engaged(scenario_id, tail_proc, hold)
             else:
                 expect = stream_limit_rows(scenario)
                 peek_until(
@@ -379,6 +403,22 @@ def run_query_after_ingest(
                     work=work,
                     profile="none",
                 )
+            if scenario.get("continue_ingest"):
+                (source / "events.json").unlink(missing_ok=True)
+                write_ndjson(
+                    source / "events_b.json",
+                    fixture_kind,
+                    original_rows,
+                    start=original_rows + 1,
+                )
+                logs += perf_run.run_skipprd(
+                    skipprd,
+                    ["--config", str(config), "sync", "--pipeline", PIPELINE, "--once"],
+                    env=env,
+                    work=work,
+                    profile="none",
+                )
+                rows = original_rows * 2
         if scenario.get("overlap"):
             hold = arm_compaction_hold(data_dir, INGEST_WORKSPACE, PIPELINE)
             records = [
@@ -453,6 +493,27 @@ def run_query_after_ingest(
         doc = parse_plain_query(measured_query)
         assert_query_doc(scenario_id, scenario, rows, doc)
         assert_wal_pin(scenario_id, scenario, parse_perf_events(measured_query))
+        if scenario.get("continue_ingest"):
+            count_out = perf_run.run_skipprd(
+                skipprd,
+                [
+                    "--config",
+                    str(config),
+                    "query",
+                    "--plain",
+                    "--sql",
+                    "SELECT count(*) AS n FROM perf_cell.perf_cell",
+                ],
+                env=env,
+                work=work,
+                profile="none",
+            )
+            got = int(float((parse_plain_query(count_out).get("rows") or [[0]])[0][0]))
+            expect = original_rows * 2
+            if got != expect:
+                raise perf_run.PerfError(
+                    f"{scenario_id}: continue ingest count {got} != {expect}"
+                )
         payload = perf_run.report_payload(scenario_id, rows, 0, events, logs, work)
         payload["kind"] = "query_after_ingest"
         payload["sql"] = sql
@@ -485,6 +546,15 @@ PG_CDC_CONTAINER = "skippr-perf-db-pg"
 PG_CDC_DDB_CONTAINER = "skippr-perf-db-pg-ddb"
 PG_CDC_PIPELINE = "postgres_skipprlake_cdc"
 CDC_DDB_TABLE = "skippr-perf-db-cdc"
+MYSQL_CDC_PORT = 3308
+MYSQL_CDC_DDB_PORT = 18023
+MYSQL_CDC_CONTAINER = "skippr-perf-db-mysql"
+MYSQL_CDC_DDB_CONTAINER = "skippr-perf-db-mysql-ddb"
+MYSQL_CDC_TABLE = "skippr-perf-db-mysql-cdc"
+DDB_CDC_PORT = 18024
+DDB_CDC_CONTAINER = "skippr-perf-db-ddb"
+DDB_CDC_SOURCE_TABLE = "skippr_dynamo_cdc"
+DDB_CDC_CATALOG_TABLE = "skippr-perf-db-ddb-cdc"
 
 
 def docker_available() -> bool:
@@ -502,28 +572,12 @@ def docker_available() -> bool:
     return False
 
 
-def write_cdc_skippr_yml(path: Path, warehouse: Path) -> None:
+def write_cdc_skippr_yml(path: Path, warehouse: Path, source: str = "pg") -> None:
     uri = f"file://{warehouse}"
-    path.write_text(
-        f"""skippr:
-  workspace: test
-  skipprd_el_storage_mode: local
-
-pipelines:
-  {PG_CDC_PIPELINE}:
-    auto_approve: yes
-    env: test
-    type: cdc
-    buffer_threshold_bytes: 20000000
-    buffer_threshold_seconds: 2
-    data_source: data_sources.postgres_cdc
-    data_sink: data_sinks.lake
-    cdc:
-      default:
-        business_key_columns: ["id"]
-
-data_sources:
-  postgres_cdc:
+    pipeline = CDC_PIPELINES[source]
+    if source == "pg":
+        catalog_table = CDC_DDB_TABLE
+        data_source = f"""  postgres_cdc:
     Postgres:
       host: 127.0.0.1
       port: {PG_CDC_PORT}
@@ -532,13 +586,64 @@ data_sources:
       database: skippr_cdc
       tables: ["orders"]
       cdc_mode: snapshot_then_cdc
-      cdc_idle_timeout_seconds: 5
+      cdc_idle_timeout_seconds: 5"""
+        source_ref = "data_sources.postgres_cdc"
+        keys = '["id"]'
+        extra_transform = ""
+    elif source == "mysql":
+        catalog_table = MYSQL_CDC_TABLE
+        data_source = f"""  mysql_cdc:
+    Mysql:
+      connection_string: mysql://root:mysql@127.0.0.1:{MYSQL_CDC_PORT}/skippr_cdc
+      tables: ["orders"]
+      cdc_mode: snapshot_then_cdc
+      server_id: 4244
+      cdc_idle_timeout_seconds: 5"""
+        source_ref = "data_sources.mysql_cdc"
+        keys = '["id"]'
+        extra_transform = ""
+    elif source == "ddb":
+        catalog_table = DDB_CDC_CATALOG_TABLE
+        data_source = f"""  dynamodb_cdc:
+    Dynamodb:
+      table_name: {DDB_CDC_SOURCE_TABLE}
+      region: us-east-1
+      endpoint_url: http://127.0.0.1:{DDB_CDC_PORT}
+      cdc_mode: snapshot_then_cdc"""
+        source_ref = "data_sources.dynamodb_cdc"
+        keys = '["id", "rmc"]'
+        extra_transform = """
+    transform:
+      batch_time_fields: _skippr_event_time
+      batch_time_unit: day"""
+    else:
+        raise perf_run.PerfError(f"unknown cdc_source {source!r}")
+    path.write_text(
+        f"""skippr:
+  workspace: test
+  skipprd_el_storage_mode: local
+
+pipelines:
+  {pipeline}:
+    auto_approve: yes
+    env: test
+    type: cdc
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 2
+    data_source: {source_ref}
+    data_sink: data_sinks.lake
+    cdc:
+      default:
+        business_key_columns: {keys}{extra_transform}
+
+data_sources:
+{data_source}
 
 data_sinks:
   lake:
     SkipprLake:
       warehouse: {uri}
-      catalog_table: {CDC_DDB_TABLE}
+      catalog_table: {catalog_table}
       region: us-east-1
       table_namespace: bronze
       object_store:
@@ -549,7 +654,7 @@ schema_sinks:
   lake_schema:
     SkipprLake:
       warehouse: {uri}
-      catalog_table: {CDC_DDB_TABLE}
+      catalog_table: {catalog_table}
       region: us-east-1
       table_namespace: bronze
       object_store:
@@ -665,7 +770,292 @@ def pg_sql(sql: str) -> None:
     )
 
 
-def cdc_sync_cmd(skipprd: Path, config: Path, env: dict[str, str]) -> list[str]:
+def _cdc_mysql_failed(reason: str) -> perf_run.PerfError:
+    logs = subprocess.run(
+        ["docker", "logs", "--tail", "80", MYSQL_CDC_CONTAINER],
+        capture_output=True,
+        text=True,
+    )
+    detail = f"{logs.stdout}{logs.stderr}".strip()
+    return perf_run.PerfError(f"mysql CDC container {reason}\n{detail}")
+
+
+def start_cdc_mysql() -> None:
+    subprocess.run(["docker", "rm", "-f", MYSQL_CDC_CONTAINER], capture_output=True, check=False)
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            MYSQL_CDC_CONTAINER,
+            "-e",
+            "MYSQL_ROOT_PASSWORD=mysql",
+            "-e",
+            "MYSQL_DATABASE=skippr_cdc",
+            "-p",
+            f"{MYSQL_CDC_PORT}:3306",
+            "mysql:8.0",
+            "--server-id=1",
+            "--log-bin=binlog",
+            "--binlog-format=ROW",
+            "--binlog-row-image=FULL",
+        ],
+        check=True,
+    )
+    for _ in range(90):
+        ready = subprocess.run(
+            [
+                "docker",
+                "exec",
+                MYSQL_CDC_CONTAINER,
+                "mysqladmin",
+                "ping",
+                "-uroot",
+                "-pmysql",
+                "--silent",
+            ],
+            capture_output=True,
+        )
+        if ready.returncode == 0:
+            break
+        time.sleep(1)
+    else:
+        raise _cdc_mysql_failed("did not accept SQL")
+    subprocess.run(
+        [
+            "docker",
+            "exec",
+            MYSQL_CDC_CONTAINER,
+            "mysql",
+            "-uroot",
+            "-pmysql",
+            "skippr_cdc",
+            "-e",
+            "CREATE TABLE IF NOT EXISTS orders (id INT PRIMARY KEY, name VARCHAR(64) NOT NULL, amount INT NOT NULL DEFAULT 0); INSERT INTO orders (id, name, amount) VALUES (1, 'alpha', 100), (2, 'beta', 50);",
+        ],
+        check=True,
+    )
+
+
+def stop_cdc_mysql() -> None:
+    subprocess.run(["docker", "rm", "-f", MYSQL_CDC_CONTAINER], capture_output=True, check=False)
+    subprocess.run(["docker", "rm", "-f", MYSQL_CDC_DDB_CONTAINER], capture_output=True, check=False)
+
+
+def mysql_sql(sql: str) -> None:
+    subprocess.run(
+        [
+            "docker",
+            "exec",
+            MYSQL_CDC_CONTAINER,
+            "mysql",
+            "-uroot",
+            "-pmysql",
+            "skippr_cdc",
+            "-e",
+            sql,
+        ],
+        check=True,
+    )
+
+
+def ddb_cdc_client():
+    import boto3
+    from botocore.config import Config as BotoConfig
+
+    return boto3.client(
+        "dynamodb",
+        endpoint_url=f"http://127.0.0.1:{DDB_CDC_PORT}",
+        region_name="us-east-1",
+        aws_access_key_id="local",
+        aws_secret_access_key="local",
+        config=BotoConfig(retries={"max_attempts": 8}),
+    )
+
+
+def start_cdc_ddb() -> None:
+    from botocore.exceptions import ClientError
+
+    subprocess.run(["docker", "rm", "-f", DDB_CDC_CONTAINER], capture_output=True, check=False)
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            DDB_CDC_CONTAINER,
+            "-p",
+            f"{DDB_CDC_PORT}:8000",
+            "amazon/dynamodb-local",
+            "-jar",
+            "DynamoDBLocal.jar",
+            "-sharedDb",
+            "-inMemory",
+        ],
+        check=True,
+    )
+    client = ddb_cdc_client()
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            client.list_tables()
+            break
+        except Exception:
+            time.sleep(0.5)
+    else:
+        raise perf_run.PerfError("dynamodb CDC Local did not become ready")
+    for name, stream in (
+        (DDB_CDC_CATALOG_TABLE, False),
+        (DDB_CDC_SOURCE_TABLE, True),
+    ):
+        try:
+            client.delete_table(TableName=name)
+            client.get_waiter("table_not_exists").wait(TableName=name)
+        except ClientError:
+            pass
+        kwargs: dict[str, Any] = {
+            "TableName": name,
+            "BillingMode": "PAY_PER_REQUEST",
+        }
+        if stream:
+            kwargs["AttributeDefinitions"] = [
+                {"AttributeName": "id", "AttributeType": "S"},
+                {"AttributeName": "rmc", "AttributeType": "S"},
+            ]
+            kwargs["KeySchema"] = [
+                {"AttributeName": "id", "KeyType": "HASH"},
+                {"AttributeName": "rmc", "KeyType": "RANGE"},
+            ]
+            kwargs["StreamSpecification"] = {
+                "StreamEnabled": True,
+                "StreamViewType": "NEW_AND_OLD_IMAGES",
+            }
+        else:
+            kwargs["AttributeDefinitions"] = [
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+            ]
+            kwargs["KeySchema"] = [
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
+            ]
+        client.create_table(**kwargs)
+        client.get_waiter("table_exists").wait(TableName=name)
+    client.put_item(
+        TableName=DDB_CDC_SOURCE_TABLE,
+        Item={
+            "id": {"S": "1"},
+            "rmc": {"S": "eu"},
+            "name": {"S": "alpha"},
+            "amount": {"N": "100"},
+        },
+    )
+    client.put_item(
+        TableName=DDB_CDC_SOURCE_TABLE,
+        Item={
+            "id": {"S": "2"},
+            "rmc": {"S": "us"},
+            "name": {"S": "beta"},
+            "amount": {"N": "50"},
+        },
+    )
+
+
+def stop_cdc_ddb() -> None:
+    subprocess.run(["docker", "rm", "-f", DDB_CDC_CONTAINER], capture_output=True, check=False)
+
+
+def apply_cdc_case(source: str, case: str) -> None:
+    if source == "pg":
+        pg_sql(CDC_CASE_SQL[case])
+        return
+    if source == "mysql":
+        mysql_sql(CDC_CASE_SQL[case])
+        return
+    if source != "ddb":
+        raise perf_run.PerfError(f"unknown cdc_source {source!r}")
+    client = ddb_cdc_client()
+    if case in {"count", "iceberg-only"}:
+        client.put_item(
+            TableName=DDB_CDC_SOURCE_TABLE,
+            Item={
+                "id": {"S": "3"},
+                "rmc": {"S": "uk"},
+                "name": {"S": "gamma"},
+                "amount": {"N": "30"},
+            },
+        )
+        return
+    if case == "update":
+        client.put_item(
+            TableName=DDB_CDC_SOURCE_TABLE,
+            Item={
+                "id": {"S": "1"},
+                "rmc": {"S": "eu"},
+                "name": {"S": "alpha-prime"},
+                "amount": {"N": "100"},
+            },
+        )
+        return
+    if case == "delete":
+        client.delete_item(
+            TableName=DDB_CDC_SOURCE_TABLE,
+            Key={"id": {"S": "2"}, "rmc": {"S": "us"}},
+        )
+        return
+    if case == "reinsert":
+        client.delete_item(
+            TableName=DDB_CDC_SOURCE_TABLE,
+            Key={"id": {"S": "2"}, "rmc": {"S": "us"}},
+        )
+        client.put_item(
+            TableName=DDB_CDC_SOURCE_TABLE,
+            Item={
+                "id": {"S": "2"},
+                "rmc": {"S": "us"},
+                "name": {"S": "beta-new"},
+                "amount": {"N": "50"},
+            },
+        )
+        return
+    if case == "sum":
+        client.put_item(
+            TableName=DDB_CDC_SOURCE_TABLE,
+            Item={
+                "id": {"S": "3"},
+                "rmc": {"S": "uk"},
+                "name": {"S": "gamma"},
+                "amount": {"N": "30"},
+            },
+        )
+        client.put_item(
+            TableName=DDB_CDC_SOURCE_TABLE,
+            Item={
+                "id": {"S": "1"},
+                "rmc": {"S": "eu"},
+                "name": {"S": "alpha"},
+                "amount": {"N": "120"},
+            },
+        )
+        return
+    if case == "overlap":
+        client.put_item(
+            TableName=DDB_CDC_SOURCE_TABLE,
+            Item={
+                "id": {"S": "1"},
+                "rmc": {"S": "eu"},
+                "name": {"S": "alpha-wal"},
+                "amount": {"N": "100"},
+            },
+        )
+        return
+    raise perf_run.PerfError(f"unknown cdc_case {case!r}")
+
+
+def cdc_sync_cmd(
+    skipprd: Path, config: Path, env: dict[str, str], pipeline: str = PG_CDC_PIPELINE
+) -> list[str]:
     return [
         str(skipprd),
         *log_args(env),
@@ -674,7 +1064,7 @@ def cdc_sync_cmd(skipprd: Path, config: Path, env: dict[str, str]) -> list[str]:
         "sync",
         "--log",
         "--pipeline",
-        PG_CDC_PIPELINE,
+        pipeline,
         "--once",
     ]
 
@@ -689,8 +1079,10 @@ def with_sync_perf(captured: str, wall_ms: int, rows: int = 0) -> str:
     )
 
 
-def run_cdc_once(skipprd: Path, config: Path, env: dict[str, str]) -> str:
-    cmd = cdc_sync_cmd(skipprd, config, env)
+def run_cdc_once(
+    skipprd: Path, config: Path, env: dict[str, str], pipeline: str = PG_CDC_PIPELINE
+) -> str:
+    cmd = cdc_sync_cmd(skipprd, config, env, pipeline)
     gnu = shutil.which("gtimeout") or shutil.which("timeout")
     started = time.perf_counter()
     if gnu is not None:
@@ -716,36 +1108,72 @@ def run_query_after_cdc(
         (work / "perf-db-report.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         (work / "perf-report.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return payload
+    source = str(scenario.get("cdc_source") or "pg")
+    pipeline = CDC_PIPELINES[source]
+    table = CDC_TABLES[source]
     warehouse = work / "warehouse"
     data_dir = work / "data"
     manifests = work / "manifests"
     warehouse.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
     config = work / "skippr.yml"
-    write_cdc_skippr_yml(config, warehouse)
+    write_cdc_skippr_yml(config, warehouse, source)
     from e2e_support import dynamodb_local as ddb_local
 
     overlap_proc = None
     hold: Path | None = None
-    start_cdc_postgres()
+    catalog_port = PG_CDC_DDB_PORT
+    catalog_container = PG_CDC_DDB_CONTAINER
+    catalog_tables = [CDC_DDB_TABLE]
     try:
-        ddb_local.start(
-            port=PG_CDC_DDB_PORT,
-            tables=[CDC_DDB_TABLE],
-            container=PG_CDC_DDB_CONTAINER,
-        )
-        perf_run.stage_plugins(config, PG_CDC_PIPELINE, manifests)
+        if source == "pg":
+            start_cdc_postgres()
+        elif source == "mysql":
+            start_cdc_mysql()
+            catalog_port = MYSQL_CDC_DDB_PORT
+            catalog_container = MYSQL_CDC_DDB_CONTAINER
+            catalog_tables = [MYSQL_CDC_TABLE]
+        elif source == "ddb":
+            start_cdc_ddb()
+            catalog_port = DDB_CDC_PORT
+            catalog_container = DDB_CDC_CONTAINER
+            catalog_tables = [DDB_CDC_CATALOG_TABLE]
+        else:
+            raise perf_run.PerfError(f"unknown cdc_source {source!r}")
+        if source != "ddb":
+            ddb_local.start(
+                port=catalog_port,
+                tables=catalog_tables,
+                container=catalog_container,
+            )
+        perf_run.stage_plugins(config, pipeline, manifests)
         env = perf_run.base_env(config, data_dir, manifests)
-        env.update(perf_run.ddb_local_env(PG_CDC_DDB_PORT, "skippr-perf-db-cdc"))
+        env.update(perf_run.ddb_local_env(catalog_port, catalog_tables[0]))
         skipprd = perf_run.skipprd_bin()
         sql = str(scenario["sql"])
-        logs = run_cdc_once(skipprd, config, env)
-        mutation = str(scenario.get("mutation") or "")
-        if mutation:
-            pg_sql(mutation)
+        logs = run_cdc_once(skipprd, config, env, pipeline)
+        if scenario.get("alter") or scenario.get("continue_ingest"):
+            if not scenario.get("alter"):
+                raise perf_run.PerfError(
+                    f"{scenario_id}: continue_ingest on CDC requires alter"
+                )
+        if scenario.get("alter"):
+            perf_run.write_migration_sql(config, str(scenario["alter"]), table)
+            logs += perf_run.run_skipprd(
+                skipprd,
+                ["--config", str(config), "migrate", "--pipeline", pipeline],
+                env=env,
+                work=work,
+                profile="none",
+            )
+        case = str(scenario.get("cdc_case") or "")
+        if case:
+            apply_cdc_case(source, case)
         if scenario.get("overlap"):
-            hold = arm_compaction_hold(data_dir, CDC_WORKSPACE, PG_CDC_PIPELINE)
-            overlap_proc = start_held_ingest(cdc_sync_cmd(skipprd, config, env), env)
+            hold = arm_compaction_hold(data_dir, CDC_WORKSPACE, pipeline)
+            overlap_proc = start_held_ingest(
+                cdc_sync_cmd(skipprd, config, env, pipeline), env
+            )
             expect_name = str((scenario.get("asserts") or {}).get("query_name") or "")
             peek_until(
                 skipprd,
@@ -760,7 +1188,7 @@ def run_query_after_cdc(
             )
             require_hold_engaged(scenario_id, overlap_proc, hold)
         else:
-            logs += run_cdc_once(skipprd, config, env)
+            logs += run_cdc_once(skipprd, config, env, pipeline)
         query_cmd = perf_run.time_prefix() + perf_run.wrap_profile(
             query_plain_args(skipprd, config, env, sql, profile),
             profile,
@@ -798,7 +1226,7 @@ def run_query_after_cdc(
                         "query",
                         "--plain",
                         "--sql",
-                        "SELECT id FROM postgres_skipprlake_cdc.postgres_orders",
+                        f"SELECT id FROM {table}",
                     ],
                     env=env,
                     work=work,
@@ -824,8 +1252,14 @@ def run_query_after_cdc(
                 overlap_proc.communicate(timeout=120)
             except Exception:
                 overlap_proc.kill()
-        ddb_local.stop(port=PG_CDC_DDB_PORT, container=PG_CDC_DDB_CONTAINER)
-        stop_cdc_postgres()
+        if source == "pg":
+            ddb_local.stop(port=PG_CDC_DDB_PORT, container=PG_CDC_DDB_CONTAINER)
+            stop_cdc_postgres()
+        elif source == "mysql":
+            ddb_local.stop(port=MYSQL_CDC_DDB_PORT, container=MYSQL_CDC_DDB_CONTAINER)
+            stop_cdc_mysql()
+        else:
+            stop_cdc_ddb()
 
 
 def run_scenario(scenario_id: str, scale: str, work: Path, profile: str) -> dict[str, Any]:

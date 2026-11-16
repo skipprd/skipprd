@@ -58,7 +58,10 @@ impl super::cdc_apply::CdcApplyBackend for BigqueryCdcBackend {
 
     fn ddl_add_order_token_column(fq_table: &str) -> String {
         format!(
-            "ALTER TABLE {fq_table} ADD COLUMN IF NOT EXISTS `_skippr_order_token` {}",
+            "ALTER TABLE {fq_table} ADD COLUMN IF NOT EXISTS `_skippr_order_token` {};\n\
+             ALTER TABLE {fq_table} ADD COLUMN IF NOT EXISTS `_skippr_tie_seq` INT64;\n\
+             ALTER TABLE {fq_table} ADD COLUMN IF NOT EXISTS `_skippr_tie_ordinal` INT64;\n\
+             ALTER TABLE {fq_table} ADD COLUMN IF NOT EXISTS `_skippr_tie_row` INT64",
             Self::ORDER_TOKEN_TYPE,
         )
     }
@@ -77,6 +80,9 @@ impl super::cdc_apply::CdcApplyBackend for BigqueryCdcBackend {
             "`_skippr_order_token` {} NOT NULL",
             Self::ORDER_TOKEN_TYPE
         ));
+        column_defs.push("`_skippr_tie_seq` INT64 NOT NULL".to_string());
+        column_defs.push("`_skippr_tie_ordinal` INT64 NOT NULL".to_string());
+        column_defs.push("`_skippr_tie_row` INT64 NOT NULL".to_string());
         let primary_key = business_key_cols
             .iter()
             .map(|(name, _)| format!("`{}`", name.replace('`', "\\`")))
@@ -741,7 +747,7 @@ impl DataSinkBigqueryPlugin {
         ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
-            append_record_batch_to_cdc_apply, ddl_add_order_token_column,
+            append_record_batch_to_cdc_apply, collapse_apply_batch, ddl_add_order_token_column,
             ddl_create_tombstone_table, guarded_warehouse_cdc_row_sql, warehouse_bulk_cdc_sql,
             CdcApplyBatch, CdcApplyColumn, CdcWarehouseDialect,
         };
@@ -854,6 +860,7 @@ impl DataSinkBigqueryPlugin {
                 &mut apply_batch,
                 &batch,
                 &ctx.part_meta.rows,
+                &ctx.decoded_ties().map_err(std::io::Error::other)?,
                 row_offset,
             )
             .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -882,12 +889,13 @@ impl DataSinkBigqueryPlugin {
                         "CDC chunk exceeds bounded staging envelope; using guarded row apply: {}",
                         error
                     );
-                    for row in &apply_batch.rows {
+                    let collapsed = collapse_apply_batch(&apply_batch);
+                    for row in &collapsed.rows {
                         let statement = guarded_warehouse_cdc_row_sql::<BigqueryCdcBackend>(
                             CdcWarehouseDialect::BigQuery,
                             &fq_table,
                             &tombstone_table,
-                            &apply_batch,
+                            &collapsed,
                             row,
                         )
                         .map_err(|error| std::io::Error::other(error.to_string()))?;

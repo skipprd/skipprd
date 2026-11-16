@@ -7,6 +7,7 @@ publish = false
 [workspace]
 resolver = "2"
 members = [
+    "crates/skippr-cdc",
     "crates/skippr-core",
     "crates/skippr-object-writer",
     "crates/skippr-lease",
@@ -46,6 +47,7 @@ futures-util = "0.3"
 hex = "0.4.3"
 sha2 = "0.10"
 md5 = "0.7.0"
+skippr-cdc = { path = "crates/skippr-cdc" }
 native-tls = "0.2.18"
 once_cell = "1.17.0"
 parquet = "59.2.0"
@@ -93,6 +95,7 @@ envy = "0.4.2"
 aws-config = "1.5.1"
 aws-sdk-s3 = "1.32.0"
 aws-types = "1.3.1"
+skippr-cdc.workspace = true
 skippr-lease = { path = "crates/skippr-lease" }
 skippr-wal-catalog = { path = "crates/skippr-wal-catalog" }
 skippr-iceberg-catalog = { path = "crates/skippr-iceberg-catalog" }

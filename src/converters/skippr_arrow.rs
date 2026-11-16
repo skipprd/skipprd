@@ -178,11 +178,21 @@ fn output_metadata_fields(
 }
 
 fn output_metadata_field(metadata: &OutputMetadata) -> Result<Field, ArrowError> {
-    Ok(Field::new(
-        metadata.out_field_name.clone(),
-        output_metadata_data_type(metadata)?,
-        metadata.nullable,
-    ))
+    let data_type = output_metadata_data_type(metadata)?;
+    if metadata.field_id() != 0 {
+        Ok(crate::compute::field_with_id(
+            &metadata.out_field_name,
+            data_type,
+            metadata.nullable,
+            metadata.field_id(),
+        ))
+    } else {
+        Ok(Field::new(
+            metadata.out_field_name.clone(),
+            data_type,
+            metadata.nullable,
+        ))
+    }
 }
 
 fn output_metadata_data_type(metadata: &OutputMetadata) -> Result<DataType, ArrowError> {
@@ -530,6 +540,22 @@ mod tests {
                 skippr_type
             );
         }
+    }
+
+    #[test]
+    fn convert_skippr_to_arrow_stamps_parquet_field_id() {
+        let mut metadata = OutputMetadata::new();
+        metadata.out_field_name = "name".to_string();
+        metadata.determined_type = SkipprDataType::String;
+        metadata.field_id = 540703409;
+        let mut meta_map = HashMap::new();
+        meta_map.insert("name".to_string(), metadata);
+        let schema = convert_skippr_to_arrow(Box::new(meta_map)).unwrap();
+        assert_eq!(
+            crate::compute::field_id_of(schema.field(0)).map(|id| id.get()),
+            Some(540703409),
+            "CREATE TABLE measures look up keys by PARQUET:field_id"
+        );
     }
 
     #[test]

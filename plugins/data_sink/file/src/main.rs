@@ -128,7 +128,7 @@ impl DataSink for FileSinkRuntimePlugin {
         ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let object_stem = if ctx.idempotency_key.is_empty() {
@@ -197,7 +197,7 @@ impl DataSink for FileSinkRuntimePlugin {
             }
         }
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let receipt = sync_file_sink(
@@ -261,7 +261,7 @@ impl DataSink for FileSinkRuntimePlugin {
         }
         let (stream, _stream_progress) = reader.into_stream();
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let receipt = sync_file_sink(

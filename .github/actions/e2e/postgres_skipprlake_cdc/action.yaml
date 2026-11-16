@@ -159,12 +159,21 @@ runs:
         rm -f "${work}/data/failpoint"
         wait "${sync_pid}" || true
         echo "${wal_name}" | grep -q 'alpha-wal'
+        docker exec skippr-postgres-cdc psql -U postgres -d skippr_cdc -c \
+          "DELETE FROM orders WHERE id = 2;"
+        run_once
+        deleted="$(query_plain "SELECT count(*) FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 2")"
+        echo "deleted=${deleted}"
+        test "${deleted}" = '[["0"]]' -o "${deleted}" = '[[0]]'
         scan="${work}/warehouse/bronze/postgres_orders"
         count="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(DISTINCT id) FROM iceberg_scan('${scan}');")"
+        gone="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}') WHERE id = 2;")"
         updated="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT name FROM iceberg_scan('${scan}') WHERE id = 1 ORDER BY _skippr_order_token DESC LIMIT 1;")"
         echo "count=${count}"
+        echo "gone=${gone}"
         echo "updated=${updated}"
-        echo "${count}" | tail -n 1 | grep -qx '3'
+        echo "${count}" | tail -n 1 | grep -qx '2'
+        echo "${gone}" | tail -n 1 | grep -qx '0'
         e2e_assert_downloaded \
           'skippr-plugin-data-source-postgres*' \
           'skippr-plugin-data-sink-skipprlake*' \

@@ -906,6 +906,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_table_keeps_assigned_field_ids() {
+        let (catalog, _dir) = catalog().await;
+        let ns = NamespaceIdent::new("bronze".into());
+        catalog.create_namespace(&ns, HashMap::new()).await.unwrap();
+        let schema = Schema::builder()
+            .with_fields(vec![NestedField::required(
+                7,
+                "region",
+                Type::Primitive(PrimitiveType::Int),
+            )
+            .into()])
+            .build()
+            .unwrap();
+        catalog
+            .create_table(
+                &ns,
+                TableCreation::builder()
+                    .name("orders".into())
+                    .schema(schema)
+                    .build(),
+            )
+            .await
+            .unwrap();
+        let loaded = catalog
+            .load_table(&TableIdent::new(ns, "orders".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded
+                .metadata()
+                .current_schema()
+                .field_by_name("region")
+                .unwrap()
+                .id,
+            7
+        );
+    }
+
+    #[tokio::test]
     async fn create_table_requires_existing_namespace() {
         let (catalog, _dir) = catalog().await;
         let ns = NamespaceIdent::new("bronze".into());

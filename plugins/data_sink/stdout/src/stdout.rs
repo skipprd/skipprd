@@ -29,7 +29,7 @@ impl DataSink for DataSinkStdoutPlugin {
         cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         let mut stream = match cdc_ctx {
-            Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+            Some(ctx) => super::cdc_encode::augment_cdc_stream(stream, ctx),
             None => stream,
         };
         while let Some(batch_result) = stream.next().await {

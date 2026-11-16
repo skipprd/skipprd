@@ -2,21 +2,29 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll as TaskPoll};
 
-use arrow::array::{RecordBatch, StringArray};
+use arrow::array::{Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::RecordBatchStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::Stream;
 
-use skippr_runtime_sdk::plugins::cdc::{MutationKind, WalPartMeta};
+use skippr_runtime_sdk::plugins::cdc::{MutationKind, SyncContext, WalPartMeta};
 
 /// Augment a RecordBatch stream with CDC metadata columns.
-/// Returns a new stream that adds `_skippr_mutation` and `_skippr_order_token`
-/// columns to each batch based on the aligned WalRowMeta entries.
+/// Returns a new stream that adds mutation, order token, and tie columns
+/// for every change. Does not call collapse.
+pub fn augment_cdc_stream(
+    stream: SendableRecordBatchStream,
+    ctx: &SyncContext,
+) -> SendableRecordBatchStream {
+    augment_stream_with_cdc_columns(stream, &ctx.part_meta, &ctx.ties)
+}
+
 pub fn augment_stream_with_cdc_columns(
     stream: SendableRecordBatchStream,
     part_meta: &WalPartMeta,
+    ties: &[(u64, u32, u64)],
 ) -> SendableRecordBatchStream {
     let orig_schema = stream.schema();
     let augmented_schema = build_augmented_schema(&orig_schema);
@@ -24,6 +32,7 @@ pub fn augment_stream_with_cdc_columns(
         inner: stream,
         schema: augmented_schema,
         rows: part_meta.rows.clone(),
+        ties: ties.to_vec(),
         row_offset: 0,
     })
 }
@@ -38,6 +47,21 @@ fn build_augmented_schema(original: &SchemaRef) -> SchemaRef {
     fields.push(Arc::new(Field::new(
         "_skippr_order_token",
         DataType::Utf8,
+        false,
+    )));
+    fields.push(Arc::new(Field::new(
+        "_skippr_tie_seq",
+        DataType::Int64,
+        false,
+    )));
+    fields.push(Arc::new(Field::new(
+        "_skippr_tie_ordinal",
+        DataType::Int32,
+        false,
+    )));
+    fields.push(Arc::new(Field::new(
+        "_skippr_tie_row",
+        DataType::Int64,
         false,
     )));
     Arc::new(Schema::new(fields))
@@ -56,6 +80,7 @@ struct CdcEncodeStream {
     inner: SendableRecordBatchStream,
     schema: SchemaRef,
     rows: Vec<skippr_runtime_sdk::plugins::cdc::WalRowMeta>,
+    ties: Vec<(u64, u32, u64)>,
     row_offset: usize,
 }
 
@@ -86,14 +111,28 @@ impl Stream for CdcEncodeStream {
                     .map(|r| Some(mutation_kind_str(&r.mutation)))
                     .collect();
 
+                if end > this.ties.len() {
+                    return TaskPoll::Ready(Some(Err(DataFusionError::Internal(format!(
+                        "CDC ties have {} entries but stream reached row offset {}",
+                        this.ties.len(),
+                        end,
+                    )))));
+                }
                 let order_tokens: StringArray = slice
                     .iter()
                     .map(|r| Some(hex::encode(&r.order_token)))
                     .collect();
+                let tie_slice = &this.ties[start..end];
+                let tie_seq: Int64Array = tie_slice.iter().map(|tie| Some(tie.0 as i64)).collect();
+                let tie_ord: Int32Array = tie_slice.iter().map(|tie| Some(tie.1 as i32)).collect();
+                let tie_row: Int64Array = tie_slice.iter().map(|tie| Some(tie.2 as i64)).collect();
 
                 let mut columns: Vec<Arc<dyn arrow::array::Array>> = batch.columns().to_vec();
                 columns.push(Arc::new(mutations));
                 columns.push(Arc::new(order_tokens));
+                columns.push(Arc::new(tie_seq));
+                columns.push(Arc::new(tie_ord));
+                columns.push(Arc::new(tie_row));
 
                 match RecordBatch::try_new(this.schema.clone(), columns) {
                     Ok(augmented) => TaskPoll::Ready(Some(Ok(augmented))),
@@ -118,7 +157,7 @@ impl RecordBatchStream for CdcEncodeStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int64Array, StringArray as ArrowStringArray};
+    use arrow::array::{Int32Array, Int64Array, StringArray as ArrowStringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use futures::StreamExt;
 
@@ -175,21 +214,21 @@ mod tests {
             kind: skippr_runtime_sdk::plugins::cdc::WalPartKind::Cdc,
             row_count: 3,
             rows: vec![
-                skippr_runtime_sdk::plugins::cdc::WalRowMeta {
-                    mutation: MutationKind::Insert,
-                    event_id: b"ev1".to_vec(),
-                    order_token: vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
-                },
-                skippr_runtime_sdk::plugins::cdc::WalRowMeta {
-                    mutation: MutationKind::Update,
-                    event_id: b"ev2".to_vec(),
-                    order_token: vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02],
-                },
-                skippr_runtime_sdk::plugins::cdc::WalRowMeta {
-                    mutation: MutationKind::Delete,
-                    event_id: b"ev3".to_vec(),
-                    order_token: vec![0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89],
-                },
+                skippr_runtime_sdk::plugins::cdc::WalRowMeta::new(
+                    MutationKind::Insert,
+                    b"ev1".to_vec(),
+                    vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
+                ),
+                skippr_runtime_sdk::plugins::cdc::WalRowMeta::new(
+                    MutationKind::Update,
+                    b"ev2".to_vec(),
+                    vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02],
+                ),
+                skippr_runtime_sdk::plugins::cdc::WalRowMeta::new(
+                    MutationKind::Delete,
+                    b"ev3".to_vec(),
+                    vec![0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89],
+                ),
             ],
         }
     }
@@ -200,18 +239,22 @@ mod tests {
         let stream = make_test_stream(batch);
 
         let meta = make_test_wal_meta();
-        let mut augmented = augment_stream_with_cdc_columns(stream, &meta);
+        let ties: Vec<(u64, u32, u64)> = (0..3).map(|i| (1, 0, i)).collect();
+        let mut augmented = augment_stream_with_cdc_columns(stream, &meta, &ties);
 
         let schema = augmented.schema();
-        assert_eq!(schema.fields().len(), 4);
+        assert_eq!(schema.fields().len(), 7);
         assert_eq!(schema.field(2).name(), "_skippr_mutation");
         assert_eq!(schema.field(2).data_type(), &DataType::Utf8);
         assert_eq!(schema.field(3).name(), "_skippr_order_token");
         assert_eq!(schema.field(3).data_type(), &DataType::Utf8);
+        assert_eq!(schema.field(4).name(), "_skippr_tie_seq");
+        assert_eq!(schema.field(5).name(), "_skippr_tie_ordinal");
+        assert_eq!(schema.field(6).name(), "_skippr_tie_row");
 
         let result_batch = augmented.next().await.unwrap().unwrap();
         assert_eq!(result_batch.num_rows(), 3);
-        assert_eq!(result_batch.num_columns(), 4);
+        assert_eq!(result_batch.num_columns(), 7);
 
         let mutations = result_batch
             .column(2)
@@ -241,7 +284,8 @@ mod tests {
             batches: vec![batch.slice(0, 1), batch.slice(1, 2)],
             index: 0,
         });
-        let mut augmented = augment_stream_with_cdc_columns(stream, &make_test_wal_meta());
+        let ties: Vec<(u64, u32, u64)> = (0..3).map(|i| (1, 0, i)).collect();
+        let mut augmented = augment_stream_with_cdc_columns(stream, &make_test_wal_meta(), &ties);
 
         let first = augmented.next().await.unwrap().unwrap();
         let second = augmented.next().await.unwrap().unwrap();
@@ -265,9 +309,12 @@ mod tests {
     fn test_build_augmented_schema() {
         let orig = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
         let augmented = build_augmented_schema(&orig);
-        assert_eq!(augmented.fields().len(), 3);
+        assert_eq!(augmented.fields().len(), 6);
         assert_eq!(augmented.field(1).name(), "_skippr_mutation");
         assert_eq!(augmented.field(2).name(), "_skippr_order_token");
+        assert_eq!(augmented.field(3).name(), "_skippr_tie_seq");
+        assert_eq!(augmented.field(4).name(), "_skippr_tie_ordinal");
+        assert_eq!(augmented.field(5).name(), "_skippr_tie_row");
     }
 
     #[test]
@@ -276,6 +323,64 @@ mod tests {
         assert_eq!(mutation_kind_str(&MutationKind::Insert), "insert");
         assert_eq!(mutation_kind_str(&MutationKind::Update), "update");
         assert_eq!(mutation_kind_str(&MutationKind::Delete), "delete");
+    }
+
+    #[tokio::test]
+    async fn two_changes_of_one_key_write_two_encoded_rows_with_tie() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1i64, 1])) as Arc<dyn arrow::array::Array>],
+        )
+        .unwrap();
+        let stream = Box::pin(VecBatchStream {
+            schema,
+            batches: vec![batch],
+            index: 0,
+        }) as SendableRecordBatchStream;
+        let first = skippr_runtime_sdk::plugins::cdc::WalRowMeta::new(
+            MutationKind::Insert,
+            b"e1".to_vec(),
+            vec![1],
+        );
+        let second = skippr_runtime_sdk::plugins::cdc::WalRowMeta::new(
+            MutationKind::Update,
+            b"e2".to_vec(),
+            vec![1],
+        );
+        let meta = WalPartMeta {
+            kind: skippr_runtime_sdk::plugins::cdc::WalPartKind::Cdc,
+            row_count: 2,
+            rows: vec![first, second],
+        };
+        let ties = vec![(9, 2, 0), (9, 2, 1)];
+        let mut augmented = augment_stream_with_cdc_columns(stream, &meta, &ties);
+        let result = augmented.next().await.unwrap().unwrap();
+        assert_eq!(result.num_rows(), 2);
+        let seq = result
+            .column_by_name("_skippr_tie_seq")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(seq.value(0), 9);
+        assert_eq!(seq.value(1), 9);
+        let ord = result
+            .column_by_name("_skippr_tie_ordinal")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(ord.value(0), 2);
+        assert_eq!(ord.value(1), 2);
+        let row = result
+            .column_by_name("_skippr_tie_row")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(row.value(0), 0);
+        assert_eq!(row.value(1), 1);
     }
 
     #[tokio::test]
@@ -294,13 +399,13 @@ mod tests {
         let meta = WalPartMeta {
             kind: skippr_runtime_sdk::plugins::cdc::WalPartKind::Cdc,
             row_count: 1,
-            rows: vec![skippr_runtime_sdk::plugins::cdc::WalRowMeta {
-                mutation: MutationKind::Snapshot,
-                event_id: b"snap".to_vec(),
-                order_token: vec![],
-            }],
+            rows: vec![skippr_runtime_sdk::plugins::cdc::WalRowMeta::new(
+                MutationKind::Snapshot,
+                b"snap".to_vec(),
+                vec![],
+            )],
         };
-        let mut augmented = augment_stream_with_cdc_columns(stream, &meta);
+        let mut augmented = augment_stream_with_cdc_columns(stream, &meta, &[(1, 0, 0)]);
         let result = augmented.next().await.unwrap().unwrap();
         let tokens = result
             .column_by_name("_skippr_order_token")

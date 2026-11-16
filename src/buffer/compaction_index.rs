@@ -56,6 +56,7 @@ pub(crate) struct IndexedCompactionSlice {
     pub group_key: CompactionGroupKey,
     pub index_entry: SegmentPartitionIndexEntry,
     pub wal_ref: WalPartRef,
+    pub seq: u64,
 }
 
 impl IndexedCompactionSlice {
@@ -1162,10 +1163,11 @@ impl CompactionIndex {
         self.slices
             .get(id)
             .map(|record| {
-                now_secs.saturating_sub(record.slice.index_entry.updated_at_secs)
-                    >= self.time_threshold_secs.unwrap_or(u64::MAX)
-                    || self.group_available_bytes(&record.slice.group_key)
-                        >= self.byte_threshold.unwrap_or(u64::MAX)
+                crate::processor::compaction_may_size(record.slice.seq)
+                    && (now_secs.saturating_sub(record.slice.index_entry.updated_at_secs)
+                        >= self.time_threshold_secs.unwrap_or(u64::MAX)
+                        || self.group_available_bytes(&record.slice.group_key)
+                            >= self.byte_threshold.unwrap_or(u64::MAX))
             })
             .unwrap_or(false)
     }
@@ -1281,6 +1283,7 @@ mod tests {
             },
             index_entry,
             wal_ref,
+            seq: start,
         }
     }
 

@@ -92,6 +92,16 @@ pub fn persist_pipeline_schema(
         );
         let mut nodes = Vec::new();
         collect_nodes(root, &mut nodes);
+        let mut seen_ids = HashMap::<i32, usize>::new();
+        for (field_id, _) in &nodes {
+            let count = seen_ids.entry(*field_id).or_insert(0);
+            *count += 1;
+            if *count > 1 {
+                return Err(format!(
+                    "schema persist duplicate field_id {field_id} in {pipeline}/{namespace}"
+                ));
+            }
+        }
         for (field_id, node) in nodes {
             desired.insert(
                 StoreFamily::Schema.key(&node_rest(pipeline, namespace, field_id)),
@@ -264,6 +274,69 @@ pub fn checksum_bytes(bytes: &[u8]) -> [u8; 32] {
 mod tests {
     use super::*;
     use crate::helpers::configuration::Config;
+
+    #[test]
+    fn persist_rejects_duplicate_zero_field_ids() {
+        let fence = CatalogFence::local();
+        let store = skippr_wal_catalog::MemorySkipprStore::open(fence);
+        let mut md = PipelineMetadata::new(&Config::new());
+        md.name = "perf_cell".into();
+        let mut root = Metadata::new().unwrap();
+        root.field_id = 0;
+        for name in ["id", "name", "amount"] {
+            let mut child = Metadata::new().unwrap();
+            child.field_id = 0;
+            child.out_field_name = name.to_string();
+            root.fields.insert(name.to_string(), child);
+        }
+        md.metadata.insert("perf_cell".into(), root);
+        let err = persist_pipeline_schema(&store, fence, &md).unwrap_err();
+        assert!(
+            err.contains("duplicate field_id 0"),
+            "File discover must not shred three columns onto node/0: {err}"
+        );
+    }
+
+    #[test]
+    fn persist_after_migrate_keeps_file_json_columns() {
+        let fence = CatalogFence::local();
+        let store = skippr_wal_catalog::MemorySkipprStore::open(fence);
+        let mut md = PipelineMetadata::new(&Config::new());
+        md.name = "perf_cell".into();
+        let mut root = Metadata::new().unwrap();
+        root.field_id = 0;
+        for name in ["id", "name", "amount"] {
+            let mut child = Metadata::new().unwrap();
+            child.field_id = 0;
+            child.out_field_name = name.to_string();
+            child.source_field_name = name.to_string();
+            root.fields.insert(name.to_string(), child);
+        }
+        md.metadata.insert("perf_cell".into(), root);
+        assert!(md.migrate_persisted_metadata());
+        persist_pipeline_schema(&store, fence, &md).unwrap();
+        let loaded = load_pipeline_schema(&store, "perf_cell").unwrap().unwrap();
+        let mut names: Vec<String> = loaded.metadata["perf_cell"]
+            .fields
+            .keys()
+            .cloned()
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["amount", "id", "name"]);
+        let published = loaded.output_metadata("perf_cell").unwrap();
+        let mut published_names: Vec<String> = published
+            .child_fields()
+            .map(|(_, field)| {
+                if field.out_field_name().is_empty() {
+                    unreachable!("migrated File JSON columns have out_field_name")
+                } else {
+                    field.out_field_name().to_string()
+                }
+            })
+            .collect();
+        published_names.sort();
+        assert_eq!(published_names, vec!["amount", "id", "name"]);
+    }
 
     #[test]
     fn shredded_schema_roundtrips_and_skips_unchanged_puts() {

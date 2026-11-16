@@ -20,6 +20,14 @@ from catalog import (  # noqa: E402
     scenario_ids,
     validate_scenario_asserts,
 )
+from matrix import (  # noqa: E402
+    CDC_ALTERS,
+    CDC_CASES,
+    CDC_SOURCES,
+    CDC_TABLES,
+    query_cdc_id,
+    query_cdc_migrate_id,
+)
 
 CATALOG_PATH = HARNESS_DIR / "catalog.yaml"
 
@@ -49,13 +57,6 @@ REQUIRED = SMOKE + (
     "q-union-point-duckdb",
     "q-union-group-duckdb",
     "q-iceberg-only-duckdb",
-    "q-cdc-union-count-pg",
-    "q-cdc-union-update-pg",
-    "q-cdc-union-delete-pg",
-    "q-cdc-union-reinsert-pg",
-    "q-cdc-union-sum-pg",
-    "q-cdc-overlap-pg",
-    "q-cdc-iceberg-only-pg",
     "q-ops-count-duckdb",
     "q-ops-stream-iceberg",
     "q-aggregates-count-duckdb",
@@ -68,6 +69,8 @@ REQUIRED = SMOKE + (
     "q-migrate-merge-stream-iceberg",
     "q-migrate-drop-stream-iceberg",
     "q-migrate-promote-stream-iceberg",
+) + tuple(query_cdc_id(case, source) for source in CDC_SOURCES for case in CDC_CASES) + tuple(
+    query_cdc_migrate_id(alter, source) for source in CDC_SOURCES for alter in CDC_ALTERS
 )
 
 
@@ -118,6 +121,7 @@ class PerfDbCatalogTests(unittest.TestCase):
                 spec = ids[query_migrate_id(alter, mode)]
                 self.assertEqual(spec.get("alter"), alter)
                 self.assertEqual(spec["kind"], "query_after_ingest")
+                self.assertTrue(spec.get("continue_ingest"), query_migrate_id(alter, mode))
                 if mode == "stream":
                     self.assertTrue(spec.get("wal_tail"))
                     self.assertEqual((spec.get("asserts") or {}).get("wal_pin"), "live")
@@ -191,6 +195,40 @@ class PerfDbCatalogTests(unittest.TestCase):
         self.assertEqual((deleted.get("asserts") or {}).get("query_count"), 1)
         self.assertEqual((deleted.get("asserts") or {}).get("query_absent_id"), 2)
 
+    def test_cdc_covers_every_source_case_and_migrate(self) -> None:
+        catalog = db_catalog()
+        ids = catalog["scenarios"]
+        for source in CDC_SOURCES:
+            for case in CDC_CASES:
+                name = query_cdc_id(case, source)
+                spec = ids[name]
+                self.assertEqual(spec["kind"], "query_after_cdc", name)
+                self.assertEqual(spec.get("cdc_source"), source, name)
+                self.assertEqual(spec.get("cdc_case"), case, name)
+                self.assertIn(CDC_TABLES[source].split(".")[1], spec["sql"], name)
+                if case == "overlap":
+                    self.assertTrue(spec.get("overlap"), name)
+                    self.assertEqual((spec.get("asserts") or {}).get("wal_pin"), "live", name)
+                if case == "iceberg-only":
+                    self.assertEqual((spec.get("asserts") or {}).get("wal_pin"), "drained", name)
+            for alter in CDC_ALTERS:
+                name = query_cdc_migrate_id(alter, source)
+                spec = ids[name]
+                self.assertEqual(spec["kind"], "query_after_cdc", name)
+                self.assertEqual(spec.get("cdc_source"), source, name)
+                self.assertEqual(spec.get("alter"), alter, name)
+                self.assertTrue(spec.get("continue_ingest"), name)
+                if alter == "rename":
+                    self.assertIn("display_name", spec["sql"], name)
+        workflow = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("skippr-plugin-data-source-mysql", workflow)
+        self.assertIn("skippr-plugin-data-source-dynamodb", workflow)
+        self.assertIn("q-cdc-union-update-mysql", workflow)
+        self.assertIn("q-cdc-union-update-ddb", workflow)
+        self.assertIn("q-cdc-migrate-rename-pg", workflow)
+
 
 class PerfDbSkillTests(unittest.TestCase):
     def test_skill_is_query_matrix_not_ingest_copy(self) -> None:
@@ -220,6 +258,11 @@ class PerfDbSkillTests(unittest.TestCase):
         self.assertIn("exhausted", text)
         self.assertIn("ingest-a-duckdb", text)
         self.assertNotIn("q-wal-count-file", text)
+        self.assertIn("q-cdc-union-update-pg", text)
+        self.assertIn("q-cdc-union-update-mysql", text)
+        self.assertIn("q-cdc-union-update-ddb", text)
+        self.assertIn("q-cdc-migrate-rename-pg", text)
+        self.assertIn("continue ingest", text.lower())
 
 
 class PerfDbWorkflowContractTests(unittest.TestCase):
@@ -299,7 +342,9 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("timeout=120", text)
         self.assertIn("--signal=KILL", text)
         self.assertIn('CDC_DDB_TABLE = "skippr-perf-db-cdc"', text)
-        self.assertIn("tables=[CDC_DDB_TABLE]", text)
+        self.assertIn("tables=catalog_tables", text)
+        self.assertIn("MYSQL_CDC_TABLE", text)
+        self.assertIn("DDB_CDC_CATALOG_TABLE", text)
         self.assertIn('scenario.get("wal_tail")', text)
         self.assertIn("stream_limit_rows", text)
         ingest = text.split("def run_query_after_ingest")[1].split("def write_cdc")[0]
@@ -346,6 +391,16 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         )
         self.assertGreater(ingest.find("write_migration_sql"), ingest.find("discover"))
         self.assertGreater(ingest.find("write_migration_sql"), ingest.find("sync"))
+        continue_at = ingest.find("continue_ingest")
+        self.assertGreater(continue_at, ingest.find("write_migration_sql"))
+        self.assertIn("events_b.json", ingest)
+        self.assertIn("start=original_rows + 1", ingest)
+        cdc = text.split("def run_query_after_cdc")[1]
+        self.assertIn('scenario.get("cdc_source")', cdc)
+        self.assertIn("mysql", cdc)
+        self.assertIn("dynamodb", cdc.lower())
+        self.assertGreater(cdc.find("write_migration_sql"), cdc.find("run_cdc_once"))
+        self.assertIn("continue_ingest", cdc)
 
     def test_profile_query_repeats_collect_after_warmup(self) -> None:
         run = perf_db_run()

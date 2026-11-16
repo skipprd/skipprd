@@ -333,6 +333,10 @@ mod tests {
             .field_by_name("region")
             .unwrap()
             .id;
+        assert_eq!(
+            field_id, 7,
+            "create_table must keep skipprd field identity, not reassign 1..N"
+        );
         writer
             .apply_alter(
                 "orders",

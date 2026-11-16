@@ -1145,6 +1145,24 @@ pub fn storage_namespace(config: &Config, namespace: &str) -> String {
     Helpers::clean_field_name(config, namespace.to_string())
 }
 
+/// Dest metadata key for an ingest batch. Plugin `IngestBatch.namespace` when
+/// set, otherwise the pipeline name — the same key sync compact uses. Discover
+/// must not invent a second key from the source path or file extension.
+pub fn ingest_dest_namespace(config: &Config, batch_namespace: Option<&str>) -> String {
+    match batch_namespace.map(str::trim).filter(|ns| !ns.is_empty()) {
+        Some(ns) => storage_namespace(config, ns),
+        None => storage_namespace(config, &config.get_pipeline_name()),
+    }
+}
+
+fn ack_discover_payloads(ingest_batches: &IngestTasks) {
+    for task in ingest_batches.tasks.iter() {
+        if task.submit_id != 0 {
+            crate::buffer::wal_writer::complete_request_without_wal(task.submit_id);
+        }
+    }
+}
+
 static STORAGE_PATH_NON_ALNUM: Lazy<regex::Regex> =
     Lazy::new(|| regex::Regex::new(r"[^a-z0-9_]+").expect("valid regex"));
 static STORAGE_PATH_COLLAPSE: Lazy<regex::Regex> =
@@ -1374,32 +1392,19 @@ fn commit_deadletters(
         }
     }
     if !dl_offsets_committed && !dl_offsets.is_empty() {
-        let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() else {
-            warn!("deadletter offset publish failed: WAL catalog handle missing");
-            if submit_id != 0 {
-                crate::buffer::wal_writer::fail_request(
-                    submit_id,
-                    "deadletter offset publish failed: WAL catalog handle missing".to_string(),
-                );
-            }
-            return false;
-        };
-        for (ok, pos) in dl_offsets.drain() {
-            if let Err(err) = crate::buffer::wal_store::block_on_async(async {
-                handle
-                    .persist_offset_hint(&ok.namespace, &ok.partition, pos, true)
-                    .await
-                    .map_err(|err| std::io::Error::other(err.to_string()))
-            }) {
-                warn!("deadletter offset publish failed: {err}");
-                if submit_id != 0 {
-                    crate::buffer::wal_writer::fail_request(
-                        submit_id,
-                        format!("deadletter offset publish failed: {err}"),
-                    );
+        if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
+            for (ok, pos) in dl_offsets.drain() {
+                if let Err(err) = crate::buffer::wal_store::block_on_async(async {
+                    handle
+                        .persist_offset_hint(&ok.namespace, &ok.partition, pos, true)
+                        .await
+                        .map_err(|err| std::io::Error::other(err.to_string()))
+                }) {
+                    warn!("deadletter offset publish failed: {err}");
                 }
-                return false;
             }
+        } else {
+            warn!("deadletter offset publish failed: WAL catalog handle missing");
         }
     }
     true
@@ -2784,14 +2789,7 @@ impl Ingest {
 
                     let first_task_datas = ingest_batches.tasks.first().map(|t| &t.datas);
                     for data in first_task_datas.into_iter().flat_map(|d| d.iter()) {
-                        let batch_ns: Option<String> = {
-                            let part = &data.offset_key.partition;
-                            if !part.is_empty() {
-                                Some(part.rsplit('.').next().unwrap_or(part).to_string())
-                            } else {
-                                None
-                            }
-                        };
+                        let batch_ns = ingest_dest_namespace(config, data.namespace.as_deref());
                         if format.is_schema_arrow() {
                             if let Ok(DecodedIngest::Arrow(batches)) =
                                 decode_ingest(config, format, &data.data)
@@ -2802,10 +2800,9 @@ impl Ingest {
                                             &batch.schema(),
                                         )
                                     {
-                                        let ns = batch_ns
-                                            .clone()
-                                            .unwrap_or_else(|| config.get_pipeline_name());
-                                        pipeline_metadata.metadata.insert(ns, derived);
+                                        pipeline_metadata
+                                            .metadata
+                                            .insert(batch_ns.clone(), derived);
                                         count = count.saturating_add(batch.num_rows() as u64);
                                     }
                                 }
@@ -2816,7 +2813,7 @@ impl Ingest {
                                 &mut text,
                                 Some(max_records),
                                 &mut pipeline_metadata.metadata,
-                                batch_ns.as_deref(),
+                                Some(batch_ns.as_str()),
                             );
                         }
 
@@ -2838,32 +2835,25 @@ impl Ingest {
                     if *NUM_ANALYSED_RECORDS.read() >= max_records {
                         let mut pipeline_metadata = METADATA.load().as_ref().clone();
 
-                        if pipeline_metadata.metadata.len() == 0 {
+                        if pipeline_metadata.metadata.is_empty() {
                             warn!("No data found in data source, skipping schema discovery");
-                            DISCOVERY_COMPLETE.store(true, Ordering::Release);
-                            return ThroughputMetrics {
-                                bytes_per_second: self.get_current_throughput(),
-                                active_cores: self.active_count.load(Ordering::Acquire),
-                                queue_length: self.queue_length.load(Ordering::Acquire),
-                                optimal_chunk_size: self.optimal_chunk_size.load(Ordering::Acquire),
-                            };
+                        } else {
+                            let flatten = config.get_transform_flatten_events();
+
+                            for (_namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
+                                AnalyseSchema::determine_field_types(
+                                    config,
+                                    &mut metadata.fields,
+                                    None,
+                                    flatten,
+                                );
+                            }
+
+                            info!("Schema discovery complete, writing metadata to Skippr");
+
+                            pipeline_metadata.enabled = true;
+                            INGEST_RT.block_on(config.set_metadata(&pipeline_metadata, false));
                         }
-
-                        let flatten = config.get_transform_flatten_events();
-
-                        for (_namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
-                            AnalyseSchema::determine_field_types(
-                                config,
-                                &mut metadata.fields,
-                                None,
-                                flatten,
-                            );
-                        }
-
-                        info!("Schema discovery complete, writing metadata to Skippr");
-
-                        pipeline_metadata.enabled = true;
-                        INGEST_RT.block_on(config.set_metadata(&pipeline_metadata, false));
                         DISCOVERY_COMPLETE.store(true, Ordering::Release);
                     }
 
@@ -2874,6 +2864,7 @@ impl Ingest {
                         max_records
                     );
 
+                    ack_discover_payloads(ingest_batches);
                     return ThroughputMetrics {
                         bytes_per_second: self.get_current_throughput(),
                         active_cores: self.active_count.load(Ordering::Acquire),
@@ -4341,8 +4332,20 @@ impl Ingest {
                             }
                         }
                     };
+                    let input_rows = merged.num_rows();
+                    let transform_started = Instant::now();
                     match crate::compute::apply_stateless(log, select.as_ref(), merged, cdc) {
                         Ok(aligned) => {
+                            let rows = aligned.batch.num_rows();
+                            crate::metrics::counters::add_stream_transform_records(rows as u64);
+                            crate::helpers::perf::emit(
+                                "stream_transform",
+                                serde_json::json!({
+                                    "elapsed_ms": transform_started.elapsed().as_millis() as u64,
+                                    "rows": rows,
+                                    "input_rows": input_rows,
+                                }),
+                            );
                             entry.schema = aligned.batch.schema();
                             entry._schema_fingerprint =
                                 crate::converters::skippr_arrow::stable_schema_fingerprint(
@@ -4622,11 +4625,7 @@ mod cdc_sidecar_tests {
     use crate::plugins::cdc::{MutationKind, WalRowMeta};
 
     fn update_meta() -> WalRowMeta {
-        WalRowMeta {
-            mutation: MutationKind::Update,
-            event_id: b"e1".to_vec(),
-            order_token: b"e1".to_vec(),
-        }
+        WalRowMeta::new(MutationKind::Update, b"e1".to_vec(), b"e1".to_vec())
     }
 
     #[test]
@@ -4983,6 +4982,156 @@ mod ndjson_flatten_iter_tests {
 #[cfg(test)]
 mod empty_ingest_tasks_tests {
     use super::*;
+
+    fn file_json_discover_config(dir: &std::path::Path, pipeline: &str) -> Config {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "skippr": { "workspace": "ws", "store": { "type": "fjall" } },
+            "pipelines": {
+                pipeline: {
+                    "data_source": "data_sources.sample",
+                    "data_dir": dir.to_str().unwrap()
+                }
+            },
+            "data_sources": {
+                "sample": { "File": { "path": dir.join("source").to_str().unwrap(), "format": "json" } }
+            }
+        }))
+        .unwrap();
+        config.bind_pipeline(pipeline)
+    }
+
+    fn json_file_discover_batch(
+        path: &str,
+        payload: &str,
+        namespace: Option<String>,
+    ) -> IngestBatch {
+        let data = payload.as_bytes().to_vec();
+        IngestBatch {
+            offset_key: OffsetKey::new("source", path),
+            bytes: data.len(),
+            data,
+            offset_pos: None,
+            source_uri: String::new(),
+            namespace,
+            cdc_rows: None,
+        }
+    }
+
+    fn discover_json_file(config: &Config, batch: IngestBatch) {
+        Ingest::reset_discovery_progress();
+        let ingest = Ingest::new_for_execution(config, RuntimeExecutionMode::Discover);
+        let mut tasks = IngestTasks::new();
+        let offsets =
+            Arc::new(crate::helpers::offsets::Offsets::init(config).expect("offset DB init"));
+        let noop: Box<dyn crate::plugins::DataSink + Send + Sync> =
+            Box::new(crate::plugins::NoopOutputPlugin);
+        let output = Arc::new(noop);
+        tasks.add(IngestTask::new(
+            vec![batch],
+            offsets.clone(),
+            output.clone(),
+        ));
+        ingest.ingest_file(config, &Arc::new(tasks), &offsets, output);
+    }
+
+    #[test]
+    fn file_json_discover_pins_dest_namespace_not_file_extension() {
+        let _guard = crate::metadata_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config = file_json_discover_config(dir.path(), "perf_cell");
+        METADATA.store(Arc::new(PipelineMetadata::new(&config)));
+        discover_json_file(
+            &config,
+            json_file_discover_batch(
+                "/tmp/work/source/events.json",
+                "{\"id\":1,\"name\":\"a\",\"amount\":10}\n",
+                None,
+            ),
+        );
+        let metadata = METADATA.load();
+        assert!(
+            metadata.metadata.contains_key("perf_cell"),
+            "File discover dest namespace must match sync (pipeline when batch.namespace is None); keys={:?}",
+            metadata.metadata.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !metadata.metadata.contains_key("json"),
+            "File discover must not treat the file extension as a namespace; keys={:?}",
+            metadata.metadata.keys().collect::<Vec<_>>()
+        );
+        let ns = metadata.metadata.get("perf_cell").unwrap();
+        let mut names: Vec<String> = ns.fields.keys().cloned().collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["amount", "id", "name"],
+            "File JSON discover must persist the dest columns sync uses; fields={:?}",
+            ns.fields
+                .iter()
+                .map(|(k, f)| (k.clone(), f.out_field_name.clone(), f.field_id))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn file_json_discover_keeps_plugin_namespace_override() {
+        let _guard = crate::metadata_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config = file_json_discover_config(dir.path(), "perf_cell");
+        METADATA.store(Arc::new(PipelineMetadata::new(&config)));
+        discover_json_file(
+            &config,
+            json_file_discover_batch(
+                "/tmp/work/source/events.json",
+                "{\"id\":1}\n",
+                Some("orders".into()),
+            ),
+        );
+        let metadata = METADATA.load();
+        assert!(
+            metadata.metadata.contains_key("orders"),
+            "explicit IngestBatch.namespace is dest identity; keys={:?}",
+            metadata.metadata.keys().collect::<Vec<_>>()
+        );
+        assert!(!metadata.metadata.contains_key("json"));
+        assert!(!metadata.metadata.contains_key("perf_cell"));
+    }
+
+    #[test]
+    fn file_json_discover_acks_sample_batches_without_wal() {
+        let _guard = crate::metadata_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config = file_json_discover_config(dir.path(), "perf_cell");
+        METADATA.store(Arc::new(PipelineMetadata::new(&config)));
+        Ingest::reset_discovery_progress();
+        let ingest = Ingest::new_for_execution(&config, RuntimeExecutionMode::Discover);
+        let mut tasks = IngestTasks::new();
+        let offsets =
+            Arc::new(crate::helpers::offsets::Offsets::init(&config).expect("offset DB init"));
+        let noop: Box<dyn crate::plugins::DataSink + Send + Sync> =
+            Box::new(crate::plugins::NoopOutputPlugin);
+        let output = Arc::new(noop);
+        let submit_id = 9_100_001;
+        let mut rx = crate::buffer::wal_writer::register_request_ack(submit_id, 1);
+        tasks.add(
+            IngestTask::new(
+                vec![json_file_discover_batch(
+                    "/tmp/work/source/events.json",
+                    "{\"id\":1}\n",
+                    None,
+                )],
+                offsets.clone(),
+                output.clone(),
+            )
+            .with_submit_id(submit_id),
+        );
+        ingest.ingest_file(&config, &Arc::new(tasks), &offsets, output);
+        assert_eq!(
+            rx.try_recv()
+                .expect("Discover must ack File sample batches without WAL"),
+            Ok(())
+        );
+    }
 
     #[test]
     fn ingest_file_empty_tasks_in_discover_mode_does_not_panic() {
@@ -5557,6 +5706,28 @@ mod storage_key_tests {
             storage_namespace(&Config::new(), "My-Stream/v2"),
             "my_stream_v2"
         );
+    }
+
+    #[test]
+    fn ingest_dest_namespace_uses_pipeline_when_batch_omits_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "skippr": { "workspace": "ws", "store": { "type": "fjall" } },
+            "pipelines": {
+                "perf_cell": {
+                    "data_source": "data_sources.sample",
+                    "data_dir": dir.path().to_str().unwrap()
+                }
+            },
+            "data_sources": {
+                "sample": { "File": { "path": "/tmp/x", "format": "json" } }
+            }
+        }))
+        .unwrap();
+        let config = config.bind_pipeline("perf_cell");
+        assert_eq!(ingest_dest_namespace(&config, None), "perf_cell");
+        assert_eq!(ingest_dest_namespace(&config, Some("")), "perf_cell");
+        assert_eq!(ingest_dest_namespace(&config, Some("orders")), "orders");
     }
 
     #[test]

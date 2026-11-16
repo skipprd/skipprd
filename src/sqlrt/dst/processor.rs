@@ -3,6 +3,7 @@ use crate::processor::test_support::{insert_meta, invoice_batch, DiskFixture, Si
 use crate::processor::{
     allows_reclaim, reset_reclaim_hold, set_min_unconsumed_seq, CrashPoint, WalCursor,
 };
+use std::collections::BTreeMap;
 
 #[test]
 fn c_reclaim_vs_stream_processor_cursor() {
@@ -65,6 +66,49 @@ fn g_incompatible_ir_wipe_clears_measures() {
 }
 
 #[test]
+fn g_dedup_keeps_higher_token() {
+    let fixture = DiskFixture::new();
+    let batch = invoice_batch(&["A", "A"], &[10, 20], &["inv", "inv"]);
+    let low = crate::plugins::cdc::WalRowMeta::new(MutationKind::Insert, b"same".to_vec(), vec![1]);
+    let high =
+        crate::plugins::cdc::WalRowMeta::new(MutationKind::Insert, b"same".to_vec(), vec![9]);
+    fixture
+        .apply_events(
+            &fixture.spec,
+            WalCursor::default(),
+            &batch,
+            Some(&[low.clone(), high.clone()]),
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .measure("customer_invoice_totals", "A", "invoice_total")
+            .unwrap(),
+        20.0
+    );
+    let reverse = invoice_batch(&["A"], &[1], &["inv"]);
+    fixture
+        .apply_events(
+            &fixture.spec,
+            WalCursor {
+                seq: 1,
+                ..WalCursor::default()
+            },
+            &reverse,
+            Some(&[low]),
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .measure("customer_invoice_totals", "A", "invoice_total")
+            .unwrap(),
+        20.0
+    );
+}
+
+#[test]
 fn g_processor_dedup_event_id() {
     let fixture = DiskFixture::new();
     let first = SimEvent::new(MutationKind::Insert, "A", 40, "inv", "same");
@@ -121,21 +165,9 @@ fn g_filter_keeps_cdc_sidecar() {
     use crate::processor::test_support::invoice_batch;
     let batch = invoice_batch(&["a", "b", "c"], &[0, 5, 0], &["i1", "i2", "i3"]);
     let cdc = vec![
-        WalRowMeta {
-            mutation: MutationKind::Insert,
-            event_id: b"a".to_vec(),
-            order_token: vec![1],
-        },
-        WalRowMeta {
-            mutation: MutationKind::Insert,
-            event_id: b"b".to_vec(),
-            order_token: vec![2],
-        },
-        WalRowMeta {
-            mutation: MutationKind::Insert,
-            event_id: b"c".to_vec(),
-            order_token: vec![3],
-        },
+        WalRowMeta::new(MutationKind::Insert, b"a".to_vec(), vec![1]),
+        WalRowMeta::new(MutationKind::Insert, b"b".to_vec(), vec![2]),
+        WalRowMeta::new(MutationKind::Insert, b"c".to_vec(), vec![3]),
     ];
     let select = StatelessSelect {
         filter: Some("amount > 0".into()),
@@ -243,7 +275,8 @@ fn g_keyed_update() {
         .unwrap();
     fixture
         .apply(
-            &SimEvent::new(MutationKind::Update, "A", 7, "inv", "e2"),
+            &SimEvent::new(MutationKind::Update, "A", 7, "inv", "e2")
+                .with_before_row(SimEvent::new(MutationKind::Insert, "A", 10, "inv", "e1").row()),
             WalCursor {
                 seq: 1,
                 ..WalCursor::default()
@@ -285,12 +318,21 @@ fn g_keyed_delete() {
 }
 
 #[test]
-fn g_missing_last_row_as_insert() {
+fn g_update_without_before_is_skipped() {
     let fixture = DiskFixture::new();
     fixture
         .apply(
-            &SimEvent::new(MutationKind::Update, "A", 10, "inv", "e1"),
+            &SimEvent::new(MutationKind::Insert, "A", 10, "inv", "e0"),
             WalCursor::default(),
+        )
+        .unwrap();
+    fixture
+        .apply(
+            &SimEvent::new(MutationKind::Update, "B", 10, "inv", "e1"),
+            WalCursor {
+                seq: 1,
+                ..WalCursor::default()
+            },
         )
         .unwrap();
     assert_eq!(
@@ -298,6 +340,12 @@ fn g_missing_last_row_as_insert() {
             .measure("customer_invoice_totals", "A", "invoice_total")
             .unwrap(),
         10.0
+    );
+    assert_eq!(
+        fixture
+            .measure("customer_invoice_totals", "B", "invoice_total")
+            .unwrap(),
+        0.0
     );
 }
 
@@ -312,7 +360,8 @@ fn g_keyed_pk_change() {
         .unwrap();
     fixture
         .apply(
-            &SimEvent::new(MutationKind::Update, "B", 10, "inv", "e2"),
+            &SimEvent::new(MutationKind::Update, "B", 10, "inv", "e2")
+                .with_before_row(SimEvent::new(MutationKind::Insert, "A", 10, "inv", "e1").row()),
             WalCursor {
                 seq: 1,
                 ..WalCursor::default()
@@ -494,10 +543,29 @@ fn g_window_retract_on_time_change() {
                 ..WalCursor::default()
             },
             &window_batch(&["A"], &[10], &["inv"], &[t13]),
-            Some(&[crate::processor::test_support::meta(
-                MutationKind::Update,
-                "e2",
-            )]),
+            Some(&[
+                crate::processor::test_support::meta(MutationKind::Update, "e2").with_before(
+                    crate::plugins::cdc::BeforeImage {
+                        key: b"A".to_vec(),
+                        row: serde_json::to_vec(&BTreeMap::from([
+                            (
+                                "customer_id".to_string(),
+                                serde_json::Value::String("A".into()),
+                            ),
+                            ("amount".to_string(), serde_json::Value::from(10)),
+                            (
+                                "invoice_id".to_string(),
+                                serde_json::Value::String("inv".into()),
+                            ),
+                            (
+                                "created_at".to_string(),
+                                serde_json::Value::String(t12.into()),
+                            ),
+                        ]))
+                        .unwrap(),
+                    },
+                ),
+            ]),
             0,
         )
         .unwrap();

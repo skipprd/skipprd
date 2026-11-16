@@ -2391,13 +2391,13 @@ impl DataSinkSnowflakePlugin {
         ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
-            append_record_batch_to_cdc_apply, ddl_add_order_token_column,
-            ddl_create_tombstone_table, delete_if_newer_sql, guarded_warehouse_cdc_row_sql,
-            tombstone_table_name, upsert_if_newer_sql, warehouse_bulk_cdc_sql, CdcApplyBatch,
-            CdcApplyColumn, CdcWarehouseDialect,
+            append_record_batch_to_cdc_apply, collapse_apply_batch, ddl_add_order_token_column,
+            ddl_create_tombstone_table, delete_if_newer_sql, format_cdc_apply_value,
+            guarded_warehouse_cdc_row_sql, tombstone_table_name, upsert_if_newer_sql,
+            warehouse_bulk_cdc_sql, CdcApplyBatch, CdcApplyColumn, CdcApplyMutation,
+            CdcWarehouseDialect,
         };
         use skippr_runtime_sdk::metrics::counters;
-        use skippr_runtime_sdk::plugins::cdc::MutationKind;
 
         tracing::debug!(
             target: "snowflake",
@@ -2504,201 +2504,176 @@ impl DataSinkSnowflakePlugin {
             .map(|f| format!("\"{}\"", f.name().to_uppercase()))
             .collect();
 
+        let mut apply_batch = CdcApplyBatch {
+            columns: arrow_schema
+                .fields()
+                .iter()
+                .map(|field| {
+                    let name = field.name().to_uppercase();
+                    let target_type = col_defs
+                        .iter()
+                        .find(|(column, _)| column.eq_ignore_ascii_case(&name))
+                        .map(|(_, target_type)| target_type.clone())
+                        .unwrap_or_else(|| Self::arrow_type_to_snowflake_ddl(field.data_type()));
+                    CdcApplyColumn { name, target_type }
+                })
+                .collect(),
+            business_key_columns: business_key_columns.clone(),
+            rows: Vec::new(),
+        };
         let mut row_offset = 0usize;
-        let mut total_rows = 0usize;
-
+        while let Some(batch_result) = stream.next().await {
+            let batch =
+                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+            let num_rows = batch.num_rows();
+            if num_rows == 0 {
+                continue;
+            }
+            append_record_batch_to_cdc_apply(
+                &mut apply_batch,
+                &batch,
+                &ctx.part_meta.rows,
+                &ctx.decoded_ties().map_err(std::io::Error::other)?,
+                row_offset,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            row_offset += num_rows;
+        }
+        let total_rows = apply_batch.rows.len();
         let bulk_scalar_batch = !col_defs
             .iter()
             .any(|(_, target_type)| target_type.eq_ignore_ascii_case("VARIANT"));
-        if bulk_scalar_batch {
-            let mut apply_batch = CdcApplyBatch {
-                columns: arrow_schema
-                    .fields()
-                    .iter()
-                    .map(|field| {
-                        let name = field.name().to_uppercase();
-                        let target_type = col_defs
-                            .iter()
-                            .find(|(column, _)| column.eq_ignore_ascii_case(&name))
-                            .map(|(_, target_type)| target_type.clone())
-                            .unwrap_or_else(|| {
-                                Self::arrow_type_to_snowflake_ddl(field.data_type())
-                            });
-                        CdcApplyColumn { name, target_type }
-                    })
-                    .collect(),
-                business_key_columns: business_key_columns.clone(),
-                rows: Vec::new(),
-            };
-
-            while let Some(batch_result) = stream.next().await {
-                let batch = batch_result
-                    .map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
-                let num_rows = batch.num_rows();
-                if num_rows == 0 {
-                    continue;
+        if total_rows > 0 && bulk_scalar_batch {
+            match warehouse_bulk_cdc_sql(
+                CdcWarehouseDialect::Snowflake,
+                &fq_table,
+                &tombstone_table,
+                &apply_batch,
+            ) {
+                Ok(sql) => {
+                    self.execute_sql_script(
+                        &sql.transactional_script(CdcWarehouseDialect::Snowflake),
+                    )
+                    .await
+                    .map_err(|error| {
+                        counters::dec_uploads_in_flight();
+                        std::io::Error::other(format!("Snowflake bulk CDC apply: {error}"))
+                    })?;
                 }
-                append_record_batch_to_cdc_apply(
-                    &mut apply_batch,
-                    &batch,
-                    &ctx.part_meta.rows,
-                    row_offset,
-                )
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-                row_offset += num_rows;
-            }
-
-            total_rows = apply_batch.rows.len();
-            if total_rows > 0 {
-                match warehouse_bulk_cdc_sql(
-                    CdcWarehouseDialect::Snowflake,
-                    &fq_table,
-                    &tombstone_table,
-                    &apply_batch,
-                ) {
-                    Ok(sql) => {
-                        self.execute_sql_script(
-                            &sql.transactional_script(CdcWarehouseDialect::Snowflake),
+                Err(error) if error.is_warehouse_stage_limit() => {
+                    warn!(
+                        target: "snowflake",
+                        "CDC chunk exceeds the retryable 1 MiB SQL envelope; using guarded row apply: {}",
+                        error
+                    );
+                    let collapsed = collapse_apply_batch(&apply_batch);
+                    for row in &collapsed.rows {
+                        let statement = guarded_warehouse_cdc_row_sql::<SnowflakeCdcBackend>(
+                            CdcWarehouseDialect::Snowflake,
+                            &fq_table,
+                            &tombstone_table,
+                            &collapsed,
+                            row,
                         )
-                        .await
-                        .map_err(|error| {
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        self.execute_sql_script(&statement).await.map_err(|error| {
                             counters::dec_uploads_in_flight();
-                            std::io::Error::other(format!("Snowflake bulk CDC apply: {error}"))
+                            std::io::Error::other(format!("Snowflake guarded CDC apply: {error}"))
                         })?;
                     }
-                    Err(error) if error.is_warehouse_stage_limit() => {
-                        warn!(
-                            target: "snowflake",
-                            "CDC chunk exceeds the retryable 1 MiB SQL envelope; using guarded row apply: {}",
-                            error
+                }
+                Err(error) => {
+                    counters::dec_uploads_in_flight();
+                    return Err(std::io::Error::other(error.to_string()));
+                }
+            }
+            counters::add_parquet_rows(total_rows as u64);
+            info!(
+                target: "snowflake",
+                "CDC safely applied {} rows to {}",
+                total_rows,
+                table_name
+            );
+        } else if total_rows > 0 {
+            let apply_batch = collapse_apply_batch(&apply_batch);
+            for row in &apply_batch.rows {
+                let incoming = skippr_cdc::StoredWinner {
+                    order: row.metadata.order_token.clone(),
+                    tie: row.metadata.tie,
+                };
+                match row.metadata.mutation {
+                    CdcApplyMutation::Upsert => {
+                        let mut all_names = col_names_quoted.clone();
+                        all_names.push("\"_skippr_order_token\"".to_string());
+                        all_names.push("\"_skippr_tie_seq\"".to_string());
+                        all_names.push("\"_skippr_tie_ordinal\"".to_string());
+                        all_names.push("\"_skippr_tie_row\"".to_string());
+                        let mut all_values: Vec<String> = row
+                            .values
+                            .iter()
+                            .map(format_cdc_apply_value::<SnowflakeCdcBackend>)
+                            .collect();
+                        all_values.push(format!(
+                            "HEX_DECODE_BINARY('{}')",
+                            hex::encode(&incoming.order)
+                        ));
+                        all_values.push(incoming.tie.seq.to_string());
+                        all_values.push(incoming.tie.ordinal.to_string());
+                        all_values.push(incoming.tie.row.to_string());
+                        let sql = upsert_if_newer_sql::<SnowflakeCdcBackend>(
+                            &fq_table,
+                            &tombstone_table,
+                            &all_names,
+                            &all_values,
+                            &bk_names_quoted,
+                            &incoming,
                         );
-                        for row in &apply_batch.rows {
-                            let statement = guarded_warehouse_cdc_row_sql::<SnowflakeCdcBackend>(
-                                CdcWarehouseDialect::Snowflake,
-                                &fq_table,
-                                &tombstone_table,
-                                &apply_batch,
-                                row,
-                            )
-                            .map_err(|error| std::io::Error::other(error.to_string()))?;
-                            self.execute_sql_script(&statement).await.map_err(|error| {
-                                counters::dec_uploads_in_flight();
-                                std::io::Error::other(format!(
-                                    "Snowflake guarded CDC apply: {error}"
-                                ))
-                            })?;
+                        if let Err(e) = self.execute_sql_script(&sql).await {
+                            error!("CDC upsert failed for {}: {}", fq_table, e);
+                            counters::dec_uploads_in_flight();
+                            return Err(std::io::Error::other(format!(
+                                "Snowflake CDC upsert: {}",
+                                e
+                            )));
                         }
                     }
-                    Err(error) => {
-                        counters::dec_uploads_in_flight();
-                        return Err(std::io::Error::other(error.to_string()));
+                    CdcApplyMutation::Delete => {
+                        let bk_values: Vec<String> = business_key_columns
+                            .iter()
+                            .map(|bk| {
+                                let idx = apply_batch
+                                    .columns
+                                    .iter()
+                                    .position(|column| column.name.eq_ignore_ascii_case(bk))
+                                    .unwrap_or(0);
+                                format_cdc_apply_value::<SnowflakeCdcBackend>(&row.values[idx])
+                            })
+                            .collect();
+                        let sql = delete_if_newer_sql::<SnowflakeCdcBackend>(
+                            &fq_table,
+                            &tombstone_table,
+                            &bk_names_quoted,
+                            &bk_values,
+                            &bk_types,
+                            &incoming,
+                        );
+                        if let Err(e) = self.execute_sql_script(&sql).await {
+                            error!("CDC delete failed for {}: {}", fq_table, e);
+                            counters::dec_uploads_in_flight();
+                            return Err(std::io::Error::other(format!(
+                                "Snowflake CDC delete: {}",
+                                e
+                            )));
+                        }
                     }
                 }
-                counters::add_parquet_rows(total_rows as u64);
-                info!(
-                    target: "snowflake",
-                    "CDC safely applied {} rows to {}",
-                    total_rows,
-                    table_name
-                );
             }
-        } else {
-            while let Some(batch_result) = stream.next().await {
-                let batch = batch_result
-                    .map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
-                let num_rows = batch.num_rows();
-                if num_rows == 0 {
-                    continue;
-                }
-
-                for row in 0..num_rows {
-                    let meta_idx = row_offset + row;
-                    let row_meta = ctx.part_meta.rows.get(meta_idx).ok_or_else(|| {
-                        std::io::Error::other(format!(
-                            "CDC row metadata missing at index {} (have {})",
-                            meta_idx,
-                            ctx.part_meta.rows.len()
-                        ))
-                    })?;
-
-                    let order_token_hex: String = row_meta
-                        .order_token
-                        .iter()
-                        .map(|b| format!("{:02x}", b))
-                        .collect();
-
-                    match row_meta.mutation {
-                        MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
-                            let mut all_names = col_names_quoted.clone();
-                            all_names.push("\"_skippr_order_token\"".to_string());
-
-                            let mut all_values: Vec<String> = (0..batch.num_columns())
-                                .map(|col| {
-                                    Self::arrow_value_to_sql(batch.column(col).as_ref(), row)
-                                })
-                                .collect();
-                            all_values.push(format!("HEX_DECODE_BINARY('{}')", order_token_hex));
-
-                            let sql = upsert_if_newer_sql::<SnowflakeCdcBackend>(
-                                &fq_table,
-                                &tombstone_table,
-                                &all_names,
-                                &all_values,
-                                &bk_names_quoted,
-                                &order_token_hex,
-                            );
-
-                            if let Err(e) = self.execute_sql_script(&sql).await {
-                                error!("CDC upsert failed for {}: {}", fq_table, e);
-                                counters::dec_uploads_in_flight();
-                                return Err(std::io::Error::other(format!(
-                                    "Snowflake CDC upsert: {}",
-                                    e
-                                )));
-                            }
-                        }
-                        MutationKind::Delete => {
-                            let bk_values: Vec<String> = business_key_columns
-                                .iter()
-                                .map(|bk| {
-                                    let col_idx = arrow_schema
-                                        .fields()
-                                        .iter()
-                                        .position(|f| f.name().eq_ignore_ascii_case(bk))
-                                        .unwrap_or(0);
-                                    Self::arrow_value_to_sql(batch.column(col_idx).as_ref(), row)
-                                })
-                                .collect();
-
-                            let sql = delete_if_newer_sql::<SnowflakeCdcBackend>(
-                                &fq_table,
-                                &tombstone_table,
-                                &bk_names_quoted,
-                                &bk_values,
-                                &bk_types,
-                                &order_token_hex,
-                            );
-
-                            if let Err(e) = self.execute_sql_script(&sql).await {
-                                error!("CDC delete failed for {}: {}", fq_table, e);
-                                counters::dec_uploads_in_flight();
-                                return Err(std::io::Error::other(format!(
-                                    "Snowflake CDC delete: {}",
-                                    e
-                                )));
-                            }
-                        }
-                    }
-                }
-
-                row_offset += num_rows;
-                total_rows += num_rows;
-                counters::add_parquet_rows(num_rows as u64);
-                info!(
-                    "CDC applied {} rows to {} (total: {})",
-                    num_rows, table_name, total_rows
-                );
-            }
+            counters::add_parquet_rows(apply_batch.rows.len() as u64);
+            info!(
+                "CDC applied {} collapsed rows to {}",
+                apply_batch.rows.len(),
+                table_name
+            );
         }
 
         counters::add_upload(1);

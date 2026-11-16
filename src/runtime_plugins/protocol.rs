@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
+// Protocol 27: SyncContext.ties is 1:1 with CDC rows (WAL address).
 // Protocol 26: SchemaAlterRequest carries CommittedAlter.
 // Protocol 25: RuntimeOutputLayout.batch_time_fields for Iceberg identity time columns.
 // Protocol 24: IngestBatch.data is bytes; prepared IPC ingest frames are gone.
@@ -35,7 +36,7 @@ use serde::{Deserialize, Serialize};
 // payload cannot steal the next length prefix (EU Staging COPY desync).
 // Bump every plugin crate patch when this constant changes so catalog paths
 // stay immutable.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 26;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 27;
 pub const COMMIT_RECEIPT_VERSION: u32 = 1;
 pub const CATALOG_INTENT_VERSION: u32 = 2;
 pub const GLUE_PARTITION_CATALOG_INTENT_VERSION: u32 = 1;
@@ -1487,8 +1488,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_hard_cut_to_v26() {
-        assert_eq!(RUNTIME_PROTOCOL_VERSION, 26);
+    fn protocol_version_is_hard_cut_to_v27() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 27);
     }
 
     #[test]

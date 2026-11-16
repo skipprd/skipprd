@@ -1,0 +1,8 @@
+[package]
+name = "skippr-cdc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The only CDC winner test. Query, Iceberg, and warehouse call this crate."
+
+[dependencies]

@@ -64,7 +64,7 @@ pub use time_partition::layout_partition_spec;
 const ICEBERG_FILE_MAX_ROWS: usize = 100_000;
 const ICEBERG_FILE_MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 const ICEBERG_MAX_FILE_WRITES_IN_FLIGHT: usize = 4;
-const ICEBERG_CDC_STATE_SHARDS: u8 = 64;
+const ICEBERG_CDC_STATE_SHARDS: u8 = skippr_cdc::ICEBERG_CDC_STATE_SHARDS;
 const ICEBERG_MAX_ENVELOPE_KEYS: usize = 1_000_000;
 const ICEBERG_GROUPED_PENDING_VERSION: u32 = 2;
 const SNAPSHOT_COMPACTION_ID: &str = "skippr.compaction-id";
@@ -287,7 +287,7 @@ struct IcebergGroupedPending {
     rows: u64,
     files: Vec<PendingIcebergFile>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    state_delta: BTreeMap<String, String>,
+    state_delta: BTreeMap<String, StoredWinnerFile>,
 }
 
 /// Outputs uploaded for one maintenance plan, kept until its commit lands.
@@ -312,14 +312,78 @@ struct GroupedCommitResult {
     already_committed: bool,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct StoredWinnerFile {
+    order: String,
+    seq: u64,
+    ordinal: u32,
+    row: u64,
+}
+
+/// Live shard names are `{shard:02}.json`. Staged names include a unique
+/// infix. Vacuum deletes a staged object after the grace period when no live
+/// catalog entry names it.
+pub(crate) const CDC_STATE_STAGE_GRACE_MS: i64 = 60 * 60 * 1000;
+
+pub(crate) fn cdc_staged_object_may_delete(file_name: &str, age_ms: i64, grace_ms: i64) -> bool {
+    let live = file_name.len() == 7 && file_name.ends_with(".json");
+    !live && age_ms >= grace_ms
+}
+
+impl StoredWinnerFile {
+    fn stored(&self) -> Result<skippr_cdc::StoredWinner, String> {
+        let order = hex::decode(&self.order).map_err(|err| err.to_string())?;
+        Ok(skippr_cdc::StoredWinner {
+            order,
+            tie: skippr_cdc::Tie {
+                seq: self.seq,
+                ordinal: self.ordinal,
+                row: self.row,
+            },
+        })
+    }
+
+    fn incoming_replaces(&self, incoming: &Self) -> Result<bool, String> {
+        if self.order.len() != incoming.order.len() {
+            return Err(format!(
+                "CDC order token width changed from {} to {}",
+                self.order.len(),
+                incoming.order.len()
+            ));
+        }
+        Ok(skippr_cdc::beats(&incoming.stored()?, &self.stored()?))
+    }
+}
+
+fn apply_cdc_state_delta(
+    loaded: &mut BTreeMap<String, StoredWinnerFile>,
+    updates: &[(&String, &StoredWinnerFile)],
+) -> Result<(), String> {
+    for (business_key, incoming) in updates {
+        let should_update = loaded
+            .get(*business_key)
+            .map(|seen| seen.incoming_replaces(incoming))
+            .transpose()?
+            .unwrap_or(true);
+        if should_update {
+            loaded.insert((*business_key).clone(), (*incoming).clone());
+        }
+    }
+    Ok(())
+}
+
+fn content_etag(bytes: &[u8]) -> String {
+    format!("\"{}\"", hex::encode(md5::compute(bytes).0))
+}
+
 #[derive(Default)]
 struct CdcStateSession {
     loaded_shards: HashMap<u8, LoadedCdcStateShard>,
-    delta: BTreeMap<String, String>,
+    delta: BTreeMap<String, StoredWinnerFile>,
 }
 
 struct LoadedCdcStateShard {
-    values: BTreeMap<String, String>,
+    values: BTreeMap<String, StoredWinnerFile>,
     etag: Option<String>,
 }
 
@@ -514,7 +578,7 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
         ctx: SinkWriteContext<'_>,
     ) -> Result<(), io::Error> {
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => crate::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => crate::cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let object_stem = if ctx.idempotency_key.is_empty() {
@@ -1317,6 +1381,12 @@ impl<S: SinkSpec> IcebergWriter<S> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let catalog = Arc::clone(&self.catalog);
+        let staged = if pending.state_delta.is_empty() {
+            BTreeMap::new()
+        } else {
+            self.persist_cdc_state_delta(namespace, &pending.state_delta)
+                .await?
+        };
         let committed = self
             .commit_grouped_append_with_retries(
                 catalog.as_ref(),
@@ -1326,9 +1396,8 @@ impl<S: SinkSpec> IcebergWriter<S> {
                 &pending.manifest,
             )
             .await?;
-        if !pending.state_delta.is_empty() {
-            self.persist_cdc_state_delta(namespace, &pending.state_delta)
-                .await?;
+        if !staged.is_empty() {
+            self.promote_cdc_state(namespace, &staged).await?;
         }
         self.table_cache.write().await.insert(
             namespace.to_string(),
@@ -1981,7 +2050,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
                             .loaded_shards
                             .get(&cdc_state_shard(key))
                             .and_then(|shard| shard.values.get(key))
-                            .map(String::as_str)
+                            .cloned()
                     })?;
                     cdc_envelope.clear();
                     cdc_state.delta = final_state.tokens;
@@ -1992,10 +2061,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
                     let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
                     let stream = chunk.into_stream(reader_schema.clone());
                     let stream = match chunk_cdc.as_ref() {
-                        Some(cdc) => crate::cdc_encode::augment_stream_with_cdc_columns(
-                            stream,
-                            &cdc.part_meta,
-                        ),
+                        Some(cdc) => crate::cdc_encode::augment_cdc_stream(stream, cdc),
                         None => stream,
                     };
                     let batches = collect_record_batches(stream).await?;
@@ -2281,7 +2347,10 @@ impl<S: SinkSpec> IcebergWriter<S> {
             };
             let values =
                 serde_json::from_slice(&bytes).map_err(|err| io::Error::other(err.to_string()))?;
-            return Ok(Some(LoadedCdcStateShard { values, etag: None }));
+            return Ok(Some(LoadedCdcStateShard {
+                values,
+                etag: Some(content_etag(&bytes)),
+            }));
         }
         let response = match self
             .s3_client
@@ -2315,19 +2384,27 @@ impl<S: SinkSpec> IcebergWriter<S> {
     async fn persist_cdc_state_delta(
         &self,
         namespace: &str,
-        delta: &BTreeMap<String, String>,
-    ) -> Result<(), io::Error> {
-        let mut by_shard = BTreeMap::<u8, Vec<(&String, &String)>>::new();
-        for (key, token) in delta {
+        delta: &BTreeMap<String, StoredWinnerFile>,
+    ) -> Result<BTreeMap<u8, Vec<u8>>, io::Error> {
+        let mut by_shard = BTreeMap::<u8, Vec<(&String, &StoredWinnerFile)>>::new();
+        for (key, winner) in delta {
             by_shard
                 .entry(cdc_state_shard(key))
                 .or_default()
-                .push((key, token));
+                .push((key, winner));
         }
         let shards = by_shard.keys().copied().collect::<Vec<_>>();
         let mut state = CdcStateSession::default();
         self.ensure_cdc_shards_loaded(namespace, &mut state, &shards)
             .await?;
+        let unique = format!(
+            "{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let mut promoted = BTreeMap::new();
         for (shard, updates) in by_shard {
             let mut loaded = state.loaded_shards.remove(&shard).ok_or_else(|| {
                 io::Error::other(format!(
@@ -2348,62 +2425,29 @@ impl<S: SinkSpec> IcebergWriter<S> {
                         },
                     };
                 }
-                for (business_key, token) in &updates {
-                    let should_update = loaded
-                        .values
-                        .get(*business_key)
-                        .map(|seen| {
-                            compare_cdc_order_tokens(seen, token)
-                                .map(|seen_is_newer| !seen_is_newer)
-                        })
-                        .transpose()?
-                        .unwrap_or(true);
-                    if should_update {
-                        loaded
-                            .values
-                            .insert((*business_key).clone(), (*token).clone());
-                    }
+                apply_cdc_state_delta(&mut loaded.values, &updates)
+                    .map_err(|err| io::Error::other(err))?;
+                let live = self.load_cdc_state_shard(namespace, shard).await?;
+                let live_etag = live.as_ref().and_then(|shard| shard.etag.clone());
+                if live_etag != loaded.etag {
+                    continue;
                 }
                 let bytes = serde_json::to_vec(&loaded.values)
                     .map_err(|err| io::Error::other(err.to_string()))?;
-                if bucket.is_empty() {
-                    self.put_object_bytes(&bucket, &key, bytes.into()).await?;
-                    persisted = true;
-                    break;
-                }
-                let request = self
-                    .s3_client
-                    .put_object()
-                    .bucket(&bucket)
-                    .key(&key)
-                    .body(ByteStream::from(bytes));
-                let request = match loaded.etag.as_ref() {
-                    Some(etag) => request.if_match(etag),
-                    None => request.if_none_match("*"),
+                let staged_key = if let Some(stem) = key.strip_suffix(".json") {
+                    format!("{stem}.{unique}.json")
+                } else {
+                    format!("{key}.{unique}")
                 };
-                match request.send().await {
-                    Ok(_) => {
-                        persisted = true;
-                        break;
-                    }
-                    Err(err)
-                        if err
-                            .raw_response()
-                            .is_some_and(|response| response.status().as_u16() == 412)
-                            && attempt < 3 =>
-                    {
-                        warn!(
-                            "Iceberg CDC state shard {} changed concurrently; retrying conditional update",
-                            shard
-                        );
-                    }
-                    Err(err) => {
-                        return Err(io::Error::other(format!(
-                            "failed to persist Iceberg CDC state shard {}: {}",
-                            shard, err
-                        )))
-                    }
+                self.put_object_bytes(&bucket, &staged_key, bytes.clone().into())
+                    .await?;
+                let live_after = self.load_cdc_state_shard(namespace, shard).await?;
+                if live_after.as_ref().and_then(|shard| shard.etag.clone()) != loaded.etag {
+                    continue;
                 }
+                promoted.insert(shard, bytes);
+                persisted = true;
+                break;
             }
             if !persisted {
                 return Err(io::Error::other(format!(
@@ -2411,6 +2455,20 @@ impl<S: SinkSpec> IcebergWriter<S> {
                     shard
                 )));
             }
+        }
+        Ok(promoted)
+    }
+
+    async fn promote_cdc_state(
+        &self,
+        namespace: &str,
+        payloads: &BTreeMap<u8, Vec<u8>>,
+    ) -> Result<(), io::Error> {
+        for (shard, bytes) in payloads {
+            let state_uri = self.cdc_state_shard_uri(namespace, *shard)?;
+            let (bucket, key) = parse_object_location(&state_uri)?.parts();
+            self.put_object_bytes(&bucket, &key, bytes.clone().into())
+                .await?;
         }
         Ok(())
     }
@@ -2564,12 +2622,17 @@ impl<S: SinkSpec> IcebergWriter<S> {
             return Ok(());
         }
 
+        let staged = if state_updates.is_empty() {
+            BTreeMap::new()
+        } else {
+            self.persist_cdc_state_delta(&namespace, &state_updates.into_iter().collect())
+                .await?
+        };
         let committed = self
             .commit_append_with_retries(catalog.as_ref(), table.identifier().clone(), commit_files)
             .await?;
-        if !state_updates.is_empty() {
-            self.persist_cdc_state_delta(&namespace, &state_updates.into_iter().collect())
-                .await?;
+        if !staged.is_empty() {
+            self.promote_cdc_state(&namespace, &staged).await?;
         }
         info!(
             "Committed Iceberg append namespace={} table={} rows={}",
@@ -2991,7 +3054,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
                 .loaded_shards
                 .get(&cdc_state_shard(key))
                 .and_then(|shard| shard.values.get(key))
-                .map(String::as_str)
+                .cloned()
         })?;
         let upsert_rows = final_state
             .upserts
@@ -3508,23 +3571,47 @@ struct CdcFinalState {
     /// only to data files with an older sequence number, so `upserts` in the same
     /// commit survive while the previously committed version is retired.
     deletes: Vec<RecordBatch>,
-    /// Winning order token per key the envelope changed.
-    tokens: BTreeMap<String, String>,
+    /// Winning StoredWinner per key the envelope changed.
+    tokens: BTreeMap<String, StoredWinnerFile>,
 }
 
 struct CdcWinner {
     batch: usize,
     row: usize,
-    token: String,
+    winner: StoredWinnerFile,
     delete: bool,
+}
+
+fn stored_winner_file(batch: &RecordBatch, row: usize, token: &str) -> StoredWinnerFile {
+    let seq = batch
+        .column_by_name("_skippr_tie_seq")
+        .and_then(|col| col.as_any().downcast_ref::<Int64Array>())
+        .map(|col| col.value(row) as u64)
+        .unwrap_or(0);
+    let ordinal = batch
+        .column_by_name("_skippr_tie_ordinal")
+        .and_then(|col| col.as_any().downcast_ref::<Int32Array>())
+        .map(|col| col.value(row) as u32)
+        .unwrap_or(0);
+    let tie_row = batch
+        .column_by_name("_skippr_tie_row")
+        .and_then(|col| col.as_any().downcast_ref::<Int64Array>())
+        .map(|col| col.value(row) as u64)
+        .unwrap_or(row as u64);
+    StoredWinnerFile {
+        order: token.to_string(),
+        seq,
+        ordinal,
+        row: tie_row,
+    }
 }
 
 /// Collapse an envelope to one event per business key: the highest order token
 /// above the committed token wins. Iceberg sees each key at most once per commit.
-fn final_state_cdc_batches<'a>(
+fn final_state_cdc_batches(
     contract: &skippr_runtime_sdk::plugins::cdc::NamespaceContract,
     batches: &[RecordBatch],
-    committed_token: impl Fn(&str) -> Option<&'a str>,
+    committed: impl Fn(&str) -> Option<StoredWinnerFile>,
 ) -> Result<CdcFinalState, io::Error> {
     let mut winners: HashMap<String, CdcWinner> = HashMap::new();
     for (batch_idx, batch) in batches.iter().enumerate() {
@@ -3533,6 +3620,7 @@ fn final_state_cdc_batches<'a>(
         for row in 0..batch.num_rows() {
             let key = business_key_for_row(batch, &contract.business_key_columns, row)?;
             let token = validate_cdc_order_token(orders.value(row))?;
+            let incoming = stored_winner_file(batch, row, token);
             let delete = match mutations.value(row) {
                 "delete" => true,
                 "snapshot" | "insert" | "update" => false,
@@ -3544,11 +3632,14 @@ fn final_state_cdc_batches<'a>(
                 }
             };
             let seen = match winners.get(&key) {
-                Some(winner) => Some(winner.token.as_str()),
-                None => committed_token(&key),
+                Some(winner) => Some(winner.winner.clone()),
+                None => committed(&key),
             };
             if let Some(seen) = seen {
-                if compare_cdc_order_tokens(seen, token)? {
+                if !seen
+                    .incoming_replaces(&incoming)
+                    .map_err(|err| io::Error::other(err))?
+                {
                     continue;
                 }
             }
@@ -3563,7 +3654,7 @@ fn final_state_cdc_batches<'a>(
                 CdcWinner {
                     batch: batch_idx,
                     row,
-                    token: token.to_string(),
+                    winner: incoming,
                     delete,
                 },
             );
@@ -3575,7 +3666,7 @@ fn final_state_cdc_batches<'a>(
     let mut delete_masks = upsert_masks.clone();
     let mut tokens = BTreeMap::new();
     for (key, winner) in winners {
-        let retire = committed_token(&key).is_some();
+        let retire = committed(&key).is_some();
         if winner.delete {
             if retire {
                 delete_masks[winner.batch][winner.row] = true;
@@ -3586,7 +3677,7 @@ fn final_state_cdc_batches<'a>(
                 delete_masks[winner.batch][winner.row] = true;
             }
         }
-        tokens.insert(key, winner.token);
+        tokens.insert(key, winner.winner);
     }
 
     let mut upserts = Vec::new();
@@ -3746,7 +3837,7 @@ fn iceberg_table_suffix(namespace: &str) -> String {
 struct PreparedCdcStreams {
     upsert_stream: SendableRecordBatchStream,
     delete_stream: Option<SendableRecordBatchStream>,
-    state_updates: HashMap<String, String>,
+    state_updates: HashMap<String, StoredWinnerFile>,
     upsert_rows: u64,
 }
 
@@ -4139,7 +4230,7 @@ fn business_key_for_row(
     business_key_columns: &[String],
     row: usize,
 ) -> Result<String, io::Error> {
-    let mut values = Vec::with_capacity(business_key_columns.len());
+    let mut owned = Vec::with_capacity(business_key_columns.len());
     for column in business_key_columns {
         validate_flat_column_name(column)?;
         let idx = batch
@@ -4155,13 +4246,13 @@ fn business_key_for_row(
         }
         let value = array_value_to_string(array.as_ref(), row)
             .map_err(|err| io::Error::other(err.to_string()))?;
-        values.push(length_prefixed_key_part(column, &value));
+        owned.push((column.as_bytes().to_vec(), value.into_bytes()));
     }
-    Ok(values.concat())
-}
-
-fn length_prefixed_key_part(column: &str, value: &str) -> String {
-    format!("{}:{}{}:{}", column.len(), column, value.len(), value)
+    let parts: Vec<(&[u8], &[u8])> = owned
+        .iter()
+        .map(|(name, value)| (name.as_slice(), value.as_slice()))
+        .collect();
+    Ok(hex::encode(skippr_cdc::encode_business_key(&parts)))
 }
 
 fn validate_cdc_order_token(token: &str) -> Result<&str, io::Error> {
@@ -4172,19 +4263,6 @@ fn validate_cdc_order_token(token: &str) -> Result<&str, io::Error> {
         )));
     }
     Ok(token)
-}
-
-fn compare_cdc_order_tokens(seen: &str, incoming: &str) -> Result<bool, io::Error> {
-    validate_cdc_order_token(seen)?;
-    validate_cdc_order_token(incoming)?;
-    if seen.len() != incoming.len() {
-        return Err(io::Error::other(format!(
-            "CDC order token width changed from {} to {}; source order encoding must be fixed-width",
-            seen.len(),
-            incoming.len()
-        )));
-    }
-    Ok(seen >= incoming)
 }
 
 fn is_s3_get_object_not_found_error(err: &SdkError<GetObjectError>) -> bool {
@@ -4569,18 +4647,22 @@ fn append_cdc_encoded_fields(
     fields: &mut Vec<Arc<NestedField>>,
     seen_field_ids: &mut HashMap<i32, ()>,
 ) {
-    for name in ["_skippr_mutation", "_skippr_order_token"] {
+    for (name, ty) in [
+        ("_skippr_mutation", Type::Primitive(PrimitiveType::String)),
+        (
+            "_skippr_order_token",
+            Type::Primitive(PrimitiveType::String),
+        ),
+        ("_skippr_tie_seq", Type::Primitive(PrimitiveType::Long)),
+        ("_skippr_tie_ordinal", Type::Primitive(PrimitiveType::Int)),
+        ("_skippr_tie_row", Type::Primitive(PrimitiveType::Long)),
+    ] {
         if fields.iter().any(|field| field.name == name) {
             continue;
         }
         let field_id = unique_iceberg_field_id(namespace, &[name.to_string()], seen_field_ids);
         seen_field_ids.insert(field_id, ());
-        fields.push(Arc::new(NestedField::new(
-            field_id,
-            name,
-            Type::Primitive(PrimitiveType::String),
-            false,
-        )));
+        fields.push(Arc::new(NestedField::new(field_id, name, ty, false)));
     }
 }
 
@@ -5084,7 +5166,7 @@ mod tests {
         let mut fields = Vec::new();
         let mut seen = HashMap::new();
         append_cdc_encoded_fields("events", &mut fields, &mut seen);
-        assert_eq!(fields.len(), 2);
+        assert_eq!(fields.len(), 5);
         for field in &fields {
             assert!(
                 !field.required,
@@ -5335,17 +5417,16 @@ mod tests {
 
     #[test]
     fn structured_business_key_encoding_avoids_delimiter_collision() {
-        assert_ne!(
-            length_prefixed_key_part("a", "1|b=2"),
-            length_prefixed_key_part("a=1|b", "2")
-        );
+        let a = skippr_cdc::encode_business_key(&[(b"a", b"1|b=2")]);
+        let b = skippr_cdc::encode_business_key(&[(b"a=1|b", b"2")]);
+        assert_ne!(a, b);
     }
 
     #[test]
     fn cdc_order_token_comparison_requires_fixed_width_hex() {
-        assert!(compare_cdc_order_tokens("0002", "0001").unwrap());
-        assert!(!compare_cdc_order_tokens("0001", "0002").unwrap());
-        assert!(compare_cdc_order_tokens("02", "0001").is_err());
+        assert!(!skippr_cdc::incoming_replaces_fixed_width("0002", "0001").unwrap());
+        assert!(skippr_cdc::incoming_replaces_fixed_width("0001", "0002").unwrap());
+        assert!(skippr_cdc::incoming_replaces_fixed_width("02", "0001").is_err());
         assert!(validate_cdc_order_token("not_hex").is_err());
     }
 
@@ -5376,7 +5457,7 @@ mod tests {
     fn cdc_order_token_width_mismatch_is_rejected() {
         let eight = "00000000";
         let thirty_two = "00000000000000000000000000000001";
-        let err = compare_cdc_order_tokens(eight, thirty_two).unwrap_err();
+        let err = skippr_cdc::incoming_replaces_fixed_width(eight, thirty_two).unwrap_err();
         assert!(
             err.to_string().contains("CDC order token width changed"),
             "{err}"
@@ -5395,6 +5476,81 @@ mod tests {
         assert!(
             mixed.to_string().contains("CDC order token width changed"),
             "{mixed}"
+        );
+    }
+
+    #[test]
+    fn vacuum_does_not_delete_a_live_shard_or_a_young_staged_object() {
+        assert!(!cdc_staged_object_may_delete(
+            "00.json",
+            CDC_STATE_STAGE_GRACE_MS * 2,
+            CDC_STATE_STAGE_GRACE_MS
+        ));
+        assert!(!cdc_staged_object_may_delete(
+            "00.123.json",
+            CDC_STATE_STAGE_GRACE_MS - 1,
+            CDC_STATE_STAGE_GRACE_MS
+        ));
+        assert!(cdc_staged_object_may_delete(
+            "00.123.json",
+            CDC_STATE_STAGE_GRACE_MS,
+            CDC_STATE_STAGE_GRACE_MS
+        ));
+    }
+
+    #[test]
+    fn stale_etag_reload_reruns_beats_tombstone_then_older_upsert() {
+        let tomb = StoredWinnerFile {
+            order: "0a".into(),
+            seq: 1,
+            ordinal: 0,
+            row: 0,
+        };
+        let older = StoredWinnerFile {
+            order: "02".into(),
+            seq: 2,
+            ordinal: 0,
+            row: 0,
+        };
+        let key = "k".to_string();
+        let mut first = BTreeMap::new();
+        apply_cdc_state_delta(&mut first, &[(&key, &tomb)]).unwrap();
+        apply_cdc_state_delta(&mut first, &[(&key, &older)]).unwrap();
+        assert_eq!(first.get("k").unwrap().order, "0a");
+        let mut second = BTreeMap::new();
+        apply_cdc_state_delta(&mut second, &[(&key, &older)]).unwrap();
+        apply_cdc_state_delta(&mut second, &[(&key, &tomb)]).unwrap();
+        assert_eq!(second.get("k").unwrap().order, "0a");
+    }
+
+    #[test]
+    fn persist_cdc_state_delta_reloads_when_etag_is_stale() {
+        let prod = include_str!("lib.rs");
+        let persist = prod
+            .split("async fn persist_cdc_state_delta")
+            .nth(1)
+            .expect("persist_cdc_state_delta");
+        let persist = persist.split("async fn promote_cdc_state").next().unwrap();
+        assert!(persist.contains("apply_cdc_state_delta"));
+        assert!(persist.contains("live_etag != loaded.etag"));
+        assert!(persist.contains("for attempt in 1..=3"));
+    }
+
+    #[test]
+    fn crash_after_stage_before_catalog_leaves_staged_objects_unreadable() {
+        let prod = include_str!("lib.rs");
+        let stage = prod
+            .find("persist_cdc_state_delta(&namespace")
+            .expect("stage CDC state");
+        let commit = prod
+            .find("commit_append_with_retries(catalog.as_ref()")
+            .expect("catalog append");
+        let promote = prod
+            .find("promote_cdc_state(&namespace")
+            .expect("promote after catalog");
+        assert!(
+            stage < commit && commit < promote,
+            "stage, then catalog, then promote"
         );
     }
 
@@ -5450,6 +5606,22 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+        }
+    }
+
+    fn cdc_key(id: i32) -> String {
+        hex::encode(skippr_cdc::encode_business_key(&[(
+            b"id",
+            id.to_string().as_bytes(),
+        )]))
+    }
+
+    fn winner_file(order: &str) -> StoredWinnerFile {
+        StoredWinnerFile {
+            order: order.to_string(),
+            seq: 0,
+            ordinal: 0,
+            row: 0,
         }
     }
 
@@ -5513,8 +5685,8 @@ mod tests {
     #[test]
     fn cdc_final_state_drops_stale_rows_and_splits_upserts_from_deletes() {
         let committed = HashMap::from([
-            ("2:id1:2".to_string(), "00000001".to_string()),
-            ("2:id1:3".to_string(), "00000005".to_string()),
+            (cdc_key(2), winner_file("00000001")),
+            (cdc_key(3), winner_file("00000005")),
         ]);
         let state = final_state_cdc_batches(
             &exact_cdc_contract(),
@@ -5523,20 +5695,19 @@ mod tests {
                 vec!["insert", "delete", "update"],
                 vec!["00000002", "00000003", "00000004"],
             )],
-            |key| committed.get(key).map(String::as_str),
+            |key| committed.get(key).cloned(),
         )
         .unwrap();
 
         assert_eq!(ids(&state.upserts), vec![1]);
         assert_eq!(ids(&state.deletes), vec![2]);
-        assert_eq!(state.deletes[0].num_columns(), 1);
         assert_eq!(state.tokens.len(), 2);
-        assert!(!state.tokens.contains_key("2:id1:3"));
+        assert!(!state.tokens.contains_key(&cdc_key(3)));
     }
 
     #[test]
     fn cdc_update_of_a_committed_key_retires_the_committed_version() {
-        let committed = HashMap::from([("2:id1:1".to_string(), "00000001".to_string())]);
+        let committed = HashMap::from([(cdc_key(1), winner_file("00000001"))]);
         let state = final_state_cdc_batches(
             &exact_cdc_contract(),
             &[cdc_batch(
@@ -5544,14 +5715,14 @@ mod tests {
                 vec!["update", "insert"],
                 vec!["00000002", "00000002"],
             )],
-            |key| committed.get(key).map(String::as_str),
+            |key| committed.get(key).cloned(),
         )
         .unwrap();
 
         assert_eq!(ids(&state.upserts), vec![1, 2]);
         assert_eq!(ids(&state.deletes), vec![1], "new key 2 needs no delete");
         assert_eq!(
-            state.tokens.get("2:id1:1").map(String::as_str),
+            state.tokens.get(&cdc_key(1)).map(|w| w.order.as_str()),
             Some("00000002")
         );
     }
@@ -5581,7 +5752,7 @@ mod tests {
         assert_eq!(token, "00000004");
         assert!(state.deletes.is_empty());
         assert_eq!(
-            state.tokens.get("2:id1:1").map(String::as_str),
+            state.tokens.get(&cdc_key(1)).map(|w| w.order.as_str()),
             Some("00000004")
         );
     }
@@ -5724,8 +5895,24 @@ mod tests {
                 },
             ],
             state_delta: BTreeMap::from([
-                ("2:id1:1".to_string(), "00000002".to_string()),
-                ("2:id1:2".to_string(), "00000003".to_string()),
+                (
+                    "2:id1:1".to_string(),
+                    StoredWinnerFile {
+                        order: "00000002".to_string(),
+                        seq: 1,
+                        ordinal: 0,
+                        row: 0,
+                    },
+                ),
+                (
+                    "2:id1:2".to_string(),
+                    StoredWinnerFile {
+                        order: "00000003".to_string(),
+                        seq: 1,
+                        ordinal: 0,
+                        row: 1,
+                    },
+                ),
             ]),
         };
 
@@ -6157,6 +6344,10 @@ mod tests {
             .field_by_name("region")
             .unwrap()
             .id;
+        assert_eq!(
+            field_id, 7,
+            "create_table must keep skipprd field identity, not reassign 1..N"
+        );
         <IcebergWriter<TestIcebergSpec> as SchemaSink>::apply_alter(
             &writer,
             "orders",

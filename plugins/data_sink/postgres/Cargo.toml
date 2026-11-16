@@ -27,6 +27,8 @@ tokio.workspace = true
 tokio-postgres.workspace = true
 tracing.workspace = true
 skippr-runtime-sdk.workspace = true
+skippr-cdc.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 arrow.workspace = true

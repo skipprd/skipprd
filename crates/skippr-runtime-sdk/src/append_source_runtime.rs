@@ -6,12 +6,10 @@ use std::sync::Mutex as StdMutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use skippr_core::discover::OutputMetadata as CoreOutputMetadata;
 use skippr_core::helpers::logging::init_logging;
 use skippr_core::plugins::source_sync::SourceSyncContext;
 use skippr_core::plugins::traits::SourceOnceContract;
 use skippr_core::plugins::DataSource;
-use skippr_core::{METADATA, PIPELINE_SCHEMA_VERSION};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
@@ -19,7 +17,7 @@ use tokio::sync::{watch, Mutex};
 
 use crate::protocol::{
     HandshakeResponse, HostFrame, PluginDataFrame, PluginFrame, RuntimeExecutionMode,
-    RuntimePluginConfigEnvelope, RuntimePluginKind, RuntimeSchemaState, RuntimeSessionHello,
+    RuntimePluginConfigEnvelope, RuntimePluginKind, RuntimeSessionHello,
     RuntimeSourceCapabilityDescriptor, SourceEvent, SourceStartRequest, RUNTIME_PROTOCOL_VERSION,
     SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_EXECUTION_MODE_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
@@ -54,10 +52,6 @@ fn configure_runtime_source_data_dir(base_data_dir: &str, plugin_name: &str) {
 fn configure_runtime_input_config(config: &RuntimePluginConfigEnvelope) {
     std::env::set_var("SKIPPR_RUNTIME_INPUT_PLUGIN_NAME", &config.plugin_name);
     std::env::set_var("SKIPPR_RUNTIME_INPUT_CONFIG_JSON", &config.raw_config_json);
-}
-
-fn runtime_mode_suppresses_data_relay(execution_mode: RuntimeExecutionMode) -> bool {
-    matches!(execution_mode, RuntimeExecutionMode::Discover)
 }
 
 fn runtime_once_idle_timeout() -> Duration {
@@ -122,31 +116,6 @@ async fn wait_for_runtime_source_once_idle(
             return Ok(());
         }
         tokio::time::sleep(idle_timeout.saturating_sub(idle_for)).await;
-    }
-}
-
-fn current_runtime_schema_state_from_core() -> RuntimeSchemaState {
-    let metadata = METADATA.load();
-    let version = PIPELINE_SCHEMA_VERSION.load(Ordering::Acquire);
-    let namespaces: std::collections::BTreeMap<_, _> = metadata
-        .metadata
-        .iter()
-        .map(|(namespace, schema)| {
-            let output = if metadata.flattened {
-                CoreOutputMetadata::from_flatterened_metadata(schema)
-            } else {
-                CoreOutputMetadata::from_metadata(schema)
-            };
-            (namespace.clone(), output.into())
-        })
-        .collect();
-    RuntimeSchemaState {
-        version,
-        namespace_versions: namespaces
-            .keys()
-            .map(|namespace| (namespace.clone(), version))
-            .collect(),
-        namespaces,
     }
 }
 
@@ -428,8 +397,6 @@ pub async fn run_append_data_source_main(
         RuntimeExecutionMode::Sync => "sync",
     };
     std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, execution_mode_label);
-    let suppress_data_relay = runtime_mode_suppresses_data_relay(start.context.execution_mode);
-
     let control = RuntimeSourceControl::new();
     let mut shutdown_rx = control.subscribe_shutdown();
     let reader_control = control.clone();
@@ -448,7 +415,7 @@ pub async fn run_append_data_source_main(
     let mut source = build(start).await?;
     let once_idle_timeout = runtime_once_idle_timeout_for_contract(
         source_once,
-        suppress_data_relay,
+        false,
         source.execution_contract().once,
     );
     let namespace_contracts = source.source_namespace_contracts();
@@ -464,7 +431,7 @@ pub async fn run_append_data_source_main(
         control_writer.clone(),
         data_writer.clone(),
         ingest_ack_client,
-        suppress_data_relay,
+        false,
         activity.clone(),
     )
     .await?;
@@ -506,13 +473,6 @@ pub async fn run_append_data_source_main(
     match sync_result {
         Ok(()) => {
             sync_ctx.drain_payload_acks()?;
-            if suppress_data_relay {
-                control_writer
-                    .write(&PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(
-                        current_runtime_schema_state_from_core(),
-                    )))
-                    .await?;
-            }
             control_writer
                 .write(&PluginFrame::SourceEvent(SourceEvent::Completed))
                 .await?;
@@ -559,6 +519,26 @@ mod tests {
     fn runtime_source_start_preserves_once_flag() {
         assert!(source_start_request(true).once);
         assert!(!source_start_request(false).once);
+    }
+
+    #[test]
+    fn discover_relays_payloads_for_schema_infer() {
+        let prod = include_str!("append_source_runtime.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(
+            !prod.contains("SchemaStateUpdate"),
+            "append sources do not publish empty plugin METADATA in place of sample batches"
+        );
+        let args = prod
+            .split("RuntimeSourceSyncContext::new(")
+            .nth(1)
+            .expect("payload context");
+        assert!(
+            args.contains("false,"),
+            "File/Stdin Discover must relay sample batches so host ingest can persist dest schema: {args}"
+        );
     }
 
     #[test]

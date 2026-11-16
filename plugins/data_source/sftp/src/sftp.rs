@@ -45,6 +45,30 @@ impl DataSourceSftpPlugin {
         Self { config }
     }
 
+    fn file_ingest_batch(host: &str, file_path: &str, contents: Vec<u8>) -> Option<IngestBatch> {
+        if contents.is_empty() {
+            return None;
+        }
+        let filename = std::path::Path::new(file_path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
+        let namespace = format!("sftp.{}", filename);
+        let bytes = contents.len();
+        Some(IngestBatch {
+            offset_key: OffsetKey {
+                namespace: namespace.clone(),
+                partition: file_path.to_string(),
+            },
+            data: contents,
+            bytes,
+            offset_pos: None,
+            source_uri: format!("sftp://{}{}", host, file_path),
+            namespace: Some(namespace),
+            cdc_rows: None,
+        })
+    }
+
     fn connect(&self) -> Result<Session, std::io::Error> {
         let port = self.config.port.unwrap_or(22);
         let tcp = TcpStream::connect(format!("{}:{}", self.config.host, port))?;
@@ -116,33 +140,12 @@ impl DataSource for DataSourceSftpPlugin {
                 .read_to_end(&mut contents)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-            if contents.is_empty() {
+            let Some(batch) =
+                DataSourceSftpPlugin::file_ingest_batch(&self.config.host, &file_path, contents)
+            else {
                 continue;
-            }
-
-            let filename = std::path::Path::new(&file_path)
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_else(|| "file".to_string());
-            let namespace = format!("sftp.{}", filename);
-            let offset_key = OffsetKey {
-                namespace: namespace.clone(),
-                partition: file_path.clone(),
             };
-
-            let bytes = contents.len();
-            submit_payload_batches(
-                ctx.as_ref(),
-                vec![IngestBatch {
-                    offset_key,
-                    data: contents.into(),
-                    bytes,
-                    offset_pos: None,
-                    source_uri: format!("sftp://{}{}", self.config.host, file_path),
-                    namespace: Some(namespace),
-                    cdc_rows: None,
-                }],
-            )?;
+            submit_payload_batches(ctx.as_ref(), vec![batch])?;
         }
 
         Ok(())
@@ -150,5 +153,29 @@ impl DataSource for DataSourceSftpPlugin {
 
     fn execution_contract(&self) -> skippr_runtime_sdk::plugins::SourceExecutionContract {
         skippr_runtime_sdk::plugins::SourceExecutionContract::finite()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_file_is_one_submit_without_cdc_rows() {
+        let batch = DataSourceSftpPlugin::file_ingest_batch(
+            "example.test",
+            "/data/orders.jsonl",
+            b"{\"id\":1}\n".to_vec(),
+        )
+        .unwrap();
+        assert_eq!(batch.offset_key.partition, "/data/orders.jsonl");
+        assert!(batch.cdc_rows.is_none());
+        let submit = vec![batch];
+        assert_eq!(submit.len(), 1);
+    }
+
+    #[test]
+    fn empty_file_is_not_submitted() {
+        assert!(DataSourceSftpPlugin::file_ingest_batch("h", "/empty", Vec::new()).is_none());
     }
 }

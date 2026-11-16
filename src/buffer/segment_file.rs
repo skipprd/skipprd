@@ -1173,21 +1173,9 @@ mod tests_wal_writer {
             kind: WalPartKind::Cdc,
             row_count: 3,
             rows: vec![
-                WalRowMeta {
-                    mutation: MutationKind::Insert,
-                    event_id: vec![1],
-                    order_token: vec![0, 0, 0, 1],
-                },
-                WalRowMeta {
-                    mutation: MutationKind::Update,
-                    event_id: vec![2],
-                    order_token: vec![0, 0, 0, 2],
-                },
-                WalRowMeta {
-                    mutation: MutationKind::Delete,
-                    event_id: vec![3],
-                    order_token: vec![0, 0, 0, 3],
-                },
+                WalRowMeta::new(MutationKind::Insert, vec![1], vec![0, 0, 0, 1]),
+                WalRowMeta::new(MutationKind::Update, vec![2], vec![0, 0, 0, 2]),
+                WalRowMeta::new(MutationKind::Delete, vec![3], vec![0, 0, 0, 3]),
             ],
         };
         let meta_blob = bincode::serialize(&wal_part_meta).unwrap();
@@ -1274,11 +1262,7 @@ mod tests_wal_writer {
             kind: WalPartKind::Cdc,
             row_count: 3,
             rows: (0..3)
-                .map(|i| WalRowMeta {
-                    mutation: MutationKind::Snapshot,
-                    event_id: vec![i],
-                    order_token: vec![0, 0, 0, i],
-                })
+                .map(|i| WalRowMeta::new(MutationKind::Snapshot, vec![i], vec![0, 0, 0, i]))
                 .collect(),
         };
         let meta_blob = bincode::serialize(&wal_meta).unwrap();

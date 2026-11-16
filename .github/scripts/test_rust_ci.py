@@ -178,6 +178,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_skipprlake_local:", text)
         self.assertIn("e2e_skipprlake:", text)
         self.assertIn("e2e_postgres_cdc:", text)
+        self.assertIn("e2e_mysql_cdc:", text)
         self.assertIn("e2e_dynamodb_cdc:", text)
         self.assertIn("e2e_s3_schema_evolution:", text)
         self.assertIn("e2e_schema_lifecycle:", text)
@@ -240,16 +241,19 @@ class RustCiTests(unittest.TestCase):
             ROOT / ".github" / "actions" / "e2e" / "postgres_skipprlake_cdc" / "action.yaml"
         ).read_text(encoding="utf-8")
         self.assertIn("UPDATE orders SET name = 'alpha-prime'", postgres_cdc)
+        self.assertIn("DELETE FROM orders WHERE id = 2", postgres_cdc)
         self.assertIn("-p 5434:5432", postgres_cdc)
         self.assertIn("SELECT 1", postgres_cdc)
         self.assertIn("unsafe_enable_version_guessing", postgres_cdc)
         self.assertIn("bronze/postgres_orders", postgres_cdc)
         self.assertIn("count(DISTINCT id)", postgres_cdc)
+        self.assertIn("WHERE id = 2", postgres_cdc)
         self.assertIn("_skippr_order_token", postgres_cdc)
         self.assertIn("timeout --signal=KILL 120", postgres_cdc)
         self.assertIn("query --plain", postgres_cdc)
         self.assertIn("hold_before_compaction_sink", postgres_cdc)
         self.assertIn("alpha-wal", postgres_cdc)
+        self.assertIn("grep -qx '2'", postgres_cdc)
         dynamodb_cdc = (
             ROOT / ".github" / "actions" / "e2e" / "dynamodb_cdc_local" / "action.yaml"
         ).read_text(encoding="utf-8")
@@ -271,7 +275,11 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("_skippr_event_time", dynamodb_cdc_run)
         self.assertIn("alpha-prime", dynamodb_cdc_run)
         self.assertIn("gamma", dynamodb_cdc_run)
-        self.assertIn("expected 3 distinct keys", dynamodb_cdc_run)
+        self.assertIn("delete_item", dynamodb_cdc_run)
+        self.assertIn("expected 2 distinct keys", dynamodb_cdc_run)
+        self.assertIn("id=2 absent", dynamodb_cdc_run)
+        self.assertIn("DuckDB stream sync", dynamodb_cdc_run)
+        self.assertIn("winning DuckDB token is still the snapshot zeros", dynamodb_cdc_run)
         self.assertIn("Starting with", dynamodb_cdc_run)
         self.assertNotIn("year, month, day", dynamodb_cdc_run)
         self.assertNotIn("day partition columns missing", dynamodb_cdc_run)
@@ -281,6 +289,37 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("SkipprLake:", dynamodb_cdc_lake)
         self.assertIn("snapshot_then_cdc", dynamodb_cdc_duckdb)
         self.assertIn("Duckdb:", dynamodb_cdc_duckdb)
+        mysql_cdc = (
+            ROOT / ".github" / "actions" / "e2e" / "mysql_skipprlake_cdc" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        mysql_cdc_yml = (
+            ROOT / ".github" / "actions" / "e2e" / "mysql_skipprlake_cdc" / "skippr.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("binlog-row-image=FULL", mysql_cdc)
+        self.assertIn("UPDATE orders SET name = 'alpha-prime'", mysql_cdc)
+        self.assertIn("DELETE FROM orders WHERE id = 2", mysql_cdc)
+        self.assertIn("-p 3307:3306", mysql_cdc)
+        self.assertIn("skippr-plugin-data-source-mysql", mysql_cdc)
+        self.assertIn("snapshot_then_cdc", mysql_cdc_yml)
+        self.assertIn("business_key_columns: [\"id\"]", mysql_cdc_yml)
+        postgres_cdc_job = text.split("\n  e2e_postgres_cdc:", 1)[1].split(
+            "\n  e2e_mysql_cdc:", 1
+        )[0]
+        mysql_cdc_job = text.split("\n  e2e_mysql_cdc:", 1)[1].split(
+            "\n  e2e_dynamodb_cdc:", 1
+        )[0]
+        dynamodb_cdc_job = text.split("\n  e2e_dynamodb_cdc:", 1)[1].split(
+            "\n  e2e_s3_schema_evolution:", 1
+        )[0]
+        self.assertIn(
+            "plugin_binaries_dir: ./runtime-plugin-binaries-linux_x86", postgres_cdc_job
+        )
+        self.assertIn(
+            "plugin_binaries_dir: ./runtime-plugin-binaries-linux_x86", mysql_cdc_job
+        )
+        self.assertIn(
+            "plugin_binaries_dir: ./runtime-plugin-binaries-linux_x86", dynamodb_cdc_job
+        )
         postgres_cdc_yml = (
             ROOT / ".github" / "actions" / "e2e" / "postgres_skipprlake_cdc" / "skippr.yml"
         ).read_text(encoding="utf-8")
@@ -378,6 +417,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("e2e_file_duckdb", publish)
         self.assertIn("e2e_skipprlake", publish)
         self.assertIn("e2e_postgres_cdc", publish)
+        self.assertIn("e2e_mysql_cdc", publish)
         self.assertIn("e2e_dynamodb_cdc", publish)
         self.assertIn("e2e_s3_schema_evolution", publish)
         self.assertIn("e2e_schema_lifecycle", publish)

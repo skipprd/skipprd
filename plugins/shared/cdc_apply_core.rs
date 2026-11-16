@@ -4,6 +4,211 @@
 ///
 /// Sinks own their backend definitions by implementing `CdcApplyBackend`.
 /// This module owns the shared SQL generation algorithm.
+/// The winner is [`skippr_cdc::winner_of_set`] / [`skippr_cdc::beats`]. Callers
+/// do not compare tokens themselves.
+const ORDER_TOKEN_COL: &str = "_skippr_order_token";
+const TIE_SEQ_COL: &str = "_skippr_tie_seq";
+const TIE_ORD_COL: &str = "_skippr_tie_ordinal";
+const TIE_ROW_COL: &str = "_skippr_tie_row";
+
+fn sql_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// One SQL encoding of [`skippr_cdc::beats`]: greater token, or equal token and
+/// later `(seq, ordinal, row)`.
+pub(crate) fn sql_beats(
+    cand_tok: &str,
+    cand_seq: &str,
+    cand_ord: &str,
+    cand_row: &str,
+    inc_tok: &str,
+    inc_seq: &str,
+    inc_ord: &str,
+    inc_row: &str,
+) -> String {
+    format!(
+        "({cand_tok} > {inc_tok} OR ({cand_tok} = {inc_tok} AND ({cand_seq} > {inc_seq} OR ({cand_seq} = {inc_seq} AND ({cand_ord} > {inc_ord} OR ({cand_ord} = {inc_ord} AND {cand_row} > {inc_row}))))))"
+    )
+}
+
+pub(crate) fn sql_incoming_beats_alias(
+    stored: &str,
+    incoming_token_sql: &str,
+    incoming: &skippr_cdc::StoredWinner,
+) -> String {
+    sql_beats(
+        incoming_token_sql,
+        &incoming.tie.seq.to_string(),
+        &incoming.tie.ordinal.to_string(),
+        &incoming.tie.row.to_string(),
+        &format!("{stored}.{}", sql_ident(ORDER_TOKEN_COL)),
+        &format!("{stored}.{}", sql_ident(TIE_SEQ_COL)),
+        &format!("{stored}.{}", sql_ident(TIE_ORD_COL)),
+        &format!("{stored}.{}", sql_ident(TIE_ROW_COL)),
+    )
+}
+
+pub(crate) fn sql_stored_loses_to_incoming(
+    stored: &str,
+    incoming_token_sql: &str,
+    incoming: &skippr_cdc::StoredWinner,
+) -> String {
+    format!(
+        "{stored}.{} IS NULL OR {}",
+        sql_ident(ORDER_TOKEN_COL),
+        sql_incoming_beats_alias(stored, incoming_token_sql, incoming)
+    )
+}
+
+pub(crate) fn sql_stored_beats_incoming(
+    stored: &str,
+    incoming_token_sql: &str,
+    incoming: &skippr_cdc::StoredWinner,
+) -> String {
+    format!(
+        "{stored}.{} IS NOT NULL AND NOT ({})",
+        sql_ident(ORDER_TOKEN_COL),
+        sql_incoming_beats_alias(stored, incoming_token_sql, incoming)
+    )
+}
+
+pub(crate) fn sql_unqualified_loses_to_incoming(
+    incoming_token_sql: &str,
+    incoming: &skippr_cdc::StoredWinner,
+) -> String {
+    format!(
+        "{} IS NULL OR {}",
+        sql_ident(ORDER_TOKEN_COL),
+        sql_beats(
+            incoming_token_sql,
+            &incoming.tie.seq.to_string(),
+            &incoming.tie.ordinal.to_string(),
+            &incoming.tie.row.to_string(),
+            &sql_ident(ORDER_TOKEN_COL),
+            &sql_ident(TIE_SEQ_COL),
+            &sql_ident(TIE_ORD_COL),
+            &sql_ident(TIE_ROW_COL),
+        )
+    )
+}
+
+pub(crate) fn sql_stage_beats_stored(stage: &str, stored: &str) -> String {
+    sql_beats(
+        &format!("{stage}.{}", sql_ident("_skippr_cdc_order_token")),
+        &format!("{stage}.{}", sql_ident("_skippr_cdc_tie_seq")),
+        &format!("{stage}.{}", sql_ident("_skippr_cdc_tie_ordinal")),
+        &format!("{stage}.{}", sql_ident("_skippr_cdc_tie_row")),
+        &format!("{stored}.{}", sql_ident(ORDER_TOKEN_COL)),
+        &format!("{stored}.{}", sql_ident(TIE_SEQ_COL)),
+        &format!("{stored}.{}", sql_ident(TIE_ORD_COL)),
+        &format!("{stored}.{}", sql_ident(TIE_ROW_COL)),
+    )
+}
+
+pub(crate) fn sql_stored_loses_to_stage(stored: &str, stage: &str) -> String {
+    format!(
+        "{stored}.{} IS NULL OR {}",
+        sql_ident(ORDER_TOKEN_COL),
+        sql_stage_beats_stored(stage, stored)
+    )
+}
+
+pub(crate) fn sql_stored_beats_stage(stored: &str, stage: &str) -> String {
+    format!(
+        "{stored}.{} IS NOT NULL AND NOT ({})",
+        sql_ident(ORDER_TOKEN_COL),
+        sql_stage_beats_stored(stage, stored)
+    )
+}
+
+pub(crate) fn sql_stored_beats_stored(cand: &str, other: &str) -> String {
+    sql_beats(
+        &format!("{cand}.{}", sql_ident(ORDER_TOKEN_COL)),
+        &format!("{cand}.{}", sql_ident(TIE_SEQ_COL)),
+        &format!("{cand}.{}", sql_ident(TIE_ORD_COL)),
+        &format!("{cand}.{}", sql_ident(TIE_ROW_COL)),
+        &format!("{other}.{}", sql_ident(ORDER_TOKEN_COL)),
+        &format!("{other}.{}", sql_ident(TIE_SEQ_COL)),
+        &format!("{other}.{}", sql_ident(TIE_ORD_COL)),
+        &format!("{other}.{}", sql_ident(TIE_ROW_COL)),
+    )
+}
+
+pub(crate) fn sql_winner_assignments(source: &str) -> String {
+    format!(
+        "{} = {source}.{}, {} = {source}.{}, {} = {source}.{}, {} = {source}.{}",
+        sql_ident(ORDER_TOKEN_COL),
+        sql_ident("_skippr_cdc_order_token"),
+        sql_ident(TIE_SEQ_COL),
+        sql_ident("_skippr_cdc_tie_seq"),
+        sql_ident(TIE_ORD_COL),
+        sql_ident("_skippr_cdc_tie_ordinal"),
+        sql_ident(TIE_ROW_COL),
+        sql_ident("_skippr_cdc_tie_row"),
+    )
+}
+
+pub(crate) fn sql_winner_copy_from_target(source: &str) -> String {
+    format!(
+        "{} = {source}.{}, {} = {source}.{}, {} = {source}.{}, {} = {source}.{}",
+        sql_ident(ORDER_TOKEN_COL),
+        sql_ident(ORDER_TOKEN_COL),
+        sql_ident(TIE_SEQ_COL),
+        sql_ident(TIE_SEQ_COL),
+        sql_ident(TIE_ORD_COL),
+        sql_ident(TIE_ORD_COL),
+        sql_ident(TIE_ROW_COL),
+        sql_ident(TIE_ROW_COL),
+    )
+}
+
+fn incoming_winner(order: &[u8], tie: skippr_cdc::Tie) -> skippr_cdc::StoredWinner {
+    skippr_cdc::StoredWinner {
+        order: order.to_vec(),
+        tie,
+    }
+}
+
+fn row_winner(meta: &CdcApplyRowMetadata) -> skippr_cdc::StoredWinner {
+    incoming_winner(&meta.order_token, meta.tie)
+}
+
+/// Collapse one apply batch to the [`skippr_cdc::beats`] winner per business key.
+/// Equal token and equal tie keep the incumbent.
+pub fn collapse_apply_batch(batch: &CdcApplyBatch) -> CdcApplyBatch {
+    let key_indexes: Vec<usize> = batch
+        .business_key_columns
+        .iter()
+        .map(|name| {
+            batch
+                .columns
+                .iter()
+                .position(|column| column.name == *name)
+                .expect("validated business key column")
+        })
+        .collect();
+    let mut winners: Vec<CdcApplyRow> = Vec::new();
+    for row in &batch.rows {
+        if let Some(existing) = winners.iter_mut().find(|winner| {
+            key_indexes
+                .iter()
+                .all(|idx| winner.values[*idx] == row.values[*idx])
+        }) {
+            if skippr_cdc::beats(&row_winner(&row.metadata), &row_winner(&existing.metadata)) {
+                *existing = row.clone();
+            }
+        } else {
+            winners.push(row.clone());
+        }
+    }
+    CdcApplyBatch {
+        columns: batch.columns.clone(),
+        business_key_columns: batch.business_key_columns.clone(),
+        rows: winners,
+    }
+}
+
 pub trait CdcApplyBackend {
     const ORDER_TOKEN_TYPE: &'static str;
 
@@ -23,8 +228,15 @@ pub trait CdcApplyBackend {
 
     fn ddl_add_order_token_column(fq_table: &str) -> String {
         format!(
-            "ALTER TABLE {fq_table} ADD COLUMN IF NOT EXISTS \"_skippr_order_token\" {}",
+            "ALTER TABLE {fq_table} ADD COLUMN IF NOT EXISTS {} {};\n\
+             ALTER TABLE {fq_table} ADD COLUMN IF NOT EXISTS {} BIGINT;\n\
+             ALTER TABLE {fq_table} ADD COLUMN IF NOT EXISTS {} INTEGER;\n\
+             ALTER TABLE {fq_table} ADD COLUMN IF NOT EXISTS {} BIGINT",
+            sql_ident(ORDER_TOKEN_COL),
             Self::ORDER_TOKEN_TYPE,
+            sql_ident(TIE_SEQ_COL),
+            sql_ident(TIE_ORD_COL),
+            sql_ident(TIE_ROW_COL),
         )
     }
 
@@ -34,16 +246,20 @@ pub trait CdcApplyBackend {
     ) -> String {
         let mut col_defs: Vec<String> = business_key_cols
             .iter()
-            .map(|(name, ty)| format!("\"{}\" {} NOT NULL", name.replace('"', "\"\""), ty))
+            .map(|(name, ty)| format!("{} {} NOT NULL", sql_ident(name), ty))
             .collect();
         col_defs.push(format!(
-            "\"_skippr_order_token\" {} NOT NULL",
+            "{} {} NOT NULL",
+            sql_ident(ORDER_TOKEN_COL),
             Self::ORDER_TOKEN_TYPE
         ));
+        col_defs.push(format!("{} BIGINT NOT NULL", sql_ident(TIE_SEQ_COL)));
+        col_defs.push(format!("{} INTEGER NOT NULL", sql_ident(TIE_ORD_COL)));
+        col_defs.push(format!("{} BIGINT NOT NULL", sql_ident(TIE_ROW_COL)));
 
         let pk_cols: Vec<String> = business_key_cols
             .iter()
-            .map(|(name, _)| format!("\"{}\"", name.replace('"', "\"\"")))
+            .map(|(name, _)| sql_ident(name))
             .collect();
 
         format!(
@@ -60,39 +276,41 @@ pub trait CdcApplyBackend {
         all_col_names: &[String],
         all_col_values: &[String],
         business_key_names: &[String],
-        order_token_hex: &str,
+        incoming: &skippr_cdc::StoredWinner,
     ) -> String {
-        let token = Self::binary_literal(order_token_hex);
-
+        let token = Self::binary_literal(&encode_hex_bytes(&incoming.order));
         let tombstone_bk_match = tombstone_match_with_row_values(
             fq_tombstone_table,
             all_col_names,
             all_col_values,
             business_key_names,
         );
-
         let source_cols: Vec<String> = all_col_names
             .iter()
             .zip(all_col_values.iter())
             .map(|(name, val)| format!("{val} AS {name}"))
             .collect();
         let source_select = source_cols.join(", ");
-
-        let on_clause: Vec<String> = business_key_names
+        let on_match = business_key_names
             .iter()
             .map(|c| format!("t.{c} = s.{c}"))
-            .collect();
-        let on_match = on_clause.join(" AND ");
-
-        let update_set: Vec<String> = all_col_names
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let update_clause = all_col_names
             .iter()
             .filter(|c| !business_key_names.contains(c))
             .map(|c| format!("{c} = s.{c}"))
-            .collect();
-        let update_clause = update_set.join(", ");
-
-        let insert_vals: Vec<String> = all_col_names.iter().map(|c| format!("s.{c}")).collect();
-        let insert_val_list = insert_vals.join(", ");
+            .collect::<Vec<_>>()
+            .join(", ");
+        let insert_val_list = all_col_names
+            .iter()
+            .map(|c| format!("s.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tombstone_loses = sql_stored_loses_to_incoming(fq_tombstone_table, &token, incoming);
+        let target_loses = sql_stored_loses_to_incoming("t", &token, incoming);
+        let tombstone_loses_unqualified =
+            sql_stored_loses_to_incoming(fq_tombstone_table, &token, incoming);
 
         format!(
             "{}\
@@ -101,35 +319,27 @@ pub trait CdcApplyBackend {
              WHERE NOT EXISTS (\n\
                SELECT 1 FROM {}\n\
                WHERE {}\n\
-               AND {}.\"_skippr_order_token\" >= {}\n\
+               AND NOT ({tombstone_loses})\n\
              )) AS s\n\
              ON {}\n\
-             WHEN MATCHED AND (\n\
-               t.\"_skippr_order_token\" IS NULL\n\
-               OR t.\"_skippr_order_token\" < {}\n\
-             ) THEN UPDATE SET {}\n\
+             WHEN MATCHED AND ({target_loses}) THEN UPDATE SET {}\n\
              WHEN NOT MATCHED THEN INSERT ({})\n\
              VALUES ({});\n\
              DELETE FROM {}\n\
              WHERE {}\n\
-             AND {}.\"_skippr_order_token\" < {};{}",
+             AND ({tombstone_loses_unqualified});{}",
             Self::tx_begin(),
             Self::merge_keyword(),
             fq_table,
             source_select,
             fq_tombstone_table,
             tombstone_bk_match,
-            fq_tombstone_table,
-            token,
             on_match,
-            token,
             update_clause,
             all_col_names.join(", "),
             insert_val_list,
             fq_tombstone_table,
             tombstone_bk_match,
-            fq_tombstone_table,
-            token,
             Self::tx_commit(),
         )
     }
@@ -140,66 +350,110 @@ pub trait CdcApplyBackend {
         business_key_names: &[String],
         business_key_values: &[String],
         _business_key_types: &[String],
-        order_token_hex: &str,
+        incoming: &skippr_cdc::StoredWinner,
     ) -> String {
-        let token = Self::binary_literal(order_token_hex);
-
+        let token = Self::binary_literal(&encode_hex_bytes(&incoming.order));
         let delete_match = qualified_matches(business_key_names, business_key_values, None);
         let on_match = business_key_names
             .iter()
             .map(|c| format!("t.{c} = s.{c}"))
             .collect::<Vec<_>>()
             .join(" AND ");
-
-        let source_cols: Vec<String> = business_key_names
+        let seq = incoming.tie.seq;
+        let ord = incoming.tie.ordinal;
+        let row = incoming.tie.row;
+        let source_select = business_key_names
             .iter()
             .zip(business_key_values.iter())
             .map(|(name, val)| format!("{val} AS {name}"))
-            .chain(std::iter::once(format!(
-                "{token} AS \"_skippr_order_token\""
-            )))
-            .collect();
-        let source_select = source_cols.join(", ");
-
-        let tombstone_cols: Vec<String> = business_key_names
+            .chain([
+                format!("{token} AS {}", sql_ident(ORDER_TOKEN_COL)),
+                format!("{seq} AS {}", sql_ident(TIE_SEQ_COL)),
+                format!("{ord} AS {}", sql_ident(TIE_ORD_COL)),
+                format!("{row} AS {}", sql_ident(TIE_ROW_COL)),
+            ])
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tombstone_cols = business_key_names
             .iter()
             .cloned()
-            .chain(std::iter::once("\"_skippr_order_token\"".to_string()))
-            .collect();
-        let insert_vals: Vec<String> = business_key_names
+            .chain([
+                sql_ident(ORDER_TOKEN_COL),
+                sql_ident(TIE_SEQ_COL),
+                sql_ident(TIE_ORD_COL),
+                sql_ident(TIE_ROW_COL),
+            ])
+            .collect::<Vec<_>>();
+        let insert_vals = business_key_names
             .iter()
             .map(|c| format!("s.{c}"))
-            .chain(std::iter::once("s.\"_skippr_order_token\"".to_string()))
-            .collect();
-
+            .chain([
+                format!("s.{}", sql_ident(ORDER_TOKEN_COL)),
+                format!("s.{}", sql_ident(TIE_SEQ_COL)),
+                format!("s.{}", sql_ident(TIE_ORD_COL)),
+                format!("s.{}", sql_ident(TIE_ROW_COL)),
+            ])
+            .collect::<Vec<_>>();
+        let row_beats_incoming = format!(
+            "SELECT 1 FROM {fq_table} AS target\n\
+             WHERE {delete_match}\n\
+             AND {}",
+            sql_stored_beats_incoming("target", &token, incoming)
+        );
+        let tombstone_loses = sql_stored_loses_to_incoming("t", &token, incoming);
+        let target_loses = sql_stored_loses_to_incoming(fq_table, &token, incoming);
+        let sync_slots = format!(
+            "{} {} AS t\n\
+             USING (SELECT * FROM {fq_table}) AS s\n\
+             ON {on_match}\n\
+             WHEN MATCHED AND {}\n\
+               THEN UPDATE SET {}\n\
+             WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})",
+            Self::merge_keyword(),
+            fq_tombstone_table,
+            sql_stored_beats_stored("s", "t"),
+            sql_winner_copy_from_target("s"),
+            tombstone_cols.join(", "),
+            business_key_names
+                .iter()
+                .map(|c| format!("s.{c}"))
+                .chain([
+                    format!("s.{}", sql_ident(ORDER_TOKEN_COL)),
+                    format!("s.{}", sql_ident(TIE_SEQ_COL)),
+                    format!("s.{}", sql_ident(TIE_ORD_COL)),
+                    format!("s.{}", sql_ident(TIE_ROW_COL)),
+                ])
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
         format!(
             "{}\
              DELETE FROM {}\n\
              WHERE {}\n\
-             AND (\n\
-               {}.\"_skippr_order_token\" IS NULL\n\
-               OR {}.\"_skippr_order_token\" < {}\n\
-             );\n\
+             AND ({target_loses});\n\
              {} {} AS t\n\
-             USING (SELECT {}) AS s\n\
-             ON {}\n\
-             WHEN MATCHED AND t.\"_skippr_order_token\" < s.\"_skippr_order_token\"\n\
-               THEN UPDATE SET \"_skippr_order_token\" = s.\"_skippr_order_token\"\n\
+             USING (SELECT {source_select}) AS s\n\
+             ON {on_match}\n\
+             WHEN MATCHED AND ({tombstone_loses})\n\
+               AND NOT EXISTS (\n\
+                 {row_beats_incoming}\n\
+               )\n\
+               THEN UPDATE SET {winner}\n\
              WHEN NOT MATCHED\n\
-               THEN INSERT ({}) VALUES ({});{}",
+               AND NOT EXISTS (\n\
+                 {row_beats_incoming}\n\
+               )\n\
+               THEN INSERT ({}) VALUES ({});\n\
+             {sync_slots};{}",
             Self::tx_begin(),
             fq_table,
             delete_match,
-            fq_table,
-            fq_table,
-            token,
             Self::merge_keyword(),
             fq_tombstone_table,
-            source_select,
-            on_match,
             tombstone_cols.join(", "),
             insert_vals.join(", "),
             Self::tx_commit(),
+            winner = sql_winner_copy_from_target("s"),
         )
     }
 }
@@ -235,7 +489,7 @@ pub fn upsert_if_newer_sql<B: CdcApplyBackend>(
     all_col_names: &[String],
     all_col_values: &[String],
     business_key_names: &[String],
-    order_token_hex: &str,
+    incoming: &skippr_cdc::StoredWinner,
 ) -> String {
     B::upsert_if_newer_sql(
         fq_table,
@@ -243,7 +497,7 @@ pub fn upsert_if_newer_sql<B: CdcApplyBackend>(
         all_col_names,
         all_col_values,
         business_key_names,
-        order_token_hex,
+        incoming,
     )
 }
 
@@ -253,7 +507,7 @@ pub fn delete_if_newer_sql<B: CdcApplyBackend>(
     business_key_names: &[String],
     business_key_values: &[String],
     business_key_types: &[String],
-    order_token_hex: &str,
+    incoming: &skippr_cdc::StoredWinner,
 ) -> String {
     B::delete_if_newer_sql(
         fq_table,
@@ -261,7 +515,7 @@ pub fn delete_if_newer_sql<B: CdcApplyBackend>(
         business_key_names,
         business_key_values,
         business_key_types,
-        order_token_hex,
+        incoming,
     )
 }
 
@@ -302,9 +556,7 @@ pub struct CdcApplyRowMetadata {
     pub mutation: CdcApplyMutation,
     pub event_id: Vec<u8>,
     pub order_token: Vec<u8>,
-    /// Stable input position used only to make equal-token replays
-    /// deterministic while reducing a batch to one winner per business key.
-    pub source_ordinal: u64,
+    pub tie: skippr_cdc::Tie,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -343,9 +595,6 @@ pub enum CdcApplyBatchError {
     EmptyOrderToken {
         row: usize,
     },
-    DuplicateSourceOrdinal {
-        ordinal: u64,
-    },
     MissingRowMetadata {
         row: usize,
         available: usize,
@@ -382,9 +631,6 @@ impl std::fmt::Display for CdcApplyBatchError {
             } => write!(f, "CDC row {row} has {actual} values; expected {expected}"),
             Self::EmptyOrderToken { row } => {
                 write!(f, "CDC row {row} has an empty order token")
-            }
-            Self::DuplicateSourceOrdinal { ordinal } => {
-                write!(f, "CDC source ordinal {ordinal} is duplicated")
             }
             Self::MissingRowMetadata { row, available } => write!(
                 f,
@@ -435,7 +681,6 @@ impl CdcApplyBatch {
             }
         }
 
-        let mut ordinals = std::collections::HashSet::new();
         for (row_idx, row) in self.rows.iter().enumerate() {
             if row.values.len() != self.columns.len() {
                 return Err(CdcApplyBatchError::RowWidth {
@@ -446,11 +691,6 @@ impl CdcApplyBatch {
             }
             if row.metadata.order_token.is_empty() {
                 return Err(CdcApplyBatchError::EmptyOrderToken { row: row_idx });
-            }
-            if !ordinals.insert(row.metadata.source_ordinal) {
-                return Err(CdcApplyBatchError::DuplicateSourceOrdinal {
-                    ordinal: row.metadata.source_ordinal,
-                });
             }
         }
 
@@ -471,9 +711,17 @@ pub fn append_record_batch_to_cdc_apply(
     apply_batch: &mut CdcApplyBatch,
     record_batch: &datafusion::arrow::record_batch::RecordBatch,
     row_metadata: &[skippr_runtime_sdk::plugins::cdc::WalRowMeta],
+    ties: &[skippr_cdc::Tie],
     source_offset: usize,
 ) -> Result<(), CdcApplyBatchError> {
     use skippr_runtime_sdk::plugins::cdc::MutationKind;
+
+    if ties.len() != row_metadata.len() {
+        return Err(CdcApplyBatchError::MissingRowMetadata {
+            row: source_offset,
+            available: ties.len().min(row_metadata.len()),
+        });
+    }
 
     for row in 0..record_batch.num_rows() {
         let metadata_index = source_offset + row;
@@ -483,6 +731,13 @@ pub fn append_record_batch_to_cdc_apply(
                 .ok_or(CdcApplyBatchError::MissingRowMetadata {
                     row: metadata_index,
                     available: row_metadata.len(),
+                })?;
+        let tie =
+            ties.get(metadata_index)
+                .copied()
+                .ok_or(CdcApplyBatchError::MissingRowMetadata {
+                    row: metadata_index,
+                    available: ties.len(),
                 })?;
         let mutation = match row_metadata.mutation {
             MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
@@ -500,7 +755,7 @@ pub fn append_record_batch_to_cdc_apply(
                 mutation,
                 event_id: row_metadata.event_id.clone(),
                 order_token: row_metadata.order_token.clone(),
-                source_ordinal: metadata_index as u64,
+                tie,
             },
             values,
         });
@@ -716,11 +971,9 @@ impl WarehouseBulkCdcSql {
     }
 }
 
-/// Build explicitly bounded staging SQL and four set-based MERGEs:
-/// target upserts, target deletes, tombstone advances, and stale-tombstone
-/// cleanup. The winner relation collapses duplicate keys by descending order
-/// token and ascending source ordinal, matching sequential equal-token
-/// behavior deterministically.
+/// Build explicitly bounded staging SQL. Incoming rows are collapsed with
+/// [`skippr_cdc::beats`]. Both target and tombstone slots store the
+/// [`skippr_cdc::winner_of_set`] winner, including the tie.
 pub fn warehouse_bulk_cdc_sql(
     dialect: CdcWarehouseDialect,
     fq_table: &str,
@@ -730,6 +983,7 @@ pub fn warehouse_bulk_cdc_sql(
     use std::hash::{Hash, Hasher};
 
     batch.validate()?;
+    let batch = collapse_apply_batch(batch);
     if batch.rows.is_empty() {
         return Err(CdcApplyBatchError::NoRows);
     }
@@ -746,11 +1000,15 @@ pub fn warehouse_bulk_cdc_sql(
     let stage_name = dialect.temp_table_name(&format!("_skippr_cdc_stage_{suffix}"));
     let winners_name = dialect.temp_table_name(&format!("_skippr_cdc_winners_{suffix}"));
 
-    let ordinal = dialect.quote_identifier("_skippr_cdc_ordinal");
     let mutation = dialect.quote_identifier("_skippr_cdc_mutation");
     let stage_token = dialect.quote_identifier("_skippr_cdc_order_token");
-    let target_token = dialect.quote_identifier("_skippr_order_token");
-    let rank = dialect.quote_identifier("_skippr_cdc_rank");
+    let stage_tie_seq = dialect.quote_identifier("_skippr_cdc_tie_seq");
+    let stage_tie_ord = dialect.quote_identifier("_skippr_cdc_tie_ordinal");
+    let stage_tie_row = dialect.quote_identifier("_skippr_cdc_tie_row");
+    let target_token = dialect.quote_identifier(ORDER_TOKEN_COL);
+    let target_tie_seq = dialect.quote_identifier(TIE_SEQ_COL);
+    let target_tie_ord = dialect.quote_identifier(TIE_ORD_COL);
+    let target_tie_row = dialect.quote_identifier(TIE_ROW_COL);
     let target_columns = batch
         .columns
         .iter()
@@ -763,9 +1021,11 @@ pub fn warehouse_bulk_cdc_sql(
         .collect::<Vec<_>>();
 
     let stage_column_defs = [
-        format!("{ordinal} {} NOT NULL", dialect.ordinal_type()),
         format!("{mutation} {} NOT NULL", dialect.mutation_type()),
         format!("{stage_token} {} NOT NULL", dialect.order_token_type()),
+        format!("{stage_tie_seq} BIGINT NOT NULL"),
+        format!("{stage_tie_ord} INTEGER NOT NULL"),
+        format!("{stage_tie_row} BIGINT NOT NULL"),
     ]
     .into_iter()
     .chain(
@@ -779,22 +1039,30 @@ pub fn warehouse_bulk_cdc_sql(
     .join(", ");
     let create_stage = dialect.create_temp_table(&stage_name, &stage_column_defs);
 
-    let load_columns = [ordinal.clone(), mutation.clone(), stage_token.clone()]
-        .into_iter()
-        .chain(target_columns.iter().cloned())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let load_columns = [
+        mutation.clone(),
+        stage_token.clone(),
+        stage_tie_seq.clone(),
+        stage_tie_ord.clone(),
+        stage_tie_row.clone(),
+    ]
+    .into_iter()
+    .chain(target_columns.iter().cloned())
+    .collect::<Vec<_>>()
+    .join(", ");
     let load_prefix = format!("INSERT INTO {stage_name} ({load_columns}) VALUES\n");
     let mut load_rows = Vec::with_capacity(batch.rows.len());
     let mut encoded_row_bytes = 0usize;
     for row in &batch.rows {
         let mut values = vec![
-            row.metadata.source_ordinal.to_string(),
             match row.metadata.mutation {
                 CdcApplyMutation::Upsert => "0".to_string(),
                 CdcApplyMutation::Delete => "1".to_string(),
             },
             dialect.binary_literal(&encode_hex_bytes(&row.metadata.order_token)),
+            row.metadata.tie.seq.to_string(),
+            row.metadata.tie.ordinal.to_string(),
+            row.metadata.tie.row.to_string(),
         ];
         values.extend(
             row.values
@@ -843,56 +1111,83 @@ pub fn warehouse_bulk_cdc_sql(
         load_stage.push(format!("{load_prefix}{};", chunk.join(",\n")));
     }
 
-    let winner_projection = target_columns
-        .iter()
-        .map(|column| format!("ranked.{column}"))
-        .chain([
-            format!("ranked.{ordinal}"),
-            format!("ranked.{mutation}"),
-            format!("ranked.{stage_token}"),
-        ])
-        .collect::<Vec<_>>()
-        .join(", ");
-    let partition_by = business_keys
-        .iter()
-        .map(|column| format!("stage.{column}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let winner_select = format!(
-        "SELECT {winner_projection}\n\
-         FROM (\n\
-           SELECT stage.*,\n\
-             ROW_NUMBER() OVER (\n\
-               PARTITION BY {partition_by}\n\
-               ORDER BY stage.{stage_token} DESC, stage.{ordinal} ASC\n\
-             ) AS {rank}\n\
-           FROM {stage_name} AS stage\n\
-         ) AS ranked\n\
-         WHERE ranked.{rank} = 1"
-    );
+    let winner_select = format!("SELECT * FROM {stage_name}");
     let create_winners = dialect.create_temp_table_as(&winners_name, &winner_select);
 
     let target_to_source = key_match_aliases("target", "source", &business_keys);
     let tombstone_to_winner = key_match_aliases("tombstone", "winner", &business_keys);
+    let winner_assign = |alias: &str| {
+        format!(
+            "{target_token} = {alias}.{stage_token}, {target_tie_seq} = {alias}.{stage_tie_seq}, {target_tie_ord} = {alias}.{stage_tie_ord}, {target_tie_row} = {alias}.{stage_tie_row}"
+        )
+    };
+    let live_assign = |alias: &str| {
+        format!(
+            "{target_token} = {alias}.{target_token}, {target_tie_seq} = {alias}.{target_tie_seq}, {target_tie_ord} = {alias}.{target_tie_ord}, {target_tie_row} = {alias}.{target_tie_row}"
+        )
+    };
+    let stage_beats = |stage: &str, stored: &str| {
+        sql_beats(
+            &format!("{stage}.{stage_token}"),
+            &format!("{stage}.{stage_tie_seq}"),
+            &format!("{stage}.{stage_tie_ord}"),
+            &format!("{stage}.{stage_tie_row}"),
+            &format!("{stored}.{target_token}"),
+            &format!("{stored}.{target_tie_seq}"),
+            &format!("{stored}.{target_tie_ord}"),
+            &format!("{stored}.{target_tie_row}"),
+        )
+    };
+    let live_beats_tomb = sql_beats(
+        &format!("source.{target_token}"),
+        &format!("source.{target_tie_seq}"),
+        &format!("source.{target_tie_ord}"),
+        &format!("source.{target_tie_row}"),
+        &format!("tombstone.{target_token}"),
+        &format!("tombstone.{target_tie_seq}"),
+        &format!("tombstone.{target_tie_ord}"),
+        &format!("tombstone.{target_tie_row}"),
+    );
+    let stored_loses = |stored: &str, stage: &str| {
+        format!(
+            "{stored}.{target_token} IS NULL OR {}",
+            stage_beats(stage, stored)
+        )
+    };
+    let stored_beats = |stored: &str, stage: &str| {
+        format!(
+            "{stored}.{target_token} IS NOT NULL AND NOT ({})",
+            stage_beats(stage, stored)
+        )
+    };
+
     let target_update_assignments = target_columns
         .iter()
         .filter(|column| !business_keys.contains(column))
         .map(|column| format!("{column} = source.{column}"))
-        .chain(std::iter::once(format!(
-            "{target_token} = source.{stage_token}"
-        )))
+        .chain(std::iter::once(winner_assign("source")))
         .collect::<Vec<_>>()
         .join(", ");
     let target_insert_columns = target_columns
         .iter()
         .cloned()
-        .chain(std::iter::once(target_token.clone()))
+        .chain([
+            target_token.clone(),
+            target_tie_seq.clone(),
+            target_tie_ord.clone(),
+            target_tie_row.clone(),
+        ])
         .collect::<Vec<_>>()
         .join(", ");
     let target_insert_values = target_columns
         .iter()
         .map(|column| format!("source.{column}"))
-        .chain(std::iter::once(format!("source.{stage_token}")))
+        .chain([
+            format!("source.{stage_token}"),
+            format!("source.{stage_tie_seq}"),
+            format!("source.{stage_tie_ord}"),
+            format!("source.{stage_tie_row}"),
+        ])
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -903,19 +1198,18 @@ pub fn warehouse_bulk_cdc_sql(
          AND NOT EXISTS (\n\
            SELECT 1 FROM {fq_tombstone_table} AS tombstone\n\
            WHERE {tombstone_to_winner}\n\
-           AND tombstone.{target_token} >= winner.{stage_token}\n\
-         )"
+           AND {}\n\
+         )",
+        stored_beats("tombstone", "winner")
     );
     let apply_upserts = format!(
         "MERGE INTO {fq_table} AS target\n\
          USING ({upsert_source}) AS source\n\
          ON {target_to_source}\n\
-         WHEN MATCHED AND (\n\
-           target.{target_token} IS NULL\n\
-           OR target.{target_token} < source.{stage_token}\n\
-         ) THEN UPDATE SET {target_update_assignments}\n\
+         WHEN MATCHED AND ({}) THEN UPDATE SET {target_update_assignments}\n\
          WHEN NOT MATCHED THEN INSERT ({target_insert_columns})\n\
-         VALUES ({target_insert_values});"
+         VALUES ({target_insert_values});",
+        stored_loses("target", "source")
     );
 
     let delete_source = format!("SELECT * FROM {winners_name} WHERE {mutation} = 1");
@@ -923,42 +1217,84 @@ pub fn warehouse_bulk_cdc_sql(
         "MERGE INTO {fq_table} AS target\n\
          USING ({delete_source}) AS source\n\
          ON {target_to_source}\n\
-         WHEN MATCHED AND (\n\
-           target.{target_token} IS NULL\n\
-           OR target.{target_token} < source.{stage_token}\n\
-         ) THEN DELETE;"
+         WHEN MATCHED AND ({}) THEN DELETE;",
+        stored_loses("target", "source")
     );
 
     let tombstone_to_source = key_match_aliases("tombstone", "source", &business_keys);
     let tombstone_columns = business_keys
         .iter()
         .cloned()
-        .chain(std::iter::once(target_token.clone()))
+        .chain([
+            target_token.clone(),
+            target_tie_seq.clone(),
+            target_tie_ord.clone(),
+            target_tie_row.clone(),
+        ])
         .collect::<Vec<_>>()
         .join(", ");
     let tombstone_values = business_keys
         .iter()
         .map(|column| format!("source.{column}"))
-        .chain(std::iter::once(format!("source.{stage_token}")))
+        .chain([
+            format!("source.{stage_token}"),
+            format!("source.{stage_tie_seq}"),
+            format!("source.{stage_tie_ord}"),
+            format!("source.{stage_tie_row}"),
+        ])
         .collect::<Vec<_>>()
         .join(", ");
     let apply_tombstones = format!(
         "MERGE INTO {fq_tombstone_table} AS tombstone\n\
          USING ({delete_source}) AS source\n\
          ON {tombstone_to_source}\n\
-         WHEN MATCHED AND tombstone.{target_token} < source.{stage_token}\n\
-           THEN UPDATE SET {target_token} = source.{stage_token}\n\
-         WHEN NOT MATCHED THEN INSERT ({tombstone_columns})\n\
-           VALUES ({tombstone_values});"
+         WHEN MATCHED AND ({})\n\
+           AND NOT EXISTS (\n\
+             SELECT 1 FROM {fq_table} AS target\n\
+             WHERE {target_to_source}\n\
+             AND {}\n\
+           )\n\
+           THEN UPDATE SET {}\n\
+         WHEN NOT MATCHED AND NOT EXISTS (\n\
+           SELECT 1 FROM {fq_table} AS target\n\
+           WHERE {target_to_source}\n\
+           AND {}\n\
+         ) THEN INSERT ({tombstone_columns})\n\
+           VALUES ({tombstone_values});",
+        stored_loses("tombstone", "source"),
+        stored_beats("target", "source"),
+        winner_assign("source"),
+        stored_beats("target", "source"),
     );
 
     let upsert_winners = format!("SELECT * FROM {winners_name} WHERE {mutation} = 0");
+    let target_slot_values = business_keys
+        .iter()
+        .map(|column| format!("source.{column}"))
+        .chain([
+            format!("source.{target_token}"),
+            format!("source.{target_tie_seq}"),
+            format!("source.{target_tie_ord}"),
+            format!("source.{target_tie_row}"),
+        ])
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sync_slots = format!(
+        "MERGE INTO {fq_tombstone_table} AS tombstone\n\
+         USING (SELECT * FROM {fq_table}) AS source\n\
+         ON {tombstone_to_source}\n\
+         WHEN MATCHED AND ({live_beats_tomb})\n\
+           THEN UPDATE SET {}\n\
+         WHEN NOT MATCHED THEN INSERT ({tombstone_columns})\n\
+           VALUES ({target_slot_values});",
+        live_assign("source")
+    );
     let clear_stale_tombstones = format!(
         "MERGE INTO {fq_tombstone_table} AS tombstone\n\
          USING ({upsert_winners}) AS source\n\
          ON {tombstone_to_source}\n\
-         WHEN MATCHED AND tombstone.{target_token} < source.{stage_token}\n\
-           THEN DELETE;"
+         WHEN MATCHED AND ({}) THEN DELETE;",
+        stage_beats("source", "tombstone")
     );
 
     let apply_statements = if dialect == CdcWarehouseDialect::Redshift {
@@ -967,9 +1303,7 @@ pub fn warehouse_bulk_cdc_sql(
             .iter()
             .filter(|column| !business_keys.contains(column))
             .map(|column| format!("{column} = winner.{column}"))
-            .chain(std::iter::once(format!(
-                "{target_token} = winner.{stage_token}"
-            )))
+            .chain(std::iter::once(winner_assign("winner")))
             .collect::<Vec<_>>()
             .join(", ");
         let update_upserts = format!(
@@ -978,15 +1312,14 @@ pub fn warehouse_bulk_cdc_sql(
              FROM {winners_name} AS winner\n\
              WHERE winner.{mutation} = 0\n\
              AND {winner_to_target}\n\
-             AND (\n\
-               target.{target_token} IS NULL\n\
-               OR target.{target_token} < winner.{stage_token}\n\
-             )\n\
+             AND ({})\n\
              AND NOT EXISTS (\n\
                SELECT 1 FROM {fq_tombstone_table} AS tombstone\n\
                WHERE {tombstone_to_winner}\n\
-               AND tombstone.{target_token} >= winner.{stage_token}\n\
-             );"
+               AND {}\n\
+             );",
+            stored_loses("target", "winner"),
+            stored_beats("tombstone", "winner")
         );
         let insert_upserts = format!(
             "INSERT INTO {fq_table} ({target_insert_columns})\n\
@@ -1000,26 +1333,33 @@ pub fn warehouse_bulk_cdc_sql(
              AND NOT EXISTS (\n\
                SELECT 1 FROM {fq_tombstone_table} AS tombstone\n\
                WHERE {tombstone_to_source}\n\
-               AND tombstone.{target_token} >= source.{stage_token}\n\
-             );"
+               AND {}\n\
+             );",
+            stored_beats("tombstone", "source")
         );
         let delete_targets = format!(
             "DELETE FROM {fq_table} AS target\n\
              USING {winners_name} AS winner\n\
              WHERE winner.{mutation} = 1\n\
              AND {winner_to_target}\n\
-             AND (\n\
-               target.{target_token} IS NULL\n\
-               OR target.{target_token} < winner.{stage_token}\n\
-             );"
+             AND ({});",
+            stored_loses("target", "winner")
         );
         let update_tombstones = format!(
             "UPDATE {fq_tombstone_table} AS tombstone\n\
-             SET {target_token} = winner.{stage_token}\n\
+             SET {}\n\
              FROM {winners_name} AS winner\n\
              WHERE winner.{mutation} = 1\n\
              AND {tombstone_to_winner}\n\
-             AND tombstone.{target_token} < winner.{stage_token};"
+             AND ({})\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {fq_table} AS target\n\
+               WHERE {winner_to_target}\n\
+               AND {}\n\
+             );",
+            winner_assign("winner"),
+            stored_loses("tombstone", "winner"),
+            stored_beats("target", "winner")
         );
         let insert_tombstones = format!(
             "INSERT INTO {fq_tombstone_table} ({tombstone_columns})\n\
@@ -1029,14 +1369,38 @@ pub fn warehouse_bulk_cdc_sql(
              AND NOT EXISTS (\n\
                SELECT 1 FROM {fq_tombstone_table} AS tombstone\n\
                WHERE {tombstone_to_source}\n\
+             )\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {fq_table} AS target\n\
+               WHERE {target_to_source}\n\
+               AND {}\n\
+             );",
+            stored_beats("target", "source")
+        );
+        let sync_slots = format!(
+            "INSERT INTO {fq_tombstone_table} ({tombstone_columns})\n\
+             SELECT {target_slot_values}\n\
+             FROM {fq_table} AS source\n\
+             WHERE NOT EXISTS (\n\
+               SELECT 1 FROM {fq_tombstone_table} AS tombstone\n\
+               WHERE {tombstone_to_source}\n\
              );"
+        );
+        let raise_slots = format!(
+            "UPDATE {fq_tombstone_table} AS tombstone\n\
+             SET {}\n\
+             FROM {fq_table} AS source\n\
+             WHERE {tombstone_to_source}\n\
+             AND ({live_beats_tomb});",
+            live_assign("source")
         );
         let clear_tombstones = format!(
             "DELETE FROM {fq_tombstone_table} AS tombstone\n\
              USING {winners_name} AS winner\n\
              WHERE winner.{mutation} = 0\n\
              AND {tombstone_to_winner}\n\
-             AND tombstone.{target_token} < winner.{stage_token};"
+             AND ({});",
+            stage_beats("winner", "tombstone")
         );
         vec![
             update_upserts,
@@ -1044,6 +1408,8 @@ pub fn warehouse_bulk_cdc_sql(
             delete_targets,
             update_tombstones,
             insert_tombstones,
+            sync_slots,
+            raise_slots,
             clear_tombstones,
         ]
     } else {
@@ -1051,6 +1417,7 @@ pub fn warehouse_bulk_cdc_sql(
             apply_upserts,
             apply_deletes,
             apply_tombstones,
+            sync_slots,
             clear_stale_tombstones,
         ]
     };
@@ -1118,6 +1485,7 @@ pub fn guarded_warehouse_cdc_sql<B: CdcApplyBackend>(
     batch: &CdcApplyBatch,
 ) -> Result<Vec<String>, CdcApplyBatchError> {
     batch.validate()?;
+    let batch = collapse_apply_batch(batch);
 
     let target_columns = batch
         .columns
@@ -1144,31 +1512,40 @@ pub fn guarded_warehouse_cdc_sql<B: CdcApplyBackend>(
         .iter()
         .map(|index| batch.columns[*index].target_type.clone())
         .collect::<Vec<_>>();
-    let target_order_token = dialect.quote_identifier("_skippr_order_token");
+    let target_order_token = dialect.quote_identifier(ORDER_TOKEN_COL);
+    let target_tie_seq = dialect.quote_identifier(TIE_SEQ_COL);
+    let target_tie_ord = dialect.quote_identifier(TIE_ORD_COL);
+    let target_tie_row = dialect.quote_identifier(TIE_ROW_COL);
 
     Ok(batch
         .rows
         .iter()
         .map(|row| {
-            let order_token_hex = encode_hex_bytes(&row.metadata.order_token);
+            let incoming = row_winner(&row.metadata);
             match row.metadata.mutation {
                 CdcApplyMutation::Upsert => {
                     let mut names = target_columns.clone();
                     names.push(target_order_token.clone());
+                    names.push(target_tie_seq.clone());
+                    names.push(target_tie_ord.clone());
+                    names.push(target_tie_row.clone());
                     let mut values = row
                         .values
                         .iter()
                         .zip(batch.columns.iter())
                         .map(|(value, column)| dialect.value_literal(value, &column.target_type))
                         .collect::<Vec<_>>();
-                    values.push(B::binary_literal(&order_token_hex));
+                    values.push(B::binary_literal(&encode_hex_bytes(&incoming.order)));
+                    values.push(incoming.tie.seq.to_string());
+                    values.push(incoming.tie.ordinal.to_string());
+                    values.push(incoming.tie.row.to_string());
                     B::upsert_if_newer_sql(
                         fq_table,
                         fq_tombstone_table,
                         &names,
                         &values,
                         &business_key_columns,
-                        &order_token_hex,
+                        &incoming,
                     )
                 }
                 CdcApplyMutation::Delete => {
@@ -1187,7 +1564,7 @@ pub fn guarded_warehouse_cdc_sql<B: CdcApplyBackend>(
                         &business_key_columns,
                         &values,
                         &business_key_types,
-                        &order_token_hex,
+                        &incoming,
                     )
                 }
             }
@@ -1428,74 +1805,23 @@ fn encode_hex_bytes(bytes: &[u8]) -> String {
     encoded
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CdcBatchStatement {
-    Upsert {
-        all_col_names: Vec<String>,
-        all_col_values: Vec<String>,
-        business_key_names: Vec<String>,
-        order_token_hex: String,
-    },
-    Delete {
-        business_key_names: Vec<String>,
-        business_key_values: Vec<String>,
-        business_key_types: Vec<String>,
-        order_token_hex: String,
-    },
-}
-
-#[allow(dead_code)]
-pub fn batched_cdc_apply_sql<B: CdcApplyBackend>(
-    fq_table: &str,
-    fq_tombstone_table: &str,
-    statements: &[CdcBatchStatement],
-) -> String {
-    let mut body = String::new();
-    for statement in statements {
-        let sql = match statement {
-            CdcBatchStatement::Upsert {
-                all_col_names,
-                all_col_values,
-                business_key_names,
-                order_token_hex,
-            } => B::upsert_if_newer_sql(
-                fq_table,
-                fq_tombstone_table,
-                all_col_names,
-                all_col_values,
-                business_key_names,
-                order_token_hex,
-            ),
-            CdcBatchStatement::Delete {
-                business_key_names,
-                business_key_values,
-                business_key_types,
-                order_token_hex,
-            } => B::delete_if_newer_sql(
-                fq_table,
-                fq_tombstone_table,
-                business_key_names,
-                business_key_values,
-                business_key_types,
-                order_token_hex,
-            ),
-        };
-        let without_wrapping_tx = sql
-            .trim()
-            .strip_prefix(B::tx_begin().trim())
-            .unwrap_or(sql.trim())
-            .trim()
-            .strip_suffix(B::tx_commit().trim())
-            .unwrap_or(sql.trim())
-            .trim();
-        body.push_str(without_wrapping_tx);
-        if !without_wrapping_tx.ends_with(';') {
-            body.push(';');
+pub(crate) fn format_cdc_apply_value<B: CdcApplyBackend>(value: &CdcApplyValue) -> String {
+    match value {
+        CdcApplyValue::Null => "NULL".to_string(),
+        CdcApplyValue::Boolean(value) => {
+            if *value {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
         }
-        body.push('\n');
+        CdcApplyValue::Signed(value) => value.to_string(),
+        CdcApplyValue::Unsigned(value) => value.to_string(),
+        CdcApplyValue::Float(value) => value.clone(),
+        CdcApplyValue::Text(value) => sql_string_literal(value),
+        CdcApplyValue::Binary(value) => B::binary_literal(&encode_hex_bytes(value)),
+        CdcApplyValue::Date(value) | CdcApplyValue::Timestamp(value) => sql_string_literal(value),
     }
-    format!("{}{}{}", B::tx_begin(), body, B::tx_commit())
 }
 
 fn find_business_key_value<'a>(
@@ -1539,6 +1865,15 @@ fn qualified_matches(names: &[String], values: &[String], qualifier: Option<&str
 }
 
 #[cfg(test)]
+fn apply_tie(row: u64) -> skippr_cdc::Tie {
+    skippr_cdc::Tie {
+        seq: 1,
+        ordinal: 0,
+        row,
+    }
+}
+
+#[cfg(test)]
 pub fn warehouse_sql_test_batch() -> CdcApplyBatch {
     CdcApplyBatch {
         columns: vec![
@@ -1562,7 +1897,7 @@ pub fn warehouse_sql_test_batch() -> CdcApplyBatch {
                     mutation: CdcApplyMutation::Upsert,
                     event_id: b"upsert".to_vec(),
                     order_token: vec![1],
-                    source_ordinal: 0,
+                    tie: apply_tie(0),
                 },
                 values: vec![
                     CdcApplyValue::Signed(7),
@@ -1575,7 +1910,7 @@ pub fn warehouse_sql_test_batch() -> CdcApplyBatch {
                     mutation: CdcApplyMutation::Delete,
                     event_id: b"delete".to_vec(),
                     order_token: vec![2],
-                    source_ordinal: 1,
+                    tie: apply_tie(1),
                 },
                 values: vec![
                     CdcApplyValue::Signed(7),
@@ -1601,7 +1936,7 @@ pub fn warehouse_sql_test_batch_with_rows(row_count: usize, value_bytes: usize) 
                 },
                 event_id: format!("event-{ordinal}").into_bytes(),
                 order_token: (ordinal as u64).to_be_bytes().to_vec(),
-                source_ordinal: ordinal as u64,
+                tie: apply_tie(ordinal as u64),
             },
             values: vec![
                 CdcApplyValue::Signed(7),
@@ -1616,7 +1951,7 @@ pub fn warehouse_sql_test_batch_with_rows(row_count: usize, value_bytes: usize) 
 #[cfg(test)]
 mod tests {
     use super::{
-        guarded_warehouse_cdc_sql, tombstone_table_name, warehouse_bulk_cdc_sql,
+        apply_tie, guarded_warehouse_cdc_sql, tombstone_table_name, warehouse_bulk_cdc_sql,
         warehouse_sql_test_batch_with_rows, CdcApplyBackend, CdcApplyBatch, CdcApplyBatchError,
         CdcApplyColumn, CdcApplyMutation, CdcApplyRow, CdcApplyRowMetadata, CdcApplyValue,
         CdcWarehouseDialect,
@@ -1645,7 +1980,7 @@ mod tests {
                 mutation,
                 event_id: format!("event-{ordinal}").into_bytes(),
                 order_token: vec![token],
-                source_ordinal: ordinal,
+                tie: apply_tie(ordinal),
             },
             values: vec![
                 CdcApplyValue::Signed(tenant_id),
@@ -1711,7 +2046,7 @@ mod tests {
                     mutation: CdcApplyMutation::Upsert,
                     event_id: b"event-1".to_vec(),
                     order_token: vec![1],
-                    source_ordinal: 0,
+                    tie: apply_tie(0),
                 },
                 values: vec![CdcApplyValue::Signed(7), CdcApplyValue::Signed(42)],
             }],
@@ -1733,7 +2068,7 @@ mod tests {
                     mutation: CdcApplyMutation::Delete,
                     event_id: b"event-1".to_vec(),
                     order_token: vec![1],
-                    source_ordinal: 0,
+                    tie: apply_tie(0),
                 },
                 values: vec![],
             }],
@@ -1751,8 +2086,6 @@ mod tests {
 
     #[test]
     fn golden_contract_covers_mixed_replay_stale_composite_and_equal_tokens() {
-        use std::collections::BTreeMap;
-
         let batch = contract_batch(vec![
             contract_row(CdcApplyMutation::Upsert, 0, 1, 10, 1, "first"),
             contract_row(CdcApplyMutation::Upsert, 1, 1, 10, 1, "equal replay"),
@@ -1763,51 +2096,152 @@ mod tests {
             contract_row(CdcApplyMutation::Upsert, 6, 2, 20, 1, "other tenant"),
         ]);
 
-        let mut winners: BTreeMap<(i64, i64), &CdcApplyRow> = BTreeMap::new();
-        for row in &batch.rows {
-            let key = match (&row.values[0], &row.values[1]) {
-                (CdcApplyValue::Signed(tenant), CdcApplyValue::Signed(id)) => (*tenant, *id),
-                _ => unreachable!(),
-            };
-            let replace = winners.get(&key).map_or(true, |winner| {
-                row.metadata.order_token > winner.metadata.order_token
-                    || (row.metadata.order_token == winner.metadata.order_token
-                        && row.metadata.source_ordinal < winner.metadata.source_ordinal)
-            });
-            if replace {
-                winners.insert(key, row);
-            }
-        }
-
-        let primary = winners.get(&(10, 1)).unwrap();
+        let collapsed = super::collapse_apply_batch(&batch);
+        let primary = collapsed
+            .rows
+            .iter()
+            .find(|row| {
+                matches!(
+                    (&row.values[0], &row.values[1]),
+                    (CdcApplyValue::Signed(10), CdcApplyValue::Signed(1))
+                )
+            })
+            .unwrap();
         assert_eq!(primary.metadata.order_token, vec![4]);
         assert_eq!(primary.metadata.mutation, CdcApplyMutation::Upsert);
         assert_eq!(
             primary.values[2],
             CdcApplyValue::Text("resurrected".to_string())
         );
-        assert_eq!(winners.get(&(20, 1)).unwrap().metadata.order_token, vec![2]);
-
-        let equal_only = contract_batch(vec![
-            contract_row(CdcApplyMutation::Delete, 8, 7, 30, 1, ""),
-            contract_row(CdcApplyMutation::Upsert, 9, 7, 30, 1, "later ordinal"),
-        ]);
-        let first = equal_only
+        let other = collapsed
             .rows
             .iter()
-            .min_by(|left, right| {
-                right
-                    .metadata
-                    .order_token
-                    .cmp(&left.metadata.order_token)
-                    .then_with(|| {
-                        left.metadata
-                            .source_ordinal
-                            .cmp(&right.metadata.source_ordinal)
-                    })
+            .find(|row| {
+                matches!(
+                    (&row.values[0], &row.values[1]),
+                    (CdcApplyValue::Signed(20), CdcApplyValue::Signed(1))
+                )
             })
             .unwrap();
-        assert_eq!(first.metadata.mutation, CdcApplyMutation::Delete);
+        assert_eq!(other.metadata.order_token, vec![2]);
+
+        let equal_only = super::collapse_apply_batch(&contract_batch(vec![
+            contract_row(CdcApplyMutation::Delete, 8, 7, 30, 1, ""),
+            contract_row(CdcApplyMutation::Upsert, 9, 7, 30, 1, "later ordinal"),
+        ]));
+        assert_eq!(equal_only.rows.len(), 1);
+        assert_eq!(
+            equal_only.rows[0].metadata.mutation,
+            CdcApplyMutation::Upsert
+        );
+        assert_eq!(
+            equal_only.rows[0].values[2],
+            CdcApplyValue::Text("later ordinal".to_string())
+        );
+    }
+
+    #[test]
+    fn row_10_tombstone_4_delete_7_both_slots_stay_10() {
+        let batch = contract_batch(vec![contract_row(
+            CdcApplyMutation::Delete,
+            0,
+            7,
+            10,
+            1,
+            "",
+        )]);
+        for dialect in [
+            CdcWarehouseDialect::Snowflake,
+            CdcWarehouseDialect::BigQuery,
+            CdcWarehouseDialect::Redshift,
+            CdcWarehouseDialect::Synapse,
+            CdcWarehouseDialect::MotherDuck,
+        ] {
+            let sql = warehouse_bulk_cdc_sql(dialect, "target", "tombstones", &batch).unwrap();
+            let apply = sql.apply_statements.join("\n");
+            let row = skippr_cdc::StoredWinner {
+                order: vec![10],
+                tie: apply_tie(1),
+            };
+            let tomb = skippr_cdc::StoredWinner {
+                order: vec![4],
+                tie: apply_tie(1),
+            };
+            let delete = skippr_cdc::StoredWinner {
+                order: vec![7],
+                tie: apply_tie(0),
+            };
+            assert_eq!(
+                skippr_cdc::winner_of_set(Some(&row), Some(&tomb), &delete),
+                row
+            );
+            assert!(
+                apply.contains("_skippr_tie_seq"),
+                "{dialect:?} stores the tie on both slots"
+            );
+            assert!(
+                apply.contains("IS NOT NULL AND NOT"),
+                "{dialect:?} leaves a stronger live row in place"
+            );
+            assert!(
+                apply.contains("_skippr_order_token"),
+                "{dialect:?} copies the winning row token onto the tombstone"
+            );
+        }
+    }
+
+    #[test]
+    fn incoming_upsert_that_beats_both_slots_replaces_and_clears_tombstone() {
+        let batch = contract_batch(vec![contract_row(
+            CdcApplyMutation::Upsert,
+            0,
+            11,
+            10,
+            1,
+            "live",
+        )]);
+        for dialect in [
+            CdcWarehouseDialect::Snowflake,
+            CdcWarehouseDialect::BigQuery,
+            CdcWarehouseDialect::Redshift,
+            CdcWarehouseDialect::Synapse,
+            CdcWarehouseDialect::MotherDuck,
+        ] {
+            let sql = warehouse_bulk_cdc_sql(dialect, "target", "tombstones", &batch).unwrap();
+            let apply = sql.apply_statements.join("\n");
+            assert!(apply.contains("mutation") || apply.contains("_skippr_cdc_mutation"));
+            assert!(
+                apply.contains("tombstone")
+                    && (apply.contains("DELETE") || apply.contains("THEN DELETE")),
+                "{dialect:?} clears a stale tombstone when the upsert wins"
+            );
+        }
+    }
+
+    #[test]
+    fn incoming_that_loses_to_either_slot_writes_nothing() {
+        let batch = contract_batch(vec![contract_row(
+            CdcApplyMutation::Upsert,
+            0,
+            1,
+            10,
+            1,
+            "stale",
+        )]);
+        for dialect in [
+            CdcWarehouseDialect::Snowflake,
+            CdcWarehouseDialect::BigQuery,
+            CdcWarehouseDialect::Redshift,
+            CdcWarehouseDialect::Synapse,
+            CdcWarehouseDialect::MotherDuck,
+        ] {
+            let sql = warehouse_bulk_cdc_sql(dialect, "target", "tombstones", &batch).unwrap();
+            let apply = sql.apply_statements.join("\n");
+            assert!(
+                apply.contains("_skippr_tie_row"),
+                "{dialect:?} writes nothing unless incoming beats the stored winner"
+            );
+        }
     }
 
     #[test]
@@ -1828,9 +2262,9 @@ mod tests {
             let setup = sql.setup_statements.join("\n");
             let apply = sql.apply_statements.join("\n");
             let cleanup = sql.cleanup_statements.join("\n");
-            assert!(setup.contains("ROW_NUMBER() OVER"));
+            assert!(!setup.contains("ROW_NUMBER() OVER"));
             assert!(setup.contains("_skippr_cdc_order_token"));
-            assert!(setup.contains("_skippr_cdc_ordinal"));
+            assert!(setup.contains("_skippr_cdc_tie_seq"));
             assert!(setup.contains("tenant_id"));
             assert!(setup.contains("id"));
             if dialect == CdcWarehouseDialect::Redshift {
@@ -1838,10 +2272,11 @@ mod tests {
                 assert!(apply.contains("UPDATE target AS target"));
                 assert!(apply.contains("DELETE FROM tombstones AS tombstone"));
             } else {
-                assert_eq!(apply.matches("MERGE INTO").count(), 4);
+                assert_eq!(apply.matches("MERGE INTO").count(), 5);
             }
             assert!(apply.contains("tombstone"));
-            assert!(apply.contains(">="));
+            assert!(apply.contains("_skippr_tie_seq"));
+            assert!(!apply.contains("ROW_NUMBER()"));
             assert_eq!(cleanup.matches("DROP TABLE IF EXISTS").count(), 2);
         }
 
@@ -1878,6 +2313,25 @@ mod tests {
         let motherduck = CdcWarehouseDialect::MotherDuck.staging_limits();
         assert_eq!(motherduck.max_rows, 1_000);
         assert_eq!(motherduck.max_total_encoded_bytes, 512 * 1024);
+    }
+
+    #[test]
+    fn guarded_path_collapses_duplicate_keys_before_row_sql() {
+        let batch = contract_batch(vec![
+            contract_row(CdcApplyMutation::Upsert, 0, 1, 10, 1, "first"),
+            contract_row(CdcApplyMutation::Upsert, 1, 2, 10, 1, "winner"),
+            contract_row(CdcApplyMutation::Delete, 2, 3, 20, 1, ""),
+        ]);
+        let sql = guarded_warehouse_cdc_sql::<TestBackend>(
+            CdcWarehouseDialect::Snowflake,
+            "target",
+            "tombstones",
+            &batch,
+        )
+        .unwrap();
+        assert_eq!(sql.len(), 2);
+        assert!(sql.iter().any(|statement| statement.contains("'winner'")));
+        assert!(!sql.iter().any(|statement| statement.contains("'first'")));
     }
 
     #[test]

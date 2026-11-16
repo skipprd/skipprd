@@ -612,6 +612,66 @@ pub fn excluded_slices(table: &Table, snapshot_id: i64) -> Result<HashSet<WalSli
     .map_err(|err| DataFusionError::Plan(err.to_string()))
 }
 
+#[derive(serde::Deserialize)]
+struct SideFileWinner {
+    order: String,
+    seq: u64,
+    ordinal: u32,
+    row: u64,
+}
+
+/// Load Iceberg CDC side-file winners. Missing shards are absent, not empty.
+pub async fn load_cdc_stored_winners(
+    table: &Table,
+) -> Result<std::collections::BTreeMap<Vec<u8>, crate::plugins::cdc::StoredWinner>> {
+    let location = table.metadata().location().trim_end_matches('/');
+    let file_io = table.file_io();
+    let mut out = std::collections::BTreeMap::new();
+    for shard in 0..skippr_cdc::ICEBERG_CDC_STATE_SHARDS {
+        let path = format!("{location}/metadata/skippr-cdc-state-v2/{shard:02}.json");
+        let input = file_io
+            .new_input(&path)
+            .map_err(|err| DataFusionError::External(Box::new(err)))?;
+        match input.exists().await {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(err) => {
+                return Err(DataFusionError::Execution(format!(
+                    "CDC side file {path}: {err}"
+                )));
+            }
+        }
+        let bytes = input
+            .read()
+            .await
+            .map_err(|err| DataFusionError::Execution(format!("CDC side file {path}: {err}")))?;
+        let values: std::collections::BTreeMap<String, SideFileWinner> =
+            serde_json::from_slice(&bytes).map_err(|err| {
+                DataFusionError::Execution(format!("CDC side file {path}: {err}"))
+            })?;
+        for (hex_key, file) in values {
+            let key = hex::decode(&hex_key).map_err(|err| {
+                DataFusionError::Execution(format!("CDC side-file key '{hex_key}': {err}"))
+            })?;
+            let order = hex::decode(&file.order).map_err(|err| {
+                DataFusionError::Execution(format!("CDC side-file token '{}': {err}", file.order))
+            })?;
+            out.insert(
+                key,
+                crate::plugins::cdc::StoredWinner {
+                    order,
+                    tie: crate::plugins::cdc::Tie {
+                        seq: file.seq,
+                        ordinal: file.ordinal,
+                        row: file.row,
+                    },
+                },
+            );
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

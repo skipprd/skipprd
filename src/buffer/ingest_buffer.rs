@@ -243,6 +243,7 @@ struct CompactionEntry {
     ordinal: usize,
     idx: SegmentPartitionIndexEntry,
     wal_ref: WalPartRef,
+    seq: u64,
 }
 
 struct CompactionWork {
@@ -986,18 +987,31 @@ impl GlobalSegment {
     }
 }
 
+fn next_ingest_batch_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn serialize_cdc_meta_to_blobs(
     cdc_meta: &HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
     batches: &HashMap<PartitionKey, WalPayload>,
 ) -> HashMap<PartitionKey, Vec<u8>> {
-    use crate::plugins::cdc::WalPartMeta;
+    use crate::plugins::cdc::{admit_wal_row, WalPartMeta};
     let mut blobs: HashMap<PartitionKey, Vec<u8>> = HashMap::new();
+    let ingest_batch_id = next_ingest_batch_id();
     for (key, rows) in cdc_meta.iter() {
         if rows.is_empty() {
             continue;
         }
+        for row in rows {
+            admit_wal_row(
+                row,
+                row.before.as_ref().map(|b| b.key.as_slice()).unwrap_or(&[]),
+            )
+            .expect("CDC update requires a before-image before a WAL row exists");
+        }
         let arrow_row_count = batches.get(key).map(WalPayload::row_count).unwrap_or(0);
-        let meta = WalPartMeta::cdc(rows.clone(), arrow_row_count)
+        let meta = WalPartMeta::cdc_stamped(rows.clone(), arrow_row_count, ingest_batch_id)
             .expect("CDC WAL metadata must align with Arrow rows before WAL serialization");
         let bytes = bincode::serialize(&meta)
             .expect("CDC WAL metadata must serialize before WAL segment write");
@@ -1560,6 +1574,7 @@ impl Buffers {
                 return true;
             }
         };
+        crate::processor::load_compaction_snapshot(&config.get_pipeline_name());
         if let Some(handle) = crate::buffer::wal_store::ingest_wal_handle() {
             if let Err(err) = handle.redo_acked_compactions().await {
                 warn!(error = %err, "compaction cycle deferred catalog reclaim");
@@ -1755,6 +1770,9 @@ impl Buffers {
         let id = catalog_id.to_string();
         let source_id = source.display_name();
         let source_descriptor = Self::source_descriptor(&source);
+        let seq = crate::buffer::wal_store::ingest_wal_handle()
+            .and_then(|handle| handle.segment_seq(&id).ok().flatten())
+            .unwrap_or(0);
         let mut indexed_slices = Vec::with_capacity(meta.index.len());
         for (ordinal, idx) in meta.index.iter().enumerate() {
             let slice_done = crate::buffer::wal_store::ingest_wal_handle()
@@ -1783,6 +1801,7 @@ impl Buffers {
                 group_key: Self::grouping_key(idx, &schema_fingerprint),
                 index_entry: idx.clone(),
                 wal_ref,
+                seq,
             });
         }
         SEGMENT_CACHE.insert(
@@ -2252,6 +2271,7 @@ impl Buffers {
                 ordinal,
                 idx: slice.index_entry,
                 wal_ref: slice.wal_ref,
+                seq: slice.seq,
             });
         }
         Self::build_compaction_work(entries, schema_fingerprint, output, config)
@@ -2411,6 +2431,19 @@ impl Buffers {
                 ordinal,
                 idx: idx.clone(),
                 wal_ref: wal_ref.clone(),
+                seq: cached
+                    .meta
+                    .index
+                    .iter()
+                    .position(|item| item.slice_ordinal == idx.slice_ordinal)
+                    .map(|_| {
+                        crate::buffer::wal_store::ingest_wal_handle()
+                            .and_then(|handle| {
+                                handle.segment_seq(&wal_ref.segment_id).ok().flatten()
+                            })
+                            .unwrap_or(0)
+                    })
+                    .unwrap_or(0),
             });
         }
         if !completed_refs.is_empty() {
@@ -3050,9 +3083,19 @@ impl Buffers {
         }
 
         let cdc_ctx = if saw_cdc {
+            let mut ties = Vec::new();
             for entry in work.entries.iter() {
+                if entry.seq == 0 {
+                    return Err(io::Error::other(format!(
+                        "CDC WAL slice {} has no catalog sequence",
+                        entry.wal_ref.segment_id
+                    )));
+                }
                 let meta = Self::load_entry_cdc_meta(entry).await?;
                 total_rows = total_rows.saturating_add(meta.row_count);
+                for row in 0..meta.rows.len() {
+                    ties.push((entry.seq, entry.idx.slice_ordinal, row as u64));
+                }
                 cdc_rows.extend(meta.rows);
             }
             let part_meta = crate::plugins::cdc::WalPartMeta::cdc(cdc_rows, total_rows)
@@ -3063,6 +3106,7 @@ impl Buffers {
             Some(crate::plugins::cdc::SyncContext {
                 part_meta,
                 contract,
+                ties,
             })
         } else {
             None
@@ -3988,6 +4032,24 @@ impl Buffers {
         COMPACT_FAILURES.remove(&format!("{}:{}", work.txn.sink_ref, work.txn.id));
         crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
         crate::metrics::counters::add_wal_compaction_transaction_completed(1);
+        let mut boundaries = std::collections::BTreeSet::new();
+        if let Some(ctx) = cdc_ctx.as_ref() {
+            for row in &ctx.part_meta.rows {
+                boundaries.insert(skippr_cdc::range_boundary(
+                    row.source_transaction_id.as_deref(),
+                    row.ingest_batch_id(),
+                ));
+            }
+        }
+        if boundaries.is_empty() {
+            boundaries.insert(skippr_cdc::RangeBoundary::Ingest(
+                work.entries
+                    .first()
+                    .map(|entry| entry.idx.start)
+                    .unwrap_or(0),
+            ));
+        }
+        crate::sqlrt::publish_catalog::publish(boundaries.into_iter().collect());
         info!(
             "Compactor: grouped compaction complete namespace={} wal_parts={} rows={} upload_elapsed={}s job_elapsed={}s compaction_id={} target={}",
             work.txn.namespace,
@@ -4446,6 +4508,7 @@ mod tests_wal_commit {
                     ordinal,
                     idx,
                     wal_ref,
+                    seq: 1,
                 }
             })
             .collect();
@@ -4653,10 +4716,12 @@ mod tests_wal_commit {
             batches.insert(key.clone(), WalPayload::Arrow(vec![make_batch()]));
             parts_meta.insert(key.clone(), (1024, SystemTime::UNIX_EPOCH));
             let rows = (0..3)
-                .map(|row| WalRowMeta {
-                    mutation: MutationKind::Insert,
-                    event_id: vec![ordinal as u8, row],
-                    order_token: vec![ordinal as u8, row],
+                .map(|row| {
+                    WalRowMeta::new(
+                        MutationKind::Insert,
+                        vec![ordinal as u8, row],
+                        vec![ordinal as u8, row],
+                    )
                 })
                 .collect();
             let meta = WalPartMeta::cdc(rows, 3).unwrap();
@@ -5528,6 +5593,7 @@ mod compaction_semantics_tests {
             ordinal: 0,
             idx,
             wal_ref,
+            seq: 1,
         }
     }
 

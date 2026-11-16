@@ -413,6 +413,7 @@ class StreamTransformPerfTests(unittest.TestCase):
                     self.assertFalse((spec.get("asserts") or {}).get("bronze_count"), name)
                 else:
                     self.assertIn("wal_compact", phases, name)
+                self.assertTrue(spec.get("continue_ingest"), name)
         self.assertEqual(len(OPS) * len(INGEST_MODES), 6)
         self.assertEqual(len(AGG_MEASURES) * len(INGEST_MODES), 6)
         self.assertEqual(len(ALTERS) * len(INGEST_MODES), 8)
@@ -456,6 +457,19 @@ class StreamTransformPerfTests(unittest.TestCase):
         self.assertLess(fn.find("write_skippr_yml"), fn.find("write_records"))
         self.assertNotIn("write_migration_sql(config, alter)\n    write_records", fn)
 
+    def test_migrate_continues_ingest_after_alter(self) -> None:
+        source = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        fn = source.split("def run_ingest_migrate", 1)[1].split("\ndef run_copy", 1)[0]
+        migrate_at = fn.find('["--config", str(config), "migrate"')
+        continue_at = fn.find("continue_ingest")
+        second_write = fn.find('start=rows + 1')
+        if second_write < 0:
+            second_write = fn.find("start=rows+")
+        self.assertGreater(migrate_at, 0)
+        self.assertGreater(continue_at, migrate_at)
+        self.assertGreater(second_write, migrate_at)
+        self.assertIn("events_b.json", fn)
+
     def test_stdin_ingest_discovers_file_sample_then_restages_stdin(self) -> None:
         source = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
         fn = source.split("def run_ingest", 1)[1].split("\ndef write_migration_sql", 1)[0]
@@ -463,6 +477,14 @@ class StreamTransformPerfTests(unittest.TestCase):
         self.assertIn('write_ingest_yml("Stdin")', fn)
         self.assertIn('work / ("stdin" if source_kind == "Stdin"', fn)
         self.assertGreater(fn.find('write_ingest_yml("Stdin")'), fn.find("discover"))
+
+    def test_non_warmup_file_events_exist_at_discover(self) -> None:
+        source = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        fn = source.split("def run_ingest", 1)[1].split("\ndef write_migration_sql", 1)[0]
+        first = fn.find('write_records(source / f"events.{source_ext}"')
+        discover = fn.find('["--config", str(config), "discover"')
+        self.assertGreater(first, -1)
+        self.assertGreater(discover, first)
 
     def test_stream_migrate_releases_store_before_cli_migrate(self) -> None:
         source = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
@@ -551,6 +573,10 @@ class StreamTransformPerfTests(unittest.TestCase):
         self.assertIn("ingest-aggregates-stream-duckdb", skill)
         self.assertIn("ingest-migrate-rename-duckdb", skill)
         self.assertIn("ingest-migrate-rename-stream-duckdb", skill)
+        self.assertIn("continue ingest", skill.lower())
+        self.assertIn("q-cdc-union-update-mysql", skill)
+        self.assertIn("q-cdc-union-update-ddb", skill)
+        self.assertIn("q-cdc-migrate-rename-pg", skill)
 
 
 class PerfParseTests(unittest.TestCase):

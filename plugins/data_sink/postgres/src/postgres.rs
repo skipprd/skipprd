@@ -37,9 +37,11 @@ impl crate::cdc_apply::CdcApplyBackend for PostgresCdcBackend {
         all_col_names: &[String],
         all_col_values: &[String],
         business_key_names: &[String],
-        order_token_hex: &str,
+        incoming: &skippr_cdc::StoredWinner,
     ) -> String {
-        let token = Self::binary_literal(order_token_hex);
+        let token = Self::binary_literal(&hex::encode(&incoming.order));
+        let loses =
+            |alias: &str| crate::cdc_apply::sql_stored_loses_to_incoming(alias, &token, incoming);
         let tombstone_bk_match = business_key_names
             .iter()
             .map(|name| {
@@ -59,6 +61,9 @@ impl crate::cdc_apply::CdcApplyBackend for PostgresCdcBackend {
         let update_set_with_token = {
             let mut parts = update_set;
             parts.push("\"_skippr_order_token\" = EXCLUDED.\"_skippr_order_token\"".to_string());
+            parts.push("\"_skippr_tie_seq\" = EXCLUDED.\"_skippr_tie_seq\"".to_string());
+            parts.push("\"_skippr_tie_ordinal\" = EXCLUDED.\"_skippr_tie_ordinal\"".to_string());
+            parts.push("\"_skippr_tie_row\" = EXCLUDED.\"_skippr_tie_row\"".to_string());
             parts.join(", ")
         };
         let bk_match = business_key_names
@@ -74,24 +79,25 @@ impl crate::cdc_apply::CdcApplyBackend for PostgresCdcBackend {
              WHERE NOT EXISTS (\n\
                SELECT 1 FROM {fq_tombstone_table}\n\
                WHERE {tombstone_bk_match}\n\
-               AND {fq_tombstone_table}.\"_skippr_order_token\" >= {token}\n\
+               AND NOT ({})\n\
              )\n\
              ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set_with_token}\n\
-             WHERE (\n\
-               {fq_table}.\"_skippr_order_token\" IS NULL\n\
-               OR {fq_table}.\"_skippr_order_token\" < {token}\n\
-             )\n\
+             WHERE ({})\n\
              AND NOT EXISTS (\n\
                SELECT 1 FROM {fq_tombstone_table}\n\
                WHERE {bk_match}\n\
-               AND {fq_tombstone_table}.\"_skippr_order_token\" >= {token}\n\
+               AND NOT ({})\n\
              );\n\
              DELETE FROM {fq_tombstone_table}\n\
              WHERE {tombstone_bk_match}\n\
-             AND {fq_tombstone_table}.\"_skippr_order_token\" < {token};\n\
+             AND ({});\n\
              COMMIT;",
             all_col_names.join(", "),
             all_col_values.join(", "),
+            loses(fq_tombstone_table),
+            loses(fq_table),
+            loses(fq_tombstone_table),
+            loses(fq_tombstone_table),
         )
     }
 
@@ -101,9 +107,11 @@ impl crate::cdc_apply::CdcApplyBackend for PostgresCdcBackend {
         business_key_names: &[String],
         business_key_values: &[String],
         _business_key_types: &[String],
-        order_token_hex: &str,
+        incoming: &skippr_cdc::StoredWinner,
     ) -> String {
-        let token = Self::binary_literal(order_token_hex);
+        let token = Self::binary_literal(&hex::encode(&incoming.order));
+        let loses =
+            |alias: &str| crate::cdc_apply::sql_stored_loses_to_incoming(alias, &token, incoming);
         let delete_match = business_key_names
             .iter()
             .zip(business_key_values.iter())
@@ -113,31 +121,70 @@ impl crate::cdc_apply::CdcApplyBackend for PostgresCdcBackend {
         let tombstone_cols = business_key_names
             .iter()
             .cloned()
-            .chain(std::iter::once("\"_skippr_order_token\"".to_string()))
+            .chain([
+                "\"_skippr_order_token\"".to_string(),
+                "\"_skippr_tie_seq\"".to_string(),
+                "\"_skippr_tie_ordinal\"".to_string(),
+                "\"_skippr_tie_row\"".to_string(),
+            ])
             .collect::<Vec<_>>();
         let tombstone_vals = business_key_values
             .iter()
             .cloned()
-            .chain(std::iter::once(token.clone()))
+            .chain([
+                token.clone(),
+                incoming.tie.seq.to_string(),
+                incoming.tie.ordinal.to_string(),
+                incoming.tie.row.to_string(),
+            ])
             .collect::<Vec<_>>();
         let conflict_cols = business_key_names.join(", ");
+        let winner_set = "\"_skippr_order_token\" = EXCLUDED.\"_skippr_order_token\", \
+             \"_skippr_tie_seq\" = EXCLUDED.\"_skippr_tie_seq\", \
+             \"_skippr_tie_ordinal\" = EXCLUDED.\"_skippr_tie_ordinal\", \
+             \"_skippr_tie_row\" = EXCLUDED.\"_skippr_tie_row\"";
 
         format!(
             "BEGIN;\n\
              DELETE FROM {fq_table}\n\
              WHERE {delete_match}\n\
-             AND (\n\
-               {fq_table}.\"_skippr_order_token\" IS NULL\n\
-               OR {fq_table}.\"_skippr_order_token\" < {token}\n\
+             AND ({});\n\
+             INSERT INTO {fq_tombstone_table} ({})\n\
+             SELECT {}\n\
+             WHERE NOT EXISTS (\n\
+               SELECT 1 FROM {fq_table}\n\
+               WHERE {delete_match}\n\
+               AND NOT ({})\n\
+             )\n\
+             ON CONFLICT ({conflict_cols}) DO UPDATE\n\
+             SET {winner_set}\n\
+             WHERE ({})\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {fq_table}\n\
+               WHERE {delete_match}\n\
+               AND NOT ({})\n\
              );\n\
              INSERT INTO {fq_tombstone_table} ({})\n\
-             VALUES ({})\n\
+             SELECT {}, {fq_table}.\"_skippr_order_token\", {fq_table}.\"_skippr_tie_seq\", {fq_table}.\"_skippr_tie_ordinal\", {fq_table}.\"_skippr_tie_row\"\n\
+             FROM {fq_table}\n\
+             WHERE {delete_match}\n\
              ON CONFLICT ({conflict_cols}) DO UPDATE\n\
-             SET \"_skippr_order_token\" = EXCLUDED.\"_skippr_order_token\"\n\
-             WHERE {fq_tombstone_table}.\"_skippr_order_token\" < EXCLUDED.\"_skippr_order_token\";\n\
+             SET {winner_set}\n\
+             WHERE ({});\n\
              COMMIT;",
+            loses(fq_table),
             tombstone_cols.join(", "),
             tombstone_vals.join(", "),
+            loses(fq_table),
+            loses(fq_tombstone_table),
+            loses(fq_table),
+            tombstone_cols.join(", "),
+            business_key_names
+                .iter()
+                .map(|name| format!("{fq_table}.{name}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            loses(fq_tombstone_table),
         )
     }
 }
@@ -812,7 +859,7 @@ impl DataSinkPostgresPlugin {
                         mutation,
                         event_id: row_meta.event_id.clone(),
                         order_token: row_meta.order_token.clone(),
-                        source_ordinal: meta_idx as u64,
+                        tie: ctx.row_tie(meta_idx).map_err(std::io::Error::other)?,
                     },
                     values,
                 });

@@ -1,7 +1,7 @@
 //! Deterministic simulation World for Iceberg ∪ WAL CDC using production merge.
 //!
-//! The current table is `collapse_wal_batches` + `anti_join_lake`. There is no
-//! second merge oracle.
+//! The current table is `reconcile_cdc`: `from_wal` then `collapse` against the
+//! stored incumbent (row slot ∪ tombstone slot). There is no second merge oracle.
 
 #[cfg(test)]
 mod alter;
@@ -56,11 +56,11 @@ use skippr_wal_catalog::{
 };
 
 use crate::failpoint::FailpointName;
-use crate::plugins::cdc::MutationKind;
+use crate::plugins::cdc::{MutationKind, StoredWinner};
 use crate::sqlrt::read_boundary::LakeSnapshot;
 
 use super::cdc_reconcile::{
-    anti_join_lake, attach_append_sidecar, attach_cdc_sidecar, collapse_wal_batches,
+    attach_append_sidecar, attach_cdc_sidecar, incumbents_from_stored, reconcile_cdc,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -168,6 +168,7 @@ pub struct QueryPin {
     pub lake: LakeSnapshot,
     pub compacted_thru: u64,
     pub wal: Vec<WalEvent>,
+    pub lake_winners: BTreeMap<Vec<u8>, crate::plugins::cdc::StoredWinner>,
 }
 
 pub struct World {
@@ -184,6 +185,8 @@ pub struct World {
     pub deadletter_skip: bool,
     pub field_ids: BTreeMap<String, i32>,
     pub alter_error: Option<String>,
+    pub lake_winners: BTreeMap<Vec<u8>, crate::plugins::cdc::StoredWinner>,
+    pub last_pin: Option<(u64, u64)>,
 }
 
 impl Default for World {
@@ -212,6 +215,8 @@ impl World {
             deadletter_skip: false,
             field_ids: BTreeMap::from([("id".into(), 1), ("name".into(), 2), ("amount".into(), 3)]),
             alter_error: None,
+            lake_winners: BTreeMap::new(),
+            last_pin: None,
         }
     }
 }
@@ -316,10 +321,16 @@ pub fn apply(world: &mut World, op: Op) {
                 lake_rows(world).iter().map(batch_from_row).collect();
             let mut next_lake = lake_rows(world);
             if !compacting.is_empty() {
-                let collapsed = collapse_wal_batches(&compacting, &keys).unwrap();
-                let kept = anti_join_lake(&lake_batches, &collapsed.changed_keys, &keys).unwrap();
-                next_lake = rows_from_batches(&kept);
-                next_lake.extend(rows_from_batches(&collapsed.survivor_batches));
+                let incumbents =
+                    incumbents_from_stored(&lake_batches, &world.lake_winners, &keys).unwrap();
+                let collapsed =
+                    reconcile_cdc(&lake_batches, &compacting, &incumbents, &keys).unwrap();
+                next_lake = rows_from_batches(&collapsed.batches);
+                world.lake_winners = collapsed
+                    .incumbents
+                    .into_iter()
+                    .map(|(key, inc)| (key, inc.winner))
+                    .collect();
             }
             world.compacted_thru = seq;
             push_snapshot(world, next_lake);
@@ -350,6 +361,7 @@ pub fn apply(world: &mut World, op: Op) {
                 lake,
                 compacted_thru: world.compacted_thru,
                 wal: live_wal(world),
+                lake_winners: world.lake_winners.clone(),
             });
         }
         Op::ReleasePin => {
@@ -623,35 +635,30 @@ fn snapshot_rows(world: &World, lake: LakeSnapshot) -> Vec<UserRow> {
     }
 }
 
-fn merge_table(lake: &[UserRow], wal: &[WalEvent]) -> BTreeMap<i64, (String, i64)> {
+fn merge_table(
+    lake: &[UserRow],
+    wal: &[WalEvent],
+    lake_winners: &BTreeMap<Vec<u8>, StoredWinner>,
+) -> BTreeMap<i64, (String, i64)> {
     let keys = vec!["id".to_string()];
     let lake_batches: Vec<RecordBatch> = lake.iter().map(batch_from_row).collect();
     let wal_batches: Vec<RecordBatch> = wal.iter().map(wal_batch).collect();
-    let collapsed = if wal_batches.is_empty() {
-        None
-    } else {
-        Some(collapse_wal_batches(&wal_batches, &keys).unwrap())
-    };
-    let kept = match &collapsed {
-        Some(c) => anti_join_lake(&lake_batches, &c.changed_keys, &keys).unwrap(),
-        None => lake_batches,
-    };
-    let mut out = rows_from_batches(&kept);
-    if let Some(c) = collapsed {
-        out.extend(rows_from_batches(&c.survivor_batches));
-    }
+    let incumbents = incumbents_from_stored(&lake_batches, lake_winners, &keys).unwrap();
+    let out = reconcile_cdc(&lake_batches, &wal_batches, &incumbents, &keys)
+        .unwrap()
+        .batches;
     let mut map = BTreeMap::new();
-    for row in out {
+    for row in rows_from_batches(&out) {
         map.insert(row.id, (row.name, row.amount));
     }
     map
 }
 
 fn live_table(world: &World) -> BTreeMap<i64, (String, i64)> {
-    merge_table(&lake_rows(world), &live_wal(world))
+    merge_table(&lake_rows(world), &live_wal(world), &world.lake_winners)
 }
 
-/// Production current table: collapse live WAL, anti-join lake.
+/// Production current table: `reconcile_cdc` on live WAL against stored incumbents.
 /// A held query pin re-merges frozen `(S,E,W)` until `ReleasePin`.
 pub fn current_table(world: &World) -> BTreeMap<i64, (String, i64)> {
     match &world.held_pin {
@@ -662,7 +669,11 @@ pub fn current_table(world: &World) -> BTreeMap<i64, (String, i64)> {
                 .filter(|event| event.seq > pin.compacted_thru)
                 .cloned()
                 .collect();
-            merge_table(&snapshot_rows(world, pin.lake.clone()), &wal)
+            merge_table(
+                &snapshot_rows(world, pin.lake.clone()),
+                &wal,
+                &pin.lake_winners,
+            )
         }
         None => live_table(world),
     }

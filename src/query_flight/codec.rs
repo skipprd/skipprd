@@ -170,8 +170,14 @@ mod tests {
             crate::sqlrt::cdc_reconcile::cdc_sidecar_schema(&user),
         )) as Arc<dyn ExecutionPlan>;
         let merge = Arc::new(
-            CdcReconcileExec::try_new(iceberg.clone(), wal.clone(), vec!["id".into()], user)
-                .unwrap(),
+            CdcReconcileExec::try_new(
+                iceberg.clone(),
+                wal.clone(),
+                vec!["id".into()],
+                user,
+                std::collections::BTreeMap::new(),
+            )
+            .unwrap(),
         ) as Arc<dyn ExecutionPlan>;
         let codec = SkipprHostCodec::default();
         let conv = DefaultPhysicalProtoConverter {};

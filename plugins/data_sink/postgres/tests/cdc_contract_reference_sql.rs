@@ -15,8 +15,19 @@ use skippr_runtime_sdk::plugins::cdc::*;
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::sink_compat::segment_file::{PartitionKey, SegmentFile, WalPayload};
 
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+fn incoming(order: Vec<u8>) -> skippr_cdc::StoredWinner {
+    skippr_cdc::StoredWinner {
+        order,
+        tie: skippr_cdc::Tie {
+            seq: 1,
+            ordinal: 0,
+            row: 0,
+        },
+    }
+}
+
+fn incoming_hex(hex: &str) -> skippr_cdc::StoredWinner {
+    incoming(hex::decode(hex).expect("hex"))
 }
 
 fn temp_dir() -> std::path::PathBuf {
@@ -81,7 +92,11 @@ fn bulk_apply_row(
             mutation,
             event_id: format!("event-{ordinal}").into_bytes(),
             order_token: vec![token],
-            source_ordinal: ordinal,
+            tie: skippr_cdc::Tie {
+                seq: 1,
+                ordinal: 0,
+                row: ordinal,
+            },
         },
         values: vec![
             CdcApplyValue::Signed(tenant_id),
@@ -108,7 +123,10 @@ fn reference_path_ddl_order_token_column() {
     let sql = ddl_add_order_token_column::<PostgresCdcBackend>("\"public\".\"users\"");
     assert_eq!(
         sql,
-        "ALTER TABLE \"public\".\"users\" ADD COLUMN IF NOT EXISTS \"_skippr_order_token\" BYTEA"
+        "ALTER TABLE \"public\".\"users\" ADD COLUMN IF NOT EXISTS \"_skippr_order_token\" BYTEA;\n\
+         ALTER TABLE \"public\".\"users\" ADD COLUMN IF NOT EXISTS \"_skippr_tie_seq\" BIGINT;\n\
+         ALTER TABLE \"public\".\"users\" ADD COLUMN IF NOT EXISTS \"_skippr_tie_ordinal\" INTEGER;\n\
+         ALTER TABLE \"public\".\"users\" ADD COLUMN IF NOT EXISTS \"_skippr_tie_row\" BIGINT"
     );
 }
 
@@ -119,11 +137,20 @@ fn reference_path_ddl_tombstone_table() {
         &[("id".to_string(), "BIGINT".to_string())],
     );
     assert!(sql.contains("\"_skippr_order_token\" BYTEA NOT NULL"));
+    assert!(sql.contains("\"_skippr_tie_seq\" BIGINT NOT NULL"));
     assert!(sql.contains("PRIMARY KEY (\"id\")"));
 }
 
 #[test]
 fn reference_path_upsert_sql_has_stale_write_guard() {
+    let incoming = skippr_cdc::StoredWinner {
+        order: vec![0, 0, 0, 0, 0, 0, 0, 1],
+        tie: skippr_cdc::Tie {
+            seq: 1,
+            ordinal: 0,
+            row: 0,
+        },
+    };
     let sql = upsert_if_newer_sql::<PostgresCdcBackend>(
         "\"public\".\"users\"",
         "\"public\".\"_skippr_tombstones_users\"",
@@ -138,26 +165,34 @@ fn reference_path_upsert_sql_has_stale_write_guard() {
             "decode('0000000000000001', 'hex')".to_string(),
         ],
         &["\"id\"".to_string()],
-        "0000000000000001",
+        &incoming,
     );
     assert!(sql.starts_with("BEGIN;"));
     assert!(sql.ends_with("COMMIT;"));
-    assert!(sql.contains("_skippr_order_token\" < decode('0000000000000001', 'hex')"));
+    assert!(sql.contains("_skippr_tie_seq"));
 }
 
 #[test]
 fn reference_path_delete_sql_writes_tombstone() {
+    let incoming = skippr_cdc::StoredWinner {
+        order: vec![0, 0, 0, 0, 0, 0, 0, 2],
+        tie: skippr_cdc::Tie {
+            seq: 1,
+            ordinal: 0,
+            row: 1,
+        },
+    };
     let sql = delete_if_newer_sql::<PostgresCdcBackend>(
         "\"public\".\"users\"",
         "\"public\".\"_skippr_tombstones_users\"",
         &["\"id\"".to_string()],
         &["1".to_string()],
         &["BIGINT".to_string()],
-        "0000000000000002",
+        &incoming,
     );
     assert!(sql.starts_with("BEGIN;"));
     assert!(sql.contains("ON CONFLICT"));
-    assert!(sql.contains("_skippr_order_token\" < EXCLUDED.\"_skippr_order_token\""));
+    assert!(sql.contains("_skippr_tie_seq"));
 }
 
 #[test]
@@ -183,21 +218,21 @@ fn reference_path_full_lifecycle_insert_update_delete() {
         kind: WalPartKind::Cdc,
         row_count: 3,
         rows: vec![
-            WalRowMeta {
-                mutation: MutationKind::Insert,
-                event_id: b"lsn:100".to_vec(),
-                order_token: vec![0, 0, 0, 100],
-            },
-            WalRowMeta {
-                mutation: MutationKind::Update,
-                event_id: b"lsn:101".to_vec(),
-                order_token: vec![0, 0, 0, 101],
-            },
-            WalRowMeta {
-                mutation: MutationKind::Delete,
-                event_id: b"lsn:102".to_vec(),
-                order_token: vec![0, 0, 0, 102],
-            },
+            WalRowMeta::new(
+                MutationKind::Insert,
+                b"lsn:100".to_vec(),
+                vec![0, 0, 0, 100],
+            ),
+            WalRowMeta::new(
+                MutationKind::Update,
+                b"lsn:101".to_vec(),
+                vec![0, 0, 0, 101],
+            ),
+            WalRowMeta::new(
+                MutationKind::Delete,
+                b"lsn:102".to_vec(),
+                vec![0, 0, 0, 102],
+            ),
         ],
     };
 
@@ -215,28 +250,13 @@ fn reference_path_full_lifecycle_insert_update_delete() {
     let mut f = std::fs::File::open(&seg.path).unwrap();
     let read_blobs = SegmentFile::read_part_meta_blobs_from_reader(&mut f).unwrap();
     let decoded: WalPartMeta = bincode::deserialize(read_blobs.get(&key).unwrap()).unwrap();
-    let actions: Vec<SinkApplyAction> = decoded
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(i, row_meta)| {
-            resolve_apply_action(
-                row_meta.mutation,
-                vec![("id".to_string(), format!("{}", i + 1))],
-                row_meta.order_token.clone(),
-            )
-        })
-        .collect();
-
     let fq_table = "\"public\".\"users\"";
     let fq_tombstone = tombstone_table_name(fq_table);
-    for action in &actions {
-        match action {
-            SinkApplyAction::UpsertIfNewer {
-                business_key,
-                order_token,
-            } => {
-                let hex = to_hex(order_token);
+    for (i, row_meta) in decoded.rows.iter().enumerate() {
+        let winner = incoming(row_meta.order_token.clone());
+        let hex = hex::encode(&row_meta.order_token);
+        match row_meta.mutation {
+            MutationKind::Insert | MutationKind::Update | MutationKind::Snapshot => {
                 let sql = upsert_if_newer_sql::<PostgresCdcBackend>(
                     fq_table,
                     &fq_tombstone,
@@ -246,27 +266,23 @@ fn reference_path_full_lifecycle_insert_update_delete() {
                         "\"_skippr_order_token\"".to_string(),
                     ],
                     &[
-                        business_key[0].1.clone(),
+                        format!("{}", i + 1),
                         "'test'".to_string(),
-                        format!("decode('{}', 'hex')", hex),
+                        format!("decode('{hex}', 'hex')"),
                     ],
                     &["\"id\"".to_string()],
-                    &hex,
+                    &winner,
                 );
                 assert!(sql.contains("BEGIN;"));
             }
-            SinkApplyAction::DeleteIfNewer {
-                business_key,
-                order_token,
-            } => {
-                let hex = to_hex(order_token);
+            MutationKind::Delete => {
                 let sql = delete_if_newer_sql::<PostgresCdcBackend>(
                     fq_table,
                     &fq_tombstone,
                     &["\"id\"".to_string()],
-                    &[business_key[0].1.clone()],
+                    &[format!("{}", i + 1)],
                     &["BIGINT".to_string()],
-                    &hex,
+                    &winner,
                 );
                 assert!(sql.contains("ON CONFLICT"));
             }
@@ -280,6 +296,7 @@ fn reference_path_replay_and_stale_write_invariants() {
     let fq_table = "\"public\".\"users\"";
     let fq_tombstone = "\"public\".\"_skippr_tombstones_users\"";
 
+    let winner = incoming_hex(token);
     let sql1 = upsert_if_newer_sql::<PostgresCdcBackend>(
         fq_table,
         fq_tombstone,
@@ -294,7 +311,7 @@ fn reference_path_replay_and_stale_write_invariants() {
             format!("decode('{}', 'hex')", token),
         ],
         &["\"id\"".to_string()],
-        token,
+        &winner,
     );
     let sql2 = upsert_if_newer_sql::<PostgresCdcBackend>(
         fq_table,
@@ -310,10 +327,10 @@ fn reference_path_replay_and_stale_write_invariants() {
             format!("decode('{}', 'hex')", token),
         ],
         &["\"id\"".to_string()],
-        token,
+        &winner,
     );
     assert_eq!(sql1, sql2);
-    assert!(sql1.contains("_skippr_order_token\" < decode('00000064', 'hex')"));
+    assert!(sql1.contains("_skippr_tie_seq"));
 
     let delete_sql = delete_if_newer_sql::<PostgresCdcBackend>(
         fq_table,
@@ -321,9 +338,9 @@ fn reference_path_replay_and_stale_write_invariants() {
         &["\"id\"".to_string()],
         &["1".to_string()],
         &["BIGINT".to_string()],
-        "00000064",
+        &winner,
     );
-    assert!(delete_sql.contains("_skippr_order_token\" < EXCLUDED.\"_skippr_order_token\""));
+    assert!(delete_sql.contains("_skippr_tie_seq"));
 }
 
 #[test]
@@ -348,14 +365,9 @@ fn reference_bulk_path_generates_one_set_based_apply_for_mixed_rows() {
     assert!(sql.create_stage_table.ends_with("ON COMMIT DROP;"));
     assert!(sql.copy_into_stage.starts_with("COPY pg_temp."));
     assert!(sql.copy_into_stage.ends_with("WITH (FORMAT text)"));
-    assert!(sql.materialize_winners.contains("ROW_NUMBER() OVER"));
-    assert!(sql
-        .materialize_winners
-        .contains("PARTITION BY stage.\"tenant_id\", stage.\"id\""));
-    assert!(sql.materialize_winners.contains(
-        "ORDER BY stage.\"_skippr_cdc_order_token\" DESC, \
-         stage.\"_skippr_cdc_ordinal\" ASC"
-    ));
+    assert!(!sql.materialize_winners.contains("ROW_NUMBER()"));
+    assert!(sql.materialize_winners.contains("SELECT * FROM pg_temp."));
+    assert!(sql.apply_winners.contains("_skippr_cdc_tie_seq"));
     assert_eq!(
         sql.apply_winners
             .matches("INSERT INTO \"public\".\"users\" AS target")

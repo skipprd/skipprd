@@ -35,6 +35,9 @@ impl super::cdc_apply::CdcApplyBackend for ClickhouseCdcBackend {
             .map(|(name, ty)| format!("\"{}\" {} NOT NULL", name, ty))
             .collect();
         col_defs.push("\"_skippr_order_token\" String NOT NULL".to_string());
+        col_defs.push("\"_skippr_tie_seq\" Int64 NOT NULL".to_string());
+        col_defs.push("\"_skippr_tie_ordinal\" Int32 NOT NULL".to_string());
+        col_defs.push("\"_skippr_tie_row\" Int64 NOT NULL".to_string());
 
         let pk_cols: Vec<String> = business_key_cols
             .iter()
@@ -55,9 +58,9 @@ impl super::cdc_apply::CdcApplyBackend for ClickhouseCdcBackend {
         all_col_names: &[String],
         all_col_values: &[String],
         business_key_names: &[String],
-        order_token_hex: &str,
+        incoming: &skippr_cdc::StoredWinner,
     ) -> String {
-        let token = Self::binary_literal(order_token_hex);
+        let token = Self::binary_literal(&hex::encode(&incoming.order));
         let tombstone_bk_match = business_key_names
             .iter()
             .map(|name| {
@@ -89,6 +92,9 @@ impl super::cdc_apply::CdcApplyBackend for ClickhouseCdcBackend {
             .map(|(name, val)| format!("{name} = {val}"))
             .collect::<Vec<_>>()
             .join(", ");
+        let incoming_beats = super::cdc_apply::sql_unqualified_loses_to_incoming(&token, incoming);
+        let tombstone_beats_incoming =
+            super::cdc_apply::sql_stored_beats_incoming(fq_tombstone_table, &token, incoming);
 
         format!(
             "INSERT INTO {fq_table} ({})\n\
@@ -97,19 +103,19 @@ impl super::cdc_apply::CdcApplyBackend for ClickhouseCdcBackend {
              AND NOT EXISTS (\n\
                SELECT 1 FROM {fq_tombstone_table}\n\
                WHERE {tombstone_bk_match}\n\
-               AND {fq_tombstone_table}.\"_skippr_order_token\" >= {token}\n\
+               AND {tombstone_beats_incoming}\n\
              );\n\
              ALTER TABLE {fq_table} UPDATE {update_set}\n\
              WHERE {target_bk_match}\n\
-             AND (\"_skippr_order_token\" IS NULL OR \"_skippr_order_token\" < {token})\n\
+             AND {incoming_beats}\n\
              AND NOT EXISTS (\n\
                SELECT 1 FROM {fq_tombstone_table}\n\
                WHERE {tombstone_bk_match}\n\
-               AND {fq_tombstone_table}.\"_skippr_order_token\" >= {token}\n\
+               AND {tombstone_beats_incoming}\n\
              );\n\
              ALTER TABLE {fq_tombstone_table} DELETE\n\
              WHERE {tombstone_bk_match_unqualified}\n\
-             AND \"_skippr_order_token\" < {token};",
+             AND {incoming_beats};",
             all_col_names.join(", "),
             all_col_values.join(", "),
         )
@@ -121,9 +127,9 @@ impl super::cdc_apply::CdcApplyBackend for ClickhouseCdcBackend {
         business_key_names: &[String],
         business_key_values: &[String],
         _business_key_types: &[String],
-        order_token_hex: &str,
+        incoming: &skippr_cdc::StoredWinner,
     ) -> String {
-        let token = Self::binary_literal(order_token_hex);
+        let token = Self::binary_literal(&hex::encode(&incoming.order));
         let delete_match = business_key_names
             .iter()
             .zip(business_key_values.iter())
@@ -134,32 +140,82 @@ impl super::cdc_apply::CdcApplyBackend for ClickhouseCdcBackend {
             .iter()
             .zip(business_key_values.iter())
             .map(|(name, value)| format!("{fq_tombstone_table}.{name} = {value}"))
-            .collect::<Vec<_>>()
-            .join(" AND ");
+            .collect::<Vec<_>>();
         let tombstone_cols = business_key_names
             .iter()
             .cloned()
-            .chain(std::iter::once("\"_skippr_order_token\"".to_string()))
+            .chain([
+                "\"_skippr_order_token\"".to_string(),
+                "\"_skippr_tie_seq\"".to_string(),
+                "\"_skippr_tie_ordinal\"".to_string(),
+                "\"_skippr_tie_row\"".to_string(),
+            ])
             .collect::<Vec<_>>();
         let tombstone_vals = business_key_values
             .iter()
             .cloned()
-            .chain(std::iter::once(token.clone()))
+            .chain([
+                token.clone(),
+                incoming.tie.seq.to_string(),
+                incoming.tie.ordinal.to_string(),
+                incoming.tie.row.to_string(),
+            ])
             .collect::<Vec<_>>();
+        let incoming_beats_row =
+            super::cdc_apply::sql_unqualified_loses_to_incoming(&token, incoming);
+        let row_beats_incoming = format!(
+            "SELECT 1 FROM {fq_table} WHERE {delete_match} AND {}",
+            super::cdc_apply::sql_stored_beats_incoming(fq_table, &token, incoming)
+        );
+        let live_beats_tombstone =
+            super::cdc_apply::sql_stored_beats_stored("live", fq_tombstone_table);
+        let live_bk = business_key_names
+            .iter()
+            .zip(business_key_values.iter())
+            .map(|(name, value)| format!("live.{name} = {value}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let live_to_tomb = business_key_names
+            .iter()
+            .map(|name| format!("live.{name} = tomb.{name}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
 
         format!(
             "ALTER TABLE {fq_table} DELETE\n\
              WHERE {delete_match}\n\
-             AND (\"_skippr_order_token\" IS NULL OR \"_skippr_order_token\" < {token});\n\
+             AND {incoming_beats_row};\n\
+             ALTER TABLE {fq_tombstone_table} DELETE\n\
+             WHERE {delete_match}\n\
+             AND {incoming_beats_row};\n\
              INSERT INTO {fq_tombstone_table} ({})\n\
              SELECT {}\n\
-             WHERE NOT EXISTS (\n\
+             WHERE NOT EXISTS ({row_beats_incoming})\n\
+             AND NOT EXISTS (\n\
                SELECT 1 FROM {fq_tombstone_table}\n\
-               WHERE {tombstone_bk_match}\n\
-               AND {fq_tombstone_table}.\"_skippr_order_token\" >= {token}\n\
+               WHERE {}\n\
+               AND NOT ({incoming_beats_row})\n\
+             );\n\
+             ALTER TABLE {fq_tombstone_table} DELETE\n\
+             WHERE {delete_match}\n\
+             AND EXISTS (\n\
+               SELECT 1 FROM {fq_table} AS live\n\
+               WHERE {live_bk}\n\
+               AND {live_beats_tombstone}\n\
+             );\n\
+             INSERT INTO {fq_tombstone_table} ({})\n\
+             SELECT {}, live.\"_skippr_order_token\", live.\"_skippr_tie_seq\", live.\"_skippr_tie_ordinal\", live.\"_skippr_tie_row\"\n\
+             FROM {fq_table} AS live\n\
+             WHERE {live_bk}\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {fq_tombstone_table} AS tomb\n\
+               WHERE {live_to_tomb}\n\
              );",
             tombstone_cols.join(", "),
             tombstone_vals.join(", "),
+            tombstone_bk_match.join(" AND "),
+            tombstone_cols.join(", "),
+            business_key_names.join(", "),
         )
     }
 }
@@ -412,51 +468,6 @@ impl DataSinkClickhousePlugin {
         Ok(())
     }
 
-    fn arrow_value_to_sql(array: &dyn Array, row: usize) -> String {
-        if array.is_null(row) {
-            return "NULL".to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
-            return format!("'{}'", a.value(row).replace('\'', "\\'"));
-        }
-        if let Some(a) = array.as_any().downcast_ref::<LargeStringArray>() {
-            return format!("'{}'", a.value(row).replace('\'', "\\'"));
-        }
-        if let Some(a) = array.as_any().downcast_ref::<Int64Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<Int32Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<Int16Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<Int8Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<UInt64Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<UInt32Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<Float64Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<Float32Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<BooleanArray>() {
-            return if a.value(row) { "1" } else { "0" }.to_string();
-        }
-        format!(
-            "'{}'",
-            arrow::util::display::array_value_to_string(array, row)
-                .unwrap_or_else(|_| "NULL".to_string())
-                .replace('\'', "\\'")
-        )
-    }
-
     async fn sync_cdc(
         &self,
         mut stream: SendableRecordBatchStream,
@@ -464,11 +475,12 @@ impl DataSinkClickhousePlugin {
         ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
-            ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-            tombstone_table_name, upsert_if_newer_sql,
+            append_record_batch_to_cdc_apply, collapse_apply_batch, ddl_add_order_token_column,
+            ddl_create_tombstone_table, delete_if_newer_sql, format_cdc_apply_value,
+            tombstone_table_name, upsert_if_newer_sql, CdcApplyBatch, CdcApplyColumn,
+            CdcApplyMutation,
         };
         use skippr_runtime_sdk::metrics::counters;
-        use skippr_runtime_sdk::plugins::cdc::MutationKind;
 
         let contract = match ctx.contract.as_ref() {
             Some(c) if !c.business_key_columns.is_empty() => c,
@@ -623,9 +635,20 @@ impl DataSinkClickhousePlugin {
             .map(|f| format!("\"{}\"", f.name()))
             .collect();
 
+        let mut apply_batch = CdcApplyBatch {
+            columns: arrow_schema
+                .fields()
+                .iter()
+                .zip(col_defs.iter())
+                .map(|(field, (_, target_type))| CdcApplyColumn {
+                    name: field.name().clone(),
+                    target_type: (*target_type).to_string(),
+                })
+                .collect(),
+            business_key_columns: contract.business_key_columns.clone(),
+            rows: Vec::new(),
+        };
         let mut row_offset = 0usize;
-        let mut total_rows = 0usize;
-
         while let Some(batch_result) = stream.next().await {
             let batch =
                 batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
@@ -633,86 +656,87 @@ impl DataSinkClickhousePlugin {
             if num_rows == 0 {
                 continue;
             }
-
-            for row in 0..num_rows {
-                let meta_idx = row_offset + row;
-                let row_meta = ctx.part_meta.rows.get(meta_idx).ok_or_else(|| {
-                    std::io::Error::other(format!(
-                        "CDC row metadata missing at index {} (have {})",
-                        meta_idx,
-                        ctx.part_meta.rows.len()
-                    ))
-                })?;
-
-                let order_token_hex: String = row_meta
-                    .order_token
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-
-                match row_meta.mutation {
-                    MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
-                        let mut all_names = col_names_quoted.clone();
-                        all_names.push("\"_skippr_order_token\"".to_string());
-
-                        let mut all_values: Vec<String> = (0..batch.num_columns())
-                            .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
-                            .collect();
-                        all_values.push(format!("'{}'", order_token_hex));
-
-                        let sql = upsert_if_newer_sql::<ClickhouseCdcBackend>(
-                            &fq_table,
-                            &tombstone_table,
-                            &all_names,
-                            &all_values,
-                            &bk_names_quoted,
-                            &order_token_hex,
-                        );
-
-                        self.execute_sql(&sql).await.map_err(|e| {
-                            error!("CDC upsert failed for {}: {}", fq_table, e);
-                            counters::dec_uploads_in_flight();
-                            e
-                        })?;
-                    }
-                    MutationKind::Delete => {
-                        let bk_values: Vec<String> = contract
-                            .business_key_columns
-                            .iter()
-                            .map(|bk| {
-                                let col_idx = arrow_schema
-                                    .fields()
-                                    .iter()
-                                    .position(|f| f.name() == bk)
-                                    .unwrap_or(0);
-                                Self::arrow_value_to_sql(batch.column(col_idx).as_ref(), row)
-                            })
-                            .collect();
-
-                        let sql = delete_if_newer_sql::<ClickhouseCdcBackend>(
-                            &fq_table,
-                            &tombstone_table,
-                            &bk_names_quoted,
-                            &bk_values,
-                            &bk_types,
-                            &order_token_hex,
-                        );
-
-                        self.execute_sql(&sql).await.map_err(|e| {
-                            error!("CDC delete failed for {}: {}", fq_table, e);
-                            counters::dec_uploads_in_flight();
-                            e
-                        })?;
-                    }
+            append_record_batch_to_cdc_apply(
+                &mut apply_batch,
+                &batch,
+                &ctx.part_meta.rows,
+                &ctx.decoded_ties().map_err(std::io::Error::other)?,
+                row_offset,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            row_offset += num_rows;
+        }
+        let apply_batch = collapse_apply_batch(&apply_batch);
+        let total_rows = apply_batch.rows.len();
+        for row in &apply_batch.rows {
+            let incoming = skippr_cdc::StoredWinner {
+                order: row.metadata.order_token.clone(),
+                tie: row.metadata.tie,
+            };
+            match row.metadata.mutation {
+                CdcApplyMutation::Upsert => {
+                    let mut all_names = col_names_quoted.clone();
+                    all_names.push("\"_skippr_order_token\"".to_string());
+                    all_names.push("\"_skippr_tie_seq\"".to_string());
+                    all_names.push("\"_skippr_tie_ordinal\"".to_string());
+                    all_names.push("\"_skippr_tie_row\"".to_string());
+                    let mut all_values: Vec<String> = row
+                        .values
+                        .iter()
+                        .map(format_cdc_apply_value::<ClickhouseCdcBackend>)
+                        .collect();
+                    all_values.push(format!("'{}'", hex::encode(&incoming.order)));
+                    all_values.push(incoming.tie.seq.to_string());
+                    all_values.push(incoming.tie.ordinal.to_string());
+                    all_values.push(incoming.tie.row.to_string());
+                    let sql = upsert_if_newer_sql::<ClickhouseCdcBackend>(
+                        &fq_table,
+                        &tombstone_table,
+                        &all_names,
+                        &all_values,
+                        &bk_names_quoted,
+                        &incoming,
+                    );
+                    self.execute_sql(&sql).await.map_err(|e| {
+                        error!("CDC upsert failed for {}: {}", fq_table, e);
+                        counters::dec_uploads_in_flight();
+                        e
+                    })?;
+                }
+                CdcApplyMutation::Delete => {
+                    let bk_values: Vec<String> = contract
+                        .business_key_columns
+                        .iter()
+                        .map(|bk| {
+                            let idx = apply_batch
+                                .columns
+                                .iter()
+                                .position(|column| column.name == *bk)
+                                .unwrap_or(0);
+                            format_cdc_apply_value::<ClickhouseCdcBackend>(&row.values[idx])
+                        })
+                        .collect();
+                    let sql = delete_if_newer_sql::<ClickhouseCdcBackend>(
+                        &fq_table,
+                        &tombstone_table,
+                        &bk_names_quoted,
+                        &bk_values,
+                        &bk_types,
+                        &incoming,
+                    );
+                    self.execute_sql(&sql).await.map_err(|e| {
+                        error!("CDC delete failed for {}: {}", fq_table, e);
+                        counters::dec_uploads_in_flight();
+                        e
+                    })?;
                 }
             }
-
-            row_offset += num_rows;
-            total_rows += num_rows;
-            counters::add_parquet_rows(num_rows as u64);
+        }
+        if total_rows > 0 {
+            counters::add_parquet_rows(total_rows as u64);
             info!(
-                "CDC applied {} rows to {} (total: {})",
-                num_rows, table_name, total_rows
+                "CDC applied {} collapsed rows to {}",
+                total_rows, table_name
             );
         }
 
@@ -880,5 +904,45 @@ impl SchemaSink for DataSinkClickhousePlugin {
             .collect();
 
         self.ensure_table(&table_name, &col_defs).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClickhouseCdcBackend;
+    use crate::cdc_apply::delete_if_newer_sql;
+
+    #[test]
+    fn delete_sql_syncs_live_winner_onto_tombstone() {
+        let incoming = skippr_cdc::StoredWinner {
+            order: vec![7],
+            tie: skippr_cdc::Tie {
+                seq: 1,
+                ordinal: 0,
+                row: 0,
+            },
+        };
+        let sql = delete_if_newer_sql::<ClickhouseCdcBackend>(
+            "\"users\"",
+            "\"_skippr_tombstones_users\"",
+            &["\"id\"".to_string()],
+            &["1".to_string()],
+            &["Int64".to_string()],
+            &incoming,
+        );
+        assert!(sql.contains("ALTER TABLE \"users\" DELETE"));
+        assert!(sql.contains("ALTER TABLE \"_skippr_tombstones_users\" DELETE"));
+        assert!(
+            sql.contains("FROM \"users\" AS live"),
+            "10/4/7 copies the remaining live winner onto the tombstone"
+        );
+        assert!(
+            sql.contains("NOT EXISTS"),
+            "tombstone insert is gated on a live row that beats incoming"
+        );
+        assert!(
+            !sql.contains("FROM \"users\"\n             WHERE \"id\" = 1;"),
+            "unguarded INSERT FROM live is illegal"
+        );
     }
 }

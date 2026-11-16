@@ -531,12 +531,51 @@ jobs:
         with:
           name: skipprd-linux_x86
           path: skipprd-linux_x86
+      - name: Download runtime plugins
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-plugin-binaries-linux_x86
+          path: runtime-plugin-binaries-linux_x86
       - name: Make skipprd executable
         run: chmod +x ./skipprd-linux_x86/skipprd
       - name: Postgres snapshot-then-CDC into SkipprLake
         uses: ./.github/actions/e2e/postgres_skipprlake_cdc
         with:
           skipprd_path: ./skipprd-linux_x86/skipprd
+          plugin_binaries_dir: ./runtime-plugin-binaries-linux_x86
+
+  e2e_mysql_cdc:
+    if: startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test')
+    name: MySQL CDC to SkipprLake (linux x86)
+    needs:
+      - linux_x86
+      - publish_runtime_plugins
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download skipprd
+        uses: actions/download-artifact@v4
+        with:
+          name: skipprd-linux_x86
+          path: skipprd-linux_x86
+      - name: Download runtime plugins
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-plugin-binaries-linux_x86
+          path: runtime-plugin-binaries-linux_x86
+      - name: Make skipprd executable
+        run: chmod +x ./skipprd-linux_x86/skipprd
+      - name: MySQL snapshot-then-CDC into SkipprLake
+        uses: ./.github/actions/e2e/mysql_skipprlake_cdc
+        with:
+          skipprd_path: ./skipprd-linux_x86/skipprd
+          plugin_binaries_dir: ./runtime-plugin-binaries-linux_x86
 
   e2e_dynamodb_cdc:
     if: startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test')
@@ -558,12 +597,18 @@ jobs:
         with:
           name: skipprd-linux_x86
           path: skipprd-linux_x86
+      - name: Download runtime plugins
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-plugin-binaries-linux_x86
+          path: runtime-plugin-binaries-linux_x86
       - name: Make skipprd executable
         run: chmod +x ./skipprd-linux_x86/skipprd
       - name: DynamoDB snapshot-then-CDC into SkipprLake and DuckDB
         uses: ./.github/actions/e2e/dynamodb_cdc_local
         with:
           skipprd_path: ./skipprd-linux_x86/skipprd
+          plugin_binaries_dir: ./runtime-plugin-binaries-linux_x86
 
   e2e_s3_schema_evolution:
     if: startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/tags/0.0.0' && !startsWith(github.ref, 'refs/tags/test')
@@ -827,6 +872,7 @@ jobs:
       - e2e_file_duckdb
       - e2e_skipprlake
       - e2e_postgres_cdc
+      - e2e_mysql_cdc
       - e2e_dynamodb_cdc
       - e2e_s3_schema_evolution
       - e2e_schema_lifecycle
