@@ -505,6 +505,13 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         start = text.split("def start_cdc_postgres")[1].split("def stop_cdc_postgres")[0]
         self.assertIn("State.Running", start)
         self.assertIn("_cdc_postgres_failed", start)
+        self.assertIn("REPLICA IDENTITY FULL", start)
+
+    def test_cdc_ddb_partitions_on_the_event_time_column_the_plugin_writes(self) -> None:
+        text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        writer = text.split("def write_cdc_skippr_yml")[1].split("def _cdc_postgres_failed")[0]
+        self.assertIn("batch_time_fields: skippr_event_time", writer)
+        self.assertNotIn("batch_time_fields: _skippr_event_time", writer)
 
     def test_download_accepts_perf_db_workflow(self) -> None:
         download = (
