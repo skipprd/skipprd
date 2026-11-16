@@ -3,7 +3,7 @@ name: skippr-tpc
 description: >-
   Run TPC-H Q1/Q3/Q6 against DuckDB, vanilla DataFusion, and skipprd query.
   GitHub is SF10. Laptop may SF1 with SKIPPR_TPC_LAPTOP=1; that is not a SHA
-  substitute for GitHub SF10. Not a /skippr-release battery. Use when the user
+  substitute for GitHub SF10. Not a /skippr-release or /skippr-regression battery. Use when the user
   says /skippr-tpc, skippr-tpc, or TPC-H.
 disable-model-invocation: true
 ---

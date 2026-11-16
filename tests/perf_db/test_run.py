@@ -194,10 +194,10 @@ class PerfDbCatalogTests(unittest.TestCase):
 
 class PerfDbSkillTests(unittest.TestCase):
     def test_skill_is_query_matrix_not_ingest_copy(self) -> None:
-        skill = REPO_ROOT / ".cursor" / "skills" / "skippr-perf-db" / "SKILL.md"
+        skill = REPO_ROOT / ".cursor" / "skills" / "skippr-regression" / "SKILL.md"
         self.assertTrue(skill.is_file(), skill)
         text = skill.read_text(encoding="utf-8")
-        self.assertIn("name: skippr-perf-db", text)
+        self.assertIn("name: skippr-regression", text)
         self.assertIn("disable-model-invocation: true", text)
         self.assertIn("Local smoke", text)
         self.assertIn("ubuntu-latest", text)
@@ -218,7 +218,7 @@ class PerfDbSkillTests(unittest.TestCase):
         self.assertIn("--workflow", text)
         self.assertIn("paul@paulhudson.me", text)
         self.assertIn("exhausted", text)
-        self.assertNotIn("ingest-a-duckdb", text)
+        self.assertIn("ingest-a-duckdb", text)
         self.assertNotIn("q-wal-count-file", text)
 
 

@@ -1,0 +1,14 @@
+---
+description: Hard cutover — one design, no shims, delete the old path in the same change
+alwaysApply: true
+---
+
+# Hard cutover (skipprd)
+
+Skill: **`hard-cutover`**. skipprd is the engine; do not keep a second ingest, catalog, or query path “for callers.”
+
+- If old and new both exist, delete the old in the same change.
+- MUST NOT `legacy_`, dual handlers, feature flags for the old path, or dual-write “for migration.”
+- Callers, tests, and `docs/docs` move together.
+- Rename + compile errors over adapters that translate forever.
+- `#[deprecated]` without removal in the same change is illegal.

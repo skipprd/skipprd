@@ -1,0 +1,24 @@
+---
+description: Tiger Style skipprd dialect — types over strings, fail-closed, one authority per job
+alwaysApply: true
+---
+
+# Tiger Style (skipprd)
+
+Skill: **`tiger-style`**. SoT: root `AGENTS.md`. skipprd has no Cloud/ReAct kernel split; the engine is the product.
+
+## Bar
+
+- Encode invariants in the type system (`enum`, newtypes, `Option`/`Result`). Prefer compile failure over runtime “don’t call this wrong.”
+- One type, CLI, catalog, and journal per job. Stringly dispatch, `rsplit`/`contains` to recover identity, and `serde_json::Value` hops at a typed API are illegal.
+- Fail closed at trust boundaries. No silent defaults that pick a second path.
+- Flat functions over one-implementor trait hierarchies. Shared logic in one place (DRY).
+- Feature-gated code must compile: `cargo check --all-features` when touching `cfg(feature)`.
+- Fixed safety ceilings in code. MUST NOT grow impl env knobs for pools/batches/timeouts the engine can bound itself.
+
+## Anti-patterns
+
+- Dual loaders/parsers/planners for the same job
+- `legacy` / `compat` / `v1`/`v2` modules beside the surviving path
+- Unbounded buffers “just for now”
+- Treating “tests pass” as SoT if the old string path still compiles
