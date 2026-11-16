@@ -444,4 +444,29 @@ mod tests {
         assert!(payload.starts_with(b"PAR1"), "parquet magic");
         assert!(payload.len() > 4);
     }
+
+    #[test]
+    fn jsonl_byte_chunks_are_separate_submits_without_cdc_rows() {
+        let offset_key = OffsetKey::new("events", "events.jsonl");
+        let data = "{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n";
+        let (tx, rx) = futures::channel::mpsc::unbounded::<Vec<Vec<IngestBatch>>>();
+        process_reader(
+            std::io::Cursor::new(data),
+            &offset_key,
+            &tx,
+            InputFormat::Json,
+            10,
+        );
+        drop(tx);
+        let groups: Vec<Vec<Vec<IngestBatch>>> = futures::executor::block_on(async {
+            use futures::StreamExt;
+            rx.collect().await
+        });
+        assert!(
+            groups.len() >= 2,
+            "byte chunks must split jsonl into more than one submit"
+        );
+        let batches: Vec<&IngestBatch> = groups.iter().flatten().flatten().collect();
+        assert!(batches.iter().all(|batch| batch.cdc_rows.is_none()));
+    }
 }

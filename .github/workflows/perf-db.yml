@@ -56,7 +56,7 @@ jobs:
           architecture_name: linux_x86
           workspace-root: skipprd
           runtime_plugin_packages_json: >-
-            ["skippr-plugin-data-source-file","skippr-plugin-data-source-postgres","skippr-plugin-data-sink-duckdb","skippr-plugin-schema-sink-duckdb","skippr-plugin-data-sink-skipprlake","skippr-plugin-schema-sink-skipprlake"]
+            ["skippr-plugin-data-source-file","skippr-plugin-data-source-postgres","skippr-plugin-data-source-mysql","skippr-plugin-data-source-dynamodb","skippr-plugin-data-sink-duckdb","skippr-plugin-schema-sink-duckdb","skippr-plugin-data-sink-skipprlake","skippr-plugin-schema-sink-skipprlake"]
 
   linux_matrix:
     name: perf-db ${{ matrix.scenario }}
@@ -86,6 +86,29 @@ jobs:
           - q-cdc-union-sum-pg
           - q-cdc-overlap-pg
           - q-cdc-iceberg-only-pg
+          - q-cdc-union-count-mysql
+          - q-cdc-union-update-mysql
+          - q-cdc-union-delete-mysql
+          - q-cdc-union-reinsert-mysql
+          - q-cdc-union-sum-mysql
+          - q-cdc-overlap-mysql
+          - q-cdc-iceberg-only-mysql
+          - q-cdc-union-count-ddb
+          - q-cdc-union-update-ddb
+          - q-cdc-union-delete-ddb
+          - q-cdc-union-reinsert-ddb
+          - q-cdc-union-sum-ddb
+          - q-cdc-overlap-ddb
+          - q-cdc-iceberg-only-ddb
+          - q-cdc-migrate-rename-pg
+          - q-cdc-migrate-drop-pg
+          - q-cdc-migrate-promote-pg
+          - q-cdc-migrate-rename-mysql
+          - q-cdc-migrate-drop-mysql
+          - q-cdc-migrate-promote-mysql
+          - q-cdc-migrate-rename-ddb
+          - q-cdc-migrate-drop-ddb
+          - q-cdc-migrate-promote-ddb
           - q-ops-count-duckdb
           - q-ops-stream-iceberg
           - q-aggregates-count-duckdb
@@ -189,6 +212,8 @@ jobs:
           cargo build --profile profiling \
             -p skippr-plugin-data-source-file \
             -p skippr-plugin-data-source-postgres \
+            -p skippr-plugin-data-source-mysql \
+            -p skippr-plugin-data-source-dynamodb \
             -p skippr-plugin-data-sink-duckdb \
             -p skippr-plugin-schema-sink-duckdb \
             -p skippr-plugin-data-sink-skipprlake \
@@ -197,6 +222,8 @@ jobs:
           cp target/profiling/skipprd skipprd-linux_x86-profile/skipprd
           cp target/profiling/skippr-plugin-data-source-file \
              target/profiling/skippr-plugin-data-source-postgres \
+             target/profiling/skippr-plugin-data-source-mysql \
+             target/profiling/skippr-plugin-data-source-dynamodb \
              target/profiling/skippr-plugin-data-sink-duckdb \
              target/profiling/skippr-plugin-schema-sink-duckdb \
              target/profiling/skippr-plugin-data-sink-skipprlake \

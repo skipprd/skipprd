@@ -9,11 +9,13 @@ fn chaos_scripts() -> Vec<Vec<SimEvent>> {
         vec![SimEvent::new(MutationKind::Insert, "A", 7, "inv", "e1")],
         vec![
             SimEvent::new(MutationKind::Insert, "A", 100, "inv", "e1"),
-            SimEvent::new(MutationKind::Update, "A", 150, "inv", "e2"),
+            SimEvent::new(MutationKind::Update, "A", 150, "inv", "e2")
+                .with_before_row(SimEvent::new(MutationKind::Insert, "A", 100, "inv", "e1").row()),
         ],
         vec![
             SimEvent::new(MutationKind::Insert, "A", 25, "inv", "e1"),
-            SimEvent::new(MutationKind::Update, "B", 25, "inv", "e2"),
+            SimEvent::new(MutationKind::Update, "B", 25, "inv", "e2")
+                .with_before_row(SimEvent::new(MutationKind::Insert, "A", 25, "inv", "e1").row()),
         ],
         vec![
             SimEvent::new(MutationKind::Insert, "A", 80, "inv", "e1"),
@@ -56,7 +58,7 @@ fn run_script_with_crash(script: &[SimEvent], crash_at: usize, point: CrashPoint
         let after = fixture.snapshot_kv();
         assert_eq!(
             before, after,
-            "{point:?} must abort the whole txn: measures, last-row, entity, dedup, cursor"
+            "{point:?} must abort the whole txn: measures, last-row, dedup, cursor"
         );
     }
     let mut recovered = cursor.clone();

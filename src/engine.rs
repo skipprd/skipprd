@@ -720,8 +720,10 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
 
     info!("Reached end of source data, persisting discovered metadata");
 
-    let updated_metadata = pipeline_metadata_with_runtime_schema(METADATA.load().as_ref(), config)
-        .map_err(io::Error::other)?;
+    let mut updated_metadata =
+        pipeline_metadata_with_runtime_schema(METADATA.load().as_ref(), config)
+            .map_err(io::Error::other)?;
+    updated_metadata.migrate_persisted_metadata();
     // Discover must not force-enable a DISABLED pipeline; DISABLE is freeze-only.
     METADATA.store(Arc::new(updated_metadata.clone()));
 

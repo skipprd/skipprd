@@ -244,8 +244,8 @@ Write these red, then implement. Functional tests lock `beats`. DST scripts lock
 ### (b) Tombstone read by query
 
 - Functional: `collapse` with a tombstone incumbent whose token beats the WAL upsert returns no row. The reverse, a newer upsert, returns the row.
-- DST: tombstone stored, older upsert still in the WAL, query for that key is empty. Today's key anti-join would show the upsert, so this stays red until the incumbent is passed in.
-- End-to-end: the late-delete scenario must assert the deleted key is absent after compact. Today it deletes id 2 and only checks that id 1 was updated.
+- DST: tombstone stored, older upsert still in the WAL, query for that key is empty. A key-only hide would show the upsert; the stored incumbent does not.
+- End-to-end: GitHub-hosted SkipprLake CDC jobs for Postgres, MySQL, and DynamoDB delete id 2 after snapshot and assert that key is absent after compact. Athena Iceberg late-delete is the Glue-path proof for Postgres.
 
 ### (c) Two Iceberg writers, one shard
 

@@ -115,20 +115,32 @@ pub fn invoice_batch(customers: &[&str], amounts: &[i64], ids: &[&str]) -> Recor
     .unwrap()
 }
 
-pub fn insert_meta(id: &str) -> WalRowMeta {
-    WalRowMeta {
-        mutation: MutationKind::Insert,
-        event_id: id.as_bytes().to_vec(),
-        order_token: id.as_bytes().to_vec(),
+pub fn invoice_before(
+    customer: &str,
+    amount: i64,
+    invoice_id: &str,
+) -> crate::plugins::cdc::BeforeImage {
+    crate::plugins::cdc::BeforeImage {
+        key: customer.as_bytes().to_vec(),
+        row: serde_json::to_vec(&BTreeMap::from([
+            ("customer_id".to_string(), Value::String(customer.into())),
+            ("amount".to_string(), Value::from(amount)),
+            ("invoice_id".to_string(), Value::String(invoice_id.into())),
+        ]))
+        .expect("before row"),
     }
 }
 
+pub fn insert_meta(id: &str) -> WalRowMeta {
+    WalRowMeta::new(
+        MutationKind::Insert,
+        id.as_bytes().to_vec(),
+        id.as_bytes().to_vec(),
+    )
+}
+
 pub fn meta(kind: MutationKind, id: &str) -> WalRowMeta {
-    WalRowMeta {
-        mutation: kind,
-        event_id: id.as_bytes().to_vec(),
-        order_token: id.as_bytes().to_vec(),
-    }
+    WalRowMeta::new(kind, id.as_bytes().to_vec(), id.as_bytes().to_vec())
 }
 
 #[derive(Clone, Debug)]
@@ -138,6 +150,7 @@ pub struct SimEvent {
     pub invoice_id: String,
     pub mutation: MutationKind,
     pub event_id: String,
+    pub before_row: Option<BTreeMap<String, Value>>,
 }
 
 impl SimEvent {
@@ -154,7 +167,13 @@ impl SimEvent {
             invoice_id: invoice_id.into(),
             mutation,
             event_id: event_id.into(),
+            before_row: None,
         }
+    }
+
+    pub fn with_before_row(mut self, row: BTreeMap<String, Value>) -> Self {
+        self.before_row = Some(row);
+        self
     }
 
     pub fn row(&self) -> BTreeMap<String, Value> {
@@ -170,7 +189,19 @@ impl SimEvent {
     }
 
     pub fn cdc(&self) -> WalRowMeta {
-        meta(self.mutation, &self.event_id)
+        let mut row = meta(self.mutation, &self.event_id);
+        if let Some(before) = &self.before_row {
+            row = row.with_before(crate::plugins::cdc::BeforeImage {
+                key: before
+                    .get("customer_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .as_bytes()
+                    .to_vec(),
+                row: serde_json::to_vec(before).expect("before row"),
+            });
+        }
+        row
     }
 }
 
@@ -178,7 +209,6 @@ impl SimEvent {
 pub struct Model {
     pub totals: BTreeMap<String, BTreeMap<String, f64>>,
     pub rows: BTreeMap<String, BTreeMap<String, Value>>,
-    pub entity: BTreeMap<String, String>,
     pub seen: BTreeSet<String>,
 }
 
@@ -188,9 +218,17 @@ impl Model {
             return;
         }
         let schema = event.batch().schema();
+        if event.mutation == MutationKind::Update && event.before_row.is_none() {
+            return;
+        }
         let new_row = event.row();
         let new_key = encode_key_ids(spec, schema.as_ref(), &new_row).unwrap();
-        let old = self.load_previous(spec, schema.as_ref(), &new_key, &new_row);
+        let old = event.before_row.clone().or_else(|| {
+            self.rows
+                .get(&new_key)
+                .cloned()
+                .filter(|row| !row.is_empty())
+        });
         let mut deltas = BTreeMap::new();
         let mut last_rows = BTreeMap::new();
         apply_mutation(
@@ -214,37 +252,9 @@ impl Model {
             if row.is_empty() {
                 self.rows.remove(&key);
             } else {
-                if let Some(entity) = entity_identity(spec, schema.as_ref(), &row) {
-                    self.entity.insert(entity, key.clone());
-                }
                 self.rows.insert(key, row);
             }
         }
-    }
-
-    fn load_previous(
-        &self,
-        spec: &ComputeKind,
-        schema: &arrow_schema::Schema,
-        new_key: &str,
-        new_row: &BTreeMap<String, Value>,
-    ) -> Option<BTreeMap<String, Value>> {
-        if let Some(entity) = entity_identity(spec, schema, new_row) {
-            if let Some(old_key) = self.entity.get(&entity) {
-                if let Some(row) = self
-                    .rows
-                    .get(old_key)
-                    .cloned()
-                    .filter(|row| !row.is_empty())
-                {
-                    return Some(row);
-                }
-            }
-        }
-        self.rows
-            .get(new_key)
-            .cloned()
-            .filter(|row| !row.is_empty())
     }
 
     pub fn total(&self, key: &str, measure: &str) -> f64 {

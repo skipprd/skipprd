@@ -15,7 +15,8 @@ fn scripts() -> Vec<Vec<SimEvent>> {
         ],
         vec![
             SimEvent::new(MutationKind::Insert, "A", 100, "inv", "e1"),
-            SimEvent::new(MutationKind::Update, "A", 150, "inv", "e2"),
+            SimEvent::new(MutationKind::Update, "A", 150, "inv", "e2")
+                .with_before_row(SimEvent::new(MutationKind::Insert, "A", 100, "inv", "e1").row()),
         ],
         vec![
             SimEvent::new(MutationKind::Insert, "A", 80, "inv", "e1"),
@@ -23,7 +24,8 @@ fn scripts() -> Vec<Vec<SimEvent>> {
         ],
         vec![
             SimEvent::new(MutationKind::Insert, "A", 25, "inv", "e1"),
-            SimEvent::new(MutationKind::Update, "B", 25, "inv", "e2"),
+            SimEvent::new(MutationKind::Update, "B", 25, "inv", "e2")
+                .with_before_row(SimEvent::new(MutationKind::Insert, "A", 25, "inv", "e1").row()),
         ],
         vec![SimEvent::new(MutationKind::Update, "A", 40, "inv", "e1")],
         vec![SimEvent::new(MutationKind::Delete, "A", 9, "inv", "e1")],
@@ -34,17 +36,21 @@ fn scripts() -> Vec<Vec<SimEvent>> {
         vec![
             SimEvent::new(MutationKind::Snapshot, "A", 5, "s1", "s1"),
             SimEvent::new(MutationKind::Insert, "B", 7, "s2", "s2"),
-            SimEvent::new(MutationKind::Update, "B", 11, "s2", "s3"),
+            SimEvent::new(MutationKind::Update, "B", 11, "s2", "s3")
+                .with_before_row(SimEvent::new(MutationKind::Insert, "B", 7, "s2", "s2").row()),
             SimEvent::new(MutationKind::Delete, "A", 5, "s1", "s4"),
-            SimEvent::new(MutationKind::Update, "C", 3, "s2", "s5"),
+            SimEvent::new(MutationKind::Update, "C", 3, "s2", "s5")
+                .with_before_row(SimEvent::new(MutationKind::Insert, "B", 11, "s2", "s3").row()),
         ],
         vec![
             SimEvent::new(MutationKind::Insert, "A", 1, "i1", "a"),
             SimEvent::new(MutationKind::Insert, "B", 2, "i2", "b"),
             SimEvent::new(MutationKind::Insert, "C", 3, "i3", "c"),
-            SimEvent::new(MutationKind::Update, "A", 4, "i1", "d"),
+            SimEvent::new(MutationKind::Update, "A", 4, "i1", "d")
+                .with_before_row(SimEvent::new(MutationKind::Insert, "A", 1, "i1", "a").row()),
             SimEvent::new(MutationKind::Delete, "B", 2, "i2", "e"),
-            SimEvent::new(MutationKind::Update, "D", 4, "i1", "f"),
+            SimEvent::new(MutationKind::Update, "D", 4, "i1", "f")
+                .with_before_row(SimEvent::new(MutationKind::Update, "A", 4, "i1", "d").row()),
         ],
     ]
 }
@@ -80,7 +86,8 @@ fn serialized_commits_flush_each_event_to_disk() {
     let script = vec![
         SimEvent::new(MutationKind::Insert, "A", 100, "inv-1", "e1"),
         SimEvent::new(MutationKind::Insert, "A", 50, "inv-2", "e2"),
-        SimEvent::new(MutationKind::Update, "A", 75, "inv-2", "e3"),
+        SimEvent::new(MutationKind::Update, "A", 75, "inv-2", "e3")
+            .with_before_row(SimEvent::new(MutationKind::Insert, "A", 50, "inv-2", "e2").row()),
         SimEvent::new(MutationKind::Insert, "B", 9, "inv-3", "e4"),
     ];
     let mut fixture = DiskFixture::new();

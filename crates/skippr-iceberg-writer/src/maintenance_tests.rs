@@ -58,14 +58,13 @@ async fn merge_write(harness: &Harness, key: &str, ids: &[i64]) {
 async fn cdc_write(harness: &Harness, key: &str, events: &[(i64, MutationKind, u8)]) {
     let rows = events
         .iter()
-        .map(|(id, mutation, token)| WalRowMeta {
-            mutation: *mutation,
-            event_id: vec![*id as u8, *token],
-            order_token: vec![0, *token],
+        .map(|(id, mutation, token)| {
+            WalRowMeta::new(*mutation, vec![*id as u8, *token], vec![0, *token])
         })
         .collect::<Vec<_>>();
     let cdc = SyncContext {
         part_meta: WalPartMeta::cdc(rows, events.len() as u64).unwrap(),
+        ties: (0..events.len() as u64).map(|i| (1, 0, i)).collect(),
         contract: Some(NamespaceContract {
             namespace: NAMESPACE.to_string(),
             business_key_columns: vec!["id".to_string()],
@@ -448,14 +447,14 @@ async fn try_cdc_write_tokens(
 ) -> Result<skippr_runtime_sdk::plugins::SinkCallResult, std::io::Error> {
     let rows = events
         .iter()
-        .map(|(id, mutation, token)| WalRowMeta {
-            mutation: *mutation,
-            event_id: id.to_be_bytes().to_vec(),
-            order_token: token.clone(),
+        .map(|(id, mutation, token)| {
+            WalRowMeta::new(*mutation, id.to_be_bytes().to_vec(), token.clone())
         })
         .collect::<Vec<_>>();
     let cdc = SyncContext {
-        part_meta: WalPartMeta::cdc(rows, events.len() as u64).unwrap(),
+        part_meta: WalPartMeta::cdc(rows, events.len() as u64)
+            .map_err(|err| std::io::Error::other(err.to_string()))?,
+        ties: (0..events.len() as u64).map(|i| (1, 0, i)).collect(),
         contract: Some(NamespaceContract {
             namespace: NAMESPACE.to_string(),
             business_key_columns: vec!["id".to_string()],
@@ -490,7 +489,7 @@ async fn empty_cdc_order_token_fail_closes_merge() {
     .unwrap_err();
     assert!(
         err.to_string()
-            .contains("CDC order token '' is not fixed-width hex"),
+            .contains("CDC order token must be non-empty"),
         "{err}"
     );
 }

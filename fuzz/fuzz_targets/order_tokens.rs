@@ -2,7 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use skipprd::plugins::cdc::MutationKind;
-use skipprd::sqlrt::cdc_reconcile::{attach_cdc_sidecar, collapse_wal_batches};
+use skipprd::sqlrt::cdc_reconcile::{attach_cdc_sidecar, reconcile_cdc};
 use skipprd::sqlrt::dst::{batch_from_row, UserRow};
 
 fuzz_target!(|data: &[u8]| {
@@ -35,6 +35,6 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     if !batches.is_empty() {
-        let _ = collapse_wal_batches(&batches, &keys);
+        let _ = reconcile_cdc(&[], &batches, &Default::default(), &keys);
     }
 });

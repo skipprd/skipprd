@@ -33,6 +33,19 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
+fn take_size_chunk(
+    current_batch: &mut Vec<IngestBatch>,
+    current_bytes: &mut usize,
+    cap: usize,
+) -> Option<Vec<IngestBatch>> {
+    if *current_bytes >= cap && !current_batch.is_empty() {
+        *current_bytes = 0;
+        Some(std::mem::take(current_batch))
+    } else {
+        None
+    }
+}
+
 fn read_meminfo_kib(key: &str) -> Option<u64> {
     if let Ok(file) = std::fs::File::open("/proc/meminfo") {
         let reader = std::io::BufReader::new(file);
@@ -561,9 +574,10 @@ impl DataSourceS3Plugin {
                     None,
                     None,
                 ));
-                if current_bytes >= self.optimal_chunk_size {
-                    let batch_bytes = current_bytes;
-                    let batch = std::mem::take(&mut current_batch);
+                if let Some(batch) =
+                    take_size_chunk(&mut current_batch, &mut current_bytes, self.optimal_chunk_size)
+                {
+                    let batch_bytes = batch.iter().map(|item| item.bytes).sum::<usize>();
                     if runtime_log_wal_enabled() {
                         let first_key = batch
                             .first()
@@ -581,7 +595,6 @@ impl DataSourceS3Plugin {
                             last_key
                         );
                     }
-                    current_bytes = 0;
                     pending_tasks.push(SourcePayloadTask { batches: batch });
                     if pending_tasks.len() >= total_cpus {
                         if runtime_log_wal_enabled() {
@@ -721,5 +734,52 @@ impl DataSource for DataSourceS3Plugin {
 
     fn execution_contract(&self) -> skippr_runtime_sdk::plugins::SourceExecutionContract {
         skippr_runtime_sdk::plugins::SourceExecutionContract::finite()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skippr_runtime_sdk::helpers::configuration::runtime_child_config;
+
+    fn object_batch(bytes: usize, key: &str) -> IngestBatch {
+        let cfg = runtime_child_config();
+        IngestBatch::new(
+            &cfg,
+            OffsetKey {
+                namespace: "bucket".into(),
+                partition: key.into(),
+            },
+            vec![0u8; bytes],
+            bytes,
+            format!("s3://bucket/{key}"),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn size_chunk_keeps_whole_objects_and_has_no_cdc_rows() {
+        let mut current = Vec::new();
+        let mut current_bytes = 0usize;
+        current.push(object_batch(60, "a"));
+        current_bytes += 60;
+        assert!(take_size_chunk(&mut current, &mut current_bytes, 100).is_none());
+        current.push(object_batch(60, "b"));
+        current_bytes += 60;
+        let chunk = take_size_chunk(&mut current, &mut current_bytes, 100).unwrap();
+        assert_eq!(chunk.len(), 2);
+        assert!(chunk.iter().all(|batch| batch.cdc_rows.is_none()));
+        assert!(current.is_empty());
+        assert_eq!(current_bytes, 0);
+    }
+
+    #[test]
+    fn one_object_larger_than_cap_is_still_one_whole_object() {
+        let mut current = vec![object_batch(200, "big")];
+        let mut current_bytes = 200usize;
+        let chunk = take_size_chunk(&mut current, &mut current_bytes, 100).unwrap();
+        assert_eq!(chunk.len(), 1);
+        assert!(chunk[0].cdc_rows.is_none());
     }
 }

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b0584c56e8bac90253d25d7f116b668260c40802e94f5bee69bdedc166417ed5 # shrinks to script = [SimEvent { customer: "A", amount: 1, invoice_id: "inv-1", mutation: Delete, event_id: "e0", before_row: None }], point = BeforeTxn, crash_slot = 0
+cc 6976031a713361686abf8bd05de17bdf1248e198c15e709cfde894a972c9f238 # shrinks to script = [SimEvent { customer: "A", amount: 1, invoice_id: "inv-1", mutation: Delete, event_id: "e0", before_row: None }]

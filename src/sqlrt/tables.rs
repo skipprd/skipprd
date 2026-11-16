@@ -669,10 +669,13 @@ async fn register_iceberg_union_view(
         .ok_or_else(|| DataFusionError::Plan(format!("pipeline '{pipeline_name}' not found")))?;
     let bound = config.bind_pipeline(pipeline_name);
     let pipeline_type = bound.pipeline_type().map_err(DataFusionError::Plan)?;
-    let source_keys = match bound.get_metadata().await {
-        Ok(md) => crate::plugins::source_contract::cdc_source_key_columns(&md.source_contracts),
-        Err(_) => std::collections::HashMap::new(),
-    };
+    let source_keys = bound
+        .get_metadata()
+        .await
+        .map(|md| crate::plugins::source_contract::cdc_source_key_columns(&md.source_contracts))
+        .map_err(|_| {
+            DataFusionError::Plan(format!("pipeline '{pipeline_name}' metadata is missing"))
+        })?;
     let business_key_columns = crate::helpers::configuration::query_namespace_business_keys(
         pipeline_type,
         pipeline_cfg.cdc.as_ref(),
@@ -715,7 +718,12 @@ impl IcebergWalTableProvider {
         pin: &UnionPin,
         projection: Option<&Vec<usize>>,
         projected: &SchemaRef,
-    ) -> datafusion::error::Result<(Arc<dyn ExecutionPlan>, Arc<dyn ExecutionPlan>)> {
+    ) -> datafusion::error::Result<(
+        Arc<dyn ExecutionPlan>,
+        Arc<dyn ExecutionPlan>,
+        std::collections::BTreeMap<Vec<u8>, crate::plugins::cdc::StoredWinner>,
+    )> {
+        let (start_seq, tip_seq) = crate::sqlrt::publish_catalog::pin_or_keep(1);
         let reader = crate::buffer::wal_reader::wal_reader_for(&pin.pipeline).ok_or_else(|| {
             DataFusionError::Plan(format!(
                 "WAL catalog for pipeline {} is not open",
@@ -725,9 +733,21 @@ impl IcebergWalTableProvider {
         let live = reader
             .live_slices(&pin.namespace)
             .map_err(|err| DataFusionError::Plan(err.to_string()))?;
-        let (lake, excluded, iceberg_plan, scan_schema) =
+        let live = if start_seq == 0 && tip_seq == u64::MAX {
+            live
+        } else {
+            live.into_iter()
+                .filter(|slice| {
+                    let seq = slice.seq.get();
+                    seq >= start_seq && seq <= tip_seq
+                })
+                .collect()
+        };
+        let (lake, excluded, iceberg_plan, scan_schema, stored) =
             self.load_iceberg_leaf(pin, projection, projected).await?;
-        let boundary = crate::sqlrt::read_boundary::ReadBoundary::new(lake, live, &excluded);
+        let boundary = crate::sqlrt::read_boundary::ReadBoundary::new(
+            lake, live, &excluded, start_seq, tip_seq,
+        );
         boundary.emit_query_pin(&pin.namespace);
         let include_cdc = !self.business_key_columns.is_empty();
         let wal_schema = if include_cdc {
@@ -742,7 +762,7 @@ impl IcebergWalTableProvider {
             include_cdc,
             pin.namespace.clone(),
         )?) as Arc<dyn ExecutionPlan>;
-        Ok((iceberg_plan, wal_plan))
+        Ok((iceberg_plan, wal_plan, stored))
     }
 
     async fn load_iceberg_leaf(
@@ -755,6 +775,7 @@ impl IcebergWalTableProvider {
         HashSet<crate::wal_slice_ref::WalSliceRef>,
         Arc<dyn ExecutionPlan>,
         SchemaRef,
+        std::collections::BTreeMap<Vec<u8>, crate::plugins::cdc::StoredWinner>,
     )> {
         let table = crate::sqlrt::iceberg_table::reload_iceberg_table(
             &pin.catalog_json,
@@ -777,6 +798,7 @@ impl IcebergWalTableProvider {
         } else {
             None
         };
+        let stored = crate::sqlrt::iceberg_table::load_cdc_stored_winners(&table).await?;
         Ok(match table.metadata().current_snapshot() {
             Some(snap) => {
                 let snapshot_id = snap.snapshot_id();
@@ -796,6 +818,7 @@ impl IcebergWalTableProvider {
                     excluded,
                     Arc::new(plan) as Arc<dyn ExecutionPlan>,
                     scan_schema,
+                    stored,
                 )
             }
             None => (
@@ -803,6 +826,7 @@ impl IcebergWalTableProvider {
                 HashSet::new(),
                 Arc::new(EmptyExec::new(scan_schema.clone())) as Arc<dyn ExecutionPlan>,
                 scan_schema,
+                stored,
             ),
         })
     }
@@ -839,7 +863,8 @@ impl TableProvider for IcebergWalTableProvider {
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let schema = crate::sqlrt::wal_table::projected_schema(&self.schema, projection)?;
         let IcebergWalMode::Local(pin) = &self.mode;
-        let (iceberg_plan, wal_plan) = self.pin_union_leaves(pin, projection, &schema).await?;
+        let (iceberg_plan, wal_plan, stored) =
+            self.pin_union_leaves(pin, projection, &schema).await?;
         if self.business_key_columns.is_empty() {
             let union = UnionExec::try_new(vec![iceberg_plan, wal_plan])?;
             return crate::sqlrt::cdc_reconcile::wrap_limit(union, schema, limit);
@@ -849,6 +874,7 @@ impl TableProvider for IcebergWalTableProvider {
             wal_plan,
             self.business_key_columns.clone(),
             self.schema.clone(),
+            stored,
         )?);
         crate::sqlrt::cdc_reconcile::wrap_limit(merge, schema, limit)
     }
@@ -1165,19 +1191,17 @@ mod tests {
             .split("async fn load_iceberg_scan_provider")
             .next()
             .expect("scan before load_iceberg_scan_provider");
-        let pin_w = scan
-            .find("live_slices")
-            .expect("scan must pin W from WalCatalogReader::live_slices");
-        let load_s = scan
-            .find("reload_iceberg_table")
-            .expect("scan must load S after pinning W");
         assert!(
-            pin_w < load_s,
-            "W-then-S: live_slices must run before reload_iceberg_table"
+            scan.contains("publish_catalog::pin_or_keep"),
+            "scan must pin one catalog range"
+        );
+        assert!(
+            scan.contains("seq >= start_seq && seq <= tip_seq"),
+            "WAL slices must be the catalog pin, not a second live listing"
         );
         assert!(
             scan.contains("ReadBoundary::new"),
-            "scan must freeze ReadBoundary from W, S, and E"
+            "scan must freeze ReadBoundary from the catalog pin"
         );
         assert!(
             scan.contains("WalScanExec::new"),
@@ -1188,8 +1212,12 @@ mod tests {
             "no Iceberg snapshot is Empty; a current snapshot is At"
         );
         assert!(
+            scan.contains("load_cdc_stored_winners"),
+            "scan must load side-file incumbents with the Iceberg leaf"
+        );
+        assert!(
             scan.contains("excluded_slices"),
-            "scan must walk E from the snapshot loaded after W"
+            "scan must freeze E from the pinned Iceberg snapshot"
         );
         assert!(
             prod.contains("enum IcebergWalMode") && !prod.contains("local_pin: Option"),

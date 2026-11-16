@@ -360,14 +360,14 @@ impl<'a> GroupedSinkWriteContext<'a> {
         let Some(cdc) = self.cdc_ctx else {
             return Ok(None);
         };
-        let part_meta = match cdc.part_meta.kind {
+        let (part_meta, ties) = match cdc.part_meta.kind {
             crate::plugins::cdc::WalPartKind::Append => {
-                crate::plugins::cdc::WalPartMeta::append(rows)
+                (crate::plugins::cdc::WalPartMeta::append(rows), Vec::new())
             }
             crate::plugins::cdc::WalPartKind::Cdc => {
                 let start = row_offset as usize;
                 let end = start.saturating_add(rows as usize);
-                let rows = cdc.part_meta.rows.get(start..end).ok_or_else(|| {
+                let sliced_rows = cdc.part_meta.rows.get(start..end).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!(
@@ -379,13 +379,32 @@ impl<'a> GroupedSinkWriteContext<'a> {
                         ),
                     )
                 })?;
-                crate::plugins::cdc::WalPartMeta::cdc(rows.to_vec(), rows.len() as u64)
-                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+                let sliced_ties = cdc.ties.get(start..end).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "CDC ties slice out of range for grouped chunk {}: rows {}..{} of {}",
+                            chunk_index,
+                            start,
+                            end,
+                            cdc.ties.len()
+                        ),
+                    )
+                })?;
+                (
+                    crate::plugins::cdc::WalPartMeta::cdc(
+                        sliced_rows.to_vec(),
+                        sliced_rows.len() as u64,
+                    )
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?,
+                    sliced_ties.to_vec(),
+                )
             }
         };
         Ok(Some(SyncContext {
             part_meta,
             contract: cdc.contract.clone(),
+            ties,
         }))
     }
 }
@@ -1336,15 +1355,12 @@ mod tests {
         use crate::plugins::cdc::{MutationKind, SyncContext, WalPartMeta, WalRowMeta};
 
         let rows = (0..4)
-            .map(|idx| WalRowMeta {
-                mutation: MutationKind::Insert,
-                event_id: vec![idx],
-                order_token: vec![idx],
-            })
+            .map(|idx| WalRowMeta::new(MutationKind::Insert, vec![idx], vec![idx]))
             .collect::<Vec<_>>();
         let cdc_ctx = SyncContext {
             part_meta: WalPartMeta::cdc(rows, 4).unwrap(),
             contract: None,
+            ties: (0..4).map(|i| (1, 0, i as u64)).collect(),
         };
         let sink_ctx = SinkWriteContext {
             filename: "namespace=users-c=abc".to_string(),

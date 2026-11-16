@@ -292,51 +292,6 @@ impl DataSinkDatabricksPlugin {
         Ok(())
     }
 
-    fn arrow_value_to_sql(array: &dyn Array, row: usize) -> String {
-        if array.is_null(row) {
-            return "NULL".to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
-            return format!("'{}'", a.value(row).replace('\'', "\\'"));
-        }
-        if let Some(a) = array.as_any().downcast_ref::<LargeStringArray>() {
-            return format!("'{}'", a.value(row).replace('\'', "\\'"));
-        }
-        if let Some(a) = array.as_any().downcast_ref::<Int64Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<Int32Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<Int16Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<Int8Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<UInt64Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<UInt32Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<Float64Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<Float32Array>() {
-            return a.value(row).to_string();
-        }
-        if let Some(a) = array.as_any().downcast_ref::<BooleanArray>() {
-            return if a.value(row) { "true" } else { "false" }.to_string();
-        }
-        format!(
-            "'{}'",
-            arrow::util::display::array_value_to_string(array, row)
-                .unwrap_or_else(|_| "NULL".to_string())
-                .replace('\'', "\\'")
-        )
-    }
-
     fn arrow_type_to_databricks(dt: &ArrowDataType) -> &'static str {
         match dt {
             ArrowDataType::Boolean => "BOOLEAN",
@@ -374,11 +329,12 @@ impl DataSinkDatabricksPlugin {
             "bulk CDC staging deferred"
         );
         use super::cdc_apply::{
-            ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-            tombstone_table_name, upsert_if_newer_sql,
+            append_record_batch_to_cdc_apply, collapse_apply_batch, ddl_add_order_token_column,
+            ddl_create_tombstone_table, delete_if_newer_sql, format_cdc_apply_value,
+            tombstone_table_name, upsert_if_newer_sql, CdcApplyBatch, CdcApplyColumn,
+            CdcApplyMutation,
         };
         use skippr_runtime_sdk::metrics::counters;
-        use skippr_runtime_sdk::plugins::cdc::MutationKind;
 
         let contract = match ctx.contract.as_ref() {
             Some(c) if !c.business_key_columns.is_empty() => c,
@@ -496,9 +452,20 @@ impl DataSinkDatabricksPlugin {
             .map(|f| format!("\"{}\"", f.name().to_lowercase()))
             .collect();
 
+        let mut apply_batch = CdcApplyBatch {
+            columns: arrow_schema
+                .fields()
+                .iter()
+                .zip(col_defs.iter())
+                .map(|(field, (_, target_type))| CdcApplyColumn {
+                    name: field.name().to_lowercase(),
+                    target_type: (*target_type).to_string(),
+                })
+                .collect(),
+            business_key_columns: contract.business_key_columns.clone(),
+            rows: Vec::new(),
+        };
         let mut row_offset = 0usize;
-        let mut total_rows = 0usize;
-
         while let Some(batch_result) = stream.next().await {
             let batch =
                 batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
@@ -506,86 +473,87 @@ impl DataSinkDatabricksPlugin {
             if num_rows == 0 {
                 continue;
             }
-
-            for row in 0..num_rows {
-                let meta_idx = row_offset + row;
-                let row_meta = ctx.part_meta.rows.get(meta_idx).ok_or_else(|| {
-                    std::io::Error::other(format!(
-                        "CDC row metadata missing at index {} (have {})",
-                        meta_idx,
-                        ctx.part_meta.rows.len()
-                    ))
-                })?;
-
-                let order_token_hex: String = row_meta
-                    .order_token
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-
-                match row_meta.mutation {
-                    MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
-                        let mut all_names = col_names_quoted.clone();
-                        all_names.push("\"_skippr_order_token\"".to_string());
-
-                        let mut all_values: Vec<String> = (0..batch.num_columns())
-                            .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
-                            .collect();
-                        all_values.push(format!("X'{}'", order_token_hex));
-
-                        let sql = upsert_if_newer_sql::<DatabricksCdcBackend>(
-                            &fq_table,
-                            &tombstone_table,
-                            &all_names,
-                            &all_values,
-                            &bk_names_quoted,
-                            &order_token_hex,
-                        );
-
-                        self.execute_sql(&sql).await.map_err(|e| {
-                            error!("CDC upsert failed for {}: {}", fq_table, e);
-                            counters::dec_uploads_in_flight();
-                            e
-                        })?;
-                    }
-                    MutationKind::Delete => {
-                        let bk_values: Vec<String> = contract
-                            .business_key_columns
-                            .iter()
-                            .map(|bk| {
-                                let col_idx = arrow_schema
-                                    .fields()
-                                    .iter()
-                                    .position(|f| f.name().to_lowercase() == *bk)
-                                    .unwrap_or(0);
-                                Self::arrow_value_to_sql(batch.column(col_idx).as_ref(), row)
-                            })
-                            .collect();
-
-                        let sql = delete_if_newer_sql::<DatabricksCdcBackend>(
-                            &fq_table,
-                            &tombstone_table,
-                            &bk_names_quoted,
-                            &bk_values,
-                            &bk_types,
-                            &order_token_hex,
-                        );
-
-                        self.execute_sql(&sql).await.map_err(|e| {
-                            error!("CDC delete failed for {}: {}", fq_table, e);
-                            counters::dec_uploads_in_flight();
-                            e
-                        })?;
-                    }
+            append_record_batch_to_cdc_apply(
+                &mut apply_batch,
+                &batch,
+                &ctx.part_meta.rows,
+                &ctx.decoded_ties().map_err(std::io::Error::other)?,
+                row_offset,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            row_offset += num_rows;
+        }
+        let apply_batch = collapse_apply_batch(&apply_batch);
+        let total_rows = apply_batch.rows.len();
+        for row in &apply_batch.rows {
+            let incoming = skippr_cdc::StoredWinner {
+                order: row.metadata.order_token.clone(),
+                tie: row.metadata.tie,
+            };
+            match row.metadata.mutation {
+                CdcApplyMutation::Upsert => {
+                    let mut all_names = col_names_quoted.clone();
+                    all_names.push("\"_skippr_order_token\"".to_string());
+                    all_names.push("\"_skippr_tie_seq\"".to_string());
+                    all_names.push("\"_skippr_tie_ordinal\"".to_string());
+                    all_names.push("\"_skippr_tie_row\"".to_string());
+                    let mut all_values: Vec<String> = row
+                        .values
+                        .iter()
+                        .map(format_cdc_apply_value::<DatabricksCdcBackend>)
+                        .collect();
+                    all_values.push(format!("X'{}'", hex::encode(&incoming.order)));
+                    all_values.push(incoming.tie.seq.to_string());
+                    all_values.push(incoming.tie.ordinal.to_string());
+                    all_values.push(incoming.tie.row.to_string());
+                    let sql = upsert_if_newer_sql::<DatabricksCdcBackend>(
+                        &fq_table,
+                        &tombstone_table,
+                        &all_names,
+                        &all_values,
+                        &bk_names_quoted,
+                        &incoming,
+                    );
+                    self.execute_sql(&sql).await.map_err(|e| {
+                        error!("CDC upsert failed for {}: {}", fq_table, e);
+                        counters::dec_uploads_in_flight();
+                        e
+                    })?;
+                }
+                CdcApplyMutation::Delete => {
+                    let bk_values: Vec<String> = contract
+                        .business_key_columns
+                        .iter()
+                        .map(|bk| {
+                            let idx = apply_batch
+                                .columns
+                                .iter()
+                                .position(|column| column.name.eq_ignore_ascii_case(bk))
+                                .unwrap_or(0);
+                            format_cdc_apply_value::<DatabricksCdcBackend>(&row.values[idx])
+                        })
+                        .collect();
+                    let sql = delete_if_newer_sql::<DatabricksCdcBackend>(
+                        &fq_table,
+                        &tombstone_table,
+                        &bk_names_quoted,
+                        &bk_values,
+                        &bk_types,
+                        &incoming,
+                    );
+                    self.execute_sql(&sql).await.map_err(|e| {
+                        error!("CDC delete failed for {}: {}", fq_table, e);
+                        counters::dec_uploads_in_flight();
+                        e
+                    })?;
                 }
             }
-
-            row_offset += num_rows;
-            total_rows += num_rows;
-            counters::add_parquet_rows(num_rows as u64);
+        }
+        if total_rows > 0 {
+            counters::add_parquet_rows(total_rows as u64);
             info!(
-                "CDC applied {} rows to {}.{}.{} (total: {})",
-                num_rows, catalog, schema, table_name, total_rows
+                "CDC applied {} collapsed rows to {}.{}.{}",
+                total_rows, catalog, schema, table_name
             );
         }
 

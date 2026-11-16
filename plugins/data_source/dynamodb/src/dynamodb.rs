@@ -16,7 +16,7 @@ use tracing::{error, info, warn};
 
 use crate::helpers::plugin_config::PluginConfigEntry;
 use skippr_runtime_sdk::plugins::cdc::{
-    source_capabilities, DynamodbCheckpoint, MutationKind, WalRowMeta,
+    before_image, source_capabilities, BeforeImage, DynamodbCheckpoint, MutationKind, WalRowMeta,
 };
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
@@ -24,8 +24,8 @@ use skippr_runtime_sdk::plugins::{
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, partition_already_closed, store_checkpoint_payload,
-    submit_payload_batch_groups_durable, submit_payload_batches_durable, IngestBatch,
-    SourceSyncContext,
+    submit_payload_batch_groups_durable, submit_payload_batches_durable, take_row_count_batch,
+    IngestBatch, SourceSyncContext,
 };
 
 /// CDC scan configuration passed to `sync_scan` when CDC tagging is needed.
@@ -121,6 +121,94 @@ impl DataSourceDynamodbPlugin {
 
     pub async fn with_runtime_config(config: DataSourceDynamodbPluginConfig) -> Self {
         Self::from_config(config).await
+    }
+
+    fn json_ingest_batch(
+        offset_key: OffsetKey,
+        json_str: String,
+        source_uri: String,
+        cdc_rows: Option<Vec<WalRowMeta>>,
+    ) -> IngestBatch {
+        let bytes = json_str.len();
+        IngestBatch {
+            offset_key,
+            data: json_str.into(),
+            bytes,
+            offset_pos: None,
+            source_uri,
+            namespace: None,
+            cdc_rows,
+        }
+    }
+
+    fn cdc_stream_batch(
+        shard_offset_key: OffsetKey,
+        table_name: &str,
+        shard_id: &str,
+        json_str: String,
+        mutation: MutationKind,
+        seq_number: &str,
+        before: Option<BeforeImage>,
+    ) -> io::Result<IngestBatch> {
+        let event_id = seq_number.as_bytes().to_vec();
+        let order_token = Self::sequence_number_to_order_token(seq_number)?;
+        let mut meta = WalRowMeta::new(mutation, event_id, order_token);
+        if let Some(before) = before {
+            meta = meta.with_before(before);
+        }
+        Ok(Self::json_ingest_batch(
+            shard_offset_key,
+            json_str,
+            format!("dynamodb-stream://{}/{}", table_name, shard_id),
+            Some(vec![meta]),
+        ))
+    }
+
+    fn streams_attr_key_bytes(av: &aws_sdk_dynamodbstreams::types::AttributeValue) -> Vec<u8> {
+        use aws_sdk_dynamodbstreams::types::AttributeValue as SAV;
+        match av {
+            SAV::S(s) => s.as_bytes().to_vec(),
+            SAV::N(s) => s.as_bytes().to_vec(),
+            SAV::B(blob) => blob.as_ref().to_vec(),
+            SAV::Bool(true) => b"true".to_vec(),
+            SAV::Bool(false) => b"false".to_vec(),
+            other => Self::streams_attribute_to_json(other)
+                .to_string()
+                .into_bytes(),
+        }
+    }
+
+    fn encode_stream_key(
+        keys: &HashMap<String, aws_sdk_dynamodbstreams::types::AttributeValue>,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut names: Vec<&String> = keys.keys().collect();
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| {
+                (
+                    name.as_bytes().to_vec(),
+                    Self::streams_attr_key_bytes(&keys[name]),
+                )
+            })
+            .collect()
+    }
+
+    fn stream_before_image(
+        keys: Option<&HashMap<String, aws_sdk_dynamodbstreams::types::AttributeValue>>,
+        old_image: Option<&HashMap<String, aws_sdk_dynamodbstreams::types::AttributeValue>>,
+    ) -> Option<BeforeImage> {
+        let row_map = old_image.filter(|m| !m.is_empty())?;
+        let key_map = keys.filter(|m| !m.is_empty()).unwrap_or(row_map);
+        let owned = Self::encode_stream_key(key_map);
+        let parts: Vec<(&[u8], &[u8])> = owned
+            .iter()
+            .map(|(name, value)| (name.as_slice(), value.as_slice()))
+            .collect();
+        Some(before_image(
+            &parts,
+            Self::streams_item_to_json(row_map, None).into_bytes(),
+        ))
     }
 
     fn n_to_json(s: &str) -> Value {
@@ -252,7 +340,6 @@ impl DataSourceDynamodbPlugin {
 
                     for item in items {
                         let json_str = Self::item_to_json(item, Some(ingest_posix));
-                        let bytes = json_str.len();
 
                         let cdc_rows = if let Some(cfg) = cdc_config {
                             let event_id = if cfg.key_attrs.is_empty() {
@@ -262,27 +349,24 @@ impl DataSourceDynamodbPlugin {
                                 Self::item_key_hash(item, &cfg.key_attrs)
                             };
                             global_row_idx += 1;
-                            Some(vec![WalRowMeta {
-                                mutation: MutationKind::Snapshot,
+                            Some(vec![WalRowMeta::new(
+                                MutationKind::Snapshot,
                                 event_id,
-                                order_token: cfg.anchor_bytes.clone(),
-                            }])
+                                cfg.anchor_bytes.clone(),
+                            )])
                         } else {
                             None
                         };
 
-                        current_batch.push(IngestBatch {
-                            offset_key: offset_key.clone(),
-                            data: json_str.into(),
-                            bytes,
-                            offset_pos: None,
-                            source_uri: format!("dynamodb://{}", table_name),
-                            namespace: None,
+                        current_batch.push(Self::json_ingest_batch(
+                            offset_key.clone(),
+                            json_str,
+                            format!("dynamodb://{}", table_name),
                             cdc_rows,
-                        });
+                        ));
 
-                        if current_batch.len() >= batch_size {
-                            batch_groups.push(std::mem::take(&mut current_batch));
+                        if let Some(full) = take_row_count_batch(&mut current_batch, batch_size) {
+                            batch_groups.push(full);
                         }
                     }
 
@@ -573,47 +657,58 @@ impl DataSourceDynamodbPlugin {
                         match mutation {
                             MutationKind::Delete => match stream_record.keys() {
                                 Some(keys) if !keys.is_empty() => keys,
-                                _ => continue,
+                                _ => {
+                                    return Err(io::Error::other(
+                                        "DynamoDB CDC Remove is missing keys",
+                                    ));
+                                }
                             },
-                            _ => match stream_record.new_image() {
-                                Some(img) if !img.is_empty() => img,
-                                _ => match stream_record.keys() {
-                                    Some(keys) if !keys.is_empty() => keys,
-                                    _ => continue,
-                                },
-                            },
+                            MutationKind::Update | MutationKind::Insert => {
+                                match stream_record.new_image() {
+                                    Some(img) if !img.is_empty() => img,
+                                    _ => {
+                                        return Err(io::Error::other(
+                                            if mutation == MutationKind::Update {
+                                                "DynamoDB CDC Modify is missing new_image"
+                                            } else {
+                                                "DynamoDB CDC Insert is missing new_image"
+                                            },
+                                        ));
+                                    }
+                                }
+                            }
+                            MutationKind::Snapshot => continue,
                         };
+
+                    let before =
+                        Self::stream_before_image(stream_record.keys(), stream_record.old_image());
+                    if matches!(mutation, MutationKind::Update | MutationKind::Delete)
+                        && before.is_none()
+                    {
+                        return Err(io::Error::other(
+                            "DynamoDB CDC Modify/Remove is missing old_image (require NEW_AND_OLD_IMAGES)",
+                        ));
+                    }
 
                     let approx_posix = stream_record
                         .approximate_creation_date_time()
                         .map(|dt| dt.secs());
                     let event_time = stream_event_time_posix(approx_posix, ingest_posix_seconds());
                     let json_str = Self::streams_item_to_json(image, Some(event_time));
-                    let bytes = json_str.len();
 
                     let seq_number = stream_record.sequence_number().ok_or_else(|| {
                         io::Error::other("DynamoDB stream record is missing sequence_number")
                     })?;
                     last_seq = Some(seq_number.to_string());
-                    let event_id = seq_number.as_bytes().to_vec();
-
-                    let order_token = Self::sequence_number_to_order_token(seq_number)?;
-
-                    let cdc_rows = Some(vec![WalRowMeta {
+                    batch.push(Self::cdc_stream_batch(
+                        shard_offset_key.clone(),
+                        table_name,
+                        shard_id,
+                        json_str,
                         mutation,
-                        event_id,
-                        order_token,
-                    }]);
-
-                    batch.push(IngestBatch {
-                        offset_key: shard_offset_key.clone(),
-                        data: json_str.into(),
-                        bytes,
-                        offset_pos: None,
-                        source_uri: format!("dynamodb-stream://{}/{}", table_name, shard_id),
-                        namespace: None,
-                        cdc_rows,
-                    });
+                        seq_number,
+                        before,
+                    )?);
 
                     total_records += 1;
                 }
@@ -940,5 +1035,130 @@ mod tests {
         let parsed: Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(parsed["id"], "a");
         assert_eq!(parsed[SKIPPR_EVENT_TIME_FIELD], 1_700_000_000);
+    }
+
+    #[test]
+    fn get_records_page_is_one_submit_without_source_transaction_id() {
+        let offset = OffsetKey::new("table", "shard");
+        let page: Vec<IngestBatch> = ["1", "2"]
+            .into_iter()
+            .map(|seq| {
+                DataSourceDynamodbPlugin::cdc_stream_batch(
+                    offset.clone(),
+                    "orders",
+                    "shard-1",
+                    format!("{{\"id\":{seq}}}"),
+                    MutationKind::Insert,
+                    seq,
+                    None,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(page.len(), 2);
+        assert!(page.iter().all(|batch| {
+            batch
+                .cdc_rows
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|row| row.source_transaction_id.is_none() && row.before.is_none())
+        }));
+    }
+
+    #[test]
+    fn modify_stamps_old_image_as_before() {
+        use aws_sdk_dynamodbstreams::types::AttributeValue as SAV;
+        let mut keys = HashMap::new();
+        keys.insert("id".into(), SAV::S("1".into()));
+        keys.insert("rmc".into(), SAV::S("eu".into()));
+        let mut old = keys.clone();
+        old.insert("name".into(), SAV::S("alpha".into()));
+        let before =
+            DataSourceDynamodbPlugin::stream_before_image(Some(&keys), Some(&old)).unwrap();
+        let batch = DataSourceDynamodbPlugin::cdc_stream_batch(
+            OffsetKey::new("table", "shard"),
+            "orders",
+            "shard-1",
+            r#"{"id":"1","name":"alpha-prime"}"#.into(),
+            MutationKind::Update,
+            "9",
+            Some(before.clone()),
+        )
+        .unwrap();
+        let meta = &batch.cdc_rows.as_ref().unwrap()[0];
+        assert_eq!(meta.mutation, MutationKind::Update);
+        let stamped = meta.before.as_ref().expect("Modify stamps before");
+        assert_eq!(stamped.key, before.key);
+        assert_eq!(stamped.row, before.row);
+        let row: Value = serde_json::from_slice(&stamped.row).unwrap();
+        assert_eq!(row["name"], "alpha");
+        assert_eq!(row["id"], "1");
+    }
+
+    #[test]
+    fn remove_stamps_old_image_as_before() {
+        use aws_sdk_dynamodbstreams::types::AttributeValue as SAV;
+        let mut keys = HashMap::new();
+        keys.insert("id".into(), SAV::S("2".into()));
+        keys.insert("rmc".into(), SAV::S("us".into()));
+        let mut old = keys.clone();
+        old.insert("name".into(), SAV::S("beta".into()));
+        let before =
+            DataSourceDynamodbPlugin::stream_before_image(Some(&keys), Some(&old)).unwrap();
+        let batch = DataSourceDynamodbPlugin::cdc_stream_batch(
+            OffsetKey::new("table", "shard"),
+            "orders",
+            "shard-1",
+            r#"{"id":"2","rmc":"us"}"#.into(),
+            MutationKind::Delete,
+            "10",
+            Some(before.clone()),
+        )
+        .unwrap();
+        let meta = &batch.cdc_rows.as_ref().unwrap()[0];
+        assert_eq!(meta.mutation, MutationKind::Delete);
+        let stamped = meta.before.as_ref().expect("Remove stamps before");
+        assert_eq!(stamped.key, before.key);
+        let row: Value = serde_json::from_slice(&stamped.row).unwrap();
+        assert_eq!(row["name"], "beta");
+    }
+
+    #[test]
+    fn modify_without_old_image_has_no_before() {
+        use aws_sdk_dynamodbstreams::types::AttributeValue as SAV;
+        let mut keys = HashMap::new();
+        keys.insert("id".into(), SAV::S("1".into()));
+        assert!(
+            DataSourceDynamodbPlugin::stream_before_image(None, None).is_none(),
+            "empty stream images cannot invent a before-image"
+        );
+        assert!(
+            DataSourceDynamodbPlugin::stream_before_image(Some(&keys), None).is_none(),
+            "keys-only Modify is not an old row"
+        );
+        assert!(
+            DataSourceDynamodbPlugin::stream_before_image(Some(&keys), None).is_none(),
+            "keys-only Remove is not an old row"
+        );
+    }
+
+    #[test]
+    fn snapshot_row_count_batches_do_not_invent_a_source_transaction_id() {
+        let mut current = vec![DataSourceDynamodbPlugin::json_ingest_batch(
+            OffsetKey::new("table", "seg"),
+            "{\"id\":1}".into(),
+            "dynamodb://table".into(),
+            Some(vec![WalRowMeta::new(
+                MutationKind::Snapshot,
+                b"k".to_vec(),
+                vec![0; 16],
+            )]),
+        )];
+        let full = take_row_count_batch(&mut current, 1).unwrap();
+        assert_eq!(full.len(), 1);
+        assert!(full[0].cdc_rows.as_ref().unwrap()[0]
+            .source_transaction_id
+            .is_none());
     }
 }

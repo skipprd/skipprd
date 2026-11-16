@@ -706,6 +706,23 @@ fn g_query_join_pin() {
 }
 
 #[test]
+fn g_stream_transform_emits_perf() {
+    let ingest = include_str!("../../ingest_work.rs");
+    let apply = ingest
+        .find("crate::compute::apply_stateless")
+        .expect("apply_stateless");
+    let slice = &ingest[apply..apply.saturating_add(900)];
+    assert!(
+        slice.contains("stream_transform"),
+        "stateless compute must emit stream_transform PERF_EVENT"
+    );
+    assert!(
+        slice.contains("add_stream_transform_records"),
+        "stateless compute must count output rows"
+    );
+}
+
+#[test]
 fn g_sync_admits_compute() {
     let engine = include_str!("../../engine.rs");
     let prod = engine.split("#[cfg(test)]").next().unwrap();

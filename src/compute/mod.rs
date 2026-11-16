@@ -449,11 +449,11 @@ mod tests {
         .unwrap();
         let err = AlignedBatch::new(
             batch,
-            Some(vec![WalRowMeta {
-                mutation: crate::plugins::cdc::MutationKind::Insert,
-                event_id: b"a".to_vec(),
-                order_token: vec![1],
-            }]),
+            Some(vec![WalRowMeta::new(
+                crate::plugins::cdc::MutationKind::Insert,
+                b"a".to_vec(),
+                vec![1],
+            )]),
         )
         .unwrap_err();
         assert!(err.contains("length mismatch"), "{err}");

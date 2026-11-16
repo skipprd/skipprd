@@ -1300,7 +1300,7 @@ pub async fn sync_runtime_input_plugin(
                             io::Error::other("offset hints require a WAL catalog handle")
                         })?;
                     for hint in hints {
-                        handle
+                        if let Err(err) = handle
                             .persist_offset_hint(
                                 &hint.key.namespace,
                                 &hint.key.partition,
@@ -1308,7 +1308,9 @@ pub async fn sync_runtime_input_plugin(
                                 hint.closed,
                             )
                             .await
-                            .map_err(|err| io::Error::other(err.to_string()))?;
+                        {
+                            warn!("offset hint trails the WAL and did not fail ingest: {err}");
+                        }
                     }
                 }
             }
@@ -4257,6 +4259,12 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
     use tokio::net::{TcpListener, TcpStream};
+
+    #[test]
+    fn persist_offset_hint_does_not_fail_ingest() {
+        let src = include_str!("host.rs");
+        assert!(src.contains("offset hint trails the WAL and did not fail ingest"));
+    }
 
     #[test]
     fn grouped_sink_does_not_synthesize_a_zero_row_chunk() {

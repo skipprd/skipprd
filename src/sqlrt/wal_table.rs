@@ -16,7 +16,7 @@ use skippr_lease::PipelineKey;
 
 use crate::buffer::wal_reader::PinnedSlice;
 pub use crate::buffer::wal_reader::WalPinLost;
-use crate::plugins::cdc::{WalPartKind, WalRowMeta};
+use crate::plugins::cdc::{CdcEvent, Tie, WalPartKind, WalRowMeta};
 use crate::sqlrt::cdc_reconcile::{
     attach_append_sidecar, attach_cdc_sidecar, cdc_sidecar_schema, is_cdc_sidecar_field,
 };
@@ -277,8 +277,22 @@ fn attach_cdc_from_meta(
     ordinal: u32,
     row_base: u64,
 ) -> Result<RecordBatch> {
-    let mutations: Vec<_> = rows.iter().map(|r| r.mutation).collect();
-    let tokens: Vec<_> = rows.iter().map(|r| r.order_token.clone()).collect();
+    let events: Vec<CdcEvent> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            CdcEvent::from_wal(
+                row,
+                Tie {
+                    seq,
+                    ordinal,
+                    row: row_base + i as u64,
+                },
+            )
+        })
+        .collect();
+    let mutations: Vec<_> = events.iter().map(|e| e.mutation).collect();
+    let tokens: Vec<_> = events.iter().map(|e| e.order.clone()).collect();
     attach_cdc_sidecar(batch, &mutations, &tokens, seq, ordinal, row_base)
 }
 
@@ -812,6 +826,10 @@ mod tests {
         assert!(prod.contains("read_pinned_slice"));
         assert!(!prod.contains("select_live_ordinals"));
         assert!(prod.contains("wal_slice::read_slice_part_meta"));
+        assert!(
+            prod.contains("CdcEvent::from_wal"),
+            "WAL scan builds CdcEvent via from_wal before the Arrow sidecar"
+        );
     }
 
     async fn persist_cdc_segment(
@@ -850,11 +868,11 @@ mod tests {
             .unwrap()]),
         );
         let meta = WalPartMeta::cdc(
-            vec![WalRowMeta {
+            vec![WalRowMeta::new(
                 mutation,
-                event_id: id.as_bytes().to_vec(),
-                order_token: vec![order],
-            }],
+                id.as_bytes().to_vec(),
+                vec![order],
+            )],
             1,
         )
         .unwrap();
@@ -1102,8 +1120,14 @@ mod tests {
         let iceberg_plan = iceberg.scan(&ctx.state(), None, &[], None).await.unwrap();
         let wal_plan = wal.scan(&ctx.state(), None, &[], None).await.unwrap();
         let merge = Arc::new(
-            CdcReconcileExec::try_new(iceberg_plan, wal_plan, vec!["id".into()], schema.clone())
-                .unwrap(),
+            CdcReconcileExec::try_new(
+                iceberg_plan,
+                wal_plan,
+                vec!["id".into()],
+                schema.clone(),
+                std::collections::BTreeMap::new(),
+            )
+            .unwrap(),
         );
         let batches = collect(merge.execute(0, ctx.task_ctx()).unwrap())
             .await
@@ -1229,11 +1253,11 @@ mod tests {
         let batch = RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec!["a", "b"]))])
             .unwrap();
         let meta = WalPartMeta::cdc(
-            vec![WalRowMeta {
-                mutation: MutationKind::Insert,
-                event_id: b"a".to_vec(),
-                order_token: vec![1],
-            }],
+            vec![WalRowMeta::new(
+                MutationKind::Insert,
+                b"a".to_vec(),
+                vec![1],
+            )],
             1,
         )
         .unwrap();

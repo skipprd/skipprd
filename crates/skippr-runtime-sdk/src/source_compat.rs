@@ -1,3 +1,23 @@
+pub fn take_row_count_batch<T>(current: &mut Vec<T>, cap: usize) -> Option<Vec<T>> {
+    if current.len() >= cap {
+        Some(std::mem::take(current))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn take_row_count_batch_splits_at_cap() {
+        let mut rows = vec![1, 2];
+        let full = super::take_row_count_batch(&mut rows, 2).unwrap();
+        assert_eq!(full, vec![1, 2]);
+        assert!(rows.is_empty());
+        assert!(super::take_row_count_batch(&mut rows, 2).is_none());
+    }
+}
+
 pub use crate::prefetch::ByteBoundedPrefetch;
 pub use crate::source_sync::{
     collect_open_list_keys, load_checkpoint_payload, offset_validation_entry,

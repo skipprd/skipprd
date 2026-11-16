@@ -1,28 +1,27 @@
 //! CDC collapse of uncompacted WAL onto a pinned Iceberg snapshot.
 //!
-//! Latest `order_token` wins per business key. Equal tokens break ties by
-//! `(seq, ordinal, row)`. Deletes suppress the key; insert/update/snapshot
-//! after-images survive. Compacted leftovers are excluded by Iceberg `E` at
-//! pin, not by in-merge snapshot dropping. Append WAL rows have no keys to
-//! suppress. v1 has no before-image: a mutated business key is a new row
-//! unless the source emitted delete(old)+insert(new).
+//! Query calls `from_wal` then `collapse`. A WAL row hides a lake row only when
+//! it beats the stored incumbent. The incumbent is `winner_of_set` of the row
+//! slot and the tombstone slot. Append WAL rows stay outside `from_wal`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, RecordBatch, UInt32Array, UInt64Array, UInt8Array,
+    Array, ArrayRef, BinaryArray, Int32Array, Int64Array, RecordBatch, StringArray, UInt32Array,
+    UInt64Array, UInt8Array,
 };
 use arrow::compute::take;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::row::{OwnedRow, RowConverter, SortField};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{StreamExt, TryStreamExt};
 
-use crate::plugins::cdc::MutationKind;
+use crate::plugins::cdc::{
+    beats, collapse, encode_business_key, stored_incumbent, MutationKind, StoredWinner, Tie,
+};
 use crate::sqlrt::wal_table::{align_exec_to_schema, project_batch};
 
 pub const CDC_MUTATION_COL: &str = "_skippr_cdc_mutation";
@@ -65,31 +64,22 @@ enum NullKey {
 }
 
 struct KeyEncoder {
-    converter: RowConverter,
     columns: Vec<String>,
 }
 
 impl KeyEncoder {
     fn new(schema: &Schema, columns: &[String]) -> Result<Self> {
-        let fields = columns
-            .iter()
-            .map(|c| {
-                schema
-                    .field_with_name(c)
-                    .map(|f| SortField::new(f.data_type().clone()))
-                    .map_err(|_| {
-                        DataFusionError::Plan(format!("CDC business key column '{c}' is missing"))
-                    })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        for c in columns {
+            schema.field_with_name(c).map_err(|_| {
+                DataFusionError::Plan(format!("CDC business key column '{c}' is missing"))
+            })?;
+        }
         Ok(Self {
-            converter: RowConverter::new(fields)
-                .map_err(|err| DataFusionError::ArrowError(Box::new(err), None))?,
             columns: columns.to_vec(),
         })
     }
 
-    fn encode(&self, batch: &RecordBatch, nulls: NullKey) -> Result<Vec<Option<OwnedRow>>> {
+    fn encode(&self, batch: &RecordBatch, nulls: NullKey) -> Result<Vec<Option<Vec<u8>>>> {
         let cols = self
             .columns
             .iter()
@@ -99,17 +89,25 @@ impl KeyEncoder {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let rows = self
-            .converter
-            .convert_columns(&cols)
-            .map_err(|err| DataFusionError::ArrowError(Box::new(err), None))?;
         (0..batch.num_rows())
             .map(|i| match (cols.iter().any(|c| c.is_null(i)), &nulls) {
                 (true, NullKey::Reject) => Err(DataFusionError::Execution(
                     "CDC WAL row has a null business key".into(),
                 )),
                 (true, NullKey::PassThrough) => Ok(None),
-                (false, _) => Ok(Some(rows.row(i).owned())),
+                (false, _) => {
+                    let mut parts = Vec::with_capacity(self.columns.len());
+                    let mut owned = Vec::with_capacity(self.columns.len());
+                    for (name, col) in self.columns.iter().zip(cols.iter()) {
+                        let value = arrow::util::display::array_value_to_string(col.as_ref(), i)
+                            .map_err(|err| DataFusionError::ArrowError(Box::new(err), None))?;
+                        owned.push((name.as_bytes().to_vec(), value.into_bytes()));
+                    }
+                    for (name, value) in &owned {
+                        parts.push((name.as_slice(), value.as_slice()));
+                    }
+                    Ok(Some(encode_business_key(&parts)))
+                }
             })
             .collect()
     }
@@ -138,128 +136,276 @@ pub fn is_cdc_sidecar_field(name: &str) -> bool {
     )
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct TieBreak {
-    order_token: Vec<u8>,
-    seq: u64,
-    ordinal: u32,
-    row: u64,
+/// One stored incumbent: the slot that `beats` the other, or the row when equal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LakeIncumbent {
+    pub winner: StoredWinner,
+    pub tombstone: bool,
 }
 
-#[derive(Clone, Debug)]
-struct Winner {
-    tie: TieBreak,
-    mutation: MutationKind,
-    batch_idx: usize,
-    row: usize,
-}
-
+/// Visible rows after `from_wal` then `collapse`, plus the resulting incumbents.
 #[derive(Debug)]
-pub struct CollapseResult {
-    pub changed_keys: HashSet<OwnedRow>,
-    pub survivor_batches: Vec<RecordBatch>,
+pub struct ReconcileResult {
+    pub batches: Vec<RecordBatch>,
+    pub incumbents: BTreeMap<Vec<u8>, LakeIncumbent>,
 }
 
-/// Collapse CDC WAL batches (user columns + sidecar) to latest-per-key survivors.
-pub fn collapse_wal_batches(
-    batches: &[RecordBatch],
+/// Row slot vs tombstone slot. A strictly stronger tombstone hides the row.
+pub fn incumbents_from_slots(
+    row: &BTreeMap<Vec<u8>, StoredWinner>,
+    tombstone: &BTreeMap<Vec<u8>, StoredWinner>,
+) -> BTreeMap<Vec<u8>, LakeIncumbent> {
+    let mut keys: Vec<Vec<u8>> = row.keys().cloned().collect();
+    for key in tombstone.keys() {
+        if !row.contains_key(key) {
+            keys.push(key.clone());
+        }
+    }
+    let mut out = BTreeMap::new();
+    for key in keys {
+        if let Some((winner, is_tomb)) = stored_incumbent(row.get(&key), tombstone.get(&key)) {
+            out.insert(
+                key,
+                LakeIncumbent {
+                    winner,
+                    tombstone: is_tomb,
+                },
+            );
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
+enum Payload {
+    Lake { batch: usize, row: usize },
+    Wal { batch: usize, row: usize },
+}
+
+#[derive(Clone)]
+struct Fold {
+    winner: Option<StoredWinner>,
+    tombstone: bool,
+    payload: Option<Payload>,
+}
+
+/// Collapse WAL onto lake with `from_wal` then `collapse`. Appends stay appends.
+pub fn reconcile_cdc(
+    lake: &[RecordBatch],
+    wal: &[RecordBatch],
+    incumbents: &BTreeMap<Vec<u8>, LakeIncumbent>,
     business_key_columns: &[String],
-) -> Result<CollapseResult> {
+) -> Result<ReconcileResult> {
     if business_key_columns.is_empty() {
         return Err(DataFusionError::Plan(
-            "collapse_wal_batches requires business_key_columns".into(),
+            "reconcile_cdc requires business_key_columns".into(),
         ));
     }
-    let mut winners: BTreeMap<OwnedRow, Winner> = BTreeMap::new();
-    let mut append_rows: Vec<(usize, usize)> = Vec::new();
-    let mut encoder: Option<KeyEncoder> = None;
-    for (batch_idx, batch) in batches.iter().enumerate() {
-        let mutation = uint8_col(batch, CDC_MUTATION_COL)?;
-        let order = binary_col(batch, CDC_ORDER_COL)?;
-        let seq = uint64_col(batch, CDC_SEQ_COL)?;
-        let ord = uint32_col(batch, CDC_ORD_COL)?;
-        let row_idx = uint64_col(batch, CDC_ROW_COL)?;
-        let enc = match encoder.as_ref() {
-            Some(enc) => enc,
-            None => {
-                encoder = Some(KeyEncoder::new(
-                    batch.schema().as_ref(),
-                    business_key_columns,
-                )?);
-                encoder.as_ref().expect("encoder just set")
-            }
-        };
-        let keys = enc.encode(batch, NullKey::Reject)?;
-        for row in 0..batch.num_rows() {
-            match decode_mutation(mutation.value(row))? {
-                None => {
-                    append_rows.push((batch_idx, row));
-                    continue;
-                }
-                Some(kind) => {
-                    let Some(key) = keys[row].clone() else {
-                        return Err(DataFusionError::Execution(
-                            "CDC WAL row has a null business key".into(),
-                        ));
-                    };
-                    let tie = TieBreak {
-                        order_token: order.value(row).to_vec(),
-                        seq: seq.value(row),
-                        ordinal: ord.value(row),
-                        row: row_idx.value(row),
-                    };
-                    let candidate = Winner {
-                        tie,
-                        mutation: kind,
-                        batch_idx,
-                        row,
-                    };
-                    match winners.get(&key) {
-                        Some(existing) if existing.tie >= candidate.tie => {}
-                        _ => {
-                            winners.insert(key, candidate);
+    if lake.is_empty() && wal.is_empty() {
+        return Ok(ReconcileResult {
+            batches: Vec::new(),
+            incumbents: incumbents.clone(),
+        });
+    }
+    let user_schema = user_schema_of(lake, wal)?;
+    let mut fold: BTreeMap<Vec<u8>, Fold> = BTreeMap::new();
+    for (key, inc) in incumbents {
+        fold.insert(
+            key.clone(),
+            Fold {
+                winner: Some(inc.winner.clone()),
+                tombstone: inc.tombstone,
+                payload: None,
+            },
+        );
+    }
+    let mut null_lake: Vec<(usize, usize)> = Vec::new();
+    if !lake.is_empty() {
+        let enc = KeyEncoder::new(lake[0].schema().as_ref(), business_key_columns)?;
+        for (batch_idx, batch) in lake.iter().enumerate() {
+            let keys = enc.encode(batch, NullKey::PassThrough)?;
+            for row in 0..batch.num_rows() {
+                match &keys[row] {
+                    None => null_lake.push((batch_idx, row)),
+                    Some(key) => {
+                        let payload = Payload::Lake {
+                            batch: batch_idx,
+                            row,
+                        };
+                        match fold.get_mut(key) {
+                            Some(state) if state.tombstone => {}
+                            Some(state) => state.payload = Some(payload),
+                            None => {
+                                fold.insert(
+                                    key.clone(),
+                                    Fold {
+                                        winner: None,
+                                        tombstone: false,
+                                        payload: Some(payload),
+                                    },
+                                );
+                            }
                         }
                     }
                 }
             }
         }
     }
-    let mut changed_keys = HashSet::new();
-    let mut keep: Vec<(usize, usize)> = append_rows;
-    for (key, winner) in &winners {
-        match winner.mutation {
-            MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
-                changed_keys.insert(key.clone());
-                keep.push((winner.batch_idx, winner.row));
-            }
-            MutationKind::Delete => {
-                changed_keys.insert(key.clone());
+    let mut append_rows: Vec<(usize, usize)> = Vec::new();
+    if !wal.is_empty() {
+        let enc = KeyEncoder::new(wal[0].schema().as_ref(), business_key_columns)?;
+        for (batch_idx, batch) in wal.iter().enumerate() {
+            let mutation = uint8_col(batch, CDC_MUTATION_COL)?;
+            let order = binary_col(batch, CDC_ORDER_COL)?;
+            let seq = uint64_col(batch, CDC_SEQ_COL)?;
+            let ord = uint32_col(batch, CDC_ORD_COL)?;
+            let row_idx = uint64_col(batch, CDC_ROW_COL)?;
+            let keys = enc.encode(batch, NullKey::Reject)?;
+            for row in 0..batch.num_rows() {
+                match decode_mutation(mutation.value(row))? {
+                    None => append_rows.push((batch_idx, row)),
+                    Some(kind) => {
+                        let Some(key) = keys[row].clone() else {
+                            return Err(DataFusionError::Execution(
+                                "CDC WAL row has a null business key".into(),
+                            ));
+                        };
+                        let order = order.value(row);
+                        if order.is_empty() {
+                            return Err(DataFusionError::Execution(
+                                "CDC WAL row has an empty order token".into(),
+                            ));
+                        }
+                        let incoming = StoredWinner {
+                            order: order.to_vec(),
+                            tie: Tie {
+                                seq: seq.value(row),
+                                ordinal: ord.value(row),
+                                row: row_idx.value(row),
+                            },
+                        };
+                        let prior = fold.get(&key).cloned();
+                        let collapsed = collapse(
+                            &incoming,
+                            kind == MutationKind::Delete,
+                            prior.as_ref().and_then(|s| s.winner.as_ref()),
+                            prior.as_ref().map(|s| s.tombstone).unwrap_or(false),
+                            key.clone(),
+                        );
+                        fold.insert(
+                            key,
+                            match collapsed {
+                                skippr_cdc::Collapse::Upsert(winner) => Fold {
+                                    payload: if prior.as_ref().and_then(|s| s.winner.as_ref())
+                                        == Some(&winner)
+                                    {
+                                        prior.and_then(|s| s.payload)
+                                    } else {
+                                        Some(Payload::Wal {
+                                            batch: batch_idx,
+                                            row,
+                                        })
+                                    },
+                                    winner: Some(winner),
+                                    tombstone: false,
+                                },
+                                skippr_cdc::Collapse::Tombstone { winner, .. } => Fold {
+                                    winner: Some(winner),
+                                    tombstone: true,
+                                    payload: None,
+                                },
+                            },
+                        );
+                    }
+                }
             }
         }
     }
-    keep.sort_unstable();
-    Ok(CollapseResult {
-        changed_keys,
-        survivor_batches: take_rows(batches, &keep)?,
+    let mut lake_keep = null_lake;
+    let mut wal_keep = append_rows;
+    for state in fold.values() {
+        match state.payload {
+            Some(Payload::Lake { batch, row }) => lake_keep.push((batch, row)),
+            Some(Payload::Wal { batch, row }) => wal_keep.push((batch, row)),
+            None => {}
+        }
+    }
+    lake_keep.sort_unstable();
+    wal_keep.sort_unstable();
+    let mut batches = Vec::new();
+    for batch in take_rows(lake, &lake_keep)? {
+        let projected = project_batch(batch, &user_schema)?;
+        if projected.num_rows() > 0 || user_schema.fields().is_empty() {
+            batches.push(projected);
+        }
+    }
+    for batch in take_rows(wal, &wal_keep)? {
+        let projected = project_batch(batch, &user_schema)?;
+        if projected.num_rows() > 0 || user_schema.fields().is_empty() {
+            batches.push(projected);
+        }
+    }
+    let incumbents = fold
+        .into_iter()
+        .filter_map(|(key, state)| {
+            state.winner.map(|winner| {
+                (
+                    key,
+                    LakeIncumbent {
+                        winner,
+                        tombstone: state.tombstone,
+                    },
+                )
+            })
+        })
+        .collect();
+    Ok(ReconcileResult {
+        batches,
+        incumbents,
     })
 }
 
-pub fn anti_join_lake(
-    lake: &[RecordBatch],
-    changed_keys: &HashSet<OwnedRow>,
-    business_key_columns: &[String],
-) -> Result<Vec<RecordBatch>> {
-    if business_key_columns.is_empty() {
-        return Err(DataFusionError::Plan(
-            "anti_join_lake requires business_key_columns".into(),
-        ));
+fn user_schema_of(lake: &[RecordBatch], wal: &[RecordBatch]) -> Result<SchemaRef> {
+    if let Some(batch) = lake.first() {
+        return Ok(batch.schema());
     }
-    if changed_keys.is_empty() {
-        return Ok(lake.to_vec());
+    let Some(batch) = wal.first() else {
+        return Err(DataFusionError::Plan(
+            "reconcile_cdc needs a lake or WAL batch".into(),
+        ));
+    };
+    let fields: Vec<Field> = batch
+        .schema()
+        .fields()
+        .iter()
+        .filter(|f| !is_cdc_sidecar_field(f.name()))
+        .map(|f| f.as_ref().clone())
+        .collect();
+    Ok(Arc::new(Schema::new(fields)))
+}
+
+/// Stored Iceberg row-slot winners. Hex `_skippr_order_token` plus tie columns.
+/// A lake row without those columns has no stored winner.
+pub fn lake_winners_from_batches(
+    batches: &[RecordBatch],
+    business_key_columns: &[String],
+) -> Result<BTreeMap<Vec<u8>, StoredWinner>> {
+    if batches.is_empty() {
+        return Ok(BTreeMap::new());
     }
     let mut encoder: Option<KeyEncoder> = None;
-    let mut out = Vec::new();
-    for batch in lake {
+    let mut winners = BTreeMap::new();
+    for batch in batches {
+        let Some(token_col) = batch.column_by_name("_skippr_order_token") else {
+            continue;
+        };
+        let token = token_col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| DataFusionError::Execution("_skippr_order_token must be Utf8".into()))?;
+        let seq = required_i64_col(batch, "_skippr_tie_seq")?;
+        let ord = required_i32_col(batch, "_skippr_tie_ordinal")?;
+        let row_idx = required_i64_col(batch, "_skippr_tie_row")?;
         let enc = match encoder.as_ref() {
             Some(enc) => enc,
             None => {
@@ -271,23 +417,82 @@ pub fn anti_join_lake(
             }
         };
         let keys = enc.encode(batch, NullKey::PassThrough)?;
-        let mut keep = Vec::new();
         for row in 0..batch.num_rows() {
-            match &keys[row] {
-                Some(key) if changed_keys.contains(key) => {}
-                _ => keep.push(row),
+            let Some(key) = keys[row].clone() else {
+                continue;
+            };
+            if token.is_null(row) {
+                continue;
+            }
+            let hex_token = token.value(row);
+            if hex_token.is_empty()
+                || hex_token.len() % 2 != 0
+                || !hex_token.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(DataFusionError::Execution(format!(
+                    "CDC order token '{hex_token}' is not fixed-width hex"
+                )));
+            }
+            let order = hex::decode(hex_token).map_err(|err| {
+                DataFusionError::Execution(format!("CDC order token '{hex_token}': {err}"))
+            })?;
+            let incoming = StoredWinner {
+                order,
+                tie: Tie {
+                    seq: seq.value(row) as u64,
+                    ordinal: ord.value(row) as u32,
+                    row: row_idx.value(row) as u64,
+                },
+            };
+            let replace = winners
+                .get(&key)
+                .map(|seen| beats(&incoming, seen))
+                .unwrap_or(true);
+            if replace {
+                winners.insert(key, incoming);
             }
         }
-        if keep.len() == batch.num_rows() {
-            out.push(batch.clone());
-        } else if !keep.is_empty() {
-            out.extend(take_rows(
-                std::slice::from_ref(batch),
-                &keep.iter().map(|r| (0, *r)).collect::<Vec<_>>(),
-            )?);
+    }
+    Ok(winners)
+}
+
+fn lake_key_set(
+    batches: &[RecordBatch],
+    business_key_columns: &[String],
+) -> Result<std::collections::BTreeSet<Vec<u8>>> {
+    let mut keys = std::collections::BTreeSet::new();
+    if batches.is_empty() {
+        return Ok(keys);
+    }
+    let enc = KeyEncoder::new(batches[0].schema().as_ref(), business_key_columns)?;
+    for batch in batches {
+        for key in enc.encode(batch, NullKey::PassThrough)? {
+            if let Some(key) = key {
+                keys.insert(key);
+            }
         }
     }
-    Ok(out)
+    Ok(keys)
+}
+
+/// Side-file winners plus lake token columns. A stored key with no lake row
+/// is a tombstone. A stored key that still has a lake row is the row slot.
+pub fn incumbents_from_stored(
+    lake: &[RecordBatch],
+    stored: &BTreeMap<Vec<u8>, StoredWinner>,
+    business_key_columns: &[String],
+) -> Result<BTreeMap<Vec<u8>, LakeIncumbent>> {
+    let mut row = lake_winners_from_batches(lake, business_key_columns)?;
+    let live = lake_key_set(lake, business_key_columns)?;
+    let mut tomb = BTreeMap::new();
+    for (key, winner) in stored {
+        if live.contains(key) {
+            row.entry(key.clone()).or_insert_with(|| winner.clone());
+        } else {
+            tomb.insert(key.clone(), winner.clone());
+        }
+    }
+    Ok(incumbents_from_slots(&row, &tomb))
 }
 
 fn take_rows(batches: &[RecordBatch], keep: &[(usize, usize)]) -> Result<Vec<RecordBatch>> {
@@ -317,6 +522,20 @@ fn take_rows(batches: &[RecordBatch], keep: &[(usize, usize)]) -> Result<Vec<Rec
         );
     }
     Ok(out)
+}
+
+fn required_i64_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int64Array> {
+    batch
+        .column_by_name(name)
+        .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+        .ok_or_else(|| DataFusionError::Execution(format!("CDC lake row is missing {name}")))
+}
+
+fn required_i32_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int32Array> {
+    batch
+        .column_by_name(name)
+        .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
+        .ok_or_else(|| DataFusionError::Execution(format!("CDC lake row is missing {name}")))
 }
 
 fn uint8_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a UInt8Array> {
@@ -421,7 +640,8 @@ fn coalesce_single(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn ExecutionPlan
     }
 }
 
-/// Serving-node merge: scan lake, collapse WAL, anti-join changed keys, union.
+/// Serving-node merge: sidecar is the Arrow spelling of `from_wal`; this node
+/// calls `collapse` against the stored incumbent (lake row ∪ side-file tomb).
 #[derive(Debug)]
 pub struct CdcReconcileExec {
     schema: SchemaRef,
@@ -429,6 +649,7 @@ pub struct CdcReconcileExec {
     iceberg: Arc<dyn ExecutionPlan>,
     wal: Arc<dyn ExecutionPlan>,
     business_key_columns: Vec<String>,
+    stored: BTreeMap<Vec<u8>, StoredWinner>,
 }
 
 impl CdcReconcileExec {
@@ -437,6 +658,7 @@ impl CdcReconcileExec {
         wal: Arc<dyn ExecutionPlan>,
         business_key_columns: Vec<String>,
         schema: SchemaRef,
+        stored: BTreeMap<Vec<u8>, StoredWinner>,
     ) -> Result<Self> {
         if business_key_columns.is_empty() {
             return Err(DataFusionError::Plan(
@@ -468,6 +690,7 @@ impl CdcReconcileExec {
             iceberg,
             wal,
             business_key_columns,
+            stored,
         })
     }
 
@@ -475,6 +698,19 @@ impl CdcReconcileExec {
         let node = CdcReconcileNode {
             arrow_schema_ipc: skippr_query_plan::schema_to_ipc(self.schema.as_ref())?,
             business_key_columns: self.business_key_columns.clone(),
+            stored: self
+                .stored
+                .iter()
+                .map(|(key, winner)| {
+                    (
+                        key.clone(),
+                        winner.order.clone(),
+                        winner.tie.seq,
+                        winner.tie.ordinal,
+                        winner.tie.row,
+                    )
+                })
+                .collect(),
         };
         bincode::serialize(&node)
             .map_err(|err| DataFusionError::Internal(format!("encode CdcReconcileExec: {err}")))
@@ -492,11 +728,25 @@ impl CdcReconcileExec {
         let node: CdcReconcileNode = bincode::deserialize(buf)
             .map_err(|err| DataFusionError::Internal(format!("decode CdcReconcileExec: {err}")))?;
         let schema = skippr_query_plan::schema_from_ipc(&node.arrow_schema_ipc)?;
+        let stored = node
+            .stored
+            .into_iter()
+            .map(|(key, order, seq, ordinal, row)| {
+                (
+                    key,
+                    StoredWinner {
+                        order,
+                        tie: Tie { seq, ordinal, row },
+                    },
+                )
+            })
+            .collect();
         Ok(Arc::new(Self::try_new(
             children[0].clone(),
             children[1].clone(),
             node.business_key_columns,
             schema,
+            stored,
         )?))
     }
 }
@@ -505,6 +755,7 @@ impl CdcReconcileExec {
 struct CdcReconcileNode {
     arrow_schema_ipc: Vec<u8>,
     business_key_columns: Vec<String>,
+    stored: Vec<(Vec<u8>, Vec<u8>, u64, u32, u64)>,
 }
 
 impl DisplayAs for CdcReconcileExec {
@@ -552,6 +803,7 @@ impl ExecutionPlan for CdcReconcileExec {
             children[1].clone(),
             self.business_key_columns.clone(),
             self.schema.clone(),
+            self.stored.clone(),
         )?))
     }
 
@@ -574,6 +826,7 @@ impl ExecutionPlan for CdcReconcileExec {
         let wal = self.wal.execute(0, Arc::clone(&context))?;
         let iceberg = self.iceberg.execute(0, context)?;
         let keys = self.business_key_columns.clone();
+        let stored = self.stored.clone();
         let schema = self.schema.clone();
         let fut = async move {
             let consumer =
@@ -583,19 +836,14 @@ impl ExecutionPlan for CdcReconcileExec {
             for batch in &wal_batches {
                 reservation.try_grow(batch.get_array_memory_size())?;
             }
-            let collapsed = collapse_wal_batches(&wal_batches, &keys)?;
             let lake_batches = iceberg.try_collect::<Vec<_>>().await?;
             for batch in &lake_batches {
                 reservation.try_grow(batch.get_array_memory_size())?;
             }
-            let lake_kept = anti_join_lake(&lake_batches, &collapsed.changed_keys, &keys)?;
-            let wal_kept = collapsed.survivor_batches;
-            let mut out = Vec::new();
-            for batch in lake_kept.into_iter().chain(wal_kept) {
-                let projected = project_batch(batch, &schema)?;
-                if projected.num_rows() > 0 || schema.fields().is_empty() {
-                    out.push(projected);
-                }
+            let incumbents = incumbents_from_stored(&lake_batches, &stored, &keys)?;
+            let mut out = reconcile_cdc(&lake_batches, &wal_batches, &incumbents, &keys)?.batches;
+            if schema.fields().is_empty() && out.is_empty() {
+                out.push(RecordBatch::new_empty(schema.clone()));
             }
             crate::helpers::perf::emit(
                 "query_reconcile",
@@ -682,6 +930,45 @@ mod tests {
         .unwrap()
     }
 
+    fn stored(order: u8, seq: u64, ordinal: u32, row: u64) -> StoredWinner {
+        StoredWinner {
+            order: vec![order],
+            tie: Tie { seq, ordinal, row },
+        }
+    }
+
+    fn id_key(id: i64) -> Vec<u8> {
+        encode_business_key(&[(b"id", id.to_string().as_bytes())])
+    }
+
+    fn n_rows(batches: &[RecordBatch]) -> usize {
+        batches.iter().map(|b| b.num_rows()).sum()
+    }
+
+    fn names(batches: &[RecordBatch]) -> Vec<String> {
+        let mut out = Vec::new();
+        for batch in batches {
+            let col = batch
+                .column_by_name("name")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            for i in 0..col.len() {
+                out.push(col.value(i).to_string());
+            }
+        }
+        out
+    }
+
+    fn merge(
+        lake: &[RecordBatch],
+        wal: &[RecordBatch],
+        incumbents: &BTreeMap<Vec<u8>, LakeIncumbent>,
+    ) -> ReconcileResult {
+        reconcile_cdc(lake, wal, incumbents, &["id".into()]).unwrap()
+    }
+
     async fn merge_sql(
         lake: Vec<RecordBatch>,
         wal: Vec<RecordBatch>,
@@ -695,7 +982,14 @@ mod tests {
         };
         let wal_exec = Arc::new(StreamingBatchesExec::from_batches(wal_schema, wal));
         let merge = Arc::new(
-            CdcReconcileExec::try_new(iceberg, wal_exec, vec!["id".into()], user_schema()).unwrap(),
+            CdcReconcileExec::try_new(
+                iceberg,
+                wal_exec,
+                vec!["id".into()],
+                user_schema(),
+                BTreeMap::new(),
+            )
+            .unwrap(),
         );
         let ctx = SessionContext::new();
         ctx.register_table(
@@ -721,10 +1015,9 @@ mod tests {
     fn uncompacted_snapshot_replaces_lake() {
         let lake = vec![row(1, "alpha", 120)];
         let wal = vec![cdc_row(1, "alpha", 100, MutationKind::Snapshot, 1, 1, 0, 0)];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
-        assert!(kept.iter().all(|b| b.num_rows() == 0) || kept.is_empty());
-        let amount = collapsed.survivor_batches[0]
+        let out = merge(&lake, &wal, &BTreeMap::new());
+        assert_eq!(n_rows(&out.batches), 1);
+        let amount = out.batches[0]
             .column_by_name("amount")
             .unwrap()
             .as_any()
@@ -735,39 +1028,20 @@ mod tests {
 
     #[test]
     fn snapshot_wal_fills_empty_lake() {
-        let lake: Vec<RecordBatch> = Vec::new();
         let wal = vec![
             cdc_row(1, "alpha", 100, MutationKind::Snapshot, 1, 1, 0, 0),
             cdc_row(2, "beta", 50, MutationKind::Snapshot, 1, 1, 1, 0),
         ];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
-        assert_eq!(kept.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
-        assert_eq!(
-            collapsed
-                .survivor_batches
-                .iter()
-                .map(|b| b.num_rows())
-                .sum::<usize>(),
-            2
-        );
+        let out = merge(&[], &wal, &BTreeMap::new());
+        assert_eq!(n_rows(&out.batches), 2);
     }
 
     #[test]
     fn insert_only_wal_unions_with_lake() {
         let lake = vec![row(1, "alpha", 10)];
         let wal = vec![cdc_row(2, "beta", 20, MutationKind::Insert, 1, 1, 0, 0)];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
-        assert_eq!(kept.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
-        assert_eq!(
-            collapsed
-                .survivor_batches
-                .iter()
-                .map(|b| b.num_rows())
-                .sum::<usize>(),
-            1
-        );
+        let out = merge(&lake, &wal, &BTreeMap::new());
+        assert_eq!(n_rows(&out.batches), 2);
     }
 
     #[test]
@@ -783,30 +1057,18 @@ mod tests {
             0,
             0,
         )];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
-        assert!(kept.iter().all(|b| b.num_rows() == 0) || kept.is_empty());
-        assert_eq!(
-            collapsed
-                .survivor_batches
-                .iter()
-                .map(|b| b.num_rows())
-                .sum::<usize>(),
-            1
-        );
+        let out = merge(&lake, &wal, &BTreeMap::new());
+        assert_eq!(n_rows(&out.batches), 1);
+        assert_eq!(names(&out.batches), vec!["alpha-prime".to_string()]);
     }
 
     #[test]
     fn delete_removes_key() {
         let lake = vec![row(1, "alpha", 10), row(2, "beta", 20)];
         let wal = vec![cdc_row(2, "beta", 20, MutationKind::Delete, 1, 1, 0, 0)];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
-        assert_eq!(kept.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
-        assert!(
-            collapsed.survivor_batches.iter().all(|b| b.num_rows() == 0)
-                || collapsed.survivor_batches.is_empty()
-        );
+        let out = merge(&lake, &wal, &BTreeMap::new());
+        assert_eq!(n_rows(&out.batches), 1);
+        assert_eq!(names(&out.batches), vec!["alpha".to_string()]);
     }
 
     #[test]
@@ -816,15 +1078,8 @@ mod tests {
             cdc_row(1, "b", 2, MutationKind::Update, 3, 1, 1, 0),
             cdc_row(1, "c", 3, MutationKind::Update, 2, 1, 2, 0),
         ];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        let batch = &collapsed.survivor_batches[0];
-        let name = batch
-            .column_by_name("name")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(name.value(0), "b");
+        let out = merge(&[], &wal, &BTreeMap::new());
+        assert_eq!(names(&out.batches), vec!["b".to_string()]);
     }
 
     #[test]
@@ -833,12 +1088,10 @@ mod tests {
             cdc_row(1, "a", 1, MutationKind::Update, 1, 1, 0, 0),
             cdc_row(1, "a", 1, MutationKind::Delete, 2, 1, 1, 0),
         ];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        assert!(
-            collapsed.survivor_batches.iter().all(|b| b.num_rows() == 0)
-                || collapsed.survivor_batches.is_empty()
-        );
-        assert!(collapsed.changed_keys.len() == 1);
+        let out = merge(&[], &wal, &BTreeMap::new());
+        assert_eq!(n_rows(&out.batches), 0);
+        assert_eq!(out.incumbents.len(), 1);
+        assert!(out.incumbents.values().next().unwrap().tombstone);
     }
 
     #[test]
@@ -847,14 +1100,80 @@ mod tests {
             cdc_row(1, "old", 1, MutationKind::Delete, 1, 1, 0, 0),
             cdc_row(1, "new", 9, MutationKind::Insert, 2, 1, 1, 0),
         ];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        let name = collapsed.survivor_batches[0]
-            .column_by_name("name")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(name.value(0), "new");
+        let out = merge(&[], &wal, &BTreeMap::new());
+        assert_eq!(names(&out.batches), vec!["new".to_string()]);
+    }
+
+    #[test]
+    fn wal_does_not_hide_a_stronger_lake_token() {
+        let lake = vec![row(1, "alpha", 100)];
+        let wal = vec![cdc_row(1, "stale", 1, MutationKind::Update, 2, 1, 0, 0)];
+        let mut row_slot = BTreeMap::new();
+        row_slot.insert(id_key(1), stored(10, 1, 0, 0));
+        let out = merge(
+            &lake,
+            &wal,
+            &incumbents_from_slots(&row_slot, &BTreeMap::new()),
+        );
+        assert_eq!(n_rows(&out.batches), 1);
+        assert_eq!(names(&out.batches), vec!["alpha".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn exec_side_file_tombstone_hides_older_wal_upsert() {
+        let iceberg = Arc::new(StreamingBatchesExec::from_batches(user_schema(), vec![]));
+        let wal = vec![cdc_row(1, "stale", 1, MutationKind::Insert, 2, 2, 0, 0)];
+        let wal_exec = Arc::new(StreamingBatchesExec::from_batches(wal[0].schema(), wal));
+        let mut side = BTreeMap::new();
+        side.insert(id_key(1), stored(10, 1, 0, 0));
+        let merge = Arc::new(
+            CdcReconcileExec::try_new(iceberg, wal_exec, vec!["id".into()], user_schema(), side)
+                .unwrap(),
+        );
+        let ctx = SessionContext::new();
+        let batches =
+            datafusion::physical_plan::common::collect(merge.execute(0, ctx.task_ctx()).unwrap())
+                .await
+                .unwrap();
+        assert_eq!(n_rows(&batches), 0);
+    }
+
+    #[test]
+    fn tombstone_incumbent_blocks_older_wal_upsert() {
+        let wal = vec![cdc_row(1, "stale", 1, MutationKind::Insert, 2, 2, 0, 0)];
+        let mut tomb = BTreeMap::new();
+        tomb.insert(id_key(1), stored(10, 1, 0, 0));
+        let out = merge(&[], &wal, &incumbents_from_slots(&BTreeMap::new(), &tomb));
+        assert_eq!(n_rows(&out.batches), 0);
+        assert!(out.incumbents[&id_key(1)].tombstone);
+        assert_eq!(out.incumbents[&id_key(1)].winner.order, vec![10]);
+    }
+
+    #[test]
+    fn row_10_tombstone_4_delete_7_keeps_lake_row() {
+        let lake = vec![row(1, "alpha", 100)];
+        let wal = vec![cdc_row(1, "alpha", 100, MutationKind::Delete, 7, 2, 0, 0)];
+        let mut row_slot = BTreeMap::new();
+        row_slot.insert(id_key(1), stored(10, 1, 0, 0));
+        let mut tomb = BTreeMap::new();
+        tomb.insert(id_key(1), stored(4, 1, 0, 0));
+        let out = merge(&lake, &wal, &incumbents_from_slots(&row_slot, &tomb));
+        assert_eq!(n_rows(&out.batches), 1);
+        assert_eq!(names(&out.batches), vec!["alpha".to_string()]);
+        let inc = &out.incumbents[&id_key(1)];
+        assert!(!inc.tombstone);
+        assert_eq!(inc.winner.order, vec![10]);
+    }
+
+    #[test]
+    fn append_survives_a_same_key_delete() {
+        let wal = vec![
+            cdc_row(1, "gone", 1, MutationKind::Delete, 2, 1, 0, 0),
+            attach_append_sidecar(row(1, "extra", 9), 1, 1, 0).unwrap(),
+        ];
+        let out = merge(&[], &wal, &BTreeMap::new());
+        assert_eq!(n_rows(&out.batches), 1);
+        assert_eq!(names(&out.batches), vec!["extra".to_string()]);
     }
 
     #[test]
@@ -863,32 +1182,16 @@ mod tests {
             cdc_row(1, "a", 1, MutationKind::Update, 5, 1, 0, 0),
             cdc_row(1, "b", 2, MutationKind::Update, 5, 2, 0, 0),
         ];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        let name = collapsed.survivor_batches[0]
-            .column_by_name("name")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(name.value(0), "b");
+        let out = merge(&[], &wal, &BTreeMap::new());
+        assert_eq!(names(&out.batches), vec!["b".to_string()]);
     }
 
     #[test]
     fn append_rows_do_not_suppress_lake() {
         let lake = vec![row(1, "alpha", 10)];
         let wal = vec![attach_append_sidecar(row(2, "extra", 1), 1, 0, 0).unwrap()];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        assert!(collapsed.changed_keys.is_empty());
-        let kept = anti_join_lake(&lake, &collapsed.changed_keys, &["id".into()]).unwrap();
-        assert_eq!(kept.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
-        assert_eq!(
-            collapsed
-                .survivor_batches
-                .iter()
-                .map(|b| b.num_rows())
-                .sum::<usize>(),
-            1
-        );
+        let out = merge(&lake, &wal, &BTreeMap::new());
+        assert_eq!(n_rows(&out.batches), 2);
     }
 
     #[tokio::test]
@@ -1047,22 +1350,9 @@ mod tests {
             )
             .unwrap(),
         ];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        assert_eq!(
-            collapsed
-                .survivor_batches
-                .iter()
-                .map(|b| b.num_rows())
-                .sum::<usize>(),
-            1
-        );
-        let name = collapsed.survivor_batches[0]
-            .column_by_name("name")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(name.value(0), "new");
+        let out = reconcile_cdc(&[], &wal, &BTreeMap::new(), &["id".into()]).unwrap();
+        assert_eq!(n_rows(&out.batches), 1);
+        assert_eq!(names(&out.batches), vec!["new".to_string()]);
     }
 
     #[test]
@@ -1103,15 +1393,8 @@ mod tests {
             )
             .unwrap(),
         ];
-        let collapsed = collapse_wal_batches(&wal, &["a".into(), "b".into()]).unwrap();
-        assert_eq!(
-            collapsed
-                .survivor_batches
-                .iter()
-                .map(|b| b.num_rows())
-                .sum::<usize>(),
-            2
-        );
+        let out = reconcile_cdc(&[], &wal, &BTreeMap::new(), &["a".into(), "b".into()]).unwrap();
+        assert_eq!(n_rows(&out.batches), 2);
     }
 
     #[test]
@@ -1126,16 +1409,9 @@ mod tests {
         )
         .unwrap();
         let wal = vec![cdc_row(1, "a", 1, MutationKind::Insert, 1, 1, 0, 0)];
-        let collapsed = collapse_wal_batches(&wal, &["id".into()]).unwrap();
-        let kept = anti_join_lake(&[lake], &collapsed.changed_keys, &["id".into()]).unwrap();
-        assert_eq!(kept.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
-        let name = kept[0]
-            .column_by_name("name")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(name.value(0), "orphan");
+        let out = merge(&[lake], &wal, &BTreeMap::new());
+        assert_eq!(n_rows(&out.batches), 2);
+        assert!(names(&out.batches).contains(&"orphan".to_string()));
     }
 
     #[test]
@@ -1153,7 +1429,7 @@ mod tests {
         )
         .unwrap();
         let wal = attach_cdc_sidecar(batch, &[MutationKind::Insert], &[vec![1]], 1, 0, 0).unwrap();
-        let err = collapse_wal_batches(&[wal], &["id".into()]).unwrap_err();
+        let err = reconcile_cdc(&[], &[wal], &BTreeMap::new(), &["id".into()]).unwrap_err();
         assert!(err.to_string().contains("null business key"), "{err}");
     }
 
@@ -1163,24 +1439,46 @@ mod tests {
         let mut cols = wal.columns().to_vec();
         cols[3] = Arc::new(UInt8Array::from(vec![99u8]));
         wal = RecordBatch::try_new(wal.schema(), cols).unwrap();
-        let err = collapse_wal_batches(&[wal], &["id".into()]).unwrap_err();
+        let err = reconcile_cdc(&[], &[wal], &BTreeMap::new(), &["id".into()]).unwrap_err();
         assert!(err.to_string().contains("unknown CDC mutation"), "{err}");
     }
 
     #[test]
-    fn collapse_wal_batches_requires_keys() {
+    fn reconcile_cdc_requires_keys() {
         let wal = vec![cdc_row(1, "a", 1, MutationKind::Insert, 1, 1, 0, 0)];
-        let err = collapse_wal_batches(&wal, &[]).unwrap_err();
+        let err = reconcile_cdc(&[], &wal, &BTreeMap::new(), &[]).unwrap_err();
         assert!(
             err.to_string().contains("requires business_key_columns"),
             "{err}"
         );
-        let lake = vec![row(1, "a", 1)];
-        let err = anti_join_lake(&lake, &HashSet::new(), &[]).unwrap_err();
-        assert!(
-            err.to_string().contains("requires business_key_columns"),
-            "{err}"
-        );
+    }
+
+    #[test]
+    fn lake_malformed_order_token_is_error() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("amount", DataType::Int64, true),
+            Field::new("_skippr_order_token", DataType::Utf8, true),
+            Field::new("_skippr_tie_seq", DataType::Int64, true),
+            Field::new("_skippr_tie_ordinal", DataType::Int32, true),
+            Field::new("_skippr_tie_row", DataType::Int64, true),
+        ]));
+        let lake = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(StringArray::from(vec!["a"])),
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(StringArray::from(vec!["zz"])),
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Int32Array::from(vec![0])),
+                Arc::new(Int64Array::from(vec![0])),
+            ],
+        )
+        .unwrap();
+        let err = lake_winners_from_batches(&[lake], &["id".into()]).unwrap_err();
+        assert!(err.to_string().contains("not fixed-width hex"), "{err}");
     }
 
     #[test]
@@ -1193,6 +1491,12 @@ mod tests {
         assert!(!prod.contains("fn scalar_key_bytes"));
         assert!(!prod.contains("drop_compacted_snapshot_leftover"));
         assert!(!prod.contains("snapshot_keys"));
+        assert!(!prod.contains("collapse_wal_batches"));
+        assert!(!prod.contains("anti_join_lake"));
+        assert!(!prod.contains("lake_keys_beaten"));
+        assert!(!prod.contains("wal_keys_visible"));
+        assert!(!prod.contains("drop_unseen_winners"));
+        assert!(!prod.contains("zero_winner"));
         assert!(prod.contains("CDC_SEQ_COL"));
         assert!(prod.contains("_skippr_cdc_seq"));
         assert!(prod.contains("struct KeyEncoder"));
@@ -1200,5 +1504,12 @@ mod tests {
         assert!(prod.contains("NullKey::Reject"));
         assert!(prod.contains("Distribution::SinglePartition"));
         assert!(prod.contains("MemoryConsumer"));
+        assert!(prod.contains("collapse("));
+        assert!(prod.contains("stored_incumbent"));
+        assert!(prod.contains("fn reconcile_cdc"));
+        assert!(prod.contains("fn incumbents_from_slots"));
+        assert!(prod.contains("fn incumbents_from_stored"));
+        assert!(!prod.contains("CdcEvent::from_wal"));
+        assert!(!prod.contains("collapse_event"));
     }
 }

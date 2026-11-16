@@ -9,10 +9,15 @@ use tokio_postgres::{Client, Transaction};
 
 const STAGE_TABLE_NAME: &str = "_skippr_cdc_stage";
 const WINNERS_TABLE_NAME: &str = "_skippr_cdc_winners";
-const STAGE_ORDINAL_COLUMN: &str = "_skippr_cdc_ordinal";
 const STAGE_MUTATION_COLUMN: &str = "_skippr_cdc_mutation";
 const STAGE_ORDER_TOKEN_COLUMN: &str = "_skippr_cdc_order_token";
+const STAGE_TIE_SEQ_COLUMN: &str = "_skippr_cdc_tie_seq";
+const STAGE_TIE_ORD_COLUMN: &str = "_skippr_cdc_tie_ordinal";
+const STAGE_TIE_ROW_COLUMN: &str = "_skippr_cdc_tie_row";
 const TARGET_ORDER_TOKEN_COLUMN: &str = "_skippr_order_token";
+const TARGET_TIE_SEQ_COLUMN: &str = "_skippr_tie_seq";
+const TARGET_TIE_ORD_COLUMN: &str = "_skippr_tie_ordinal";
+const TARGET_TIE_ROW_COLUMN: &str = "_skippr_tie_row";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PostgresBulkCdcSql {
@@ -22,16 +27,18 @@ pub struct PostgresBulkCdcSql {
     pub apply_winners: String,
 }
 
-/// Generate the Postgres reference-adapter SQL for one bounded CDC batch.
+/// Generate the Postgres COPY load plus apply SQL for one bounded CDC batch.
 ///
-/// The staging tables are connection-local and `ON COMMIT DROP`. The caller
-/// runs these statements and the native COPY load inside one transaction.
+/// Incoming rows are collapsed with [`collapse_apply_batch`]. Apply predicates
+/// are [`sql_beats`]. COPY is the Postgres load dialect; ranking is not a
+/// second winner. The staging tables are connection-local and `ON COMMIT DROP`.
 pub fn postgres_bulk_cdc_sql(
     fq_table: &str,
     fq_tombstone_table: &str,
     batch: &CdcApplyBatch,
 ) -> Result<PostgresBulkCdcSql, CdcApplyBatchError> {
     batch.validate()?;
+    let batch = collapse_apply_batch(batch);
 
     let target_columns: Vec<String> = batch
         .columns
@@ -45,7 +52,6 @@ pub fn postgres_bulk_cdc_sql(
         .collect();
 
     let mut stage_columns = vec![
-        format!("{} BIGINT NOT NULL", quote_identifier(STAGE_ORDINAL_COLUMN)),
         format!(
             "{} SMALLINT NOT NULL CHECK ({} IN (0, 1))",
             quote_identifier(STAGE_MUTATION_COLUMN),
@@ -55,6 +61,12 @@ pub fn postgres_bulk_cdc_sql(
             "{} BYTEA NOT NULL",
             quote_identifier(STAGE_ORDER_TOKEN_COLUMN)
         ),
+        format!("{} BIGINT NOT NULL", quote_identifier(STAGE_TIE_SEQ_COLUMN)),
+        format!(
+            "{} INTEGER NOT NULL",
+            quote_identifier(STAGE_TIE_ORD_COLUMN)
+        ),
+        format!("{} BIGINT NOT NULL", quote_identifier(STAGE_TIE_ROW_COLUMN)),
     ];
     stage_columns.extend(
         batch
@@ -70,9 +82,11 @@ pub fn postgres_bulk_cdc_sql(
     );
 
     let copy_columns = [
-        quote_identifier(STAGE_ORDINAL_COLUMN),
         quote_identifier(STAGE_MUTATION_COLUMN),
         quote_identifier(STAGE_ORDER_TOKEN_COLUMN),
+        quote_identifier(STAGE_TIE_SEQ_COLUMN),
+        quote_identifier(STAGE_TIE_ORD_COLUMN),
+        quote_identifier(STAGE_TIE_ROW_COLUMN),
     ]
     .into_iter()
     .chain(target_columns.iter().cloned())
@@ -83,51 +97,31 @@ pub fn postgres_bulk_cdc_sql(
         quote_identifier(STAGE_TABLE_NAME)
     );
 
-    let winner_projection = target_columns
-        .iter()
-        .map(|column| format!("ranked.{column}"))
-        .chain([
-            format!("ranked.{}", quote_identifier(STAGE_ORDINAL_COLUMN)),
-            format!("ranked.{}", quote_identifier(STAGE_MUTATION_COLUMN)),
-            format!("ranked.{}", quote_identifier(STAGE_ORDER_TOKEN_COLUMN)),
-        ])
-        .collect::<Vec<_>>()
-        .join(", ");
-    let partition_by = business_keys
-        .iter()
-        .map(|column| format!("stage.{column}"))
-        .collect::<Vec<_>>()
-        .join(", ");
     let materialize_winners = format!(
-        "CREATE TEMP TABLE {} ON COMMIT DROP AS\n\
-         SELECT {winner_projection}\n\
-         FROM (\n\
-           SELECT stage.*,\n\
-             ROW_NUMBER() OVER (\n\
-               PARTITION BY {partition_by}\n\
-               ORDER BY stage.{} DESC, stage.{} ASC\n\
-             ) AS \"_skippr_cdc_rank\"\n\
-           FROM pg_temp.{} AS stage\n\
-         ) AS ranked\n\
-         WHERE ranked.\"_skippr_cdc_rank\" = 1;",
+        "CREATE TEMP TABLE {} ON COMMIT DROP AS SELECT * FROM pg_temp.{};",
         quote_identifier(WINNERS_TABLE_NAME),
-        quote_identifier(STAGE_ORDER_TOKEN_COLUMN),
-        quote_identifier(STAGE_ORDINAL_COLUMN),
         quote_identifier(STAGE_TABLE_NAME),
     );
 
     let target_insert_columns = target_columns
         .iter()
         .cloned()
-        .chain(std::iter::once(quote_identifier(TARGET_ORDER_TOKEN_COLUMN)))
+        .chain([
+            quote_identifier(TARGET_ORDER_TOKEN_COLUMN),
+            quote_identifier(TARGET_TIE_SEQ_COLUMN),
+            quote_identifier(TARGET_TIE_ORD_COLUMN),
+            quote_identifier(TARGET_TIE_ROW_COLUMN),
+        ])
         .collect::<Vec<_>>();
     let winner_insert_values = target_columns
         .iter()
         .map(|column| format!("winner.{column}"))
-        .chain(std::iter::once(format!(
-            "winner.{}",
-            quote_identifier(STAGE_ORDER_TOKEN_COLUMN)
-        )))
+        .chain([
+            format!("winner.{}", quote_identifier(STAGE_ORDER_TOKEN_COLUMN)),
+            format!("winner.{}", quote_identifier(STAGE_TIE_SEQ_COLUMN)),
+            format!("winner.{}", quote_identifier(STAGE_TIE_ORD_COLUMN)),
+            format!("winner.{}", quote_identifier(STAGE_TIE_ROW_COLUMN)),
+        ])
         .collect::<Vec<_>>();
     let conflict_columns = business_keys.join(", ");
 
@@ -136,19 +130,49 @@ pub fn postgres_bulk_cdc_sql(
         .filter(|column| !business_keys.contains(column))
         .map(|column| format!("{column} = EXCLUDED.{column}"))
         .collect::<Vec<_>>();
-    update_assignments.push(format!(
-        "{} = EXCLUDED.{}",
-        quote_identifier(TARGET_ORDER_TOKEN_COLUMN),
-        quote_identifier(TARGET_ORDER_TOKEN_COLUMN)
-    ));
+    update_assignments.extend([
+        format!(
+            "{} = EXCLUDED.{}",
+            quote_identifier(TARGET_ORDER_TOKEN_COLUMN),
+            quote_identifier(TARGET_ORDER_TOKEN_COLUMN)
+        ),
+        format!(
+            "{} = EXCLUDED.{}",
+            quote_identifier(TARGET_TIE_SEQ_COLUMN),
+            quote_identifier(TARGET_TIE_SEQ_COLUMN)
+        ),
+        format!(
+            "{} = EXCLUDED.{}",
+            quote_identifier(TARGET_TIE_ORD_COLUMN),
+            quote_identifier(TARGET_TIE_ORD_COLUMN)
+        ),
+        format!(
+            "{} = EXCLUDED.{}",
+            quote_identifier(TARGET_TIE_ROW_COLUMN),
+            quote_identifier(TARGET_TIE_ROW_COLUMN)
+        ),
+    ]);
 
     let winner_to_tombstone = key_match("tombstone", "winner", &business_keys);
     let excluded_to_tombstone = key_match("tombstone", "EXCLUDED", &business_keys);
     let winner_to_target = key_match("target", "winner", &business_keys);
-    let stage_token = quote_identifier(STAGE_ORDER_TOKEN_COLUMN);
     let target_token = quote_identifier(TARGET_ORDER_TOKEN_COLUMN);
     let mutation = quote_identifier(STAGE_MUTATION_COLUMN);
     let winners_table = format!("pg_temp.{}", quote_identifier(WINNERS_TABLE_NAME));
+
+    let stage_beats_tomb = sql_stage_beats_stored("winner", "tombstone");
+    let tomb_loses_to_stage = sql_stored_loses_to_stage("tombstone", "winner");
+    let target_loses_to_stage = sql_stored_loses_to_stage("target", "winner");
+    let target_beats_stage = sql_stored_beats_stage("target", "winner");
+    let winner_set = format!(
+        "{target_token} = EXCLUDED.{target_token}, {} = EXCLUDED.{}, {} = EXCLUDED.{}, {} = EXCLUDED.{}",
+        quote_identifier(TARGET_TIE_SEQ_COLUMN),
+        quote_identifier(TARGET_TIE_SEQ_COLUMN),
+        quote_identifier(TARGET_TIE_ORD_COLUMN),
+        quote_identifier(TARGET_TIE_ORD_COLUMN),
+        quote_identifier(TARGET_TIE_ROW_COLUMN),
+        quote_identifier(TARGET_TIE_ROW_COLUMN),
+    );
 
     let apply_upserts = format!(
         "INSERT INTO {fq_table} AS target ({})\n\
@@ -158,17 +182,14 @@ pub fn postgres_bulk_cdc_sql(
          AND NOT EXISTS (\n\
            SELECT 1 FROM {fq_tombstone_table} AS tombstone\n\
            WHERE {winner_to_tombstone}\n\
-           AND tombstone.{target_token} >= winner.{stage_token}\n\
+           AND NOT ({tomb_loses_to_stage})\n\
          )\n\
          ON CONFLICT ({conflict_columns}) DO UPDATE SET {}\n\
-         WHERE (\n\
-           target.{target_token} IS NULL\n\
-           OR target.{target_token} < EXCLUDED.{target_token}\n\
-         )\n\
+         WHERE ({target_loses_to_stage})\n\
          AND NOT EXISTS (\n\
            SELECT 1 FROM {fq_tombstone_table} AS tombstone\n\
            WHERE {excluded_to_tombstone}\n\
-           AND tombstone.{target_token} >= EXCLUDED.{target_token}\n\
+           AND NOT ({tomb_loses_to_stage})\n\
          );",
         target_insert_columns.join(", "),
         winner_insert_values.join(", "),
@@ -180,30 +201,47 @@ pub fn postgres_bulk_cdc_sql(
          USING {winners_table} AS winner\n\
          WHERE winner.{mutation} = 1\n\
          AND {winner_to_target}\n\
-         AND (\n\
-           target.{target_token} IS NULL\n\
-           OR target.{target_token} < winner.{stage_token}\n\
-         );"
+         AND ({target_loses_to_stage});"
     );
 
     let tombstone_insert_values = business_keys
         .iter()
         .map(|column| format!("winner.{column}"))
-        .chain(std::iter::once(format!("winner.{stage_token}")))
+        .chain([
+            format!("winner.{}", quote_identifier(STAGE_ORDER_TOKEN_COLUMN)),
+            format!("winner.{}", quote_identifier(STAGE_TIE_SEQ_COLUMN)),
+            format!("winner.{}", quote_identifier(STAGE_TIE_ORD_COLUMN)),
+            format!("winner.{}", quote_identifier(STAGE_TIE_ROW_COLUMN)),
+        ])
         .collect::<Vec<_>>();
     let tombstone_columns = business_keys
         .iter()
         .cloned()
-        .chain(std::iter::once(target_token.clone()))
+        .chain([
+            target_token.clone(),
+            quote_identifier(TARGET_TIE_SEQ_COLUMN),
+            quote_identifier(TARGET_TIE_ORD_COLUMN),
+            quote_identifier(TARGET_TIE_ROW_COLUMN),
+        ])
         .collect::<Vec<_>>();
     let apply_tombstones = format!(
         "INSERT INTO {fq_tombstone_table} AS tombstone ({})\n\
          SELECT {}\n\
          FROM {winners_table} AS winner\n\
          WHERE winner.{mutation} = 1\n\
+         AND NOT EXISTS (\n\
+           SELECT 1 FROM {fq_table} AS target\n\
+           WHERE {winner_to_target}\n\
+           AND {target_beats_stage}\n\
+         )\n\
          ON CONFLICT ({conflict_columns}) DO UPDATE\n\
-         SET {target_token} = EXCLUDED.{target_token}\n\
-         WHERE tombstone.{target_token} < EXCLUDED.{target_token};",
+         SET {winner_set}\n\
+         WHERE ({tomb_loses_to_stage})\n\
+         AND NOT EXISTS (\n\
+           SELECT 1 FROM {fq_table} AS target\n\
+           WHERE {winner_to_target}\n\
+           AND {target_beats_stage}\n\
+         );",
         tombstone_columns.join(", "),
         tombstone_insert_values.join(", "),
     );
@@ -213,7 +251,28 @@ pub fn postgres_bulk_cdc_sql(
          USING {winners_table} AS winner\n\
          WHERE winner.{mutation} = 0\n\
          AND {winner_to_tombstone}\n\
-         AND tombstone.{target_token} < winner.{stage_token};"
+         AND ({stage_beats_tomb});"
+    );
+    let sync_slots = format!(
+        "INSERT INTO {fq_tombstone_table} AS tombstone ({})\n\
+         SELECT {}\n\
+         FROM {fq_table} AS source\n\
+         ON CONFLICT ({conflict_columns}) DO UPDATE\n\
+         SET {winner_set}\n\
+         WHERE ({});",
+        tombstone_columns.join(", "),
+        business_keys
+            .iter()
+            .map(|column| format!("source.{column}"))
+            .chain([
+                format!("source.{}", quote_identifier(TARGET_ORDER_TOKEN_COLUMN)),
+                format!("source.{}", quote_identifier(TARGET_TIE_SEQ_COLUMN)),
+                format!("source.{}", quote_identifier(TARGET_TIE_ORD_COLUMN)),
+                format!("source.{}", quote_identifier(TARGET_TIE_ROW_COLUMN)),
+            ])
+            .collect::<Vec<_>>()
+            .join(", "),
+        sql_stored_beats_stored("EXCLUDED", "tombstone"),
     );
 
     Ok(PostgresBulkCdcSql {
@@ -224,6 +283,7 @@ pub fn postgres_bulk_cdc_sql(
             apply_upserts,
             apply_deletes,
             apply_tombstones,
+            sync_slots,
             clear_stale_tombstones,
         ]
         .join("\n"),
@@ -242,13 +302,14 @@ pub async fn apply_postgres_cdc_batch(
     batch
         .validate()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let batch = collapse_apply_batch(batch);
     if batch.rows.is_empty() {
         return Ok(0);
     }
 
-    let sql = postgres_bulk_cdc_sql(fq_table, fq_tombstone_table, batch)
+    let sql = postgres_bulk_cdc_sql(fq_table, fq_tombstone_table, &batch)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let payload = postgres_copy_text_payload(batch)
+    let payload = postgres_copy_text_payload(&batch)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let transaction = client
         .transaction()
@@ -278,8 +339,6 @@ fn postgres_copy_text_payload(batch: &CdcApplyBatch) -> Result<String, CdcApplyB
 
     let mut payload = String::new();
     for row in &batch.rows {
-        payload.push_str(&row.metadata.source_ordinal.to_string());
-        payload.push('\t');
         payload.push(match row.metadata.mutation {
             CdcApplyMutation::Upsert => '0',
             CdcApplyMutation::Delete => '1',
@@ -289,6 +348,12 @@ fn postgres_copy_text_payload(batch: &CdcApplyBatch) -> Result<String, CdcApplyB
             "\\x{}",
             encode_hex(&row.metadata.order_token)
         )));
+        payload.push('\t');
+        payload.push_str(&row.metadata.tie.seq.to_string());
+        payload.push('\t');
+        payload.push_str(&row.metadata.tie.ordinal.to_string());
+        payload.push('\t');
+        payload.push_str(&row.metadata.tie.row.to_string());
         for value in &row.values {
             payload.push('\t');
             match value {
@@ -402,4 +467,71 @@ fn encode_hex(bytes: &[u8]) -> String {
         let _ = write!(encoded, "{byte:02x}");
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_10_tombstone_4_delete_7_sql_keeps_the_live_row() {
+        let batch = CdcApplyBatch {
+            columns: vec![CdcApplyColumn {
+                name: "id".to_string(),
+                target_type: "BIGINT".to_string(),
+            }],
+            business_key_columns: vec!["id".to_string()],
+            rows: vec![CdcApplyRow {
+                metadata: CdcApplyRowMetadata {
+                    mutation: CdcApplyMutation::Delete,
+                    event_id: b"e".to_vec(),
+                    order_token: vec![7],
+                    tie: skippr_cdc::Tie {
+                        seq: 1,
+                        ordinal: 0,
+                        row: 0,
+                    },
+                },
+                values: vec![CdcApplyValue::Signed(1)],
+            }],
+        };
+        let sql = postgres_bulk_cdc_sql("target", "tombstones", &batch).unwrap();
+        let apply = sql.apply_winners;
+        let row = skippr_cdc::StoredWinner {
+            order: vec![10],
+            tie: skippr_cdc::Tie {
+                seq: 1,
+                ordinal: 0,
+                row: 0,
+            },
+        };
+        let tomb = skippr_cdc::StoredWinner {
+            order: vec![4],
+            tie: skippr_cdc::Tie {
+                seq: 1,
+                ordinal: 0,
+                row: 0,
+            },
+        };
+        let delete = skippr_cdc::StoredWinner {
+            order: vec![7],
+            tie: skippr_cdc::Tie {
+                seq: 1,
+                ordinal: 0,
+                row: 0,
+            },
+        };
+        assert_eq!(
+            skippr_cdc::winner_of_set(Some(&row), Some(&tomb), &delete),
+            row
+        );
+        assert!(
+            apply.contains("_skippr_tie_seq"),
+            "Postgres stores the tie on both slots"
+        );
+        assert!(
+            apply.contains("NOT EXISTS"),
+            "Postgres leaves a stronger live row in place: {apply}"
+        );
+    }
 }

@@ -39,6 +39,7 @@ from matrix import (  # noqa: E402
     ALTER_SQL,
     COMPUTE_YAML,
     SQL_YAML,
+    alter_sql,
     expected_amount_sum_range,
     expected_filter_rows,
 )
@@ -823,8 +824,6 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
         and not flatten
         and bool((scenario.get("asserts") or {}).get("exact_arrow_eq_total"))
     )
-    if warmup:
-        write_records(source / f"warmup.{source_ext}", fixture_kind, 1, fmt=source_format)
     sink = str(scenario["sink"])
     output = work / "output"
     extra_source: dict[str, str] = {"source_format": source_format}
@@ -836,6 +835,10 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
     if source_kind == "Stdin":
         write_records(stdin_payload, fixture_kind, rows, fmt="json")
         write_records(source / "events.json", fixture_kind, 1, fmt="json")
+    elif warmup:
+        write_records(source / f"warmup.{source_ext}", fixture_kind, 1, fmt=source_format)
+    else:
+        write_records(source / f"events.{source_ext}", fixture_kind, rows, fmt=source_format)
     config = work / "skippr.yml"
 
     def write_ingest_yml(kind: str) -> None:
@@ -886,7 +889,6 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
                 profile="none",
             )
             (source / f"warmup.{source_ext}").unlink(missing_ok=True)
-        if source_kind == "File":
             write_records(source / f"events.{source_ext}", fixture_kind, rows, fmt=source_format)
         measured = run_skipprd(
             skipprd,
@@ -978,8 +980,8 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
                 subprocess.run([docker, "rm", "-f", "skippr-perf-pg"], check=False)
 
 
-def write_migration_sql(config: Path, alter: str) -> Path:
-    sql = ALTER_SQL[alter]
+def write_migration_sql(config: Path, alter: str, table: str = "perf_cell.perf_cell") -> Path:
+    sql = alter_sql(alter, table) if table != "perf_cell.perf_cell" else ALTER_SQL[alter]
     directory = config.parent / "migrations"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "001.sql"
@@ -1068,6 +1070,14 @@ def run_ingest_migrate(
             hold = None
             if leftover_segs(data_dir) == 0:
                 raise PerfError(f"{scenario_id}: stream migrate expected leftover WAL")
+            if scenario.get("continue_ingest"):
+                write_records(
+                    source / "events_b.json",
+                    fixture_kind,
+                    rows,
+                    fmt="json",
+                    start=rows + 1,
+                )
             measured = run_skipprd(
                 skipprd,
                 sync_args,
@@ -1093,18 +1103,35 @@ def run_ingest_migrate(
                 work=work,
                 profile="none",
             )
+            if scenario.get("continue_ingest"):
+                (source / "events.json").unlink(missing_ok=True)
+                write_records(
+                    source / "events_b.json",
+                    fixture_kind,
+                    rows,
+                    fmt="json",
+                    start=rows + 1,
+                )
+                logs += run_skipprd(
+                    skipprd,
+                    sync_args,
+                    env=env,
+                    work=work,
+                    profile="none",
+                )
         wall_ms = int((time.perf_counter() - started) * 1000)
         events = assert_scenario_perf(logs if mode == "stream" else measured, scenario)
         asserts = scenario.get("asserts") or {}
+        expect_rows = rows * 2 if scenario.get("continue_ingest") else rows
         if asserts.get("bronze_count"):
             count = duckdb_scan(warehouse, PIPELINE, "SELECT count(*) FROM iceberg_scan('{scan}')")
-            if int(count) != rows:
-                raise PerfError(f"{scenario_id}: bronze count {count} != {rows}")
+            if int(count) != expect_rows:
+                raise PerfError(f"{scenario_id}: bronze count {count} != {expect_rows}")
         if asserts.get("amount_sum"):
             summed = duckdb_scan(
                 warehouse, PIPELINE, "SELECT coalesce(sum(amount),0) FROM iceberg_scan('{scan}')"
             )
-            if int(float(summed)) != expected_amount_sum(rows):
+            if int(float(summed)) != expected_amount_sum(expect_rows):
                 raise PerfError(f"{scenario_id}: amount sum {summed}")
         assert_dest_columns(scenario_id, scenario, warehouse)
         return report_payload(scenario_id, rows, wall_ms, events, logs, work)

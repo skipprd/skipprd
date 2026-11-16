@@ -13,15 +13,15 @@ use tracing::{info, warn};
 use crate::pgoutput::{self, PgColumn, PgOutputMessage};
 use skippr_runtime_sdk::helpers::configuration::{runtime_child_config, Config};
 use skippr_runtime_sdk::plugins::cdc::{
-    source_capabilities, MutationKind, PostgresCheckpoint, WalRowMeta,
+    before_image, source_capabilities, BeforeImage, MutationKind, PostgresCheckpoint, WalRowMeta,
 };
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
-    SourceSyncContext,
+    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches_durable,
+    take_row_count_batch, IngestBatch, SourceSyncContext,
 };
 
 #[derive(Debug, Deserialize, SkipprConfig, Serialize, Clone)]
@@ -46,6 +46,11 @@ pub struct DataSourcePostgresPluginConfig {
     pub publication_name: Option<String>,
     #[serde(default)]
     pub cdc_idle_timeout_seconds: Option<u64>,
+}
+
+enum CdcFlush {
+    Idle,
+    Commit { lsn: u64 },
 }
 
 pub struct DataSourcePostgresPlugin {
@@ -173,6 +178,67 @@ impl DataSourcePostgresPlugin {
         submit_payload_batches_durable(ctx, batches).map(|_| ())
     }
 
+    fn prepare_cdc_flush(mut batches: Vec<IngestBatch>, flush: CdcFlush) -> Vec<IngestBatch> {
+        if let CdcFlush::Commit { lsn } = flush {
+            Self::stamp_source_transaction(&mut batches, lsn);
+        }
+        batches
+    }
+
+    fn flush_cdc(
+        &self,
+        batches: Vec<IngestBatch>,
+        flush: CdcFlush,
+        ctx: &dyn SourceSyncContext,
+    ) -> io::Result<()> {
+        self.ingest_batches(Self::prepare_cdc_flush(batches, flush), ctx)
+    }
+
+    fn idle_timeout_stop(
+        &self,
+        idle: Duration,
+        pending_batches: &mut Vec<IngestBatch>,
+        ctx: &dyn SourceSyncContext,
+    ) -> io::Result<()> {
+        info!(
+            "Runtime Postgres CDC idle timeout reached after {}s; stopping stream",
+            idle.as_secs()
+        );
+        if !pending_batches.is_empty() {
+            self.flush_cdc(std::mem::take(pending_batches), CdcFlush::Idle, ctx)?;
+        }
+        Ok(())
+    }
+
+    fn replica_before(cols: &[PgColumn], tuple: &[Option<String>]) -> BeforeImage {
+        let owned = Self::replica_key_parts(cols, tuple);
+        let parts: Vec<(&[u8], &[u8])> = owned
+            .iter()
+            .map(|(name, value)| (name.as_slice(), value.as_slice()))
+            .collect();
+        before_image(&parts, Self::tuple_to_json(cols, tuple).into_bytes())
+    }
+
+    fn update_before(
+        cols: &[PgColumn],
+        old_row: Option<&[Option<String>]>,
+    ) -> io::Result<BeforeImage> {
+        let old = old_row.ok_or_else(|| {
+            io::Error::other(
+                "Postgres CDC UPDATE is missing replica identity old row (require replica identity)",
+            )
+        })?;
+        Ok(Self::replica_before(cols, old))
+    }
+
+    fn snapshot_cdc_rows(lsn_id: &[u8]) -> Vec<WalRowMeta> {
+        vec![WalRowMeta::new(
+            MutationKind::Snapshot,
+            lsn_id.to_vec(),
+            lsn_id.to_vec(),
+        )]
+    }
+
     fn cdc_batch(
         &self,
         ingest_config: &Config,
@@ -181,12 +247,17 @@ impl DataSourcePostgresPlugin {
         tuple: &[Option<String>],
         mutation: MutationKind,
         lsn: u64,
+        before: Option<BeforeImage>,
     ) -> IngestBatch {
         let namespace = format!("postgres.{}", table);
         let offset_key = OffsetKey::new(namespace.clone(), table.to_string());
         let json_str = Self::tuple_to_json(columns, tuple);
         let bytes = json_str.len();
         let lsn_id = lsn.to_be_bytes().to_vec();
+        let mut meta = WalRowMeta::new(mutation, lsn_id.clone(), lsn_id);
+        if let Some(before) = before {
+            meta = meta.with_before(before);
+        }
         IngestBatch::new_with_offset_pos(
             ingest_config,
             offset_key,
@@ -195,12 +266,33 @@ impl DataSourcePostgresPlugin {
             lsn,
             format!("postgres://{}", table),
             Some(namespace),
-            Some(vec![WalRowMeta {
-                mutation,
-                event_id: lsn_id.clone(),
-                order_token: lsn_id,
-            }]),
+            Some(vec![meta]),
         )
+    }
+
+    fn replica_key_parts(cols: &[PgColumn], tuple: &[Option<String>]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        cols.iter()
+            .zip(tuple.iter())
+            .filter_map(|(col, val)| {
+                val.as_ref()
+                    .map(|value| (col.name.as_bytes().to_vec(), value.as_bytes().to_vec()))
+            })
+            .collect()
+    }
+
+    fn replica_business_key(cols: &[PgColumn], tuple: &[Option<String>]) -> Vec<u8> {
+        Self::replica_before(cols, tuple).key
+    }
+
+    fn stamp_source_transaction(batches: &mut [IngestBatch], commit_lsn: u64) {
+        let id = commit_lsn.to_be_bytes().to_vec();
+        for batch in batches {
+            if let Some(rows) = batch.cdc_rows.as_mut() {
+                for row in rows {
+                    row.stamp_source_transaction_id(id.clone());
+                }
+            }
+        }
     }
 
     async fn sync_snapshot(&mut self, ctx: Arc<dyn SourceSyncContext>) -> io::Result<()> {
@@ -255,8 +347,8 @@ impl DataSourcePostgresPlugin {
                     None,
                 ));
 
-                if current_batch.len() >= batch_size {
-                    self.ingest_batches(std::mem::take(&mut current_batch), ctx.as_ref())?;
+                if let Some(full) = take_row_count_batch(&mut current_batch, batch_size) {
+                    self.ingest_batches(full, ctx.as_ref())?;
                 }
             }
 
@@ -413,15 +505,11 @@ impl DataSourcePostgresPlugin {
                     snapshot_lsn,
                     format!("postgres://{}", table_name),
                     Some(namespace.clone()),
-                    Some(vec![WalRowMeta {
-                        mutation: MutationKind::Snapshot,
-                        event_id: lsn_id.clone(),
-                        order_token: lsn_id.clone(),
-                    }]),
+                    Some(Self::snapshot_cdc_rows(&lsn_id)),
                 ));
 
-                if current_batch.len() >= batch_size {
-                    self.ingest_batches(std::mem::take(&mut current_batch), ctx.as_ref())?;
+                if let Some(full) = take_row_count_batch(&mut current_batch, batch_size) {
+                    self.ingest_batches(full, ctx.as_ref())?;
                 }
             }
 
@@ -475,28 +563,13 @@ impl DataSourcePostgresPlugin {
         loop {
             let next_event = if let Some(idle_timeout) = idle_timeout {
                 let Some(remaining) = idle_remaining(idle_timeout, last_data.elapsed()) else {
-                    info!(
-                        "Runtime Postgres CDC idle timeout reached after {}s; stopping stream",
-                        idle_timeout.as_secs()
-                    );
-                    if !pending_batches.is_empty() {
-                        self.ingest_batches(std::mem::take(&mut pending_batches), ctx.as_ref())?;
-                    }
+                    self.idle_timeout_stop(idle_timeout, &mut pending_batches, ctx.as_ref())?;
                     break;
                 };
                 match tokio::time::timeout(remaining, client.recv()).await {
                     Ok(result) => result.map_err(|err| io::Error::other(err.to_string()))?,
                     Err(_) => {
-                        info!(
-                            "Runtime Postgres CDC idle timeout reached after {}s; stopping stream",
-                            idle_timeout.as_secs()
-                        );
-                        if !pending_batches.is_empty() {
-                            self.ingest_batches(
-                                std::mem::take(&mut pending_batches),
-                                ctx.as_ref(),
-                            )?;
-                        }
+                        self.idle_timeout_stop(idle_timeout, &mut pending_batches, ctx.as_ref())?;
                         break;
                     }
                 }
@@ -546,11 +619,17 @@ impl DataSourcePostgresPlugin {
                                     &new_row,
                                     MutationKind::Insert,
                                     wal_end.as_u64(),
+                                    None,
                                 ));
                             }
                         }
-                        PgOutputMessage::Update { oid, new_row, .. } => {
+                        PgOutputMessage::Update {
+                            oid,
+                            new_row,
+                            old_row,
+                        } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
+                                let before = Self::update_before(cols, old_row.as_deref())?;
                                 pending_batches.push(self.cdc_batch(
                                     &ingest_config,
                                     table,
@@ -558,11 +637,13 @@ impl DataSourcePostgresPlugin {
                                     &new_row,
                                     MutationKind::Update,
                                     wal_end.as_u64(),
+                                    Some(before),
                                 ));
                             }
                         }
                         PgOutputMessage::Delete { oid, old_row } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
+                                let before = Self::replica_before(cols, &old_row);
                                 pending_batches.push(self.cdc_batch(
                                     &ingest_config,
                                     table,
@@ -570,16 +651,25 @@ impl DataSourcePostgresPlugin {
                                     &old_row,
                                     MutationKind::Delete,
                                     wal_end.as_u64(),
+                                    Some(before),
                                 ));
                             }
                         }
                     }
                 }
                 ReplicationEvent::Commit { lsn, .. } => {
-                    client.update_applied_lsn(lsn);
                     let lsn_u64: u64 = lsn.into();
-                    self.ingest_batches(std::mem::take(&mut pending_batches), ctx.as_ref())?;
-                    self.store_resume_checkpoint(ctx.as_ref(), &slot_name, lsn_u64)?;
+                    self.flush_cdc(
+                        std::mem::take(&mut pending_batches),
+                        CdcFlush::Commit { lsn: lsn_u64 },
+                        ctx.as_ref(),
+                    )?;
+                    client.update_applied_lsn(lsn);
+                    if let Err(err) =
+                        self.store_resume_checkpoint(ctx.as_ref(), &slot_name, lsn_u64)
+                    {
+                        warn!("trailing Postgres LSN store failed after WAL durability: {err}");
+                    }
                 }
                 ReplicationEvent::KeepAlive { .. } | ReplicationEvent::StoppedAt { .. } => {
                     unreachable!("classified before this match")
@@ -744,5 +834,188 @@ mod tests {
             idle_remaining(Duration::from_secs(5), Duration::from_secs(6)),
             None
         );
+    }
+
+    #[test]
+    fn commit_stamps_one_source_transaction_id_on_every_row() {
+        let plugin = plugin(SourceCdcMode::CdcOnly);
+        let cfg = runtime_child_config();
+        let cols = [PgColumn {
+            name: "id".into(),
+            type_oid: 23,
+        }];
+        let batches = vec![
+            plugin.cdc_batch(
+                &cfg,
+                "people",
+                &cols,
+                &[Some("1".into())],
+                MutationKind::Insert,
+                1,
+                None,
+            ),
+            plugin.cdc_batch(
+                &cfg,
+                "people",
+                &cols,
+                &[Some("2".into())],
+                MutationKind::Insert,
+                2,
+                None,
+            ),
+        ];
+        let batches =
+            DataSourcePostgresPlugin::prepare_cdc_flush(batches, CdcFlush::Commit { lsn: 99 });
+        let ids: Vec<_> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .cdc_rows
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row.source_transaction_id.clone())
+            })
+            .collect();
+        let expected = 99u64.to_be_bytes().to_vec();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().all(|id| id.as_ref() == Some(&expected)));
+    }
+
+    #[test]
+    fn update_without_old_row_is_rejected() {
+        let cols = [PgColumn {
+            name: "id".into(),
+            type_oid: 23,
+        }];
+        let err = DataSourcePostgresPlugin::update_before(&cols, None).unwrap_err();
+        assert!(err.to_string().contains("missing replica identity old row"));
+        let before =
+            DataSourcePostgresPlugin::update_before(&cols, Some(&[Some("7".into())])).unwrap();
+        assert_eq!(
+            before.key,
+            DataSourcePostgresPlugin::replica_business_key(&cols, &[Some("7".into())])
+        );
+    }
+
+    #[test]
+    fn delete_carries_the_old_row_as_before() {
+        let cols = [PgColumn {
+            name: "id".into(),
+            type_oid: 23,
+        }];
+        let before = DataSourcePostgresPlugin::replica_before(&cols, &[Some("7".into())]);
+        assert_eq!(
+            before.key,
+            DataSourcePostgresPlugin::replica_business_key(&cols, &[Some("7".into())])
+        );
+        assert!(!before.row.is_empty());
+    }
+
+    #[test]
+    fn idle_flush_does_not_invent_a_source_transaction_id() {
+        let plugin = plugin(SourceCdcMode::CdcOnly);
+        let cfg = runtime_child_config();
+        let cols = [PgColumn {
+            name: "id".into(),
+            type_oid: 23,
+        }];
+        let batch = plugin.cdc_batch(
+            &cfg,
+            "people",
+            &cols,
+            &[Some("1".into())],
+            MutationKind::Insert,
+            1,
+            None,
+        );
+        let flushed = DataSourcePostgresPlugin::prepare_cdc_flush(vec![batch], CdcFlush::Idle);
+        assert!(flushed[0].cdc_rows.as_ref().unwrap()[0]
+            .source_transaction_id
+            .is_none());
+    }
+
+    #[test]
+    fn idle_then_commit_are_two_flushes() {
+        let plugin = plugin(SourceCdcMode::CdcOnly);
+        let cfg = runtime_child_config();
+        let cols = [PgColumn {
+            name: "id".into(),
+            type_oid: 23,
+        }];
+        let idle_row = plugin.cdc_batch(
+            &cfg,
+            "people",
+            &cols,
+            &[Some("1".into())],
+            MutationKind::Insert,
+            1,
+            None,
+        );
+        let commit_row = plugin.cdc_batch(
+            &cfg,
+            "people",
+            &cols,
+            &[Some("2".into())],
+            MutationKind::Insert,
+            2,
+            None,
+        );
+        let idle = DataSourcePostgresPlugin::prepare_cdc_flush(vec![idle_row], CdcFlush::Idle);
+        let commit = DataSourcePostgresPlugin::prepare_cdc_flush(
+            vec![commit_row],
+            CdcFlush::Commit { lsn: 50 },
+        );
+        assert!(idle[0].cdc_rows.as_ref().unwrap()[0]
+            .source_transaction_id
+            .is_none());
+        assert_eq!(
+            commit[0].cdc_rows.as_ref().unwrap()[0]
+                .source_transaction_id
+                .as_deref(),
+            Some(50u64.to_be_bytes().as_slice())
+        );
+    }
+
+    #[test]
+    fn snapshot_rows_do_not_invent_a_source_transaction_id() {
+        let rows = DataSourcePostgresPlugin::snapshot_cdc_rows(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].mutation, MutationKind::Snapshot);
+        assert!(rows[0].source_transaction_id.is_none());
+    }
+
+    #[test]
+    fn snapshot_row_count_batches_split_at_the_cap() {
+        let plugin = plugin(SourceCdcMode::Snapshot);
+        let cfg = runtime_child_config();
+        let cols = [PgColumn {
+            name: "id".into(),
+            type_oid: 23,
+        }];
+        let mut current = vec![
+            plugin.cdc_batch(
+                &cfg,
+                "people",
+                &cols,
+                &[Some("1".into())],
+                MutationKind::Insert,
+                1,
+                None,
+            ),
+            plugin.cdc_batch(
+                &cfg,
+                "people",
+                &cols,
+                &[Some("2".into())],
+                MutationKind::Insert,
+                2,
+                None,
+            ),
+        ];
+        let full = take_row_count_batch(&mut current, 2).unwrap();
+        assert_eq!(full.len(), 2);
+        assert!(current.is_empty());
+        assert!(take_row_count_batch(&mut current, 2).is_none());
     }
 }

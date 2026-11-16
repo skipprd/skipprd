@@ -250,21 +250,9 @@ mod tests {
     fn filter_keeps_cdc_sidecar() {
         let batch = invoice_batch(&["a", "b", "c"], &[0, 5, 0]);
         let cdc = vec![
-            WalRowMeta {
-                mutation: MutationKind::Insert,
-                event_id: b"a".to_vec(),
-                order_token: vec![1],
-            },
-            WalRowMeta {
-                mutation: MutationKind::Insert,
-                event_id: b"b".to_vec(),
-                order_token: vec![2],
-            },
-            WalRowMeta {
-                mutation: MutationKind::Insert,
-                event_id: b"c".to_vec(),
-                order_token: vec![3],
-            },
+            WalRowMeta::new(MutationKind::Insert, b"a".to_vec(), vec![1]),
+            WalRowMeta::new(MutationKind::Insert, b"b".to_vec(), vec![2]),
+            WalRowMeta::new(MutationKind::Insert, b"c".to_vec(), vec![3]),
         ];
         let select = StatelessSelect {
             filter: Some("amount > 0".into()),

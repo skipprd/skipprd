@@ -17,6 +17,17 @@ use skippr_plugin_data_sink_postgres::{
 use skippr_runtime_sdk::plugins::cdc::{MutationKind, WalPartKind, WalPartMeta, WalRowMeta};
 use skippr_runtime_sdk::sink_compat::segment_file::{PartitionKey, SegmentFile, WalPayload};
 
+fn incoming_hex(hex: &str) -> skippr_cdc::StoredWinner {
+    skippr_cdc::StoredWinner {
+        order: hex::decode(hex).expect("hex"),
+        tie: skippr_cdc::Tie {
+            seq: 1,
+            ordinal: 0,
+            row: 0,
+        },
+    }
+}
+
 const SOURCE_CONN: &str =
     "host=localhost port=15432 user=postgres password=testpass dbname=skippr_test";
 const TARGET_CONN: &str =
@@ -45,7 +56,11 @@ fn bulk_row(
             mutation,
             event_id: format!("event-{ordinal}").into_bytes(),
             order_token: vec![token],
-            source_ordinal: ordinal,
+            tie: skippr_cdc::Tie {
+                seq: 1,
+                ordinal: 0,
+                row: ordinal,
+            },
         },
         values,
     }
@@ -89,21 +104,21 @@ fn cdc_wal_roundtrip_with_postgres_metadata() {
         kind: WalPartKind::Cdc,
         row_count: 3,
         rows: vec![
-            WalRowMeta {
-                mutation: MutationKind::Insert,
-                event_id: b"pg:lsn:0/1000000".to_vec(),
-                order_token: 0x1000000u64.to_be_bytes().to_vec(),
-            },
-            WalRowMeta {
-                mutation: MutationKind::Insert,
-                event_id: b"pg:lsn:0/1000001".to_vec(),
-                order_token: 0x1000001u64.to_be_bytes().to_vec(),
-            },
-            WalRowMeta {
-                mutation: MutationKind::Update,
-                event_id: b"pg:lsn:0/1000002".to_vec(),
-                order_token: 0x1000002u64.to_be_bytes().to_vec(),
-            },
+            WalRowMeta::new(
+                MutationKind::Insert,
+                b"pg:lsn:0/1000000".to_vec(),
+                0x1000000u64.to_be_bytes().to_vec(),
+            ),
+            WalRowMeta::new(
+                MutationKind::Insert,
+                b"pg:lsn:0/1000001".to_vec(),
+                0x1000001u64.to_be_bytes().to_vec(),
+            ),
+            WalRowMeta::new(
+                MutationKind::Update,
+                b"pg:lsn:0/1000002".to_vec(),
+                0x1000002u64.to_be_bytes().to_vec(),
+            ),
         ],
     };
     let blob = bincode::serialize(&wal_meta).unwrap();
@@ -211,7 +226,7 @@ async fn cdc_upsert_rejects_stale_write() {
             "decode('0000000000000002', 'hex')".to_string(),
         ],
         &["\"id\"".to_string()],
-        "0000000000000002",
+        &incoming_hex("0000000000000002"),
     );
     client.batch_execute(&sql1).await.unwrap();
 
@@ -229,7 +244,7 @@ async fn cdc_upsert_rejects_stale_write() {
             "decode('0000000000000001', 'hex')".to_string(),
         ],
         &["\"id\"".to_string()],
-        "0000000000000001",
+        &incoming_hex("0000000000000001"),
     );
     client.batch_execute(&sql2).await.unwrap();
 
@@ -275,7 +290,7 @@ async fn cdc_delete_then_stale_insert_blocked_by_tombstone() {
             "decode('0000000000000002', 'hex')".to_string(),
         ],
         &["\"id\"".to_string()],
-        "0000000000000002",
+        &incoming_hex("0000000000000002"),
     );
     client.batch_execute(&sql_insert).await.unwrap();
 
@@ -285,7 +300,7 @@ async fn cdc_delete_then_stale_insert_blocked_by_tombstone() {
         &["\"id\"".to_string()],
         &["1".to_string()],
         &["BIGINT".to_string()],
-        "0000000000000003",
+        &incoming_hex("0000000000000003"),
     );
     client.batch_execute(&sql_delete).await.unwrap();
 
@@ -303,7 +318,7 @@ async fn cdc_delete_then_stale_insert_blocked_by_tombstone() {
             "decode('0000000000000002', 'hex')".to_string(),
         ],
         &["\"id\"".to_string()],
-        "0000000000000002",
+        &incoming_hex("0000000000000002"),
     );
     client.batch_execute(&sql_stale_insert).await.unwrap();
 

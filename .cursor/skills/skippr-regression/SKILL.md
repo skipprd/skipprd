@@ -46,8 +46,8 @@ and does not gate the tag.
 
 ```
 skippr-regression:
-- [ ] Local smoke ingest/copy A+B (File ingest exact-Arrow → Duckdb or SkipprLake), B (File copy json→json), JSON File → Parquet File ingest, Skipprd CSV → DuckDB, DuckDB NDJSON/CSV baselines, File and Stdin ingest for every transform.compute filter/derive/compose cell and every CREATE TABLE measure, and File ingest then migrate for every ALTER (historical compact and in-stream WAL hold)
-- [ ] Local smoke query A (q-wal-count-iceberg, q-wal-point-iceberg) and B (q-union-count-duckdb, q-union-overlap-duckdb); SQL compose / CREATE TABLE / migrate historical (DuckDB drained) and stream (SkipprLake STREAM + live WAL pin); CDC smoke when Docker is up
+- [ ] Local smoke ingest/copy A+B (File ingest exact-Arrow → Duckdb or SkipprLake), B (File copy json→json), JSON File → Parquet File ingest, Skipprd CSV → DuckDB, DuckDB NDJSON/CSV baselines, File and Stdin ingest for every transform.compute filter/derive/compose cell and every CREATE TABLE measure, and File ingest then migrate on that data then continue ingest for every ALTER (historical compact and in-stream WAL hold)
+- [ ] Local smoke query A (q-wal-count-iceberg, q-wal-point-iceberg) and B (q-union-count-duckdb, q-union-overlap-duckdb); SQL compose / CREATE TABLE / migrate historical (DuckDB drained) and stream (SkipprLake STREAM + live WAL pin) with continue ingest after ALTER then query; CDC SnapshotThenLogExactOnce for Postgres, MySQL, and DynamoDB when Docker is up (count / update / late-delete / reinsert / sum / overlap / iceberg-only) plus ALTER on existing CDC data then continue CDC then query (`q-cdc-union-update-pg`, `q-cdc-union-update-mysql`, `q-cdc-union-update-ddb`, `q-cdc-migrate-rename-pg`)
 - [ ] PERF logs parsed; exact_arrow_rows == total on ingest-A; identity on copy-B; query_collect present; counts match ingest rows; point returns id 1; warehouse has parquet
 - [ ] Commit harness/skill with hooks (never --no-verify)
 - [ ] gh workflow run perf.yml --ref this branch
@@ -115,8 +115,8 @@ copy-B, json→parquet), perf-stat (ingest-A, copy-B, json→parquet).
 `linux_matrix` still runs every catalog cell: each `transform.compute`
 ingest cell (`filter`, `derive`, `compose`) and each CREATE TABLE measure
 (`sum`, `count`, `both`) on File (historical) and Stdin (stream), plus each
-ALTER (`rename`, `merge`, `drop`, `promote`) after compact and under a WAL
-compaction hold. The json→parquet cell is File ingest of a stable schema
+ALTER (`rename`, `merge`, `drop`, `promote`) on already-ingested File data
+then continue ingest (historical compact and in-stream WAL hold). The json→parquet cell is File ingest of a stable schema
 (including RFC3339 timestamps) into File parquet. `linux_analyze` ranks
 `perf.folded` leaves against `origin/main...HEAD` new code. One runner
 label, not a second harness. skipprd and wrap scripts fail closed after 10
@@ -161,17 +161,21 @@ Fail the cell when:
 - `wal_pin` does not match the last `query_pin`
 - the compaction hold never engaged
 - the warehouse has no `*.parquet` after compact
+- continue ingest after migrate does not land the second batch (File count is not 2× ingest rows; CDC mutation after ALTER is missing)
 
 Query cells always `sync --once` then `skipprd query --sql --plain --warmup`.
 `--warmup` starts QueryRuntime, opens catalog connections, and runs the
 statement once; `query_collect` elapsed is the **query time** of the second
 collect, not skipprd process startup.
 
-Postgres CDC query cells are in this matrix (`query_after_cdc`); skip
-locally if Docker is down, fail closed on GitHub. `sync --once` for those
-cells is wrapped with a 120s KILL. Do not put ingest/copy Postgres CDC cells
-here (query_after_cdc is allowed). Dual-catalog ingest/copy cells do not
-belong on `perf-db.yml`.
+CDC query cells are in this matrix (`query_after_cdc`) for every
+GitHub-local SnapshotThenLogExactOnce source: Postgres, MySQL, DynamoDB
+(count, update, late-delete, reinsert, sum, overlap, iceberg-only). ALTER
+cells migrate an already-ingested File lake or CDC lake, continue ingest /
+CDC, then query. Skip CDC locally if Docker is down, fail closed on GitHub.
+`sync --once` for CDC cells is wrapped with a 120s KILL. Do not put
+ingest/copy CDC cells on `perf.yml` (query_after_cdc is the suite home).
+Dual-catalog ingest/copy cells do not belong on `perf-db.yml`.
 
 ### Local smoke (this Mac, before GitHub)
 
@@ -183,13 +187,16 @@ CLI. Release host + only the plugins the cell needs
 cargo build --release -p skipprd --bin skipprd --features iceberg-catalog-dynamodb
 cargo build --release \
   -p skippr-plugin-data-source-file \
+  -p skippr-plugin-data-source-postgres \
+  -p skippr-plugin-data-source-mysql \
+  -p skippr-plugin-data-source-dynamodb \
   -p skippr-plugin-data-sink-duckdb \
   -p skippr-plugin-schema-sink-duckdb \
   -p skippr-plugin-data-sink-skipprlake \
   -p skippr-plugin-schema-sink-skipprlake
 export SKIPPRD_BIN="$PWD/target/release/skipprd"
 python3 tests/perf_db/run.py \
-  --scenario q-wal-count-iceberg,q-wal-point-iceberg,q-union-count-duckdb,q-ops-count-duckdb,q-aggregates-count-duckdb,q-migrate-rename-duckdb --scale smoke
+  --scenario q-wal-count-iceberg,q-wal-point-iceberg,q-union-count-duckdb,q-ops-count-duckdb,q-aggregates-count-duckdb,q-migrate-rename-duckdb,q-cdc-union-update-pg,q-cdc-union-update-mysql,q-cdc-union-update-ddb,q-cdc-migrate-rename-pg --scale smoke
 ```
 
 Fail the cell if required `PERF_EVENT` lines are missing (`sync`,
@@ -204,11 +211,12 @@ perf-stat on `q-wal-count-iceberg`, `q-wal-point-iceberg`,
 `q-ops-count-duckdb`, `q-ops-stream-iceberg`, `q-migrate-rename-duckdb`,
 `q-migrate-rename-stream-iceberg`; heaptrack on the two count cells.
 `linux_matrix` also queries after SQL compose, CREATE TABLE both-measures,
-and every ALTER (`rename`, `merge`, `drop`, `promote`) on historical
-(drained DuckDB) and stream (SkipprLake STREAM with a live WAL pin). Hottest
-frames must not be `admit_payload` / whole-seg `read_to_end` after the
-catalog slice index lands. skipprd and wrap scripts fail closed after 10
-minutes.
+every File ALTER (`rename`, `merge`, `drop`, `promote`) on historical
+(drained DuckDB) and stream (SkipprLake STREAM with a live WAL pin) after
+continue ingest, and every CDC cell above including ALTER-then-continue-CDC
+for Postgres, MySQL, and DynamoDB. Hottest frames must not be
+`admit_payload` / whole-seg `read_to_end` after the catalog slice index
+lands. skipprd and wrap scripts fail closed after 10 minutes.
 
 ```bash
 gh workflow run perf-db.yml --ref "$(git branch --show-current)"
@@ -233,6 +241,6 @@ Download `flamegraph.svg`, `perf.folded`, `perf-stat.txt`, `heaptrack*`,
 - `aws s3 sync --delete`
 - Write `cloudcycle-datalake-iceberg-*` or other EU production/staging buckets
 - Treat WAL leftover import as a perf or query cell
-- Put Postgres CDC back in the ingest/copy matrix until `sync --once` exits
+- Put CDC ingest/copy cells on `perf.yml` until `sync --once` exits (CDC lives on `perf-db.yml`)
 - Query jsonl File sink (no Iceberg parquet)
 - Amazon SES for the iteration memo (Gmail AFK only)

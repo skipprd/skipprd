@@ -722,7 +722,7 @@ impl DataSink for DataSinkAthenaPlugin {
         ctx: SinkWriteContext<'_>,
     ) -> Result<(), std::io::Error> {
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => super::cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
@@ -790,7 +790,7 @@ impl DataSink for DataSinkAthenaPlugin {
         ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => super::cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let namespace = BufferChunker::decode_file_namespace(&ctx.filename);

@@ -310,7 +310,7 @@ impl DataSink for DataSinkSftpPlugin {
         ctx.validate_grouped::<skippr_runtime_sdk::plugins::SftpAtomicRename>()
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => super::cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let object_stem = if ctx.idempotency_key.is_empty() {
@@ -369,7 +369,7 @@ impl DataSink for DataSinkSftpPlugin {
             return Ok(SinkWriteOutcome::AlreadyApplied);
         }
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => super::cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let receipt = self.write_stream(stream, &remote_file_path).await?;
@@ -418,7 +418,7 @@ impl DataSink for DataSinkSftpPlugin {
         }
         let (stream, _stream_progress) = reader.into_stream();
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => super::cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let receipt = self.write_stream(stream, &remote_file_path).await?;

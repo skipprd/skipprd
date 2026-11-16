@@ -105,11 +105,7 @@ impl DataSourceKafkaPlugin {
             Err(_) => (payload.to_string(), MutationKind::Insert),
         };
 
-        let meta = WalRowMeta {
-            mutation,
-            event_id: event_id.clone(),
-            order_token: event_id,
-        };
+        let meta = WalRowMeta::new(mutation, event_id.clone(), event_id);
         (data, meta)
     }
 }
@@ -262,11 +258,8 @@ impl DataSource for DataSourceKafkaPlugin {
                                 msg.partition(),
                                 msg.offset(),
                             );
-                            let meta = WalRowMeta {
-                                mutation: MutationKind::Insert,
-                                event_id: event_id.clone(),
-                                order_token: event_id,
-                            };
+                            let meta =
+                                WalRowMeta::new(MutationKind::Insert, event_id.clone(), event_id);
                             (payload, Some(vec![meta]))
                         }
                     } else {

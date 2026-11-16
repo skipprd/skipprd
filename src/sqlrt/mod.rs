@@ -14,6 +14,7 @@ pub mod iceberg_table;
 pub mod metadata;
 pub mod operators;
 pub mod parser;
+pub mod publish_catalog;
 pub mod query;
 pub mod read_boundary;
 pub mod registry;

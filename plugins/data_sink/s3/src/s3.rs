@@ -232,7 +232,7 @@ impl DataSink for DataSinkS3Plugin {
         cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         let stream = match cdc_ctx {
-            Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+            Some(ctx) => super::cdc_encode::augment_cdc_stream(stream, ctx),
             None => stream,
         };
         self.inner_sync(stream, filename).await
@@ -246,7 +246,7 @@ impl DataSink for DataSinkS3Plugin {
         ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => super::cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let object_stem = if ctx.idempotency_key.is_empty() {
@@ -296,7 +296,7 @@ impl DataSink for DataSinkS3Plugin {
         let final_key =
             self.object_key_for_filename(ObjectBody::Grouped, &ctx.filename, &object_stem);
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => super::cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let receipt = self.write_stream(stream, &final_key).await?;
@@ -338,7 +338,7 @@ impl DataSink for DataSinkS3Plugin {
             self.object_key_for_filename(ObjectBody::Grouped, &ctx.filename, &object_stem);
         let (stream, _stream_progress) = reader.into_stream();
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => super::cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let receipt = self.write_stream(stream, &final_key).await?;

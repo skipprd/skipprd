@@ -10,6 +10,7 @@ use skippr_lease::{DurableError, PipelineKey};
 
 use crate::buffer::wal_reader::{wal_reader_for, PinnedSlice};
 use crate::wal_slice_ref::WalSliceRef;
+use skippr_cdc::{align_start, CatalogEntry};
 
 /// Iceberg snapshot captured with the WAL pin. `Empty` means no current snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +25,15 @@ pub struct ReadBoundary {
     pub lake: LakeSnapshot,
     pub wal: Vec<PinnedSlice>,
     pub excluded: usize,
+    /// Inclusive catalog range `[start, tip]` after `align_start`.
+    pub start_seq: u64,
+    pub tip_seq: u64,
+}
+
+/// Pin `[align_start(start), tip]`. The tip is the latest committed entry.
+pub fn pin_catalog_range(entries: &[CatalogEntry], start: u64) -> (u64, u64) {
+    let tip = entries.iter().map(|entry| entry.seq).max().unwrap_or(start);
+    (align_start(entries, start), tip)
 }
 
 /// `W \ E`.
@@ -42,12 +52,16 @@ impl ReadBoundary {
         lake: LakeSnapshot,
         live: Vec<PinnedSlice>,
         excluded: &HashSet<WalSliceRef>,
+        start_seq: u64,
+        tip_seq: u64,
     ) -> Self {
         let live = minus_excluded(live, excluded, |slice| slice.slice_ref());
         Self {
             lake,
             wal: live,
             excluded: excluded.len(),
+            start_seq,
+            tip_seq,
         }
     }
 
@@ -62,10 +76,13 @@ impl ReadBoundary {
                 pipeline.pipeline()
             ))
         })?;
+        let (start_seq, tip_seq) = crate::sqlrt::publish_catalog::pin_or_keep(1);
         Ok(Self::new(
             LakeSnapshot::Empty,
             reader.live_slices(namespace)?,
             exclude_slices,
+            start_seq,
+            tip_seq,
         ))
     }
 
@@ -80,6 +97,8 @@ impl ReadBoundary {
             "snapshot": snapshot,
             "wal_slices": wal_slices,
             "excluded_slices": self.excluded,
+            "start_seq": self.start_seq,
+            "tip_seq": self.tip_seq,
         })
     }
 
@@ -353,8 +372,29 @@ mod tests {
     }
 
     #[test]
+    fn pin_catalog_range_rewinds_start_and_keeps_the_tip() {
+        use skippr_cdc::RangeBoundary;
+        let entries = vec![
+            CatalogEntry {
+                seq: 1,
+                boundaries: vec![RangeBoundary::Ingest(7)],
+            },
+            CatalogEntry {
+                seq: 2,
+                boundaries: vec![RangeBoundary::Ingest(8)],
+            },
+            CatalogEntry {
+                seq: 3,
+                boundaries: vec![RangeBoundary::Ingest(7), RangeBoundary::Ingest(8)],
+            },
+        ];
+        assert_eq!(pin_catalog_range(&entries, 3), (1, 3));
+        assert_eq!(pin_catalog_range(&entries, 1), (1, 3));
+    }
+
+    #[test]
     fn query_pin_fields_report_snapshot_and_w_minus_e() {
-        let empty = ReadBoundary::new(LakeSnapshot::Empty, Vec::new(), &HashSet::new());
+        let empty = ReadBoundary::new(LakeSnapshot::Empty, Vec::new(), &HashSet::new(), 0, 0);
         let fields = empty.query_pin_fields("ns");
         assert_eq!(fields["namespace"], "ns");
         assert!(fields["snapshot"].is_null());
@@ -365,6 +405,8 @@ mod tests {
             lake: LakeSnapshot::At(7),
             wal: Vec::new(),
             excluded: 1,
+            start_seq: 1,
+            tip_seq: 7,
         };
         let fields = at.query_pin_fields("ns");
         assert_eq!(fields["snapshot"], 7);

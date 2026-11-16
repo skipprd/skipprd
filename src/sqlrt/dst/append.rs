@@ -57,6 +57,7 @@ fn tiny_slice_ns(segment: &str, start: u64, bytes: u64, namespace: &str) -> Inde
         },
         index_entry,
         wal_ref,
+        seq: start,
     }
 }
 

@@ -1377,10 +1377,13 @@ mod tests {
     }
 
     #[test]
-    fn apply_alter_binds_host_arrow_without_field_ids() {
+    fn apply_alter_binds_host_arrow_field_ids() {
         let meta = trips();
         let schema = host_arrow(&meta, FlattenMode::Nested);
-        assert!(schema.fields().iter().all(|f| field_id_of(f).is_none()));
+        assert!(
+            schema.fields().iter().all(|f| field_id_of(f).is_some()),
+            "convert_skippr_to_arrow stamps PARQUET:field_id from Metadata"
+        );
         let alter = canonicalize(
             FlattenMode::Nested,
             &meta,
@@ -1394,6 +1397,10 @@ mod tests {
         let out = apply_alter(RecordBatch::new_empty(schema), &alter).unwrap();
         assert!(out.schema().index_of("region_code").is_ok());
         assert!(out.schema().index_of("region").is_err());
+        assert_eq!(
+            field_id_of(out.schema().field_with_name("region_code").unwrap()),
+            Some(21)
+        );
     }
 
     #[test]

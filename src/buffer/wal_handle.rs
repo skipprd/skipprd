@@ -639,6 +639,11 @@ impl PipelineWalHandle {
         })
     }
 
+    pub fn segment_seq(&self, segment_id: &str) -> Result<Option<u64>, DurableError> {
+        let id = SegmentId::new(segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
+        Ok(self.segment_row(&id)?.map(|row| row.seq.get()))
+    }
+
     fn segment_row(&self, id: &SegmentId) -> Result<Option<SegmentRow>, DurableError> {
         match self
             .catalog

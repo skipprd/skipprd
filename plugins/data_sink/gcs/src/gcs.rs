@@ -121,7 +121,7 @@ impl DataSink for DataSinkGcsPlugin {
         ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => super::cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let object_stem = if ctx.idempotency_key.is_empty() {
@@ -170,7 +170,7 @@ impl DataSink for DataSinkGcsPlugin {
             return Ok(SinkWriteOutcome::AlreadyApplied);
         }
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => super::cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let receipt = self.write_stream(stream, &final_key).await?;
@@ -210,7 +210,7 @@ impl DataSink for DataSinkGcsPlugin {
         }
         let (stream, _stream_progress) = reader.into_stream();
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => super::cdc_encode::augment_cdc_stream(stream, cdc),
             None => stream,
         };
         let receipt = self.write_stream(stream, &final_key).await?;
@@ -618,21 +618,14 @@ mod tests {
         let cdc = SyncContext {
             part_meta: WalPartMeta::cdc(
                 vec![
-                    WalRowMeta {
-                        mutation: MutationKind::Insert,
-                        event_id: b"one".to_vec(),
-                        order_token: vec![1],
-                    },
-                    WalRowMeta {
-                        mutation: MutationKind::Delete,
-                        event_id: b"two".to_vec(),
-                        order_token: vec![2],
-                    },
+                    WalRowMeta::new(MutationKind::Insert, b"one".to_vec(), vec![1]),
+                    WalRowMeta::new(MutationKind::Delete, b"two".to_vec(), vec![2]),
                 ],
                 2,
             )
             .unwrap(),
             contract: None,
+            ties: vec![(1, 0, 0), (1, 0, 1)],
         };
         let make_context = || {
             GroupedSinkWriteContext::try_from(SinkWriteContext {

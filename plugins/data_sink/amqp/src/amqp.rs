@@ -292,6 +292,21 @@ fn encode_row(
                 "_skippr_order_token".to_string(),
                 serde_json::Value::String(hex::encode(&row_meta.order_token)),
             );
+            let tie = cdc_ctx
+                .row_tie(row_offset + row_idx)
+                .map_err(|err| io::Error::other(err))?;
+            map.insert(
+                "_skippr_tie_seq".to_string(),
+                serde_json::Value::from(tie.seq),
+            );
+            map.insert(
+                "_skippr_tie_ordinal".to_string(),
+                serde_json::Value::from(tie.ordinal),
+            );
+            map.insert(
+                "_skippr_tie_row".to_string(),
+                serde_json::Value::from(tie.row),
+            );
         }
     }
 
@@ -795,15 +810,14 @@ mod tests {
         let rows = mutations
             .iter()
             .enumerate()
-            .map(|(index, mutation)| WalRowMeta {
-                mutation: *mutation,
-                event_id: vec![index as u8 + 1],
-                order_token: vec![0, index as u8 + 10],
+            .map(|(index, mutation)| {
+                WalRowMeta::new(*mutation, vec![index as u8 + 1], vec![0, index as u8 + 10])
             })
             .collect::<Vec<_>>();
         let cdc = SyncContext {
             part_meta: WalPartMeta::cdc(rows, 4).unwrap(),
             contract: None,
+            ties: (0..4).map(|i| (1, 0, i as u64)).collect(),
         };
         let wal_refs = [wal_ref("segment-a"), wal_ref("segment-b")];
         let envelope = EnvelopeContext {
@@ -828,6 +842,9 @@ mod tests {
                 value["_skippr_order_token"],
                 format!("00{:02x}", index as u8 + 10)
             );
+            assert_eq!(value["_skippr_tie_seq"], 1);
+            assert_eq!(value["_skippr_tie_ordinal"], 0);
+            assert_eq!(value["_skippr_tie_row"], index);
             assert_eq!(value["_skippr_compaction_id"], "compaction-19");
             assert_eq!(value["_skippr_wal_refs_fingerprint"], expected_fingerprint);
             assert_eq!(value["_skippr_wal_ref_count"], 2);

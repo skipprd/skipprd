@@ -1,0 +1,167 @@
+name: MySQL CDC into SkipprLake
+description: Snapshot-then-CDC from MySQL on GitHub-hosted Docker into a local SkipprLake warehouse.
+inputs:
+  skipprd_path:
+    required: true
+  plugin_binaries_dir:
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Install Python deps and DuckDB
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install --quiet boto3
+        if ! command -v duckdb >/dev/null 2>&1; then
+          curl -fsSL https://install.duckdb.org | sh
+          echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
+        fi
+    - name: Start MySQL with ROW binlog
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker rm -f skippr-mysql-cdc >/dev/null 2>&1 || true
+        docker run -d --name skippr-mysql-cdc \
+          -e MYSQL_ROOT_PASSWORD=mysql \
+          -e MYSQL_DATABASE=skippr_cdc \
+          -p 3307:3306 \
+          mysql:8.0 \
+          --server-id=1 \
+          --log-bin=binlog \
+          --binlog-format=ROW \
+          --binlog-row-image=FULL
+        ready=0
+        for _ in $(seq 1 90); do
+          if docker exec skippr-mysql-cdc mysqladmin ping -uroot -pmysql --silent >/dev/null 2>&1; then
+            ready=1
+            break
+          fi
+          sleep 1
+        done
+        if [ "${ready}" != "1" ]; then
+          echo "mysql CDC container did not accept SQL" >&2
+          docker logs skippr-mysql-cdc >&2 || true
+          exit 1
+        fi
+        docker exec skippr-mysql-cdc mysql -uroot -pmysql skippr_cdc -e \
+          "CREATE TABLE IF NOT EXISTS orders (
+             id INT PRIMARY KEY,
+             name VARCHAR(64) NOT NULL,
+             amount INT NOT NULL DEFAULT 0
+           );
+           INSERT INTO orders (id, name, amount) VALUES (1, 'alpha', 100), (2, 'beta', 50);"
+    - name: Start DynamoDB Local
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker rm -f skippr-mysql-cdc-ddb >/dev/null 2>&1 || true
+        docker run -d --name skippr-mysql-cdc-ddb -p 18012:8000 amazon/dynamodb-local \
+          -jar DynamoDBLocal.jar -sharedDb -inMemory
+        python3 - <<'PY'
+        import time
+        import boto3
+        from botocore.config import Config as BotoConfig
+        from botocore.exceptions import ClientError
+        client = boto3.client(
+            "dynamodb",
+            endpoint_url="http://127.0.0.1:18012",
+            region_name="us-east-1",
+            aws_access_key_id="local",
+            aws_secret_access_key="local",
+            config=BotoConfig(retries={"max_attempts": 8}),
+        )
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                client.list_tables()
+                break
+            except Exception:
+                time.sleep(0.5)
+        else:
+            raise SystemExit("DynamoDB Local did not become ready")
+        name = "skippr-mysql-cdc-catalog"
+        try:
+            client.delete_table(TableName=name)
+            client.get_waiter("table_not_exists").wait(TableName=name)
+        except ClientError:
+            pass
+        client.create_table(
+            TableName=name,
+            AttributeDefinitions=[
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+            ],
+            KeySchema=[
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        client.get_waiter("table_exists").wait(TableName=name)
+        PY
+    - name: Sync MySQL CDC into SkipprLake
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: local
+        AWS_SECRET_ACCESS_KEY: local
+        AWS_DEFAULT_REGION: us-east-1
+        AWS_EC2_METADATA_DISABLED: "true"
+        AWS_ENDPOINT_URL_DYNAMODB: http://127.0.0.1:18012
+        PLUGIN_BINARIES_DIR: ${{ inputs.plugin_binaries_dir }}
+      run: |
+        set -euo pipefail
+        source "${GITHUB_WORKSPACE}/.github/scripts/e2e_stage_plugins.sh"
+        work="${RUNNER_TEMP:-/tmp}/skippr-mysql-cdc"
+        mkdir -p "${work}/warehouse" "${work}/data"
+        warehouse_uri="file://${work}/warehouse"
+        sed "s|LAKE_WAREHOUSE_PLACEHOLDER|${warehouse_uri}|" \
+          .github/actions/e2e/mysql_skipprlake_cdc/skippr.yml \
+          > "${work}/skippr.yml"
+        e2e_stage_plugins "${work}/skippr.yml" mysql_skipprlake_cdc "${work}/manifests"
+        run_once() {
+          timeout --signal=KILL 120 \
+            env DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+            "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
+            sync --log --pipeline mysql_skipprlake_cdc --once
+        }
+        query_plain() {
+          local sql="$1"
+          DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
+            "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
+            query --plain --sql "${sql}" \
+          | python3 -c 'import json,sys; d=next(json.loads(l) for l in reversed(sys.stdin.read().splitlines()) if l.strip().startswith("{") and "\"rows\"" in l); print(json.dumps(d["rows"]))'
+        }
+        run_once
+        test "$(query_plain 'SELECT count(*) FROM mysql_skipprlake_cdc.orders')" = '[["2"]]' \
+          -o "$(query_plain 'SELECT count(*) FROM mysql_skipprlake_cdc.orders')" = '[[2]]'
+        docker exec skippr-mysql-cdc mysql -uroot -pmysql skippr_cdc -e \
+          "INSERT INTO orders (id, name, amount) VALUES (3, 'gamma', 30);"
+        run_once
+        docker exec skippr-mysql-cdc mysql -uroot -pmysql skippr_cdc -e \
+          "UPDATE orders SET name = 'alpha-prime' WHERE id = 1;"
+        run_once
+        name="$(query_plain "SELECT name FROM mysql_skipprlake_cdc.orders WHERE id = 1")"
+        echo "query name=${name}"
+        echo "${name}" | grep -q 'alpha-prime'
+        docker exec skippr-mysql-cdc mysql -uroot -pmysql skippr_cdc -e \
+          "DELETE FROM orders WHERE id = 2;"
+        run_once
+        deleted="$(query_plain "SELECT count(*) FROM mysql_skipprlake_cdc.orders WHERE id = 2")"
+        echo "deleted=${deleted}"
+        test "${deleted}" = '[["0"]]' -o "${deleted}" = '[[0]]'
+        scan="${work}/warehouse/bronze/orders"
+        count="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(DISTINCT id) FROM iceberg_scan('${scan}');")"
+        gone="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${scan}') WHERE id = 2;")"
+        updated="$(duckdb -csv -c "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; SELECT name FROM iceberg_scan('${scan}') WHERE id = 1 ORDER BY _skippr_order_token DESC LIMIT 1;")"
+        echo "count=${count}"
+        echo "gone=${gone}"
+        echo "updated=${updated}"
+        echo "${count}" | tail -n 1 | grep -qx '2'
+        echo "${gone}" | tail -n 1 | grep -qx '0'
+        echo "${updated}" | tail -n 1 | grep -qx 'alpha-prime'
+        e2e_assert_downloaded \
+          'skippr-plugin-data-source-mysql*' \
+          'skippr-plugin-data-sink-skipprlake*' \
+          'skippr-plugin-schema-sink-skipprlake*'

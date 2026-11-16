@@ -1,7 +1,7 @@
 # skippr-perf scenario catalog. WAL leftover import is out of suite.
 # Postgres CDC is out of this matrix until sync --once actually exits.
 # SQL filter/derive and CREATE TABLE: File = historical batch, Stdin = stream source.
-# Migrate: historical = ALTER after compact; stream = ALTER under a WAL compaction hold.
+# Migrate: historical = ALTER after compact then continue ingest; stream = ALTER under a WAL compaction hold then continue ingest.
 defaults:
   rows: 10000
   smoke_rows: 200
@@ -318,6 +318,7 @@ scenarios:
     fixture: exact_arrow
     alter: rename
     mode: historical
+    continue_ingest: true
     profile: none
     required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim]
     asserts:
@@ -332,6 +333,7 @@ scenarios:
     fixture: exact_arrow_merge
     alter: merge
     mode: historical
+    continue_ingest: true
     profile: none
     required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim]
     asserts:
@@ -346,6 +348,7 @@ scenarios:
     fixture: exact_arrow
     alter: drop
     mode: historical
+    continue_ingest: true
     profile: none
     required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim]
     asserts:
@@ -359,6 +362,7 @@ scenarios:
     fixture: exact_arrow
     alter: promote
     mode: historical
+    continue_ingest: true
     profile: none
     required_perf: [ingest_profile, plugin_ipc, sync, wal_persist, wal_compact, wal_reclaim]
     asserts:
@@ -372,6 +376,7 @@ scenarios:
     fixture: exact_arrow
     alter: rename
     mode: stream
+    continue_ingest: true
     profile: none
     required_perf: [ingest_profile, plugin_ipc, sync, wal_persist]
     asserts:
@@ -385,6 +390,7 @@ scenarios:
     fixture: exact_arrow_merge
     alter: merge
     mode: stream
+    continue_ingest: true
     profile: none
     required_perf: [ingest_profile, plugin_ipc, sync, wal_persist]
     asserts:
@@ -397,6 +403,7 @@ scenarios:
     fixture: exact_arrow
     alter: drop
     mode: stream
+    continue_ingest: true
     profile: none
     required_perf: [ingest_profile, plugin_ipc, sync, wal_persist]
     asserts:
@@ -409,6 +416,7 @@ scenarios:
     fixture: exact_arrow
     alter: promote
     mode: stream
+    continue_ingest: true
     profile: none
     required_perf: [ingest_profile, plugin_ipc, sync, wal_persist]
     asserts:

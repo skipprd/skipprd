@@ -8,6 +8,7 @@ description = "Shared Iceberg data and schema sink writer. The catalog is inject
 [dependencies]
 async-trait.workspace = true
 tokio.workspace = true
+skippr-cdc = { path = "../skippr-cdc" }
 skippr-runtime-sdk.workspace = true
 skippr-object-writer = { path = "../skippr-object-writer" }
 skippr-iceberg-catalog = { path = "../skippr-iceberg-catalog" }

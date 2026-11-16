@@ -257,11 +257,11 @@ mod tests {
             .unwrap()]),
         );
         let meta = WalPartMeta::cdc(
-            vec![WalRowMeta {
-                mutation: MutationKind::Update,
-                event_id: b"1".to_vec(),
-                order_token: vec![2],
-            }],
+            vec![WalRowMeta::new(
+                MutationKind::Update,
+                b"1".to_vec(),
+                vec![2],
+            )],
             1,
         )
         .unwrap();

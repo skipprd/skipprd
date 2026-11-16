@@ -57,11 +57,11 @@ def _factory(kind: str):
     return factory
 
 
-def write_ndjson(path: Path, kind: str, rows: int) -> Path:
+def write_ndjson(path: Path, kind: str, rows: int, *, start: int = 1) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     factory = _factory(kind)
     with path.open("w", encoding="utf-8") as handle:
-        for index in range(1, rows + 1):
+        for index in range(start, start + rows):
             handle.write(json.dumps(factory(index), separators=(",", ":")) + "\n")
     return path
 
@@ -100,9 +100,9 @@ def write_insert_sql(path: Path, rows: int) -> Path:
     return path
 
 
-def write_records(path: Path, kind: str, rows: int, *, fmt: str) -> Path:
+def write_records(path: Path, kind: str, rows: int, *, fmt: str, start: int = 1) -> Path:
     if fmt in {"json", "ndjson"}:
-        return write_ndjson(path, kind, rows)
+        return write_ndjson(path, kind, rows, start=start)
     if fmt == "csv":
         return write_csv(path, kind, rows)
     if fmt == "json_array":

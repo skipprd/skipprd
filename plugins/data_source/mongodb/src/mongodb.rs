@@ -134,11 +134,11 @@ impl DataSourceMongodbPlugin {
                     )
                     .into_bytes()
                 };
-                Some(vec![WalRowMeta {
-                    mutation: MutationKind::Snapshot,
-                    event_id: id_hash,
-                    order_token: anchor.to_vec(),
-                }])
+                Some(vec![WalRowMeta::new(
+                    MutationKind::Snapshot,
+                    id_hash,
+                    anchor.to_vec(),
+                )])
             } else {
                 None
             };
@@ -330,11 +330,7 @@ impl DataSourceMongodbPlugin {
                 offset_pos: None,
                 source_uri: source_uri.clone(),
                 namespace: Some(namespace.clone()),
-                cdc_rows: Some(vec![WalRowMeta {
-                    mutation,
-                    event_id,
-                    order_token,
-                }]),
+                cdc_rows: Some(vec![WalRowMeta::new(mutation, event_id, order_token)]),
             };
 
             submit_payload_batches_durable(ctx.as_ref(), vec![batch])?;
