@@ -102,6 +102,26 @@ pub fn is_exact_arrow_eligible(fields: &HashMap<String, Metadata>, flatten: bool
     true
 }
 
+fn bind_source_field<'a>(
+    fields: &'a HashMap<String, Metadata>,
+    dest: &arrow::datatypes::Field,
+) -> Option<(&'a String, &'a Metadata)> {
+    if let Some(id) = crate::compute::field_id_of(dest).map(|id| id.get()) {
+        if id != 0 {
+            if let Some(found) = fields
+                .iter()
+                .find(|(_, meta)| meta.enabled && meta.field_id == id)
+            {
+                return Some(found);
+            }
+        }
+    }
+    let out_name = dest.name();
+    fields.iter().find(|(_, meta)| {
+        meta.enabled && (meta.out_field_name == *out_name || meta.source_field_name == *out_name)
+    })
+}
+
 pub fn plan_for_namespace(
     fields: &HashMap<String, Metadata>,
     flatten: bool,
@@ -117,9 +137,7 @@ pub fn plan_for_namespace(
         if out_name == "__skippr_empty_struct" {
             continue;
         }
-        let (source_field, meta) = fields.iter().find(|(_, m)| {
-            m.enabled && (m.out_field_name == *out_name || m.source_field_name == *out_name)
-        })?;
+        let (source_field, meta) = bind_source_field(fields, field)?;
         columns.push(ExactColumnSpec {
             source_field: source_field.clone(),
             out_field_name: out_name.clone(),
@@ -644,6 +662,7 @@ mod tests {
     }
     use crate::ingest::fast_ingest::DEFAULT_NESTED_MESSAGE;
     use crate::ingest_work::Ingest;
+    use arrow::datatypes::{DataType, Field, Schema};
     use arrow::json::ReaderBuilder as ArrowJsonReaderBuilder;
     use serde_json::json;
     use std::sync::Arc;
@@ -835,6 +854,35 @@ mod tests {
         assert!(!Arc::ptr_eq(&p1, &p2));
         assert_eq!(cache.len(), 2);
         assert!(p2.columns.iter().any(|c| c.source_field == "new_col"));
+    }
+
+    #[test]
+    fn plan_binds_renamed_dest_field_by_field_id() {
+        let mut name = Metadata::new_with_type(SkipprDataType::String, "name");
+        name.field_id = 4;
+        let mut id = Metadata::new_with_type(SkipprDataType::Integer, "id");
+        id.field_id = 1;
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), name);
+        fields.insert("id".to_string(), id);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, true).with_metadata(HashMap::from([(
+                crate::compute::PARQUET_FIELD_ID.to_string(),
+                "1".to_string(),
+            )])),
+            Field::new("display_name", DataType::Utf8, true).with_metadata(HashMap::from([(
+                crate::compute::PARQUET_FIELD_ID.to_string(),
+                "4".to_string(),
+            )])),
+        ]));
+        let plan = plan_for_namespace(&fields, false, schema).expect("plan");
+        let display = plan
+            .columns
+            .iter()
+            .find(|col| col.out_field_name == "display_name")
+            .expect("display_name");
+        assert_eq!(display.source_field, "name");
+        assert!(plan.allowed_source_fields.contains("name"));
     }
 
     #[test]

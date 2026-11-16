@@ -192,16 +192,20 @@ def assert_query_doc(
         ids = [str(row[0]) for row in result_rows]
         if len(ids) != len(set(ids)):
             raise perf_run.PerfError(f"{scenario_id}: duplicate ids in overlap query")
+    header = [str(col) for col in (doc.get("header") or [])]
     expect_name = asserts.get("query_name")
     if expect_name:
         if len(result_rows) != 1:
             raise perf_run.PerfError(
                 f"{scenario_id}: query_name expected 1 row, got {len(result_rows)}: {result_rows}"
             )
-        got = str(result_rows[0][0])
+        name_idx = next(
+            (i for i, col in enumerate(header) if col in {"name", "display_name"}),
+            0,
+        )
+        got = str(result_rows[0][name_idx])
         if got != str(expect_name):
             raise perf_run.PerfError(f"{scenario_id}: name {got!r} != {expect_name!r}")
-    header = [str(col) for col in (doc.get("header") or [])]
     has = asserts.get("query_has") or []
     missing = asserts.get("query_missing") or []
     if isinstance(has, str):
