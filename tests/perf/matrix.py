@@ -29,7 +29,7 @@ CDC_PIPELINES = {
 CDC_TABLES = {
     "pg": "postgres_skipprlake_cdc.postgres_orders",
     "mysql": "mysql_skipprlake_cdc.orders",
-    "ddb": "dynamodb_skipprlake_cdc.skippr_dynamo_cdc",
+    "ddb": "dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc",
 }
 CDC_CASE_SQL = {
     "count": "INSERT INTO orders (id, name, amount) VALUES (3, 'gamma', 30);",
