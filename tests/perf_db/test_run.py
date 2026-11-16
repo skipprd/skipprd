@@ -491,6 +491,12 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         once = src.split("def run_cdc_once")[1].split("def run_query_after_cdc")[0]
         self.assertIn("with_sync_perf", once)
 
+    def test_cdc_mysql_waits_for_sql_not_ping(self) -> None:
+        text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        start = text.split("def start_cdc_mysql")[1].split("def stop_cdc_mysql")[0]
+        self.assertIn("SELECT 1", start)
+        self.assertNotIn("mysqladmin", start)
+
     def test_cdc_postgres_failure_includes_container_logs(self) -> None:
         text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
         helper = text.split("def _cdc_postgres_failed")[1].split("def start_cdc_postgres")[0]

@@ -1272,44 +1272,48 @@ pub async fn sync_runtime_input_plugin(
                             saw_unflushed_batches
                         );
                     }
-                    if saw_unflushed_batches {
-                        flush_all_segments(config, offsets.clone())
+                    if execution_mode != RuntimeExecutionMode::Discover {
+                        if saw_unflushed_batches {
+                            flush_all_segments(config, offsets.clone())
+                                .await
+                                .map_err(|err| io::Error::other(err.to_string()))?;
+                            saw_unflushed_batches = false;
+                        }
+                        let handle =
+                            crate::buffer::wal_store::ingest_wal_handle().ok_or_else(|| {
+                                io::Error::other("checkpoint update requires a WAL catalog handle")
+                            })?;
+                        handle
+                            .persist_checkpoint(&update.key, &update.envelope)
                             .await
                             .map_err(|err| io::Error::other(err.to_string()))?;
-                        saw_unflushed_batches = false;
                     }
-                    let handle =
-                        crate::buffer::wal_store::ingest_wal_handle().ok_or_else(|| {
-                            io::Error::other("checkpoint update requires a WAL catalog handle")
-                        })?;
-                    handle
-                        .persist_checkpoint(&update.key, &update.envelope)
-                        .await
-                        .map_err(|err| io::Error::other(err.to_string()))?;
                 }
                 PluginDataFrame::OffsetMaterializationHints { hints } => {
                     drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone()).await?;
-                    if saw_unflushed_batches {
-                        flush_all_segments(config, offsets.clone())
-                            .await
-                            .map_err(|err| io::Error::other(err.to_string()))?;
-                        saw_unflushed_batches = false;
-                    }
-                    let handle =
-                        crate::buffer::wal_store::ingest_wal_handle().ok_or_else(|| {
-                            io::Error::other("offset hints require a WAL catalog handle")
-                        })?;
-                    for hint in hints {
-                        if let Err(err) = handle
-                            .persist_offset_hint(
-                                &hint.key.namespace,
-                                &hint.key.partition,
-                                hint.position,
-                                hint.closed,
-                            )
-                            .await
-                        {
-                            warn!("offset hint trails the WAL and did not fail ingest: {err}");
+                    if execution_mode != RuntimeExecutionMode::Discover {
+                        if saw_unflushed_batches {
+                            flush_all_segments(config, offsets.clone())
+                                .await
+                                .map_err(|err| io::Error::other(err.to_string()))?;
+                            saw_unflushed_batches = false;
+                        }
+                        let handle =
+                            crate::buffer::wal_store::ingest_wal_handle().ok_or_else(|| {
+                                io::Error::other("offset hints require a WAL catalog handle")
+                            })?;
+                        for hint in hints {
+                            if let Err(err) = handle
+                                .persist_offset_hint(
+                                    &hint.key.namespace,
+                                    &hint.key.partition,
+                                    hint.position,
+                                    hint.closed,
+                                )
+                                .await
+                            {
+                                warn!("offset hint trails the WAL and did not fail ingest: {err}");
+                            }
                         }
                     }
                 }
@@ -4695,6 +4699,28 @@ mod tests {
                 )
                 .unwrap(),
             ))
+        );
+    }
+
+    #[test]
+    fn discover_does_not_persist_cdc_checkpoints_to_wal() {
+        let src = include_str!("host.rs");
+        let start = src
+            .find("PluginDataFrame::CheckpointUpdate")
+            .expect("CheckpointUpdate");
+        let body = src[start..]
+            .split("PluginDataFrame::OffsetMaterializationHints")
+            .next()
+            .unwrap();
+        let discover = body
+            .find("RuntimeExecutionMode::Discover")
+            .expect("Discover");
+        let persist = body
+            .find("checkpoint update requires a WAL catalog handle")
+            .expect("WAL persist");
+        assert!(
+            discover < persist,
+            "Discover must skip CheckpointUpdate before WAL persist; cleanup_discover wipes WAL"
         );
     }
 
