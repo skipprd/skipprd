@@ -220,6 +220,9 @@ class PerfDbCatalogTests(unittest.TestCase):
                 self.assertTrue(spec.get("continue_ingest"), name)
                 if alter == "rename":
                     self.assertIn("display_name", spec["sql"], name)
+                if alter == "promote":
+                    self.assertRegex(spec["sql"], r"SELECT\s+id\b", name)
+                    self.assertIn("id", (spec.get("asserts") or {}).get("query_has") or [], name)
         workflow = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(
             encoding="utf-8"
         )
@@ -495,7 +498,20 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
         start = text.split("def start_cdc_mysql")[1].split("def stop_cdc_mysql")[0]
         self.assertIn("SELECT 1", start)
+        self.assertIn("CREATE TABLE IF NOT EXISTS orders", start)
+        self.assertIn("INSERT IGNORE", start)
         self.assertNotIn("mysqladmin", start)
+        helper = text.split("def _mysql_cli")[1].split("def start_cdc_mysql")[0]
+        self.assertIn("127.0.0.1", helper)
+
+    def test_cdc_ddb_query_fqn_is_storage_namespace(self) -> None:
+        self.assertEqual(
+            CDC_TABLES["ddb"],
+            "dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc",
+        )
+        catalog = (HARNESS_DIR / "catalog.yaml").read_text(encoding="utf-8")
+        self.assertIn("dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc", catalog)
+        self.assertNotIn("dynamodb_skipprlake_cdc.skippr_dynamo_cdc", catalog)
 
     def test_cdc_postgres_failure_includes_container_logs(self) -> None:
         text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")

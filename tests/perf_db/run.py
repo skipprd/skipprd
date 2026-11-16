@@ -780,6 +780,24 @@ def _cdc_mysql_failed(reason: str) -> perf_run.PerfError:
     return perf_run.PerfError(f"mysql CDC container {reason}\n{detail}")
 
 
+def _mysql_cli(*args: str, check: bool = False) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [
+            "docker",
+            "exec",
+            MYSQL_CDC_CONTAINER,
+            "mysql",
+            "-h",
+            "127.0.0.1",
+            "-uroot",
+            "-pmysql",
+            *args,
+        ],
+        capture_output=True,
+        check=check,
+    )
+
+
 def start_cdc_mysql() -> None:
     subprocess.run(["docker", "rm", "-f", MYSQL_CDC_CONTAINER], capture_output=True, check=False)
     subprocess.run(
@@ -803,39 +821,22 @@ def start_cdc_mysql() -> None:
         ],
         check=True,
     )
+    create_sql = (
+        "CREATE TABLE IF NOT EXISTS orders (id INT PRIMARY KEY, name VARCHAR(64) NOT NULL, "
+        "amount INT NOT NULL DEFAULT 0); INSERT IGNORE INTO orders (id, name, amount) VALUES "
+        "(1, 'alpha', 100), (2, 'beta', 50);"
+    )
     for _ in range(90):
-        ready = subprocess.run(
-            [
-                "docker",
-                "exec",
-                MYSQL_CDC_CONTAINER,
-                "mysql",
-                "-uroot",
-                "-pmysql",
-                "-e",
-                "SELECT 1",
-            ],
-            capture_output=True,
-        )
-        if ready.returncode == 0:
+        ready = _mysql_cli("-e", "SELECT 1")
+        if ready.returncode != 0:
+            time.sleep(1)
+            continue
+        created = _mysql_cli("skippr_cdc", "-e", create_sql)
+        if created.returncode == 0:
             break
         time.sleep(1)
     else:
         raise _cdc_mysql_failed("did not accept SQL")
-    subprocess.run(
-        [
-            "docker",
-            "exec",
-            MYSQL_CDC_CONTAINER,
-            "mysql",
-            "-uroot",
-            "-pmysql",
-            "skippr_cdc",
-            "-e",
-            "CREATE TABLE IF NOT EXISTS orders (id INT PRIMARY KEY, name VARCHAR(64) NOT NULL, amount INT NOT NULL DEFAULT 0); INSERT INTO orders (id, name, amount) VALUES (1, 'alpha', 100), (2, 'beta', 50);",
-        ],
-        check=True,
-    )
 
 
 def stop_cdc_mysql() -> None:
@@ -844,20 +845,7 @@ def stop_cdc_mysql() -> None:
 
 
 def mysql_sql(sql: str) -> None:
-    subprocess.run(
-        [
-            "docker",
-            "exec",
-            MYSQL_CDC_CONTAINER,
-            "mysql",
-            "-uroot",
-            "-pmysql",
-            "skippr_cdc",
-            "-e",
-            sql,
-        ],
-        check=True,
-    )
+    _mysql_cli("skippr_cdc", "-e", sql, check=True)
 
 
 def ddb_cdc_client():

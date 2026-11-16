@@ -285,7 +285,7 @@ scenarios:
     kind: query_after_cdc
     cdc_source: ddb
     cdc_case: count
-    sql: "SELECT count(*) AS n FROM dynamodb_skipprlake_cdc.skippr_dynamo_cdc"
+    sql: "SELECT count(*) AS n FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc"
     required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_count: 3
@@ -296,7 +296,7 @@ scenarios:
     kind: query_after_cdc
     cdc_source: ddb
     cdc_case: update
-    sql: "SELECT name FROM dynamodb_skipprlake_cdc.skippr_dynamo_cdc WHERE id = '1'"
+    sql: "SELECT name FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '1'"
     required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_name: alpha-prime
@@ -307,7 +307,7 @@ scenarios:
     kind: query_after_cdc
     cdc_source: ddb
     cdc_case: delete
-    sql: "SELECT count(*) AS n FROM dynamodb_skipprlake_cdc.skippr_dynamo_cdc"
+    sql: "SELECT count(*) AS n FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc"
     required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_count: 1
@@ -319,7 +319,7 @@ scenarios:
     kind: query_after_cdc
     cdc_source: ddb
     cdc_case: reinsert
-    sql: "SELECT name FROM dynamodb_skipprlake_cdc.skippr_dynamo_cdc WHERE id = '2'"
+    sql: "SELECT name FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '2'"
     required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_name: beta-new
@@ -330,7 +330,7 @@ scenarios:
     kind: query_after_cdc
     cdc_source: ddb
     cdc_case: sum
-    sql: "SELECT SUM(amount) FROM dynamodb_skipprlake_cdc.skippr_dynamo_cdc"
+    sql: "SELECT SUM(amount) FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc"
     required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_sum: 200
@@ -342,7 +342,7 @@ scenarios:
     cdc_source: ddb
     cdc_case: overlap
     overlap: true
-    sql: "SELECT name FROM dynamodb_skipprlake_cdc.skippr_dynamo_cdc WHERE id = '1'"
+    sql: "SELECT name FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '1'"
     required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_name: alpha-wal
@@ -354,7 +354,7 @@ scenarios:
     kind: query_after_cdc
     cdc_source: ddb
     cdc_case: iceberg-only
-    sql: "SELECT count(*) AS n FROM dynamodb_skipprlake_cdc.skippr_dynamo_cdc"
+    sql: "SELECT count(*) AS n FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc"
     asserts:
       query_count: 3
       wal_pin: drained
@@ -395,7 +395,7 @@ scenarios:
     cdc_case: update
     alter: promote
     continue_ingest: true
-    sql: "SELECT name FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 1"
+    sql: "SELECT id, name FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 1"
     required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_name: alpha-prime
@@ -438,7 +438,7 @@ scenarios:
     cdc_case: update
     alter: promote
     continue_ingest: true
-    sql: "SELECT name FROM mysql_skipprlake_cdc.orders WHERE id = 1"
+    sql: "SELECT id, name FROM mysql_skipprlake_cdc.orders WHERE id = 1"
     required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_name: alpha-prime
@@ -452,7 +452,7 @@ scenarios:
     cdc_case: update
     alter: rename
     continue_ingest: true
-    sql: "SELECT display_name FROM dynamodb_skipprlake_cdc.skippr_dynamo_cdc WHERE id = '1'"
+    sql: "SELECT display_name FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '1'"
     required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_name: alpha-prime
@@ -467,7 +467,7 @@ scenarios:
     cdc_case: count
     alter: drop
     continue_ingest: true
-    sql: "SELECT count(*) AS n FROM dynamodb_skipprlake_cdc.skippr_dynamo_cdc"
+    sql: "SELECT count(*) AS n FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc"
     required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_count: 3
@@ -481,7 +481,7 @@ scenarios:
     cdc_case: update
     alter: promote
     continue_ingest: true
-    sql: "SELECT name FROM dynamodb_skipprlake_cdc.skippr_dynamo_cdc WHERE id = '1'"
+    sql: "SELECT id, name FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '1'"
     required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_name: alpha-prime

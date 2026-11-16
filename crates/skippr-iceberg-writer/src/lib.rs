@@ -5231,6 +5231,10 @@ mod tests {
             "type_matrix_orders"
         );
         assert_eq!(iceberg_table_suffix("S3.Raw-Orders"), "raw_orders");
+        assert_eq!(
+            iceberg_table_suffix("dynamodb:skippr_dynamo_cdc"),
+            "dynamodb_skippr_dynamo_cdc"
+        );
     }
 
     #[test]

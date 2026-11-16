@@ -5706,6 +5706,10 @@ mod storage_key_tests {
             storage_namespace(&Config::new(), "My-Stream/v2"),
             "my_stream_v2"
         );
+        assert_eq!(
+            storage_namespace(&Config::new(), "dynamodb:skippr_dynamo_cdc"),
+            "dynamodb_skippr_dynamo_cdc"
+        );
     }
 
     #[test]
