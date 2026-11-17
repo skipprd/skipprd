@@ -187,13 +187,20 @@ def start_logged_ingest(
     )
 
 
+def numeric_query_count(value: object) -> int | None:
+    """YAML `1` is int, not bool. `1 in {True, False}` is true in Python — do not use that."""
+    if value is None or isinstance(value, bool):
+        return None
+    return int(value)
+
+
 def cdc_query_done(scenario: dict[str, Any], doc: dict[str, Any]) -> bool:
     asserts = scenario.get("asserts") or {}
     rows = doc.get("rows") or []
     if not rows:
         return False
-    expect_count = asserts.get("query_count")
-    if expect_count not in (None, True, False):
+    expect_count = numeric_query_count(asserts.get("query_count"))
+    if expect_count is not None:
         return str(rows[0][0]) == str(expect_count)
     if "query_sum" in asserts:
         return int(float(rows[0][0])) == int(asserts["query_sum"])
@@ -273,11 +280,11 @@ def assert_query_doc(
             raise perf_run.PerfError(
                 f"{scenario_id}: query header still has {col!r}; header={header}"
             )
-    if "query_count" in asserts and asserts["query_count"] not in {True, False}:
+    expect_count = numeric_query_count(asserts.get("query_count"))
+    if expect_count is not None:
         got = int(float(result_rows[0][0]))
-        expect = int(asserts["query_count"])
-        if got != expect:
-            raise perf_run.PerfError(f"{scenario_id}: count {got} != {expect}")
+        if got != expect_count:
+            raise perf_run.PerfError(f"{scenario_id}: count {got} != {expect_count}")
     if "query_sum" in asserts:
         got = int(float(result_rows[0][0]))
         expect = int(asserts["query_sum"])

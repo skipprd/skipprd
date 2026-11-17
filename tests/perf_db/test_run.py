@@ -522,6 +522,26 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("query_sum", text.split("def cdc_query_done")[1].split("def parse_plain_query")[0])
         self.assertGreater(ddb.find("run_cdc_once"), ddb.find("peek_until"))
 
+    def test_query_count_one_is_not_boolean_true(self) -> None:
+        run = perf_db_run()
+        self.assertEqual(run.numeric_query_count(1), 1)
+        self.assertIsNone(run.numeric_query_count(True))
+        self.assertIsNone(run.numeric_query_count(False))
+        spec = {"asserts": {"query_count": 1}}
+        self.assertFalse(
+            run.cdc_query_done(spec, {"header": ["n"], "rows": [["2"]]})
+        )
+        self.assertTrue(
+            run.cdc_query_done(spec, {"header": ["n"], "rows": [["1"]]})
+        )
+        with self.assertRaisesRegex(run.perf_run.PerfError, "count 2 != 1"):
+            run.assert_query_doc(
+                "q-cdc-union-delete-ddb",
+                spec,
+                0,
+                {"header": ["n"], "rows": [["2"]]},
+            )
+
     def test_cdc_ddb_query_fqn_is_storage_namespace(self) -> None:
         self.assertEqual(
             CDC_TABLES["ddb"],
