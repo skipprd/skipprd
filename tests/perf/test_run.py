@@ -33,7 +33,7 @@ class PerfCatalogTests(unittest.TestCase):
     def test_postgres_cdc_is_out_of_the_perf_matrix(self) -> None:
         ids = scenario_ids()
         self.assertNotIn("cdc-postgres-skipprlake", ids)
-        workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        workflow = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         self.assertNotIn("cdc-postgres-skipprlake", workflow)
         self.assertNotIn("cdc_postgres_skipprlake", (HARNESS_DIR / "run.py").read_text(encoding="utf-8"))
 
@@ -89,7 +89,7 @@ class PerfCatalogTests(unittest.TestCase):
         self.assertGreaterEqual(int(fast.get("rows") or 0), 100000)
         self.assertGreaterEqual(int(csv_fast.get("rows") or 0), 100000)
         self.assertLess(int(inserts.get("rows") or 0), int(fast.get("rows") or 0))
-        workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        workflow = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         for name in (
             "duckdb-ndjson",
             "duckdb-csv",
@@ -122,7 +122,7 @@ class PerfCatalogTests(unittest.TestCase):
             "wal_reclaim",
         ):
             self.assertIn(phase, phases)
-        workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        workflow = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         self.assertIn("ingest-json-parquet", workflow)
         self.assertRegex(
             workflow,
@@ -158,7 +158,7 @@ class PerfCatalogTests(unittest.TestCase):
             self.assertGreaterEqual(rows, 50000, name)
 
     def test_linux_matrix_uses_linux_scale(self) -> None:
-        text = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        text = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
         self.assertIn("scale: linux", matrix)
         self.assertNotIn("scale: ci", matrix)
@@ -417,7 +417,7 @@ class StreamTransformPerfTests(unittest.TestCase):
         self.assertEqual(len(OPS) * len(INGEST_MODES), 6)
         self.assertEqual(len(AGG_MEASURES) * len(INGEST_MODES), 6)
         self.assertEqual(len(ALTERS) * len(INGEST_MODES), 8)
-        workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        workflow = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         self.assertRegex(
             workflow,
             r"- scenario: ingest-ops-duckdb\n\s+profile: flamegraph",
@@ -851,7 +851,7 @@ class WrapProfileTests(unittest.TestCase):
 
 class PerfWorkflowContractTests(unittest.TestCase):
     def test_perf_yml_lists_every_catalog_scenario_and_one_runner(self) -> None:
-        text = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        text = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
         for scenario_id in scenario_ids():
             self.assertIn(scenario_id, matrix, scenario_id)
@@ -870,7 +870,7 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("needs.linux_profile.result == 'success'", analyze)
         self.assertIn("needs.linux_profile.result != 'skipped'", analyze)
         self.assertIn("!cancelled()", analyze)
-        self.assertIn("perf-*-linux-flamegraph", text)
+        self.assertIn("regression-*-linux-flamegraph", text)
         self.assertNotIn("if: always() && needs.linux_profile.result != 'skipped'", text)
         self.assertIn("ingest-slow-flatten-duckdb", text)
         self.assertIn("analyze.py", text)
@@ -899,7 +899,7 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("heaptrack produced no profile", heaptrack)
         self.assertIn("if-no-files-found: error", heaptrack)
         self.assertNotIn("if-no-files-found: warn", heaptrack)
-        workflow = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+        workflow = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         matrix_job = workflow.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
         self.assertIn("linux_contracts", matrix_job)
         profile_job = workflow.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0]
@@ -907,11 +907,11 @@ class PerfWorkflowContractTests(unittest.TestCase):
         contracts = workflow.split("\n  linux_contracts:")[1].split("\n  build_linux:")[0]
         self.assertIn("test_release_sha_batteries.py", contracts)
 
-    def test_linux_profile_apt_skips_generic_kernel_tools(self) -> None:
-        text = (REPO_ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
+    def test_linux_profile_apt_uses_generic_kernel_tools(self) -> None:
+        text = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         profile = text.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0]
-        self.assertNotIn("linux-tools-generic", profile)
-        self.assertIn("linux-tools-$(uname -r)", profile)
+        self.assertNotIn("linux-tools-$(uname -r)", profile)
+        self.assertIn("linux-tools-generic", profile)
         self.assertIn("heaptrack", profile)
 
     def test_ci_does_not_skip_r2_cells(self) -> None:

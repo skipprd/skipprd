@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- `/skippr-regression` is one GitHub workflow (`skippr-regression.yml`): one host build and one frame-pointer build for ingest/copy and Iceberg∪WAL query. `perf.yml` and `perf-db.yml` are gone.
 - Declared compute is bound `ComputeKind` in the Skippr Store journal, a map keyed by compute name. YAML/Python `transform.compute` (`type: sql` or `type: sdl`) serialize `CREATE VIEW` / `CREATE TABLE AS SELECT` (or ingest `SELECT` filter/derive). `skipprd sync` admits new names before ingest (including WAL-only); an existing name whose canonical hash changed requires `ALTER COMPUTE` (View / keyed / windowed also accept `ALTER TABLE` sugar; Latest and stream-table joins are `DROP` then `CREATE`). Schema is `ALTER TABLE`. The former ingest op/aggregate lists and `transform.sql` / `compute/*.sql` are unknown fields.
 - `ALTER TABLE` / `skipprd migrate` rewrite live WAL (`segs/alter-{seq}/`), apply destination DDL keyed by Iceberg table property `skippr.alter-seq` or warehouse table `skippr_alter_seq`, then append the output log (`PipelineMetadata.alters`). Source discover metadata is not rewritten. Project, rename, and cast are ALTER (not ingest SQL). Copy forbids `transform.compute`. `RENAME COLUMN TO` is one identifier; string into long MERGE fails closed. `down()` is Rename only.
 - `skipprd serve` Flight and `skipprd query` share Iceberg ∪ WAL registration; WAL-absent falls through to Iceberg history.

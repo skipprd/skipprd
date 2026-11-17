@@ -530,7 +530,7 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("stay commented", text)
 
     def test_perf_workflow_skill_and_no_s3_delete(self) -> None:
-        workflow = ROOT / ".github" / "workflows" / "perf.yml"
+        workflow = ROOT / ".github" / "workflows" / "skippr-regression.yml"
         text = workflow.read_text(encoding="utf-8")
         header = text.split("\njobs:", 1)[0]
         self.assertIn("workflow_dispatch:", header)
@@ -569,7 +569,7 @@ class RustCiTests(unittest.TestCase):
             "linux_contracts",
             text.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0],
         )
-        self.assertIn("perf-*-linux-flamegraph", text)
+        self.assertIn("regression-*-linux-flamegraph", text)
         self.assertIn("analyze.py", text)
         self.assertIn("python3 -m pip install --quiet boto3", text)
         self.assertRegex(
@@ -618,7 +618,7 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("bike_hire", heaptrack)
 
     def test_perf_db_workflow_skill_and_no_s3_delete(self) -> None:
-        workflow = ROOT / ".github" / "workflows" / "perf-db.yml"
+        workflow = ROOT / ".github" / "workflows" / "skippr-regression.yml"
         text = workflow.read_text(encoding="utf-8")
         header = text.split("\njobs:", 1)[0]
         self.assertIn("workflow_dispatch:", header)
@@ -649,7 +649,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("heaptrack", text)
         self.assertIn("perf-stat", text)
         self.assertIn("skippr-plugin-data-sink-skipprlake", text)
-        self.assertNotIn("skippr-plugin-data-sink-file", text)
+        self.assertIn("skippr-plugin-data-sink-file", text)
         self.assertIn("linux_analyze", text)
         self.assertIn("build_linux_profile", text)
         self.assertIn("perf.folded", text)
@@ -699,7 +699,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("tests/perf/analyze.py", skill_text)
         self.assertIn("tests/perf/memo.py", skill_text)
         self.assertIn("paul@paulhudson.me", skill_text)
-        self.assertIn("perf-db.yml", skill_text)
+        self.assertIn("skippr-regression.yml", skill_text)
         self.assertIn("q-wal-count-iceberg", skill_text)
         self.assertIn("file parquet Iceberg", skill_text)
         self.assertIn("heaptrack", skill_text)

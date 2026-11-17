@@ -127,7 +127,7 @@ class PerfDbCatalogTests(unittest.TestCase):
                     self.assertEqual((spec.get("asserts") or {}).get("wal_pin"), "live")
                 else:
                     self.assertEqual((spec.get("asserts") or {}).get("wal_pin"), "drained")
-        workflow = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(
+        workflow = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(
             encoding="utf-8"
         )
         self.assertIn("q-ops-count-duckdb", workflow)
@@ -223,7 +223,7 @@ class PerfDbCatalogTests(unittest.TestCase):
                 if alter == "promote":
                     self.assertRegex(spec["sql"], r"SELECT\s+id\b", name)
                     self.assertIn("id", (spec.get("asserts") or {}).get("query_has") or [], name)
-        workflow = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(
+        workflow = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(
             encoding="utf-8"
         )
         self.assertIn("skippr-plugin-data-source-mysql", workflow)
@@ -244,7 +244,7 @@ class PerfDbSkillTests(unittest.TestCase):
         self.assertIn("ubuntu-latest", text)
         self.assertNotIn("skippr-darwin-arm64", text)
         self.assertIn("Do **not** run skipprd-docs", text)
-        self.assertIn("perf-db.yml", text)
+        self.assertIn("skippr-regression.yml", text)
         self.assertIn("q-wal-count-iceberg", text)
         self.assertIn("q-union-count-duckdb", text)
         self.assertIn("file parquet Iceberg", text)
@@ -256,7 +256,7 @@ class PerfDbSkillTests(unittest.TestCase):
         self.assertIn("tests/perf/download.py", text)
         self.assertIn("tests/perf/analyze.py", text)
         self.assertIn("tests/perf/memo.py", text)
-        self.assertIn("--workflow", text)
+        self.assertIn("skippr-regression.yml", text)
         self.assertIn("paul@paulhudson.me", text)
         self.assertIn("exhausted", text)
         self.assertIn("ingest-a-duckdb", text)
@@ -270,7 +270,7 @@ class PerfDbSkillTests(unittest.TestCase):
 
 class PerfDbWorkflowContractTests(unittest.TestCase):
     def test_perf_db_yml_linux_matrix_lists_every_catalog_scenario(self) -> None:
-        text = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(encoding="utf-8")
+        text = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
         for scenario_id in scenario_ids(db_catalog()):
             self.assertIn(scenario_id, matrix, scenario_id)
@@ -287,20 +287,20 @@ class PerfDbWorkflowContractTests(unittest.TestCase):
         self.assertIn("test_release_sha_batteries.py", contracts)
 
     def test_linux_matrix_uses_perf_db_linux_scale(self) -> None:
-        text = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(encoding="utf-8")
+        text = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
         self.assertIn("scale: linux", matrix)
         self.assertNotIn("scale: ci", matrix)
 
     def test_linux_profile_apt_does_not_pin_missing_kernel_tools(self) -> None:
-        text = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(encoding="utf-8")
+        text = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         profile = text.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0]
         self.assertNotIn("linux-tools-$(uname -r)", profile)
         self.assertIn("linux-tools-generic", profile)
         self.assertIn("heaptrack", profile)
 
     def test_linux_analyze_runs_when_a_profile_cell_fails(self) -> None:
-        text = (REPO_ROOT / ".github" / "workflows" / "perf-db.yml").read_text(encoding="utf-8")
+        text = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         analyze = text.split("\n  linux_analyze:")[1]
         self.assertNotIn("needs.linux_profile.result == 'success'", analyze)
         self.assertIn("needs.linux_profile.result != 'skipped'", analyze)
@@ -572,8 +572,8 @@ class PerfDbRunnerContractTests(unittest.TestCase):
             REPO_ROOT / "tests" / "perf" / "download.py"
         ).read_text(encoding="utf-8")
         self.assertIn('--workflow', download)
-        self.assertIn("perf-db.yml", download)
-        self.assertIn("skippr-perf-db", download)
+        self.assertIn("skippr-regression.yml", download)
+        self.assertIn("regression-", download)
 
 
 if __name__ == "__main__":

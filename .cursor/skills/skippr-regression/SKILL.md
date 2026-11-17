@@ -3,7 +3,7 @@ name: skippr-regression
 description: >-
   Run the skipprd e2e correctness + performance suite over time: ingest/copy
   and ingest-then-query (Iceberg ∪ WAL). Smoke on this Mac first, then dispatch
-  perf.yml and perf-db.yml on GitHub-hosted Linux x86, download flamegraphs,
+  skippr-regression.yml on GitHub-hosted Linux x86, download flamegraphs,
   generate ideas, iterate, and email a plain-English memo to paul@paulhudson.me
   after each round. Use when the user says /skippr-regression, skippr-regression,
   /skippr-perf, skippr-perf, /skippr-perf-db, skippr-perf-db, or asks for
@@ -17,7 +17,7 @@ disable-model-invocation: true
 Opt-in **correctness + performance** suite. Prove correctness first, then
 timings, `--log perf` / `skipprd::perf` events, flamegraphs, heaptrack, and
 perf-stat. Ingest/copy and Iceberg∪WAL query are the **same** regression
-loop. Two GitHub workflows (`perf.yml`, `perf-db.yml`); one skill.
+loop. One GitHub workflow (`skippr-regression.yml`); one skill.
 
 Wrap scripts read `SKIPPR_LOG_LEVEL` through `skipprd_cli.log_args()` into
 `--log`. Do **not** run skipprd-docs. Do **not** publish PyPI. Do **not**
@@ -38,7 +38,7 @@ Amazon SES. Reuse `tests/perf/download.py`, `tests/perf/analyze.py`, and
 `tests/perf/memo.py`. Do not copy those files.
 
 `/skippr-release` and `/skippr-beta-release` wait on this suite’s SHA
-batteries: `perf.yml` and `perf-db.yml` `linux_matrix` (not frame-pointer /
+batteries: `skippr-regression.yml` `linux_matrix` (not frame-pointer /
 inferno / flamegraph / heaptrack / perf-stat). TPC-H SF10 is `/skippr-tpc`
 and does not gate the tag.
 
@@ -50,17 +50,14 @@ skippr-regression:
 - [ ] Local smoke query A (q-wal-count-iceberg, q-wal-point-iceberg) and B (q-union-count-duckdb, q-union-overlap-duckdb); SQL compose / CREATE TABLE / migrate historical (DuckDB drained) and stream (SkipprLake STREAM + live WAL pin) with continue ingest after ALTER then query; CDC SnapshotThenLogExactOnce for Postgres, MySQL, and DynamoDB when Docker is up (count / update / late-delete / reinsert / sum / overlap / iceberg-only) plus ALTER on existing CDC data then continue CDC then query (`q-cdc-union-update-pg`, `q-cdc-union-update-mysql`, `q-cdc-union-update-ddb`, `q-cdc-migrate-rename-pg`)
 - [ ] PERF logs parsed; exact_arrow_rows == total on ingest-A; identity on copy-B; query_collect present; counts match ingest rows; point returns id 1; warehouse has parquet
 - [ ] Commit harness/skill with hooks (never --no-verify)
-- [ ] gh workflow run perf.yml --ref this branch
-- [ ] gh workflow run perf-db.yml --ref this branch
+- [ ] gh workflow run skippr-regression.yml --ref this branch
 - [ ] Watch until Linux x86 cells finished (matrix + flamegraph/heaptrack/perf-stat). Do not wait 180m on a hung cell — cancel if skipprd has no timeout evidence.
 - [ ] python3 tests/perf/download.py (flamegraphs, folded stacks, perf-stat, reports)
-- [ ] python3 tests/perf/download.py --workflow perf-db.yml --out artifacts/skippr-perf-db
-- [ ] python3 tests/perf/analyze.py --artifacts artifacts/skippr-perf --base origin/main
-- [ ] python3 tests/perf/analyze.py --artifacts artifacts/skippr-perf-db --base origin/main
+- [ ] python3 tests/perf/analyze.py --artifacts artifacts/skippr-regression --base origin/main
 - [ ] python3 tests/perf/memo.py --iteration N --artifacts … --bottlenecks … --run-url … --done … --mail (once per workflow run)
 - [ ] Generate ideas from timings, failed cells, and hot leaves (overall first; new code if it is actually hot)
 - [ ] Implement the top remaining idea. Local smoke again if product code changed.
-- [ ] Commit (hooks), dispatch both workflows, watch, download, analyze, email, iterate
+- [ ] Commit (hooks), dispatch skippr-regression.yml, watch, download, analyze, email, iterate
 - [ ] Stop when ideas are exhausted
 ```
 
@@ -68,14 +65,14 @@ Exhausted means: no remaining idea with a clear test, **or** ingest-A and
 copy-B `elapsed_ms` **and** `q-wal-count-iceberg` / `q-union-count-duckdb`
 query `elapsed_ms` moved under 10% on two consecutive GitHub runs after the
 last product change **and** no cell is still broken. Cap **5** GitHub
-dispatches per workflow unless a skipprd frame is still over 10% of those
+dispatches unless a skipprd frame is still over 10% of those
 cells’ samples.
 
 Each memo is a short plain-English note to `paul@paulhudson.me`: what the
 numbers said, what broke, what changed, what is next. No tables. No markdown
 fences.
 
-## Ingest / copy (`perf.yml`)
+## Ingest / copy
 
 Postgres CDC is out of this matrix until `sync --once` actually exits
 (release e2e still has it).
@@ -105,8 +102,9 @@ File CSV → DuckDB (`ingest-csv-duckdb`).
 
 ### GitHub
 
-`.github/workflows/perf.yml` is **`workflow_dispatch` only** (not every
-engine tag). GitHub jobs run on GitHub-hosted Linux x86 (`ubuntu-latest`) —
+`.github/workflows/skippr-regression.yml` is **`workflow_dispatch` only** (not every
+engine tag). One host build and one frame-pointer build serve ingest/copy and
+query cells. GitHub jobs run on GitHub-hosted Linux x86 (`ubuntu-latest`) —
 not the Mac self-hosted runner. Local smoke stays on this Mac. Profiling
 cells on that same Linux runner: flamegraph (ingest-A, copy-B,
 json→parquet, flatten, SQL compose File and Stdin, CREATE TABLE File and
@@ -117,17 +115,18 @@ ingest cell (`filter`, `derive`, `compose`) and each CREATE TABLE measure
 (`sum`, `count`, `both`) on File (historical) and Stdin (stream), plus each
 ALTER (`rename`, `merge`, `drop`, `promote`) on already-ingested File data
 then continue ingest (historical compact and in-stream WAL hold). The json→parquet cell is File ingest of a stable schema
-(including RFC3339 timestamps) into File parquet. `linux_analyze` ranks
+(including RFC3339 timestamps) into File parquet. Query cells are `q-*` on
+that same matrix. `linux_analyze` ranks
 `perf.folded` leaves against `origin/main...HEAD` new code. One runner
 label, not a second harness. skipprd and wrap scripts fail closed after 10
 minutes (`COMMAND_TIMEOUT_SECONDS`); kill the process group.
 
 ```bash
-gh workflow run perf.yml --ref "$(git branch --show-current)"
+gh workflow run skippr-regression.yml --ref "$(git branch --show-current)"
 gh run watch --exit-status
 python3 tests/perf/download.py
-python3 tests/perf/analyze.py --artifacts artifacts/skippr-perf --base origin/main
-python3 tests/perf/memo.py --iteration N --artifacts artifacts/skippr-perf \
+python3 tests/perf/analyze.py --artifacts artifacts/skippr-regression --base origin/main
+python3 tests/perf/memo.py --iteration N --artifacts artifacts/skippr-regression \
   --bottlenecks bottlenecks.json --run-url "$RUN_URL" --done "…" --mail
 ```
 
@@ -137,7 +136,7 @@ Download `flamegraph.svg`, `perf.folded`, `perf-stat.txt`,
 `perf-report.json`. Heaptrack on ingest-A/copy-B Linux is this harness
 (`.github/actions/e2e/heaptrack`), not bike_hire.
 
-## Query / Iceberg ∪ WAL (`perf-db.yml`)
+## Query / Iceberg ∪ WAL
 
 Ingest→query. Comparison is **file parquet Iceberg** (SkipprLake
 `object_store: type: file`) against **DuckDB Iceberg**. The WAL profile
@@ -174,8 +173,8 @@ GitHub-local SnapshotThenLogExactOnce source: Postgres, MySQL, DynamoDB
 cells migrate an already-ingested File lake or CDC lake, continue ingest /
 CDC, then query. Skip CDC locally if Docker is down, fail closed on GitHub.
 `sync --once` for CDC cells is wrapped with a 120s KILL. Do not put
-ingest/copy CDC cells on `perf.yml` (query_after_cdc is the suite home).
-Dual-catalog ingest/copy cells do not belong on `perf-db.yml`.
+ingest/copy CDC cells on the ingest half of `linux_matrix` (query_after_cdc is the suite home).
+Dual-catalog ingest/copy cells do not belong on the query half.
 
 ### Local smoke (this Mac, before GitHub)
 
@@ -204,8 +203,8 @@ Fail the cell if required `PERF_EVENT` lines are missing (`sync`,
 
 ### GitHub
 
-`.github/workflows/perf-db.yml` is **`workflow_dispatch` only**. Jobs run on
-GitHub-hosted Linux x86 (`ubuntu-latest`). Profiling cells: flamegraph and
+The same `skippr-regression.yml` `linux_matrix` and `linux_profile` jobs run
+query cells (`q-*`). Profiling cells: flamegraph and
 perf-stat on `q-wal-count-iceberg`, `q-wal-point-iceberg`,
 `q-union-count-duckdb`; flamegraph on `q-cdc-union-update-pg`,
 `q-ops-count-duckdb`, `q-ops-stream-iceberg`, `q-migrate-rename-duckdb`,
@@ -217,15 +216,6 @@ continue ingest, and every CDC cell above including ALTER-then-continue-CDC
 for Postgres, MySQL, and DynamoDB. Hottest frames must not be
 `admit_payload` / whole-seg `read_to_end` after the catalog slice index
 lands. skipprd and wrap scripts fail closed after 10 minutes.
-
-```bash
-gh workflow run perf-db.yml --ref "$(git branch --show-current)"
-gh run watch --exit-status
-python3 tests/perf/download.py --workflow perf-db.yml --out artifacts/skippr-perf-db
-python3 tests/perf/analyze.py --artifacts artifacts/skippr-perf-db --base origin/main
-python3 tests/perf/memo.py --iteration N --artifacts artifacts/skippr-perf-db \
-  --bottlenecks bottlenecks.json --run-url "$RUN_URL" --done "…" --mail
-```
 
 Read `bottlenecks.json` / stdout: hottest frames in new code first **only if
 they are actually hot**; otherwise overall hot leaves and failed cells.
@@ -241,6 +231,6 @@ Download `flamegraph.svg`, `perf.folded`, `perf-stat.txt`, `heaptrack*`,
 - `aws s3 sync --delete`
 - Write `cloudcycle-datalake-iceberg-*` or other EU production/staging buckets
 - Treat WAL leftover import as a perf or query cell
-- Put CDC ingest/copy cells on `perf.yml` until `sync --once` exits (CDC lives on `perf-db.yml`)
+- Put CDC ingest/copy cells on the ingest matrix until `sync --once` exits (CDC lives on query_after_cdc `q-*` cells)
 - Query jsonl File sink (no Iceberg parquet)
 - Amazon SES for the iteration memo (Gmail AFK only)

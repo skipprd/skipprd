@@ -23,13 +23,14 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
             [
                 "rust.yml",
                 "skippr-fuzz.yml",
-                "perf.yml",
-                "perf-db.yml",
+                "skippr-regression.yml",
             ],
         )
         self.assertNotIn("skippr-tpc.yml", names)
         self.assertNotIn("skippr-gate.yml", names)
         self.assertFalse((ROOT / ".github" / "workflows" / "skippr-gate.yml").exists())
+        self.assertFalse((ROOT / ".github" / "workflows" / "perf.yml").exists())
+        self.assertFalse((ROOT / ".github" / "workflows" / "perf-db.yml").exists())
 
     def test_success_on_sha_skips_dispatch(self) -> None:
         runs = [
@@ -87,24 +88,23 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
         )
 
     def test_perf_gate_is_matrix_not_frame_pointer(self) -> None:
-        perf = next(b for b in mod.BATTERIES if b.workflow == "perf.yml")
-        perf_db = next(b for b in mod.BATTERIES if b.workflow == "perf-db.yml")
-        self.assertIn("perf ingest-a-duckdb", perf.gate_jobs)
-        self.assertIn("perf copy-b-json-json", perf.gate_jobs)
-        self.assertIn("perf workflow contracts", perf.gate_jobs)
-        self.assertIn("release host + perf plugins (linux x86)", perf.gate_jobs)
-        self.assertNotIn("frame-pointer host + inferno (linux x86)", perf.gate_jobs)
-        self.assertTrue(all("flamegraph" not in name for name in perf.gate_jobs))
-        self.assertTrue(all("heaptrack" not in name for name in perf.gate_jobs))
-        self.assertTrue(all("perf-stat" not in name for name in perf.gate_jobs))
-        self.assertIn("perf-db q-wal-count-iceberg", perf_db.gate_jobs)
-        self.assertIn("perf-db workflow contracts", perf_db.gate_jobs)
-        self.assertNotIn("frame-pointer host + inferno (linux x86)", perf_db.gate_jobs)
+        regression = next(b for b in mod.BATTERIES if b.workflow == "skippr-regression.yml")
+        self.assertIn("regression ingest-a-duckdb", regression.gate_jobs)
+        self.assertIn("regression copy-b-json-json", regression.gate_jobs)
+        self.assertIn("regression q-wal-count-iceberg", regression.gate_jobs)
+        self.assertIn("regression workflow contracts", regression.gate_jobs)
+        self.assertIn("release host + regression plugins (linux x86)", regression.gate_jobs)
+        self.assertNotIn("frame-pointer host + inferno (linux x86)", regression.gate_jobs)
+        self.assertTrue(all("flamegraph" not in name for name in regression.gate_jobs))
+        self.assertTrue(all("heaptrack" not in name for name in regression.gate_jobs))
+        self.assertTrue(all("perf-stat" not in name for name in regression.gate_jobs))
         rust = next(b for b in mod.BATTERIES if b.workflow == "rust.yml")
         self.assertEqual(rust.gate_jobs, ())
-        workflow = (ROOT / ".github" / "workflows" / "perf.yml").read_text(encoding="utf-8")
-        for name in perf.gate_jobs:
-            token = name.removeprefix("perf ").removeprefix("release host + ")
+        workflow = (ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(
+            encoding="utf-8"
+        )
+        for name in regression.gate_jobs:
+            token = name.removeprefix("regression ").removeprefix("release host + ")
             self.assertTrue(
                 name in workflow or token in workflow,
                 name,
@@ -120,26 +120,26 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
             }
         ]
         jobs = [
-            {"name": "perf workflow contracts", "conclusion": "success"},
-            {"name": "release host + perf plugins (linux x86)", "conclusion": "success"},
-            {"name": "perf ingest-a-duckdb", "conclusion": "success"},
+            {"name": "regression workflow contracts", "conclusion": "success"},
+            {"name": "release host + regression plugins (linux x86)", "conclusion": "success"},
+            {"name": "regression ingest-a-duckdb", "conclusion": "success"},
             {"name": "frame-pointer host + inferno (linux x86)", "conclusion": ""},
         ]
         gate = (
-            "perf workflow contracts",
-            "release host + perf plugins (linux x86)",
-            "perf ingest-a-duckdb",
+            "regression workflow contracts",
+            "release host + regression plugins (linux x86)",
+            "regression ingest-a-duckdb",
         )
         self.assertEqual(
             mod.plan_for_gate_jobs("abc", runs, jobs, gate),
             mod.Plan.SKIP_DISPATCH,
         )
-        jobs[2] = {"name": "perf ingest-a-duckdb", "conclusion": "failure"}
+        jobs[2] = {"name": "regression ingest-a-duckdb", "conclusion": "failure"}
         self.assertEqual(
             mod.plan_for_gate_jobs("abc", runs, jobs, gate),
             mod.Plan.WAIT,
         )
-        jobs[2] = {"name": "perf ingest-a-duckdb", "conclusion": "success"}
+        jobs[2] = {"name": "regression ingest-a-duckdb", "conclusion": "success"}
         del jobs[0]
         self.assertEqual(
             mod.plan_for_gate_jobs("abc", runs, jobs, gate),
@@ -148,9 +148,9 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
         runs[0]["status"] = "completed"
         runs[0]["conclusion"] = "failure"
         jobs = [
-            {"name": "perf workflow contracts", "conclusion": "success"},
-            {"name": "release host + perf plugins (linux x86)", "conclusion": "success"},
-            {"name": "perf ingest-a-duckdb", "conclusion": "success"},
+            {"name": "regression workflow contracts", "conclusion": "success"},
+            {"name": "release host + regression plugins (linux x86)", "conclusion": "success"},
+            {"name": "regression ingest-a-duckdb", "conclusion": "success"},
             {"name": "frame-pointer host + inferno (linux x86)", "conclusion": "failure"},
         ]
         self.assertEqual(

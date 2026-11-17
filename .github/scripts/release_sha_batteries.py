@@ -80,21 +80,12 @@ BATTERIES: tuple[Battery, ...] = (
     ),
     Battery("skippr-fuzz.yml", "skippr-fuzz"),
     Battery(
-        "perf.yml",
-        "skippr-perf",
+        "skippr-regression.yml",
+        "skippr-regression",
         gate_jobs=perf_gate_jobs(
-            ROOT / ".github" / "workflows" / "perf.yml",
-            "perf workflow contracts",
-            "release host + perf plugins (linux x86)",
-        ),
-    ),
-    Battery(
-        "perf-db.yml",
-        "skippr-perf-db",
-        gate_jobs=perf_gate_jobs(
-            ROOT / ".github" / "workflows" / "perf-db.yml",
-            "perf-db workflow contracts",
-            "release host + query plugins (linux x86)",
+            ROOT / ".github" / "workflows" / "skippr-regression.yml",
+            "regression workflow contracts",
+            "release host + regression plugins (linux x86)",
         ),
     ),
 )

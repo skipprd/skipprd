@@ -44,10 +44,9 @@ Batteries (all must pass; never skip a cell):
 |---|---|
 | `rust.yml` | File smoke e2e + `linux_dst` (`sqlrt::dst::`). CDN e2e still waits for the tag. |
 | `skippr-fuzz.yml` | Timeboxed cargo fuzz; timeout fails |
-| `perf.yml` | skippr-regression ingest/copy `linux_matrix` (correctness + timings). Not frame-pointer / flamegraph / heaptrack / perf-stat. |
-| `perf-db.yml` | skippr-regression Iceberg∪WAL query `linux_matrix`. Not frame-pointer / flamegraph / heaptrack / perf-stat. |
+| `skippr-regression.yml` | ingest/copy and Iceberg∪WAL query `linux_matrix` (correctness + timings). Not frame-pointer / flamegraph / heaptrack / perf-stat. |
 
-Correctness + performance over time is **`/skippr-regression`** (both workflows). TPC-H SF10 is **`/skippr-tpc`**. It is not a SHA battery. Do not block the tag on it.
+Correctness + performance over time is **`/skippr-regression`**. TPC-H SF10 is **`/skippr-tpc`**. It is not a SHA battery. Do not block the tag on it.
 
 ```bash
 python3 .github/scripts/release_sha_batteries.py --ensure --sha "$(git rev-parse HEAD)"

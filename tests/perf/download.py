@@ -11,9 +11,8 @@ from pathlib import Path
 
 def keep_artifact(name: str) -> bool:
     return (
-        name.startswith("perf-")
-        or name.startswith("skippr-perf-")
-        or name.startswith("skippr-perf-db")
+        name.startswith("regression-")
+        or name.startswith("skippr-regression-")
         or name.startswith("heaptrack-")
     )
 
@@ -32,7 +31,7 @@ def download_argv(
     return argv
 
 
-def latest_run_id(branch: str, repo: str, workflow: str = "perf.yml") -> str:
+def latest_run_id(branch: str, repo: str, workflow: str = "skippr-regression.yml") -> str:
     proc = subprocess.run(
         [
             "gh",
@@ -80,10 +79,10 @@ def list_artifact_names(run_id: str, repo: str) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Download skippr-perf GitHub artifacts")
     parser.add_argument("--run-id", default="")
-    parser.add_argument("--out", default="artifacts/skippr-perf")
+    parser.add_argument("--out", default="artifacts/skippr-regression")
     parser.add_argument("--repo", default="skipprd/skipprd")
     parser.add_argument("--branch", default="")
-    parser.add_argument("--workflow", default="perf.yml", help="perf.yml or perf-db.yml")
+    parser.add_argument("--workflow", default="skippr-regression.yml")
     args = parser.parse_args(argv)
     run_id = args.run_id.strip()
     if not run_id:
