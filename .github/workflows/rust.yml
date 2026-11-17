@@ -37,7 +37,7 @@ jobs:
       - run: python3 .github/scripts/test_release_sha_batteries.py
       - run: python3 tests/perf/test_run.py
       - run: python3 tests/perf/test_analyze.py
-      - run: python3 tests/perf_db/test_run.py
+      - run: python3 tests/perf/test_query.py
       - run: python3 tests/tpc/test_run.py
       - run: python3 tests/skipprlake_e2e/test_run.py
 

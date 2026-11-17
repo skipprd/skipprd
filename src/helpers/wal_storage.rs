@@ -401,8 +401,8 @@ mod tests {
             "perf harness must not write skippr.store.type dynamodb"
         );
         assert!(
-            !include_str!("../../tests/perf_db/run.py").contains("type: dynamodb"),
-            "perf-db harness must not write skippr.store.type dynamodb"
+            !include_str!("../../tests/perf/query.py").contains("type: dynamodb"),
+            "query harness must not write skippr.store.type dynamodb"
         );
         assert!(
             !include_str!("../../skippr.pyi").contains("class SledStore"),

@@ -94,9 +94,7 @@ QUERY_LABELS = {
 
 
 def memo_suite(reports: dict[str, dict[str, Any]]) -> str:
-    if any(payload.get("kind") == "query_after_ingest" for payload in reports.values()):
-        return "skippr-perf-db"
-    return "skippr-perf"
+    return "skippr-regression"
 
 
 def timings_from_reports(reports: dict[str, dict[str, Any]]) -> list[str]:

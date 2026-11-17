@@ -57,6 +57,7 @@ class PerfCatalogTests(unittest.TestCase):
             name
             for name, spec in catalog["scenarios"].items()
             if spec.get("group") == "smoke"
+            and spec["kind"] not in {"query_after_ingest", "query_after_cdc"}
         ]
         self.assertEqual(
             sorted(smoke),
@@ -939,8 +940,8 @@ class PerfWorkflowContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("tests/perf/run.py", cell)
-        self.assertIn("tests/perf_db/run.py", cell)
-        self.assertIn("q-*", cell)
+        self.assertNotIn("tests/perf_db", cell)
+        self.assertNotIn("q-*", cell)
         regression_action = (
             REPO_ROOT / ".github" / "actions" / "e2e" / "regression" / "action.yaml"
         ).read_text(encoding="utf-8")
@@ -952,12 +953,15 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertFalse((REPO_ROOT / ".github" / "actions" / "e2e" / "perf").exists())
         self.assertFalse((REPO_ROOT / ".github" / "actions" / "e2e" / "perf-db").exists())
         self.assertFalse((REPO_ROOT / ".github" / "actions" / "e2e" / "heaptrack").exists())
+        self.assertFalse((REPO_ROOT / "tests" / "perf_db").exists())
         workflow = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         matrix_job = workflow.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
         self.assertIn("linux_contracts", matrix_job)
         profile_job = workflow.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0]
         self.assertIn("linux_contracts", profile_job)
         contracts = workflow.split("\n  linux_contracts:")[1].split("\n  build_linux:")[0]
+        self.assertIn("tests/perf/test_run.py", contracts)
+        self.assertIn("tests/perf/test_query.py", contracts)
         self.assertIn("test_release_sha_batteries.py", contracts)
 
     def test_linux_profile_apt_uses_generic_kernel_tools(self) -> None:

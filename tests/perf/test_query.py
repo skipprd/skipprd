@@ -29,15 +29,12 @@ from matrix import (  # noqa: E402
     query_cdc_migrate_id,
 )
 
-CATALOG_PATH = HARNESS_DIR / "catalog.yaml"
-
-
 def db_catalog() -> dict:
-    return load_catalog(CATALOG_PATH)
+    return load_catalog()
 
 
 def perf_db_run():
-    spec = importlib.util.spec_from_file_location("perf_db_run", HARNESS_DIR / "run.py")
+    spec = importlib.util.spec_from_file_location("perf_query", HARNESS_DIR / "query.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -147,6 +144,7 @@ class PerfDbCatalogTests(unittest.TestCase):
             name
             for name, spec in catalog["scenarios"].items()
             if spec.get("group") == "smoke"
+            and spec["kind"] in {"query_after_ingest", "query_after_cdc"}
         ]
         self.assertEqual(sorted(smoke), sorted(SMOKE))
         iceberg = catalog["scenarios"]["q-wal-count-iceberg"]
@@ -157,7 +155,8 @@ class PerfDbCatalogTests(unittest.TestCase):
     def test_every_cell_requires_sync_and_query_collect(self) -> None:
         catalog = db_catalog()
         for name, spec in catalog["scenarios"].items():
-            self.assertIn(spec["kind"], {"query_after_ingest", "query_after_cdc"}, name)
+            if spec["kind"] not in {"query_after_ingest", "query_after_cdc"}:
+                continue
             if spec["kind"] == "query_after_ingest":
                 self.assertIn(spec["sink"], {"skipprlake", "duckdb"}, name)
                 self.assertTrue((spec.get("asserts") or {}).get("iceberg_parquet"), name)
@@ -285,6 +284,7 @@ class PerfDbWorkflowContractTests(unittest.TestCase):
         self.assertIn("linux_contracts", profile_job)
         contracts = text.split("\n  linux_contracts:")[1].split("\n  build_linux:")[0]
         self.assertIn("tests/perf/test_run.py", contracts)
+        self.assertIn("tests/perf/test_query.py", contracts)
         self.assertIn("test_release_sha_batteries.py", contracts)
 
     def test_linux_matrix_uses_perf_db_linux_scale(self) -> None:
@@ -315,11 +315,11 @@ class PerfDbWorkflowContractTests(unittest.TestCase):
         self.assertGreaterEqual(linux_rows, 10000)
         self.assertEqual(run.row_count(scenario, "linux"), linux_rows)
         self.assertEqual(run.row_count(scenario, "smoke"), int(catalog["defaults"]["smoke_rows"]))
-        src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        src = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         self.assertNotIn("perf_run.row_count", src)
 
     def test_ci_does_not_skip_docker_cdc_cells(self) -> None:
-        src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        src = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         start = src.index("def run_query_after_cdc")
         chunk = src[start : start + 900]
         self.assertIn("GITHUB_ACTIONS", chunk)
@@ -329,7 +329,7 @@ class PerfDbWorkflowContractTests(unittest.TestCase):
 
 class PerfDbRunnerContractTests(unittest.TestCase):
     def test_runner_queries_after_sync_and_shares_perf_helpers(self) -> None:
-        text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         self.assertIn("query_after_ingest", text)
         self.assertIn("query_after_cdc", text)
         self.assertIn("skipprd query", text)
@@ -339,10 +339,11 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("required_perf_for", text)
         self.assertIn("log_args(env)", text)
         self.assertIn("COMMAND_TIMEOUT_SECONDS", text)
-        self.assertIn("perf-db-report.json", text)
+        self.assertNotIn("perf-db-report.json", text)
+        self.assertIn("perf-report.json", text)
         self.assertIn("iceberg_parquet", text)
         self.assertIn("*.parquet", text)
-        self.assertIn("load_perf_db_catalog", text)
+        self.assertIn("load_catalog", text)
         self.assertIn("timeout=120", text)
         self.assertIn("--signal=KILL", text)
         self.assertIn('CDC_DDB_TABLE = "skippr-perf-db-cdc"', text)
@@ -418,7 +419,7 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         )
         self.assertIn("--repeat", flame_cmd)
         self.assertIn(str(run.PROFILE_QUERY_REPEAT), flame_cmd)
-        src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        src = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         ingest = src.split("def run_query_after_ingest")[1].split("def write_cdc")[0]
         cdc = src.split("def run_query_after_cdc")[1]
         self.assertIn("query_plain_args(", ingest)
@@ -469,7 +470,7 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         run.assert_wal_pin("cell", {"asserts": {}}, [])
 
     def test_every_query_cell_does_not_select_skippr_store_dynamodb(self) -> None:
-        text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         ingest = text.split("def run_query_after_ingest")[1].split("def write_cdc")[0]
         self.assertNotIn("dynamodb_store=True", ingest)
         self.assertNotIn("type: dynamodb", ingest)
@@ -498,12 +499,12 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("sync", phases)
         already = 'PERF_EVENT {"phase":"sync","elapsed_ms":9,"rows":2,"bytes":0}\n'
         self.assertEqual(run.with_sync_perf(already, 40, 2), already)
-        src = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        src = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         once = src.split("def run_cdc_once")[1].split("def run_query_after_cdc")[0]
         self.assertIn("with_sync_perf", once)
 
     def test_cdc_mysql_waits_for_sql_not_ping(self) -> None:
-        text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         start = text.split("def start_cdc_mysql")[1].split("def stop_cdc_mysql")[0]
         self.assertIn("SELECT 1", start)
         self.assertIn("CREATE TABLE IF NOT EXISTS orders", start)
@@ -513,7 +514,7 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("127.0.0.1", helper)
 
     def test_cdc_ddb_follows_the_stream_before_the_mutation(self) -> None:
-        text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         cdc = text.split("def run_query_after_cdc")[1]
         ddb = cdc.split('source == "ddb" and case')[1].split("else:")[0]
         self.assertIn("once=False", ddb)
@@ -554,7 +555,7 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertNotIn("dynamodb_skipprlake_cdc.skippr_dynamo_cdc", catalog)
 
     def test_cdc_postgres_failure_includes_container_logs(self) -> None:
-        text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         helper = text.split("def _cdc_postgres_failed")[1].split("def start_cdc_postgres")[0]
         self.assertIn("docker", helper)
         self.assertIn("logs", helper)
@@ -564,7 +565,7 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("REPLICA IDENTITY FULL", start)
 
     def test_cdc_ddb_partitions_on_the_event_time_column_the_plugin_writes(self) -> None:
-        text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         writer = text.split("def write_cdc_skippr_yml")[1].split("def _cdc_postgres_failed")[0]
         self.assertIn("batch_time_fields: skippr_event_time", writer)
         self.assertNotIn("batch_time_fields: _skippr_event_time", writer)

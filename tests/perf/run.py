@@ -1612,6 +1612,14 @@ def run_scenario(scenario_id: str, scale: str, work: Path, profile: str) -> dict
         return run_s3_ingest(scenario_id, scenario, scale, work, profile)
     if kind == "duckdb_ingest":
         return run_duckdb_ingest(scenario_id, scenario, scale, work)
+    if kind == "query_after_ingest":
+        from query import run_query_after_ingest
+
+        return run_query_after_ingest(scenario_id, scenario, scale, work, profile)
+    if kind == "query_after_cdc":
+        from query import run_query_after_cdc
+
+        return run_query_after_cdc(scenario_id, scenario, work, profile)
     raise PerfError(f"unknown kind {kind}")
 
 

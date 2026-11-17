@@ -115,7 +115,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("test_engine_tag.py", text)
         self.assertIn("tests/perf/test_run.py", text)
         self.assertIn("tests/perf/test_analyze.py", text)
-        self.assertIn("tests/perf_db/test_run.py", text)
+        self.assertIn("tests/perf/test_query.py", text)
         self.assertIn("chaos_mode_published:", text)
         self.assertIn("e2e_prev_plugins:", text)
         self.assertIn("e2e_prev_host:", text)
@@ -130,7 +130,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("test_release_sha_batteries.py", linux_test)
         self.assertIn("tests/tpc/test_run.py", linux_test)
         self.assertIn("tests/skipprlake_e2e/test_run.py", linux_test)
-        self.assertIn("tests/perf_db/test_run.py", linux_test)
+        self.assertIn("tests/perf/test_query.py", linux_test)
         self.assertIn("runs-on: ubuntu-latest", linux_test)
         self.assertNotIn("dtolnay/rust-toolchain", linux_test)
         linux_build = text.split("\n  linux_x86:", 1)[1].split("\n  macos_arm64:", 1)[0]
@@ -631,12 +631,13 @@ class RustCiTests(unittest.TestCase):
         import sys
 
         sys.path.insert(0, str(ROOT / "tests" / "perf"))
-        sys.path.insert(0, str(ROOT / "tests" / "perf_db"))
-        from catalog import load_catalog, scenario_ids
+        from catalog import load_catalog, scenario_kind
 
-        db_catalog = load_catalog(ROOT / "tests" / "perf_db" / "catalog.yaml")
+        catalog = load_catalog(ROOT / "tests" / "perf" / "catalog.yaml")
         matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
-        for scenario_id in scenario_ids(db_catalog):
+        for scenario_id, spec in catalog["scenarios"].items():
+            if scenario_kind(spec) not in {"query_after_ingest", "query_after_cdc"}:
+                continue
             self.assertIn(scenario_id, matrix, scenario_id)
         self.assertNotIn("q-wal-count-file", text)
         self.assertNotIn("q-union-count-skipprlake", text)
@@ -676,13 +677,14 @@ class RustCiTests(unittest.TestCase):
             "linux_matrix and linux_profile both need boto3 for DynamoDB Local",
         )
         cell = (ROOT / ".github" / "scripts" / "run_regression_cell.sh").read_text(encoding="utf-8")
-        self.assertIn("tests/perf_db/run.py", cell)
+        self.assertNotIn("tests/perf_db", cell)
         self.assertIn("tests/perf/run.py", cell)
         self.assertNotIn("python3 tests/perf_db/run.py", text)
         contracts = text.split("\n  linux_contracts:")[1].split("\n  build_linux:")[0]
         self.assertIn("tests/perf/test_run.py", contracts)
+        self.assertIn("tests/perf/test_query.py", contracts)
         self.assertIn("test_release_sha_batteries.py", contracts)
-        runner = (ROOT / "tests" / "perf_db" / "run.py").read_text(encoding="utf-8")
+        runner = (ROOT / "tests" / "perf" / "query.py").read_text(encoding="utf-8")
         self.assertIn("log_args", runner)
         self.assertIn("query_after_ingest", runner)
         self.assertIn("skipprd query", runner)

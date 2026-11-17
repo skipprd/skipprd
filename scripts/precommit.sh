@@ -33,8 +33,8 @@ python3 tests/tpc/test_run.py
 echo "precommit: python3 tests/perf/test_run.py"
 python3 tests/perf/test_run.py
 
-echo "precommit: python3 tests/perf_db/test_run.py"
-python3 tests/perf_db/test_run.py
+echo "precommit: python3 tests/perf/test_query.py"
+python3 tests/perf/test_query.py
 
 echo "precommit: python3 .github/scripts/test_stream_transforms_ci.py"
 python3 .github/scripts/test_stream_transforms_ci.py

@@ -1,4 +1,4 @@
-"""Permutation SoT for skippr-perf and skippr-perf-db transform / migrate / CDC cells.
+"""Permutation SoT for skippr-regression transform / migrate / CDC cells.
 
 Historical ingest is File `sync --once`. Stream ingest is Stdin (SQL filter/derive
 and CREATE TABLE) or a compaction hold (migrate + query). Copy pipelines may set

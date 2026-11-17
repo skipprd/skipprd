@@ -17,7 +17,8 @@ disable-model-invocation: true
 Opt-in **correctness + performance** suite. Prove correctness first, then
 timings, `--log perf` / `skipprd::perf` events, flamegraphs, heaptrack, and
 perf-stat. Ingest/copy and Iceberg∪WAL query are the **same** regression
-loop. One GitHub workflow (`skippr-regression.yml`); one skill.
+loop. One GitHub workflow (`skippr-regression.yml`); one catalog
+(`tests/perf/catalog.yaml`); one skill.
 
 Wrap scripts read `SKIPPR_LOG_LEVEL` through `skipprd_cli.log_args()` into
 `--log`. Do **not** run skipprd-docs. Do **not** publish PyPI. Do **not**
@@ -194,7 +195,7 @@ cargo build --release \
   -p skippr-plugin-data-sink-skipprlake \
   -p skippr-plugin-schema-sink-skipprlake
 export SKIPPRD_BIN="$PWD/target/release/skipprd"
-python3 tests/perf_db/run.py \
+python3 tests/perf/run.py \
   --scenario q-wal-count-iceberg,q-wal-point-iceberg,q-union-count-duckdb,q-ops-count-duckdb,q-aggregates-count-duckdb,q-migrate-rename-duckdb,q-cdc-union-update-pg,q-cdc-union-update-mysql,q-cdc-union-update-ddb,q-cdc-migrate-rename-pg --scale smoke
 ```
 

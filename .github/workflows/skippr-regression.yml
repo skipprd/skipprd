@@ -20,7 +20,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 tests/perf/test_run.py
-      - run: python3 tests/perf_db/test_run.py
+      - run: python3 tests/perf/test_query.py
       - run: python3 tests/perf/test_analyze.py
       - run: python3 .github/scripts/test_rust_ci.py
       - run: python3 .github/scripts/test_release_sha_batteries.py

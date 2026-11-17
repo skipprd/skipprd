@@ -168,10 +168,15 @@ def scenario_kind(scenario: dict[str, Any]) -> str:
     return kind
 
 
+QUERY_REQUIRED_PERF = ["sync", "query_collect", "query_pin"]
+
+
 def required_perf_for(catalog: dict[str, Any], scenario: dict[str, Any]) -> list[str]:
     defaults = catalog.get("defaults") or {}
     if "required_perf" in scenario:
         phases = list(scenario.get("required_perf") or [])
+    elif scenario_kind(scenario) in {"query_after_ingest", "query_after_cdc"}:
+        phases = list(QUERY_REQUIRED_PERF)
     else:
         phases = list(defaults.get("required_perf") or [])
     if not phases:

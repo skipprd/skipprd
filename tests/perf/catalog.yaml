@@ -1,12 +1,21 @@
-# skippr-perf scenario catalog. WAL leftover import is out of suite.
-# Postgres CDC is out of this matrix until sync --once actually exits.
+# skippr-regression scenario catalog. WAL leftover import is out of suite.
+# Ingest/copy: File/Stdin → DuckDB/SkipprLake/file. Postgres CDC ingest cells stay out until sync --once actually exits.
+# Query (q-*): ingest then skipprd query. File parquet Iceberg vs DuckDB.
+# CDC query: SnapshotThenLogExactOnce for Postgres, MySQL, DynamoDB (count / update /
+# late-delete / reinsert / sum / overlap / iceberg-only), plus ALTER on that lake
+# then continue CDC then query.
+# File migrate query cells ALTER already-ingested rows, ingest a second batch, then query.
+# Ops/aggregates/migrate: historical = drained DuckDB SELECT; stream = SkipprLake STREAM with live WAL pin.
+# wal_pin: drained = the measured query pinned no WAL (W \ E empty, lake only);
+#          live    = the measured query read WAL held behind the compaction hold.
 # SQL filter/derive and CREATE TABLE: File = historical batch, Stdin = stream source.
-# Migrate: historical = ALTER after compact then continue ingest; stream = ALTER under a WAL compaction hold then continue ingest.
+# Migrate ingest cells: historical = ALTER after compact then continue ingest; stream = ALTER under a WAL compaction hold then continue ingest.
 defaults:
   rows: 10000
   smoke_rows: 200
   linux_rows: 50000
   required_perf: [sync]
+  table: events
 
 scenarios:
   ingest-a-duckdb:
@@ -571,3 +580,647 @@ scenarios:
     asserts:
       min_sync_events: 12
       min_wal_persist_events: 12
+
+  q-wal-count-iceberg:
+    group: smoke
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
+    asserts:
+      query_count: true
+      iceberg_parquet: true
+
+  q-wal-point-iceberg:
+    group: smoke
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    sql: "SELECT id FROM perf_cell.perf_cell WHERE id = 1"
+    asserts:
+      query_point: true
+      iceberg_parquet: true
+
+  q-union-count-duckdb:
+    group: smoke
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
+    asserts:
+      query_count: true
+      iceberg_parquet: true
+
+  q-wal-group-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell GROUP BY name"
+    asserts:
+      query_group: true
+      iceberg_parquet: true
+
+  q-stream-tail-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+
+  q-iceberg-only-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
+    asserts:
+      query_count: true
+      iceberg_parquet: true
+      wal_pin: drained
+
+  q-union-point-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    sql: "SELECT id FROM perf_cell.perf_cell WHERE id = 1"
+    asserts:
+      query_point: true
+      iceberg_parquet: true
+
+  q-union-group-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell GROUP BY name"
+    asserts:
+      query_group: true
+      iceberg_parquet: true
+
+  q-iceberg-only-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
+    asserts:
+      query_count: true
+      iceberg_parquet: true
+      wal_pin: drained
+
+  q-union-overlap-duckdb:
+    group: smoke
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    overlap: true
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
+    asserts:
+      query_count: true
+      query_unique: true
+      iceberg_parquet: true
+      wal_pin: live
+
+  q-cdc-union-count-pg:
+    group: always
+    kind: query_after_cdc
+    cdc_source: pg
+    cdc_case: count
+    sql: "SELECT count(*) AS n FROM postgres_skipprlake_cdc.postgres_orders"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_count: 3
+      query_reconcile: true
+
+  q-cdc-union-update-pg:
+    group: always
+    kind: query_after_cdc
+    cdc_source: pg
+    cdc_case: update
+    sql: "SELECT name FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 1"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: alpha-prime
+      query_reconcile: true
+
+  q-cdc-union-delete-pg:
+    group: always
+    kind: query_after_cdc
+    cdc_source: pg
+    cdc_case: delete
+    sql: "SELECT count(*) AS n FROM postgres_skipprlake_cdc.postgres_orders"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_count: 1
+      query_absent_id: 2
+      query_reconcile: true
+
+  q-cdc-union-reinsert-pg:
+    group: always
+    kind: query_after_cdc
+    cdc_source: pg
+    cdc_case: reinsert
+    sql: "SELECT name FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 2"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: beta-new
+      query_reconcile: true
+
+  q-cdc-union-sum-pg:
+    group: always
+    kind: query_after_cdc
+    cdc_source: pg
+    cdc_case: sum
+    sql: "SELECT SUM(amount) FROM postgres_skipprlake_cdc.postgres_orders"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_sum: 200
+      query_reconcile: true
+
+  q-cdc-overlap-pg:
+    group: always
+    kind: query_after_cdc
+    cdc_source: pg
+    cdc_case: overlap
+    overlap: true
+    sql: "SELECT name FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 1"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: alpha-wal
+      query_reconcile: true
+      wal_pin: live
+
+  q-cdc-iceberg-only-pg:
+    group: always
+    kind: query_after_cdc
+    cdc_source: pg
+    cdc_case: iceberg-only
+    sql: "SELECT count(*) AS n FROM postgres_skipprlake_cdc.postgres_orders"
+    asserts:
+      query_count: 3
+      wal_pin: drained
+
+  q-cdc-union-count-mysql:
+    group: always
+    kind: query_after_cdc
+    cdc_source: mysql
+    cdc_case: count
+    sql: "SELECT count(*) AS n FROM mysql_skipprlake_cdc.orders"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_count: 3
+      query_reconcile: true
+
+  q-cdc-union-update-mysql:
+    group: always
+    kind: query_after_cdc
+    cdc_source: mysql
+    cdc_case: update
+    sql: "SELECT name FROM mysql_skipprlake_cdc.orders WHERE id = 1"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: alpha-prime
+      query_reconcile: true
+
+  q-cdc-union-delete-mysql:
+    group: always
+    kind: query_after_cdc
+    cdc_source: mysql
+    cdc_case: delete
+    sql: "SELECT count(*) AS n FROM mysql_skipprlake_cdc.orders"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_count: 1
+      query_absent_id: 2
+      query_reconcile: true
+
+  q-cdc-union-reinsert-mysql:
+    group: always
+    kind: query_after_cdc
+    cdc_source: mysql
+    cdc_case: reinsert
+    sql: "SELECT name FROM mysql_skipprlake_cdc.orders WHERE id = 2"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: beta-new
+      query_reconcile: true
+
+  q-cdc-union-sum-mysql:
+    group: always
+    kind: query_after_cdc
+    cdc_source: mysql
+    cdc_case: sum
+    sql: "SELECT SUM(amount) FROM mysql_skipprlake_cdc.orders"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_sum: 200
+      query_reconcile: true
+
+  q-cdc-overlap-mysql:
+    group: always
+    kind: query_after_cdc
+    cdc_source: mysql
+    cdc_case: overlap
+    overlap: true
+    sql: "SELECT name FROM mysql_skipprlake_cdc.orders WHERE id = 1"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: alpha-wal
+      query_reconcile: true
+      wal_pin: live
+
+  q-cdc-iceberg-only-mysql:
+    group: always
+    kind: query_after_cdc
+    cdc_source: mysql
+    cdc_case: iceberg-only
+    sql: "SELECT count(*) AS n FROM mysql_skipprlake_cdc.orders"
+    asserts:
+      query_count: 3
+      wal_pin: drained
+
+  q-cdc-union-count-ddb:
+    group: always
+    kind: query_after_cdc
+    cdc_source: ddb
+    cdc_case: count
+    sql: "SELECT count(*) AS n FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_count: 3
+      query_reconcile: true
+
+  q-cdc-union-update-ddb:
+    group: always
+    kind: query_after_cdc
+    cdc_source: ddb
+    cdc_case: update
+    sql: "SELECT name FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '1'"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: alpha-prime
+      query_reconcile: true
+
+  q-cdc-union-delete-ddb:
+    group: always
+    kind: query_after_cdc
+    cdc_source: ddb
+    cdc_case: delete
+    sql: "SELECT count(*) AS n FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_count: 1
+      query_absent_id: 2
+      query_reconcile: true
+
+  q-cdc-union-reinsert-ddb:
+    group: always
+    kind: query_after_cdc
+    cdc_source: ddb
+    cdc_case: reinsert
+    sql: "SELECT name FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '2'"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: beta-new
+      query_reconcile: true
+
+  q-cdc-union-sum-ddb:
+    group: always
+    kind: query_after_cdc
+    cdc_source: ddb
+    cdc_case: sum
+    sql: "SELECT SUM(amount) FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_sum: 200
+      query_reconcile: true
+
+  q-cdc-overlap-ddb:
+    group: always
+    kind: query_after_cdc
+    cdc_source: ddb
+    cdc_case: overlap
+    overlap: true
+    sql: "SELECT name FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '1'"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: alpha-wal
+      query_reconcile: true
+      wal_pin: live
+
+  q-cdc-iceberg-only-ddb:
+    group: always
+    kind: query_after_cdc
+    cdc_source: ddb
+    cdc_case: iceberg-only
+    sql: "SELECT count(*) AS n FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc"
+    asserts:
+      query_count: 3
+      wal_pin: drained
+
+  q-cdc-migrate-rename-pg:
+    group: always
+    kind: query_after_cdc
+    cdc_source: pg
+    cdc_case: update
+    alter: rename
+    continue_ingest: true
+    sql: "SELECT display_name FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 1"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: alpha-prime
+      query_reconcile: true
+      query_has: [display_name]
+      query_missing: [name]
+
+  q-cdc-migrate-drop-pg:
+    group: always
+    kind: query_after_cdc
+    cdc_source: pg
+    cdc_case: count
+    alter: drop
+    continue_ingest: true
+    sql: "SELECT count(*) AS n FROM postgres_skipprlake_cdc.postgres_orders"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_count: 3
+      query_reconcile: true
+      query_missing: [name]
+
+  q-cdc-migrate-promote-pg:
+    group: always
+    kind: query_after_cdc
+    cdc_source: pg
+    cdc_case: update
+    alter: promote
+    continue_ingest: true
+    sql: "SELECT id, name FROM postgres_skipprlake_cdc.postgres_orders WHERE id = 1"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: alpha-prime
+      query_reconcile: true
+      query_has: [id]
+
+  q-cdc-migrate-rename-mysql:
+    group: always
+    kind: query_after_cdc
+    cdc_source: mysql
+    cdc_case: update
+    alter: rename
+    continue_ingest: true
+    sql: "SELECT display_name FROM mysql_skipprlake_cdc.orders WHERE id = 1"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: alpha-prime
+      query_reconcile: true
+      query_has: [display_name]
+      query_missing: [name]
+
+  q-cdc-migrate-drop-mysql:
+    group: always
+    kind: query_after_cdc
+    cdc_source: mysql
+    cdc_case: count
+    alter: drop
+    continue_ingest: true
+    sql: "SELECT count(*) AS n FROM mysql_skipprlake_cdc.orders"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_count: 3
+      query_reconcile: true
+      query_missing: [name]
+
+  q-cdc-migrate-promote-mysql:
+    group: always
+    kind: query_after_cdc
+    cdc_source: mysql
+    cdc_case: update
+    alter: promote
+    continue_ingest: true
+    sql: "SELECT id, name FROM mysql_skipprlake_cdc.orders WHERE id = 1"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: alpha-prime
+      query_reconcile: true
+      query_has: [id]
+
+  q-cdc-migrate-rename-ddb:
+    group: always
+    kind: query_after_cdc
+    cdc_source: ddb
+    cdc_case: update
+    alter: rename
+    continue_ingest: true
+    sql: "SELECT display_name FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '1'"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: alpha-prime
+      query_reconcile: true
+      query_has: [display_name]
+      query_missing: [name]
+
+  q-cdc-migrate-drop-ddb:
+    group: always
+    kind: query_after_cdc
+    cdc_source: ddb
+    cdc_case: count
+    alter: drop
+    continue_ingest: true
+    sql: "SELECT count(*) AS n FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_count: 3
+      query_reconcile: true
+      query_missing: [name]
+
+  q-cdc-migrate-promote-ddb:
+    group: always
+    kind: query_after_cdc
+    cdc_source: ddb
+    cdc_case: update
+    alter: promote
+    continue_ingest: true
+    sql: "SELECT id, name FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '1'"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_name: alpha-prime
+      query_reconcile: true
+      query_has: [id]
+
+  q-ops-count-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    transform_sql: compose
+    sql: "SELECT name, amount_gbp FROM perf_cell.perf_cell WHERE id = 1"
+    asserts:
+      query_name: user_1
+      iceberg_parquet: true
+      wal_pin: drained
+      query_has: [name, amount_gbp]
+
+  q-ops-stream-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    transform_sql: compose
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+      query_has: [name, amount_gbp]
+
+  q-aggregates-count-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    transform_compute: both
+    sql: "SELECT count(*) AS n FROM perf_cell.perf_cell"
+    asserts:
+      query_count: true
+      iceberg_parquet: true
+      wal_pin: drained
+
+  q-aggregates-stream-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    transform_compute: both
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+
+  q-migrate-rename-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    alter: rename
+    continue_ingest: true
+    sql: "SELECT display_name FROM perf_cell.perf_cell WHERE id = 1"
+    asserts:
+      query_name: user_1
+      iceberg_parquet: true
+      wal_pin: drained
+      query_has: [display_name]
+      query_missing: [name]
+
+  q-migrate-merge-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow_merge
+    alter: merge
+    continue_ingest: true
+    sql: "SELECT amount FROM perf_cell.perf_cell WHERE id = 1"
+    asserts:
+      iceberg_parquet: true
+      wal_pin: drained
+      query_has: [amount]
+      query_missing: [amount_string]
+
+  q-migrate-drop-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    alter: drop
+    continue_ingest: true
+    sql: "SELECT id, amount FROM perf_cell.perf_cell WHERE id = 1"
+    asserts:
+      query_point: true
+      iceberg_parquet: true
+      wal_pin: drained
+      query_has: [id, amount]
+      query_missing: [name]
+
+  q-migrate-promote-duckdb:
+    group: always
+    kind: query_after_ingest
+    sink: duckdb
+    fixture: exact_arrow
+    alter: promote
+    continue_ingest: true
+    sql: "SELECT id FROM perf_cell.perf_cell WHERE id = 1"
+    asserts:
+      query_point: true
+      iceberg_parquet: true
+      wal_pin: drained
+      query_has: [id]
+
+  q-migrate-rename-stream-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    alter: rename
+    continue_ingest: true
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+      query_has: [display_name]
+      query_missing: [name]
+
+  q-migrate-merge-stream-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow_merge
+    alter: merge
+    continue_ingest: true
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+      query_missing: [amount_string]
+
+  q-migrate-drop-stream-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    alter: drop
+    continue_ingest: true
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+      query_missing: [name]
+
+  q-migrate-promote-stream-iceberg:
+    group: always
+    kind: query_after_ingest
+    sink: skipprlake
+    fixture: exact_arrow
+    alter: promote
+    continue_ingest: true
+    wal_tail: true
+    sql: "STREAM * FROM perf_cell LIMIT 10"
+    asserts:
+      stream_limit: true
+      iceberg_parquet: true
+      wal_pin: live
+      query_has: [id]
