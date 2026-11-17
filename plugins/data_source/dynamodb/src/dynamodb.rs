@@ -86,10 +86,18 @@ impl TryFrom<PluginConfigEntry> for DataSourceDynamodbPluginConfig {
     }
 }
 
+/// `--once` GetRecords idle cap. Continuous `sync` polls until the host stops it.
+const MAX_EMPTY_POLLS: u32 = 5;
+
+fn stream_idle_should_stop(once: bool, empty_polls: u32) -> bool {
+    once && empty_polls >= MAX_EMPTY_POLLS
+}
+
 pub struct DataSourceDynamodbPlugin {
     pub(crate) config: DataSourceDynamodbPluginConfig,
     client: Client,
     streams_client: StreamsClient,
+    once: bool,
 }
 
 impl DataSourceDynamodbPlugin {
@@ -116,11 +124,14 @@ impl DataSourceDynamodbPlugin {
             config,
             client,
             streams_client,
+            once: true,
         }
     }
 
-    pub async fn with_runtime_config(config: DataSourceDynamodbPluginConfig) -> Self {
-        Self::from_config(config).await
+    pub async fn with_runtime_config(config: DataSourceDynamodbPluginConfig, once: bool) -> Self {
+        let mut plugin = Self::from_config(config).await;
+        plugin.once = once;
+        plugin
     }
 
     fn json_ingest_batch(
@@ -611,7 +622,6 @@ impl DataSourceDynamodbPlugin {
         let mut total_records = 0u64;
         let mut empty_polls = 0u32;
         let mut last_seq: Option<String> = None;
-        const MAX_EMPTY_POLLS: u32 = 5;
 
         loop {
             let records_resp = self
@@ -631,7 +641,7 @@ impl DataSourceDynamodbPlugin {
 
             if records.is_empty() {
                 empty_polls += 1;
-                if empty_polls >= MAX_EMPTY_POLLS {
+                if stream_idle_should_stop(self.once, empty_polls) {
                     info!(
                         "DynamoDB CDC: shard {} exhausted after {} records",
                         shard_id, total_records
@@ -959,6 +969,19 @@ mod tests {
             initial_shard_iterator_type(SourceCdcMode::CdcOnly),
             ShardIteratorType::Latest
         );
+    }
+
+    #[test]
+    fn once_sync_stops_after_empty_getrecords_polls() {
+        assert!(!stream_idle_should_stop(true, 4));
+        assert!(stream_idle_should_stop(true, 5));
+        assert!(stream_idle_should_stop(true, 6));
+    }
+
+    #[test]
+    fn continuous_sync_does_not_stop_on_empty_getrecords() {
+        assert!(!stream_idle_should_stop(false, 5));
+        assert!(!stream_idle_should_stop(false, 500));
     }
 
     #[test]

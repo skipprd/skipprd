@@ -134,7 +134,7 @@ Read `bottlenecks.json` / stdout: hottest frames in new code first **only if
 they are actually hot**; otherwise overall hot leaves and failed cells.
 Download `flamegraph.svg`, `perf.folded`, `perf-stat.txt`,
 `perf-report.json`. Heaptrack on ingest-A/copy-B Linux is this harness
-(`.github/actions/e2e/heaptrack`), not bike_hire.
+(`profile: heaptrack` on `e2e/regression`), not bike_hire.
 
 ## Query / Iceberg ∪ WAL
 

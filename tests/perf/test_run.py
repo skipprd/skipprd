@@ -855,8 +855,10 @@ class PerfWorkflowContractTests(unittest.TestCase):
         matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
         for scenario_id in scenario_ids():
             self.assertIn(scenario_id, matrix, scenario_id)
-        self.assertIn("actions/e2e/perf", text)
-        self.assertIn("actions/e2e/heaptrack", text)
+        self.assertIn("actions/e2e/regression", text)
+        self.assertNotIn("actions/e2e/perf/", text)
+        self.assertNotIn("actions/e2e/perf-db", text)
+        self.assertNotIn("actions/e2e/heaptrack", text)
         self.assertNotIn("python3 tests/perf/run.py", text)
         self.assertIn("ubuntu-latest", text)
         self.assertNotIn("skippr-darwin-arm64", text)
@@ -884,21 +886,23 @@ class PerfWorkflowContractTests(unittest.TestCase):
         self.assertIn("target/profiling/", text)
         self.assertNotIn("if-no-files-found: warn", text)
         self.assertIn("if-no-files-found: error", text)
-        cell = (REPO_ROOT / ".github" / "scripts" / "run_perf_cell.sh").read_text(encoding="utf-8")
-        self.assertIn("tests/perf/run.py", cell)
-        perf_action = (REPO_ROOT / ".github" / "actions" / "e2e" / "perf" / "action.yaml").read_text(
+        cell = (REPO_ROOT / ".github" / "scripts" / "run_regression_cell.sh").read_text(
             encoding="utf-8"
         )
-        heaptrack = (
-            REPO_ROOT / ".github" / "actions" / "e2e" / "heaptrack" / "action.yaml"
+        self.assertIn("tests/perf/run.py", cell)
+        self.assertIn("tests/perf_db/run.py", cell)
+        self.assertIn("q-*", cell)
+        regression_action = (
+            REPO_ROOT / ".github" / "actions" / "e2e" / "regression" / "action.yaml"
         ).read_text(encoding="utf-8")
-        self.assertIn("run_perf_cell.sh", perf_action)
-        self.assertIn("run_perf_cell.sh", heaptrack)
-        self.assertNotIn("python3 tests/perf/run.py", perf_action)
-        self.assertNotIn("python3 tests/perf/run.py", heaptrack)
-        self.assertIn("heaptrack produced no profile", heaptrack)
-        self.assertIn("if-no-files-found: error", heaptrack)
-        self.assertNotIn("if-no-files-found: warn", heaptrack)
+        self.assertIn("run_regression_cell.sh", regression_action)
+        self.assertNotIn("python3 tests/perf/run.py", regression_action)
+        self.assertNotIn("python3 tests/perf_db/run.py", regression_action)
+        self.assertFalse((REPO_ROOT / ".github" / "scripts" / "run_perf_cell.sh").exists())
+        self.assertFalse((REPO_ROOT / ".github" / "scripts" / "run_perf_db_cell.sh").exists())
+        self.assertFalse((REPO_ROOT / ".github" / "actions" / "e2e" / "perf").exists())
+        self.assertFalse((REPO_ROOT / ".github" / "actions" / "e2e" / "perf-db").exists())
+        self.assertFalse((REPO_ROOT / ".github" / "actions" / "e2e" / "heaptrack").exists())
         workflow = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         matrix_job = workflow.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
         self.assertIn("linux_contracts", matrix_job)

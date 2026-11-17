@@ -189,44 +189,29 @@ jobs:
           fi
           curl -fsSL https://install.duckdb.org | sh
           echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
-      - name: Run ingest scenario
-        if: ${{ !startsWith(matrix.scenario, 'q-') }}
-        uses: ./skipprd/.github/actions/e2e/perf
+      - name: Run scenario
+        uses: ./skipprd/.github/actions/e2e/regression
         with:
           scenario: ${{ matrix.scenario }}
           skipprd_path: ${{ github.workspace }}/skipprd/skipprd-linux_x86/skipprd
           plugin_binaries_dir: ${{ github.workspace }}/skipprd/runtime-plugin-binaries-linux_x86
           scale: linux
           workspace-root: skipprd
-          work: ${{ runner.temp }}/skippr-perf
+          work: ${{ runner.temp }}/skippr-regression
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      - name: Run query scenario
-        if: ${{ startsWith(matrix.scenario, 'q-') }}
-        uses: ./skipprd/.github/actions/e2e/perf-db
-        with:
-          scenario: ${{ matrix.scenario }}
-          skipprd_path: ${{ github.workspace }}/skipprd/skipprd-linux_x86/skipprd
-          plugin_binaries_dir: ${{ github.workspace }}/skipprd/runtime-plugin-binaries-linux_x86
-          scale: linux
-          workspace-root: skipprd
-          work: ${{ runner.temp }}/skippr-perf-db
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: regression-${{ matrix.scenario }}-linux
           path: |
-            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf-report.json
-            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf.log
-            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/*.svg
-            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/profile.json.gz
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf-db-report.json
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf-report.json
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf.log
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/*.svg
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/profile.json.gz
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/perf-report.json
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/perf.log
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/perf-db-report.json
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/*.svg
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/profile.json.gz
           retention-days: 1
           if-no-files-found: error
 
@@ -421,9 +406,8 @@ jobs:
             curl -fsSL https://install.duckdb.org | sh
             echo "${HOME}/.duckdb/cli/latest" >> "$GITHUB_PATH"
           fi
-      - name: Run ingest flamegraph or perf-stat
-        if: ${{ !startsWith(matrix.scenario, 'q-') && matrix.profile != 'heaptrack' }}
-        uses: ./skipprd/.github/actions/e2e/perf
+      - name: Run scenario
+        uses: ./skipprd/.github/actions/e2e/regression
         with:
           scenario: ${{ matrix.scenario }}
           skipprd_path: ${{ github.workspace }}/skipprd/skipprd-linux_x86-profile/skipprd
@@ -431,52 +415,25 @@ jobs:
           scale: linux
           profile: ${{ matrix.profile }}
           workspace-root: skipprd
-          work: ${{ runner.temp }}/skippr-perf
-      - name: Run ingest heaptrack
-        if: ${{ !startsWith(matrix.scenario, 'q-') && matrix.profile == 'heaptrack' }}
-        uses: ./skipprd/.github/actions/e2e/heaptrack
-        with:
-          skipprd_path: ${{ github.workspace }}/skipprd/skipprd-linux_x86-profile/skipprd
-          plugin_binaries_dir: ${{ github.workspace }}/skipprd/runtime-plugin-binaries-linux_x86-profile
-          scale: linux
-          workspace-root: skipprd
-          scenario: ${{ matrix.scenario }}
-      - name: Run query profile
-        if: ${{ startsWith(matrix.scenario, 'q-') }}
-        uses: ./skipprd/.github/actions/e2e/perf-db
-        with:
-          scenario: ${{ matrix.scenario }}
-          skipprd_path: ${{ github.workspace }}/skipprd/skipprd-linux_x86-profile/skipprd
-          plugin_binaries_dir: ${{ github.workspace }}/skipprd/runtime-plugin-binaries-linux_x86-profile
-          scale: linux
-          profile: ${{ matrix.profile }}
-          workspace-root: skipprd
-          work: ${{ runner.temp }}/skippr-perf-db
+          work: ${{ runner.temp }}/skippr-regression
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: regression-${{ matrix.scenario }}-linux-${{ matrix.profile }}
           path: |
-            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf-report.json
-            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf.log
-            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf.folded
-            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/flamegraph.svg
-            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/*.svg
-            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf.data
-            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/perf-stat.txt
-            ${{ runner.temp }}/skippr-perf/${{ matrix.scenario }}/heaptrack*
-            ${{ runner.temp }}/skippr-perf-heaptrack/${{ matrix.scenario }}/perf-report.json
-            ${{ runner.temp }}/skippr-perf-heaptrack/${{ matrix.scenario }}/perf.log
-            ${{ runner.temp }}/skippr-perf-heaptrack/${{ matrix.scenario }}/heaptrack*
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf-db-report.json
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf-report.json
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf.log
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf.folded
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/flamegraph.svg
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/*.svg
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf.data
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/perf-stat.txt
-            ${{ runner.temp }}/skippr-perf-db/${{ matrix.scenario }}/heaptrack*
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/perf-report.json
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/perf.log
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/perf-db-report.json
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/perf.folded
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/flamegraph.svg
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/*.svg
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/perf.data
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/perf-stat.txt
+            ${{ runner.temp }}/skippr-regression/${{ matrix.scenario }}/heaptrack*
           retention-days: 1
           if-no-files-found: error
 

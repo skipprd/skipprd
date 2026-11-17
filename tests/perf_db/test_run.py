@@ -274,7 +274,8 @@ class PerfDbWorkflowContractTests(unittest.TestCase):
         matrix = text.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
         for scenario_id in scenario_ids(db_catalog()):
             self.assertIn(scenario_id, matrix, scenario_id)
-        self.assertIn("actions/e2e/perf-db", text)
+        self.assertIn("actions/e2e/regression", text)
+        self.assertNotIn("actions/e2e/perf-db", text)
         self.assertIn("ubuntu-latest", text)
         self.assertNotIn("skippr-darwin-arm64", text)
         self.assertNotIn("if-no-files-found: warn", text)
@@ -366,6 +367,7 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("arm_compaction_hold", text)
         self.assertIn("OVERLAP_WAIT_SECONDS", text)
         self.assertIn("never reached the expected query result", text)
+        self.assertIn("follow ingest exited rc=", text)
         self.assertNotIn("CLUSTER_TENANT", text)
         self.assertIn("seconds=90", ingest)
         alter_tail = ingest.split('if scenario.get("alter")')[1]

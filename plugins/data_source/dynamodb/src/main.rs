@@ -24,7 +24,7 @@ async fn run() -> std::io::Result<()> {
                     .map_err(std::io::Error::other)?;
                 let cfg: DataSourceDynamodbPluginConfig =
                     start.config.0.decode().map_err(std::io::Error::other)?;
-                let plugin = DataSourceDynamodbPlugin::with_runtime_config(cfg).await;
+                let plugin = DataSourceDynamodbPlugin::with_runtime_config(cfg, start.once).await;
                 Ok(Box::new(plugin) as Box<dyn DataSource + Send>)
             })
         },

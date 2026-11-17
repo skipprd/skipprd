@@ -152,6 +152,11 @@ def peek_until(
         except Exception:  # noqa: BLE001 — peeks race ingest startup; the measured query asserts
             pass
         time.sleep(1)
+    code = ingest.poll()
+    if code is not None:
+        raise perf_run.PerfError(
+            f"{scenario_id}: follow ingest exited rc={code} before the expected query result"
+        )
     raise perf_run.PerfError(
         f"{scenario_id}: held ingest never reached the expected query result"
     )

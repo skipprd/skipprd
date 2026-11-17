@@ -1,5 +1,5 @@
-name: skippr-perf-db cell
-description: "Run one tests/perf_db scenario: ingest then skipprd query --plain."
+name: skippr-regression cell
+description: "Run one ingest/copy or Iceberg∪WAL query scenario with local plugins and --log perf."
 inputs:
   scenario:
     required: true
@@ -23,7 +23,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Run skippr-perf-db scenario
+    - name: Run skippr-regression scenario
       shell: bash
       working-directory: ${{ inputs.workspace-root }}
       env:
@@ -34,4 +34,4 @@ runs:
         PERF_SCALE: ${{ inputs.scale }}
         PERF_PROFILE: ${{ inputs.profile }}
         SKIPPR_LOG_LEVEL: perf
-      run: bash .github/scripts/run_perf_db_cell.sh
+      run: bash .github/scripts/run_regression_cell.sh

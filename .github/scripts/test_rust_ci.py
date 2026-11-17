@@ -582,8 +582,10 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("if: ${{ secrets.", text)
         self.assertIn("R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}", text)
         self.assertIn("if: env.R2_ACCESS_KEY_ID != ''", text)
-        self.assertIn("actions/e2e/perf", text)
-        self.assertIn("actions/e2e/heaptrack", text)
+        self.assertIn("actions/e2e/regression", text)
+        self.assertNotIn("actions/e2e/perf/", text)
+        self.assertNotIn("actions/e2e/perf-db", text)
+        self.assertNotIn("actions/e2e/heaptrack", text)
         self.assertNotIn("python3 tests/perf/run.py", text)
         contracts = text.split("\n  linux_contracts:")[1].split("\n  build_linux:")[0]
         self.assertIn("test_release_sha_batteries.py", contracts)
@@ -610,12 +612,9 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("new code", skill_text)
         self.assertIn("perf-stat", skill_text)
         self.assertTrue((ROOT / ".github" / "scripts" / "skipprd_cli.py").is_file())
-        heaptrack = (
-            ROOT / ".github" / "actions" / "e2e" / "heaptrack" / "action.yaml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("ingest-a-duckdb", heaptrack)
-        self.assertIn("heaptrack", heaptrack)
-        self.assertNotIn("bike_hire", heaptrack)
+        self.assertFalse((ROOT / ".github" / "actions" / "e2e" / "heaptrack").exists())
+        self.assertIn("profile: heaptrack", text)
+        self.assertNotIn("bike_hire", text)
 
     def test_perf_db_workflow_skill_and_no_s3_delete(self) -> None:
         workflow = ROOT / ".github" / "workflows" / "skippr-regression.yml"
@@ -670,13 +669,15 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("if: ${{ secrets.", text)
         self.assertIn("R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}", text)
         self.assertIn("if: env.R2_ACCESS_KEY_ID != ''", text)
-        self.assertIn("actions/e2e/perf-db", text)
+        self.assertIn("actions/e2e/regression", text)
         self.assertGreaterEqual(
             text.count("python3 -m pip install --quiet boto3"),
             2,
             "linux_matrix and linux_profile both need boto3 for DynamoDB Local",
         )
-        self.assertIn("tests/perf_db/run.py", (ROOT / ".github" / "scripts" / "run_perf_db_cell.sh").read_text(encoding="utf-8"))
+        cell = (ROOT / ".github" / "scripts" / "run_regression_cell.sh").read_text(encoding="utf-8")
+        self.assertIn("tests/perf_db/run.py", cell)
+        self.assertIn("tests/perf/run.py", cell)
         self.assertNotIn("python3 tests/perf_db/run.py", text)
         contracts = text.split("\n  linux_contracts:")[1].split("\n  build_linux:")[0]
         self.assertIn("tests/perf/test_run.py", contracts)
