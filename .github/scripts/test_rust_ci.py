@@ -201,6 +201,8 @@ class RustCiTests(unittest.TestCase):
         )[0]
         self.assertIn("[self-hosted, skippr-linux-x64-32]", skipprlake_local)
         self.assertIn("tests/skipprlake_e2e/run.py", skipprlake_local)
+        self.assertIn("actions/setup-java@v4", skipprlake_local)
+        self.assertIn('java-version: "17"', skipprlake_local)
         self.assertIn("SKIP_CARGO_BUILD", skipprlake_local)
         self.assertIn("runtime-plugin-binaries-linux_x86", skipprlake_local)
         self.assertNotIn("USE_PUBLISHED_PLUGINS", skipprlake_local)
