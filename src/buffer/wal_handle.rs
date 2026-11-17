@@ -1053,6 +1053,9 @@ impl PipelineWalHandle {
             let Some(mut row) = self.segment_row(&id)? else {
                 return Ok(true);
             };
+            let keep_offsets = row.offsets.clone();
+            let keep_checkpoints = row.checkpoints.clone();
+            let keep_seq = row.seq.get();
             row.done.or_bits(ordinals);
             crate::metrics::counters::add_compaction_catalog_bit_write(ordinals.len() as u64);
             let all_done = row.done.all_done();
@@ -1062,6 +1065,21 @@ impl PipelineWalHandle {
             row.version = next_catalog_version(version)?;
             let location = row.location.clone();
             let slice_count = row.slice_count;
+            if can_reclaim {
+                // Closed/position live on the segment until reclaim. Write the
+                // offsets family before deleting the row so the next skipprd
+                // process still skips immutable File partitions.
+                publish_committed(
+                    self.offsets.as_ref(),
+                    &keep_offsets,
+                    &keep_checkpoints,
+                    epoch.get(),
+                    keep_seq,
+                    skippr_lease::PublishMode::Republish,
+                )
+                .map_err(|err| DurableError::Io(err.to_string()))?;
+                self.offsets.flush().map_err(DurableError::Io)?;
+            }
             let mut txn = CatalogTxn::new();
             if can_reclaim {
                 txn.delete(
@@ -1692,6 +1710,56 @@ mod tests {
             !offsets_family_empty(kv.as_ref()),
             "startup republish fills the offsets family"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reclaim_keeps_closed_offsets_after_the_segment_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, _overlay, kv) = overlay_handle(dir.path());
+        let mut map = HashMap::new();
+        map.insert(
+            OffsetKey::new(
+                "source",
+                "home/runner/work/temp/skippr_file_duckdb_append/source/people_csv",
+            ),
+            2u64,
+        );
+        handle
+            .persist_segment(
+                "seg-file",
+                &map,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                SystemTime::UNIX_EPOCH,
+            )
+            .await
+            .unwrap();
+        handle
+            .complete_slices_and_reclaim("seg-file", &[0])
+            .await
+            .unwrap();
+        assert!(
+            handle
+                .catalog
+                .get(&CatalogKey::Segment(SegmentId::new("seg-file").unwrap()))
+                .unwrap()
+                .is_none(),
+            "compacted File WAL row is deleted"
+        );
+        let fence = skippr_wal_catalog::CatalogFence::local();
+        let restarted = StoreOffsetStore::new(Arc::clone(&kv), fence);
+        let closed = restarted
+            .get_offset(
+                "source",
+                "home/runner/work/temp/skippr_file_duckdb_append/source/people_csv",
+            )
+            .unwrap()
+            .expect("Closed must survive WAL reclaim across process restart");
+        assert_eq!(&closed[8..16], &2u64.to_le_bytes());
+        assert_eq!(&closed[16..24], &1u64.to_le_bytes());
     }
 
     #[tokio::test]

@@ -2,7 +2,9 @@
 //! DDL journal is not this trait.
 //!
 //! Live resume is an in-process overlay installed at WAL catalog commit.
-//! The Skippr Store `offsets` family is written only by startup `republish_all`.
+//! The Skippr Store `offsets` family is written by startup `republish_all`
+//! and by reclaim of a fully compacted segment, so Closed/position survive
+//! after the WAL row is deleted.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
