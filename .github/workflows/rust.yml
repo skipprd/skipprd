@@ -177,6 +177,7 @@ jobs:
             curl -fsSL https://install.duckdb.org | sh
             export PATH="${HOME}/.duckdb/cli/latest:${PATH}"
           fi
+          export AWS_EC2_METADATA_DISABLED=true
           work="${RUNNER_TEMP:-/tmp}/skippr-file-duckdb-append"
           mkdir -p "${work}/source" "${work}/warehouse" "${work}/data" "${work}/manifests"
           cp tests/fixtures/formats/people.csv "${work}/source/people.csv"
