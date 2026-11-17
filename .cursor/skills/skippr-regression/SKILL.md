@@ -90,7 +90,7 @@ cargo build --release -p skipprd --bin skipprd \
   -p skippr-plugin-data-sink-duckdb \
   -p skippr-plugin-schema-sink-duckdb
 export SKIPPRD_BIN="$PWD/target/release/skipprd"
-python3 tests/perf/run.py --scenario ingest-a-duckdb,copy-b-json-json,copy-py-json-json,copy-py-site-lookup,ingest-py-duckdb,ingest-py-compose-duckdb,ingest-json-parquet,ingest-csv-duckdb,duckdb-ndjson,duckdb-csv,duckdb-json-array,duckdb-insert-values,ingest-ops-duckdb,ingest-ops-filter-duckdb,ingest-ops-compose-stream-duckdb,ingest-aggregates-duckdb,ingest-aggregates-stream-duckdb,ingest-migrate-rename-duckdb,ingest-migrate-rename-stream-duckdb --scale smoke
+python3 tests/perf/run.py --scenario ingest-a-duckdb,copy-b-json-json,copy-py-stamp-json-json,copy-py-site-lookup,ingest-py-site-duckdb,ingest-py-sql-compose-duckdb,ingest-json-parquet,ingest-csv-duckdb,duckdb-ndjson,duckdb-csv,duckdb-json-array,duckdb-insert-values,ingest-sql-compose-duckdb,ingest-sql-filter-duckdb,ingest-sql-compose-stream-duckdb,ingest-create-table-both-duckdb,ingest-create-table-both-stream-duckdb,ingest-migrate-rename-duckdb,ingest-migrate-rename-stream-duckdb --scale smoke
 ```
 
 Duckdb Iceberg is enough for A on a laptop. SkipprLake needs DynamoDB Local
@@ -196,7 +196,7 @@ cargo build --release \
   -p skippr-plugin-schema-sink-skipprlake
 export SKIPPRD_BIN="$PWD/target/release/skipprd"
 python3 tests/perf/run.py \
-  --scenario q-wal-count-iceberg,q-wal-point-iceberg,q-union-count-duckdb,q-ops-count-duckdb,q-aggregates-count-duckdb,q-migrate-rename-duckdb,q-cdc-union-update-pg,q-cdc-union-update-mysql,q-cdc-union-update-ddb,q-cdc-migrate-rename-pg --scale smoke
+  --scenario q-wal-count-iceberg,q-wal-point-iceberg,q-union-count-duckdb,q-sql-compose-duckdb,q-create-table-duckdb,q-migrate-rename-duckdb,q-cdc-union-update-pg,q-cdc-union-update-mysql,q-cdc-union-update-ddb,q-cdc-migrate-rename-pg --scale smoke
 ```
 
 Fail the cell if required `PERF_EVENT` lines are missing (`sync`,
@@ -208,7 +208,7 @@ The same `skippr-regression.yml` `linux_matrix` and `linux_profile` jobs run
 query cells (`q-*`). Profiling cells: flamegraph and
 perf-stat on `q-wal-count-iceberg`, `q-wal-point-iceberg`,
 `q-union-count-duckdb`; flamegraph on `q-cdc-union-update-pg`,
-`q-ops-count-duckdb`, `q-ops-stream-iceberg`, `q-migrate-rename-duckdb`,
+`q-sql-compose-duckdb`, `q-sql-compose-stream-iceberg`, `q-migrate-rename-duckdb`,
 `q-migrate-rename-stream-iceberg`; heaptrack on the two count cells.
 `linux_matrix` also queries after SQL compose, CREATE TABLE both-measures,
 every File ALTER (`rename`, `merge`, `drop`, `promote`) on historical

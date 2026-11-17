@@ -50,6 +50,9 @@ class PerfCatalogTests(unittest.TestCase):
         text = (HARNESS_DIR / "catalog.yaml").read_text(encoding="utf-8").lower()
         self.assertIn("wal leftover import is out of suite", text)
         self.assertNotRegex(text, r"(?m)^  import:")
+        self.assertNotIn("ingest-ops-", text)
+        self.assertNotIn("q-ops-", text)
+        self.assertNotIn("ingest-aggregates-", text)
 
     def test_smoke_group_is_a_and_b(self) -> None:
         catalog = load_catalog()
@@ -146,10 +149,10 @@ class PerfCatalogTests(unittest.TestCase):
             "ingest-a-duckdb",
             "copy-b-json-json",
             "ingest-json-parquet",
-            "ingest-ops-duckdb",
-            "ingest-ops-compose-stream-duckdb",
-            "ingest-aggregates-duckdb",
-            "ingest-aggregates-stream-duckdb",
+            "ingest-sql-compose-duckdb",
+            "ingest-sql-compose-stream-duckdb",
+            "ingest-create-table-both-duckdb",
+            "ingest-create-table-both-stream-duckdb",
             "ingest-migrate-rename-duckdb",
             "ingest-migrate-rename-stream-duckdb",
             "ingest-slow-flatten-duckdb",
@@ -361,27 +364,27 @@ class FileParquetYamlTests(unittest.TestCase):
 
 
 class StreamTransformPerfTests(unittest.TestCase):
-    def test_catalog_covers_every_ops_agg_migrate_permutation(self) -> None:
+    def test_catalog_covers_every_sql_create_table_migrate_permutation(self) -> None:
         from matrix import (
             AGG_MEASURES,
             ALTERS,
             INGEST_MODES,
-            OPS,
-            ingest_agg_id,
+            SQL_SELECTS,
+            ingest_create_table_id,
             ingest_migrate_id,
-            ingest_ops_id,
+            ingest_sql_id,
         )
 
         catalog = load_catalog()
         ids = catalog["scenarios"]
-        for op in OPS:
+        for op in SQL_SELECTS:
             for mode in INGEST_MODES:
-                name = ingest_ops_id(op, mode)
+                name = ingest_sql_id(op, mode)
                 spec = ids[name]
                 self.assertEqual(spec["kind"], "ingest", name)
-                from matrix import SCHEMA_CHANGING_OPS
+                from matrix import SCHEMA_CHANGING_SQL
 
-                if op in SCHEMA_CHANGING_OPS:
+                if op in SCHEMA_CHANGING_SQL:
                     self.assertEqual(spec["sink"], "file", name)
                     self.assertEqual(spec.get("sink_format"), "parquet", name)
                 else:
@@ -394,7 +397,7 @@ class StreamTransformPerfTests(unittest.TestCase):
                 self.assertIn("stream_transform", required_perf_for(catalog, spec), name)
         for measure in AGG_MEASURES:
             for mode in INGEST_MODES:
-                name = ingest_agg_id(measure, mode)
+                name = ingest_create_table_id(measure, mode)
                 spec = ids[name]
                 self.assertEqual(spec["kind"], "ingest", name)
                 self.assertEqual(spec.get("transform_compute"), measure, name)
@@ -415,25 +418,25 @@ class StreamTransformPerfTests(unittest.TestCase):
                 else:
                     self.assertIn("wal_compact", phases, name)
                 self.assertTrue(spec.get("continue_ingest"), name)
-        self.assertEqual(len(OPS) * len(INGEST_MODES), 6)
+        self.assertEqual(len(SQL_SELECTS) * len(INGEST_MODES), 6)
         self.assertEqual(len(AGG_MEASURES) * len(INGEST_MODES), 6)
         self.assertEqual(len(ALTERS) * len(INGEST_MODES), 8)
         workflow = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         self.assertRegex(
             workflow,
-            r"- scenario: ingest-ops-duckdb\n\s+profile: flamegraph",
+            r"- scenario: ingest-sql-compose-duckdb\n\s+profile: flamegraph",
         )
         self.assertRegex(
             workflow,
-            r"- scenario: ingest-ops-compose-stream-duckdb\n\s+profile: flamegraph",
+            r"- scenario: ingest-sql-compose-stream-duckdb\n\s+profile: flamegraph",
         )
         self.assertRegex(
             workflow,
-            r"- scenario: ingest-aggregates-duckdb\n\s+profile: flamegraph",
+            r"- scenario: ingest-create-table-both-duckdb\n\s+profile: flamegraph",
         )
         self.assertRegex(
             workflow,
-            r"- scenario: ingest-aggregates-stream-duckdb\n\s+profile: flamegraph",
+            r"- scenario: ingest-create-table-both-stream-duckdb\n\s+profile: flamegraph",
         )
         self.assertRegex(
             workflow,
@@ -591,21 +594,21 @@ class StreamTransformPerfTests(unittest.TestCase):
     def test_catalog_includes_py_cells(self) -> None:
         catalog = load_catalog()
         for name in (
-            "copy-py-json-json",
+            "copy-py-stamp-json-json",
             "copy-py-site-lookup",
-            "ingest-py-duckdb",
-            "ingest-py-stream-duckdb",
-            "ingest-py-compose-duckdb",
+            "ingest-py-site-duckdb",
+            "ingest-py-site-stream-duckdb",
+            "ingest-py-sql-compose-duckdb",
         ):
             self.assertIn(name, catalog["scenarios"], name)
-        copy_py = catalog["scenarios"]["copy-py-json-json"]
+        copy_py = catalog["scenarios"]["copy-py-stamp-json-json"]
         self.assertEqual(copy_py.get("transform_py"), "stamp")
         self.assertTrue((copy_py.get("asserts") or {}).get("identity"))
         self.assertIn("mapped", (copy_py.get("asserts") or {}).get("dest_has") or [])
         site = catalog["scenarios"]["copy-py-site-lookup"]
         self.assertEqual(site.get("transform_py"), "site")
         self.assertEqual(site.get("batch_partition_fields"), "detail.site")
-        compose = catalog["scenarios"]["ingest-py-compose-duckdb"]
+        compose = catalog["scenarios"]["ingest-py-sql-compose-duckdb"]
         self.assertEqual(compose.get("transform_py"), "stamp")
         self.assertEqual(compose.get("transform_sql"), "compose")
 
@@ -613,14 +616,14 @@ class StreamTransformPerfTests(unittest.TestCase):
         skill = (REPO_ROOT / ".cursor" / "skills" / "skippr-regression" / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("ingest-ops-duckdb", skill)
-        self.assertIn("copy-py-json-json", skill)
+        self.assertIn("ingest-sql-compose-duckdb", skill)
+        self.assertIn("copy-py-stamp-json-json", skill)
         self.assertIn("copy-py-site-lookup", skill)
-        self.assertIn("ingest-py-duckdb", skill)
-        self.assertIn("ingest-py-compose-duckdb", skill)
-        self.assertIn("ingest-ops-compose-stream-duckdb", skill)
-        self.assertIn("ingest-aggregates-duckdb", skill)
-        self.assertIn("ingest-aggregates-stream-duckdb", skill)
+        self.assertIn("ingest-py-site-duckdb", skill)
+        self.assertIn("ingest-py-sql-compose-duckdb", skill)
+        self.assertIn("ingest-sql-compose-stream-duckdb", skill)
+        self.assertIn("ingest-create-table-both-duckdb", skill)
+        self.assertIn("ingest-create-table-both-stream-duckdb", skill)
         self.assertIn("ingest-migrate-rename-duckdb", skill)
         self.assertIn("ingest-migrate-rename-stream-duckdb", skill)
         self.assertIn("continue ingest", skill.lower())
@@ -957,8 +960,16 @@ class PerfWorkflowContractTests(unittest.TestCase):
         workflow = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(encoding="utf-8")
         matrix_job = workflow.split("\n  linux_matrix:")[1].split("\n  build_linux_profile:")[0]
         self.assertIn("linux_contracts", matrix_job)
+        self.assertIn("name: ${{ matrix.scenario }}", matrix_job.split("\n    needs:", 1)[0])
+        self.assertNotRegex(workflow, r"(?m)^    name: regression ")
+        self.assertNotIn("ingest-ops-", workflow)
+        self.assertNotIn("q-ops-", workflow)
         profile_job = workflow.split("\n  linux_profile:")[1].split("\n  linux_analyze:")[0]
         self.assertIn("linux_contracts", profile_job)
+        self.assertIn(
+            "name: ${{ matrix.scenario }} ${{ matrix.profile }}",
+            profile_job.split("\n    needs:", 1)[0],
+        )
         contracts = workflow.split("\n  linux_contracts:")[1].split("\n  build_linux:")[0]
         self.assertIn("tests/perf/test_run.py", contracts)
         self.assertIn("tests/perf/test_query.py", contracts)

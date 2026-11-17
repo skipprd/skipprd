@@ -54,10 +54,10 @@ REQUIRED = SMOKE + (
     "q-union-point-duckdb",
     "q-union-group-duckdb",
     "q-iceberg-only-duckdb",
-    "q-ops-count-duckdb",
-    "q-ops-stream-iceberg",
-    "q-aggregates-count-duckdb",
-    "q-aggregates-stream-iceberg",
+    "q-sql-compose-duckdb",
+    "q-sql-compose-stream-iceberg",
+    "q-create-table-duckdb",
+    "q-create-table-stream-iceberg",
     "q-migrate-rename-duckdb",
     "q-migrate-merge-duckdb",
     "q-migrate-drop-duckdb",
@@ -86,24 +86,24 @@ class PerfDbCatalogTests(unittest.TestCase):
         self.assertNotIn("q-union-count-skipprlake", ids)
         self.assertIn("q-cdc-union-update-pg", ids)
         self.assertIn("q-union-overlap-duckdb", ids)
-        self.assertIn("q-ops-count-duckdb", ids)
+        self.assertIn("q-sql-compose-duckdb", ids)
         self.assertIn("q-migrate-rename-stream-iceberg", ids)
 
-    def test_ops_aggregates_migrate_cover_stream_and_historical(self) -> None:
+    def test_sql_create_table_migrate_cover_stream_and_historical(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "tests" / "perf"))
         from matrix import (  # noqa: WPS433
             ALTERS,
             INGEST_MODES,
-            query_agg_id,
+            query_create_table_id,
             query_migrate_id,
-            query_ops_id,
+            query_sql_id,
         )
 
         catalog = db_catalog()
         ids = catalog["scenarios"]
         for mode in INGEST_MODES:
-            ops = ids[query_ops_id(mode)]
-            aggs = ids[query_agg_id(mode)]
+            ops = ids[query_sql_id(mode)]
+            aggs = ids[query_create_table_id(mode)]
             self.assertEqual(ops["kind"], "query_after_ingest")
             self.assertEqual(ops.get("transform_sql"), "compose")
             self.assertEqual(aggs.get("transform_compute"), "both")
@@ -127,11 +127,11 @@ class PerfDbCatalogTests(unittest.TestCase):
         workflow = (REPO_ROOT / ".github" / "workflows" / "skippr-regression.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("q-ops-count-duckdb", workflow)
-        self.assertIn("q-ops-stream-iceberg", workflow)
+        self.assertIn("q-sql-compose-duckdb", workflow)
+        self.assertIn("q-sql-compose-stream-iceberg", workflow)
         self.assertRegex(
             workflow,
-            r"- scenario: q-ops-count-duckdb\n\s+profile: flamegraph",
+            r"- scenario: q-sql-compose-duckdb\n\s+profile: flamegraph",
         )
         self.assertRegex(
             workflow,

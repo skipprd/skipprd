@@ -89,12 +89,14 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
 
     def test_perf_gate_is_matrix_not_frame_pointer(self) -> None:
         regression = next(b for b in mod.BATTERIES if b.workflow == "skippr-regression.yml")
-        self.assertIn("regression ingest-a-duckdb", regression.gate_jobs)
-        self.assertIn("regression copy-b-json-json", regression.gate_jobs)
-        self.assertIn("regression q-wal-count-iceberg", regression.gate_jobs)
-        self.assertIn("regression workflow contracts", regression.gate_jobs)
-        self.assertIn("release host + regression plugins (linux x86)", regression.gate_jobs)
+        self.assertIn("ingest-a-duckdb", regression.gate_jobs)
+        self.assertIn("copy-b-json-json", regression.gate_jobs)
+        self.assertIn("q-wal-count-iceberg", regression.gate_jobs)
+        self.assertIn("workflow contracts", regression.gate_jobs)
+        self.assertIn("release host + plugins (linux x86)", regression.gate_jobs)
+        self.assertNotIn("regression ingest-a-duckdb", regression.gate_jobs)
         self.assertNotIn("frame-pointer host + inferno (linux x86)", regression.gate_jobs)
+        self.assertTrue(all(not name.startswith("regression ") for name in regression.gate_jobs))
         self.assertTrue(all("flamegraph" not in name for name in regression.gate_jobs))
         self.assertTrue(all("heaptrack" not in name for name in regression.gate_jobs))
         self.assertTrue(all("perf-stat" not in name for name in regression.gate_jobs))
@@ -104,11 +106,7 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
             encoding="utf-8"
         )
         for name in regression.gate_jobs:
-            token = name.removeprefix("regression ").removeprefix("release host + ")
-            self.assertTrue(
-                name in workflow or token in workflow,
-                name,
-            )
+            self.assertIn(name, workflow, name)
 
     def test_gate_jobs_skip_while_frame_pointer_still_running(self) -> None:
         runs = [
@@ -120,26 +118,26 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
             }
         ]
         jobs = [
-            {"name": "regression workflow contracts", "conclusion": "success"},
-            {"name": "release host + regression plugins (linux x86)", "conclusion": "success"},
-            {"name": "regression ingest-a-duckdb", "conclusion": "success"},
+            {"name": "workflow contracts", "conclusion": "success"},
+            {"name": "release host + plugins (linux x86)", "conclusion": "success"},
+            {"name": "ingest-a-duckdb", "conclusion": "success"},
             {"name": "frame-pointer host + inferno (linux x86)", "conclusion": ""},
         ]
         gate = (
-            "regression workflow contracts",
-            "release host + regression plugins (linux x86)",
-            "regression ingest-a-duckdb",
+            "workflow contracts",
+            "release host + plugins (linux x86)",
+            "ingest-a-duckdb",
         )
         self.assertEqual(
             mod.plan_for_gate_jobs("abc", runs, jobs, gate),
             mod.Plan.SKIP_DISPATCH,
         )
-        jobs[2] = {"name": "regression ingest-a-duckdb", "conclusion": "failure"}
+        jobs[2] = {"name": "ingest-a-duckdb", "conclusion": "failure"}
         self.assertEqual(
             mod.plan_for_gate_jobs("abc", runs, jobs, gate),
             mod.Plan.WAIT,
         )
-        jobs[2] = {"name": "regression ingest-a-duckdb", "conclusion": "success"}
+        jobs[2] = {"name": "ingest-a-duckdb", "conclusion": "success"}
         del jobs[0]
         self.assertEqual(
             mod.plan_for_gate_jobs("abc", runs, jobs, gate),
@@ -148,9 +146,9 @@ class ReleaseShaBatteriesTests(unittest.TestCase):
         runs[0]["status"] = "completed"
         runs[0]["conclusion"] = "failure"
         jobs = [
-            {"name": "regression workflow contracts", "conclusion": "success"},
-            {"name": "release host + regression plugins (linux x86)", "conclusion": "success"},
-            {"name": "regression ingest-a-duckdb", "conclusion": "success"},
+            {"name": "workflow contracts", "conclusion": "success"},
+            {"name": "release host + plugins (linux x86)", "conclusion": "success"},
+            {"name": "ingest-a-duckdb", "conclusion": "success"},
             {"name": "frame-pointer host + inferno (linux x86)", "conclusion": "failure"},
         ]
         self.assertEqual(

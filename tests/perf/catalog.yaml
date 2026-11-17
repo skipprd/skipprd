@@ -5,7 +5,7 @@
 # late-delete / reinsert / sum / overlap / iceberg-only), plus ALTER on that lake
 # then continue CDC then query.
 # File migrate query cells ALTER already-ingested rows, ingest a second batch, then query.
-# Ops/aggregates/migrate: historical = drained DuckDB SELECT; stream = SkipprLake STREAM with live WAL pin.
+# SQL SELECT / CREATE TABLE / migrate: historical = drained DuckDB SELECT; stream = SkipprLake STREAM with live WAL pin.
 # wal_pin: drained = the measured query pinned no WAL (W \ E empty, lake only);
 #          live    = the measured query read WAL held behind the compaction hold.
 # SQL filter/derive and CREATE TABLE: File = historical batch, Stdin = stream source.
@@ -55,7 +55,7 @@ scenarios:
     asserts:
       identity: true
 
-  copy-py-json-json:
+  copy-py-stamp-json-json:
     group: always
     kind: copy
     sink: file
@@ -79,7 +79,7 @@ scenarios:
     asserts:
       identity: true
 
-  ingest-py-duckdb:
+  ingest-py-site-duckdb:
     group: always
     kind: ingest
     sink: duckdb
@@ -92,7 +92,7 @@ scenarios:
       bronze_count: true
       dest_has: [site]
 
-  ingest-py-stream-duckdb:
+  ingest-py-site-stream-duckdb:
     group: always
     kind: ingest
     sink: duckdb
@@ -106,7 +106,7 @@ scenarios:
       bronze_count: true
       dest_has: [site]
 
-  ingest-py-compose-duckdb:
+  ingest-py-sql-compose-duckdb:
     group: always
     kind: ingest
     sink: file
@@ -213,7 +213,7 @@ scenarios:
       exact_arrow_rows: 0
       bronze_count: true
 
-  ingest-ops-duckdb:
+  ingest-sql-compose-duckdb:
     group: always
     kind: ingest
     sink: file
@@ -229,7 +229,7 @@ scenarios:
       amount_sum: true
       dest_has: [id, name, amount, amount_gbp]
 
-  ingest-ops-filter-duckdb:
+  ingest-sql-filter-duckdb:
     group: always
     kind: ingest
     sink: duckdb
@@ -241,7 +241,7 @@ scenarios:
       bronze_count: true
       amount_sum: true
 
-  ingest-ops-derive-duckdb:
+  ingest-sql-derive-duckdb:
     group: always
     kind: ingest
     sink: file
@@ -257,7 +257,7 @@ scenarios:
       amount_sum: true
       dest_has: [id, name, amount, amount_gbp]
 
-  ingest-ops-filter-stream-duckdb:
+  ingest-sql-filter-stream-duckdb:
     group: always
     kind: ingest
     sink: duckdb
@@ -270,7 +270,7 @@ scenarios:
       bronze_count: true
       amount_sum: true
 
-  ingest-ops-derive-stream-duckdb:
+  ingest-sql-derive-stream-duckdb:
     group: always
     kind: ingest
     sink: file
@@ -286,7 +286,7 @@ scenarios:
       amount_sum: true
       dest_has: [id, name, amount, amount_gbp]
 
-  ingest-ops-compose-stream-duckdb:
+  ingest-sql-compose-stream-duckdb:
     group: always
     kind: ingest
     sink: file
@@ -302,7 +302,7 @@ scenarios:
       amount_sum: true
       dest_has: [id, name, amount, amount_gbp]
 
-  ingest-aggregates-duckdb:
+  ingest-create-table-both-duckdb:
     group: always
     kind: ingest
     sink: duckdb
@@ -316,7 +316,7 @@ scenarios:
       bronze_count: true
       amount_sum: true
 
-  ingest-aggregates-sum-duckdb:
+  ingest-create-table-sum-duckdb:
     group: always
     kind: ingest
     sink: duckdb
@@ -330,7 +330,7 @@ scenarios:
       bronze_count: true
       amount_sum: true
 
-  ingest-aggregates-count-duckdb:
+  ingest-create-table-count-duckdb:
     group: always
     kind: ingest
     sink: duckdb
@@ -344,7 +344,7 @@ scenarios:
       bronze_count: true
       amount_sum: true
 
-  ingest-aggregates-stream-duckdb:
+  ingest-create-table-both-stream-duckdb:
     group: always
     kind: ingest
     sink: duckdb
@@ -358,7 +358,7 @@ scenarios:
       bronze_count: true
       amount_sum: true
 
-  ingest-aggregates-sum-stream-duckdb:
+  ingest-create-table-sum-stream-duckdb:
     group: always
     kind: ingest
     sink: duckdb
@@ -372,7 +372,7 @@ scenarios:
       bronze_count: true
       amount_sum: true
 
-  ingest-aggregates-count-stream-duckdb:
+  ingest-create-table-count-stream-duckdb:
     group: always
     kind: ingest
     sink: duckdb
@@ -1054,7 +1054,7 @@ scenarios:
       query_reconcile: true
       query_has: [id]
 
-  q-ops-count-duckdb:
+  q-sql-compose-duckdb:
     group: always
     kind: query_after_ingest
     sink: duckdb
@@ -1067,7 +1067,7 @@ scenarios:
       wal_pin: drained
       query_has: [name, amount_gbp]
 
-  q-ops-stream-iceberg:
+  q-sql-compose-stream-iceberg:
     group: always
     kind: query_after_ingest
     sink: skipprlake
@@ -1081,7 +1081,7 @@ scenarios:
       wal_pin: live
       query_has: [name, amount_gbp]
 
-  q-aggregates-count-duckdb:
+  q-create-table-duckdb:
     group: always
     kind: query_after_ingest
     sink: duckdb
@@ -1093,7 +1093,7 @@ scenarios:
       iceberg_parquet: true
       wal_pin: drained
 
-  q-aggregates-stream-iceberg:
+  q-create-table-stream-iceberg:
     group: always
     kind: query_after_ingest
     sink: skipprlake

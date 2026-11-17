@@ -9,10 +9,10 @@ cells ALTER already-ingested data, ingest more, then query.
 
 from __future__ import annotations
 
-OPS = ("filter", "derive", "compose")
+SQL_SELECTS = ("filter", "derive", "compose")
 # Iceberg dest schema is discovered from source columns. Derive/compose add
 # columns, so those cells write File parquet so dest_has matches the folded batch.
-SCHEMA_CHANGING_OPS = ("derive", "compose")
+SCHEMA_CHANGING_SQL = ("derive", "compose")
 INGEST_MODES = ("historical", "stream")
 AGG_MEASURES = ("sum", "count", "both")
 ALTERS = ("rename", "merge", "drop", "promote")
@@ -50,22 +50,16 @@ CDC_CASE_SQL = {
 FILTER_AMOUNT_GT = 50
 
 
-def ingest_ops_id(op: str, mode: str) -> str:
-    if op == "compose" and mode == "historical":
-        return "ingest-ops-duckdb"
+def ingest_sql_id(op: str, mode: str) -> str:
     if mode == "historical":
-        return f"ingest-ops-{op}-duckdb"
-    return f"ingest-ops-{op}-stream-duckdb"
+        return f"ingest-sql-{op}-duckdb"
+    return f"ingest-sql-{op}-stream-duckdb"
 
 
-def ingest_agg_id(measure: str, mode: str) -> str:
-    if measure == "both" and mode == "historical":
-        return "ingest-aggregates-duckdb"
+def ingest_create_table_id(measure: str, mode: str) -> str:
     if mode == "historical":
-        return f"ingest-aggregates-{measure}-duckdb"
-    if measure == "both":
-        return "ingest-aggregates-stream-duckdb"
-    return f"ingest-aggregates-{measure}-stream-duckdb"
+        return f"ingest-create-table-{measure}-duckdb"
+    return f"ingest-create-table-{measure}-stream-duckdb"
 
 
 def ingest_migrate_id(alter: str, mode: str) -> str:
@@ -74,16 +68,16 @@ def ingest_migrate_id(alter: str, mode: str) -> str:
     return f"ingest-migrate-{alter}-stream-duckdb"
 
 
-def query_ops_id(mode: str) -> str:
+def query_sql_id(mode: str) -> str:
     if mode == "historical":
-        return "q-ops-count-duckdb"
-    return "q-ops-stream-iceberg"
+        return "q-sql-compose-duckdb"
+    return "q-sql-compose-stream-iceberg"
 
 
-def query_agg_id(mode: str) -> str:
+def query_create_table_id(mode: str) -> str:
     if mode == "historical":
-        return "q-aggregates-count-duckdb"
-    return "q-aggregates-stream-iceberg"
+        return "q-create-table-duckdb"
+    return "q-create-table-stream-iceberg"
 
 
 def query_migrate_id(alter: str, mode: str) -> str:

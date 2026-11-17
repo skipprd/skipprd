@@ -59,7 +59,10 @@ def linux_matrix_job_prefix(workflow: Path) -> str:
         stripped = line.strip()
         if stripped.startswith("name:"):
             raw = stripped.split("name:", 1)[1].strip()
-            return raw.split("${{", 1)[0].strip() + " "
+            prefix = raw.split("${{", 1)[0].rstrip()
+            if not prefix:
+                return ""
+            return prefix + " "
     raise SystemExit(f"no linux_matrix job name in {workflow}")
 
 
@@ -84,8 +87,8 @@ BATTERIES: tuple[Battery, ...] = (
         "skippr-regression",
         gate_jobs=perf_gate_jobs(
             ROOT / ".github" / "workflows" / "skippr-regression.yml",
-            "regression workflow contracts",
-            "release host + regression plugins (linux x86)",
+            "workflow contracts",
+            "release host + plugins (linux x86)",
         ),
     ),
 )
