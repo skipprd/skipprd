@@ -2188,18 +2188,24 @@ impl<S: SinkSpec> IcebergWriter<S> {
         for batch in batches {
             let batch = crate::parquet_util::coerce_timestamp_dates_to_date32(batch, &date_fields)?;
             let batch = crate::parquet_util::coerce_timestamps_to_microseconds(batch)?;
-            let batch = if content == PendingFileContent::Data {
+            let stamp = content == PendingFileContent::Data
+                || time_partition_source_present(&batch, iceberg_schema.as_ref(), &partition_spec);
+            let batch = if stamp {
                 self.stamp_time_partition_for(&namespace, batch, iceberg_schema.as_ref())?
             } else {
                 batch
             };
             prepared.push(apply_iceberg_field_ids(batch, &iceberg_schema)?);
         }
-        let schema = prepared
-            .first()
-            .map(RecordBatch::schema)
-            .ok_or_else(|| io::Error::other("refusing to upload an empty Iceberg file"))?;
-        let partition = if content == PendingFileContent::Data {
+        if prepared.is_empty() {
+            return Err(io::Error::other("refusing to upload an empty Iceberg file"));
+        }
+        let partition = if content == PendingFileContent::Data
+            || time_partition_source_present_in_batches(
+                &prepared,
+                iceberg_schema.as_ref(),
+                &partition_spec,
+            ) {
             stored_partition_from_spec_fields(
                 iceberg_schema.as_ref(),
                 partition_spec.fields(),
@@ -2209,6 +2215,17 @@ impl<S: SinkSpec> IcebergWriter<S> {
         } else {
             Vec::new()
         };
+        if content == PendingFileContent::EqualityDeletes && !equality_ids.is_empty() {
+            let names = equality_column_names(iceberg_schema.as_ref(), &equality_ids)?;
+            prepared = prepared
+                .into_iter()
+                .map(|batch| project_batch_columns(&batch, &names))
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        let schema = prepared
+            .first()
+            .map(RecordBatch::schema)
+            .ok_or_else(|| io::Error::other("refusing to upload an empty Iceberg file"))?;
         let order_fields =
             skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
                 &schema,
@@ -3568,9 +3585,10 @@ fn prepare_grouped_policy_batches(
 struct CdcFinalState {
     /// The latest version of every key whose winning event is not a delete.
     upserts: Vec<RecordBatch>,
-    /// Business-key columns to equality-delete. Iceberg applies an equality delete
-    /// only to data files with an older sequence number, so `upserts` in the same
-    /// commit survive while the previously committed version is retired.
+    /// Rows whose winning event is a delete, still in the source schema so upload
+    /// can stamp the day partition. Iceberg applies an equality delete only to
+    /// data files with an older sequence number, so `upserts` in the same commit
+    /// survive while the previously committed version is retired.
     deletes: Vec<RecordBatch>,
     /// Winning StoredWinner per key the envelope changed.
     tokens: BTreeMap<String, StoredWinnerFile>,
@@ -3692,10 +3710,7 @@ fn final_state_cdc_batches(
         let delete = filter_record_batch(batch, &BooleanArray::from(delete_mask))
             .map_err(|err| io::Error::other(err.to_string()))?;
         if delete.num_rows() > 0 {
-            deletes.push(project_batch_columns(
-                &delete,
-                &contract.business_key_columns,
-            )?);
+            deletes.push(delete);
         }
     }
     Ok(CdcFinalState {
@@ -3715,6 +3730,44 @@ fn utf8_column<'b>(batch: &'b RecordBatch, name: &str) -> Result<&'b StringArray
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| io::Error::other(format!("{name} must be Utf8")))
+}
+
+fn equality_column_names(schema: &Schema, equality_ids: &[i32]) -> Result<Vec<String>, io::Error> {
+    equality_ids
+        .iter()
+        .map(|id| {
+            schema
+                .field_by_id(*id)
+                .map(|field| field.name.clone())
+                .ok_or_else(|| {
+                    io::Error::other(format!(
+                        "Iceberg equality-delete field id {id} is not in the table schema"
+                    ))
+                })
+        })
+        .collect()
+}
+
+fn time_partition_source_present(
+    batch: &RecordBatch,
+    iceberg_schema: &Schema,
+    partition_spec: &iceberg::spec::PartitionSpec,
+) -> bool {
+    partition_spec.fields().iter().any(|field| {
+        iceberg_schema
+            .field_by_id(field.source_id)
+            .is_some_and(|source| batch.column_by_name(source.name.as_str()).is_some())
+    })
+}
+
+fn time_partition_source_present_in_batches(
+    batches: &[RecordBatch],
+    iceberg_schema: &Schema,
+    partition_spec: &iceberg::spec::PartitionSpec,
+) -> bool {
+    batches
+        .iter()
+        .any(|batch| time_partition_source_present(batch, iceberg_schema, partition_spec))
 }
 
 fn equality_ids_for_columns(
@@ -5708,6 +5761,10 @@ mod tests {
         assert_eq!(ids(&state.deletes), vec![2]);
         assert_eq!(state.tokens.len(), 2);
         assert!(!state.tokens.contains_key(&cdc_key(3)));
+        assert!(
+            state.deletes[0].column_by_name("value").is_some(),
+            "delete rows keep source columns so Iceberg can stamp the day partition without a sibling data file"
+        );
     }
 
     #[test]
