@@ -1,10 +1,10 @@
 """Permutation SoT for skippr-perf and skippr-perf-db transform / migrate / CDC cells.
 
 Historical ingest is File `sync --once`. Stream ingest is Stdin (SQL filter/derive
-and CREATE TABLE) or a compaction hold (migrate + query). Copy pipelines cannot
-set transform.compute. CDC query cells are SnapshotThenLogExactOnce for every
-GitHub-local source (Postgres, MySQL, DynamoDB). File and CDC migrate cells
-ALTER already-ingested data, ingest more, then query.
+and CREATE TABLE) or a compaction hold (migrate + query). Copy pipelines may set
+`type: py` (`path` + `handler`) only. CDC query cells are SnapshotThenLogExactOnce
+for every GitHub-local source (Postgres, MySQL, DynamoDB). File and CDC migrate
+cells ALTER already-ingested data, ingest more, then query.
 """
 
 from __future__ import annotations
@@ -175,3 +175,18 @@ COMPUTE_YAML = {
 }
 
 ALTER_SQL = {alter: alter_sql(alter) for alter in ALTERS}
+
+PY_YAML = {
+    "stamp": (
+        "        - name: enrich\n"
+        "          type: py\n"
+        "          path: stamp.py\n"
+        "          handler: transform\n"
+    ),
+    "site": (
+        "        - name: enrich\n"
+        "          type: py\n"
+        "          path: enrich.py\n"
+        "          handler: transform\n"
+    ),
+}

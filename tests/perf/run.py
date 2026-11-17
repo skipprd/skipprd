@@ -38,6 +38,7 @@ from fixtures import (  # noqa: E402
 from matrix import (  # noqa: E402
     ALTER_SQL,
     COMPUTE_YAML,
+    PY_YAML,
     SQL_YAML,
     alter_sql,
     expected_amount_sum_range,
@@ -263,6 +264,26 @@ def wrap_skippr_yml(script: Path) -> Path:
     return script.parent / "skippr.yml"
 
 
+def transform_py_of(scenario: dict[str, Any]) -> str:
+    raw = scenario.get("transform_py")
+    if raw:
+        return str(raw)
+    return ""
+
+
+def stage_py_files(config: Path, py_key: str) -> None:
+    dest = config.parent
+    if py_key == "stamp":
+        shutil.copy(HARNESS_DIR / "py_stamp" / "stamp.py", dest / "stamp.py")
+        return
+    if py_key == "site":
+        src = HARNESS_DIR / "py_site_lookup"
+        shutil.copy(src / "enrich.py", dest / "enrich.py")
+        shutil.copy(src / "lookup.py", dest / "lookup.py")
+        return
+    raise PerfError(py_key)
+
+
 def write_skippr_yml(
     path: Path,
     *,
@@ -275,24 +296,39 @@ def write_skippr_yml(
     extra_source: dict[str, str] | None = None,
     sql: bool | str = False,
     compute: bool | str = False,
+    py: bool | str = False,
+    partition_fields: str = "",
 ) -> None:
     """SkipprLake Iceberg catalog is `catalog_table`, never `skippr.store.type`."""
+    py_key = "stamp" if py is True else (str(py) if py else "")
+    if py_key:
+        stage_py_files(path, py_key)
     if kind.startswith("copy"):
         flatten_yaml = ""
-        transform_yaml = ""
+        extra_transform = ""
+        compute_items: list[str] = []
+        if py_key:
+            compute_items.append(PY_YAML[py_key])
+        if compute_items:
+            extra_transform += "      compute:\n" + "".join(compute_items)
+        if partition_fields:
+            extra_transform += f"      batch_partition_fields: {partition_fields}\n"
+        transform_yaml = f"    transform:\n{extra_transform}" if extra_transform else ""
         pipeline_type = "    type: copy\n"
     else:
         flatten_yaml = "      flatten_events: yes\n" if flatten else "      flatten_events: no\n"
         extra_transform = ""
-        sql_items: list[str] = []
+        compute_items: list[str] = []
         sql_key = "compose" if sql is True else (str(sql) if sql else "")
         compute_key = "both" if compute is True else (str(compute) if compute else "")
+        if py_key:
+            compute_items.append(PY_YAML[py_key])
         if sql_key:
-            sql_items.append(SQL_YAML[sql_key])
+            compute_items.append(SQL_YAML[sql_key])
         if compute_key:
-            sql_items.append(COMPUTE_YAML[compute_key])
-        if sql_items:
-            extra_transform += "      compute:\n" + "".join(sql_items)
+            compute_items.append(COMPUTE_YAML[compute_key])
+        if compute_items:
+            extra_transform += "      compute:\n" + "".join(compute_items)
         transform_yaml = f"    transform:\n{flatten_yaml}{extra_transform}"
         pipeline_type = ""
     if source_kind == "File":
@@ -715,6 +751,35 @@ def assert_copy_identity(
             raise PerfError(f"{scenario_id}: identity ids mismatch")
 
 
+def nested_get(obj: Any, path: str) -> Any:
+    cur = obj
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def assert_copy_jsonl_fields(
+    scenario_id: str, scenario: dict[str, Any], output: Path
+) -> None:
+    has = (scenario.get("asserts") or {}).get("dest_has") or []
+    if isinstance(has, str):
+        has = [has]
+    if not has:
+        return
+    for path in jsonl_object_paths(output):
+        for line in read_jsonl_text(path).splitlines():
+            if not line.strip():
+                continue
+            obj = json.loads(line)
+            for col in has:
+                if nested_get(obj, col) is None:
+                    raise PerfError(
+                        f"{scenario_id}: copy jsonl missing {col!r} in {path}"
+                    )
+
+
 def assert_perf(events: list[dict[str, Any]], required: list[str]) -> None:
     missing = missing_phases(events, required)
     if missing:
@@ -817,6 +882,7 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
     flatten = bool(scenario.get("flatten_events"))
     ops = transform_sql_of(scenario)
     aggregates = transform_compute_of(scenario)
+    py = transform_py_of(scenario)
     source_format = str(scenario.get("source_format") or "json")
     source_ext = "csv" if source_format == "csv" else "json"
     warmup = (
@@ -853,6 +919,7 @@ def run_ingest(scenario_id: str, scenario: dict[str, Any], scale: str, work: Pat
             extra_source=extra_source,
             sql=ops or False,
             compute=aggregates or False,
+            py=py or False,
         )
 
     write_ingest_yml("File" if source_kind == "Stdin" else source_kind)
@@ -1151,8 +1218,10 @@ def run_copy(scenario_id: str, scenario: dict[str, Any], scale: str, work: Path,
     source.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
-    write_ndjson(source / "events.json", "exact_arrow", rows)
+    fixture_kind = str(scenario.get("fixture", "exact_arrow"))
+    write_ndjson(source / "events.json", fixture_kind, rows)
     config = work / "skippr.yml"
+    py = transform_py_of(scenario)
     write_skippr_yml(
         config,
         kind="copy",
@@ -1162,6 +1231,8 @@ def run_copy(scenario_id: str, scenario: dict[str, Any], scale: str, work: Path,
         warehouse=None,
         flatten=False,
         extra_source={"output_dir": str(output)},
+        py=py or False,
+        partition_fields=str(scenario.get("batch_partition_fields") or ""),
     )
     stage_plugins(config, PIPELINE, manifests)
     env = base_env(config, data_dir, manifests)
@@ -1178,6 +1249,7 @@ def run_copy(scenario_id: str, scenario: dict[str, Any], scale: str, work: Path,
     events = assert_scenario_perf(logs, scenario)
     copied, ids = count_jsonl(output)
     assert_copy_identity(scenario_id, scenario, rows, copied, ids)
+    assert_copy_jsonl_fields(scenario_id, scenario, output)
     return report_payload(scenario_id, rows, wall_ms, events, logs, work)
 
 

@@ -31,6 +31,23 @@ def nested_flatten_record(index: int) -> dict[str, Any]:
     }
 
 
+def site_lookup_hit_record(index: int) -> dict[str, Any]:
+    record = exact_arrow_record(index)
+    record["device_id"] = "dev-1"
+    record["event_time"] = 0
+    return record
+
+
+def site_lookup_record(index: int) -> dict[str, Any]:
+    record = exact_arrow_record(index)
+    if index % 3 == 1:
+        record["device_id"] = "dev-1"
+        record["event_time"] = 0 if index % 2 else 100
+    elif index % 3 == 2:
+        record["truck"] = {"id": "asset-9"}
+    return record
+
+
 def is_exact_arrow_eligible_record(record: dict[str, Any], flatten: bool) -> bool:
     if flatten:
         return False
@@ -50,6 +67,8 @@ def _factory(kind: str):
         "exact_arrow_ts": exact_arrow_ts_record,
         "exact_arrow_merge": exact_arrow_merge_record,
         "nested_flatten": nested_flatten_record,
+        "site_lookup": site_lookup_record,
+        "site_lookup_hit": site_lookup_hit_record,
     }
     factory = factories.get(kind)
     if factory is None:

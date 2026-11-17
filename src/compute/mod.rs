@@ -12,6 +12,7 @@ mod apply;
 mod bind;
 mod journal;
 mod parse;
+mod py;
 mod stateless;
 mod table;
 
@@ -31,6 +32,13 @@ pub use parse::{
 };
 #[cfg(test)]
 pub(crate) use parse::{VIEW_ILLEGAL, VIEW_ILLEGAL_REQUIRED, VIEW_LEGAL};
+#[cfg(test)]
+pub(crate) use py::write_py_dir;
+pub use py::{
+    admit_item, apply_py_records, assert_py_matches_journal, blocks_unflattened_arrow,
+    copy_wal_fingerprint, has_py, py_changed_message, py_loads, PyLoad, COPY_PY_UNADMITTED,
+    PY_FILE_MAX_BYTES, PY_UNFLATTENED_ARROW,
+};
 pub use stateless::{apply_stateless, dest_schema, drop_invalid_event_times, StatelessSelect};
 pub use table::{relation_sql, stream_join_sql, view_sql, ComputeTableProvider};
 
@@ -264,6 +272,13 @@ pub enum ComputeKind {
         table: Fqn,
         on: NonEmpty<FieldId>,
     },
+    /// File + handler Python map on decoded JSON objects.
+    Py {
+        name: Fqn,
+        path: String,
+        handler: String,
+        digest: String,
+    },
 }
 
 impl ComputeKind {
@@ -274,7 +289,8 @@ impl ComputeKind {
             | Self::Latest { name, .. }
             | Self::KeyedTable { name, .. }
             | Self::WindowedTable { name, .. }
-            | Self::StreamTableJoin { name, .. } => name,
+            | Self::StreamTableJoin { name, .. }
+            | Self::Py { name, .. } => name,
         }
     }
 
@@ -283,7 +299,7 @@ impl ComputeKind {
     }
 
     pub fn is_table_backed(&self) -> bool {
-        !matches!(self, Self::Stateless { .. })
+        !matches!(self, Self::Stateless { .. } | Self::Py { .. })
     }
 
     pub fn is_stateless(&self) -> bool {
@@ -295,7 +311,10 @@ impl ComputeKind {
             Self::KeyedTable { name, .. }
             | Self::WindowedTable { name, .. }
             | Self::Latest { name, .. } => Some(name.name.as_str()),
-            Self::Stateless { .. } | Self::View { .. } | Self::StreamTableJoin { .. } => None,
+            Self::Stateless { .. }
+            | Self::View { .. }
+            | Self::StreamTableJoin { .. }
+            | Self::Py { .. } => None,
         }
     }
 
@@ -305,7 +324,7 @@ impl ComputeKind {
             | Self::KeyedTable { keys, .. }
             | Self::WindowedTable { keys, .. } => Some(keys.as_slice()),
             Self::StreamTableJoin { on, .. } => Some(on.as_slice()),
-            Self::Stateless { .. } | Self::View { .. } => None,
+            Self::Stateless { .. } | Self::View { .. } | Self::Py { .. } => None,
         }
     }
 

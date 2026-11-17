@@ -72,6 +72,11 @@ jobs:
           - ingest-a-duckdb
           - ingest-a-skipprlake
           - copy-b-json-json
+          - copy-py-json-json
+          - copy-py-site-lookup
+          - ingest-py-duckdb
+          - ingest-py-stream-duckdb
+          - ingest-py-compose-duckdb
           - ingest-json-parquet
           - ingest-csv-duckdb
           - duckdb-ndjson
@@ -314,6 +319,10 @@ jobs:
           - scenario: ingest-a-duckdb
             profile: flamegraph
           - scenario: copy-b-json-json
+            profile: flamegraph
+          - scenario: copy-py-json-json
+            profile: flamegraph
+          - scenario: ingest-py-duckdb
             profile: flamegraph
           - scenario: ingest-json-parquet
             profile: flamegraph

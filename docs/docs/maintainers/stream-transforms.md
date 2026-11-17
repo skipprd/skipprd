@@ -1,20 +1,21 @@
 # Stream compute
 
-Declared compute is bound `ComputeKind` in the Skippr Store journal (`compute#workspace#pipeline`), a map keyed by compute name. YAML / Python `transform.compute` (`type: sql` or `type: sdl`) serialize that IR. `skipprd sync` admits new names before ingest (including WAL-only / no `data_sink`); hash mismatch fails the run until `ALTER COMPUTE`. Processor start loads the journal; it does not replace the list. Default ingest is unchanged when `transform.compute` is unset. Store authority: [Skippr Store KV](skippr-store-kv.md).
+Declared compute is bound `ComputeKind` in the Skippr Store journal (`compute#workspace#pipeline`), a map keyed by compute name. YAML / Python `transform.compute` (`type: sql`, `type: sdl`, or `type: py`) serialize that IR. `skipprd sync` admits new names before ingest (including WAL-only / no `data_sink`); hash mismatch fails the run until `ALTER COMPUTE` (or `DROP` then `CREATE` for `type: py`). Ingest deadletters py batches as `PYTHON_COMPUTE` when disk path, handler, or digest does not match the journal. Processor start loads the journal; it does not replace the list. Default ingest is unchanged when `transform.compute` is unset. Store authority: [Skippr Store KV](skippr-store-kv.md).
 
 ## Placement
 
 ```text
-source → schema map → Arrow batch → apply_log → Stateless → WAL catalog commit
-                                              ↓
-                                    Keyed/Latest/Windowed (stream_state family)
-                                              ↓
-                                    existing compact / sinks
+source → type: py (JSON objects) → schema map → Arrow batch → apply_log → Stateless → WAL catalog commit
+                                                                              ↓
+                                                                    Keyed/Latest/Windowed (stream_state family)
+                                                                              ↓
+                                                                    existing compact / sinks
 ```
 
+- `type: py` loads `path` and calls `handler(record)` 1:1 in a bounded `python3` worker on decoded JSON objects (after array unwrap), before `flatten_events` / schema map. Copy identity is the mapped JSON line. Sibling `.py` files in that directory are on `sys.path`. Changing `path`, `handler`, or a sibling `.py` changes the journal hash; ingest matches the journaled path, handler, and digest, and deadletters as `PYTHON_COMPUTE` on mismatch.
 - Stateless (filter/derive) runs after schema mapping and before `WalCommitUnit` submit.
 - Keyed/Latest/Windowed consume **immutable** committed SEGF segments. There is no second processing WAL.
-- `type: copy` cannot set `transform.compute`. Schema is ALTER TABLE. Stateless is filter and derive only; alter it with `ALTER COMPUTE`.
+- `type: copy` cannot set `transform.compute` sql or sdl. `type: py` is allowed. Schema is ALTER TABLE. Stateless is filter and derive only; alter it with `ALTER COMPUTE`.
 
 ## Aggregates
 
@@ -37,7 +38,7 @@ All processor tests open a real fjall Skippr Store on the local filesystem. A su
 - Smoke (local iteration): `./scripts/stream-transforms-smoke.sh` (`SKIPPR_STREAM_TEST_PROFILE=smoke`).
 - Full matrix (git commit via `scripts/precommit.sh`, and `.github/workflows/stream-transforms.yml` on pull requests): deterministic CDC scripts vs a golden model, crash injection at `BeforeTxn` / `BeforeCommit` / `DuringTxn` / `AfterTxn` with drop+reopen, multi-row batch atomicity, reclaim-hold restore from the disk cursor, and proptest fuzz of event streams plus Arrow/CDC alignment.
 
-A config edit whose canonical hash differs from the named catalog entry fails closed until `ALTER COMPUTE` writes the new entry (View / KeyedTable / WindowedTable also accept `ALTER TABLE` sugar). Latest and StreamTableJoin identity changes are `DROP` then `CREATE`. Sync admit does not wipe ad-hoc journal rows.
+A config edit whose canonical hash differs from the named catalog entry fails closed until `ALTER COMPUTE` writes the new entry (View / KeyedTable / WindowedTable also accept `ALTER TABLE` sugar). Latest, StreamTableJoin, and `type: py` identity changes are `DROP` then `CREATE`. Sync admit does not wipe ad-hoc journal rows.
 
 ## Reclaim hold
 

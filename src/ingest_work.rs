@@ -292,6 +292,61 @@ fn ensure_slow_ingest_worker(config: &Config) {
     handle.spawn(worker);
 }
 
+fn py_loads_admitted(
+    config: &crate::helpers::configuration::Config,
+    offsets: &Offsets,
+) -> Result<Vec<crate::compute::PyLoad>, String> {
+    let loads = crate::compute::py_loads(config)?;
+    if loads.is_empty() {
+        return Ok(loads);
+    }
+    let store = offsets.open_stream_state()?;
+    let key = crate::compute::journal_key(&config.get_workspace_name(), &config.get_pipeline_name())?;
+    let log = crate::compute::load_journal(store.as_ref(), &key)?;
+    crate::compute::assert_py_matches_journal(&config.get_pipeline_name(), &loads, &log)?;
+    Ok(loads)
+}
+
+fn copy_record_text(record: &CopyWalRecord) -> String {
+    if let Some(bytes) = &record.identity {
+        String::from_utf8_lossy(bytes).trim_end().to_string()
+    } else {
+        record.value.to_string()
+    }
+}
+
+fn apply_copy_python(
+    loads: &[crate::compute::PyLoad],
+    records: Vec<CopyWalRecord>,
+) -> Result<(Vec<CopyWalRecord>, Vec<(CopyWalRecord, String)>), String> {
+    if loads.is_empty() {
+        return Ok((records, Vec::new()));
+    }
+    let mut values = Vec::with_capacity(records.len());
+    for record in &records {
+        values.push(record.decoded_value().map_err(|err| err.to_string())?);
+    }
+    let outs = crate::compute::apply_py_records(loads, values)?;
+    if outs.len() != records.len() {
+        return Err(format!(
+            "python compute returned {} results for {} records",
+            outs.len(),
+            records.len()
+        ));
+    }
+    let mut ok = Vec::new();
+    let mut failed = Vec::new();
+    for (record, out) in records.into_iter().zip(outs) {
+        match out {
+            Ok(value) => {
+                ok.push(CopyWalRecord::from_transformed(value).map_err(|err| err.to_string())?)
+            }
+            Err(err) => failed.push((record, err)),
+        }
+    }
+    Ok((ok, failed))
+}
+
 fn merge_inject_fields(record: &mut Value, fields: &std::collections::BTreeMap<String, Value>) {
     if fields.is_empty() {
         return;
@@ -3116,7 +3171,11 @@ impl Ingest {
         let primary_sink_ref = config.get_pipeline_output_sink_ref();
         let pipeline_name = config.get_pipeline_name();
         let empty_schema: SchemaRef = Arc::new(arrow::datatypes::Schema::empty());
-        let fingerprint = crate::pipeline_type::COPY_WAL_FINGERPRINT.to_string();
+        let py_loads = py_loads_admitted(config, offset_db_clone);
+        let fingerprint = match &py_loads {
+            Ok(loads) => crate::compute::copy_wal_fingerprint(loads),
+            Err(_) => crate::compute::COPY_PY_UNADMITTED.to_string(),
+        };
         let allowed_values =
             cleaned_partition_allowed_values(config, &config.get_partition_allowed_values());
         let mut ns_cache = HashMap::new();
@@ -3170,6 +3229,84 @@ impl Ingest {
             decode_ns += decode_started
                 .map(|started| started.elapsed().as_nanos() as u64)
                 .unwrap_or(0);
+            let records = match &py_loads {
+                Err(err) => {
+                    let decode_offset_pos = ingest_batch.offset_pos.unwrap_or(1);
+                    dl_records.push(DeadletterRecord {
+                        namespace: pipeline_name.clone(),
+                        record: String::from_utf8(ingest_batch.data.clone()).unwrap_or_else(|_| {
+                            format!("{} {} bytes", format.as_str(), ingest_batch.data.len())
+                        }),
+                        error: err.clone(),
+                        failure_code: "PYTHON_COMPUTE".to_string(),
+                        event_time: None,
+                        source_uri: ingest_batch.source_uri.clone(),
+                        offset_key: format!(
+                            "{}:{}",
+                            ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition
+                        ),
+                        offset_pos: decode_offset_pos,
+                    });
+                    dl_offsets
+                        .entry(ingest_batch.offset_key.clone())
+                        .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
+                        .or_insert(decode_offset_pos);
+                    continue;
+                }
+                Ok(loads) if loads.is_empty() => records,
+                Ok(loads) => match apply_copy_python(loads, records) {
+                    Ok((ok, failed)) => {
+                        for (record, err) in failed {
+                            let decode_offset_pos = ingest_batch.offset_pos.unwrap_or(1);
+                            dl_records.push(DeadletterRecord {
+                                namespace: pipeline_name.clone(),
+                                record: copy_record_text(&record),
+                                error: err,
+                                failure_code: "PYTHON_COMPUTE".to_string(),
+                                event_time: None,
+                                source_uri: ingest_batch.source_uri.clone(),
+                                offset_key: format!(
+                                    "{}:{}",
+                                    ingest_batch.offset_key.namespace,
+                                    ingest_batch.offset_key.partition
+                                ),
+                                offset_pos: decode_offset_pos,
+                            });
+                            dl_offsets
+                                .entry(ingest_batch.offset_key.clone())
+                                .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
+                                .or_insert(decode_offset_pos);
+                        }
+                        ok
+                    }
+                    Err(err) => {
+                        let decode_offset_pos = ingest_batch.offset_pos.unwrap_or(1);
+                        dl_records.push(DeadletterRecord {
+                            namespace: pipeline_name.clone(),
+                            record: String::from_utf8(ingest_batch.data.clone()).unwrap_or_else(
+                                |_| {
+                                    format!("{} {} bytes", format.as_str(), ingest_batch.data.len())
+                                },
+                            ),
+                            error: err,
+                            failure_code: "PYTHON_COMPUTE".to_string(),
+                            event_time: None,
+                            source_uri: ingest_batch.source_uri.clone(),
+                            offset_key: format!(
+                                "{}:{}",
+                                ingest_batch.offset_key.namespace,
+                                ingest_batch.offset_key.partition
+                            ),
+                            offset_pos: decode_offset_pos,
+                        });
+                        dl_offsets
+                            .entry(ingest_batch.offset_key.clone())
+                            .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
+                            .or_insert(decode_offset_pos);
+                        continue;
+                    }
+                },
+            };
             let offset_pos = ingest_batch
                 .offset_pos
                 .unwrap_or_else(|| records.len().max(1) as u64);
@@ -3587,64 +3724,28 @@ impl Ingest {
                 IngestFlattenIter::from_ndjson(payload_text.unwrap_or(""))
             } else {
                 let decode_started = Instant::now();
-                let mut records: Vec<Value> =
-                    match decode_ingest(config, format, &ingest_batch.data) {
-                        Ok(DecodedIngest::Rows(records)) => records,
-                        Ok(DecodedIngest::Arrow(batches)) => {
-                            ingest_profile::add_decode_ns(
-                                decode_started.elapsed().as_nanos() as u64
+                let mut records: Vec<Value> = match decode_ingest(
+                    config,
+                    format,
+                    &ingest_batch.data,
+                ) {
+                    Ok(DecodedIngest::Rows(records)) => records,
+                    Ok(DecodedIngest::Arrow(batches)) => {
+                        ingest_profile::add_decode_ns(decode_started.elapsed().as_nanos() as u64);
+                        if ingest_batch.cdc_rows().is_some() {
+                            panic!(
+                                "schema'd {} ingest for {}:{} cannot carry CDC row sidecars",
+                                format.as_str(),
+                                ingest_batch.offset_key.namespace,
+                                ingest_batch.offset_key.partition
                             );
-                            if ingest_batch.cdc_rows().is_some() {
-                                panic!(
-                                    "schema'd {} ingest for {}:{} cannot carry CDC row sidecars",
-                                    format.as_str(),
-                                    ingest_batch.offset_key.namespace,
-                                    ingest_batch.offset_key.partition
-                                );
-                            }
-                            if flatten {
-                                match crate::ingest::schema_arrow::coerced_batches_to_json_values(
-                                    &batches,
-                                ) {
-                                    Ok(records) => records,
-                                    Err(err) => {
-                                        dl_records.push(DeadletterRecord {
-                                            namespace: config.get_pipeline_name(),
-                                            record: format!(
-                                                "{} {} bytes",
-                                                format.as_str(),
-                                                ingest_batch.data.len()
-                                            ),
-                                            error: err.to_string(),
-                                            failure_code: "INPUT_FORMAT".to_string(),
-                                            event_time: None,
-                                            source_uri: ingest_batch.source_uri.clone(),
-                                            offset_key: format!(
-                                                "{}:{}",
-                                                ingest_batch.offset_key.namespace,
-                                                ingest_batch.offset_key.partition
-                                            ),
-                                            offset_pos: 1,
-                                        });
-                                        continue;
-                                    }
-                                }
-                            } else {
-                                if let Err(err) = ingest_schema_arrow_batches(
-                                    config,
-                                    &transform_snap,
-                                    &primary_sink_ref,
-                                    ingest_batch,
-                                    batches,
-                                    offset_snapshot.as_ref(),
-                                    is_cdc_batch,
-                                    track_position,
-                                    &mut buf,
-                                    &mut schema_hash_cache,
-                                    &mut i,
-                                    &mut _j,
-                                    &mut latest_timestamp,
-                                ) {
+                        }
+                        if flatten {
+                            match crate::ingest::schema_arrow::coerced_batches_to_json_values(
+                                &batches,
+                            ) {
+                                Ok(records) => records,
+                                Err(err) => {
                                     dl_records.push(DeadletterRecord {
                                         namespace: config.get_pipeline_name(),
                                         record: format!(
@@ -3652,7 +3753,7 @@ impl Ingest {
                                             format.as_str(),
                                             ingest_batch.data.len()
                                         ),
-                                        error: err,
+                                        error: err.to_string(),
                                         failure_code: "INPUT_FORMAT".to_string(),
                                         event_time: None,
                                         source_uri: ingest_batch.source_uri.clone(),
@@ -3663,42 +3764,101 @@ impl Ingest {
                                         ),
                                         offset_pos: 1,
                                     });
+                                    continue;
                                 }
+                            }
+                        } else {
+                            if crate::compute::blocks_unflattened_arrow(
+                                crate::compute::has_py(config),
+                                flatten,
+                            ) {
+                                dl_records.push(DeadletterRecord {
+                                        namespace: config.get_pipeline_name(),
+                                        record: format!(
+                                            "{} {} bytes",
+                                            format.as_str(),
+                                            ingest_batch.data.len()
+                                        ),
+                                        error: crate::compute::PY_UNFLATTENED_ARROW.into(),
+                                        failure_code: "PYTHON_COMPUTE".to_string(),
+                                        event_time: None,
+                                        source_uri: ingest_batch.source_uri.clone(),
+                                        offset_key: format!(
+                                            "{}:{}",
+                                            ingest_batch.offset_key.namespace,
+                                            ingest_batch.offset_key.partition
+                                        ),
+                                        offset_pos: 1,
+                                    });
                                 continue;
                             }
-                        }
-                        Err(err) => {
-                            ingest_profile::add_decode_ns(
-                                decode_started.elapsed().as_nanos() as u64
-                            );
-                            let decode_offset_pos = payload_text
-                                .map(|text| text.lines().count().max(1) as u64)
-                                .unwrap_or(1);
-                            dl_records.push(DeadletterRecord {
-                                namespace: config.get_pipeline_name(),
-                                record: if format.is_text() {
-                                    payload_text.unwrap_or("").to_string()
-                                } else {
-                                    format!("{} {} bytes", format.as_str(), ingest_batch.data.len())
-                                },
-                                error: err.to_string(),
-                                failure_code: "INPUT_FORMAT".to_string(),
-                                event_time: None,
-                                source_uri: ingest_batch.source_uri.clone(),
-                                offset_key: format!(
-                                    "{}:{}",
-                                    ingest_batch.offset_key.namespace,
-                                    ingest_batch.offset_key.partition
-                                ),
-                                offset_pos: 1,
-                            });
-                            dl_offsets
-                                .entry(ingest_batch.offset_key.clone())
-                                .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
-                                .or_insert(decode_offset_pos);
+                            if let Err(err) = ingest_schema_arrow_batches(
+                                config,
+                                &transform_snap,
+                                &primary_sink_ref,
+                                ingest_batch,
+                                batches,
+                                offset_snapshot.as_ref(),
+                                is_cdc_batch,
+                                track_position,
+                                &mut buf,
+                                &mut schema_hash_cache,
+                                &mut i,
+                                &mut _j,
+                                &mut latest_timestamp,
+                            ) {
+                                dl_records.push(DeadletterRecord {
+                                    namespace: config.get_pipeline_name(),
+                                    record: format!(
+                                        "{} {} bytes",
+                                        format.as_str(),
+                                        ingest_batch.data.len()
+                                    ),
+                                    error: err,
+                                    failure_code: "INPUT_FORMAT".to_string(),
+                                    event_time: None,
+                                    source_uri: ingest_batch.source_uri.clone(),
+                                    offset_key: format!(
+                                        "{}:{}",
+                                        ingest_batch.offset_key.namespace,
+                                        ingest_batch.offset_key.partition
+                                    ),
+                                    offset_pos: 1,
+                                });
+                            }
                             continue;
                         }
-                    };
+                    }
+                    Err(err) => {
+                        ingest_profile::add_decode_ns(decode_started.elapsed().as_nanos() as u64);
+                        let decode_offset_pos = payload_text
+                            .map(|text| text.lines().count().max(1) as u64)
+                            .unwrap_or(1);
+                        dl_records.push(DeadletterRecord {
+                            namespace: config.get_pipeline_name(),
+                            record: if format.is_text() {
+                                payload_text.unwrap_or("").to_string()
+                            } else {
+                                format!("{} {} bytes", format.as_str(), ingest_batch.data.len())
+                            },
+                            error: err.to_string(),
+                            failure_code: "INPUT_FORMAT".to_string(),
+                            event_time: None,
+                            source_uri: ingest_batch.source_uri.clone(),
+                            offset_key: format!(
+                                "{}:{}",
+                                ingest_batch.offset_key.namespace,
+                                ingest_batch.offset_key.partition
+                            ),
+                            offset_pos: 1,
+                        });
+                        dl_offsets
+                            .entry(ingest_batch.offset_key.clone())
+                            .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
+                            .or_insert(decode_offset_pos);
+                        continue;
+                    }
+                };
                 ingest_profile::add_decode_ns(decode_started.elapsed().as_nanos() as u64);
                 if Config::debug_enabled() {
                     debug!(
@@ -3740,7 +3900,71 @@ impl Ingest {
             let fixed_batch_namespace = ingest_batch.namespace.is_some();
             let mut cached_exact_partition_key: Option<IngestPartitionKey> = None;
 
-            for item in flatten_iter {
+            let flatten_items: Vec<IngestFlattenItem> = flatten_iter.collect();
+            let py_loads = py_loads_admitted(config, offset_db_clone);
+            let mut py_out: Option<std::vec::IntoIter<Result<Value, String>>> = None;
+            match &py_loads {
+                Err(err) => {
+                    let decode_offset_pos = ingest_batch.offset_pos.unwrap_or(1);
+                    dl_records.push(DeadletterRecord {
+                        namespace: config.get_pipeline_name(),
+                        record: payload_text.unwrap_or("").to_string(),
+                        error: err.clone(),
+                        failure_code: "PYTHON_COMPUTE".to_string(),
+                        event_time: None,
+                        source_uri: ingest_batch.source_uri.clone(),
+                        offset_key: format!(
+                            "{}:{}",
+                            ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition
+                        ),
+                        offset_pos: decode_offset_pos,
+                    });
+                    merge_dl_offset_for_key(
+                        &mut dl_offsets,
+                        &ingest_batch.offset_key,
+                        decode_offset_pos,
+                    );
+                    continue;
+                }
+                Ok(loads) if loads.is_empty() => {}
+                Ok(loads) => {
+                    let rows: Vec<Value> = flatten_items
+                        .iter()
+                        .filter_map(|item| match item {
+                            IngestFlattenItem::Row { value, .. } => Some(value.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    match crate::compute::apply_py_records(loads, rows) {
+                        Ok(results) => py_out = Some(results.into_iter()),
+                        Err(err) => {
+                            let decode_offset_pos = ingest_batch.offset_pos.unwrap_or(1);
+                            dl_records.push(DeadletterRecord {
+                                namespace: config.get_pipeline_name(),
+                                record: payload_text.unwrap_or("").to_string(),
+                                error: err,
+                                failure_code: "PYTHON_COMPUTE".to_string(),
+                                event_time: None,
+                                source_uri: ingest_batch.source_uri.clone(),
+                                offset_key: format!(
+                                    "{}:{}",
+                                    ingest_batch.offset_key.namespace,
+                                    ingest_batch.offset_key.partition
+                                ),
+                                offset_pos: decode_offset_pos,
+                            });
+                            merge_dl_offset_for_key(
+                                &mut dl_offsets,
+                                &ingest_batch.offset_key,
+                                decode_offset_pos,
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            for item in flatten_items {
                 match item {
                     IngestFlattenItem::NotObject { line, offset_pos } => {
                         dl_records.push(DeadletterRecord {
@@ -3795,6 +4019,46 @@ impl Ingest {
                         value: mut record,
                     } => {
                         cdc_row_idx += 1;
+
+                        if let Some(iter) = py_out.as_mut() {
+                            match iter.next() {
+                                Some(Ok(value)) => record = value,
+                                Some(Err(err)) => {
+                                    let line_str = match payload_text
+                                        .unwrap_or("")
+                                        .lines()
+                                        .nth(line as usize - 1)
+                                    {
+                                        Some(line) => line,
+                                        None => "",
+                                    };
+                                    let offset_pos = ingest_batch.offset_pos_for_line(line);
+                                    dl_records.push(DeadletterRecord {
+                                        namespace: config.get_pipeline_name(),
+                                        record: line_str.to_string(),
+                                        error: err,
+                                        failure_code: "PYTHON_COMPUTE".to_string(),
+                                        event_time: None,
+                                        source_uri: ingest_batch.source_uri.clone(),
+                                        offset_key: format!(
+                                            "{}:{}",
+                                            ingest_batch.offset_key.namespace,
+                                            ingest_batch.offset_key.partition
+                                        ),
+                                        offset_pos,
+                                    });
+                                    merge_dl_offset_for_key(
+                                        &mut dl_offsets,
+                                        &ingest_batch.offset_key,
+                                        offset_pos,
+                                    );
+                                    continue;
+                                }
+                                None => panic!(
+                                    "python compute result count shorter than JSON object rows"
+                                ),
+                            }
+                        }
 
                         if record.is_null()
                             || (record.is_object() && record.as_object().unwrap().is_empty())

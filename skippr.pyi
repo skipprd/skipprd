@@ -569,7 +569,7 @@ SdlDoc: TypeAlias = (
     | SdlDocWindowedTable
     | SdlDocStreamTableJoin
 )
-ComputeItem: TypeAlias = ComputeItemSql | ComputeItemSdl
+ComputeItem: TypeAlias = ComputeItemSql | ComputeItemSdl | ComputeItemPy
 DataSourceConfig: TypeAlias = (
     DataSourceAdRollAds
     | DataSourceAmqp
@@ -1285,14 +1285,14 @@ class SdlDocStreamTableJoin:
 
 @final
 class ComputeItemSql:
-    """One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`)."""
+    """SQL lane. YAML `{name, type: sql, value}`."""
     def __new__(
         cls,
         *,
         name: str,
         value: str,
     ) -> ComputeItemSql:
-        """One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`).
+        """SQL lane. YAML `{name, type: sql, value}`.
 
         Args:
             name: YAML key `name`.
@@ -1309,14 +1309,14 @@ class ComputeItemSql:
 
 @final
 class ComputeItemSdl:
-    """One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`)."""
+    """SDL lane. YAML `{name, type: sdl, value}`."""
     def __new__(
         cls,
         *,
         name: str,
         value: SdlDoc,
     ) -> ComputeItemSdl:
-        """One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`).
+        """SDL lane. YAML `{name, type: sdl, value}`.
 
         Args:
             name: YAML key `name`.
@@ -1329,6 +1329,36 @@ class ComputeItemSdl:
     @property
     def value(self) -> SdlDoc:
         """YAML key `value`."""
+        ...
+
+@final
+class ComputeItemPy:
+    """Python lane. YAML `{name, type: py, path, handler}`. Inline `value` is an unknown field."""
+    def __new__(
+        cls,
+        *,
+        name: str,
+        path: str,
+        handler: str,
+    ) -> ComputeItemPy:
+        """Python lane. YAML `{name, type: py, path, handler}`. Inline `value` is an unknown field.
+
+        Args:
+            name: YAML key `name`.
+            path: YAML key `path`.
+            handler: YAML key `handler`."""
+        ...
+    @property
+    def name(self) -> str:
+        """YAML key `name`."""
+        ...
+    @property
+    def path(self) -> str:
+        """YAML key `path`."""
+        ...
+    @property
+    def handler(self) -> str:
+        """YAML key `handler`."""
         ...
 
 @final
@@ -1526,7 +1556,7 @@ class Transform:
         Args:
             event_time: Event-time column (FieldId after bind). YAML alias `batch_time_fields`.
             watermark_delay: Watermark delay parsed at the edge to Duration (`5 minutes`).
-            compute: Declared compute. Each item is `{name, type: sql|sdl, value}`. Journaled as `ComputeKind`.
+            compute: Declared compute. SQL/SDL items are `{name, type, value}`. `type: py` is `{name, path, handler}`. Journaled as `ComputeKind`.
             batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.
             flatten_events: Flatten nested objects into underscore-separated columns (`contact_name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).
             record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.
@@ -1553,7 +1583,7 @@ class Transform:
         ...
     @property
     def compute(self) -> Sequence[ComputeItem] | None:
-        """Declared compute. Each item is `{name, type: sql|sdl, value}`. Journaled as `ComputeKind`.
+        """Declared compute. SQL/SDL items are `{name, type, value}`. `type: py` is `{name, path, handler}`. Journaled as `ComputeKind`.
 
         YAML key `compute`."""
         ...

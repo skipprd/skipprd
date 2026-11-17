@@ -563,11 +563,60 @@ class StreamTransformPerfTests(unittest.TestCase):
         self.assertNotIn("aggregates:", copy_text)
         self.assertNotIn("compute:", copy_text)
 
+    def test_copy_py_yaml_writes_path_handler(self) -> None:
+        from run import write_skippr_yml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "skippr.yml"
+            write_skippr_yml(
+                path,
+                kind="copy",
+                source_kind="File",
+                source_path="/src",
+                sink="file",
+                warehouse=None,
+                flatten=False,
+                extra_source={"output_dir": "/out"},
+                py="stamp",
+            )
+            text = path.read_text(encoding="utf-8")
+            self.assertTrue((path.parent / "stamp.py").is_file())
+        self.assertIn("type: copy", text)
+        self.assertIn("type: py", text)
+        self.assertIn("path: stamp.py", text)
+        self.assertIn("handler: transform", text)
+        self.assertNotIn("value:", text)
+
+    def test_catalog_includes_py_cells(self) -> None:
+        catalog = load_catalog()
+        for name in (
+            "copy-py-json-json",
+            "copy-py-site-lookup",
+            "ingest-py-duckdb",
+            "ingest-py-stream-duckdb",
+            "ingest-py-compose-duckdb",
+        ):
+            self.assertIn(name, catalog["scenarios"], name)
+        copy_py = catalog["scenarios"]["copy-py-json-json"]
+        self.assertEqual(copy_py.get("transform_py"), "stamp")
+        self.assertTrue((copy_py.get("asserts") or {}).get("identity"))
+        self.assertIn("mapped", (copy_py.get("asserts") or {}).get("dest_has") or [])
+        site = catalog["scenarios"]["copy-py-site-lookup"]
+        self.assertEqual(site.get("transform_py"), "site")
+        self.assertEqual(site.get("batch_partition_fields"), "detail.site")
+        compose = catalog["scenarios"]["ingest-py-compose-duckdb"]
+        self.assertEqual(compose.get("transform_py"), "stamp")
+        self.assertEqual(compose.get("transform_sql"), "compose")
+
     def test_skill_smoke_includes_stream_transform_cells(self) -> None:
         skill = (REPO_ROOT / ".cursor" / "skills" / "skippr-regression" / "SKILL.md").read_text(
             encoding="utf-8"
         )
         self.assertIn("ingest-ops-duckdb", skill)
+        self.assertIn("copy-py-json-json", skill)
+        self.assertIn("copy-py-site-lookup", skill)
+        self.assertIn("ingest-py-duckdb", skill)
+        self.assertIn("ingest-py-compose-duckdb", skill)
         self.assertIn("ingest-ops-compose-stream-duckdb", skill)
         self.assertIn("ingest-aggregates-duckdb", skill)
         self.assertIn("ingest-aggregates-stream-duckdb", skill)

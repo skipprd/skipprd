@@ -199,6 +199,67 @@ def run_cell(
     return 0
 
 
+def run_py_stamp_cell(template: str, skipprd: str, work: Path) -> int:
+    cell = "json_jsonl_py_stamp"
+    fixture = TESTDATA / "flat.json"
+    source = work / cell / "source"
+    out = work / cell / "output"
+    data = work / cell / "data"
+    source.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
+    data.mkdir(parents=True, exist_ok=True)
+    shutil.copy(fixture, source / fixture.name)
+    yaml = (
+        template.replace("SOURCE_DIR_PLACEHOLDER", str(source))
+        .replace("OUTPUT_DIR_PLACEHOLDER", str(out))
+        .replace("      batch_partition_fields: region\n", "")
+    )
+    yaml = yaml.replace(
+        "    transform:\n",
+        "    transform:\n      compute:\n        - name: enrich\n"
+        "          type: py\n          path: stamp.py\n          handler: transform\n",
+    )
+    cfg = work / cell / "skippr.yml"
+    cfg.write_text(yaml)
+    stamp = ACTION.parents[3] / "tests" / "perf" / "py_stamp" / "stamp.py"
+    shutil.copy(stamp, cfg.parent / "stamp.py")
+    env = os.environ.copy()
+    env["DATA_DIR"] = str(data)
+    env["DATA_DIR_MIN_FREE_BYTES"] = "0"
+    env["DATA_DIR_HIGH_WATERMARK_PCT"] = "0"
+    subprocess.check_call(
+        [
+            skipprd,
+            "--config",
+            str(cfg),
+            "sync",
+            *log_args(env),
+            "--pipeline",
+            "file_copy",
+            "--once",
+        ],
+        env=env,
+    )
+    written = list_sink_objects(out, "jsonl")
+    if not written:
+        print(f"{cell}: no jsonl objects under {out}", file=sys.stderr)
+        return 1
+    ids = set().union(*(record_ids(path, "jsonl") for path in written))
+    if ids != {"1", "2"}:
+        print(f"{cell}: expected ids 1 and 2, got {ids}", file=sys.stderr)
+        return 1
+    mapped = []
+    for path in written:
+        for line in read_sink_body(path, "jsonl").decode().splitlines():
+            if line.strip():
+                mapped.append(json.loads(line).get("mapped"))
+    if mapped != [True, True]:
+        print(f"{cell}: expected mapped true, got {mapped}", file=sys.stderr)
+        return 1
+    print(f"{cell}: {len(written)} object(s), mapped field present")
+    return 0
+
+
 def main() -> int:
     skipprd = os.environ["SKIPPRD_PATH"]
     work = Path(os.environ["COPY_WORK"])
@@ -216,7 +277,7 @@ def main() -> int:
             cell,
         ):
             return 1
-    return 0
+    return run_py_stamp_cell(template, skipprd, work)
 
 
 if __name__ == "__main__":

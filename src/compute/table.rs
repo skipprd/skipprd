@@ -48,6 +48,9 @@ impl ComputeTableProvider {
             ComputeKind::Stateless { .. } => Err(DataFusionError::Plan(
                 "Stateless is not table-backed; ALTER COMPUTE only".into(),
             )),
+            ComputeKind::Py { .. } => Err(DataFusionError::Plan(
+                "Py is not table-backed; DROP and CREATE to change path, handler, or digest".into(),
+            )),
         }
     }
 }

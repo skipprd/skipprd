@@ -21,7 +21,7 @@ pub enum ComputeApplyError {
     Message(String),
     #[error("CREATE / DROP compute requires a writer Skippr Store (same as ALTER TABLE)")]
     NeedsWriter,
-    #[error("type: copy cannot set compute")]
+    #[error("type: copy cannot set transform.compute sql or sdl")]
     CopyPipeline,
 }
 
@@ -199,7 +199,8 @@ pub fn prefix_deletes(
     Ok(ops)
 }
 
-/// Bind config items and put new names. Same hash is a no-op. Hash mismatch requires ALTER.
+/// Bind config items and put new names. Same hash is a no-op. Hash mismatch
+/// requires `ALTER COMPUTE` (SQL/SDL) or `DROP` then `CREATE` (`type: py`).
 /// Names in the journal that are not in config (ad-hoc CREATE) are kept.
 pub fn admit_config(
     config: &Config,
@@ -215,6 +216,13 @@ pub fn admit_config(
     if items.is_empty() {
         return Ok(log);
     }
+    if matches!(
+        config.pipeline_type(),
+        Ok(crate::pipeline_type::PipelineType::Copy)
+    ) && items.iter().any(|item| !item.is_py())
+    {
+        return Err(ComputeApplyError::CopyPipeline);
+    }
     let bound = bind_config_items(config, metadata, &items, &log)?;
     let mut dirty = false;
     for kind in bound {
@@ -223,9 +231,10 @@ pub fn admit_config(
         match log.items.get(&name) {
             Some(entry) if entry.hash == hash => {}
             Some(_) => {
-                return Err(ComputeApplyError::Message(format!(
-                    "compute {name} changed; ALTER COMPUTE to migrate"
-                )));
+                return Err(ComputeApplyError::Message(match &kind {
+                    ComputeKind::Py { .. } => super::py::py_changed_message(kind.name()),
+                    _ => format!("compute {name} changed; ALTER COMPUTE to migrate"),
+                }));
             }
             None => {
                 log.insert(kind)?;
@@ -298,6 +307,18 @@ fn bind_item(
             let unbound = sdl_to_unbound(&pipeline, &name, value)?;
             bind_statement(catalog, unbound)
                 .map_err(|err| ComputeApplyError::Message(err.to_string()))
+        }
+        ComputeItem::Py { path, handler, .. } => {
+            let dir = config.config_dir.as_deref().ok_or_else(|| {
+                ComputeApplyError::Message("python compute path requires skippr.yml".into())
+            })?;
+            let load = super::py::admit_item(dir, path, handler)?;
+            Ok(ComputeKind::Py {
+                name,
+                path: path.clone(),
+                handler: handler.clone(),
+                digest: load.digest,
+            })
         }
     }
 }
@@ -576,6 +597,12 @@ fn parse_order(order: &[String]) -> Result<Vec<(String, bool)>, ComputeApplyErro
         .collect()
 }
 
+fn py_alter_rejected(name: &Fqn) -> ComputeApplyError {
+    ComputeApplyError::Message(format!(
+        "Py {name} is DROP and CREATE, not ALTER COMPUTE"
+    ))
+}
+
 async fn apply_alter_compute(
     config: &Config,
     store: &dyn SkipprStore,
@@ -592,7 +619,10 @@ async fn apply_alter_compute(
     let entry = log.get(&bound_name).cloned().ok_or_else(|| {
         ComputeApplyError::Message(format!("compute {bound_name} is not in the catalog"))
     })?;
-    if !entry.kind.is_table_backed()
+    if matches!(entry.kind, ComputeKind::Py { .. }) {
+        return Err(py_alter_rejected(&bound_name));
+    }
+    if entry.kind.is_stateless()
         && alterations
             .iter()
             .any(|alt| !matches!(alt, ComputeAlteration::SetFilter { .. }))
@@ -716,6 +746,7 @@ fn apply_one(
         (ComputeKind::StreamTableJoin { name, .. }, _) => Err(ComputeApplyError::Message(format!(
             "StreamTableJoin {name} is DROP and CREATE, not ALTER COMPUTE"
         ))),
+        (ComputeKind::Py { name, .. }, _) => Err(py_alter_rejected(&name)),
         (other, ComputeAlteration::RenameColumn { from, to }) => {
             if other.name().name.as_str() == from {
                 return Err(ComputeApplyError::Message(
@@ -953,6 +984,50 @@ fn qualify_alter_name(pipeline: &str, name: &Fqn) -> Result<Fqn, ComputeApplyErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn py_alter_compute_is_drop_create_not_stateless() {
+        let src = include_str!("apply.rs");
+        let gate = src
+            .split("async fn apply_alter_compute")
+            .nth(1)
+            .unwrap()
+            .split("fn apply_alterations")
+            .next()
+            .unwrap();
+        assert!(
+            gate.contains("ComputeKind::Py"),
+            "ALTER COMPUTE on Py must fail before the Stateless SET FILTER gate"
+        );
+        assert!(
+            !gate.contains("is_table_backed()"),
+            "Py must not share the Stateless SET FILTER gate via is_table_backed"
+        );
+        let catalog = BindCatalog {
+            ingest: Default::default(),
+            ingest_namespaces: Default::default(),
+            existing: Vec::new(),
+            event_time: None,
+            watermark_delay: None,
+        };
+        let kind = ComputeKind::Py {
+            name: Fqn::from_parts("p", "enrich").unwrap(),
+            path: "stamp.py".into(),
+            handler: "transform".into(),
+            digest: "abc".into(),
+        };
+        let err = apply_one(
+            &catalog,
+            kind,
+            &ComputeAlteration::SetFilter {
+                expr: "true".into(),
+            },
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("DROP and CREATE"), "{msg}");
+        assert!(!msg.contains("Stateless"), "{msg}");
+    }
 
     #[test]
     fn alter_name_foreign_pipeline_fails() {

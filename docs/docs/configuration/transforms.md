@@ -63,13 +63,13 @@ pipelines:
 | `time_partition_prefix` | `TRANSFORM_TIME_PARTITION_PREFIX` | none | Text added before each time-partition folder name. |
 | `flatten_events` | `TRANSFORM_FLATTEN_EVENTS` | `false` | Turn nested objects into top-level columns with underscore names. |
 | `record_field_path` | `TRANSFORM_RECORD_FIELD_PATH` | none (each object is a record) | Path to an array of records inside each source object. |
-| `inject_fields` | none | none | Fixed field names and values added to every record. |
+| `inject_fields` | none | none | Fixed field names and values added to every record after `type: py`. |
 | `batch_order_fields` | `TRANSFORM_BATCH_ORDER_FIELDS` | none (unsorted) | Columns to sort rows by inside each Parquet file. Comma-separated. |
 | `enable_single_quote_parsing` | none | `false` | Accept JSON that wraps strings in single quotes. |
 | `enable_unicode_parsing` | none | `false` | Accept JSON with unescaped Unicode. |
 | `event_time` | `TRANSFORM_BATCH_TIME_FIELDS` | none | Event-time column (YAML alias `batch_time_fields`). File/Iceberg partitions use it. Required for windowed `CREATE TABLE`. |
 | `watermark_delay` | none | none | Event-time delay (`5 minutes`). Required for windowed `CREATE TABLE`. |
-| `compute` | none | none | Declared compute: named `{name, type: sql\|sdl, value}` items. See [Declared compute](#declared-compute). |
+| `compute` | none | none | Declared compute: named `{name, type: sql\|sdl, value}` items, or `type: py` `{path, handler}`. See [Declared compute](#declared-compute). |
 
 A key in `skippr.yml` beats its environment fallback. Flags accept `true`/`false`, `yes`/`no`, or `1`/`0`.
 
@@ -114,7 +114,7 @@ Set `record_field_path` to the array so each element becomes a record. Without i
 
 ## Add fixed fields
 
-`inject_fields` adds the same fields to every record before ingest, for example to tag where data came from:
+`inject_fields` adds the same fields to every record after `type: py` and before `flatten_events`, for example to tag where data came from. `type: copy` cannot set `inject_fields`.
 
 ```yaml
 transform:
@@ -136,7 +136,7 @@ While sorting is on, Skipprd sizes row groups automatically, between about 16 Mi
 
 ## Declared compute
 
-`compute` is a list of named items. Each item is `{name, type, value}` with `type: sql` (Skippr SQL) or `type: sdl` (typed Skipper Definition Language). SQL is `CREATE VIEW` / `CREATE TABLE AS SELECT` (GROUP BY, `date_trunc`, `DISTINCT ON`) or ingest `SELECT` filter/derive. Skipprd binds both lanes to `ComputeKind` and journals them in Skippr Store, keyed by `name`. `skipprd query` and `skipprd serve` register `pipeline.compute_name`. View / keyed / windowed accept [`ALTER TABLE`](/operations/alter) sugar; Latest and stream-table joins are `DROP` then `CREATE`. Stateless requires `ALTER COMPUTE`. Ad-hoc `CREATE` / `DROP` in `skipprd query` is supported; Git `transform.compute` is the usual way to ship.
+`compute` is a list of named items. SQL and SDL items are `{name, type, value}`. `type: py` is `{name, type, path, handler}`: `path` is a `.py` file relative to `skippr.yml`, `handler` is the function name in that file. SQL is `CREATE VIEW` / `CREATE TABLE AS SELECT` (GROUP BY, `date_trunc`, `DISTINCT ON`) or ingest `SELECT` filter/derive. Skipprd loads the Python file in a bounded `python3` worker on decoded JSON objects (after array unwrap), before `flatten_events` and before SQL. The worker puts that file's directory on `sys.path`, so sibling imports (`from lookup import lookup`) resolve. `lookup()` is user code, not an engine builtin. Inline `value:` on `type: py` is an unknown field. Skipprd binds all three lanes to `ComputeKind` and journals them in Skippr Store, keyed by `name`. Editing an existing SQL/SDL name without `ALTER COMPUTE` fails closed. `skipprd query` and `skipprd serve` register `pipeline.compute_name`. View / keyed / windowed accept [`ALTER TABLE`](/operations/alter) sugar; Latest, stream-table joins, and `type: py` are `DROP` then `CREATE`. Stateless requires `ALTER COMPUTE`. Ad-hoc `CREATE` / `DROP` in `skipprd query` is supported; Git `transform.compute` is the usual way to ship.
 
 ```yaml
 transform:
@@ -150,9 +150,29 @@ transform:
         SELECT customer_id, SUM(amount) AS invoice_total, COUNT(*) AS invoice_count
         FROM invoices.orders
         GROUP BY customer_id
+    - name: enrich
+      type: py
+      path: transforms/enrich.py
+      handler: transform
 ```
 
-`type: copy` cannot set `compute`. Editing an existing name without `ALTER COMPUTE` fails closed. See [Materialised views](/concepts/materialised-views).
+```python
+# transforms/lookup.py
+def lookup(device_id):
+    return CACHE.get(device_id)
+
+# transforms/enrich.py
+from lookup import lookup
+
+def transform(record):
+    detail = record.setdefault("detail", {})
+    site = lookup(record.get("device_id"))
+    if site:
+        detail["site"] = site
+    return record
+```
+
+`type: copy` may set `type: py` only (`sql` and `sdl` fail closed). Python runs on the raw JSON object; the copy identity is the transformed compact JSON line. Copy still does not flatten, inject, sort, or infer a schema. A handler error deadletters that record as `PYTHON_COMPUTE`. Changing `path`, `handler`, or any sibling `.py` in that directory changes the journal hash (`DROP` then `CREATE`). Sync admit fails closed until then. Ingest deadletters those batches as `PYTHON_COMPUTE` if disk path, handler, or digest does not match the journal. Absolute `path`, `..`, or a missing file fails closed. `python3` must be on `PATH`. See [Materialised views](/concepts/materialised-views).
 
 ## Next steps
 

@@ -4,7 +4,7 @@ use std::fs;
 use std::fs::File;
 use std::io::Read;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use std::sync::mpsc::Receiver as StdReceiver;
 use std::sync::Arc;
@@ -383,7 +383,7 @@ pub struct Transform {
     /// Watermark delay parsed at the edge to Duration (`5 minutes`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watermark_delay: Option<String>,
-    /// Declared compute. Each item is `{name, type: sql|sdl, value}`. Journaled as `ComputeKind`.
+    /// Declared compute. SQL/SDL items are `{name, type, value}`. `type: py` is `{name, path, handler}`. Journaled as `ComputeKind`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute: Option<Vec<ComputeItem>>,
     /// Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.
@@ -433,19 +433,37 @@ pub struct Transform {
     pub inject_fields: Option<BTreeMap<String, Value>>,
 }
 
-/// One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`).
+/// One `transform.compute` list item. `type` is the authoring lane (`sql`, `sdl`, or `py`).
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ComputeItem {
-    Sql { name: String, value: String },
-    Sdl { name: String, value: SdlDoc },
+    /// SQL lane. YAML `{name, type: sql, value}`.
+    Sql {
+        name: String,
+        value: String,
+    },
+    /// SDL lane. YAML `{name, type: sdl, value}`.
+    Sdl {
+        name: String,
+        value: SdlDoc,
+    },
+    /// Python lane. YAML `{name, type: py, path, handler}`. Inline `value` is an unknown field.
+    Py {
+        name: String,
+        path: String,
+        handler: String,
+    },
 }
 
 impl ComputeItem {
     pub fn name(&self) -> &str {
         match self {
-            Self::Sql { name, .. } | Self::Sdl { name, .. } => name,
+            Self::Sql { name, .. } | Self::Sdl { name, .. } | Self::Py { name, .. } => name,
         }
+    }
+
+    pub fn is_py(&self) -> bool {
+        matches!(self, Self::Py { .. })
     }
 }
 
@@ -743,6 +761,9 @@ pub struct Config {
     /// Bound pipeline for this session. Not YAML. Set by Session / CLI loop.
     #[serde(skip)]
     pub active_pipeline: Option<String>,
+    /// Directory of `skippr.yml`. Python compute `path` is relative to this. Not YAML.
+    #[serde(skip)]
+    pub config_dir: Option<PathBuf>,
 }
 
 /// Empty in-memory config for runtime plugin children. Does not load skippr.yml.
@@ -845,6 +866,7 @@ impl Config {
             dbt: None,
             vector_sources: None,
             active_pipeline: Some(name.to_string()),
+            config_dir: self.config_dir.clone(),
         })
     }
 
@@ -1016,6 +1038,9 @@ impl Config {
         let mut resolved: Config = serde_json::from_value(value)
             .map_err(|err| format!("Invalid Skippr configuration: {err}"))?;
         resolved.active_pipeline = self.active_pipeline.clone();
+        resolved.config_dir = origin
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .or_else(|| self.config_dir.clone());
         Ok(resolved)
     }
 
@@ -1771,9 +1796,9 @@ impl Config {
         if transform
             .compute
             .as_ref()
-            .is_some_and(|items| !items.is_empty())
+            .is_some_and(|items| items.iter().any(|item| !item.is_py()))
         {
-            return Some("type: copy cannot set transform.compute".into());
+            return Some("type: copy cannot set transform.compute sql or sdl".into());
         }
         None
     }
@@ -2238,6 +2263,12 @@ impl Config {
         Self::validate_env_u64(self, "SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", &mut violations);
         Self::validate_env_u64(self, "SCHEMA_SYNC_TIMEOUT_SECONDS", &mut violations);
         Self::validate_env_u8(self, "STATS_HLL_PRECISION", &mut violations);
+
+        if self.get_transform_compute().iter().any(ComputeItem::is_py) {
+            if let Err(err) = crate::compute::py_loads(self) {
+                violations.push(err);
+            }
+        }
 
         violations
     }
@@ -3861,7 +3892,7 @@ compute:
     }
 
     #[test]
-    fn copy_pipeline_rejects_compute() {
+    fn copy_pipeline_rejects_sql_compute() {
         let mut sql_config = Config::new();
         let mut sql_pipeline = Pipeline::default();
         sql_pipeline.r#type = Some(crate::pipeline_type::PipelineType::Copy);
@@ -3879,9 +3910,94 @@ compute:
         assert!(
             sql_violations
                 .iter()
-                .any(|v| v.contains("type: copy cannot set transform.compute")),
+                .any(|v| v.contains("type: copy cannot set transform.compute sql or sdl")),
             "{sql_violations:?}"
         );
+    }
+
+    #[test]
+    fn copy_pipeline_allows_py_compute() {
+        let dir = crate::compute::write_py_dir(&[(
+            "enrich.py",
+            "def transform(record):\n    return record\n",
+        )]);
+        let mut config = Config::new();
+        config.config_dir = Some(dir.path().to_path_buf());
+        let mut pipeline = Pipeline::default();
+        pipeline.r#type = Some(crate::pipeline_type::PipelineType::Copy);
+        pipeline.transform = Some(Transform {
+            compute: Some(vec![ComputeItem::Py {
+                name: "p.enrich".into(),
+                path: "enrich.py".into(),
+                handler: "transform".into(),
+            }]),
+            ..Default::default()
+        });
+        config.pipelines.insert("p".to_string(), pipeline);
+        let violations = config.bind_pipeline("p").get_config_dependency_violations();
+        assert!(
+            violations.iter().all(|v| !v.contains("transform.compute")
+                && !v.contains("python compute")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn py_compute_without_skippr_yml_dir_is_a_violation() {
+        let mut config = Config::new();
+        let mut pipeline = Pipeline::default();
+        pipeline.transform = Some(Transform {
+            compute: Some(vec![ComputeItem::Py {
+                name: "p.enrich".into(),
+                path: "enrich.py".into(),
+                handler: "transform".into(),
+            }]),
+            ..Default::default()
+        });
+        config.pipelines.insert("p".to_string(), pipeline);
+        let violations = config.bind_pipeline("p").get_config_dependency_violations();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("python compute path requires skippr.yml")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn transform_compute_parses_py() {
+        let transform: Transform = serde_yaml::from_str(
+            r#"
+compute:
+  - name: enrich
+    type: py
+    path: transforms/enrich.py
+    handler: transform
+"#,
+        )
+        .unwrap();
+        match &transform.compute.as_ref().unwrap()[0] {
+            ComputeItem::Py {
+                name,
+                path,
+                handler,
+            } => {
+                assert_eq!(name, "enrich");
+                assert_eq!(path, "transforms/enrich.py");
+                assert_eq!(handler, "transform");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_compute_py_value_is_unknown_field() {
+        let err = serde_yaml::from_str::<ComputeItem>(
+            "type: py\nname: enrich\nvalue: \"def transform(record): return record\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown field"), "{err}");
     }
 
     #[test]

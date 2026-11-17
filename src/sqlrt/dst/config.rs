@@ -12,7 +12,7 @@ use crate::sqlrt::dst::{batch_from_row, UserRow};
 use std::collections::HashMap;
 
 #[test]
-fn d_copy_cannot_set_flatten_or_sql() {
+fn d_copy_cannot_set_flatten() {
     let mut config = Config::new();
     let mut pipeline = Pipeline::default();
     pipeline.r#type = Some(PipelineType::Copy);
@@ -31,7 +31,7 @@ fn d_copy_cannot_set_flatten_or_sql() {
 }
 
 #[test]
-fn g_copy_cannot_set_compute() {
+fn g_copy_cannot_set_sql_compute() {
     let mut config = Config::new();
     let mut pipeline = Pipeline::default();
     pipeline.r#type = Some(PipelineType::Copy);
@@ -47,7 +47,7 @@ fn g_copy_cannot_set_compute() {
     assert!(
         violations
             .iter()
-            .any(|v| v.contains("type: copy cannot set transform.compute")),
+            .any(|v| v.contains("type: copy cannot set transform.compute sql or sdl")),
         "{violations:?}"
     );
 }

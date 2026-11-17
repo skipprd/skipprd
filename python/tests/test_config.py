@@ -23,7 +23,9 @@ from skippr import (
     Pipeline,
     S3Storage,
     SchemaSinkGlue,
+    ComputeItemPy,
     ComputeItemSql,
+    PipelineType,
     Transform,
 )
 
@@ -493,6 +495,63 @@ def test_pipeline_transform_compute():
     assert "CREATE VIEW" in yaml
     assert "p.positive" in yaml
     assert "p.doubled" in yaml
+
+
+def test_pipeline_transform_compute_py():
+    cfg = Config()
+    src = cfg.data_source("src", _s3())
+    cfg.pipeline(
+        "p",
+        Pipeline(
+            data_source=src,
+            transform=Transform(
+                compute=[
+                    ComputeItemPy(
+                        name="enrich",
+                        path="transforms/enrich.py",
+                        handler="transform",
+                    ),
+                ],
+            ),
+        ),
+    )
+    yaml = cfg.to_yaml()
+    assert "type: py" in yaml
+    assert "path: transforms/enrich.py" in yaml
+    assert "handler: transform" in yaml
+    assert "value:" not in yaml.split("type: py", 1)[1].split("\n  ", 1)[0]
+
+
+def test_compute_item_py_rejects_value():
+    with pytest.raises(TypeError):
+        ComputeItemPy(name="enrich", value="def transform(record): return record")
+
+
+def test_copy_pipeline_compute_py_yaml():
+    cfg = Config()
+    src = cfg.data_source("src", _s3())
+    cfg.pipeline(
+        "p",
+        Pipeline(
+            data_source=src,
+            type=PipelineType.COPY,
+            transform=Transform(
+                compute=[
+                    ComputeItemPy(
+                        name="enrich",
+                        path="transforms/enrich.py",
+                        handler="transform",
+                    ),
+                ],
+            ),
+        ),
+    )
+    yaml = cfg.to_yaml()
+    assert "type: copy" in yaml
+    assert "type: py" in yaml
+    assert "path: transforms/enrich.py" in yaml
+    assert "handler: transform" in yaml
+    assert "value:" not in yaml
 
 
 def test_getters_return_refs_or_raise_key_error():

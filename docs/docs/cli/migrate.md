@@ -7,7 +7,7 @@ description: Apply SQL schema migrations next to skippr.yml without stopping the
 
 `skipprd migrate` applies `migrations/*.sql` next to `skippr.yml`. Each file is one atomic `ALTER TABLE` batch. Skipprd records the file in the Skippr Store **journal** family so a retry is idempotent: the same id and checksum is a no-op, a changed file with the same id fails closed.
 
-Python authors those files; the engine never loads `.py`. `Session.migrate()` is the same path as the CLI.
+Python authors those files; migrate never loads `.py`. Declared `transform.compute` `type: py` does load the file in `path`. `Session.migrate()` is the same path as the CLI.
 
 You do not stop the pipeline. Apply is in-stream. `DISABLE PIPELINE` still freezes ingest; it is not the ALTER gate.
 

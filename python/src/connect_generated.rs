@@ -226,6 +226,7 @@ config_union!(PySdlDoc, "SdlDoc", "type", {
 config_union!(PyComputeItem, "ComputeItem", "type", {
     Sql(PyComputeItemSql) = "sql",
     Sdl(PyComputeItemSdl) = "sdl",
+    Py(PyComputeItemPy) = "py",
 });
 
 #[pyclass(
@@ -1049,7 +1050,7 @@ impl PySdlDocStreamTableJoin {
     }
 }
 
-#[doc = "One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`)."]
+#[doc = "SQL lane. YAML `{name, type: sql, value}`."]
 #[pyclass(frozen, from_py_object, name = "ComputeItemSql", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyComputeItemSql {
@@ -1064,7 +1065,7 @@ pub struct PyComputeItemSql {
 #[pymethods]
 impl PyComputeItemSql {
     #[new]
-    #[doc = "One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`).\n\nArgs:\n    name: YAML key `name`.\n    value: YAML key `value`."]
+    #[doc = "SQL lane. YAML `{name, type: sql, value}`.\n\nArgs:\n    name: YAML key `name`.\n    value: YAML key `value`."]
     #[pyo3(signature = (*, name, value))]
     fn new(name: String, value: String) -> Self {
         Self { name, value }
@@ -1075,7 +1076,7 @@ impl PyComputeItemSql {
     }
 }
 
-#[doc = "One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`)."]
+#[doc = "SDL lane. YAML `{name, type: sdl, value}`."]
 #[pyclass(frozen, from_py_object, name = "ComputeItemSdl", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyComputeItemSdl {
@@ -1090,7 +1091,7 @@ pub struct PyComputeItemSdl {
 #[pymethods]
 impl PyComputeItemSdl {
     #[new]
-    #[doc = "One `transform.compute` list item. `type` is the authoring lane (`sql` or `sdl`).\n\nArgs:\n    name: YAML key `name`.\n    value: YAML key `value`."]
+    #[doc = "SDL lane. YAML `{name, type: sdl, value}`.\n\nArgs:\n    name: YAML key `name`.\n    value: YAML key `value`."]
     #[pyo3(signature = (*, name, value))]
     fn new(name: String, value: PySdlDoc) -> Self {
         Self { name, value }
@@ -1098,6 +1099,39 @@ impl PyComputeItemSdl {
 
     fn __repr__(&self) -> PyResult<String> {
         config_repr("ComputeItemSdl", self)
+    }
+}
+
+#[doc = "Python lane. YAML `{name, type: py, path, handler}`. Inline `value` is an unknown field."]
+#[pyclass(frozen, from_py_object, name = "ComputeItemPy", module = "skippr")]
+#[derive(Clone, Serialize)]
+pub struct PyComputeItemPy {
+    #[doc = "YAML key `name`."]
+    #[pyo3(get)]
+    pub name: String,
+    #[doc = "YAML key `path`."]
+    #[pyo3(get)]
+    pub path: String,
+    #[doc = "YAML key `handler`."]
+    #[pyo3(get)]
+    pub handler: String,
+}
+
+#[pymethods]
+impl PyComputeItemPy {
+    #[new]
+    #[doc = "Python lane. YAML `{name, type: py, path, handler}`. Inline `value` is an unknown field.\n\nArgs:\n    name: YAML key `name`.\n    path: YAML key `path`.\n    handler: YAML key `handler`."]
+    #[pyo3(signature = (*, name, path, handler))]
+    fn new(name: String, path: String, handler: String) -> Self {
+        Self {
+            name,
+            path,
+            handler,
+        }
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        config_repr("ComputeItemPy", self)
     }
 }
 
@@ -1299,7 +1333,7 @@ pub struct PyTransform {
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watermark_delay: Option<String>,
-    #[doc = "Declared compute. Each item is `{name, type: sql|sdl, value}`. Journaled as `ComputeKind`.\n\nYAML key `compute`."]
+    #[doc = "Declared compute. SQL/SDL items are `{name, type, value}`. `type: py` is `{name, path, handler}`. Journaled as `ComputeKind`.\n\nYAML key `compute`."]
     #[pyo3(get)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compute: Option<Vec<PyComputeItem>>,
@@ -1352,7 +1386,7 @@ pub struct PyTransform {
 #[pymethods]
 impl PyTransform {
     #[new]
-    #[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink.\n\nArgs:\n    event_time: Event-time column (FieldId after bind). YAML alias `batch_time_fields`.\n    watermark_delay: Watermark delay parsed at the edge to Duration (`5 minutes`).\n    compute: Declared compute. Each item is `{name, type: sql|sdl, value}`. Journaled as `ComputeKind`.\n    batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n    flatten_events: Flatten nested objects into underscore-separated columns (`contact_name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n    record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.\n    batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).\n    partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.\n    namespace_fields: Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.\n    time_partition_prefix: Prefix for time-partition folder names (`p_` → `p_2026-10-08`).\n    enable_single_quote_parsing: Accept JSON that uses single quotes around strings.\n    enable_unicode_parsing: Accept JSON with unescaped Unicode.\n    batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.\n    inject_fields: Static field names and JSON values merged onto each source record before ingest."]
+    #[doc = "How source records are namespaced, partitioned, flattened, and ordered before the sink.\n\nArgs:\n    event_time: Event-time column (FieldId after bind). YAML alias `batch_time_fields`.\n    watermark_delay: Watermark delay parsed at the edge to Duration (`5 minutes`).\n    compute: Declared compute. SQL/SDL items are `{name, type, value}`. `type: py` is `{name, path, handler}`. Journaled as `ComputeKind`.\n    batch_time_unit: Time-partition granularity: `year`, `month`, `day`, `hour`, or `minute`. Requires `batch_time_fields`.\n    flatten_events: Flatten nested objects into underscore-separated columns (`contact_name`). Default false (`TRANSFORM_FLATTEN_EVENTS`).\n    record_field_path: JSON pointer/path to the array of records inside each source object. Unset means the object is the record.\n    batch_partition_fields: Hive-style partition columns. Comma-separated; nested paths use dots (`country,product.category`).\n    partition_allowed_values: Allowed values for partition columns. Records outside this set are dropped.\n    namespace_fields: Fields that split records into schemas/tables. Each unique combination is one namespace. Comma-separated.\n    time_partition_prefix: Prefix for time-partition folder names (`p_` → `p_2026-10-08`).\n    enable_single_quote_parsing: Accept JSON that uses single quotes around strings.\n    enable_unicode_parsing: Accept JSON with unescaped Unicode.\n    batch_order_fields: Sort columns inside each Parquet file for predicate pruning. Comma-separated output names.\n    inject_fields: Static field names and JSON values merged onto each source record before ingest."]
     #[pyo3(signature = (*, event_time = None, watermark_delay = None, compute = None, batch_time_unit = None, flatten_events = None, record_field_path = None, batch_partition_fields = None, partition_allowed_values = None, namespace_fields = None, time_partition_prefix = None, enable_single_quote_parsing = None, enable_unicode_parsing = None, batch_order_fields = None, inject_fields = None))]
     fn new(
         event_time: Option<String>,
@@ -6894,6 +6928,7 @@ pub fn register_generated_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySdlDocStreamTableJoin>()?;
     m.add_class::<PyComputeItemSql>()?;
     m.add_class::<PyComputeItemSdl>()?;
+    m.add_class::<PyComputeItemPy>()?;
     m.add_class::<PyPipeline>()?;
     m.add_class::<PySdlDerive>()?;
     m.add_class::<PySdlMeasure>()?;

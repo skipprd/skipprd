@@ -30,6 +30,8 @@ mod processor;
 #[cfg(test)]
 mod proptest_schedules;
 #[cfg(test)]
+mod py_fixtures;
+#[cfg(test)]
 mod query_pin;
 #[cfg(test)]
 mod regressions;

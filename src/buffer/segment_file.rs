@@ -79,8 +79,9 @@ impl CopyPart {
     }
 }
 
-/// One partition's WAL bytes. Copy and Arrow never share a map entry
-/// (`schema_fingerprint` for copy is always `"copy"`).
+/// One partition's WAL bytes. Copy and Arrow never share a map entry.
+/// Identity copy uses `schema_fingerprint` `"copy"`; python copy uses
+/// `copy_wal_fingerprint` (`copy#…`) or `COPY_PY_UNADMITTED`.
 #[derive(Clone, Debug)]
 pub enum WalPayload {
     Arrow(Vec<RecordBatch>),

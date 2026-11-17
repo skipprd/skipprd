@@ -29,6 +29,18 @@ pub struct CopyWalRecord {
 }
 
 impl CopyWalRecord {
+    /// Identity bytes of a Python-mapped JSON object, plus the value for routing.
+    pub fn from_transformed(value: Value) -> Result<Self, CopyEncodeError> {
+        let mut identity = serde_json::to_vec(&value).map_err(|err| {
+            CopyEncodeError::Output(format!("encode python copy identity: {err}"))
+        })?;
+        identity.push(b'\n');
+        Ok(Self {
+            value,
+            identity: Some(identity),
+        })
+    }
+
     /// JSON value for encode paths that cannot use identity bytes.
     /// Identity WAL frames leave `value` null until this runs.
     pub fn decoded_value(&self) -> Result<Value, CopyEncodeError> {
