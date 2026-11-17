@@ -124,6 +124,29 @@ def write_manifest_index(
     return path
 
 
+def write_release_indexes(
+    output_dir: Path,
+    bundle_version: Optional[str],
+    catalog_entries: list,
+    manifests: list,
+) -> None:
+    """Write {semver}/manifest-index.json. latest/ only for production tags."""
+    if should_write_latest_pointer(bundle_version or "") or not bundle_version:
+        latest_dir = output_dir / "latest"
+        latest_dir.mkdir(parents=True, exist_ok=True)
+        latest_index = {
+            "bundle_version": "latest",
+            "sdk_build_fingerprint": catalog_sdk_build_fingerprint(catalog_entries),
+            "manifests": manifests,
+        }
+        validate_manifest_index_sdk_build_fingerprint(latest_index, catalog_entries)
+        with (latest_dir / "manifest-index.json").open("w", encoding="utf-8") as handle:
+            json.dump(latest_index, handle, indent=2)
+            handle.write("\n")
+    if bundle_version:
+        write_manifest_index(output_dir, bundle_version, catalog_entries, manifests)
+
+
 def fresh_metadata_url(url: str) -> str:
     parsed = urllib.parse.urlsplit(url)
     query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
@@ -629,36 +652,7 @@ def main() -> None:
         )
 
     require_complete_catalog_index(latest_entries, catalog_entries)
-
-    if should_write_latest_pointer(bundle_version) or not bundle_version:
-        latest_dir = output_dir / "latest"
-        latest_dir.mkdir(parents=True, exist_ok=True)
-        latest_index_path = latest_dir / "manifest-index.json"
-        latest_index = {
-            "bundle_version": "latest",
-            "sdk_build_fingerprint": catalog_sdk_build_fingerprint(catalog_entries),
-            "manifests": latest_entries,
-        }
-        validate_manifest_index_sdk_build_fingerprint(latest_index, catalog_entries)
-        with latest_index_path.open("w", encoding="utf-8") as handle:
-            json.dump(latest_index, handle, indent=2)
-            handle.write("\n")
-    if bundle_version:
-        write_manifest_index(output_dir, bundle_version, catalog_entries, latest_entries)
-
-    # Tagged hosts fetch /{semver}/manifest-index.json, not /latest/.
-    ref = os.environ.get("GITHUB_REF", "")
-    tag = os.environ.get("GITHUB_REF_NAME", "").strip()
-    if ref.startswith("refs/tags/") and tag and tag != "latest":
-        host_index = copy.deepcopy(latest_index)
-        host_index["bundle_version"] = tag
-        host_dir = output_dir / tag
-        host_dir.mkdir(parents=True, exist_ok=True)
-        host_index_path = host_dir / "manifest-index.json"
-        validate_manifest_index_sdk_build_fingerprint(host_index, catalog_entries)
-        with host_index_path.open("w", encoding="utf-8") as handle:
-            json.dump(host_index, handle, indent=2)
-            handle.write("\n")
+    write_release_indexes(output_dir, bundle_version, catalog_entries, latest_entries)
 
 
 if __name__ == "__main__":

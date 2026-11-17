@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import json
 import tempfile
 import urllib.error
 import urllib.parse
@@ -560,6 +561,32 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             ),
             "https://install.skippr.io/releases/runtime-plugins/latest/manifest-index.json",
         )
+
+    def test_beta_index_is_tag_scoped_and_skips_latest(self) -> None:
+        catalog = [
+            {"manifest_filename": "file-source.json", "sdk_build_fingerprint": "fp1"}
+        ]
+        manifests = [
+            {"manifest_filename": "file-source.json", "sdk_build_fingerprint": "fp1"}
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            publish_runtime_plugins.write_release_indexes(
+                output, "18.3.9-beta-1", catalog, manifests
+            )
+            tag_index = json.loads(
+                (output / "18.3.9-beta-1" / "manifest-index.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(tag_index["bundle_version"], "18.3.9-beta-1")
+            self.assertFalse((output / "latest").exists())
+            publish_runtime_plugins.write_release_indexes(
+                output, "18.3.9", catalog, manifests
+            )
+            latest = json.loads(
+                (output / "latest" / "manifest-index.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(latest["bundle_version"], "latest")
+            self.assertTrue((output / "18.3.9" / "manifest-index.json").is_file())
 
     def test_beta_plugin_objects_are_tag_prefixed(self) -> None:
         from engine_tag import staged_relative_path
