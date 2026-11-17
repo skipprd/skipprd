@@ -210,6 +210,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("DATA_DIR_HIGH_WATERMARK_PCT=0", file_duckdb)
         self.assertIn("skipprd query", file_duckdb)
         self.assertIn("hold_before_compaction_sink", file_duckdb)
+        self.assertIn("AWS_EC2_METADATA_DISABLED=true", file_duckdb)
         self.assertNotIn('>> "${work}/source/people.csv"', file_duckdb)
         self.assertIn("people_overlap.csv", file_duckdb)
         self.assertIn("${work}/data/test_file_duckdb_append/failpoint", file_duckdb)

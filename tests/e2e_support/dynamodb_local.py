@@ -32,6 +32,9 @@ def java_bin() -> str:
     ]
     if os.environ.get("JAVA_HOME"):
         candidates.append(Path(os.environ["JAVA_HOME"]) / "bin" / "java")
+    jvm_root = Path("/usr/lib/jvm")
+    if jvm_root.is_dir():
+        candidates.extend(sorted(jvm_root.glob("*/bin/java")))
     which = shutil.which("java")
     if which:
         candidates.append(Path(which))

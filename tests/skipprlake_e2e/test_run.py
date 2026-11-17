@@ -24,6 +24,7 @@ class SkipprLakeE2eHarnessTests(unittest.TestCase):
         header = src.split("def wait_client", 1)[0]
         self.assertNotIn("import boto3", header)
         self.assertIn("import boto3", src)
+        self.assertIn("/usr/lib/jvm", src)
 
     def test_expected_gold_matches_twelve_shop_rows(self) -> None:
         expected = json.loads(
