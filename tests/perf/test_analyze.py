@@ -178,7 +178,12 @@ class DownloadArgvTests(unittest.TestCase):
             "99",
             Path("/tmp/out"),
             repo="skipprd/skipprd",
-            names=["perf-ingest-a-duckdb-linux-flamegraph", "skipprd-linux_x86"],
+            names=[
+                "regression-ingest-a-duckdb-linux-flamegraph",
+                "skippr-regression-bottlenecks",
+                "perf-ingest-a-duckdb-linux-flamegraph",
+                "skipprd-linux_x86",
+            ],
         )
         self.assertEqual(
             argv[:6],
@@ -187,7 +192,9 @@ class DownloadArgvTests(unittest.TestCase):
         self.assertIn("-R", argv)
         self.assertIn("skipprd/skipprd", argv)
         self.assertIn("-n", argv)
-        self.assertIn("perf-ingest-a-duckdb-linux-flamegraph", argv)
+        self.assertIn("regression-ingest-a-duckdb-linux-flamegraph", argv)
+        self.assertIn("skippr-regression-bottlenecks", argv)
+        self.assertNotIn("perf-ingest-a-duckdb-linux-flamegraph", argv)
         self.assertNotIn("skipprd-linux_x86", argv)
 
 
