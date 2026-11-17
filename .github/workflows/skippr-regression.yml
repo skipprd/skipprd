@@ -1,0 +1,10 @@
+# GitHub only lists workflow_dispatch files that exist on the default branch.
+# Feature branches (alter-single-sot) own the real jobs in this same path.
+name: skippr-regression
+on:
+  workflow_dispatch:
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "dispatch --ref a branch that defines linux_matrix"
