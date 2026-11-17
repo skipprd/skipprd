@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Python wheel version is the engine git tag.
 
-CI stamps pyproject.toml / python/Cargo.toml from GITHUB_REF_NAME before
-maturin. Production x.y.z → skippr==x.y.z. Beta x.y.z-beta-N → PEP 440
-x.y.zbN. Moving a production tag whose filenames already exist stamps a
-PEP 427 build number. Committed pyproject stays a dummy x.y.z.
+CI stamps pyproject.toml (PEP 440) and python/Cargo.toml (engine tag) from
+GITHUB_REF_NAME before maturin. Production x.y.z → skippr==x.y.z. Beta
+x.y.z-beta-N → pyproject x.y.zbN, cargo x.y.z-beta-N (Cargo rejects xbN).
+Moving a production tag whose filenames already exist stamps a PEP 427
+build number. Committed pyproject stays a dummy x.y.z.
 """
 
 from __future__ import annotations
@@ -52,24 +53,32 @@ def python_semver(pyproject: Path = PYPROJECT, cargo: Path = PYTHON_CARGO) -> st
     return pyproject_version
 
 
+def _replace_first_version(path: Path, version: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    updated, count = re.subn(
+        r'(?m)^(version\s*=\s*")[^"]+(")',
+        rf"\g<1>{version}\g<2>",
+        text,
+        count=1,
+    )
+    if count != 1:
+        raise SystemExit(f"failed updating python version in {path}")
+    path.write_text(updated, encoding="utf-8")
+
+
 def stamp_python_package_version(
-    version: str,
+    tag: str,
     pyproject: Path = PYPROJECT,
     cargo: Path = PYTHON_CARGO,
 ) -> None:
-    if not PEP440_RE.fullmatch(version):
-        raise SystemExit(f"python version must be x.y.z or x.y.zbN, got: {version}")
-    for path in (pyproject, cargo):
-        text = path.read_text(encoding="utf-8")
-        updated, count = re.subn(
-            r'(?m)^(version\s*=\s*")[^"]+(")',
-            rf"\g<1>{version}\g<2>",
-            text,
-            count=1,
-        )
-        if count != 1:
-            raise SystemExit(f"failed updating python version in {path}")
-        path.write_text(updated, encoding="utf-8")
+    """Stamp pyproject with PEP 440 and python/Cargo.toml with the engine tag."""
+    if not is_engine_tag(tag):
+        raise SystemExit(f"not an engine tag: {tag}")
+    py_version = pep440_version(tag)
+    if not PEP440_RE.fullmatch(py_version):
+        raise SystemExit(f"python version must be x.y.z or x.y.zbN, got: {py_version}")
+    _replace_first_version(pyproject, py_version)
+    _replace_first_version(cargo, tag)
 
 
 def python_version_for_tag(tag: str, pyproject: Path = PYPROJECT, cargo: Path = PYTHON_CARGO) -> str:
@@ -87,7 +96,7 @@ def prepare_ci_package_versions(
     """Return the skipprd host stamp. Engine tags also stamp the skippr wheel semver."""
     tag = (ref_name if ref_name is not None else os.environ.get("GITHUB_REF_NAME", "")).strip()
     if is_engine_tag(tag):
-        stamp_python_package_version(pep440_version(tag), pyproject=pyproject, cargo=cargo)
+        stamp_python_package_version(tag, pyproject=pyproject, cargo=cargo)
         return tag
     return python_semver(pyproject=pyproject, cargo=cargo)
 

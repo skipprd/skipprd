@@ -268,6 +268,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertNotIn("stamps the root host package version from the tag name (`v1.2.3`", text)
         self.assertNotIn("Python has its own semver", text)
         self.assertIn("stamps the `skippr` wheel from the unprefixed engine tag", text)
+        self.assertIn("the engine tag in `python/Cargo.toml`", text)
         self.assertNotIn("Bump `pyproject.toml` and `python/Cargo.toml` together, then tag", text)
 
     def test_install_docs_pin_unprefixed_engine_version(self):
@@ -364,7 +365,7 @@ class PythonBindingsCiTests(unittest.TestCase):
             )
             self.assertIn('version = "16.0.0"', pyproject.read_text(encoding="utf-8"))
 
-    def test_beta_tag_stamps_unique_pep440_python_version(self):
+    def test_beta_tag_stamps_pep440_pyproject_and_cargo_engine_tag(self):
         module = load_wheel_version()
         self.assertEqual(module.python_version_for_tag("18.3.10-beta-2"), "18.3.10b2")
         with tempfile.TemporaryDirectory() as tmp:
@@ -380,7 +381,8 @@ class PythonBindingsCiTests(unittest.TestCase):
             self.assertEqual(stamped, "18.3.10-beta-2")
             self.assertEqual(module.pep440_version("18.3.10-beta-2"), "18.3.10b2")
             self.assertIn('version = "18.3.10b2"', pyproject.read_text(encoding="utf-8"))
-            self.assertIn('version = "18.3.10b2"', cargo.read_text(encoding="utf-8"))
+            self.assertIn('version = "18.3.10-beta-2"', cargo.read_text(encoding="utf-8"))
+            self.assertNotIn('version = "18.3.10b2"', cargo.read_text(encoding="utf-8"))
             pyproject.write_text('version = "18.3.6"\n', encoding="utf-8")
             cargo.write_text('[package]\nname = "skipprd-python"\nversion = "18.3.6"\n', encoding="utf-8")
             self.assertEqual(
