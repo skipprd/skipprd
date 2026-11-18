@@ -339,6 +339,45 @@ mod tests {
     }
 
     #[test]
+    fn persist_after_migrate_assigns_nested_file_json_field_ids() {
+        let fence = CatalogFence::local();
+        let store = skippr_wal_catalog::MemorySkipprStore::open(fence);
+        let mut md = PipelineMetadata::new(&Config::new());
+        md.name = "bike_hire_many".into();
+        let mut root = Metadata::new().unwrap();
+        root.field_id = 0;
+        let mut device = Metadata::new().unwrap();
+        device.field_id = 0;
+        device.out_field_name = "device".to_string();
+        device.source_field_name = "device".to_string();
+        device.determined_type = crate::discover::SkipprDataType::Record;
+        let mut firmware = Metadata::new().unwrap();
+        firmware.field_id = 0;
+        firmware.out_field_name = "firmware".to_string();
+        firmware.source_field_name = "firmware".to_string();
+        device.fields.insert("firmware".to_string(), firmware);
+        root.fields.insert("device".to_string(), device);
+        md.metadata.insert("bike_hire_many".into(), root);
+        assert!(
+            persist_pipeline_schema(&store, fence, &md).is_err(),
+            "unrepaired nested File JSON must not shred onto node/0"
+        );
+        assert!(md.migrate_persisted_metadata());
+        persist_pipeline_schema(&store, fence, &md).unwrap();
+        let loaded = load_pipeline_schema(&store, "bike_hire_many")
+            .unwrap()
+            .unwrap();
+        let device = loaded.metadata["bike_hire_many"]
+            .fields
+            .get("device")
+            .unwrap();
+        let firmware = device.fields.get("firmware").unwrap();
+        assert_ne!(device.field_id, 0);
+        assert_ne!(firmware.field_id, 0);
+        assert_ne!(device.field_id, firmware.field_id);
+    }
+
+    #[test]
     fn shredded_schema_roundtrips_and_skips_unchanged_puts() {
         let fence = CatalogFence::local();
         let store = skippr_wal_catalog::MemorySkipprStore::open(fence);

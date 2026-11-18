@@ -301,7 +301,8 @@ fn py_loads_admitted(
         return Ok(loads);
     }
     let store = offsets.open_stream_state()?;
-    let key = crate::compute::journal_key(&config.get_workspace_name(), &config.get_pipeline_name())?;
+    let key =
+        crate::compute::journal_key(&config.get_workspace_name(), &config.get_pipeline_name())?;
     let log = crate::compute::load_journal(store.as_ref(), &key)?;
     crate::compute::assert_py_matches_journal(&config.get_pipeline_name(), &loads, &log)?;
     Ok(loads)
@@ -2882,8 +2883,11 @@ impl Ingest {
                     }
 
                     {
+                        pipeline_metadata.migrate_persisted_metadata();
                         let mut new_pm = METADATA.load().as_ref().clone();
                         new_pm.metadata = pipeline_metadata.metadata.clone();
+                        new_pm.metadata_version = pipeline_metadata.metadata_version;
+                        new_pm.schema_id = pipeline_metadata.schema_id;
                         METADATA.store(Arc::new(new_pm));
                     }
 
@@ -2907,6 +2911,15 @@ impl Ingest {
                             info!("Schema discovery complete, writing metadata to Skippr");
 
                             pipeline_metadata.enabled = true;
+                            pipeline_metadata.migrate_persisted_metadata();
+                            {
+                                let mut stored = METADATA.load().as_ref().clone();
+                                stored.metadata = pipeline_metadata.metadata.clone();
+                                stored.metadata_version = pipeline_metadata.metadata_version;
+                                stored.schema_id = pipeline_metadata.schema_id;
+                                stored.enabled = true;
+                                METADATA.store(Arc::new(stored));
+                            }
                             INGEST_RT.block_on(config.set_metadata(&pipeline_metadata, false));
                         }
                         DISCOVERY_COMPLETE.store(true, Ordering::Release);
@@ -3315,7 +3328,12 @@ impl Ingest {
                 .clone()
                 .unwrap_or_else(|| pipeline_name.clone());
             let fixed_namespace = if transform_snap.skip_namespace_field_parse {
-                Some(storage_namespace(config, &batch_namespace_override))
+                // COPY with empty namespace_fields must not insert the pipeline
+                // name as a hive folder (Firehose device is device_data/p_rmc=).
+                match config.pipeline_type() {
+                    Ok(crate::pipeline_type::PipelineType::Copy) => Some(String::new()),
+                    _ => Some(storage_namespace(config, &batch_namespace_override)),
+                }
             } else {
                 None
             };
@@ -3724,55 +3742,54 @@ impl Ingest {
                 IngestFlattenIter::from_ndjson(payload_text.unwrap_or(""))
             } else {
                 let decode_started = Instant::now();
-                let mut records: Vec<Value> = match decode_ingest(
-                    config,
-                    format,
-                    &ingest_batch.data,
-                ) {
-                    Ok(DecodedIngest::Rows(records)) => records,
-                    Ok(DecodedIngest::Arrow(batches)) => {
-                        ingest_profile::add_decode_ns(decode_started.elapsed().as_nanos() as u64);
-                        if ingest_batch.cdc_rows().is_some() {
-                            panic!(
-                                "schema'd {} ingest for {}:{} cannot carry CDC row sidecars",
-                                format.as_str(),
-                                ingest_batch.offset_key.namespace,
-                                ingest_batch.offset_key.partition
+                let mut records: Vec<Value> =
+                    match decode_ingest(config, format, &ingest_batch.data) {
+                        Ok(DecodedIngest::Rows(records)) => records,
+                        Ok(DecodedIngest::Arrow(batches)) => {
+                            ingest_profile::add_decode_ns(
+                                decode_started.elapsed().as_nanos() as u64
                             );
-                        }
-                        if flatten {
-                            match crate::ingest::schema_arrow::coerced_batches_to_json_values(
-                                &batches,
-                            ) {
-                                Ok(records) => records,
-                                Err(err) => {
-                                    dl_records.push(DeadletterRecord {
-                                        namespace: config.get_pipeline_name(),
-                                        record: format!(
-                                            "{} {} bytes",
-                                            format.as_str(),
-                                            ingest_batch.data.len()
-                                        ),
-                                        error: err.to_string(),
-                                        failure_code: "INPUT_FORMAT".to_string(),
-                                        event_time: None,
-                                        source_uri: ingest_batch.source_uri.clone(),
-                                        offset_key: format!(
-                                            "{}:{}",
-                                            ingest_batch.offset_key.namespace,
-                                            ingest_batch.offset_key.partition
-                                        ),
-                                        offset_pos: 1,
-                                    });
-                                    continue;
-                                }
+                            if ingest_batch.cdc_rows().is_some() {
+                                panic!(
+                                    "schema'd {} ingest for {}:{} cannot carry CDC row sidecars",
+                                    format.as_str(),
+                                    ingest_batch.offset_key.namespace,
+                                    ingest_batch.offset_key.partition
+                                );
                             }
-                        } else {
-                            if crate::compute::blocks_unflattened_arrow(
-                                crate::compute::has_py(config),
-                                flatten,
-                            ) {
-                                dl_records.push(DeadletterRecord {
+                            if flatten {
+                                match crate::ingest::schema_arrow::coerced_batches_to_json_values(
+                                    &batches,
+                                ) {
+                                    Ok(records) => records,
+                                    Err(err) => {
+                                        dl_records.push(DeadletterRecord {
+                                            namespace: config.get_pipeline_name(),
+                                            record: format!(
+                                                "{} {} bytes",
+                                                format.as_str(),
+                                                ingest_batch.data.len()
+                                            ),
+                                            error: err.to_string(),
+                                            failure_code: "INPUT_FORMAT".to_string(),
+                                            event_time: None,
+                                            source_uri: ingest_batch.source_uri.clone(),
+                                            offset_key: format!(
+                                                "{}:{}",
+                                                ingest_batch.offset_key.namespace,
+                                                ingest_batch.offset_key.partition
+                                            ),
+                                            offset_pos: 1,
+                                        });
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                if crate::compute::blocks_unflattened_arrow(
+                                    crate::compute::has_py(config),
+                                    flatten,
+                                ) {
+                                    dl_records.push(DeadletterRecord {
                                         namespace: config.get_pipeline_name(),
                                         record: format!(
                                             "{} {} bytes",
@@ -3790,75 +3807,77 @@ impl Ingest {
                                         ),
                                         offset_pos: 1,
                                     });
+                                    continue;
+                                }
+                                if let Err(err) = ingest_schema_arrow_batches(
+                                    config,
+                                    &transform_snap,
+                                    &primary_sink_ref,
+                                    ingest_batch,
+                                    batches,
+                                    offset_snapshot.as_ref(),
+                                    is_cdc_batch,
+                                    track_position,
+                                    &mut buf,
+                                    &mut schema_hash_cache,
+                                    &mut i,
+                                    &mut _j,
+                                    &mut latest_timestamp,
+                                ) {
+                                    dl_records.push(DeadletterRecord {
+                                        namespace: config.get_pipeline_name(),
+                                        record: format!(
+                                            "{} {} bytes",
+                                            format.as_str(),
+                                            ingest_batch.data.len()
+                                        ),
+                                        error: err,
+                                        failure_code: "INPUT_FORMAT".to_string(),
+                                        event_time: None,
+                                        source_uri: ingest_batch.source_uri.clone(),
+                                        offset_key: format!(
+                                            "{}:{}",
+                                            ingest_batch.offset_key.namespace,
+                                            ingest_batch.offset_key.partition
+                                        ),
+                                        offset_pos: 1,
+                                    });
+                                }
                                 continue;
                             }
-                            if let Err(err) = ingest_schema_arrow_batches(
-                                config,
-                                &transform_snap,
-                                &primary_sink_ref,
-                                ingest_batch,
-                                batches,
-                                offset_snapshot.as_ref(),
-                                is_cdc_batch,
-                                track_position,
-                                &mut buf,
-                                &mut schema_hash_cache,
-                                &mut i,
-                                &mut _j,
-                                &mut latest_timestamp,
-                            ) {
-                                dl_records.push(DeadletterRecord {
-                                    namespace: config.get_pipeline_name(),
-                                    record: format!(
-                                        "{} {} bytes",
-                                        format.as_str(),
-                                        ingest_batch.data.len()
-                                    ),
-                                    error: err,
-                                    failure_code: "INPUT_FORMAT".to_string(),
-                                    event_time: None,
-                                    source_uri: ingest_batch.source_uri.clone(),
-                                    offset_key: format!(
-                                        "{}:{}",
-                                        ingest_batch.offset_key.namespace,
-                                        ingest_batch.offset_key.partition
-                                    ),
-                                    offset_pos: 1,
-                                });
-                            }
+                        }
+                        Err(err) => {
+                            ingest_profile::add_decode_ns(
+                                decode_started.elapsed().as_nanos() as u64
+                            );
+                            let decode_offset_pos = payload_text
+                                .map(|text| text.lines().count().max(1) as u64)
+                                .unwrap_or(1);
+                            dl_records.push(DeadletterRecord {
+                                namespace: config.get_pipeline_name(),
+                                record: if format.is_text() {
+                                    payload_text.unwrap_or("").to_string()
+                                } else {
+                                    format!("{} {} bytes", format.as_str(), ingest_batch.data.len())
+                                },
+                                error: err.to_string(),
+                                failure_code: "INPUT_FORMAT".to_string(),
+                                event_time: None,
+                                source_uri: ingest_batch.source_uri.clone(),
+                                offset_key: format!(
+                                    "{}:{}",
+                                    ingest_batch.offset_key.namespace,
+                                    ingest_batch.offset_key.partition
+                                ),
+                                offset_pos: 1,
+                            });
+                            dl_offsets
+                                .entry(ingest_batch.offset_key.clone())
+                                .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
+                                .or_insert(decode_offset_pos);
                             continue;
                         }
-                    }
-                    Err(err) => {
-                        ingest_profile::add_decode_ns(decode_started.elapsed().as_nanos() as u64);
-                        let decode_offset_pos = payload_text
-                            .map(|text| text.lines().count().max(1) as u64)
-                            .unwrap_or(1);
-                        dl_records.push(DeadletterRecord {
-                            namespace: config.get_pipeline_name(),
-                            record: if format.is_text() {
-                                payload_text.unwrap_or("").to_string()
-                            } else {
-                                format!("{} {} bytes", format.as_str(), ingest_batch.data.len())
-                            },
-                            error: err.to_string(),
-                            failure_code: "INPUT_FORMAT".to_string(),
-                            event_time: None,
-                            source_uri: ingest_batch.source_uri.clone(),
-                            offset_key: format!(
-                                "{}:{}",
-                                ingest_batch.offset_key.namespace,
-                                ingest_batch.offset_key.partition
-                            ),
-                            offset_pos: 1,
-                        });
-                        dl_offsets
-                            .entry(ingest_batch.offset_key.clone())
-                            .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
-                            .or_insert(decode_offset_pos);
-                        continue;
-                    }
-                };
+                    };
                 ingest_profile::add_decode_ns(decode_started.elapsed().as_nanos() as u64);
                 if Config::debug_enabled() {
                     debug!(

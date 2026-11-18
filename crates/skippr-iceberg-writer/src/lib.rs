@@ -22,7 +22,7 @@ use arrow::array::{
     TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
     TimestampSecondArray, UInt32Array,
 };
-use arrow::compute::filter_record_batch;
+use arrow::compute::{filter_record_batch, take};
 use arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema, SchemaRef};
 use arrow::util::display::array_value_to_string;
 use async_trait::async_trait;
@@ -267,7 +267,7 @@ struct PendingIcebergFile {
     partition: Vec<Option<StoredPartitionValue>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(untagged)]
 enum StoredPartitionValue {
     Bool(bool),
@@ -2090,62 +2090,74 @@ impl<S: SinkSpec> IcebergWriter<S> {
                 }
             };
 
-            for roll in roll_record_batches(data_batches) {
-                let identity = grouped_file_identity(
-                    &manifest.idempotency_key,
-                    PendingFileContent::Data,
-                    data_roll_index,
-                );
-                data_roll_index = data_roll_index.saturating_add(1);
-                uploads.push(self.upload_grouped_file(
-                    namespace.to_string(),
-                    PendingFileContent::Data,
-                    identity,
-                    roll,
-                    date_fields.clone(),
-                    iceberg_schema.clone(),
-                    Arc::clone(&partition_spec),
-                    require_homogeneous,
-                    Vec::new(),
-                ));
-                while uploads.len() >= ICEBERG_MAX_FILE_WRITES_IN_FLIGHT {
-                    let file = uploads
-                        .next()
-                        .await
-                        .ok_or_else(|| io::Error::other("grouped upload queue closed early"))??;
-                    if file.content == PendingFileContent::Data {
-                        data_rows = data_rows.saturating_add(file.rows);
+            for part_batches in split_batches_by_partition(
+                data_batches,
+                iceberg_schema.as_ref(),
+                partition_spec.as_ref(),
+                require_homogeneous,
+            )? {
+                for roll in roll_record_batches(part_batches) {
+                    let identity = grouped_file_identity(
+                        &manifest.idempotency_key,
+                        PendingFileContent::Data,
+                        data_roll_index,
+                    );
+                    data_roll_index = data_roll_index.saturating_add(1);
+                    uploads.push(self.upload_grouped_file(
+                        namespace.to_string(),
+                        PendingFileContent::Data,
+                        identity,
+                        roll,
+                        date_fields.clone(),
+                        iceberg_schema.clone(),
+                        Arc::clone(&partition_spec),
+                        require_homogeneous,
+                        Vec::new(),
+                    ));
+                    while uploads.len() >= ICEBERG_MAX_FILE_WRITES_IN_FLIGHT {
+                        let file = uploads.next().await.ok_or_else(|| {
+                            io::Error::other("grouped upload queue closed early")
+                        })??;
+                        if file.content == PendingFileContent::Data {
+                            data_rows = data_rows.saturating_add(file.rows);
+                        }
+                        files.push(file);
                     }
-                    files.push(file);
                 }
             }
-            for roll in roll_record_batches(delete_batches) {
-                let identity = grouped_file_identity(
-                    &manifest.idempotency_key,
-                    PendingFileContent::EqualityDeletes,
-                    delete_roll_index,
-                );
-                delete_roll_index = delete_roll_index.saturating_add(1);
-                uploads.push(self.upload_grouped_file(
-                    namespace.to_string(),
-                    PendingFileContent::EqualityDeletes,
-                    identity,
-                    roll,
-                    date_fields.clone(),
-                    iceberg_schema.clone(),
-                    Arc::clone(&partition_spec),
-                    require_homogeneous,
-                    equality_ids.clone().unwrap_or_default(),
-                ));
-                while uploads.len() >= ICEBERG_MAX_FILE_WRITES_IN_FLIGHT {
-                    let file = uploads
-                        .next()
-                        .await
-                        .ok_or_else(|| io::Error::other("grouped upload queue closed early"))??;
-                    if file.content == PendingFileContent::Data {
-                        data_rows = data_rows.saturating_add(file.rows);
+            for part_batches in split_batches_by_partition(
+                delete_batches,
+                iceberg_schema.as_ref(),
+                partition_spec.as_ref(),
+                require_homogeneous,
+            )? {
+                for roll in roll_record_batches(part_batches) {
+                    let identity = grouped_file_identity(
+                        &manifest.idempotency_key,
+                        PendingFileContent::EqualityDeletes,
+                        delete_roll_index,
+                    );
+                    delete_roll_index = delete_roll_index.saturating_add(1);
+                    uploads.push(self.upload_grouped_file(
+                        namespace.to_string(),
+                        PendingFileContent::EqualityDeletes,
+                        identity,
+                        roll,
+                        date_fields.clone(),
+                        iceberg_schema.clone(),
+                        Arc::clone(&partition_spec),
+                        require_homogeneous,
+                        equality_ids.clone().unwrap_or_default(),
+                    ));
+                    while uploads.len() >= ICEBERG_MAX_FILE_WRITES_IN_FLIGHT {
+                        let file = uploads.next().await.ok_or_else(|| {
+                            io::Error::other("grouped upload queue closed early")
+                        })??;
+                        if file.content == PendingFileContent::Data {
+                            data_rows = data_rows.saturating_add(file.rows);
+                        }
+                        files.push(file);
                     }
-                    files.push(file);
                 }
             }
         }
@@ -3502,6 +3514,81 @@ fn record_batch_memory_size(batch: &RecordBatch) -> usize {
         .sum()
 }
 
+fn row_partition_values(
+    iceberg_schema: &Schema,
+    fields: &[PartitionField],
+    batch: &RecordBatch,
+    row: usize,
+) -> Result<Vec<Option<StoredPartitionValue>>, io::Error> {
+    fields
+        .iter()
+        .map(|field| {
+            let source = iceberg_schema.field_by_id(field.source_id).ok_or_else(|| {
+                io::Error::other(format!(
+                    "Iceberg partition field {} has no source column",
+                    field.field_id
+                ))
+            })?;
+            let Some(col) = batch.column_by_name(source.name.as_str()) else {
+                return Ok(None);
+            };
+            if field.transform == Transform::Identity {
+                return Ok(stored_partition_value_at(col.as_ref(), row));
+            }
+            let Some(datum) = partition_source_datum(col.as_ref(), row) else {
+                return Ok(None);
+            };
+            let func = create_transform_function(&field.transform)
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            let transformed = func
+                .transform_literal_result(&datum)
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            Ok(Some(stored_partition_from_datum(&transformed)?))
+        })
+        .collect()
+}
+
+fn take_batch_rows(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch, io::Error> {
+    let idx = UInt32Array::from(indices.to_vec());
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|col| take(col, &idx, None).map_err(|err| io::Error::other(err.to_string())))
+        .collect::<Result<Vec<_>, _>>()?;
+    RecordBatch::try_new(batch.schema(), columns).map_err(|err| io::Error::other(err.to_string()))
+}
+
+fn split_batches_by_partition(
+    batches: Vec<RecordBatch>,
+    iceberg_schema: &Schema,
+    partition_spec: &iceberg::spec::PartitionSpec,
+    require_homogeneous: bool,
+) -> Result<Vec<Vec<RecordBatch>>, io::Error> {
+    if !require_homogeneous || partition_spec.fields().is_empty() || batches.is_empty() {
+        return Ok(if batches.is_empty() {
+            Vec::new()
+        } else {
+            vec![batches]
+        });
+    }
+    let fields = partition_spec.fields();
+    let mut groups: HashMap<Vec<Option<StoredPartitionValue>>, Vec<RecordBatch>> = HashMap::new();
+    for batch in batches {
+        let mut rows_by_key: HashMap<Vec<Option<StoredPartitionValue>>, Vec<u32>> = HashMap::new();
+        for row in 0..batch.num_rows() {
+            let key = row_partition_values(iceberg_schema, fields, &batch, row)?;
+            rows_by_key.entry(key).or_default().push(row as u32);
+        }
+        for (key, indices) in rows_by_key {
+            groups
+                .entry(key)
+                .or_default()
+                .push(take_batch_rows(&batch, &indices)?);
+        }
+    }
+    Ok(groups.into_values().collect())
+}
+
 fn roll_record_batches(batches: Vec<RecordBatch>) -> Vec<Vec<RecordBatch>> {
     let mut rolls = Vec::new();
     let mut current = Vec::new();
@@ -4119,9 +4206,6 @@ fn iceberg_type_from_arrow(
         DataType::Struct(fields) => {
             let mut children = Vec::new();
             for field in fields.iter() {
-                if field.name() == SKIPPR_EMPTY_STRUCT_MARKER {
-                    continue;
-                }
                 let mut child_path = path.to_vec();
                 child_path.push(field.name().to_string());
                 let field_id =
@@ -5321,7 +5405,7 @@ mod tests {
     }
 
     #[test]
-    fn iceberg_schema_from_arrow_maps_struct_skipping_empty_marker() {
+    fn iceberg_schema_from_arrow_maps_struct_including_empty_marker() {
         let mut firmware_meta = HashMap::new();
         firmware_meta.insert(PARQUET_FIELD_ID_META_KEY.to_string(), "1485247109".into());
         let mut modem_meta = HashMap::new();
@@ -5349,9 +5433,9 @@ mod tests {
             .iter()
             .map(|field| field.name.as_str())
             .collect();
-        assert_eq!(names, vec!["firmware", "modem"]);
-        assert_eq!(st.fields()[0].id, 1485247109);
-        assert_eq!(st.fields()[1].id, 1468357056);
+        assert_eq!(names, vec!["__skippr_empty_struct", "firmware", "modem"]);
+        assert_eq!(st.fields()[1].id, 1485247109);
+        assert_eq!(st.fields()[2].id, 1468357056);
     }
 
     #[test]
