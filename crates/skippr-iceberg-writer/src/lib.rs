@@ -1128,48 +1128,45 @@ impl<S: SinkSpec> IcebergWriter<S> {
         let current = table.metadata().current_schema();
         let names_ok = iceberg_schema_has_all_fields(current, &dest);
         let types_ok = iceberg_field_types_match(current, &dest);
-        if names_ok && types_ok {
-            return Ok(table);
-        }
-        if !types_ok && table.metadata().current_snapshot().is_none() {
-            info!(
-                "Replacing empty Iceberg table schema namespace={} dest_fields={}",
-                namespace,
-                dest.as_struct().fields().len()
-            );
-            return self
-                .recreate_table_with_iceberg_schema(namespace, dest)
-                .await;
-        }
-        if !names_ok {
-            let catalog = Arc::clone(&self.catalog);
-            let next_schema_id = next_iceberg_schema_id(table.metadata());
-            let evolved = merge_iceberg_schema_missing_fields(
-                namespace,
-                table.metadata().current_schema(),
-                &dest,
-                next_schema_id,
-            )?;
-            let tx = Transaction::new(&table);
-            let tx = tx
-                .replace_schema(evolved)
-                .apply(tx)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            return match tx.commit(catalog.as_ref()).await {
-                Ok(table) => {
-                    self.table_cache.write().await.remove(namespace);
-                    Ok(table)
-                }
-                Err(err) if err.kind() == iceberg::ErrorKind::CatalogCommitConflicts => catalog
-                    .load_table(&self.table_ident(namespace)?)
+        let has_snapshot = table.metadata().current_snapshot().is_some();
+        match iceberg_arrow_schema_plan(names_ok, types_ok, has_snapshot) {
+            IcebergArrowSchemaPlan::Keep => Ok(table),
+            IcebergArrowSchemaPlan::Recreate => {
+                info!(
+                    "Replacing empty Iceberg table schema namespace={} dest_fields={}",
+                    namespace,
+                    dest.as_struct().fields().len()
+                );
+                self.recreate_table_with_iceberg_schema(namespace, dest)
                     .await
-                    .map_err(|err| io::Error::other(err.to_string())),
-                Err(err) => Err(io::Error::other(err.to_string())),
-            };
+            }
+            IcebergArrowSchemaPlan::MergeMissing => {
+                let catalog = Arc::clone(&self.catalog);
+                let next_schema_id = next_iceberg_schema_id(table.metadata());
+                let evolved = merge_iceberg_schema_missing_fields(
+                    namespace,
+                    table.metadata().current_schema(),
+                    &dest,
+                    next_schema_id,
+                )?;
+                let tx = Transaction::new(&table);
+                let tx = tx
+                    .replace_schema(evolved)
+                    .apply(tx)
+                    .map_err(|err| io::Error::other(err.to_string()))?;
+                match tx.commit(catalog.as_ref()).await {
+                    Ok(table) => {
+                        self.table_cache.write().await.remove(namespace);
+                        Ok(table)
+                    }
+                    Err(err) if err.kind() == iceberg::ErrorKind::CatalogCommitConflicts => catalog
+                        .load_table(&self.table_ident(namespace)?)
+                        .await
+                        .map_err(|err| io::Error::other(err.to_string())),
+                    Err(err) => Err(io::Error::other(err.to_string())),
+                }
+            }
         }
-        Err(io::Error::other(format!(
-            "Iceberg field type change for namespace '{namespace}' requires an empty table"
-        )))
     }
 
     async fn recreate_table_with_iceberg_schema(
@@ -4136,6 +4133,30 @@ fn next_iceberg_schema_id(metadata: &iceberg::spec::TableMetadata) -> i32 {
         + 1
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum IcebergArrowSchemaPlan {
+    Keep,
+    Recreate,
+    MergeMissing,
+}
+
+fn iceberg_arrow_schema_plan(
+    names_ok: bool,
+    types_ok: bool,
+    has_snapshot: bool,
+) -> IcebergArrowSchemaPlan {
+    if names_ok && types_ok {
+        return IcebergArrowSchemaPlan::Keep;
+    }
+    if !types_ok && !has_snapshot {
+        return IcebergArrowSchemaPlan::Recreate;
+    }
+    if !names_ok {
+        return IcebergArrowSchemaPlan::MergeMissing;
+    }
+    IcebergArrowSchemaPlan::Keep
+}
+
 fn iceberg_schema_has_all_fields(current: &Schema, desired: &Schema) -> bool {
     desired
         .as_struct()
@@ -5068,16 +5089,7 @@ fn field_to_nested_field(
             ))
         }
         typ => {
-            if promote_timestamps.contains(metadata.out_field_name())
-                && matches!(
-                    typ,
-                    SkipprDataType::Long
-                        | SkipprDataType::Integer
-                        | SkipprDataType::Byte
-                        | SkipprDataType::Short
-                        | SkipprDataType::TimestampMilli
-                )
-            {
+            if promote_timestamps.contains(metadata.out_field_name()) {
                 Type::Primitive(PrimitiveType::Timestamp)
             } else {
                 primitive_type_for_skippr(typ)
@@ -5488,6 +5500,26 @@ mod tests {
             .build()
             .unwrap();
         assert!(!iceberg_field_types_match(&current, &desired));
+    }
+
+    #[test]
+    fn iceberg_arrow_schema_plan_keeps_committed_types_after_snapshot() {
+        assert_eq!(
+            iceberg_arrow_schema_plan(true, true, true),
+            IcebergArrowSchemaPlan::Keep
+        );
+        assert_eq!(
+            iceberg_arrow_schema_plan(true, false, false),
+            IcebergArrowSchemaPlan::Recreate
+        );
+        assert_eq!(
+            iceberg_arrow_schema_plan(false, true, true),
+            IcebergArrowSchemaPlan::MergeMissing
+        );
+        assert_eq!(
+            iceberg_arrow_schema_plan(true, false, true),
+            IcebergArrowSchemaPlan::Keep
+        );
     }
 
     #[test]
