@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [16.0.10] - 2026-11-18
+
+### Changed
+
+- Runtime plugin crate patches (immutable CDN version paths) after the 16.0.9 host event-time filter changed the linked plugin binaries.
+
 ## [16.0.9] - 2026-11-18
 
 ### Fixed

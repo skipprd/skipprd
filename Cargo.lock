@@ -10920,7 +10920,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-amqp"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -10942,7 +10942,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-athena"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -10972,7 +10972,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-athena-iceberg"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "clap",
  "iceberg",
@@ -10988,7 +10988,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-azure-blob"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11011,7 +11011,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-bigquery"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11037,7 +11037,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-clickhouse"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11062,7 +11062,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-databricks"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11088,7 +11088,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-duckdb"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "clap",
  "iceberg",
@@ -11105,7 +11105,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-file"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11126,7 +11126,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-gcs"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11149,7 +11149,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-motherduck"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11173,7 +11173,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-postgres"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11199,7 +11199,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-redshift"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11225,7 +11225,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-s3"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11249,7 +11249,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-sftp"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11272,7 +11272,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-skipprlake"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "clap",
  "iceberg",
@@ -11286,7 +11286,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-snowflake"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "aes",
  "arrow 59.3.1",
@@ -11323,7 +11323,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-stdout"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11341,7 +11341,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-synapse"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11365,7 +11365,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-adroll-ads"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11381,7 +11381,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-amqp"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -11398,7 +11398,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-apple-search-ads"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11414,7 +11414,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-bing-webmaster-tools"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11431,7 +11431,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-clickhouse"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -11446,7 +11446,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-delta-lake"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11463,7 +11463,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-dynamodb"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -11486,7 +11486,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-eventbridge"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -11503,7 +11503,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-file"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11523,7 +11523,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-google-ads"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11540,7 +11540,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-google-analytics"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11556,7 +11556,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-google-pagespeed"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11574,7 +11574,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-google-search-console"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11591,7 +11591,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-http-client"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -11607,7 +11607,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-http-server"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "axum 0.7.9",
@@ -11622,7 +11622,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-hubspot-crm"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11639,7 +11639,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-kafka"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -11656,7 +11656,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-kinesis"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -11673,7 +11673,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-linkedin-ads"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11689,7 +11689,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-meta-ads"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11708,7 +11708,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-meta-instagram-ads"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11724,7 +11724,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-mongodb"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11743,7 +11743,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-motherduck"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -11759,7 +11759,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-mqtt"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -11775,7 +11775,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-mssql"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11793,7 +11793,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-mysql"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "async-trait",
  "clap",
@@ -11810,7 +11810,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-otlp"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "arrow 59.3.1",
  "async-trait",
@@ -11837,7 +11837,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-pcap"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -11850,7 +11850,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-postgres"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "async-trait",
  "clap",
@@ -11866,7 +11866,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-redshift"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -11884,7 +11884,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-revolut-business"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11903,7 +11903,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-s3"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -11923,7 +11923,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-sftp"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -11939,7 +11939,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-shopify-admin"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11955,7 +11955,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-sns"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -11972,7 +11972,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-socket"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -11986,7 +11986,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-sqs"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -12003,7 +12003,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-statsd"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -12018,7 +12018,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-stdin"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -12032,7 +12032,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-stripe"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12048,7 +12048,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-sumup"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12065,7 +12065,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-websocket"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -12083,7 +12083,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-x-ads"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -12103,7 +12103,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-xero-accounting"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12130,7 +12130,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-athena-iceberg"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-athena-iceberg",
@@ -12140,7 +12140,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-bigquery"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-bigquery",
@@ -12150,7 +12150,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-clickhouse"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-clickhouse",
@@ -12160,7 +12160,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-duckdb"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-duckdb",
@@ -12170,7 +12170,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-glue"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -12181,7 +12181,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-motherduck"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-motherduck",
@@ -12191,7 +12191,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-postgres"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "async-trait",
  "clap",
@@ -12202,7 +12202,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-redshift"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-redshift",
@@ -12212,7 +12212,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-skipprlake"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-skipprlake",
@@ -12222,7 +12222,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-snowflake"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-snowflake",
