@@ -4065,20 +4065,27 @@ fn iceberg_field_types_match(current: &Schema, desired: &Schema) -> bool {
     })
 }
 
-fn iceberg_type_from_arrow(data_type: &DataType) -> Result<Type, io::Error> {
-    Ok(Type::Primitive(match data_type {
-        DataType::Boolean => PrimitiveType::Boolean,
+fn iceberg_type_from_arrow(
+    data_type: &DataType,
+    namespace: &str,
+    path: &[String],
+    seen_field_ids: &mut HashMap<i32, ()>,
+) -> Result<Type, io::Error> {
+    let primitive = match data_type {
+        DataType::Boolean => Some(PrimitiveType::Boolean),
         DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::UInt8 | DataType::UInt16 => {
-            PrimitiveType::Int
+            Some(PrimitiveType::Int)
         }
-        DataType::Int64 | DataType::UInt32 | DataType::UInt64 => PrimitiveType::Long,
-        DataType::Float32 => PrimitiveType::Float,
-        DataType::Float64 => PrimitiveType::Double,
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => PrimitiveType::String,
-        DataType::Binary | DataType::LargeBinary | DataType::BinaryView => PrimitiveType::Binary,
-        DataType::Date32 | DataType::Date64 => PrimitiveType::Date,
-        DataType::Timestamp(_, _) => PrimitiveType::Timestamp,
-        DataType::Time32(_) | DataType::Time64(_) => PrimitiveType::Time,
+        DataType::Int64 | DataType::UInt32 | DataType::UInt64 => Some(PrimitiveType::Long),
+        DataType::Float32 => Some(PrimitiveType::Float),
+        DataType::Float64 => Some(PrimitiveType::Double),
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Some(PrimitiveType::String),
+        DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
+            Some(PrimitiveType::Binary)
+        }
+        DataType::Date32 | DataType::Date64 => Some(PrimitiveType::Date),
+        DataType::Timestamp(_, _) => Some(PrimitiveType::Timestamp),
+        DataType::Time32(_) | DataType::Time64(_) => Some(PrimitiveType::Time),
         DataType::Decimal128(precision, scale) => {
             let scale = u32::try_from(*scale).map_err(|_| {
                 io::Error::other(format!(
@@ -4090,30 +4097,50 @@ fn iceberg_type_from_arrow(data_type: &DataType) -> Result<Type, io::Error> {
                     "unsupported Arrow type for Iceberg dest schema: {data_type}"
                 )));
             }
-            PrimitiveType::Decimal {
+            Some(PrimitiveType::Decimal {
                 precision: u32::from(*precision),
                 scale,
-            }
+            })
         }
-        other => {
-            return Err(io::Error::other(format!(
-                "unsupported Arrow type for Iceberg dest schema: {other}"
-            )))
+        _ => None,
+    };
+    if let Some(primitive) = primitive {
+        return Ok(Type::Primitive(primitive));
+    }
+    match data_type {
+        DataType::List(field) | DataType::LargeList(field) | DataType::FixedSizeList(field, _) => {
+            let mut element_path = path.to_vec();
+            element_path.push("element".to_string());
+            let element_type = iceberg_type_from_arrow(
+                field.data_type(),
+                namespace,
+                &element_path,
+                seen_field_ids,
+            )?;
+            let element_field_id =
+                unique_iceberg_field_id(namespace, &element_path, seen_field_ids);
+            seen_field_ids.insert(element_field_id, ());
+            Ok(Type::List(ListType::new(Arc::new(
+                NestedField::list_element(element_field_id, element_type, true),
+            ))))
         }
-    }))
+        other => Err(io::Error::other(format!(
+            "unsupported Arrow type for Iceberg dest schema: {other}"
+        ))),
+    }
 }
 
 fn iceberg_schema_from_arrow(namespace: &str, schema: &ArrowSchema) -> Result<Schema, io::Error> {
     let mut fields = Vec::new();
     let mut seen_field_ids = HashMap::<i32, ()>::new();
     for field in schema.fields() {
-        let field_id =
-            unique_iceberg_field_id(namespace, &[field.name().to_string()], &seen_field_ids);
+        let path = vec![field.name().to_string()];
+        let field_id = unique_iceberg_field_id(namespace, &path, &seen_field_ids);
         seen_field_ids.insert(field_id, ());
         fields.push(Arc::new(NestedField::new(
             field_id,
             field.name(),
-            iceberg_type_from_arrow(field.data_type())?,
+            iceberg_type_from_arrow(field.data_type(), namespace, &path, &mut seen_field_ids)?,
             !field.is_nullable(),
         )));
     }
@@ -5164,6 +5191,24 @@ mod tests {
                 precision: 38,
                 scale: 9
             })
+        ));
+    }
+
+    #[test]
+    fn iceberg_schema_from_arrow_maps_list_int32() {
+        let arrow = ArrowSchema::new(vec![arrow::datatypes::Field::new(
+            "tags",
+            DataType::List(Arc::new(arrow::datatypes::Field::new(
+                "item",
+                DataType::Int32,
+                true,
+            ))),
+            true,
+        )]);
+        let dest = iceberg_schema_from_arrow("bike_hire_many", &arrow).unwrap();
+        assert!(matches!(
+            dest.field_by_name("tags").unwrap().field_type.as_ref(),
+            Type::List(_)
         ));
     }
 

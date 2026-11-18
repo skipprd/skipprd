@@ -19,7 +19,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- Iceberg dest schema accepts Skippr `Decimal128(38, 9)`, so SkipprLake compact of decimal columns no longer fail-closes as `unsupported Arrow type`.
+- Iceberg dest schema accepts Skippr `Decimal128(38, 9)` and Arrow `List`, so SkipprLake compact of decimal and list columns no longer fail-closes as `unsupported Arrow type`.
 - DynamoDB CDC `sync` without `--once` keeps polling the stream. Five empty GetRecords polls still end `--once`.
 - FlightSQL re-register of Iceberg `namespace.table` on the shared QueryRuntime catalog no longer fails with `The table … already exists` when GetFlightInfo and DoGet overlap (dbt `dim_shop` after `stg_bronze_shop`).
 
