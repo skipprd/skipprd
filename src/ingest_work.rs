@@ -74,6 +74,7 @@ use std::string::ToString;
 use std::sync::atomic::AtomicU64;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 use threadpool::ThreadPool;
 extern crate num_cpus;
@@ -131,12 +132,22 @@ struct SlowIngestTask {
 static SLOW_INGEST_TX: once_cell::sync::OnceCell<mpsc::Sender<SlowIngestTask>> =
     once_cell::sync::OnceCell::new();
 
+enum MonitorMsg {
+    Completed(u64),
+    Stop,
+}
+
 /// Create an ingest thread pool, backing off thread count when the OS returns EAGAIN.
 fn build_ingest_thread_pool(requested: usize) -> (ThreadPool, usize) {
     let requested = requested.max(1);
     let mut threads = requested;
     loop {
-        match std::panic::catch_unwind(|| ThreadPool::new(threads)) {
+        match std::panic::catch_unwind(|| {
+            threadpool::Builder::new()
+                .num_threads(threads)
+                .thread_name("skipprd-ingest".to_string())
+                .build()
+        }) {
             Ok(pool) => {
                 if threads != requested {
                     warn!(
@@ -1840,7 +1851,9 @@ pub struct Ingest {
     thread_pool: Arc<ThreadPool>,
     num_cpus: usize,
     execution_mode: RuntimeExecutionMode,
-    tx: Sender<u64>,
+    tx: Sender<MonitorMsg>,
+    monitor: Option<JoinHandle<()>>,
+    monitor_exited: Arc<AtomicBool>,
     active_count: Arc<AtomicUsize>, // Track total number of active threads
     queue_length: Arc<AtomicUsize>, // Track total number of queued tasks
     /// Sum of `IngestBatch::bytes` for tasks not yet signaled complete on `tx`
@@ -1863,17 +1876,7 @@ use tracing::{debug, error, info, warn};
 
 impl Drop for Ingest {
     fn drop(&mut self) {
-        let outstanding = self.queue_length.load(Ordering::SeqCst);
-        if outstanding == 0 {
-            return;
-        }
-
-        info!(
-            "Completing, waiting for {} ingest tasks to finish",
-            outstanding
-        );
-
-        self.wait_for_completion();
+        self.shutdown();
     }
 }
 
@@ -2594,105 +2597,106 @@ impl Ingest {
                 .unwrap_or(if is_ci { 1 } else { 2 });
         let max_queue_length = (num_cpus * queue_factor).max(num_cpus);
         let worker_config = config.clone();
-        std::thread::spawn(move || {
-            while let Ok(completed_bytes) = rx.recv() {
-                // Check if we're shutting down
-                // if is_shutting_down_clone.load(Ordering::SeqCst) > 0 {
-                //     self.wait_for_completion();
-                //     println!("Shutting down monitoring thread");
-                //     break;
-                // }
-
-                active_count_clone.fetch_sub(1, AcqRel);
-                queue_length_clone.fetch_sub(1, AcqRel);
-                outstanding_bytes_clone.fetch_sub(completed_bytes as usize, AcqRel);
-                // Wake any producers waiting on queue capacity
-                let (lock, cv) = &*queue_cv_clone;
-                if let Ok(_g) = lock.lock() {
-                    cv.notify_all();
-                }
-
-                let current_queue_length = queue_length_clone.load(Ordering::Acquire);
-                let current_active_threads = active_count_clone.load(Ordering::Acquire);
-                crate::metrics::counters::set_active_threads(current_active_threads);
-                crate::metrics::counters::set_queue_length(current_queue_length);
-
-                // println!("Task completed ({} tasks in queue, {}/{} active threads)",
-                //          current_queue_length,
-                //          current_active_threads,
-                //          num_cpus
-                // );
-
-                // Process any queued tasks if we have capacity
-                if current_active_threads < num_cpus {
-                    let _lock = match queue_lock_clone.write() {
-                        Ok(lock) => lock,
-                        Err(e) => {
-                            error!("Failed to acquire queue lock: {:?}", e);
-                            continue;
-                        }
+        let monitor_exited = Arc::new(AtomicBool::new(false));
+        let monitor_exited_clone = monitor_exited.clone();
+        let monitor = std::thread::Builder::new()
+            .name("skipprd-ingest-monitor".to_string())
+            .spawn(move || {
+                while let Ok(msg) = rx.recv() {
+                    let completed_bytes = match msg {
+                        MonitorMsg::Stop => break,
+                        MonitorMsg::Completed(completed_bytes) => completed_bytes,
                     };
 
-                    let mut task_queue = match task_queue_clone.write() {
-                        Ok(queue) => queue,
-                        Err(e) => {
-                            error!("Failed to acquire task queue: {:?}", e);
-                            continue;
-                        }
-                    };
+                    active_count_clone.fetch_sub(1, AcqRel);
+                    queue_length_clone.fetch_sub(1, AcqRel);
+                    outstanding_bytes_clone.fetch_sub(completed_bytes as usize, AcqRel);
+                    // Wake any producers waiting on queue capacity
+                    let (lock, cv) = &*queue_cv_clone;
+                    if let Ok(_g) = lock.lock() {
+                        cv.notify_all();
+                    }
 
-                    // Process tasks from the queue while we have capacity
-                    while let Some(ingest_task) = task_queue.pop_front() {
-                        if active_count_clone.load(Ordering::Acquire) >= num_cpus {
-                            // Put the task back if we're at capacity
-                            task_queue.push_front(ingest_task);
-                            break;
-                        }
+                    let current_queue_length = queue_length_clone.load(Ordering::Acquire);
+                    let current_active_threads = active_count_clone.load(Ordering::Acquire);
+                    crate::metrics::counters::set_active_threads(current_active_threads);
+                    crate::metrics::counters::set_queue_length(current_queue_length);
 
-                        // Process the queued task
-                        let tx = tx_clone.clone();
-                        let offset_db_clone = ingest_task.offset_db.clone();
-                        let datas_clone = ingest_task.datas.clone();
-                        let shared_output_clone = ingest_task.shared_output.clone();
-                        let submit_id = ingest_task.submit_id;
-
-                        // Increment active count before spawning
-                        active_count_clone.fetch_add(1, AcqRel);
-                        crate::metrics::counters::set_active_threads(
-                            active_count_clone.load(Ordering::Acquire),
-                        );
-                        // Note: We don't increment queue_length here since we're processing from the queue,
-                        // and the task was already counted in queue_length when it was added to the queue
-
-                        let queued_handle = shared_handle.clone();
-                        let completed_bytes: u64 = datas_clone.iter().map(|b| b.bytes as u64).sum();
-                        let queued_config = worker_config.clone();
-                        thread_pool_clone.execute(move || {
-                            let result =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    Ingest::process_batch(
-                                        &queued_config,
-                                        &datas_clone,
-                                        &offset_db_clone,
-                                        queued_handle,
-                                        shared_output_clone,
-                                        submit_id,
-                                    );
-                                }));
-                            if result.is_err() {
-                                error!("Queued ingest task panicked; forcing completion signal");
-                                crate::buffer::wal_writer::fail_request(
-                                    submit_id,
-                                    "queued ingest task panicked",
-                                );
+                    // Process any queued tasks if we have capacity
+                    if current_active_threads < num_cpus {
+                        let _lock = match queue_lock_clone.write() {
+                            Ok(lock) => lock,
+                            Err(e) => {
+                                error!("Failed to acquire queue lock: {:?}", e);
+                                continue;
                             }
-                            let _ = tx.send(completed_bytes);
-                        });
+                        };
+
+                        let mut task_queue = match task_queue_clone.write() {
+                            Ok(queue) => queue,
+                            Err(e) => {
+                                error!("Failed to acquire task queue: {:?}", e);
+                                continue;
+                            }
+                        };
+
+                        // Process tasks from the queue while we have capacity
+                        while let Some(ingest_task) = task_queue.pop_front() {
+                            if active_count_clone.load(Ordering::Acquire) >= num_cpus {
+                                // Put the task back if we're at capacity
+                                task_queue.push_front(ingest_task);
+                                break;
+                            }
+
+                            // Process the queued task
+                            let tx = tx_clone.clone();
+                            let offset_db_clone = ingest_task.offset_db.clone();
+                            let datas_clone = ingest_task.datas.clone();
+                            let shared_output_clone = ingest_task.shared_output.clone();
+                            let submit_id = ingest_task.submit_id;
+
+                            // Increment active count before spawning
+                            active_count_clone.fetch_add(1, AcqRel);
+                            crate::metrics::counters::set_active_threads(
+                                active_count_clone.load(Ordering::Acquire),
+                            );
+                            // Note: We don't increment queue_length here since we're processing from the queue,
+                            // and the task was already counted in queue_length when it was added to the queue
+
+                            let queued_handle = shared_handle.clone();
+                            let completed_bytes: u64 =
+                                datas_clone.iter().map(|b| b.bytes as u64).sum();
+                            let queued_config = worker_config.clone();
+                            thread_pool_clone.execute(move || {
+                                let result =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        Ingest::process_batch(
+                                            &queued_config,
+                                            &datas_clone,
+                                            &offset_db_clone,
+                                            queued_handle,
+                                            shared_output_clone,
+                                            submit_id,
+                                        );
+                                    }));
+                                if result.is_err() {
+                                    error!(
+                                        "Queued ingest task panicked; forcing completion signal"
+                                    );
+                                    crate::buffer::wal_writer::fail_request(
+                                        submit_id,
+                                        "queued ingest task panicked",
+                                    );
+                                }
+                                let _ = tx.send(MonitorMsg::Completed(completed_bytes));
+                            });
+                        }
                     }
                 }
-            }
-            debug!("Monitoring thread exited");
-        });
+                monitor_exited_clone.store(true, Ordering::Release);
+                debug!("Monitoring thread exited");
+            })
+            .expect("ingest monitor thread");
 
         let analyse_schema: AnalyseSchema = AnalyseSchema { i: 0 };
         let throughput_window = Arc::new(RwLock::new(VecDeque::with_capacity(100)));
@@ -2709,6 +2713,8 @@ impl Ingest {
             execution_mode,
             thread_pool,
             tx,
+            monitor: Some(monitor),
+            monitor_exited,
             active_count,
             queue_length,
             outstanding_bytes,
@@ -2724,6 +2730,50 @@ impl Ingest {
             throughput_history,
             max_chunk_size,
         }
+    }
+
+    fn shutdown(&mut self) {
+        let Some(monitor) = self.monitor.take() else {
+            return;
+        };
+
+        let remaining = self.queue_length.load(Ordering::SeqCst);
+        if remaining > 0 {
+            info!(
+                "Completing, waiting for {remaining} ingest tasks to finish before stopping the monitor"
+            );
+        }
+
+        let mut last_report_time = Instant::now();
+        while self.queue_length.load(Ordering::SeqCst) > 0
+            || self.outstanding_bytes.load(Ordering::SeqCst) > 0
+        {
+            if last_report_time.elapsed() > Duration::from_secs(5) {
+                info!(
+                    "Waiting for ingest queue before monitor stop: {} tasks outstanding ({} active), outstanding_bytes={}",
+                    self.queue_length.load(Ordering::SeqCst),
+                    self.active_count.load(Ordering::SeqCst),
+                    self.outstanding_bytes.load(Ordering::SeqCst),
+                );
+                last_report_time = Instant::now();
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        let _ = self.tx.send(MonitorMsg::Stop);
+        if monitor.join().is_err() {
+            error!("Ingest monitor thread panicked");
+        }
+        debug_assert!(
+            self.monitor_exited.load(Ordering::Acquire),
+            "ingest monitor must set monitor_exited before join returns"
+        );
+        self.thread_pool.join();
+    }
+
+    #[cfg(test)]
+    fn monitor_exit_flag(&self) -> Arc<AtomicBool> {
+        self.monitor_exited.clone()
     }
 
     pub fn wait_for_completion(&self) {
@@ -3039,7 +3089,7 @@ impl Ingest {
                                 "active ingest task panicked",
                             );
                         }
-                        let _ = tx.send(completed_bytes);
+                        let _ = tx.send(MonitorMsg::Completed(completed_bytes));
                     });
 
                     self.update_throughput(completed_bytes);
@@ -5443,6 +5493,108 @@ mod empty_ingest_tasks_tests {
         let output = Arc::new(noop);
 
         ingest.ingest_file(&config, &empty_tasks, &offsets, output);
+    }
+}
+
+#[cfg(test)]
+mod ingest_shutdown_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn shutdown_test_config(dir: &std::path::Path) -> Config {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "skippr": { "workspace": "ws", "store": { "type": "fjall" } },
+            "pipelines": {
+                "p": {
+                    "data_source": "data_sources.sample",
+                    "data_dir": dir.to_str().unwrap()
+                }
+            },
+            "data_sources": {
+                "sample": { "File": { "path": dir.join("source").to_str().unwrap(), "format": "json" } }
+            }
+        }))
+        .unwrap();
+        config.bind_pipeline("p")
+    }
+
+    fn idle_ingest(dir: &std::path::Path) -> Ingest {
+        let config = shutdown_test_config(dir);
+        Ingest::new_for_execution(&config, RuntimeExecutionMode::Discover)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn comm_equals(comm: &str, name: &str) -> bool {
+        let comm = comm.trim();
+        comm == name || (comm.len() == 15 && name.starts_with(comm))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn named_thread_count(name: &str) -> usize {
+        let Ok(entries) = std::fs::read_dir("/proc/self/task") else {
+            return 0;
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                std::fs::read_to_string(entry.path().join("comm"))
+                    .ok()
+                    .is_some_and(|comm| comm_equals(&comm, name))
+            })
+            .count()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_named_thread_count_at_most(name: &str, max: usize) {
+        for _ in 0..100_000 {
+            if named_thread_count(name) <= max {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!(
+            "{name} threads still {} after ingest drop (max {max})",
+            named_thread_count(name)
+        );
+    }
+
+    #[test]
+    fn idle_drop_joins_the_monitor() {
+        let dir = tempfile::tempdir().unwrap();
+        let ingest = idle_ingest(dir.path());
+        let flag = ingest.monitor_exit_flag();
+        assert!(!flag.load(Ordering::Acquire));
+        drop(ingest);
+        assert!(flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn second_ingest_does_not_keep_the_first_monitor() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = idle_ingest(dir.path());
+        let first_flag = first.monitor_exit_flag();
+        drop(first);
+        assert!(first_flag.load(Ordering::Acquire));
+
+        let second = idle_ingest(dir.path());
+        let second_flag = second.monitor_exit_flag();
+        assert!(first_flag.load(Ordering::Acquire));
+        assert!(!second_flag.load(Ordering::Acquire));
+        drop(second);
+        assert!(first_flag.load(Ordering::Acquire));
+        assert!(second_flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn idle_drop_releases_named_pool_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let baseline_pool = named_thread_count("skipprd-ingest");
+        let baseline_monitor = named_thread_count("skipprd-ingest-monitor");
+        let ingest = idle_ingest(dir.path());
+        drop(ingest);
+        wait_named_thread_count_at_most("skipprd-ingest", baseline_pool);
+        wait_named_thread_count_at_most("skipprd-ingest-monitor", baseline_monitor);
     }
 }
 
