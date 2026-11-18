@@ -23,7 +23,7 @@ use arrow::array::{
     TimestampSecondArray, UInt32Array,
 };
 use arrow::compute::filter_record_batch;
-use arrow::datatypes::{DataType, Schema as ArrowSchema, SchemaRef};
+use arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema, SchemaRef};
 use arrow::util::display::array_value_to_string;
 use async_trait::async_trait;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
@@ -4102,27 +4102,57 @@ fn iceberg_type_from_arrow(
                 scale,
             })
         }
+        DataType::FixedSizeBinary(_) => Some(PrimitiveType::Binary),
+        DataType::Null => Some(PrimitiveType::Int),
         _ => None,
     };
     if let Some(primitive) = primitive {
         return Ok(Type::Primitive(primitive));
     }
     match data_type {
+        DataType::Dictionary(_, value) => {
+            iceberg_type_from_arrow(value.as_ref(), namespace, path, seen_field_ids)
+        }
         DataType::List(field) | DataType::LargeList(field) | DataType::FixedSizeList(field, _) => {
-            let mut element_path = path.to_vec();
-            element_path.push("element".to_string());
-            let element_type = iceberg_type_from_arrow(
-                field.data_type(),
-                namespace,
-                &element_path,
-                seen_field_ids,
-            )?;
-            let element_field_id =
-                unique_iceberg_field_id(namespace, &element_path, seen_field_ids);
-            seen_field_ids.insert(element_field_id, ());
-            Ok(Type::List(ListType::new(Arc::new(
-                NestedField::list_element(element_field_id, element_type, true),
-            ))))
+            iceberg_list_type_from_arrow(field, namespace, path, seen_field_ids)
+        }
+        DataType::Struct(fields) => {
+            let mut children = Vec::new();
+            for field in fields.iter() {
+                if field.name() == SKIPPR_EMPTY_STRUCT_MARKER {
+                    continue;
+                }
+                let mut child_path = path.to_vec();
+                child_path.push(field.name().to_string());
+                let field_id =
+                    iceberg_field_id_for_arrow(namespace, &child_path, field, seen_field_ids);
+                seen_field_ids.insert(field_id, ());
+                children.push(Arc::new(NestedField::new(
+                    field_id,
+                    field.name(),
+                    iceberg_type_from_arrow(
+                        field.data_type(),
+                        namespace,
+                        &child_path,
+                        seen_field_ids,
+                    )?,
+                    !field.is_nullable(),
+                )));
+            }
+            Ok(Type::Struct(iceberg::spec::StructType::new(children)))
+        }
+        DataType::Map(entries, _) => {
+            let DataType::Struct(kv) = entries.data_type() else {
+                return Err(io::Error::other(format!(
+                    "unsupported Arrow type for Iceberg dest schema: {data_type}"
+                )));
+            };
+            if kv.len() != 2 {
+                return Err(io::Error::other(format!(
+                    "unsupported Arrow type for Iceberg dest schema: {data_type}"
+                )));
+            }
+            iceberg_map_type_from_arrow(&kv[0], &kv[1], namespace, path, seen_field_ids)
         }
         other => Err(io::Error::other(format!(
             "unsupported Arrow type for Iceberg dest schema: {other}"
@@ -4130,12 +4160,90 @@ fn iceberg_type_from_arrow(
     }
 }
 
+const SKIPPR_EMPTY_STRUCT_MARKER: &str = "__skippr_empty_struct";
+
+fn arrow_parquet_field_id(field: &ArrowField) -> Option<i32> {
+    field
+        .metadata()
+        .get(PARQUET_FIELD_ID_META_KEY)
+        .and_then(|value| value.parse().ok())
+}
+
+fn iceberg_field_id_for_arrow(
+    namespace: &str,
+    path: &[String],
+    field: &ArrowField,
+    seen_field_ids: &HashMap<i32, ()>,
+) -> i32 {
+    if let Some(id) = arrow_parquet_field_id(field) {
+        if id != 0 && !seen_field_ids.contains_key(&id) {
+            return id;
+        }
+    }
+    unique_iceberg_field_id(namespace, path, seen_field_ids)
+}
+
+fn iceberg_list_type_from_arrow(
+    field: &ArrowField,
+    namespace: &str,
+    path: &[String],
+    seen_field_ids: &mut HashMap<i32, ()>,
+) -> Result<Type, io::Error> {
+    let mut element_path = path.to_vec();
+    element_path.push("element".to_string());
+    let element_type =
+        iceberg_type_from_arrow(field.data_type(), namespace, &element_path, seen_field_ids)?;
+    let element_field_id =
+        iceberg_field_id_for_arrow(namespace, &element_path, field, seen_field_ids);
+    seen_field_ids.insert(element_field_id, ());
+    Ok(Type::List(ListType::new(Arc::new(
+        NestedField::list_element(element_field_id, element_type, true),
+    ))))
+}
+
+fn iceberg_map_type_from_arrow(
+    key_field: &ArrowField,
+    value_field: &ArrowField,
+    namespace: &str,
+    path: &[String],
+    seen_field_ids: &mut HashMap<i32, ()>,
+) -> Result<Type, io::Error> {
+    let mut key_path = path.to_vec();
+    key_path.push("key".to_string());
+    let mut value_path = path.to_vec();
+    value_path.push("value".to_string());
+    let key_type =
+        iceberg_type_from_arrow(key_field.data_type(), namespace, &key_path, seen_field_ids)?;
+    let value_type = iceberg_type_from_arrow(
+        value_field.data_type(),
+        namespace,
+        &value_path,
+        seen_field_ids,
+    )?;
+    let key_field_id = iceberg_field_id_for_arrow(namespace, &key_path, key_field, seen_field_ids);
+    seen_field_ids.insert(key_field_id, ());
+    let value_field_id =
+        iceberg_field_id_for_arrow(namespace, &value_path, value_field, seen_field_ids);
+    seen_field_ids.insert(value_field_id, ());
+    Ok(Type::Map(MapType::new(
+        Arc::new(NestedField::map_key_element(key_field_id, key_type)),
+        Arc::new(NestedField::map_value_element(
+            value_field_id,
+            value_type,
+            true,
+        )),
+    )))
+}
+
 fn iceberg_schema_from_arrow(namespace: &str, schema: &ArrowSchema) -> Result<Schema, io::Error> {
     let mut fields = Vec::new();
     let mut seen_field_ids = HashMap::<i32, ()>::new();
     for field in schema.fields() {
+        if field.name() == SKIPPR_EMPTY_STRUCT_MARKER {
+            continue;
+        }
         let path = vec![field.name().to_string()];
-        let field_id = unique_iceberg_field_id(namespace, &path, &seen_field_ids);
+        let field_id = iceberg_field_id_for_arrow(namespace, &path, field, &seen_field_ids);
         seen_field_ids.insert(field_id, ());
         fields.push(Arc::new(NestedField::new(
             field_id,
@@ -5209,6 +5317,67 @@ mod tests {
         assert!(matches!(
             dest.field_by_name("tags").unwrap().field_type.as_ref(),
             Type::List(_)
+        ));
+    }
+
+    #[test]
+    fn iceberg_schema_from_arrow_maps_struct_skipping_empty_marker() {
+        let mut firmware_meta = HashMap::new();
+        firmware_meta.insert(PARQUET_FIELD_ID_META_KEY.to_string(), "1485247109".into());
+        let mut modem_meta = HashMap::new();
+        modem_meta.insert(PARQUET_FIELD_ID_META_KEY.to_string(), "1468357056".into());
+        let arrow = ArrowSchema::new(vec![arrow::datatypes::Field::new(
+            "device",
+            DataType::Struct(
+                vec![
+                    arrow::datatypes::Field::new("__skippr_empty_struct", DataType::Boolean, true),
+                    arrow::datatypes::Field::new("firmware", DataType::Utf8, true)
+                        .with_metadata(firmware_meta),
+                    arrow::datatypes::Field::new("modem", DataType::Utf8, true)
+                        .with_metadata(modem_meta),
+                ]
+                .into(),
+            ),
+            true,
+        )]);
+        let dest = iceberg_schema_from_arrow("bike_hire_many", &arrow).unwrap();
+        let Type::Struct(st) = dest.field_by_name("device").unwrap().field_type.as_ref() else {
+            panic!("expected Iceberg struct");
+        };
+        let names: Vec<&str> = st
+            .fields()
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["firmware", "modem"]);
+        assert_eq!(st.fields()[0].id, 1485247109);
+        assert_eq!(st.fields()[1].id, 1468357056);
+    }
+
+    #[test]
+    fn iceberg_schema_from_arrow_maps_map_string_string() {
+        let arrow = ArrowSchema::new(vec![arrow::datatypes::Field::new(
+            "attrs",
+            DataType::Map(
+                Arc::new(arrow::datatypes::Field::new(
+                    "entries",
+                    DataType::Struct(
+                        vec![
+                            arrow::datatypes::Field::new("key", DataType::Utf8, false),
+                            arrow::datatypes::Field::new("value", DataType::Utf8, true),
+                        ]
+                        .into(),
+                    ),
+                    false,
+                )),
+                false,
+            ),
+            true,
+        )]);
+        let dest = iceberg_schema_from_arrow("bike_hire_many", &arrow).unwrap();
+        assert!(matches!(
+            dest.field_by_name("attrs").unwrap().field_type.as_ref(),
+            Type::Map(_)
         ));
     }
 
