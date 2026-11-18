@@ -39,7 +39,7 @@ FAIL_CLOSED = [
         "fail_closed_nested_record_drop",
         "ALTER TABLE s3_alter DROP COLUMN detail.pour_location",
         False,
-        ("nested ALTER", "not found"),
+        ("nested ALTER", "not found", "flattened"),
     ),
     (
         "fail_closed_merge_same",

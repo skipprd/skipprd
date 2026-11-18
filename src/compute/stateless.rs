@@ -40,15 +40,27 @@ pub fn dest_schema(
 }
 
 /// Drop rows whose event-time column is null or unparsable. Caller deadletters `dropped`.
+fn event_time_column_index(schema: &Schema, col: &str) -> Result<usize, String> {
+    let trimmed = col.trim();
+    let mut names = vec![trimmed.to_string()];
+    let stripped = trimmed.trim_matches('_');
+    if stripped != trimmed && !stripped.is_empty() {
+        names.push(stripped.to_string());
+    }
+    for name in &names {
+        if let Ok(idx) = schema.index_of(name) {
+            return Ok(idx);
+        }
+    }
+    schema.index_of(trimmed).map_err(|err| err.to_string())
+}
+
 pub fn drop_invalid_event_times(
     batch: RecordBatch,
     cdc: Option<Vec<WalRowMeta>>,
     col: &str,
 ) -> Result<(AlignedBatch, usize), String> {
-    let idx = batch
-        .schema()
-        .index_of(col)
-        .map_err(|err| err.to_string())?;
+    let idx = event_time_column_index(batch.schema().as_ref(), col)?;
     let keep = event_time_keep(batch.column(idx))?;
     let dropped = keep.iter().filter(|keep| !**keep).count();
     if dropped == 0 {
@@ -294,5 +306,18 @@ mod tests {
         let aligned = apply_stateless(&[], Some(&select), batch, None).unwrap();
         assert_eq!(aligned.batch.num_rows(), 1);
         assert!(aligned.batch.schema().field_with_name("amount2").is_ok());
+    }
+
+    #[test]
+    fn drop_invalid_event_times_resolves_cleaned_skippr_column() {
+        let batch = RecordBatch::try_from_iter(vec![(
+            "skippr_event_time",
+            Arc::new(Int64Array::from(vec![1_794_063_845i64])) as arrow::array::ArrayRef,
+        )])
+        .unwrap();
+        let (aligned, dropped) =
+            drop_invalid_event_times(batch, None, "_skippr_event_time").unwrap();
+        assert_eq!(dropped, 0);
+        assert_eq!(aligned.batch.num_rows(), 1);
     }
 }

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [16.0.9] - 2026-11-18
+
+### Fixed
+
+- Ingest event-time filter resolves Skippr-cleaned `skippr_event_time` when YAML names `_skippr_event_time`, so DynamoDB CDC compact writes parquet.
+- Flattened `ALTER TABLE DROP COLUMN detail.pour_location` fail-closed e2e accepts the flattened-path error.
+
 ## [16.0.8] - 2026-11-18
 
 ### Changed
