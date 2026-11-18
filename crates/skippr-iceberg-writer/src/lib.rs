@@ -4079,6 +4079,22 @@ fn iceberg_type_from_arrow(data_type: &DataType) -> Result<Type, io::Error> {
         DataType::Date32 | DataType::Date64 => PrimitiveType::Date,
         DataType::Timestamp(_, _) => PrimitiveType::Timestamp,
         DataType::Time32(_) | DataType::Time64(_) => PrimitiveType::Time,
+        DataType::Decimal128(precision, scale) => {
+            let scale = u32::try_from(*scale).map_err(|_| {
+                io::Error::other(format!(
+                    "unsupported Arrow type for Iceberg dest schema: {data_type}"
+                ))
+            })?;
+            if !(1..=38).contains(precision) {
+                return Err(io::Error::other(format!(
+                    "unsupported Arrow type for Iceberg dest schema: {data_type}"
+                )));
+            }
+            PrimitiveType::Decimal {
+                precision: u32::from(*precision),
+                scale,
+            }
+        }
         other => {
             return Err(io::Error::other(format!(
                 "unsupported Arrow type for Iceberg dest schema: {other}"
@@ -5131,6 +5147,23 @@ mod tests {
         assert!(matches!(
             dest.field_by_name("amount").unwrap().field_type.as_ref(),
             Type::Primitive(PrimitiveType::Double)
+        ));
+    }
+
+    #[test]
+    fn iceberg_schema_from_arrow_maps_skippr_decimal128() {
+        let arrow = ArrowSchema::new(vec![arrow::datatypes::Field::new(
+            "amount",
+            DataType::Decimal128(38, 9),
+            true,
+        )]);
+        let dest = iceberg_schema_from_arrow("bike_hire_many", &arrow).unwrap();
+        assert!(matches!(
+            dest.field_by_name("amount").unwrap().field_type.as_ref(),
+            Type::Primitive(PrimitiveType::Decimal {
+                precision: 38,
+                scale: 9
+            })
         ));
     }
 
