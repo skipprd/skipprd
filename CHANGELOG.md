@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [16.0.8] - 2026-11-18
+
 ### Changed
 
 - `/skippr-regression` is one GitHub workflow (`skippr-regression.yml`): one host build and one frame-pointer build for ingest/copy and Iceberg∪WAL query. Cells are one composite action (`e2e/regression`) and one script (`run_regression_cell.sh`) calling `tests/perf/run.py`. Scenario kind in one `tests/perf/catalog.yaml` owns ingest vs query. SQL SELECT cells are `ingest-sql-*` / `q-sql-compose-*`, CREATE TABLE cells are `ingest-create-table-*` / `q-create-table-*`, and Python cells name the handler (`stamp` / `site`). GitHub job titles are the scenario id. `tests/perf_db`, `perf.yml`, `perf-db.yml`, `e2e/perf`, `e2e/perf-db`, `e2e/heaptrack`, `run_perf_cell.sh`, and `run_perf_db_cell.sh` are gone.
@@ -13,6 +15,7 @@ All notable changes to this project will be documented in this file.
 - Ingest ACKs plugins after WAL catalog commit. Live resume is an in-process overlay. The Skippr Store `offsets` family is filled only by startup `republish_all`, not during ingest.
 - Compile cache in GitHub Actions is R2 sccache (`skippr-web-rust-cache`). GitHub Actions cache (`Swatinem/rust-cache`) is gone. Intra-run artifacts expire in one day.
 - Iceberg destinations (SkipprLake, Athena Iceberg, DuckDB Iceberg) map `batch_time_unit` 1:1 to a hidden `year|month|day|hour` transform on the event-time column, and identity-partition `batch_partition_fields`. Calendar `year`/`month`/`day` ints are no longer table columns. `minute` fail-closes on Iceberg. File sinks keep Hive `year=` / `month=` / `day=` folders. Recreate existing Iceberg tables that still identity-partition those ints. SkipprLake e2e filters `WHERE event_ts >= TIMESTAMP … AND event_ts < TIMESTAMP …`. File smoke now includes `e2e_skipprlake_local` on `skippr-linux-x64-32`.
+- Bump catalog plugin crate patches whose checksum inputs changed since 16.0.7 so CDN version paths stay immutable. DynamoDB source stays 0.1.17.
 
 ### Fixed
 
