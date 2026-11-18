@@ -3161,17 +3161,7 @@ impl Ingest {
                 let active = self.active_count.load(Ordering::Acquire);
                 let queued = self.queue_length.load(Ordering::Acquire);
                 let has_flush_backlog =
-                    crate::metrics::counters::COMPACTION_PLANNER_READY_WORK_COUNT
-                        .load(Ordering::Relaxed)
-                        > 0
-                        || crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
-                            .load(Ordering::Relaxed)
-                            > 0
-                        || crate::metrics::counters::COMPACTION_ACTIVE_JOBS.load(Ordering::Relaxed)
-                            > 0
-                        || crate::metrics::counters::COMPACTION_INFLIGHT_SLICE_COUNT
-                            .load(Ordering::Relaxed)
-                            > 0;
+                    crate::buffer::ingest_buffer::Buffers::ingest_tick_has_flush_backlog();
                 crate::ingest::tuner::update_flush_budget(
                     crate::ingest::tuner::FlushMode::Ingest,
                     has_flush_backlog,

@@ -428,6 +428,21 @@ fn ratio_at_most(value: u64, total: u64, percent: u64) -> bool {
     total > 0 && value.saturating_mul(100) <= total.saturating_mul(percent)
 }
 
+/// Ingest-tick backlog for the flush tuner. Does not hydrate the planner.
+///
+/// A started compactor whose planner is still empty is backlog so Idle cannot
+/// collapse the seeded compact width before hydrate. After load, force-reclaimable
+/// WAL keeps that width. In-flight / ready counters short-circuit without the
+/// index lock.
+pub(crate) fn ingest_tick_has_backlog(
+    compactor_started: bool,
+    planner_loaded: bool,
+    inflight_or_ready: bool,
+    reclaimable: bool,
+) -> bool {
+    inflight_or_ready || (compactor_started && !planner_loaded) || (planner_loaded && reclaimable)
+}
+
 fn memory_healthy(signals: FlushBudgetSignals) -> bool {
     match (
         signals.available_memory_bytes,
@@ -1478,9 +1493,10 @@ mod throughput_window_tests {
 #[cfg(test)]
 mod tuning_tests {
     use super::{
-        caps_from_env, compute_flush_budget, scheduler_additive_step, BudgetReason,
-        FlushBudgetCaps, FlushBudgetPolicyState, FlushBudgetSignals, FlushBudgetSnapshot,
-        FlushMode, BACKLOG_GRACE_SAMPLES, GROWTH_COOLDOWN_SAMPLES, QUIET_SAMPLES_BEFORE_GROWTH,
+        caps_from_env, compute_flush_budget, ingest_tick_has_backlog, scheduler_additive_step,
+        BudgetReason, FlushBudgetCaps, FlushBudgetPolicyState, FlushBudgetSignals,
+        FlushBudgetSnapshot, FlushMode, BACKLOG_GRACE_SAMPLES, GROWTH_COOLDOWN_SAMPLES,
+        QUIET_SAMPLES_BEFORE_GROWTH,
     };
     use serial_test::serial;
 
@@ -1580,6 +1596,61 @@ mod tuning_tests {
     }
 
     #[test]
+    fn ingest_tick_has_backlog_truth_table() {
+        assert!(!ingest_tick_has_backlog(false, false, false, false));
+        assert!(ingest_tick_has_backlog(true, false, false, false));
+        assert!(ingest_tick_has_backlog(false, true, false, true));
+        assert!(!ingest_tick_has_backlog(false, true, false, false));
+        assert!(ingest_tick_has_backlog(false, false, true, false));
+        assert!(ingest_tick_has_backlog(true, true, true, false));
+    }
+
+    fn seeded() -> FlushBudgetSnapshot {
+        FlushBudgetSnapshot {
+            scheduler_jobs: 2,
+            decode_jobs: 2,
+            sink_sessions: 2,
+            upload_sessions: 4,
+            multipart_parts: 2,
+            catalog_operations: 2,
+            ingest_reserved_cores: 16,
+            generation: 1,
+            reason: BudgetReason::EnvironmentCaps,
+        }
+    }
+
+    fn ingest_idle_signals(has_backlog: bool) -> FlushBudgetSignals {
+        FlushBudgetSignals {
+            mode: Some(FlushMode::Ingest),
+            has_backlog,
+            active_ingest: 1,
+            queued_ingest: 0,
+            scheduler_ready_depth: 0,
+            cpu_active_tasks: 1,
+            run_queue: Some(8.0),
+            process_rss_bytes: Some(32 * GIB),
+            total_memory_bytes: Some(128 * GIB),
+            available_memory_bytes: Some(80 * GIB),
+            ..FlushBudgetSignals::default()
+        }
+    }
+
+    #[test]
+    fn ingest_tick_without_backlog_idles_seeded_scheduler() {
+        let next = decide(seeded(), caps(), ingest_idle_signals(false));
+        assert_eq!(next.scheduler_jobs, 1);
+        assert_eq!(next.reason, BudgetReason::Idle);
+    }
+
+    #[test]
+    fn ingest_tick_with_unhydrated_compactor_holds_seeded_scheduler() {
+        let has_backlog = ingest_tick_has_backlog(true, false, false, false);
+        let next = decide(seeded(), caps(), ingest_idle_signals(has_backlog));
+        assert_eq!(next.scheduler_jobs, 2);
+        assert_ne!(next.reason, BudgetReason::Idle);
+    }
+
+    #[test]
     fn healthy_drain_ramps_additively() {
         let before = current();
         let next = decide(before, caps(), healthy_drain());
@@ -1641,6 +1712,18 @@ mod tuning_tests {
         assert_eq!(next.scheduler_jobs, 2);
         assert_eq!(next.decode_jobs, 2);
         assert_eq!(next.reason, BudgetReason::IngestPressure);
+    }
+
+    #[test]
+    fn drain_in_rss_dead_band_holds_scheduler() {
+        let before = current();
+        let mut signals = healthy_drain();
+        signals.process_rss_bytes = Some(90 * GIB);
+        signals.available_memory_bytes = Some(38 * GIB);
+        let next = decide(before, caps(), signals);
+        assert_eq!(next.scheduler_jobs, before.scheduler_jobs);
+        assert_ne!(next.reason, BudgetReason::HealthyDrain);
+        assert_ne!(next.reason, BudgetReason::HighRss);
     }
 
     #[test]

@@ -1734,6 +1734,30 @@ impl Buffers {
         Self::reclaimable_wal_partition_count(config, 1) > 0
     }
 
+    /// Flush-tuner backlog for ingest ticks. Does not hydrate the planner.
+    pub(crate) fn ingest_tick_has_flush_backlog() -> bool {
+        use std::sync::atomic::Ordering as AO;
+        let inflight_or_ready =
+            crate::metrics::counters::COMPACTION_PLANNER_READY_WORK_COUNT.load(AO::Relaxed) > 0
+                || crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT.load(AO::Relaxed) > 0
+                || crate::metrics::counters::COMPACTION_ACTIVE_JOBS.load(AO::Relaxed) > 0
+                || crate::metrics::counters::COMPACTION_INFLIGHT_SLICE_COUNT.load(AO::Relaxed) > 0;
+        if inflight_or_ready {
+            return crate::ingest::tuner::ingest_tick_has_backlog(false, false, true, false);
+        }
+        let started = COMPACTOR_STARTED.load(AO::Relaxed);
+        let mut index = compaction_index();
+        let loaded = index.manifests_loaded();
+        let reclaimable = loaded
+            && index.reclaimable_slice_count(
+                true,
+                Self::now_secs(),
+                Self::sent_manifest_stale_secs(),
+                1,
+            ) > 0;
+        crate::ingest::tuner::ingest_tick_has_backlog(started, loaded, false, reclaimable)
+    }
+
     pub(crate) fn reclaimable_wal_partition_count(config: &Config, limit: usize) -> usize {
         Self::hydrate_planner(config);
         Self::reclaimable_wal_partition_count_in_memory(limit)
