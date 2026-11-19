@@ -47,9 +47,9 @@ The log line starts `Skippr could not find a published runtime`.
 
 ## The run did not finish cleanly
 
-Look for `Finalising: compactor drain/stop did not complete cleanly` or `integrity check mismatch`.
+Look for `Finalising: compactor drain/stop did not complete cleanly`, `Finalising: durable catalog outbox drain failed`, or `integrity check mismatch`.
 
-**Cause:** Skipprd exited before in-flight writes settled, or uploaded counts do not match.
+**Cause:** Skipprd exited before in-flight writes or catalog commits settled, or uploaded counts do not match `expected_uploaded_rows`.
 
 **Fix:** Treat that run's counts as untrusted. Re-run:
 
@@ -57,7 +57,7 @@ Look for `Finalising: compactor drain/stop did not complete cleanly` or `integri
 skipprd sync --pipeline payments --once --log
 ```
 
-The next run recovers from the WAL. Confirm `Pipeline sync complete` and that destination counts match the source. If a summary reports `quarantined_parts` greater than 0, a slice failed to read — check source files or objects for corruption, then re-run.
+The next run recovers from the WAL. Confirm `Pipeline sync complete` and that destination counts match the source. If a summary reports `quarantined_parts` greater than 0, a slice failed to read. Check source files or objects for corruption, then re-run.
 
 ## Deadletters
 
