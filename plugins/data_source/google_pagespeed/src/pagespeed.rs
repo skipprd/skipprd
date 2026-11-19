@@ -10,7 +10,6 @@ use skippr_runtime_sdk::plugins::source_contract::{
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
-use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch};
 use tokio::time::sleep;
 use tracing::info;
@@ -25,12 +24,6 @@ use crate::streams::{
 };
 
 const DISCOVER_MAX_URLS: u32 = 1;
-
-fn runtime_is_discover_mode() -> bool {
-    std::env::var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV)
-        .map(|m| m.eq_ignore_ascii_case("discover"))
-        .unwrap_or(false)
-}
 
 pub struct DataSourceGooglePageSpeedPlugin {
     config: DataSourceGooglePageSpeedPluginConfig,
@@ -144,7 +137,7 @@ impl DataSource for DataSourceGooglePageSpeedPlugin {
 
     async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         self.config.validate()?;
-        let discover = runtime_is_discover_mode();
+        let discover = ctx.execution_mode().resume_frozen();
         let run_date = Utc::now().format("%Y-%m-%d").to_string();
         let max_urls = if discover {
             DISCOVER_MAX_URLS

@@ -73,12 +73,13 @@ impl DataSourceSqsPlugin {
     fn flush_pending(
         pending: &mut Vec<IngestBatch>,
         ctx: &dyn SourceSyncContext,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<bool, std::io::Error> {
         if pending.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let batch = std::mem::take(pending);
-        submit_payload_batches_durable(ctx, batch).map(|_| ())
+        let ack = submit_payload_batches_durable(ctx, batch)?;
+        Ok(ack.origin_commit_permitted())
     }
 
     async fn run_sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
@@ -171,29 +172,29 @@ impl DataSourceSqsPlugin {
                 to_delete.push((msg_id, receipt));
 
                 if pending_bytes >= batch_limit {
-                    Self::flush_pending(&mut pending, ctx.as_ref())?;
+                    let origin_commit = Self::flush_pending(&mut pending, ctx.as_ref())?;
                     pending_bytes = 0;
-                    if !to_delete.is_empty() {
+                    if origin_commit && !to_delete.is_empty() {
                         if let Err(e) =
                             Self::delete_batch(&self.client, &queue_url, &to_delete).await
                         {
                             error!("SQS delete_message_batch: {}", e);
                         }
-                        to_delete.clear();
                     }
+                    to_delete.clear();
                 }
             }
 
             if !pending.is_empty() {
-                Self::flush_pending(&mut pending, ctx.as_ref())?;
+                let origin_commit = Self::flush_pending(&mut pending, ctx.as_ref())?;
                 pending_bytes = 0;
-            }
-
-            if !to_delete.is_empty() {
-                if let Err(e) = Self::delete_batch(&self.client, &queue_url, &to_delete).await {
-                    error!("SQS delete_message_batch: {}", e);
+                if origin_commit && !to_delete.is_empty() {
+                    if let Err(e) = Self::delete_batch(&self.client, &queue_url, &to_delete).await {
+                        error!("SQS delete_message_batch: {}", e);
+                    }
                 }
             }
+            to_delete.clear();
         }
 
         if !pending.is_empty() {
@@ -245,5 +246,116 @@ impl DataSource for DataSourceSqsPlugin {
         } else {
             SourceExecutionContract::finite()
         }
+    }
+}
+
+#[cfg(test)]
+mod origin_commit_tests {
+    use super::*;
+    use skippr_runtime_sdk::plugins::cdc::CheckpointEnvelope;
+    use skippr_runtime_sdk::plugins::{
+        OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
+    };
+    use skippr_runtime_sdk::protocol::{RuntimeExecutionMode, RuntimeOffsetMaterializationHint};
+    use skippr_runtime_sdk::source_compat::{IngestBatch, ThroughputMetrics};
+
+    struct ModeCtx(RuntimeExecutionMode);
+
+    impl SourceSyncContext for ModeCtx {
+        fn execution_mode(&self) -> RuntimeExecutionMode {
+            self.0
+        }
+
+        fn submit_payload_tasks(
+            &self,
+            _tasks: Vec<SourcePayloadTask>,
+        ) -> Result<ThroughputMetrics, std::io::Error> {
+            Ok(ThroughputMetrics {
+                bytes_per_second: 0,
+                active_cores: 0,
+                queue_length: 0,
+                optimal_chunk_size: 0,
+            })
+        }
+
+        fn validate_offset_batch(
+            &self,
+            entries: &[OffsetValidationEntry],
+        ) -> Result<Vec<bool>, std::io::Error> {
+            Ok(vec![true; entries.len()])
+        }
+
+        fn relay_offset_hints(
+            &self,
+            _hints: Vec<RuntimeOffsetMaterializationHint>,
+        ) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn store_checkpoint(
+            &self,
+            _key: &str,
+            _envelope: &CheckpointEnvelope,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn load_checkpoint_envelope(
+            &self,
+            _key: &str,
+        ) -> Result<Option<CheckpointEnvelope>, String> {
+            Ok(None)
+        }
+    }
+
+    fn sample_batch() -> IngestBatch {
+        IngestBatch {
+            offset_key: OffsetKey {
+                namespace: "sqs:q".into(),
+                partition: "m".into(),
+            },
+            data: b"{}".to_vec().into(),
+            bytes: 2,
+            offset_pos: None,
+            source_uri: "sqs://q".into(),
+            namespace: Some("sqs.q".into()),
+            cdc_rows: None,
+        }
+    }
+
+    #[test]
+    fn sqs_deletes_only_when_origin_commit_permitted() {
+        let src = include_str!("sqs.rs");
+        let impl_src = src.split("#[cfg(test)]").next().expect("impl");
+        assert!(impl_src.contains("submit_payload_batches_durable"));
+        assert!(impl_src.contains("origin_commit_permitted"));
+        let delete = impl_src.find("delete_batch").expect("delete");
+        let gate = impl_src.find("origin_commit").expect("origin gate");
+        assert!(
+            gate < delete,
+            "SQS must not delete until durable ACK permits origin commit"
+        );
+    }
+
+    #[test]
+    fn flush_pending_forbids_origin_commit_when_frozen() {
+        let mut pending = vec![sample_batch()];
+        let permitted = DataSourceSqsPlugin::flush_pending(
+            &mut pending,
+            &ModeCtx(RuntimeExecutionMode::Discover),
+        )
+        .expect("flush");
+        assert!(!permitted);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn flush_pending_permits_origin_commit_when_sync() {
+        let mut pending = vec![sample_batch()];
+        let permitted =
+            DataSourceSqsPlugin::flush_pending(&mut pending, &ModeCtx(RuntimeExecutionMode::Sync))
+                .expect("flush");
+        assert!(permitted);
+        assert!(pending.is_empty());
     }
 }

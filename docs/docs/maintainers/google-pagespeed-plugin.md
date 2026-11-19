@@ -38,7 +38,7 @@ Env: `PAGESPEED_API_KEY` (overridden by `api_key` in config). Offline tests: `SK
 - `tld_sample`: homepage + robots/sitemap discovery (capped by `max_urls`).
 - `url_list`: explicit URL list.
 
-Discover mode: one URL, `mobile` only, `performance` category; no checkpoint writes.
+Discover mode: one URL, `mobile` only, `performance` category. Fetch budget via `ctx.execution_mode()`.
 
 ## Checkpoint
 

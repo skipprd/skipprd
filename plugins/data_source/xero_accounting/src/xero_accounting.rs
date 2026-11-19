@@ -17,7 +17,6 @@ use skippr_runtime_sdk::plugins::source_contract::{
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
-use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
 };
@@ -442,25 +441,19 @@ impl DataSourceXeroAccountingPlugin {
         client: &XeroApiClient,
         ctx: &dyn SourceSyncContext,
         run_date: &str,
-        discover: bool,
     ) -> Result<(Vec<Value>, Vec<Value>, u64), std::io::Error> {
         let ckpt_key = self.checkpoint_key("accounts");
-        let if_modified = if discover {
-            None
-        } else {
-            Self::load_last_modified(ctx, &ckpt_key)?
-        };
+        let if_modified = Self::load_last_modified(ctx, &ckpt_key)?;
         let rows = client.list_accounts(if_modified.as_deref()).await?;
         let curated: Vec<Value> = rows
             .iter()
             .map(|row| map_account(run_date, run_date, &self.tenant_id, row))
             .collect();
         let (raw_rows, redacted) = self.build_raw_rows(run_date, "accounts", &rows, &["AccountID"]);
-        if !discover {
-            if let Some(max_updated) = max_updated_date_utc(&rows) {
-                Self::store_last_modified(ctx, &ckpt_key, &max_updated)?;
-            }
+        if let Some(max_updated) = max_updated_date_utc(&rows) {
+            Self::store_last_modified(ctx, &ckpt_key, &max_updated)?;
         }
+
         Ok((curated, raw_rows, redacted))
     }
 
@@ -469,25 +462,19 @@ impl DataSourceXeroAccountingPlugin {
         client: &XeroApiClient,
         ctx: &dyn SourceSyncContext,
         run_date: &str,
-        discover: bool,
     ) -> Result<(Vec<Value>, Vec<Value>, u64), std::io::Error> {
         let ckpt_key = self.checkpoint_key("contacts");
-        let if_modified = if discover {
-            None
-        } else {
-            Self::load_last_modified(ctx, &ckpt_key)?
-        };
+        let if_modified = Self::load_last_modified(ctx, &ckpt_key)?;
         let rows = client.list_contacts(if_modified.as_deref()).await?;
         let curated: Vec<Value> = rows
             .iter()
             .map(|row| map_contact(run_date, run_date, &self.tenant_id, row))
             .collect();
         let (raw_rows, redacted) = self.build_raw_rows(run_date, "contacts", &rows, &["ContactID"]);
-        if !discover {
-            if let Some(max_updated) = max_updated_date_utc(&rows) {
-                Self::store_last_modified(ctx, &ckpt_key, &max_updated)?;
-            }
+        if let Some(max_updated) = max_updated_date_utc(&rows) {
+            Self::store_last_modified(ctx, &ckpt_key, &max_updated)?;
         }
+
         Ok((curated, raw_rows, redacted))
     }
 
@@ -499,11 +486,7 @@ impl DataSourceXeroAccountingPlugin {
         discover: bool,
     ) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>, u64), std::io::Error> {
         let ckpt_key = self.checkpoint_key("invoices");
-        let if_modified = if discover {
-            None
-        } else {
-            Self::load_last_modified(ctx, &ckpt_key)?
-        };
+        let if_modified = Self::load_last_modified(ctx, &ckpt_key)?;
         let where_clause = if discover {
             None
         } else {
@@ -536,11 +519,10 @@ impl DataSourceXeroAccountingPlugin {
             &line_source_rows,
             &["LineItemID"],
         );
-        if !discover {
-            if let Some(max_updated) = max_updated_date_utc(&rows) {
-                Self::store_last_modified(ctx, &ckpt_key, &max_updated)?;
-            }
+        if let Some(max_updated) = max_updated_date_utc(&rows) {
+            Self::store_last_modified(ctx, &ckpt_key, &max_updated)?;
         }
+
         Ok((
             curated,
             line_curated,
@@ -558,11 +540,7 @@ impl DataSourceXeroAccountingPlugin {
         discover: bool,
     ) -> Result<(Vec<Value>, Vec<Value>, u64), std::io::Error> {
         let ckpt_key = self.checkpoint_key("payments");
-        let if_modified = if discover {
-            None
-        } else {
-            Self::load_last_modified(ctx, &ckpt_key)?
-        };
+        let if_modified = Self::load_last_modified(ctx, &ckpt_key)?;
         let where_clause = if discover {
             None
         } else {
@@ -576,11 +554,10 @@ impl DataSourceXeroAccountingPlugin {
             .map(|row| map_payment(run_date, &self.tenant_id, row))
             .collect();
         let (raw_rows, redacted) = self.build_raw_rows(run_date, "payments", &rows, &["PaymentID"]);
-        if !discover {
-            if let Some(max_updated) = max_updated_date_utc(&rows) {
-                Self::store_last_modified(ctx, &ckpt_key, &max_updated)?;
-            }
+        if let Some(max_updated) = max_updated_date_utc(&rows) {
+            Self::store_last_modified(ctx, &ckpt_key, &max_updated)?;
         }
+
         Ok((curated, raw_rows, redacted))
     }
 
@@ -592,11 +569,7 @@ impl DataSourceXeroAccountingPlugin {
         discover: bool,
     ) -> Result<(Vec<Value>, Vec<Value>, u64), std::io::Error> {
         let ckpt_key = self.checkpoint_key("bank");
-        let if_modified = if discover {
-            None
-        } else {
-            Self::load_last_modified(ctx, &ckpt_key)?
-        };
+        let if_modified = Self::load_last_modified(ctx, &ckpt_key)?;
         let where_clause = if discover {
             None
         } else {
@@ -611,19 +584,12 @@ impl DataSourceXeroAccountingPlugin {
             .collect();
         let (raw_rows, redacted) =
             self.build_raw_rows(run_date, "bank_transactions", &rows, &["BankTransactionID"]);
-        if !discover {
-            if let Some(max_updated) = max_updated_date_utc(&rows) {
-                Self::store_last_modified(ctx, &ckpt_key, &max_updated)?;
-            }
+        if let Some(max_updated) = max_updated_date_utc(&rows) {
+            Self::store_last_modified(ctx, &ckpt_key, &max_updated)?;
         }
+
         Ok((curated, raw_rows, redacted))
     }
-}
-
-fn runtime_is_discover_mode() -> bool {
-    std::env::var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV)
-        .map(|mode| mode.eq_ignore_ascii_case("discover"))
-        .unwrap_or(false)
 }
 
 #[async_trait]
@@ -663,7 +629,7 @@ impl DataSource for DataSourceXeroAccountingPlugin {
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
         }
 
-        let discover = runtime_is_discover_mode();
+        let discover = ctx.execution_mode().resume_frozen();
         let run_date = Utc::now().format("%Y-%m-%d").to_string();
         let started = Instant::now();
         let client = self.api_client().await?;
@@ -692,9 +658,8 @@ impl DataSource for DataSourceXeroAccountingPlugin {
                     )
                 }
                 XeroStream::Accounts => {
-                    let (curated, raw, redacted) = self
-                        .sync_accounts(&client, ctx.as_ref(), &run_date, discover)
-                        .await?;
+                    let (curated, raw, redacted) =
+                        self.sync_accounts(&client, ctx.as_ref(), &run_date).await?;
                     properties_redacted += redacted;
                     self.submit_namespace(
                         ctx.as_ref(),
@@ -710,9 +675,8 @@ impl DataSource for DataSourceXeroAccountingPlugin {
                     )
                 }
                 XeroStream::Contacts => {
-                    let (curated, raw, redacted) = self
-                        .sync_contacts(&client, ctx.as_ref(), &run_date, discover)
-                        .await?;
+                    let (curated, raw, redacted) =
+                        self.sync_contacts(&client, ctx.as_ref(), &run_date).await?;
                     properties_redacted += redacted;
                     self.submit_namespace(
                         ctx.as_ref(),
@@ -887,7 +851,6 @@ mod tests {
         let _guard = ENV_TEST_LOCK.lock().unwrap();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         set_fixture_dir(fixture_dir);
-        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
 
         let plugin = DataSourceXeroAccountingPlugin::new(sample_config()).unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());

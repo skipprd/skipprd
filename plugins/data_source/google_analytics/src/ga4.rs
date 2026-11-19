@@ -17,7 +17,6 @@ use skippr_runtime_sdk::plugins::source_contract::{
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
-use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
 };
@@ -34,12 +33,6 @@ const CHECKPOINT_PAYLOAD_VERSION: u32 = 1;
 
 /// Temporary discover sampling: last N days × minimal stream profile only (no customer config).
 const DISCOVER_SAMPLE_DAYS: u32 = 3;
-
-fn runtime_is_discover_mode() -> bool {
-    std::env::var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV)
-        .map(|mode| mode.eq_ignore_ascii_case("discover"))
-        .unwrap_or(false)
-}
 
 fn discover_sample_date_window(end_date: NaiveDate) -> (NaiveDate, NaiveDate) {
     let span = DISCOVER_SAMPLE_DAYS.max(1);
@@ -490,7 +483,7 @@ impl DataSource for DataSourceGoogleAnalyticsPlugin {
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
         }
 
-        let discover = runtime_is_discover_mode();
+        let discover = ctx.execution_mode().resume_frozen();
         let end_date = self.effective_end_date()?;
         let configured_start = Self::parse_date(&self.config.start_date)?;
         let start_date = if discover {
@@ -532,11 +525,7 @@ impl DataSource for DataSourceGoogleAnalyticsPlugin {
 
         for stream in streams {
             let checkpoint_key = self.checkpoint_key(stream.namespace);
-            let last_completed = if discover {
-                None
-            } else {
-                Self::load_last_completed(ctx.as_ref(), &checkpoint_key)?
-            };
+            let last_completed = Self::load_last_completed(ctx.as_ref(), &checkpoint_key)?;
             let window = planner.plan(start_date, last_completed, end_date);
             let dates = DateWindowPlanner::dates_inclusive(&window);
             let chunks = chunk_dates(&dates, self.config.window_in_days);
@@ -586,11 +575,10 @@ impl DataSource for DataSourceGoogleAnalyticsPlugin {
                         );
                         let grouped = group_rows_by_date(rows);
                         self.submit_rows_grouped(ctx.as_ref(), stream, &grouped)?;
-                        if !discover {
-                            for date in chunk_dates_list {
-                                Self::store_last_completed(ctx.as_ref(), &checkpoint_key, date)?;
-                            }
+                        for date in chunk_dates_list {
+                            Self::store_last_completed(ctx.as_ref(), &checkpoint_key, date)?;
                         }
+
                         if self.config.request_interval_ms > 0 {
                             sleep(TokioDuration::from_millis(self.config.request_interval_ms))
                                 .await;
@@ -674,16 +662,6 @@ mod tests {
         let sync_streams = plugin.streams_for_run(false);
         assert_eq!(discover_streams.len(), 4);
         assert_eq!(sync_streams.len(), FULL_STREAM_COUNT);
-    }
-
-    #[test]
-    fn runtime_is_discover_mode_reads_child_env() {
-        std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, "discover");
-        assert!(runtime_is_discover_mode());
-        std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, "sync");
-        assert!(!runtime_is_discover_mode());
-        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
-        assert!(!runtime_is_discover_mode());
     }
 
     #[test]

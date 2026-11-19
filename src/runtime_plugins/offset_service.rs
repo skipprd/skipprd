@@ -8,8 +8,8 @@ use tracing::warn;
 
 use crate::helpers::offsets::{OffsetTypes, Offsets, OffsetsError};
 use crate::runtime_plugins::protocol::{
-    HostOffsetFrame, PluginOffsetFrame, RuntimeOffsetValidationEntry, RuntimeSessionHello,
-    RUNTIME_PROTOCOL_VERSION,
+    HostOffsetFrame, PluginOffsetFrame, RuntimeExecutionMode, RuntimeOffsetValidationEntry,
+    RuntimeSessionHello, RUNTIME_PROTOCOL_VERSION,
 };
 use crate::runtime_plugins::wire::{read_frame, write_frame};
 
@@ -45,6 +45,7 @@ async fn handle_offset_connection(
     mut stream: TcpStream,
     offsets: Arc<Offsets>,
     expected_token: String,
+    execution_mode: RuntimeExecutionMode,
 ) -> io::Result<()> {
     let hello: RuntimeSessionHello = read_frame(&mut stream).await?;
     if hello.protocol_version != RUNTIME_PROTOCOL_VERSION {
@@ -69,8 +70,11 @@ async fn handle_offset_connection(
                 request_id,
                 entries,
             } => {
-                let should_process =
-                    validate_entries(&offsets, &entries).map_err(io::Error::from)?;
+                let should_process = if execution_mode.resume_frozen() {
+                    vec![true; entries.len()]
+                } else {
+                    validate_entries(&offsets, &entries).map_err(io::Error::from)?
+                };
                 write_frame(
                     &mut stream,
                     &HostOffsetFrame::ValidateOffsetBatchResponse {
@@ -81,9 +85,13 @@ async fn handle_offset_connection(
                 .await?;
             }
             PluginOffsetFrame::LoadCheckpoint { request_id, key } => {
-                let envelope = offsets
-                    .load_checkpoint_envelope(&key)
-                    .map_err(io::Error::other)?;
+                let envelope = if execution_mode.resume_frozen() {
+                    None
+                } else {
+                    offsets
+                        .load_checkpoint_envelope(&key)
+                        .map_err(io::Error::other)?
+                };
                 write_frame(
                     &mut stream,
                     &HostOffsetFrame::LoadCheckpointResponse {
@@ -112,7 +120,11 @@ impl Drop for OffsetServiceEndpoint {
 }
 
 impl OffsetServiceEndpoint {
-    pub fn spawn(offsets: Arc<Offsets>, session_token: String) -> io::Result<Self> {
+    pub fn spawn(
+        offsets: Arc<Offsets>,
+        session_token: String,
+        execution_mode: RuntimeExecutionMode,
+    ) -> io::Result<Self> {
         let std_listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
         let addr = std_listener.local_addr()?;
         std_listener.set_nonblocking(true)?;
@@ -134,7 +146,9 @@ impl OffsetServiceEndpoint {
                 };
                 let token = token_for_accept.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_offset_connection(stream, offsets, token).await {
+                    if let Err(err) =
+                        handle_offset_connection(stream, offsets, token, execution_mode).await
+                    {
                         warn!("offset service connection failed: {err}");
                     }
                 });
@@ -212,7 +226,8 @@ mod tests {
         Config::setenv("DATA_DIR", data_dir.to_str().unwrap());
         let offsets = Arc::new(Offsets::init(&Config::new()).expect("first offset open"));
         let service =
-            OffsetServiceEndpoint::spawn(offsets.clone(), "tok".into()).expect("offset service");
+            OffsetServiceEndpoint::spawn(offsets.clone(), "tok".into(), RuntimeExecutionMode::Sync)
+                .expect("offset service");
         drop(service);
         drop(offsets);
         let reopened = Offsets::init(&Config::new());
@@ -224,6 +239,149 @@ mod tests {
         }
         reopened
             .expect("discover-then-sync must reopen sled after the runtime offset service drops");
+    }
+
+    async fn rpc_validate_and_load(
+        addr: std::net::SocketAddr,
+        token: &str,
+        entry: RuntimeOffsetValidationEntry,
+        checkpoint_key: &str,
+    ) -> (Vec<bool>, Option<crate::plugins::cdc::CheckpointEnvelope>) {
+        use crate::runtime_plugins::wire::{read_frame, write_frame};
+        let mut stream = TcpStream::connect(addr)
+            .await
+            .expect("connect offset service");
+        write_frame(
+            &mut stream,
+            &RuntimeSessionHello {
+                protocol_version: RUNTIME_PROTOCOL_VERSION,
+                token: token.to_string(),
+            },
+        )
+        .await
+        .expect("hello");
+        write_frame(
+            &mut stream,
+            &PluginOffsetFrame::ValidateOffsetBatch {
+                request_id: 1,
+                entries: vec![entry],
+            },
+        )
+        .await
+        .expect("validate");
+        let HostOffsetFrame::ValidateOffsetBatchResponse { should_process, .. } =
+            read_frame(&mut stream).await.expect("validate response")
+        else {
+            panic!("expected validate response");
+        };
+        write_frame(
+            &mut stream,
+            &PluginOffsetFrame::LoadCheckpoint {
+                request_id: 2,
+                key: checkpoint_key.to_string(),
+            },
+        )
+        .await
+        .expect("load");
+        let HostOffsetFrame::LoadCheckpointResponse { envelope, .. } =
+            read_frame(&mut stream).await.expect("load response")
+        else {
+            panic!("expected load response");
+        };
+        (should_process, envelope)
+    }
+
+    #[test]
+    fn discover_ignores_closed_and_checkpoints() {
+        use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
+
+        let offsets = Arc::new(Offsets::from_memory_for_test());
+        let closed_key = OffsetKey::new("ns", "p");
+        offsets
+            .seed_published_offset(&closed_key, 0, 0, 1, 1)
+            .unwrap();
+        let envelope = CheckpointEnvelope::from_payload(
+            CheckpointAuthority::AdvisoryHint,
+            CheckpointKind::AdvisoryProgress,
+            1,
+            &b"checkpoint".to_vec(),
+        )
+        .unwrap();
+        offsets
+            .seed_published_checkpoint("ckpt", &envelope, 2)
+            .unwrap();
+
+        let service = OffsetServiceEndpoint::spawn(
+            offsets.clone(),
+            "tok".into(),
+            RuntimeExecutionMode::Discover,
+        )
+        .expect("offset service");
+        let entry = RuntimeOffsetValidationEntry {
+            key: closed_key.clone(),
+            offset_type: OffsetTypes::Closed,
+            offset_value: 1,
+        };
+        let (should_process, loaded) =
+            OFFSET_SERVICE_RT.block_on(rpc_validate_and_load(service.addr, "tok", entry, "ckpt"));
+        assert_eq!(should_process, vec![true]);
+        assert!(loaded.is_none());
+        assert!(offsets.get(&closed_key).unwrap().is_some());
+        assert!(offsets.load_checkpoint_envelope("ckpt").unwrap().is_some());
+    }
+
+    #[test]
+    fn sync_honors_closed_and_checkpoints() {
+        use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
+
+        let offsets = Arc::new(Offsets::from_memory_for_test());
+        let closed_key = OffsetKey::new("ns", "p");
+        offsets
+            .seed_published_offset(&closed_key, 0, 0, 1, 1)
+            .unwrap();
+        let envelope = CheckpointEnvelope::from_payload(
+            CheckpointAuthority::AdvisoryHint,
+            CheckpointKind::AdvisoryProgress,
+            1,
+            &b"checkpoint".to_vec(),
+        )
+        .unwrap();
+        offsets
+            .seed_published_checkpoint("ckpt", &envelope, 2)
+            .unwrap();
+
+        let service =
+            OffsetServiceEndpoint::spawn(offsets.clone(), "tok".into(), RuntimeExecutionMode::Sync)
+                .expect("offset service");
+        let entry = RuntimeOffsetValidationEntry {
+            key: closed_key,
+            offset_type: OffsetTypes::Closed,
+            offset_value: 1,
+        };
+        let (should_process, loaded) =
+            OFFSET_SERVICE_RT.block_on(rpc_validate_and_load(service.addr, "tok", entry, "ckpt"));
+        assert_eq!(should_process, vec![false]);
+        assert_eq!(loaded, Some(envelope));
+    }
+
+    #[test]
+    fn discover_does_not_call_offset_store() {
+        let offsets = Arc::new(Offsets::from_transport(Arc::new(FailingOffsetTransport)));
+        let service = OffsetServiceEndpoint::spawn(
+            offsets.clone(),
+            "tok".into(),
+            RuntimeExecutionMode::Discover,
+        )
+        .expect("offset service");
+        let entry = RuntimeOffsetValidationEntry {
+            key: OffsetKey::new("ns", "p"),
+            offset_type: OffsetTypes::Closed,
+            offset_value: 1,
+        };
+        let (should_process, loaded) =
+            OFFSET_SERVICE_RT.block_on(rpc_validate_and_load(service.addr, "tok", entry, "ckpt"));
+        assert_eq!(should_process, vec![true]);
+        assert!(loaded.is_none());
     }
 
     #[test]

@@ -13,7 +13,6 @@ use skippr_runtime_sdk::plugins::source_contract::{
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
-use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
 };
@@ -268,11 +267,6 @@ impl DataSourceXAdsPluginConfig {
         Ok(())
     }
 }
-fn runtime_is_discover_mode() -> bool {
-    std::env::var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV)
-        .map(|m| m.eq_ignore_ascii_case("discover"))
-        .unwrap_or(false)
-}
 fn discover_sample_date_window(end: NaiveDate) -> (NaiveDate, NaiveDate) {
     let span = DISCOVER_SAMPLE_DAYS.max(1);
     (end - Duration::days(i64::from(span - 1)), end)
@@ -297,7 +291,7 @@ impl DataSource for DataSourceXAdsPlugin {
             .collect()
     }
     async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
-        let discover = runtime_is_discover_mode();
+        let discover = ctx.execution_mode().resume_frozen();
         let start = Self::parse_date(&self.config.start_date)?;
         let end = self.effective_end_date()?;
         let api = self.api_client();
@@ -305,11 +299,7 @@ impl DataSource for DataSourceXAdsPlugin {
             match stream.kind {
                 XAdsStreamKind::Analytics => {
                     let key = self.checkpoint_key(stream.namespace);
-                    let last = if discover {
-                        None
-                    } else {
-                        Self::load_last_completed(ctx.as_ref(), &key)?
-                    };
+                    let last = Self::load_last_completed(ctx.as_ref(), &key)?;
                     let end = if discover {
                         discover_sample_date_window(end).1
                     } else {
@@ -332,9 +322,7 @@ impl DataSource for DataSourceXAdsPlugin {
                             date.format("%Y-%m-%d").to_string(),
                             rows,
                         )?;
-                        if !discover {
-                            Self::store_last_completed(ctx.as_ref(), &key, date)?;
-                        }
+                        Self::store_last_completed(ctx.as_ref(), &key, date)?;
                     }
                 }
                 _ => {

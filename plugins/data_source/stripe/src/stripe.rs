@@ -14,7 +14,6 @@ use skippr_runtime_sdk::plugins::source_contract::{
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
-use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches_durable, IngestBatch};
 use tracing::{info, warn};
 
@@ -412,12 +411,6 @@ impl DataSourceStripePlugin {
     }
 }
 
-fn runtime_is_discover_mode() -> bool {
-    std::env::var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV)
-        .map(|mode| mode.eq_ignore_ascii_case("discover"))
-        .unwrap_or(false)
-}
-
 #[async_trait]
 impl DataSource for DataSourceStripePlugin {
     fn execution_contract(&self) -> SourceExecutionContract {
@@ -460,7 +453,7 @@ impl DataSource for DataSourceStripePlugin {
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
         }
 
-        let discover = runtime_is_discover_mode();
+        let discover = ctx.execution_mode().resume_frozen();
         let run_date = Utc::now().format("%Y-%m-%d").to_string();
         let started = Instant::now();
         let client = self.api_client().await?;
@@ -657,7 +650,6 @@ mod tests {
         let _guard = ENV_TEST_LOCK.lock().unwrap();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         set_fixture_dir(fixture_dir);
-        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
 
         let plugin = DataSourceStripePlugin::new(sample_config()).unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());

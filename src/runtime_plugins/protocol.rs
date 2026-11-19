@@ -45,8 +45,6 @@ pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
 pub const SKIPPR_RUNTIME_OFFSET_ADDR_ENV: &str = "SKIPPR_RUNTIME_OFFSET_ADDR";
 pub const SKIPPR_RUNTIME_SESSION_TOKEN_ENV: &str = "SKIPPR_RUNTIME_SESSION_TOKEN";
-/// Set on runtime source children by the host (`discover` | `sync`). Not a customer-facing setting.
-pub const SKIPPR_RUNTIME_EXECUTION_MODE_ENV: &str = "SKIPPR_RUNTIME_EXECUTION_MODE";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeSessionHello {
@@ -353,12 +351,19 @@ pub enum RuntimeExecutionMode {
     Sync,
 }
 
+impl RuntimeExecutionMode {
+    /// Discover must not read, write, or erase resume (Closed, Position, checkpoints)
+    /// and must not origin-commit.
+    pub fn resume_frozen(self) -> bool {
+        matches!(self, Self::Discover)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeExecutionContext {
     pub pipeline_name: String,
     pub workspace_name: String,
     pub data_dir: String,
-    #[serde(default)]
     pub execution_mode: RuntimeExecutionMode,
     #[serde(default)]
     pub output_layout: RuntimeOutputLayout,
@@ -989,6 +994,20 @@ mod tests {
             crate::pipeline_type::PipelineType::Ingest
         );
         assert!(decoded.once);
+    }
+
+    #[test]
+    fn omitted_execution_mode_does_not_default_to_sync() {
+        let json = serde_json::json!({
+            "pipeline_name": "p",
+            "workspace_name": "w",
+            "data_dir": "/d"
+        });
+        let err = serde_json::from_value::<RuntimeExecutionContext>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("execution_mode"),
+            "missing handshake mode must fail closed, not Sync: {err}"
+        );
     }
 
     #[test]

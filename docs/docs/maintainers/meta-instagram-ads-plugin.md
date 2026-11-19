@@ -23,11 +23,11 @@ All namespaces: `replace_partition` on `date`, `semantics: mutable_report`, `loo
 
 ## Discover sampling (automatic)
 
-When `SKIPPR_RUNTIME_EXECUTION_MODE=discover`:
+When `ctx.execution_mode().resume_frozen()` (discover):
 
 - Last **3** calendar days only
 - **`account_daily`** stream only (`StreamProfile::Minimal`)
-- No checkpoint load/advance; `lookback_days` treated as **0** for the date planner
+- `lookback_days` treated as **0** for the date planner. Checkpoint load/store still runs; the host does not persist.
 
 Contracts emitted from `source_namespace_contracts()` still reflect the configured profile (e.g. all five on `full`).
 

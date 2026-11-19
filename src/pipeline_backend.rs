@@ -62,7 +62,8 @@ pub fn open_wal_catalog_reader_for_config(
         .map_err(|err| err.to_string())
 }
 
-/// Discover reset: catalog rows (`wal#`) plus published offset/checkpoint items.
+/// Discover reset: WAL catalog rows (`wal#`) only. Published offsets and
+/// checkpoints stay so `skipprd discover` cannot erase sync resume.
 pub fn reset_pipeline_state(
     config: &Config,
     offsets: &Offsets,
@@ -70,9 +71,6 @@ pub fn reset_pipeline_state(
 ) -> Result<(), String> {
     let catalog = open_wal_catalog_for_config(config, Some(offsets), fence)?;
     skippr_wal_catalog::reset_catalog(catalog.as_ref(), fence).map_err(|err| err.to_string())?;
-    if let Some(store) = offsets.bytes_store() {
-        store.reset_published_ingest()?;
-    }
     Ok(())
 }
 
@@ -143,7 +141,20 @@ mod tests {
     }
 
     #[test]
-    fn discover_reset_drops_catalog_and_offsets() {
+    fn discover_reset_drops_catalog_and_keeps_offsets() {
+        use crate::helpers::offsets::OffsetKey;
+        use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
+
+        let config: Config = serde_json::from_value(json!({
+            "skippr": { "workspace": "ws-a", "tenant": "ten-a", "store": { "type": "fjall" } },
+            "pipelines": {
+                "orders": { "data_source": "data_sources.sample" }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            }
+        }))
+        .unwrap();
         let offsets = Offsets::from_memory_for_test();
         let fence = CatalogFence::local();
         let catalog = offsets.open_wal_catalog(fence).unwrap();
@@ -159,29 +170,39 @@ mod tests {
         )
         .unwrap();
         catalog.commit(&txn, fence).unwrap();
+        let key = OffsetKey::new("ns", "p");
+        offsets.seed_published_offset(&key, 1, 2, 0, 1).unwrap();
+        let envelope = CheckpointEnvelope::from_payload(
+            CheckpointAuthority::AdvisoryHint,
+            CheckpointKind::AdvisoryProgress,
+            1,
+            &b"checkpoint".to_vec(),
+        )
+        .unwrap();
         offsets
-            .seed_published_offset(
-                &crate::helpers::offsets::OffsetKey::new("ns", "p"),
-                1,
-                2,
-                0,
-                1,
-            )
+            .seed_published_checkpoint("ckpt", &envelope, 2)
             .unwrap();
-        skippr_wal_catalog::reset_catalog(&catalog, fence).unwrap();
-        offsets
-            .bytes_store()
-            .unwrap()
-            .reset_published_ingest()
-            .unwrap();
+        reset_pipeline_state(&config, &offsets, fence).unwrap();
         assert!(catalog
             .get(&skippr_wal_catalog::CatalogKey::Format)
             .unwrap()
             .is_none());
-        assert!(offsets
-            .get(&crate::helpers::offsets::OffsetKey::new("ns", "p"))
-            .unwrap()
-            .is_none());
+        assert!(offsets.get(&key).unwrap().is_some());
+        assert!(offsets.load_checkpoint_envelope("ckpt").unwrap().is_some());
+    }
+
+    #[test]
+    fn discover_reset_pipeline_state_does_not_wipe_published_ingest() {
+        let src = include_str!("pipeline_backend.rs");
+        let start = src
+            .find("pub fn reset_pipeline_state")
+            .expect("reset_pipeline_state");
+        let body = src[start..].split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !body.contains("reset_published_ingest"),
+            "discover cleanup must not erase Closed/checkpoint rows"
+        );
+        assert!(body.contains("reset_catalog"));
     }
 
     #[test]

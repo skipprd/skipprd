@@ -28,11 +28,7 @@ use crate::buffer::ingest_buffer::flush_all_segments;
 use crate::catalog_coordinator::CatalogCoordinator;
 use crate::discover::OutputMetadata;
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::{OffsetTypes, Offsets};
-#[cfg(test)]
-use crate::helpers::offsets::{
-    RuntimeOffsetOperation, RuntimeOffsetRpcRequest, RuntimeOffsetRpcResponse, RuntimeOffsetValue,
-};
+use crate::helpers::offsets::Offsets;
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use crate::plugins::cdc;
 use crate::plugins::{DataSink, SchemaSink, SchemaSyncRequest, SinkWriteOutcome};
@@ -508,32 +504,6 @@ impl RuntimeChildConnection {
     }
 }
 
-#[cfg(test)]
-fn handle_runtime_offset_request(
-    offsets: &Offsets,
-    request: RuntimeOffsetRpcRequest,
-) -> RuntimeOffsetRpcResponse {
-    let result = match request.operation {
-        RuntimeOffsetOperation::Validate {
-            key,
-            offset_type,
-            offset_value,
-        } => offsets
-            .validate(&key, offset_type, offset_value)
-            .map(RuntimeOffsetValue::Validate)
-            .map_err(|err| err.to_string()),
-        RuntimeOffsetOperation::LoadCheckpointEnvelope { key } => offsets
-            .load_checkpoint_envelope(&key)
-            .map(RuntimeOffsetValue::LoadCheckpointEnvelope)
-            .map_err(|err| err.to_string()),
-    };
-
-    RuntimeOffsetRpcResponse {
-        request_id: request.request_id,
-        result,
-    }
-}
-
 struct BufferedRuntimeFrameReader {
     buffer: Vec<u8>,
     consumed: usize,
@@ -970,10 +940,11 @@ pub async fn sync_runtime_input_plugin(
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
 ) -> io::Result<()> {
     let session_token = Uuid::new_v4().to_string();
-    let _offset_service = OffsetServiceEndpoint::spawn(offsets.clone(), session_token.clone())
-        .map_err(|err| {
-            io::Error::other(format!("failed to start runtime offset service: {err}"))
-        })?;
+    let _offset_service =
+        OffsetServiceEndpoint::spawn(offsets.clone(), session_token.clone(), execution_mode)
+            .map_err(|err| {
+                io::Error::other(format!("failed to start runtime offset service: {err}"))
+            })?;
     let mut connection = RuntimeChildConnection::spawn(
         config,
         resolved,
@@ -1272,7 +1243,7 @@ pub async fn sync_runtime_input_plugin(
                             saw_unflushed_batches
                         );
                     }
-                    if execution_mode != RuntimeExecutionMode::Discover {
+                    if !execution_mode.resume_frozen() {
                         if saw_unflushed_batches {
                             flush_all_segments(config, offsets.clone())
                                 .await
@@ -1291,7 +1262,7 @@ pub async fn sync_runtime_input_plugin(
                 }
                 PluginDataFrame::OffsetMaterializationHints { hints } => {
                     drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone()).await?;
-                    if execution_mode != RuntimeExecutionMode::Discover {
+                    if !execution_mode.resume_frozen() {
                         if saw_unflushed_batches {
                             flush_all_segments(config, offsets.clone())
                                 .await
@@ -4242,26 +4213,19 @@ impl SchemaSink for RuntimeSchemaSinkPlugin {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+    use std::sync::Arc;
 
     use super::{
-        handle_runtime_offset_request, reset_runtime_sink_process_budgets_for_test,
-        BufferedRuntimeFrameReader, RuntimeChildConnection, RuntimeSinkProcessBudget,
-        MAX_RUNTIME_FRAME_BYTES,
+        reset_runtime_sink_process_budgets_for_test, BufferedRuntimeFrameReader,
+        RuntimeChildConnection, RuntimeSinkProcessBudget, MAX_RUNTIME_FRAME_BYTES,
     };
     use crate::helpers::configuration::{Config, Pipeline};
-    use crate::helpers::offsets::{
-        OffsetKey, OffsetTypes, Offsets, RuntimeOffsetOperation, RuntimeOffsetRpcRequest,
-        RuntimeOffsetValue,
-    };
     use crate::helpers::plugin_config::{DataSinkEntry, PluginConfigEntry};
-    use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
     use crate::runtime_plugins::protocol::{RuntimeBinding, RuntimeExecutionMode};
     use crate::runtime_plugins::wire::write_frame;
     use crate::serdes::output_format::OutputFormat;
     use serde::{Deserialize, Serialize};
     use serial_test::serial;
-    use tempfile::TempDir;
     use tokio::net::{TcpListener, TcpStream};
 
     #[test]
@@ -4286,12 +4250,6 @@ mod tests {
         );
         assert!(body.contains("grouped sink produced no rows"));
         assert!(body.contains("if chunk.rows == 0"));
-    }
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn env_lock() -> MutexGuard<'static, ()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
     }
 
     #[test]
@@ -4400,42 +4358,6 @@ mod tests {
             deadletter.pipeline_type,
             crate::pipeline_type::PipelineType::Copy
         );
-    }
-
-    struct DataDirGuard {
-        old_data_dir: Option<String>,
-        _temp_dir: TempDir,
-        _lock: MutexGuard<'static, ()>,
-    }
-
-    impl Drop for DataDirGuard {
-        fn drop(&mut self) {
-            if let Some(ref value) = self.old_data_dir {
-                Config::setenv("DATA_DIR", value);
-            } else {
-                std::env::remove_var("DATA_DIR");
-                Config::set_evncache("DATA_DIR", "");
-            }
-            Config::reset_envcache();
-        }
-    }
-
-    fn setup_offsets() -> (DataDirGuard, Offsets) {
-        let lock = env_lock();
-        let temp_dir = tempfile::tempdir().unwrap();
-        let old_data_dir = std::env::var("DATA_DIR").ok();
-        Config::setenv("DATA_DIR", temp_dir.path().to_str().unwrap());
-        Config::reset_envcache();
-        let offsets = Offsets::init(&Config::new()).unwrap();
-        offsets.clear_for_test();
-        (
-            DataDirGuard {
-                old_data_dir,
-                _temp_dir: temp_dir,
-                _lock: lock,
-            },
-            offsets,
-        )
     }
 
     #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -4630,79 +4552,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
-    fn runtime_offset_request_handler_reads_host_state() {
-        let (_guard, offsets) = setup_offsets();
-        let key = OffsetKey::new("runtime-host", "partition-1");
-
-        let initial_validate = handle_runtime_offset_request(
-            &offsets,
-            RuntimeOffsetRpcRequest {
-                request_id: 1,
-                operation: RuntimeOffsetOperation::Validate {
-                    key: key.clone(),
-                    offset_type: OffsetTypes::Closed,
-                    offset_value: 1,
-                },
-            },
-        );
-        assert_eq!(
-            initial_validate.result.unwrap(),
-            RuntimeOffsetValue::Validate(None)
-        );
-
-        offsets.seed_published_offset(&key, 0, 0, 1, 1).unwrap();
-        let envelope = CheckpointEnvelope::from_payload(
-            CheckpointAuthority::AdvisoryHint,
-            CheckpointKind::AdvisoryProgress,
-            1,
-            &b"checkpoint".to_vec(),
-        )
-        .unwrap();
-        offsets
-            .seed_published_checkpoint("runtime-host-checkpoint", &envelope, 2)
-            .unwrap();
-
-        let validate_response = handle_runtime_offset_request(
-            &offsets,
-            RuntimeOffsetRpcRequest {
-                request_id: 2,
-                operation: RuntimeOffsetOperation::Validate {
-                    key: key.clone(),
-                    offset_type: OffsetTypes::Closed,
-                    offset_value: 1,
-                },
-            },
-        );
-        assert_eq!(
-            validate_response.result.unwrap(),
-            RuntimeOffsetValue::Validate(Some(true))
-        );
-
-        let load_checkpoint = handle_runtime_offset_request(
-            &offsets,
-            RuntimeOffsetRpcRequest {
-                request_id: 3,
-                operation: RuntimeOffsetOperation::LoadCheckpointEnvelope {
-                    key: "runtime-host-checkpoint".to_string(),
-                },
-            },
-        );
-        assert_eq!(
-            load_checkpoint.result.unwrap(),
-            RuntimeOffsetValue::LoadCheckpointEnvelope(Some(
-                CheckpointEnvelope::from_payload(
-                    CheckpointAuthority::AdvisoryHint,
-                    CheckpointKind::AdvisoryProgress,
-                    1,
-                    &b"checkpoint".to_vec(),
-                )
-                .unwrap(),
-            ))
-        );
-    }
-
-    #[test]
     fn discover_does_not_persist_cdc_checkpoints_to_wal() {
         let src = include_str!("host.rs");
         let start = src
@@ -4712,15 +4561,28 @@ mod tests {
             .split("PluginDataFrame::OffsetMaterializationHints")
             .next()
             .unwrap();
-        let discover = body
-            .find("RuntimeExecutionMode::Discover")
-            .expect("Discover");
+        let frozen = body.find("resume_frozen").expect("resume_frozen");
         let persist = body
             .find("checkpoint update requires a WAL catalog handle")
             .expect("WAL persist");
         assert!(
-            discover < persist,
-            "Discover must skip CheckpointUpdate before WAL persist; cleanup_discover wipes WAL"
+            frozen < persist,
+            "Discover must skip CheckpointUpdate before WAL persist"
+        );
+    }
+
+    #[test]
+    fn discover_does_not_persist_offset_materialization_hints() {
+        let src = include_str!("host.rs");
+        let start = src
+            .find("PluginDataFrame::OffsetMaterializationHints")
+            .expect("OffsetMaterializationHints");
+        let body = src[start..].split("if !data_completed").next().unwrap();
+        let frozen = body.find("resume_frozen").expect("resume_frozen");
+        let persist = body.find("persist_offset_hint").expect("WAL persist");
+        assert!(
+            frozen < persist,
+            "Discover must skip OffsetMaterializationHints before WAL persist"
         );
     }
 

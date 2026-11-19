@@ -14,7 +14,6 @@ use skippr_runtime_sdk::plugins::source_contract::{
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
-use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches_durable, IngestBatch};
 use tracing::{info, warn};
 
@@ -368,12 +367,6 @@ impl DataSourceRevolutBusinessPlugin {
     }
 }
 
-fn runtime_is_discover_mode() -> bool {
-    std::env::var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV)
-        .map(|mode| mode.eq_ignore_ascii_case("discover"))
-        .unwrap_or(false)
-}
-
 #[async_trait]
 impl DataSource for DataSourceRevolutBusinessPlugin {
     fn execution_contract(&self) -> SourceExecutionContract {
@@ -403,7 +396,7 @@ impl DataSource for DataSourceRevolutBusinessPlugin {
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
         }
 
-        let discover = runtime_is_discover_mode();
+        let discover = ctx.execution_mode().resume_frozen();
         let run_date = Utc::now().format("%Y-%m-%d").to_string();
         let started = Instant::now();
         let client = self.api_client().await?;
@@ -629,7 +622,6 @@ mod tests {
     #[tokio::test]
     async fn happy_sync() {
         let _guard = test_fixture_guard();
-        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
 
         let plugin = DataSourceRevolutBusinessPlugin::new(sample_config()).unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());

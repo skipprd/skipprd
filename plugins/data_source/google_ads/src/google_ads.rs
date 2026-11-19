@@ -17,7 +17,6 @@ use skippr_runtime_sdk::plugins::source_contract::{
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
-use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
 };
@@ -276,12 +275,6 @@ impl DataSourceGoogleAdsPluginConfig {
     }
 }
 
-fn runtime_is_discover_mode() -> bool {
-    std::env::var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV)
-        .map(|mode| mode.eq_ignore_ascii_case("discover"))
-        .unwrap_or(false)
-}
-
 fn discover_sample_date_window(end_date: NaiveDate) -> (NaiveDate, NaiveDate) {
     let span = DISCOVER_SAMPLE_DAYS.max(1);
     (end_date - Duration::days(i64::from(span - 1)), end_date)
@@ -318,7 +311,7 @@ impl DataSource for DataSourceGoogleAdsPlugin {
     }
 
     async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
-        let discover = runtime_is_discover_mode();
+        let discover = ctx.execution_mode().resume_frozen();
         let start_date = Self::parse_date(&self.config.start_date)?;
         let mut end_date = self.effective_end_date()?;
         if discover {
@@ -329,11 +322,7 @@ impl DataSource for DataSourceGoogleAdsPlugin {
         let api = self.api_client();
         for stream in self.streams_for_run(discover) {
             let key = self.checkpoint_key(stream.namespace);
-            let last = if discover {
-                None
-            } else {
-                Self::load_last_completed(ctx.as_ref(), &key)?
-            };
+            let last = Self::load_last_completed(ctx.as_ref(), &key)?;
             let window = DateWindowPlanner {
                 lookback_days: if discover {
                     0
@@ -354,9 +343,7 @@ impl DataSource for DataSourceGoogleAdsPlugin {
                         .cloned()
                         .unwrap_or_default(),
                 )?;
-                if !discover {
-                    Self::store_last_completed(ctx.as_ref(), &key, date)?;
-                }
+                Self::store_last_completed(ctx.as_ref(), &key, date)?;
             }
         }
         Ok(())

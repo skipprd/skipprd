@@ -16,7 +16,6 @@ use skippr_runtime_sdk::plugins::source_contract::{
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
-use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
 };
@@ -46,12 +45,6 @@ const DISCOVER_SAMPLE_DAYS: u32 = 3;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ShopifyOrderCheckpoint {
     last_completed_date: String,
-}
-
-fn runtime_is_discover_mode() -> bool {
-    std::env::var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV)
-        .map(|mode| mode.eq_ignore_ascii_case("discover"))
-        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Deserialize, SkipprConfig)]
@@ -619,11 +612,7 @@ impl DataSourceShopifyAdminPlugin {
         discover: bool,
     ) -> Result<(), std::io::Error> {
         let checkpoint_key = self.order_checkpoint_key();
-        let last_completed = if discover {
-            None
-        } else {
-            Self::load_last_completed_order_date(ctx, &checkpoint_key)?
-        };
+        let last_completed = Self::load_last_completed_order_date(ctx, &checkpoint_key)?;
         let (start, end) = self.order_date_window(discover, last_completed)?;
         let mut cursor_day = start;
         while cursor_day <= end {
@@ -631,9 +620,8 @@ impl DataSourceShopifyAdminPlugin {
             self.submit_rows_by_order_date(ctx, NAMESPACE_ORDER_FACT, orders)?;
             self.submit_rows_by_order_date(ctx, NAMESPACE_ORDER_LINE_FACT, lines)?;
             self.submit_rows_by_order_date(ctx, NAMESPACE_REFUND_FACT, refunds)?;
-            if !discover {
-                Self::store_last_completed_order_date(ctx, &checkpoint_key, cursor_day)?;
-            }
+            Self::store_last_completed_order_date(ctx, &checkpoint_key, cursor_day)?;
+
             cursor_day += Duration::days(1);
         }
         Ok(())
@@ -892,7 +880,7 @@ impl DataSource for DataSourceShopifyAdminPlugin {
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
         }
 
-        let discover = runtime_is_discover_mode();
+        let discover = ctx.execution_mode().resume_frozen();
         let run_date = Utc::now().format("%Y-%m-%d").to_string();
         let started = Instant::now();
         let client = self.graphql_client();
@@ -1017,7 +1005,6 @@ mod tests {
     use crate::test_support::{
         clear_fixture_dir, sample_config, set_fixture_dir, RecordingSyncContext,
     };
-    use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 
     static ENV_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -1063,7 +1050,6 @@ mod tests {
     async fn happy_sync() {
         let _lock = env_lock();
         set_fixture_dir();
-        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
 
         let mut plugin = DataSourceShopifyAdminPlugin::new(sample_config()).unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
@@ -1108,16 +1094,16 @@ mod tests {
     async fn discover_sync_emits_minimal_streams_only() {
         let _lock = env_lock();
         set_fixture_dir();
-        std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, "discover");
 
         let mut plugin = DataSourceShopifyAdminPlugin::new(sample_config()).unwrap();
-        let ctx = Arc::new(RecordingSyncContext::default());
+        let ctx = Arc::new(RecordingSyncContext {
+            execution_mode: skippr_runtime_sdk::protocol::RuntimeExecutionMode::Discover,
+            ..Default::default()
+        });
         plugin.sync(ctx.clone()).await.expect("discover sync");
 
         assert!(!ctx.rows_for_namespace(NAMESPACE_STORE_SNAPSHOT).is_empty());
         assert!(!ctx.rows_for_namespace(NAMESPACE_SYNC_RUN_DAILY).is_empty());
-
-        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
         clear_fixture_dir();
     }
 }

@@ -25,10 +25,6 @@ pub(crate) mod test_env {
     pub fn clear_fixture_dir() {
         std::env::remove_var("SKIPPR_BING_WEBMASTER_TOOLS_FIXTURE_DIR");
     }
-
-    pub fn clear_discover_mode() {
-        std::env::remove_var(skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
-    }
 }
 
 pub use bing::*;

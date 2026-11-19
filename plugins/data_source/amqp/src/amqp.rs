@@ -137,7 +137,7 @@ impl DataSource for DataSourceAmqpPlugin {
                         namespace: namespace.clone(),
                         partition: counter.to_string(),
                     };
-                    submit_payload_batches_durable(
+                    let ack = submit_payload_batches_durable(
                         ctx.as_ref(),
                         vec![IngestBatch {
                             offset_key,
@@ -149,10 +149,12 @@ impl DataSource for DataSourceAmqpPlugin {
                             cdc_rows: None,
                         }],
                     )?;
-                    delivery
-                        .ack(BasicAckOptions::default())
-                        .await
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    if ack.origin_commit_permitted() {
+                        delivery
+                            .ack(BasicAckOptions::default())
+                            .await
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    }
                 }
                 Ok(Some(Err(e))) => {
                     error!("AMQP consumer error: {}", e);
@@ -177,5 +179,23 @@ impl DataSource for DataSourceAmqpPlugin {
         } else {
             SourceExecutionContract::stream(SourceOnceContract::HostIdleBounded)
         }
+    }
+}
+
+#[cfg(test)]
+mod origin_commit_tests {
+    #[test]
+    fn amqp_acks_only_when_origin_commit_permitted() {
+        let src = include_str!("amqp.rs");
+        let impl_src = src.split("#[cfg(test)]").next().expect("impl");
+        assert!(impl_src.contains("submit_payload_batches_durable"));
+        let ack = impl_src.find("BasicAckOptions").expect("origin ack");
+        let gate = impl_src
+            .find("origin_commit_permitted")
+            .expect("origin gate");
+        assert!(
+            gate < ack,
+            "AMQP must not ack until durable ACK permits origin commit"
+        );
     }
 }

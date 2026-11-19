@@ -275,8 +275,8 @@ async fn cleanup_discover_ingest_artifacts(
     }
 
     // Do not `remove_dir_all(DATA_DIR)` or the sled `db` directory: pipeline
-    // metadata lives under DATA_DIR. Prefix-delete catalog and offset rows;
-    // only strip transient ingest/WAL/runtime-child paths.
+    // metadata lives under DATA_DIR. Prefix-delete WAL catalog rows only;
+    // published offsets/checkpoints stay. Strip transient ingest/WAL/runtime-child paths.
     cleanup_discover_local_pipeline_artifacts(&config.get_data_dir());
     Ok(())
 }
@@ -1921,6 +1921,76 @@ mod discover_cleanup_tests {
     use crate::helpers::offsets::{Offsets, SLED_NAME};
     use serde_json::json;
     use serial_test::serial;
+
+    #[test]
+    fn discover_cleanup_does_not_reset_published_ingest() {
+        let src = include_str!("engine.rs");
+        let start = src
+            .find("async fn cleanup_discover_ingest_artifacts")
+            .expect("cleanup_discover_ingest_artifacts");
+        let body = src[start..]
+            .split("fn cleanup_discover_local_pipeline_artifacts")
+            .next()
+            .unwrap();
+        assert!(
+            !body.contains("reset_published_ingest"),
+            "discover cleanup must not erase Closed/checkpoint rows"
+        );
+        assert!(body.contains("reset_pipeline_state"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn discover_cleanup_keeps_closed_and_checkpoints() {
+        use crate::helpers::offsets::OffsetKey;
+        use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_root = dir.path().join("data");
+        let old_wal = std::env::var("WAL_STORAGE").ok();
+        Config::set_wal_storage("disk");
+        let config: Config = serde_json::from_value(json!({
+            "skippr": {
+                "workspace": "ws",
+                "tenant": "t",
+                "store": { "type": "fjall" }
+            },
+            "pipelines": {
+                "orders": {
+                    "data_source": "data_sources.sample",
+                    "data_dir": data_root.to_str().unwrap()
+                }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p/" } }
+            }
+        }))
+        .unwrap();
+        let bound = config.bind_pipeline("orders");
+        let offsets = Offsets::from_memory_for_test();
+        let key = OffsetKey::new("ns", "p");
+        offsets.seed_published_offset(&key, 1, 2, 1, 1).unwrap();
+        let envelope = CheckpointEnvelope::from_payload(
+            CheckpointAuthority::AdvisoryHint,
+            CheckpointKind::AdvisoryProgress,
+            1,
+            &b"checkpoint".to_vec(),
+        )
+        .unwrap();
+        offsets
+            .seed_published_checkpoint("ckpt", &envelope, 2)
+            .unwrap();
+        let result = cleanup_discover_ingest_artifacts(&bound, &offsets).await;
+        if let Some(value) = old_wal {
+            Config::set_wal_storage(&value);
+        } else {
+            std::env::remove_var("WAL_STORAGE");
+            Config::set_evncache("WAL_STORAGE", "");
+        }
+        result.expect("discover cleanup");
+        assert!(offsets.get(&key).unwrap().is_some());
+        assert!(offsets.load_checkpoint_envelope("ckpt").unwrap().is_some());
+    }
 
     #[test]
     fn discover_cleanup_keeps_sled_db_and_strips_payloads() {

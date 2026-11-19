@@ -8,13 +8,14 @@ use skippr_core::helpers::offsets::{OffsetKey, OffsetTypes};
 use skippr_core::ingest_work::{IngestBatch, ThroughputMetrics};
 use skippr_core::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use skippr_core::plugins::source_sync::{
-    OffsetValidationEntry, PayloadSubmissionBatch, SourcePayloadTask, SourceSyncContext,
+    DurableBatchAck, OffsetValidationEntry, PayloadSubmissionBatch, SourcePayloadTask,
+    SourceSyncContext,
 };
 use skippr_core::runtime_plugins::protocol::{
-    HostOffsetFrame, PluginDataFrame, PluginOffsetFrame, RuntimeCheckpointUpdate, RuntimeIngestAck,
-    RuntimeOffsetMaterializationHint, RuntimeOffsetValidationEntry, RuntimeRawIngestBatch,
-    RuntimeSessionHello, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_OFFSET_ADDR_ENV,
-    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    HostOffsetFrame, PluginDataFrame, PluginOffsetFrame, RuntimeCheckpointUpdate,
+    RuntimeExecutionMode, RuntimeIngestAck, RuntimeOffsetMaterializationHint,
+    RuntimeOffsetValidationEntry, RuntimeRawIngestBatch, RuntimeSessionHello,
+    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use skippr_core::runtime_plugins::wire::{read_frame, write_frame};
 use tokio::net::TcpStream;
@@ -290,6 +291,7 @@ pub struct RuntimeSourceSyncContext {
     suppress_payloads: bool,
     metrics: Arc<StdMutex<ThroughputMetrics>>,
     activity: RuntimeSourceActivity,
+    execution_mode: RuntimeExecutionMode,
 }
 
 impl RuntimeSourceSyncContext {
@@ -299,6 +301,7 @@ impl RuntimeSourceSyncContext {
         ingest_ack_client: Arc<RuntimeIngestAckClient>,
         suppress_payloads: bool,
         activity: RuntimeSourceActivity,
+        execution_mode: RuntimeExecutionMode,
     ) -> io::Result<(Self, tokio::net::tcp::OwnedReadHalf)> {
         let (offset_client, offset_reader) = RuntimeOffsetClient::connect().await?;
         let offset_client = Arc::new(offset_client);
@@ -316,6 +319,7 @@ impl RuntimeSourceSyncContext {
                     optimal_chunk_size: 0,
                 })),
                 activity,
+                execution_mode,
             },
             offset_reader,
         ))
@@ -337,6 +341,10 @@ impl RuntimeSourceSyncContext {
 }
 
 impl SourceSyncContext for RuntimeSourceSyncContext {
+    fn execution_mode(&self) -> RuntimeExecutionMode {
+        self.execution_mode
+    }
+
     fn submit_payload_tasks(
         &self,
         tasks: Vec<SourcePayloadTask>,
@@ -503,15 +511,17 @@ pub fn submit_payload_batches(
 }
 
 /// Submit and wait until WAL persist ACK. Required before committing Kafka
-/// offsets, AMQP/SQS deletes, or source checkpoints.
+/// offsets, AMQP/SQS deletes, or source checkpoints. Discover schema ACK
+/// returns `origin_commit_permitted == false`.
 pub fn submit_payload_batches_durable(
     ctx: &dyn SourceSyncContext,
     batches: Vec<IngestBatch>,
-) -> Result<ThroughputMetrics, io::Error> {
+) -> Result<DurableBatchAck, io::Error> {
     if batches.is_empty() {
-        return Ok(empty_metrics());
+        return Ok(DurableBatchAck::from_sync_context(ctx, empty_metrics()));
     }
-    ctx.submit_payload_tasks_and_wait(vec![source_payload_task(batches)])
+    let metrics = ctx.submit_payload_tasks_and_wait(vec![source_payload_task(batches)])?;
+    Ok(DurableBatchAck::from_sync_context(ctx, metrics))
 }
 
 /// Submit multiple schedulable batch groups. Returns after host accept, not persist.
@@ -534,15 +544,16 @@ pub fn submit_payload_batch_groups(
 pub fn submit_payload_batch_groups_durable(
     ctx: &dyn SourceSyncContext,
     groups: Vec<Vec<IngestBatch>>,
-) -> Result<ThroughputMetrics, io::Error> {
+) -> Result<DurableBatchAck, io::Error> {
     if groups.is_empty() {
-        return Ok(empty_metrics());
+        return Ok(DurableBatchAck::from_sync_context(ctx, empty_metrics()));
     }
     let tasks = groups
         .into_iter()
         .map(source_payload_task)
         .collect::<Vec<_>>();
-    ctx.submit_payload_tasks_and_wait(tasks)
+    let metrics = ctx.submit_payload_tasks_and_wait(tasks)?;
+    Ok(DurableBatchAck::from_sync_context(ctx, metrics))
 }
 
 /// Returns true when a Closed partition was already ingested and should be skipped.
@@ -716,6 +727,10 @@ mod tests {
     }
 
     impl SourceSyncContext for ClosedCheckCtx {
+        fn execution_mode(&self) -> RuntimeExecutionMode {
+            RuntimeExecutionMode::Sync
+        }
+
         fn submit_payload_tasks(
             &self,
             _tasks: Vec<SourcePayloadTask>,

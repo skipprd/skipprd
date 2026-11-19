@@ -18,7 +18,6 @@ use skippr_runtime_sdk::plugins::source_contract::{
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
-use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
 };
@@ -31,12 +30,6 @@ use crate::streams::{resolve_streams, InsightsLevel, MetaStreamDef, StreamProfil
 
 const CHECKPOINT_PAYLOAD_VERSION: u32 = 1;
 const DISCOVER_SAMPLE_DAYS: u32 = 3;
-
-fn runtime_is_discover_mode() -> bool {
-    std::env::var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV)
-        .map(|mode| mode.eq_ignore_ascii_case("discover"))
-        .unwrap_or(false)
-}
 
 fn discover_sample_date_window(end_date: NaiveDate) -> (NaiveDate, NaiveDate) {
     let span = DISCOVER_SAMPLE_DAYS.max(1);
@@ -555,7 +548,7 @@ impl DataSource for DataSourceMetaAdsPlugin {
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
         }
 
-        let discover = runtime_is_discover_mode();
+        let discover = ctx.execution_mode().resume_frozen();
         let end_date = self.effective_end_date()?;
         let configured_start = Self::parse_date(&self.config.start_date)?;
         let start_date = if discover {
@@ -599,11 +592,7 @@ impl DataSource for DataSourceMetaAdsPlugin {
 
         for stream in streams {
             let checkpoint_key = self.checkpoint_key(stream.namespace);
-            let last_completed = if discover {
-                None
-            } else {
-                Self::load_last_completed(ctx.as_ref(), &checkpoint_key)?
-            };
+            let last_completed = Self::load_last_completed(ctx.as_ref(), &checkpoint_key)?;
             let window = planner.plan(start_date, last_completed, end_date);
             let dates = DateWindowPlanner::dates_inclusive(&window);
 
@@ -611,9 +600,8 @@ impl DataSource for DataSourceMetaAdsPlugin {
                 let rows = self
                     .sync_stream_date(&api, stream, date, &access_token)
                     .await?;
-                if !discover {
-                    Self::store_last_completed(ctx.as_ref(), &checkpoint_key, date)?;
-                }
+                Self::store_last_completed(ctx.as_ref(), &checkpoint_key, date)?;
+
                 let date_key = date.format("%Y-%m-%d").to_string();
                 let rows_for_day = group_rows_by_date(rows)
                     .get(&date_key)
@@ -806,16 +794,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_is_discover_mode_reads_child_env() {
-        let _lock = env_test_lock();
-        std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, "discover");
-        assert!(runtime_is_discover_mode());
-        std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, "sync");
-        assert!(!runtime_is_discover_mode());
-        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
-    }
-
-    #[test]
     fn meta_checkpoint_roundtrip_envelope() {
         let cp = MetaNamespaceCheckpoint {
             last_completed_date: "2024-03-01".into(),
@@ -957,7 +935,6 @@ mod tests {
         let _lock = env_test_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         std::env::set_var("SKIPPR_META_ADS_FIXTURE_DIR", fixture_dir);
-        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
 
         let mut cfg = test_config();
         cfg.start_date = "2024-12-01".into();
@@ -1047,7 +1024,6 @@ mod tests {
         let _lock = env_test_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         std::env::set_var("SKIPPR_META_ADS_FIXTURE_DIR", fixture_dir);
-        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
 
         let mut cfg = test_config();
         cfg.stream_profile = StreamProfile::Minimal;
@@ -1103,11 +1079,10 @@ mod tests {
     }
 
     #[test]
-    fn discover_sync_does_not_store_checkpoints() {
+    fn discover_sync_calls_store_checkpoint() {
         let _lock = env_test_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         std::env::set_var("SKIPPR_META_ADS_FIXTURE_DIR", fixture_dir);
-        std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, "discover");
 
         let mut cfg = test_config();
         cfg.access_token = None;
@@ -1116,16 +1091,18 @@ mod tests {
         cfg.end_date = Some("2024-01-01".into());
         let mut plugin = DataSourceMetaAdsPlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let ctx = Arc::new(RecordingSyncContext::default());
+        let ctx = Arc::new(RecordingSyncContext {
+            execution_mode: skippr_runtime_sdk::protocol::RuntimeExecutionMode::Discover,
+            ..Default::default()
+        });
         rt.block_on(plugin.sync(ctx.clone()))
             .expect("discover sync");
         assert!(
-            ctx.checkpoint_stores.lock().unwrap().is_empty(),
-            "discover must not persist checkpoints"
+            !ctx.checkpoint_stores.lock().unwrap().is_empty(),
+            "discover still calls store; host persist is frozen"
         );
 
         std::env::remove_var("SKIPPR_META_ADS_FIXTURE_DIR");
-        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
     }
 
     use skippr_runtime_sdk::plugins::{
@@ -1136,10 +1113,15 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingSyncContext {
+        execution_mode: skippr_runtime_sdk::protocol::RuntimeExecutionMode,
         checkpoint_stores: Mutex<Vec<String>>,
     }
 
     impl SourceSyncContext for RecordingSyncContext {
+        fn execution_mode(&self) -> skippr_runtime_sdk::protocol::RuntimeExecutionMode {
+            self.execution_mode
+        }
+
         fn submit_payload_tasks(
             &self,
             _tasks: Vec<SourcePayloadTask>,

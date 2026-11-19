@@ -9,8 +9,8 @@
 - Client-side date filter on full API payloads (~3 months returned per call)
 - .NET `/Date(ms)/` dates parsed to `YYYY-MM-DD` bronze `date`
 - Namespace contracts: `ReplacePartition`, `date` partition, dimension PKs (`Query`, `Url`)
-- Checkpoints: `last_completed_date` per namespace (sync only; zero-row days still advance)
-- Discover: 3-day window, minimal streams only, `lookback_days=0`, no checkpoint I/O
+- Checkpoints: `last_completed_date` per namespace (zero-row days still advance)
+- Discover: 3-day window, minimal streams only, `lookback_days=0`; checkpoint load/store still called, host does not persist
 - `page_daily`: run-date snapshot (rows tagged with sync `end_date` when API has no `Date`)
 - `site_run_daily` aggregate emitted on full-profile sync (non-discover)
 - `api_key` preferred over `access_token` when both are set
@@ -27,5 +27,5 @@
 - Empty `{"d":[]}` response → no bronze rows; checkpoint still advances per day in window
 - API rows without parseable `Date` (dated streams) → skipped unless `page_daily` partition date applies
 - Unparseable `/Date(...)/` values → row skipped for dated streams
-- Discover must not store checkpoints or emit `page_daily` / `site_run_daily`
+- Discover does not emit `page_daily` / `site_run_daily` (fetch budget); load/store still called, host persist is frozen
 - Malformed checkpoint payload → ignored on load (warn, treat as no checkpoint)

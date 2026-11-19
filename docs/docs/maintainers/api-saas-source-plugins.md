@@ -121,13 +121,13 @@ Prefer `plugins/shared/api_source/` where applicable:
 
 `skipprd discover` must not pull full historical backfills or large bronze catalogs just to infer schemas. Sampling is **automatic** (not a `skippr.yml` knob):
 
-- [ ] Read `SKIPPR_RUNTIME_EXECUTION_MODE` via `SKIPPR_RUNTIME_EXECUTION_MODE_ENV` (`discover` vs normal sync) — set by the host in [`append_source_runtime.rs`](https://github.com/skipprd/skipprd/blob/main/crates/skippr-runtime-sdk/src/append_source_runtime.rs)
-- [ ] In discover mode: narrow **date window** (e.g. last 3 days), **minimal stream profile**, `lookback_days = 0`, **no checkpoint load/advance**
+- [ ] Read `ctx.execution_mode().resume_frozen()` for fetch-budget sampling (`discover` vs `sync`). Resume (Closed, checkpoints) is frozen in the offset service and host persist path — plugins always `load`/`store` checkpoint wrappers and keep real partition keys.
+- [ ] In discover mode: narrow **date window** (e.g. last 3 days), **minimal stream profile**, `lookback_days = 0`
 - [ ] `source_namespace_contracts()` still reflects the **configured** profile so discover knows all namespaces; only `sync()` API traffic is throttled
-- [ ] Unit tests: discover window, minimal streams only, env detection, no checkpoint writes in discover
+- [ ] Unit tests: discover window, minimal streams only, mode from `SourceSyncContext`
 - [ ] For fan-out APIs (per-campaign child reports): discover must **not** run fan-out enumeration — only org-wide / minimal grains
 
-Reference: `runtime_is_discover_mode()` and `streams_for_run(discover)` in `plugins/data_source/google_analytics/`.
+Reference: `ctx.execution_mode().resume_frozen()` and `streams_for_run(discover)` in `plugins/data_source/google_analytics/`.
 
 ### Tests (source)
 
@@ -331,7 +331,7 @@ Discover runs the same source plugin as sync. Without an in-plugin sampling knob
 | --- | --- |
 | Short recent date window (e.g. 3 days) | `start_date` … effective end |
 | Minimal bronze profile for HTTP calls | User-selected profile |
-| No checkpoint read/write | Per-namespace checkpoints |
+| Plugin still `load`/`store`; host persist frozen | Per-namespace checkpoints persist |
 | No parent/child fan-out (if applicable) | Full enumeration when required |
 
 Log clearly when sampling is active so operators do not confuse discover traffic with scheduled sync volume.

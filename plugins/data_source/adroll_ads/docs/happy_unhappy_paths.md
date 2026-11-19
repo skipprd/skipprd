@@ -9,7 +9,7 @@
 - Reporting stream: `reporting_daily` uses GraphQL daily reports with `ReplacePartition` on `date`
 - Fixture sync (`SKIPPR_ADROLL_ADS_FIXTURE_DIR`): per-namespace JSON parses rows with `advertiser_id`, entity IDs, and report dates
 - Normal sync: day loop, submit batches, advance `last_completed_date` checkpoint for `reporting_daily`
-- Discover: 3-day window, `minimal` streams only, and no checkpoint load/store
+- Discover: 3-day window, `minimal` streams only; checkpoint load/store still called, host does not persist
 - Zero-row API day still advances checkpoint for reporting sync
 - OAuth refresh path accepted when all four refresh fields are non-empty
 
@@ -25,4 +25,4 @@
 - Corrupt checkpoint payload → ignored (warn), full window from planner
 - HTTP 429 / transient statuses → retry/backoff; 400/403 → give up (no retry)
 - Unknown fixture namespace → clear missing-fixture error
-- Discover must not call `store_checkpoint` (regression)
+- Discover still calls `store_checkpoint`; host persist is frozen

@@ -17,7 +17,6 @@ use skippr_runtime_sdk::plugins::source_contract::{
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
-use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batches_durable, IngestBatch,
 };
@@ -37,12 +36,6 @@ use crate::url_inspection::inspection_rows_for_date;
 const CHECKPOINT_PAYLOAD_VERSION: u32 = 1;
 const DISCOVER_SAMPLE_DAYS: u32 = 3;
 const GSC_HISTORY_MONTHS: i64 = 16;
-
-fn runtime_is_discover_mode() -> bool {
-    std::env::var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV)
-        .map(|mode| mode.eq_ignore_ascii_case("discover"))
-        .unwrap_or(false)
-}
 
 fn discover_sample_date_window(end_date: NaiveDate) -> (NaiveDate, NaiveDate) {
     let span = DISCOVER_SAMPLE_DAYS.max(1);
@@ -395,11 +388,7 @@ impl DataSourceGoogleSearchConsolePlugin {
     ) -> Result<RunStats, std::io::Error> {
         let mut stats = RunStats::default();
         let checkpoint_key = self.checkpoint_key(stream.namespace);
-        let last_completed = if discover {
-            None
-        } else {
-            Self::load_last_completed(ctx.as_ref(), &checkpoint_key)?
-        };
+        let last_completed = Self::load_last_completed(ctx.as_ref(), &checkpoint_key)?;
         let planner = DateWindowPlanner {
             lookback_days: if discover {
                 0
@@ -437,9 +426,8 @@ impl DataSourceGoogleSearchConsolePlugin {
                     let grouped = group_rows_by_date(rows);
                     let mut cursor = chunk_start;
                     while cursor <= chunk_end {
-                        if !discover {
-                            Self::store_last_completed(ctx.as_ref(), &checkpoint_key, cursor)?;
-                        }
+                        Self::store_last_completed(ctx.as_ref(), &checkpoint_key, cursor)?;
+
                         let date_key = cursor.format("%Y-%m-%d").to_string();
                         let rows_for_day = grouped.get(&date_key).cloned().unwrap_or_default();
                         self.submit_rows_for_date(
@@ -593,7 +581,7 @@ impl DataSource for DataSourceGoogleSearchConsolePlugin {
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
         }
 
-        let discover = runtime_is_discover_mode();
+        let discover = ctx.execution_mode().resume_frozen();
         let end_date = self.effective_end_date()?;
         let configured_start = Self::parse_date(&self.config.start_date)?;
         let start_date = if discover {
@@ -870,24 +858,30 @@ mod tests {
     }
 
     #[test]
-    fn discover_sync_does_not_store_checkpoints() {
+    fn discover_sync_calls_store_checkpoint() {
         let _lock = env_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         std::env::set_var("SKIPPR_GOOGLE_SEARCH_CONSOLE_FIXTURE_DIR", fixture_dir);
-        std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, "discover");
 
         let mut cfg = test_config();
-        cfg.end_date = Some("2025-06-01".into());
+        cfg.start_date = "2026-10-30".into();
+        cfg.end_date = Some("2026-11-01".into());
+        cfg.processing_lag_days = 0;
         cfg.stream_profile = StreamProfile::Minimal;
         let mut plugin = DataSourceGoogleSearchConsolePlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let ctx = Arc::new(RecordingSyncContext::default());
+        let ctx = Arc::new(RecordingSyncContext {
+            execution_mode: skippr_runtime_sdk::protocol::RuntimeExecutionMode::Discover,
+            ..Default::default()
+        });
         rt.block_on(plugin.sync(ctx.clone()))
             .expect("discover sync");
-        assert!(ctx.checkpoint_stores.lock().unwrap().is_empty());
+        assert!(
+            !ctx.checkpoint_stores.lock().unwrap().is_empty(),
+            "discover still calls store; host persist is frozen"
+        );
 
         std::env::remove_var("SKIPPR_GOOGLE_SEARCH_CONSOLE_FIXTURE_DIR");
-        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
     }
 
     use skippr_runtime_sdk::plugins::{
@@ -898,10 +892,15 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingSyncContext {
+        execution_mode: skippr_runtime_sdk::protocol::RuntimeExecutionMode,
         checkpoint_stores: Mutex<Vec<String>>,
     }
 
     impl SourceSyncContext for RecordingSyncContext {
+        fn execution_mode(&self) -> skippr_runtime_sdk::protocol::RuntimeExecutionMode {
+            self.execution_mode
+        }
+
         fn submit_payload_tasks(
             &self,
             _tasks: Vec<SourcePayloadTask>,

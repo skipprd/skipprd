@@ -3,7 +3,7 @@ use std::io;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes};
 use crate::ingest_work::{IngestBatch, ThroughputMetrics};
 use crate::plugins::cdc::CheckpointEnvelope;
-use crate::runtime_plugins::protocol::RuntimeOffsetMaterializationHint;
+use crate::runtime_plugins::protocol::{RuntimeExecutionMode, RuntimeOffsetMaterializationHint};
 
 /// One schedulable unit of source payload for host-owned ingest.
 #[derive(Clone, Debug)]
@@ -42,8 +42,32 @@ pub struct OffsetValidationEntry {
     pub offset_value: u64,
 }
 
+/// WAL persist wait result. Origin delete/commit is allowed only when the host
+/// actually persisted; Discover schema ACK sets this false.
+#[derive(Clone, Debug)]
+pub struct DurableBatchAck {
+    pub metrics: ThroughputMetrics,
+    origin_commit_permitted: bool,
+}
+
+impl DurableBatchAck {
+    pub fn from_sync_context(ctx: &dyn SourceSyncContext, metrics: ThroughputMetrics) -> Self {
+        Self {
+            metrics,
+            origin_commit_permitted: !ctx.execution_mode().resume_frozen(),
+        }
+    }
+
+    pub fn origin_commit_permitted(&self) -> bool {
+        self.origin_commit_permitted
+    }
+}
+
 /// Runtime and in-process sources submit payloads and offset checks through this context.
 pub trait SourceSyncContext: Send + Sync {
+    /// Host handshake mode. Fetch-budget sampling reads this; offset identity does not.
+    fn execution_mode(&self) -> RuntimeExecutionMode;
+
     /// Submit one or more payload tasks to the host ingest scheduler.
     fn submit_payload_tasks(
         &self,
@@ -106,4 +130,67 @@ pub trait SourceSyncContext: Send + Sync {
 
     /// Load a durable checkpoint envelope from the host offset store.
     fn load_checkpoint_envelope(&self, key: &str) -> Result<Option<CheckpointEnvelope>, String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime_plugins::protocol::RuntimeOffsetMaterializationHint;
+
+    struct ModeCtx(RuntimeExecutionMode);
+
+    impl SourceSyncContext for ModeCtx {
+        fn execution_mode(&self) -> RuntimeExecutionMode {
+            self.0
+        }
+        fn submit_payload_tasks(
+            &self,
+            _tasks: Vec<SourcePayloadTask>,
+        ) -> Result<ThroughputMetrics, io::Error> {
+            Err(io::Error::other("unused"))
+        }
+        fn validate_offset_batch(
+            &self,
+            entries: &[OffsetValidationEntry],
+        ) -> Result<Vec<bool>, io::Error> {
+            Ok(vec![true; entries.len()])
+        }
+        fn relay_offset_hints(
+            &self,
+            _hints: Vec<RuntimeOffsetMaterializationHint>,
+        ) -> Result<(), io::Error> {
+            Ok(())
+        }
+        fn store_checkpoint(
+            &self,
+            _key: &str,
+            _envelope: &CheckpointEnvelope,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn load_checkpoint_envelope(
+            &self,
+            _key: &str,
+        ) -> Result<Option<CheckpointEnvelope>, String> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn discover_durable_ack_forbids_origin_commit() {
+        let metrics = ThroughputMetrics {
+            bytes_per_second: 0,
+            active_cores: 0,
+            queue_length: 0,
+            optimal_chunk_size: 0,
+        };
+        let frozen = DurableBatchAck::from_sync_context(
+            &ModeCtx(RuntimeExecutionMode::Discover),
+            metrics.clone(),
+        );
+        assert!(!frozen.origin_commit_permitted());
+        let sync =
+            DurableBatchAck::from_sync_context(&ModeCtx(RuntimeExecutionMode::Sync), metrics);
+        assert!(sync.origin_commit_permitted());
+    }
 }

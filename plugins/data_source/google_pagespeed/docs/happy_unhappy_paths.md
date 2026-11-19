@@ -9,7 +9,7 @@
 - Job checkpoint: resume skips completed URL×strategy pairs
 - Rate limiting via `requests_per_minute`
 - API errors classified → error page row + issue codes (`INVALID_URL`, quota, etc.)
-- Discover: no checkpoint load/store; performance category only
+- Discover: sample fetch budget (mobile, 1 URL, performance category); this plugin has no checkpoint wrappers
 - Five namespaces, `ReplacePartition` on `run_date`
 
 ## Unhappy paths
@@ -20,4 +20,3 @@
 - No CrUX field data → `NO_FIELD_DATA` issue
 - Slow LCP category → `FIELD_LCP_SLOW` issue
 - HTTP 429 → retry (client); 400 → give up
-- Discover must not call `store_checkpoint`

@@ -393,6 +393,10 @@ mod tests {
     }
 
     impl SourceSyncContext for MemoryCheckpointCtx {
+        fn execution_mode(&self) -> skippr_runtime_sdk::protocol::RuntimeExecutionMode {
+            skippr_runtime_sdk::protocol::RuntimeExecutionMode::Sync
+        }
+
         fn submit_payload_tasks(
             &self,
             _tasks: Vec<SourcePayloadTask>,

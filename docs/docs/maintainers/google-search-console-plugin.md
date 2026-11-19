@@ -27,7 +27,7 @@ Auth: OAuth refresh, static `access_token`, or service account (`webmasters.read
 
 `search_appearance_daily` is **optional** — HTTP 400 skips that stream only.
 
-Discover mode: last 3 days × `minimal` only; does not advance checkpoints.
+Discover mode: last 3 days × `minimal` only. Plugin still load/store checkpoint wrappers; host persist is frozen.
 
 ## Config (engine)
 

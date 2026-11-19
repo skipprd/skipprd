@@ -124,19 +124,21 @@ impl DataSource for DataSourceEventbridgePlugin {
                 });
             }
 
-            if !pending.is_empty() {
-                submit_payload_batches_durable(ctx.as_ref(), pending)?;
+            if pending.is_empty() {
+                continue;
             }
-
-            for msg in &messages {
-                if let Some(handle) = msg.receipt_handle() {
-                    let _ = self
-                        .sqs_client
-                        .delete_message()
-                        .queue_url(&self.config.sqs_queue_url)
-                        .receipt_handle(handle)
-                        .send()
-                        .await;
+            let ack = submit_payload_batches_durable(ctx.as_ref(), pending)?;
+            if ack.origin_commit_permitted() {
+                for msg in &messages {
+                    if let Some(handle) = msg.receipt_handle() {
+                        let _ = self
+                            .sqs_client
+                            .delete_message()
+                            .queue_url(&self.config.sqs_queue_url)
+                            .receipt_handle(handle)
+                            .send()
+                            .await;
+                    }
                 }
             }
         }
@@ -148,5 +150,23 @@ impl DataSource for DataSourceEventbridgePlugin {
         skippr_runtime_sdk::plugins::SourceExecutionContract::stream(
             skippr_runtime_sdk::plugins::SourceOnceContract::HostIdleBounded,
         )
+    }
+}
+
+#[cfg(test)]
+mod origin_commit_tests {
+    #[test]
+    fn eventbridge_deletes_only_when_origin_commit_permitted() {
+        let src = include_str!("eventbridge.rs");
+        let impl_src = src.split("#[cfg(test)]").next().expect("impl");
+        assert!(impl_src.contains("submit_payload_batches_durable"));
+        let delete = impl_src.find("delete_message").expect("delete");
+        let gate = impl_src
+            .find("origin_commit_permitted")
+            .expect("origin gate");
+        assert!(
+            gate < delete,
+            "EventBridge must not delete until durable ACK permits origin commit"
+        );
     }
 }

@@ -32,7 +32,7 @@ Bing returns the full available history per call (~3 months); the plugin filters
 | `standard` | `site_daily`, `query_daily`, `crawl_daily` |
 | `full` | All five curated namespaces (includes `site_run_daily`) |
 
-Discover mode: last 3 days × `minimal` only; does not advance checkpoints.
+Discover mode: last 3 days × `minimal` only. Plugin still load/store checkpoint wrappers; host persist is frozen.
 
 ## Config (engine)
 

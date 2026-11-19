@@ -43,6 +43,7 @@ pub fn clear_fixture_dir() {
 
 #[derive(Default)]
 pub struct RecordingSyncContext {
+    execution_mode: skippr_runtime_sdk::protocol::RuntimeExecutionMode,
     payload_tasks: Mutex<Vec<SourcePayloadTask>>,
     checkpoints: Mutex<HashMap<String, CheckpointEnvelope>>,
 }
@@ -67,6 +68,10 @@ impl RecordingSyncContext {
 }
 
 impl SourceSyncContext for RecordingSyncContext {
+    fn execution_mode(&self) -> skippr_runtime_sdk::protocol::RuntimeExecutionMode {
+        self.execution_mode
+    }
+
     fn submit_payload_tasks(
         &self,
         tasks: Vec<SourcePayloadTask>,

@@ -16,7 +16,9 @@ pub use source_contract::{
     SinkWritePolicySupport, SourceContractError, SourceNamespaceContract, SourceSemantics,
     WritePolicy, WritePolicyUnsupportedError,
 };
-pub use source_sync::{OffsetValidationEntry, SourcePayloadTask, SourceSyncContext};
+pub use source_sync::{
+    DurableBatchAck, OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
+};
 pub use traits::{
     AlterSupport, AtLeastOnceMessageDelivery, ConfiguredSink, DataSink, DataSource,
     DeterministicObjectOverwrite, FinalStateIdempotentApply, GroupedBatchReader,

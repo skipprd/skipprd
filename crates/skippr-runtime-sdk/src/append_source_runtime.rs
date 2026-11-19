@@ -20,7 +20,7 @@ use crate::protocol::{
     RuntimePluginConfigEnvelope, RuntimePluginKind, RuntimeSessionHello,
     RuntimeSourceCapabilityDescriptor, SourceEvent, SourceStartRequest, RUNTIME_PROTOCOL_VERSION,
     SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
-    SKIPPR_RUNTIME_EXECUTION_MODE_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::source_sync::{
     run_offset_service_reader_loop, RuntimeIngestAckClient, RuntimeSourceSyncContext,
@@ -392,11 +392,7 @@ pub async fn run_append_data_source_main(
 
     configure_runtime_source_data_dir(&start.context.data_dir, plugin_name);
     configure_runtime_input_config(&start.config.0);
-    let execution_mode_label = match start.context.execution_mode {
-        RuntimeExecutionMode::Discover => "discover",
-        RuntimeExecutionMode::Sync => "sync",
-    };
-    std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, execution_mode_label);
+    let execution_mode: RuntimeExecutionMode = start.context.execution_mode;
     let control = RuntimeSourceControl::new();
     let mut shutdown_rx = control.subscribe_shutdown();
     let reader_control = control.clone();
@@ -433,6 +429,7 @@ pub async fn run_append_data_source_main(
         ingest_ack_client,
         false,
         activity.clone(),
+        execution_mode,
     )
     .await?;
     let offset_client = sync_ctx.offset_client();

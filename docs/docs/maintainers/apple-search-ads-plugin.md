@@ -24,7 +24,7 @@ The client-credentials path signs a JWT and exchanges it with Apple for `scope=s
 
 ## Sync loop
 
-- Discover mode runs the minimal profile for the last three days and does not persist checkpoints.
+- Discover mode runs the minimal profile for the last three days. Plugin still load/store checkpoint wrappers; host persist is frozen.
 - Campaign and ad group references are enumerated before fan-out streams run.
 - `search_term_daily` requests Apple’s `ORTZ` timezone, matching Search Ads API requirements.
 - Reports paginate through Apple’s offset/limit selector and merge all returned rows before normalization.

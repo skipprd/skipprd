@@ -267,7 +267,7 @@ impl DataSource for DataSourceKafkaPlugin {
                     };
 
                     let bytes = data.len();
-                    submit_payload_batches_durable(
+                    let ack = submit_payload_batches_durable(
                         ctx.as_ref(),
                         vec![IngestBatch {
                             offset_key,
@@ -282,10 +282,12 @@ impl DataSource for DataSourceKafkaPlugin {
                             cdc_rows,
                         }],
                     )?;
-                    if let Err(e) =
-                        consumer.commit_message(&msg, rdkafka::consumer::CommitMode::Async)
-                    {
-                        error!("Kafka commit error: {}", e);
+                    if ack.origin_commit_permitted() {
+                        if let Err(e) =
+                            consumer.commit_message(&msg, rdkafka::consumer::CommitMode::Async)
+                        {
+                            error!("Kafka commit error: {}", e);
+                        }
                     }
                 }
                 Ok(Some(Err(e))) => {
@@ -325,13 +327,17 @@ mod persist_before_commit_tests {
         let src = include_str!("kafka.rs");
         let impl_src = src.split("#[cfg(test)]").next().expect("impl");
         assert!(impl_src.contains("submit_payload_batches_durable"));
+        assert!(impl_src.contains("origin_commit_permitted"));
         let commit = impl_src.find("commit_message").expect("commit");
         let submit = impl_src
             .rfind("submit_payload_batches_durable")
             .expect("durable submit");
+        let gate = impl_src
+            .find("origin_commit_permitted")
+            .expect("origin gate");
         assert!(
-            submit < commit,
-            "Kafka must persist WAL before committing the source offset"
+            submit < gate && gate < commit,
+            "Kafka must persist WAL and only commit when origin_commit_permitted"
         );
     }
 }

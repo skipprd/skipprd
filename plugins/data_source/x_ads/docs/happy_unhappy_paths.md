@@ -12,7 +12,7 @@
 - Pagination: follow `paging.next` until exhausted (live API)
 - Normal sync: day loop, submit batches, advance `last_completed_date` checkpoint per namespace
 - Discover: 3-day window, `minimal` streams only, `lookback_days=0`, contracts still reflect configured profile
-- Discover: no checkpoint load/store
+- Discover: sample fetch budget; checkpoint load/store still called, host does not persist
 - Zero-row API day still advances checkpoint (sync path)
 - OAuth refresh path accepted when all four fields non-empty
 
@@ -29,4 +29,4 @@
 - Corrupt checkpoint payload → ignored (warn), full window from planner
 - HTTP 429 → retry/backoff; 400/403 → give up (no retry)
 - Unknown fixture namespace → falls through to live HTTP (CI uses fixtures only)
-- Discover must not call `store_checkpoint` (regression)
+- Discover still calls `store_checkpoint`; host persist is frozen
