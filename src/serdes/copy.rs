@@ -234,6 +234,11 @@ fn identity_ndjson(
         if !line_looks_like_json_value(content) {
             return None;
         }
+        // Firehose concatenates objects on one line (`{...}{...}`). That still
+        // starts with `{` and ends with `}`; only a real parse is one record.
+        if serde_json::from_str::<Value>(content.trim()).is_err() {
+            return None;
+        }
         let mut identity = line.as_bytes().to_vec();
         if !identity.ends_with(&[b'\n']) {
             identity.push(b'\n');
@@ -549,6 +554,16 @@ mod tests {
             text.contains("123.45"),
             "expected coerced 123.45, got {text}"
         );
+    }
+
+    #[test]
+    fn concatenated_firehose_json_splits_into_records() {
+        let config = Config::new();
+        let payload = "{\"id\":1}{\"id\":2}";
+        let decoded = decode_copy_bytes(&config, InputFormat::Json, payload.as_bytes()).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].decoded_value().unwrap()["id"], 1);
+        assert_eq!(decoded[1].decoded_value().unwrap()["id"], 2);
     }
 
     #[test]
