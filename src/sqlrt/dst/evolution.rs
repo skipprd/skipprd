@@ -437,7 +437,7 @@ fn e_leaf_split_then_fast_apply() {
         "detail",
         &json!({"docket_aggregate_size_code": "10mm"}),
         &metadata,
-        Some(true),
+        true,
         true,
     )
     .expect("DST: fast apply after publish");

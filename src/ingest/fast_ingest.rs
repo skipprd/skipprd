@@ -165,7 +165,7 @@ pub fn fast_path_ingest(
     for (field, value, data_type) in fields_to_process {
         // No need to convert string to enum since we already have the enum
         let resolved_value =
-            match fast_set_value(config, &data_type, &field, &value, metadata, None, flatten) {
+            match fast_set_value(config, &data_type, &field, &value, metadata, true, flatten) {
                 Ok(v) => v,
                 Err(e) => {
                     if crate::helpers::configuration::Config::log_wal_enabled() {
@@ -222,7 +222,7 @@ pub fn validate_required_fields(
     Ok(())
 }
 
-/// Fast-path set_value: structural walk or scalar coerce; apply-only evolution.
+/// Fast-path set_value: dest walk first; published sibling dest-only on dest miss.
 #[inline]
 pub fn fast_set_value(
     config: &Config,
@@ -230,7 +230,7 @@ pub fn fast_set_value(
     field: &str,
     value: &Value,
     metadata: &HashMap<String, Metadata>,
-    apply_evolution: Option<bool>,
+    apply_evolution: bool,
     flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     // Early return for null or empty values
@@ -247,34 +247,15 @@ pub fn fast_set_value(
         });
     }
 
-    let apply_evolution_bool = apply_evolution.unwrap_or(true);
-
-    match data_type {
-        SkipprDataType::Record | SkipprDataType::Map | SkipprDataType::Array => {
-            if apply_evolution_bool {
-                if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
-                    return Ok(v);
-                }
-            }
-            match data_type {
-                SkipprDataType::Record => {
-                    process_record_field(config, field, value, metadata, flatten)
-                }
-                SkipprDataType::Map => process_map_field(config, field, value, metadata, flatten),
-                SkipprDataType::Array => {
-                    process_array_field(config, field, value, metadata, flatten)
-                }
-                _ => unreachable!("container arm"),
-            }
+    let dest = match data_type {
+        SkipprDataType::Record => {
+            process_record_field(config, field, value, metadata, flatten, apply_evolution)
         }
-        SkipprDataType::Date => {
-            if apply_evolution_bool {
-                if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
-                    return Ok(v);
-                }
-            }
-            fast_set_date(field, value, metadata)
+        SkipprDataType::Map => {
+            process_map_field(config, field, value, metadata, flatten, apply_evolution)
         }
+        SkipprDataType::Array => process_array_field(config, field, value, metadata, flatten),
+        SkipprDataType::Date => fast_set_date(field, value, metadata),
         SkipprDataType::String
         | SkipprDataType::Long
         | SkipprDataType::Integer
@@ -292,28 +273,24 @@ pub fn fast_set_value(
         | SkipprDataType::Fixed
         | SkipprDataType::Json
         | SkipprDataType::Null
-        | SkipprDataType::Unknown => match_scalar_value_optimized(
-            config,
-            field,
-            data_type,
-            value,
-            metadata,
-            apply_evolution_bool,
-            flatten,
-        ),
+        | SkipprDataType::Unknown => {
+            match_scalar_value_optimized(field, data_type, value, metadata)
+        }
+    };
+    match dest {
+        Ok(v) => Ok(v),
+        Err(e) if apply_evolution => {
+            if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
+                Ok(v)
+            } else {
+                Err(e)
+            }
+        }
+        Err(e) => Err(e),
     }
 }
 
-/// Fast-path evolution runs on a metadata clone; only accept results whose target
-/// field already exists in live metadata so new siblings route to slow ingest.
-fn accept_fast_path_evolution(
-    input_field: &str,
-    result: &ResolvedFieldValue,
-    live: &HashMap<String, Metadata>,
-) -> bool {
-    result.field == input_field || live.contains_key(&result.field)
-}
-
+/// Dest-only walk of published siblings on live metadata, ranked by the factory scorer.
 fn try_fast_path_evolution(
     config: &Config,
     field: &str,
@@ -321,35 +298,43 @@ fn try_fast_path_evolution(
     metadata: &HashMap<String, Metadata>,
     flatten: bool,
 ) -> Option<ResolvedFieldValue> {
-    let has_evolution = metadata.get(field).is_some_and(|m| !m.evolution.is_empty());
-    if !has_evolution {
+    let mut ranked: Vec<(i32, Evolution)> = metadata
+        .get(field)
+        .map(|m| {
+            m.evolution
+                .values()
+                .filter(|e| metadata.contains_key(&e.new_field))
+                .map(|e| (e.score_published_sibling(value, metadata), e.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if ranked.is_empty() {
         return None;
     }
-    if let Some(evo) = metadata.get(field).and_then(|m| m.evolution.get("array")) {
-        if metadata.contains_key(&evo.new_field) {
-            return Some(ResolvedFieldValue::new(
-                evo.new_field.clone(),
-                value.clone(),
-            ));
+    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_score, evolution) in ranked {
+        if let Ok(v) = fast_set_value(
+            config,
+            &evolution.type_string,
+            &evolution.new_field,
+            value,
+            metadata,
+            true,
+            flatten,
+        ) {
+            return Some(v);
         }
     }
-    let mut meta_ev = metadata.clone();
-    match Evolution::apply_evolution_factory(config, field, value, &mut meta_ev, flatten) {
-        Ok(v) if accept_fast_path_evolution(field, &v, metadata) => Some(v),
-        _ => None,
-    }
+    None
 }
 
-/// Scalar coerce on the fast path; existing siblings only via try_fast_path_evolution.
+/// Scalar coerce on the dest walk. Sibling apply lives in `fast_set_value`.
 #[inline]
 pub fn match_scalar_value_optimized(
-    config: &Config,
     field: &str,
     data_type: &SkipprDataType,
     value: &Value,
     metadata: &HashMap<String, Metadata>,
-    apply_evolution: bool,
-    flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     if value.is_null() {
         return Ok(ResolvedFieldValue {
@@ -365,17 +350,10 @@ pub fn match_scalar_value_optimized(
             field: output_field_name,
             value: v,
         }),
-        Err(_) => {
-            if apply_evolution {
-                if let Some(v) = try_fast_path_evolution(config, field, value, metadata, flatten) {
-                    return Ok(v);
-                }
-            }
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                scalar_mismatch(data_type, None, field, value),
-            )))
-        }
+        Err(_) => Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            scalar_mismatch(data_type, None, field, value),
+        ))),
     }
 }
 
@@ -517,6 +495,7 @@ fn process_record_field(
     value: &Value,
     metadata: &HashMap<String, Metadata>,
     flatten: bool,
+    apply_evolution: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     let _m = Map::new();
 
@@ -547,7 +526,7 @@ fn process_record_field(
                     &sub_field,
                     val,
                     &metadata.get(field).unwrap().fields,
-                    None,
+                    apply_evolution,
                     flatten,
                 )?;
                 m.insert(new_val.field, new_val.value);
@@ -594,7 +573,7 @@ fn process_record_field(
                     sub_field,
                     sub_value,
                     &parent.fields,
-                    None,
+                    apply_evolution,
                     flatten,
                 )?;
                 m.insert(newval.field, newval.value);
@@ -618,6 +597,7 @@ fn process_map_field(
     value: &Value,
     metadata: &HashMap<String, Metadata>,
     flatten: bool,
+    apply_evolution: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     if !value.is_object() {
         return Err(Box::new(std::io::Error::new(
@@ -668,7 +648,7 @@ fn process_map_field(
                 key,
                 val,
                 &field_metadata.fields,
-                None,
+                apply_evolution,
                 flatten,
             )?;
 
@@ -758,7 +738,7 @@ fn process_array_field(
                     sub_field,
                     val,
                     &parent_meta.fields,
-                    None,
+                    false,
                     flatten,
                 )?;
                 array.push(new_val.value);
@@ -925,7 +905,7 @@ mod tests {
             field,
             &json!("20mm"),
             &meta,
-            Some(true),
+            true,
             false,
         )
         .expect_err("fast Date must miss without has_evolution");
@@ -956,7 +936,7 @@ mod tests {
             field,
             &json!("20mm"),
             &meta,
-            Some(true),
+            true,
             false,
         )
         .expect("fast Date applies existing sibling");
@@ -995,56 +975,42 @@ mod tests_match_scalar_value_fast {
     fn test_match_scalar_value_string() {
         let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
-        let flatten = false;
-
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::String,
                 &str_to_val("hello"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             str_to_val("hello")
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::String,
                 &i64_to_val(123),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             str_to_val("123")
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::String,
                 &f64_to_val(123.4),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             str_to_val("123.4")
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::String,
                 &bool_to_val(true),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             str_to_val("true")
@@ -1055,30 +1021,22 @@ mod tests_match_scalar_value_fast {
     fn test_match_scalar_value_fast_int() {
         let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
-        let flatten = false;
-
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Integer,
                 &i64_to_val(123),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             i64_to_val(123)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Integer,
                 &str_to_val("123"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             i64_to_val(123)
@@ -1086,26 +1044,20 @@ mod tests_match_scalar_value_fast {
 
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Integer,
                 &bool_to_val(true),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             i64_to_val(1)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Integer,
                 &bool_to_val(false),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             i64_to_val(0)
@@ -1113,104 +1065,80 @@ mod tests_match_scalar_value_fast {
 
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Integer,
                 &str_to_val("true"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             i64_to_val(1)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Integer,
                 &str_to_val("false"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             i64_to_val(0)
         );
         assert_eq!(
             match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Integer,
                 &str_to_val("True"),
                 &metadata,
-                true,
-                flatten
             )
             .is_err(),
             true
         );
         assert_eq!(
             match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Integer,
                 &str_to_val("False"),
                 &metadata,
-                true,
-                flatten
             )
             .is_err(),
             true
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Integer,
                 &i64_to_val(1),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             i64_to_val(1)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Integer,
                 &str_to_val("1"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             i64_to_val(1)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Integer,
                 &i64_to_val(0),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             i64_to_val(0)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Integer,
                 &str_to_val("0"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             i64_to_val(0)
@@ -1221,30 +1149,22 @@ mod tests_match_scalar_value_fast {
     fn test_match_scalar_value_fast_double() {
         let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
-        let flatten = false;
-
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Double,
                 &f64_to_val(123.4),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             f64_to_val(123.4)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Double,
                 &str_to_val("123.4"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             f64_to_val(123.4)
@@ -1255,30 +1175,22 @@ mod tests_match_scalar_value_fast {
     fn test_match_scalar_value_fast_decimal() {
         let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
-        let flatten = false;
-
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Decimal,
                 &str_to_val("120.50"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             str_to_val("120.50")
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Decimal,
                 &f64_to_val(50.0),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             str_to_val("50.0")
@@ -1289,17 +1201,12 @@ mod tests_match_scalar_value_fast {
     fn test_match_scalar_value_fast_timestamp_string() {
         let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
-        let flatten = false;
-
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Timestamp,
                 &str_to_val("2025-01-03T09:15:00"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             str_to_val("2025-01-03T09:15:00")
@@ -1310,160 +1217,122 @@ mod tests_match_scalar_value_fast {
     fn test_match_scalar_value_fast_boolean() {
         let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
-        let flatten = false;
-
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Boolean,
                 &bool_to_val(true),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             bool_to_val(true)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Boolean,
                 &bool_to_val(false),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             bool_to_val(false)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Boolean,
                 &str_to_val("true"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             bool_to_val(true)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Boolean,
                 &str_to_val("false"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             bool_to_val(false)
         );
         assert_eq!(
             match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Boolean,
                 &str_to_val("True"),
                 &metadata,
-                true,
-                flatten
             )
             .is_err(),
             true
         );
         assert_eq!(
             match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Boolean,
                 &str_to_val("False"),
                 &metadata,
-                true,
-                flatten
             )
             .is_err(),
             true
         );
         assert_eq!(
             match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Boolean,
                 &str_to_val("Yes"),
                 &metadata,
-                true,
-                flatten
             )
             .is_err(),
             true
         );
         assert_eq!(
             match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Boolean,
                 &str_to_val("No"),
                 &metadata,
-                true,
-                flatten
             )
             .is_err(),
             true
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Boolean,
                 &i64_to_val(1),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             bool_to_val(true)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Boolean,
                 &i64_to_val(0),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             bool_to_val(false)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Boolean,
                 &str_to_val("1"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             bool_to_val(true)
         );
         assert_eq!(
             get_or_panic(match_scalar_value_optimized(
-                &Config::new(),
                 "field",
                 &SkipprDataType::Boolean,
                 &str_to_val("0"),
                 &metadata,
-                true,
-                flatten
             ))
             .value,
             bool_to_val(false)
@@ -1478,16 +1347,11 @@ mod tests_match_scalar_value_fast {
     fn test_match_scalar_value_fast_unknown() {
         let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
-        let flatten = false;
-
         let result = match_scalar_value_optimized(
-            &Config::new(),
             "field",
             &SkipprDataType::Unknown,
             &str_to_val("hello"),
             &metadata,
-            true,
-            flatten,
         );
 
         assert!(result.is_err(), "unknown data type should error");
@@ -1770,7 +1634,7 @@ mod tests_process_record_field {
         });
 
         // This should succeed because the array length is within repetition_count
-        let result = process_record_field(&Config::new(), "person", &value, &metadata, false);
+        let result = process_record_field(&Config::new(), "person", &value, &metadata, false, true);
         assert!(result.is_ok());
 
         // Create a record with an array of length 3 (exceeds limit)
@@ -1783,8 +1647,14 @@ mod tests_process_record_field {
         });
 
         // This should fail because the array length exceeds repetition_count
-        let result_exceeds =
-            process_record_field(&Config::new(), "person", &value_exceeds, &metadata, false);
+        let result_exceeds = process_record_field(
+            &Config::new(),
+            "person",
+            &value_exceeds,
+            &metadata,
+            false,
+            true,
+        );
         assert!(result_exceeds.is_err());
 
         let mut nested_metadata = HashMap::new();
@@ -1823,6 +1693,7 @@ mod tests_process_record_field {
             &nested_value,
             &nested_metadata,
             false,
+            true,
         );
         assert!(nested_result.is_ok());
 
@@ -1841,6 +1712,7 @@ mod tests_process_record_field {
             &nested_value_exceeds,
             &nested_metadata,
             false,
+            true,
         );
         // The optimization we made is that this error would be caught in process_array_field
         // when it processes the "tags" field, not in the process_record_field check
@@ -1871,6 +1743,7 @@ mod tests_process_record_field {
             "detail",
             &json!({"docket_aggregate_size_code": "20mm"}),
             &metadata,
+            true,
             true,
         )
         .expect_err("fast path must not create a sibling");
@@ -1920,6 +1793,7 @@ mod tests_process_record_field {
             &json!({"docket_aggregate_size_code": "20mm"}),
             &metadata,
             true,
+            true,
         )
         .expect("fast path applies existing leaf sibling");
         assert_eq!(resolved.value["docket_aggregate_size_code_string"], "20mm");
@@ -1943,6 +1817,7 @@ mod tests_process_record_field {
             "detail",
             &json!({"docket_aggregate_size_code": "20mm"}),
             &metadata,
+            true,
             true,
         )
         .expect_err("fast path must miss without has_evolution");
@@ -1971,6 +1846,7 @@ mod tests_process_record_field {
             "detail",
             &json!({"docket_aggregate_size_code": "10mm"}),
             &metadata,
+            true,
             true,
         )
         .expect("fast path applies after slow publish");
@@ -2015,7 +1891,7 @@ mod tests_process_record_field {
             "codes",
             &json!([1, "HNL"]),
             &metadata,
-            Some(true),
+            true,
             false,
         )
         .expect_err("fast path must not apply a parent-split that was never published");
@@ -2193,24 +2069,18 @@ mod tests_fast_path_ingest {
         metadata.insert("count".to_string(), int_meta);
 
         let in_range = match_scalar_value_optimized(
-            &Config::new(),
             "count",
             &SkipprDataType::Integer,
             &json!(42i64),
             &metadata,
-            false,
-            false,
         );
         assert!(in_range.is_ok());
 
         let overflow = match_scalar_value_optimized(
-            &Config::new(),
             "count",
             &SkipprDataType::Integer,
             &json!(i64::from(i32::MAX) + 1),
             &metadata,
-            false,
-            false,
         );
         assert!(overflow.is_err());
     }
@@ -2496,7 +2366,7 @@ mod tests_fast_set_value_proptest {
                 "test_field",
                 &value,
                 &metadata,
-                Some(false),
+                false,
                 false,
             );
         }
@@ -2540,7 +2410,14 @@ mod tests_data_loss_regression {
     fn map_key_not_in_metadata_returns_error() {
         let metadata = HashMap::new();
         let value = json!({"unknown_key": "value"});
-        let result = process_map_field(&Config::new(), "missing_map", &value, &metadata, false);
+        let result = process_map_field(
+            &Config::new(),
+            "missing_map",
+            &value,
+            &metadata,
+            false,
+            true,
+        );
         assert!(result.is_err(), "map with unknown key should error");
     }
 
@@ -2553,7 +2430,7 @@ mod tests_data_loss_regression {
             "test_field",
             &json!(42),
             &metadata,
-            Some(false),
+            false,
             false,
         );
         assert!(result.is_err(), "unknown data type should error");
@@ -2586,5 +2463,719 @@ mod tests_data_loss_regression {
             assert!(arr[0].is_null());
             assert!(arr[2].is_null());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_dest_before_evolution {
+    use super::*;
+    use crate::discover::date_formats::DateFormats;
+    use crate::discover::evolution::Evolution;
+    use crate::discover::{AnalyseSchema, DateCandidate};
+    use serde_json::json;
+
+    fn leaf(name: &str, ty: SkipprDataType) -> Metadata {
+        let mut m = Metadata::new().unwrap();
+        m.determined_type = ty;
+        m.out_field_name = name.to_string();
+        m.enabled = true;
+        m
+    }
+
+    fn record_named(name: &str, children: &[(&str, SkipprDataType)]) -> Metadata {
+        let mut m = Metadata::new().unwrap();
+        m.determined_type = SkipprDataType::Record;
+        m.out_field_name = name.to_string();
+        m.enabled = true;
+        for (child, ty) in children {
+            m.fields
+                .insert((*child).to_string(), leaf(child, ty.clone()));
+        }
+        m
+    }
+
+    fn evo(ty: SkipprDataType, new_field: &str) -> Evolution {
+        Evolution {
+            type_string: ty,
+            new_field: new_field.to_string(),
+            sovled: true,
+        }
+    }
+
+    fn detail_with_record_sibling(
+        dest_children: &[(&str, SkipprDataType)],
+        sibling_children: &[(&str, SkipprDataType)],
+    ) -> HashMap<String, Metadata> {
+        let mut dest = record_named("detail", dest_children);
+        dest.evolution.insert(
+            "detail_record".into(),
+            evo(SkipprDataType::Record, "detail_record"),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert("detail".into(), dest);
+        metadata.insert(
+            "detail_record".into(),
+            record_named("detail_record", sibling_children),
+        );
+        metadata
+    }
+
+    fn map_with_sibling(
+        dest_children: &[(&str, SkipprDataType)],
+        sibling_children: &[(&str, SkipprDataType)],
+    ) -> HashMap<String, Metadata> {
+        let mut dest = record_named("attrs", dest_children);
+        dest.determined_type = SkipprDataType::Map;
+        dest.evolution
+            .insert("attrs_map".into(), evo(SkipprDataType::Map, "attrs_map"));
+        let mut sibling = record_named("attrs_map", sibling_children);
+        sibling.determined_type = SkipprDataType::Map;
+        let mut metadata = HashMap::new();
+        metadata.insert("attrs".into(), dest);
+        metadata.insert("attrs_map".into(), sibling);
+        metadata
+    }
+
+    fn array_int_with_array_sibling(sibling_name: &str) -> HashMap<String, Metadata> {
+        let mut dest = Metadata::new().unwrap();
+        dest.determined_type = SkipprDataType::Array;
+        dest.determined_type_values = Some(SkipprDataType::Integer);
+        dest.out_field_name = "codes".into();
+        dest.enabled = true;
+        dest.evolution
+            .insert("array".into(), evo(SkipprDataType::Array, sibling_name));
+        let mut sibling = Metadata::new().unwrap();
+        sibling.determined_type = SkipprDataType::Array;
+        sibling.determined_type_values = Some(SkipprDataType::Integer);
+        sibling.out_field_name = sibling_name.to_string();
+        sibling.enabled = true;
+        let mut metadata = HashMap::new();
+        metadata.insert("codes".into(), dest);
+        metadata.insert(sibling_name.to_string(), sibling);
+        metadata
+    }
+
+    fn set_field(
+        ty: &SkipprDataType,
+        field: &str,
+        metadata: &HashMap<String, Metadata>,
+        value: serde_json::Value,
+        apply: bool,
+    ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
+        fast_set_value(&Config::new(), ty, field, &value, metadata, apply, false)
+    }
+
+    fn live_keys(metadata: &HashMap<String, Metadata>) -> Vec<String> {
+        let mut keys: Vec<String> = metadata.keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn dest_compatible_record_stays_on_canonical_field() {
+        let metadata = detail_with_record_sibling(
+            &[("qty", SkipprDataType::Integer)],
+            &[("qty", SkipprDataType::Integer)],
+        );
+        let resolved = set_field(
+            &SkipprDataType::Record,
+            "detail",
+            &metadata,
+            json!({"qty": 1}),
+            true,
+        )
+        .expect("dest-compatible record");
+        assert_eq!(
+            resolved.field, "detail",
+            "canonical dest must win when the object still coerces; got {}",
+            resolved.field
+        );
+        assert_eq!(resolved.value["qty"], 1);
+    }
+
+    #[test]
+    fn dest_miss_falls_back_to_existing_record_sibling() {
+        let metadata = detail_with_record_sibling(
+            &[("qty", SkipprDataType::Integer)],
+            &[
+                ("qty", SkipprDataType::Integer),
+                ("note", SkipprDataType::String),
+            ],
+        );
+        let resolved = set_field(
+            &SkipprDataType::Record,
+            "detail",
+            &metadata,
+            json!({"qty": 1, "note": "x"}),
+            true,
+        )
+        .expect("live sibling dest-walk");
+        assert_eq!(resolved.field, "detail_record");
+        assert_eq!(resolved.value["note"], "x");
+    }
+
+    #[test]
+    fn dest_miss_sibling_lacking_extra_key_is_err() {
+        let metadata = detail_with_record_sibling(
+            &[("qty", SkipprDataType::Integer)],
+            &[("qty", SkipprDataType::Integer)],
+        );
+        let before = live_keys(&metadata);
+        let err = set_field(
+            &SkipprDataType::Record,
+            "detail",
+            &metadata,
+            json!({"qty": 1, "note": "x"}),
+            true,
+        )
+        .expect_err("unpublished extra key must not clone-discover onto sibling");
+        assert!(
+            err.to_string().contains("note") || err.to_string().contains("Subfield"),
+            "expected dest extra-key miss, got {err}"
+        );
+        assert_eq!(live_keys(&metadata), before);
+        assert!(metadata
+            .get("detail_record")
+            .unwrap()
+            .fields
+            .get("note")
+            .is_none());
+    }
+
+    #[test]
+    fn dest_compatible_and_dest_shaped_rows_do_not_split() {
+        let metadata = detail_with_record_sibling(
+            &[
+                ("qty", SkipprDataType::Integer),
+                ("code", SkipprDataType::String),
+            ],
+            &[("qty", SkipprDataType::Integer)],
+        );
+        let qty_only = set_field(
+            &SkipprDataType::Record,
+            "detail",
+            &metadata,
+            json!({"qty": 1}),
+            true,
+        )
+        .expect("qty-only dest");
+        let dest_shaped = set_field(
+            &SkipprDataType::Record,
+            "detail",
+            &metadata,
+            json!({"qty": 1, "code": "x"}),
+            true,
+        )
+        .expect("dest-shaped");
+        assert_eq!(
+            qty_only.field, "detail",
+            "qty-only still fits dest; must not steal to sibling ({})",
+            qty_only.field
+        );
+        assert_eq!(dest_shaped.field, "detail");
+    }
+
+    #[test]
+    fn positional_record_fitting_indexes_stay_on_dest() {
+        let mut dest = Metadata::new().unwrap();
+        dest.determined_type = SkipprDataType::Record;
+        dest.out_field_name = "detail".into();
+        dest.enabled = true;
+        dest.fields.insert(
+            "0".into(),
+            record_named("0", &[("qty", SkipprDataType::Integer)]),
+        );
+        dest.evolution.insert(
+            "detail_record".into(),
+            evo(SkipprDataType::Record, "detail_record"),
+        );
+        let mut sibling = Metadata::new().unwrap();
+        sibling.determined_type = SkipprDataType::Record;
+        sibling.out_field_name = "detail_record".into();
+        sibling.enabled = true;
+        sibling.fields.insert(
+            "0".into(),
+            record_named("0", &[("qty", SkipprDataType::Integer)]),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert("detail".into(), dest);
+        metadata.insert("detail_record".into(), sibling);
+        let resolved = set_field(
+            &SkipprDataType::Record,
+            "detail",
+            &metadata,
+            json!([{"qty": 1}]),
+            true,
+        )
+        .expect("positional dest");
+        assert_eq!(resolved.field, "detail");
+    }
+
+    #[test]
+    fn parent_stays_dest_when_child_leaf_sibling_applies() {
+        let mut child = leaf("qty", SkipprDataType::Integer);
+        child.evolution.insert(
+            "qty_string".into(),
+            evo(SkipprDataType::String, "qty_string"),
+        );
+        let mut dest = record_named("detail", &[]);
+        dest.fields.insert("qty".into(), child);
+        dest.fields.insert(
+            "qty_string".into(),
+            leaf("qty_string", SkipprDataType::String),
+        );
+        dest.evolution.insert(
+            "detail_record".into(),
+            evo(SkipprDataType::Record, "detail_record"),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert("detail".into(), dest);
+        metadata.insert(
+            "detail_record".into(),
+            record_named("detail_record", &[("qty", SkipprDataType::Integer)]),
+        );
+        let resolved = set_field(
+            &SkipprDataType::Record,
+            "detail",
+            &metadata,
+            json!({"qty": "n/a"}),
+            true,
+        )
+        .expect("leaf sibling on dest parent");
+        assert_eq!(resolved.field, "detail");
+        assert_eq!(resolved.value["qty_string"], "n/a");
+        assert!(resolved.value.get("qty").is_none() || resolved.value["qty"].is_null());
+    }
+
+    #[test]
+    fn apply_evolution_false_dest_miss_does_not_steal() {
+        let metadata = detail_with_record_sibling(
+            &[("qty", SkipprDataType::Integer)],
+            &[
+                ("qty", SkipprDataType::Integer),
+                ("note", SkipprDataType::String),
+            ],
+        );
+        set_field(
+            &SkipprDataType::Record,
+            "detail",
+            &metadata,
+            json!({"qty": 1, "note": "x"}),
+            false,
+        )
+        .expect_err("apply off must not sibling-route");
+    }
+
+    #[test]
+    fn apply_evolution_false_is_transitive_to_record_children() {
+        let mut child = leaf("qty", SkipprDataType::Integer);
+        child.evolution.insert(
+            "qty_string".into(),
+            evo(SkipprDataType::String, "qty_string"),
+        );
+        let mut dest = record_named("detail", &[]);
+        dest.fields.insert("qty".into(), child);
+        dest.fields.insert(
+            "qty_string".into(),
+            leaf("qty_string", SkipprDataType::String),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert("detail".into(), dest);
+        set_field(
+            &SkipprDataType::Record,
+            "detail",
+            &metadata,
+            json!({"qty": "n/a"}),
+            false,
+        )
+        .expect_err("false must stay dest-only through nested record children");
+    }
+
+    #[test]
+    fn dest_miss_ranks_timestamp_milli_over_timestamp() {
+        let mut dest = leaf("ts", SkipprDataType::Integer);
+        dest.evolution.insert(
+            "ts_timestamp".into(),
+            evo(SkipprDataType::Timestamp, "ts_timestamp"),
+        );
+        dest.evolution.insert(
+            "ts_timestamp_milli".into(),
+            evo(SkipprDataType::TimestampMilli, "ts_timestamp_milli"),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert("ts".into(), dest);
+        metadata.insert(
+            "ts_timestamp".into(),
+            leaf("ts_timestamp", SkipprDataType::Timestamp),
+        );
+        metadata.insert(
+            "ts_timestamp_milli".into(),
+            leaf("ts_timestamp_milli", SkipprDataType::TimestampMilli),
+        );
+        let resolved = set_field(
+            &SkipprDataType::Integer,
+            "ts",
+            &metadata,
+            json!(1_700_000_000_123i64),
+            true,
+        )
+        .expect("ranked milli sibling");
+        assert_eq!(resolved.field, "ts_timestamp_milli");
+    }
+
+    #[test]
+    fn dest_miss_ranks_double_over_string() {
+        let mut dest = leaf("n", SkipprDataType::Integer);
+        dest.evolution
+            .insert("n_string".into(), evo(SkipprDataType::String, "n_string"));
+        dest.evolution
+            .insert("n_double".into(), evo(SkipprDataType::Double, "n_double"));
+        let mut metadata = HashMap::new();
+        metadata.insert("n".into(), dest);
+        metadata.insert("n_string".into(), leaf("n_string", SkipprDataType::String));
+        metadata.insert("n_double".into(), leaf("n_double", SkipprDataType::Double));
+        let resolved = set_field(&SkipprDataType::Integer, "n", &metadata, json!(1.5), true)
+            .expect("ranked double sibling");
+        assert_eq!(resolved.field, "n_double");
+    }
+
+    #[test]
+    fn dest_miss_accepts_sibling_when_out_field_name_differs_from_key() {
+        let mut dest = leaf("qty", SkipprDataType::Integer);
+        dest.evolution.insert(
+            "qty_string".into(),
+            evo(SkipprDataType::String, "qty_string"),
+        );
+        let mut sibling = leaf("qty_string", SkipprDataType::String);
+        sibling.out_field_name = "qty_str".into();
+        let mut metadata = HashMap::new();
+        metadata.insert("qty".into(), dest);
+        metadata.insert("qty_string".into(), sibling);
+        let resolved = set_field(
+            &SkipprDataType::Integer,
+            "qty",
+            &metadata,
+            json!("n/a"),
+            true,
+        )
+        .expect("published sibling with cleaned out name");
+        assert_eq!(resolved.field, "qty_str");
+        assert_eq!(resolved.value, json!("n/a"));
+    }
+
+    #[test]
+    fn dest_compatible_map_stays_on_canonical_field() {
+        let metadata = map_with_sibling(
+            &[("qty", SkipprDataType::Integer)],
+            &[("qty", SkipprDataType::Integer)],
+        );
+        let resolved = set_field(
+            &SkipprDataType::Map,
+            "attrs",
+            &metadata,
+            json!({"qty": 1}),
+            true,
+        )
+        .expect("dest-compatible map");
+        assert_eq!(resolved.field, "attrs");
+    }
+
+    #[test]
+    fn parent_map_stays_dest_when_child_leaf_sibling_applies() {
+        let mut child = leaf("qty", SkipprDataType::Integer);
+        child.evolution.insert(
+            "qty_string".into(),
+            evo(SkipprDataType::String, "qty_string"),
+        );
+        let mut dest = record_named("attrs", &[]);
+        dest.determined_type = SkipprDataType::Map;
+        dest.fields.insert("qty".into(), child);
+        dest.fields.insert(
+            "qty_string".into(),
+            leaf("qty_string", SkipprDataType::String),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert("attrs".into(), dest);
+        let resolved = set_field(
+            &SkipprDataType::Map,
+            "attrs",
+            &metadata,
+            json!({"qty": "n/a"}),
+            true,
+        )
+        .expect("map child leaf sibling");
+        assert_eq!(resolved.field, "attrs");
+        assert_eq!(resolved.value["qty_string"], "n/a");
+    }
+
+    #[test]
+    fn apply_evolution_false_is_transitive_to_map_children() {
+        let mut child = leaf("qty", SkipprDataType::Integer);
+        child.evolution.insert(
+            "qty_string".into(),
+            evo(SkipprDataType::String, "qty_string"),
+        );
+        let mut dest = record_named("attrs", &[]);
+        dest.determined_type = SkipprDataType::Map;
+        dest.fields.insert("qty".into(), child);
+        dest.fields.insert(
+            "qty_string".into(),
+            leaf("qty_string", SkipprDataType::String),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert("attrs".into(), dest);
+        set_field(
+            &SkipprDataType::Map,
+            "attrs",
+            &metadata,
+            json!({"qty": "n/a"}),
+            false,
+        )
+        .expect_err("false must stay dest-only through nested map children");
+    }
+
+    #[test]
+    fn dest_miss_map_falls_back_to_live_sibling() {
+        let metadata = map_with_sibling(
+            &[("qty", SkipprDataType::Integer)],
+            &[
+                ("qty", SkipprDataType::Integer),
+                ("note", SkipprDataType::String),
+            ],
+        );
+        let resolved = set_field(
+            &SkipprDataType::Map,
+            "attrs",
+            &metadata,
+            json!({"qty": 1, "note": "x"}),
+            true,
+        )
+        .expect("map sibling");
+        assert_eq!(resolved.field, "attrs_map");
+        assert_eq!(resolved.value["note"], "x");
+    }
+
+    #[test]
+    fn dest_miss_map_sibling_lacking_extra_key_is_err() {
+        let metadata = map_with_sibling(
+            &[("qty", SkipprDataType::Integer)],
+            &[("qty", SkipprDataType::Integer)],
+        );
+        let before = live_keys(&metadata);
+        set_field(
+            &SkipprDataType::Map,
+            "attrs",
+            &metadata,
+            json!({"qty": 1, "note": "x"}),
+            true,
+        )
+        .expect_err("map extra key must not clone-discover");
+        assert_eq!(live_keys(&metadata), before);
+    }
+
+    #[test]
+    fn dest_compatible_array_stays_on_canonical_field() {
+        let metadata = array_int_with_array_sibling("codes_array_integer");
+        let resolved = set_field(
+            &SkipprDataType::Array,
+            "codes",
+            &metadata,
+            json!([1, 2]),
+            true,
+        )
+        .expect("dest-compatible array");
+        assert_eq!(
+            resolved.field, "codes",
+            "array short-circuit must not steal dest-compatible values; got {}",
+            resolved.field
+        );
+        assert_eq!(resolved.value, json!([1, 2]));
+    }
+
+    #[test]
+    fn non_array_dest_miss_does_not_raw_clone_onto_array_sibling() {
+        let mut metadata = array_int_with_array_sibling("codes_array_integer");
+        metadata.get_mut("codes").unwrap().evolution.insert(
+            "codes_string".into(),
+            evo(SkipprDataType::String, "codes_string"),
+        );
+        metadata.insert(
+            "codes_string".into(),
+            leaf("codes_string", SkipprDataType::String),
+        );
+        let resolved = set_field(
+            &SkipprDataType::Array,
+            "codes",
+            &metadata,
+            json!("hello"),
+            true,
+        )
+        .expect("string sibling after dest array miss");
+        assert_eq!(resolved.field, "codes_string");
+        assert_eq!(resolved.value, json!("hello"));
+    }
+
+    #[test]
+    fn array_element_published_sibling_still_errs() {
+        let mut qty = leaf("qty", SkipprDataType::Integer);
+        qty.evolution.insert(
+            "qty_string".into(),
+            evo(SkipprDataType::String, "qty_string"),
+        );
+        let mut elem = record_named("0", &[]);
+        elem.fields.insert("qty".into(), qty);
+        elem.fields.insert(
+            "qty_string".into(),
+            leaf("qty_string", SkipprDataType::String),
+        );
+        let mut dest = Metadata::new().unwrap();
+        dest.determined_type = SkipprDataType::Array;
+        dest.determined_type_values = Some(SkipprDataType::Record);
+        dest.out_field_name = "codes".into();
+        dest.enabled = true;
+        dest.repetition_count = 4;
+        dest.fields.insert("0".into(), elem);
+        let mut metadata = HashMap::new();
+        metadata.insert("codes".into(), dest);
+        set_field(
+            &SkipprDataType::Array,
+            "codes",
+            &metadata,
+            json!([{"qty": 1}, {"qty": "BWL"}]),
+            true,
+        )
+        .expect_err("array elements are dest-only; mixed must miss fast path");
+    }
+
+    #[test]
+    fn record_array_repetition_overflow_falls_back_to_live_sibling() {
+        let mut dest = Metadata::new().unwrap();
+        dest.determined_type = SkipprDataType::Array;
+        dest.determined_type_values = Some(SkipprDataType::Record);
+        dest.out_field_name = "items".into();
+        dest.enabled = true;
+        dest.repetition_count = 1;
+        dest.fields.insert(
+            "0".into(),
+            record_named("0", &[("qty", SkipprDataType::Integer)]),
+        );
+        dest.evolution.insert(
+            "array".into(),
+            evo(SkipprDataType::Array, "items_array_record"),
+        );
+        let mut sibling = Metadata::new().unwrap();
+        sibling.determined_type = SkipprDataType::Array;
+        sibling.determined_type_values = Some(SkipprDataType::Record);
+        sibling.out_field_name = "items_array_record".into();
+        sibling.enabled = true;
+        sibling.repetition_count = 4;
+        sibling.fields.insert(
+            "0".into(),
+            record_named("0", &[("qty", SkipprDataType::Integer)]),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert("items".into(), dest);
+        metadata.insert("items_array_record".into(), sibling);
+        let resolved = set_field(
+            &SkipprDataType::Array,
+            "items",
+            &metadata,
+            json!([{"qty": 1}, {"qty": 2}]),
+            true,
+        )
+        .expect("overflow dest, live sibling dest-walk");
+        assert_eq!(resolved.field, "items_array_record");
+        assert_eq!(resolved.value.as_array().map(|a| a.len()), Some(2));
+    }
+
+    #[test]
+    fn scalar_dest_coerce_still_beats_type_suffix_sibling() {
+        let mut dest = leaf("qty", SkipprDataType::Integer);
+        dest.evolution.insert(
+            "qty_string".into(),
+            evo(SkipprDataType::String, "qty_string"),
+        );
+        let sibling = leaf("qty_string", SkipprDataType::String);
+        let mut metadata = HashMap::new();
+        metadata.insert("qty".into(), dest);
+        metadata.insert("qty_string".into(), sibling);
+        let resolved = set_field(&SkipprDataType::Integer, "qty", &metadata, json!(42), true)
+            .expect("scalar dest coerce");
+        assert_eq!(resolved.field, "qty");
+        assert_eq!(resolved.value, json!(42));
+    }
+
+    fn date_meta_with_string_sibling() -> HashMap<String, Metadata> {
+        let date_str = "2023-05-21 12:34:56";
+        let format_name = AnalyseSchema::is_valid_date(date_str).unwrap();
+        let date_candidate = DateCandidate {
+            check_count: 1,
+            valid_count: 1,
+            field: "when".into(),
+            format: format_name.to_string(),
+        };
+        let mut dest = Metadata::new().unwrap();
+        dest.determined_type = SkipprDataType::Date;
+        dest.out_field_name = "when".into();
+        dest.enabled = true;
+        dest.date_candidate = Some(date_candidate);
+        dest.evolution.insert(
+            "when_string".into(),
+            evo(SkipprDataType::String, "when_string"),
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert("when".into(), dest);
+        metadata.insert(
+            "when_string".into(),
+            leaf("when_string", SkipprDataType::String),
+        );
+        metadata
+    }
+
+    #[test]
+    fn dest_compatible_date_stays_on_canonical_field() {
+        let metadata = date_meta_with_string_sibling();
+        let date_str = "2023-05-21 12:34:56";
+        let resolved = set_field(
+            &SkipprDataType::Date,
+            "when",
+            &metadata,
+            json!(date_str),
+            true,
+        )
+        .expect("parseable date dest");
+        assert_eq!(
+            resolved.field, "when",
+            "parseable date must not steal to string sibling; got {}",
+            resolved.field
+        );
+        let format_name = AnalyseSchema::is_valid_date(date_str).unwrap();
+        let format = DateFormats::from_str(format_name).unwrap().as_str();
+        let expected = Helpers::parse_date_from_string(date_str, format).unwrap();
+        assert_eq!(resolved.value, json!(expected.timestamp() * 1000));
+    }
+
+    #[test]
+    fn dest_miss_date_falls_back_to_string_sibling() {
+        let metadata = date_meta_with_string_sibling();
+        let resolved = set_field(
+            &SkipprDataType::Date,
+            "when",
+            &metadata,
+            json!("20mm"),
+            true,
+        )
+        .expect("unparseable date sibling");
+        assert_eq!(resolved.field, "when_string");
+        assert_eq!(resolved.value, json!("20mm"));
+    }
+
+    #[test]
+    fn dest_miss_non_string_date_falls_back_to_string_sibling() {
+        let metadata = date_meta_with_string_sibling();
+        let resolved = set_field(&SkipprDataType::Date, "when", &metadata, json!(42), true)
+            .expect("numeric date dest miss");
+        assert_eq!(resolved.field, "when_string");
+        assert_eq!(resolved.value, json!("42"));
     }
 }
