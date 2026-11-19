@@ -438,15 +438,9 @@ pub struct Transform {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ComputeItem {
     /// SQL lane. YAML `{name, type: sql, value}`.
-    Sql {
-        name: String,
-        value: String,
-    },
+    Sql { name: String, value: String },
     /// SDL lane. YAML `{name, type: sdl, value}`.
-    Sdl {
-        name: String,
-        value: SdlDoc,
-    },
+    Sdl { name: String, value: SdlDoc },
     /// Python lane. YAML `{name, type: py, path, handler}`. Inline `value` is an unknown field.
     Py {
         name: String,
@@ -1798,7 +1792,10 @@ impl Config {
             .as_ref()
             .is_some_and(|items| items.iter().any(|item| !item.is_py()))
         {
-            return Some("type: copy cannot set transform.compute sql or sdl".into());
+            return Some(
+                "type: copy cannot set transform.compute sql or sdl; only type: py (path + handler) is allowed"
+                    .into(),
+            );
         }
         None
     }
@@ -3936,8 +3933,9 @@ compute:
         config.pipelines.insert("p".to_string(), pipeline);
         let violations = config.bind_pipeline("p").get_config_dependency_violations();
         assert!(
-            violations.iter().all(|v| !v.contains("transform.compute")
-                && !v.contains("python compute")),
+            violations
+                .iter()
+                .all(|v| !v.contains("transform.compute") && !v.contains("python compute")),
             "{violations:?}"
         );
     }

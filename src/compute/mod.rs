@@ -16,6 +16,8 @@ mod py;
 mod stateless;
 mod table;
 
+#[cfg(test)]
+pub(crate) use apply::drop_copy_py;
 pub use apply::{
     admit_config, apply_query_statement, bind_catalog, prefix_deletes, resolve_ddl_pipeline,
     stateless_for_namespace, ComputeApplyError,
@@ -36,8 +38,8 @@ pub(crate) use parse::{VIEW_ILLEGAL, VIEW_ILLEGAL_REQUIRED, VIEW_LEGAL};
 pub(crate) use py::write_py_dir;
 pub use py::{
     admit_item, apply_py_records, assert_py_matches_journal, blocks_unflattened_arrow,
-    copy_wal_fingerprint, has_py, py_changed_message, py_loads, PyLoad, COPY_PY_UNADMITTED,
-    PY_FILE_MAX_BYTES, PY_UNFLATTENED_ARROW,
+    copy_wal_fingerprint, has_py, py_changed_message, py_drop_howto, py_loads, PyLoad,
+    COPY_PY_UNADMITTED, PY_FILE_MAX_BYTES, PY_UNFLATTENED_ARROW,
 };
 pub use stateless::{apply_stateless, dest_schema, drop_invalid_event_times, StatelessSelect};
 pub use table::{relation_sql, stream_join_sql, view_sql, ComputeTableProvider};

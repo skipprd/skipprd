@@ -1,6 +1,6 @@
 # Stream compute
 
-Declared compute is bound `ComputeKind` in the Skippr Store journal (`compute#workspace#pipeline`), a map keyed by compute name. YAML / Python `transform.compute` (`type: sql`, `type: sdl`, or `type: py`) serialize that IR. `skipprd sync` admits new names before ingest (including WAL-only / no `data_sink`); hash mismatch fails the run until `ALTER COMPUTE` (or `DROP` then `CREATE` for `type: py`). Ingest deadletters py batches as `PYTHON_COMPUTE` when disk path, handler, or digest does not match the journal. Processor start loads the journal; it does not replace the list. Default ingest is unchanged when `transform.compute` is unset. Store authority: [Skippr Store KV](skippr-store-kv.md).
+Declared compute is bound `ComputeKind` in the Skippr Store journal (`compute#workspace#pipeline`), a map keyed by compute name. YAML / Python `transform.compute` (`type: sql`, `type: sdl`, or `type: py`) serialize that IR. `skipprd sync` admits new names before ingest (including WAL-only / no `data_sink`); hash mismatch fails the run until `ALTER COMPUTE` (or `DROP COMPUTE <name>` for `type: py`; the next sync admits the files). Ingest deadletters py batches as `PYTHON_COMPUTE` when disk path, handler, or digest does not match the journal. Processor start loads the journal; it does not replace the list. Default ingest is unchanged when `transform.compute` is unset. Store authority: [Skippr Store KV](skippr-store-kv.md).
 
 ## Placement
 
@@ -38,7 +38,7 @@ All processor tests open a real fjall Skippr Store on the local filesystem. A su
 - Smoke (local iteration): `./scripts/stream-transforms-smoke.sh` (`SKIPPR_STREAM_TEST_PROFILE=smoke`).
 - Full matrix (git commit via `scripts/precommit.sh`, and `.github/workflows/stream-transforms.yml` on pull requests): deterministic CDC scripts vs a golden model, crash injection at `BeforeTxn` / `BeforeCommit` / `DuringTxn` / `AfterTxn` with drop+reopen, multi-row batch atomicity, reclaim-hold restore from the disk cursor, and proptest fuzz of event streams plus Arrow/CDC alignment.
 
-A config edit whose canonical hash differs from the named catalog entry fails closed until `ALTER COMPUTE` writes the new entry (View / KeyedTable / WindowedTable also accept `ALTER TABLE` sugar). Latest, StreamTableJoin, and `type: py` identity changes are `DROP` then `CREATE`. Sync admit does not wipe ad-hoc journal rows.
+A config edit whose canonical hash differs from the named catalog entry fails closed until `ALTER COMPUTE` writes the new entry (View / KeyedTable / WindowedTable also accept `ALTER TABLE` sugar). Latest and StreamTableJoin identity changes are `DROP` then `CREATE`. `type: py` is `DROP COMPUTE <name>`; the next sync admits the files. WAL, offsets, and the destination stay. Sync admit does not wipe ad-hoc journal rows.
 
 ## Reclaim hold
 

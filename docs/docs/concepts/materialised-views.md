@@ -56,7 +56,7 @@ cfg.pipeline(
 cfg.save()
 ```
 
-`type: copy` cannot set `compute` sql or sdl. `type: py` is allowed (`path` + `handler`): the worker maps JSON objects and the copy identity is the transformed line. A handler error deadletters that record as `PYTHON_COMPUTE`. Changing `path`, `handler`, or a sibling `.py` changes the journaled digest (`DROP` then `CREATE`). Sync admit fails closed until then. Ingest deadletters those batches as `PYTHON_COMPUTE` if disk path, handler, or digest does not match the journal. A SQL/SDL transform error fails the ingest batch and does not advance source offsets.
+`type: copy` cannot set `compute` sql or sdl. `type: py` is allowed (`path` + `handler`): the worker maps JSON objects and the copy identity is the transformed line. A handler error deadletters that record as `PYTHON_COMPUTE`. Changing `path`, `handler`, or a sibling `.py` changes the journaled digest. Digest mismatch is `DROP COMPUTE <name>`; the next sync admits the files. WAL, offsets, and the destination stay. Ingest deadletters those batches as `PYTHON_COMPUTE` if disk path, handler, or digest does not match the journal. A SQL/SDL transform error fails the ingest batch and does not advance source offsets.
 
 ## What Skipprd does
 

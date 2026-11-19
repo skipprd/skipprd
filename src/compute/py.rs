@@ -91,7 +91,7 @@ pub fn py_loads(config: &Config) -> Result<Vec<PyLoad>, String> {
 }
 
 /// Disk path, handler, and digest must match journaled `ComputeKind::Py`.
-/// Path retarget or sibling edits fail closed until DROP then CREATE.
+/// Path retarget or sibling edits fail closed until `DROP COMPUTE`.
 pub fn assert_py_matches_journal(
     pipeline: &str,
     loads: &[PyLoad],
@@ -137,9 +137,19 @@ pub fn admit_item(config_dir: &Path, path: &str, handler: &str) -> Result<PyLoad
     })
 }
 
-/// Py identity change is DROP then CREATE. Not `ALTER COMPUTE`.
+/// Next step after a `type: py` path, handler, or digest change.
+pub fn py_drop_howto(name: &super::Fqn) -> String {
+    format!(
+        "Run DROP COMPUTE {name} in skipprd query, then skipprd sync to load the files on disk. WAL, offsets, and the destination stay"
+    )
+}
+
+/// Py identity change is `DROP COMPUTE`, then the next sync. Not `ALTER COMPUTE`.
 pub fn py_changed_message(name: &super::Fqn) -> String {
-    format!("compute {name} changed; DROP and CREATE to migrate")
+    format!(
+        "python compute {name} changed (path, handler, or a sibling .py). {}. CREATE and ALTER COMPUTE cannot migrate type: py",
+        py_drop_howto(name)
+    )
 }
 
 /// Copy WAL identity when python compute was not admitted. Not `"copy"`.

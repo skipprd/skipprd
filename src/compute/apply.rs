@@ -21,7 +21,9 @@ pub enum ComputeApplyError {
     Message(String),
     #[error("CREATE / DROP compute requires a writer Skippr Store (same as ALTER TABLE)")]
     NeedsWriter,
-    #[error("type: copy cannot set transform.compute sql or sdl")]
+    #[error(
+        "type: copy cannot set transform.compute sql or sdl; only type: py (path + handler) is allowed"
+    )]
     CopyPipeline,
 }
 
@@ -35,12 +37,20 @@ pub async fn apply_query_statement(
     config: &Config,
     stmt: &Statement,
 ) -> Result<String, ComputeApplyError> {
-    if config
+    let is_copy = config
         .pipeline_type()
         .map(|t| t == crate::pipeline_type::PipelineType::Copy)
-        .unwrap_or(false)
-    {
-        return Err(ComputeApplyError::CopyPipeline);
+        .unwrap_or(false);
+    if is_copy {
+        match stmt {
+            Statement::DropCompute { .. } => {}
+            Statement::CreateView { name, .. }
+            | Statement::CreateTableAs { name, .. }
+            | Statement::AlterCompute { name, .. } => {
+                return Err(copy_create_alter_rejected(name));
+            }
+            _ => return Err(ComputeApplyError::CopyPipeline),
+        }
     }
     let offsets = Offsets::init(config).map_err(|_| ComputeApplyError::NeedsWriter)?;
     let store = offsets
@@ -79,13 +89,57 @@ pub async fn apply_query_statement(
             .await
         }
         Statement::DropCompute { name } => {
-            drop_named(config, store.as_ref(), fence, &metadata, name).await
+            if is_copy {
+                drop_copy_py(config, store.as_ref(), fence, &metadata, name).await
+            } else {
+                drop_named(config, store.as_ref(), fence, &metadata, name).await
+            }
         }
         Statement::AlterCompute { name, alterations } => {
             apply_alter_compute(config, store.as_ref(), fence, &metadata, name, alterations).await
         }
         _ => Err(ComputeApplyError::Message("not a compute statement".into())),
     }
+}
+
+/// Copy `DROP COMPUTE` of journaled `ComputeKind::Py`. SQL and SDL stay illegal.
+pub(crate) async fn drop_copy_py(
+    config: &Config,
+    store: &dyn SkipprStore,
+    fence: CatalogFence,
+    metadata: &PipelineMetadata,
+    name: &Fqn,
+) -> Result<String, ComputeApplyError> {
+    let workspace = config.get_workspace_name();
+    let pipeline = config.get_pipeline_name();
+    let key = journal::journal_key(&workspace, &pipeline)?;
+    let log = journal::load(store, &key)?;
+    match log.get(name) {
+        Some(entry) if matches!(entry.kind, ComputeKind::Py { .. }) => {
+            drop_named(config, store, fence, metadata, name).await
+        }
+        Some(_) => Err(copy_drop_not_py(name)),
+        None => Err(copy_drop_missing(name)),
+    }
+}
+
+fn copy_create_alter_rejected(name: &Fqn) -> ComputeApplyError {
+    ComputeApplyError::Message(format!(
+        "type: copy does not CREATE or ALTER {name}. For type: py, {}. SQL and SDL are not allowed on copy",
+        super::py::py_drop_howto(name)
+    ))
+}
+
+fn copy_drop_not_py(name: &Fqn) -> ComputeApplyError {
+    ComputeApplyError::Message(format!(
+        "{name} is not type: py. Copy DROP COMPUTE only drops python compute (type: py). SQL and SDL are not allowed on copy"
+    ))
+}
+
+fn copy_drop_missing(name: &Fqn) -> ComputeApplyError {
+    ComputeApplyError::Message(format!(
+        "{name} is not in the journal. Copy DROP COMPUTE only drops a journaled type: py compute"
+    ))
 }
 
 async fn apply_create(
@@ -200,7 +254,7 @@ pub fn prefix_deletes(
 }
 
 /// Bind config items and put new names. Same hash is a no-op. Hash mismatch
-/// requires `ALTER COMPUTE` (SQL/SDL) or `DROP` then `CREATE` (`type: py`).
+/// requires `ALTER COMPUTE` (SQL/SDL) or `DROP COMPUTE` (`type: py`).
 /// Names in the journal that are not in config (ad-hoc CREATE) are kept.
 pub fn admit_config(
     config: &Config,
@@ -599,7 +653,8 @@ fn parse_order(order: &[String]) -> Result<Vec<(String, bool)>, ComputeApplyErro
 
 fn py_alter_rejected(name: &Fqn) -> ComputeApplyError {
     ComputeApplyError::Message(format!(
-        "Py {name} is DROP and CREATE, not ALTER COMPUTE"
+        "ALTER COMPUTE does not apply to python compute {name}. {}",
+        super::py::py_drop_howto(name)
     ))
 }
 
@@ -1025,7 +1080,12 @@ mod tests {
         )
         .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("DROP and CREATE"), "{msg}");
+        assert!(msg.contains("DROP COMPUTE p.enrich"), "{msg}");
+        assert!(msg.contains("skipprd query"), "{msg}");
+        assert!(msg.contains("skipprd sync"), "{msg}");
+        assert!(msg.contains("destination"), "{msg}");
+        assert!(!msg.contains("DROP and CREATE"), "{msg}");
+        assert!(!msg.contains("bucket"), "{msg}");
         assert!(!msg.contains("Stateless"), "{msg}");
     }
 

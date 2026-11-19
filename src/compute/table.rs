@@ -10,7 +10,7 @@ use datafusion::datasource::TableProvider;
 use datafusion::error::DataFusionError;
 use skippr_wal_catalog::{SkipprStoreRead, StoreFamily};
 
-use super::{ComputeKind, Fqn, Relation, StatelessSelect};
+use super::{py_drop_howto, ComputeKind, Fqn, Relation, StatelessSelect};
 
 pub struct ComputeTableProvider;
 
@@ -48,9 +48,10 @@ impl ComputeTableProvider {
             ComputeKind::Stateless { .. } => Err(DataFusionError::Plan(
                 "Stateless is not table-backed; ALTER COMPUTE only".into(),
             )),
-            ComputeKind::Py { .. } => Err(DataFusionError::Plan(
-                "Py is not table-backed; DROP and CREATE to change path, handler, or digest".into(),
-            )),
+            ComputeKind::Py { .. } => Err(DataFusionError::Plan(format!(
+                "python compute {fqn} is not a table. {}",
+                py_drop_howto(fqn)
+            ))),
         }
     }
 }
