@@ -18,7 +18,7 @@ from analyze import (  # noqa: E402
     rust_module_needles,
     symbols_from_diff,
 )
-from download import download_argv  # noqa: E402
+from download import artifact_names_from_pages, download_argv  # noqa: E402
 
 
 PERF_SCRIPT = """\
@@ -173,6 +173,16 @@ class BottleneckTests(unittest.TestCase):
 
 
 class DownloadArgvTests(unittest.TestCase):
+    def test_paginated_artifact_json_is_one_name_list(self) -> None:
+        pages = (
+            json.dumps({"artifacts": [{"name": "regression-a"}, {"name": ""}]})
+            + json.dumps({"artifacts": [{"name": "heaptrack-b"}]})
+        )
+        self.assertEqual(
+            artifact_names_from_pages(pages),
+            ["regression-a", "heaptrack-b"],
+        )
+
     def test_downloads_named_perf_artifacts_only(self) -> None:
         argv = download_argv(
             "99",

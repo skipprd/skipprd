@@ -60,6 +60,23 @@ def latest_run_id(branch: str, repo: str, workflow: str = "skippr-regression.yml
     return str(rows[0]["databaseId"])
 
 
+def artifact_names_from_pages(text: str) -> list[str]:
+    names: list[str] = []
+    decoder = json.JSONDecoder()
+    index = 0
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        payload, index = decoder.raw_decode(text, index)
+        artifacts = payload.get("artifacts") if isinstance(payload, dict) else payload
+        if not isinstance(artifacts, list):
+            continue
+        names.extend(str(item["name"]) for item in artifacts if item.get("name"))
+    return names
+
+
 def list_artifact_names(run_id: str, repo: str) -> list[str]:
     proc = subprocess.run(
         ["gh", "api", f"repos/{repo}/actions/runs/{run_id}/artifacts", "--paginate"],
@@ -69,11 +86,7 @@ def list_artifact_names(run_id: str, repo: str) -> list[str]:
     )
     if proc.returncode != 0:
         raise SystemExit(proc.stderr.strip() or "gh api artifacts failed")
-    payload = json.loads(proc.stdout or "{}")
-    artifacts = payload.get("artifacts") if isinstance(payload, dict) else payload
-    if not isinstance(artifacts, list):
-        return []
-    return [str(item["name"]) for item in artifacts if item.get("name")]
+    return artifact_names_from_pages(proc.stdout or "")
 
 
 def main(argv: list[str] | None = None) -> int:
