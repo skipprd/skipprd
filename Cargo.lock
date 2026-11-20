@@ -11422,7 +11422,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-dynamodb"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -11430,7 +11430,6 @@ dependencies = [
  "aws-sdk-dynamodbstreams",
  "aws-types",
  "base64 0.22.1",
- "chrono",
  "clap",
  "datafusion 55.2.0",
  "md5",

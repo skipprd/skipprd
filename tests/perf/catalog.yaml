@@ -857,6 +857,19 @@ scenarios:
       query_count: 3
       query_reconcile: true
 
+  q-cdc-partition-day-ddb:
+    group: always
+    kind: query_after_cdc
+    cdc_source: ddb
+    cdc_partition_day: true
+    cdc_case: count
+    sql: "SELECT event_ts, skippr_event_time FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '1'"
+    required_perf: [sync, query_collect, query_pin, query_reconcile]
+    asserts:
+      query_has: event_ts
+      query_missing: skippr_event_time
+      query_reconcile: true
+
   q-cdc-union-update-ddb:
     group: always
     kind: query_after_cdc

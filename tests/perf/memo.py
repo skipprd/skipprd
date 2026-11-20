@@ -87,6 +87,7 @@ QUERY_LABELS = {
     "q-cdc-union-update-pg": "CDC update (Postgres)",
     "q-cdc-union-update-mysql": "CDC update (MySQL)",
     "q-cdc-union-update-ddb": "CDC update (DynamoDB)",
+    "q-cdc-partition-day-ddb": "CDC day partition on user event_ts (DynamoDB)",
     "q-cdc-union-delete-pg": "CDC late-delete (Postgres)",
     "q-cdc-migrate-rename-pg": "CDC migrate rename then continue (Postgres)",
 }

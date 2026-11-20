@@ -11,9 +11,17 @@ All notable changes to this project will be documented in this file.
 - Dest schema is the data plugin. `schema_sinks` YAML, `schema_sink` on a data sink, SchemaSink plugins, and `skipprd connect schema-sink` are deleted. Runtime protocol 28. Tables are created on first compact from published output metadata.
 - Runtime plugin crate patches (immutable CDN version paths) after the 16.0.9 host event-time filter changed the linked plugin binaries.
 
+### Removed
+
+- DynamoDB source plugin no longer injects `_skippr_event_time`. Day partitioning is opt-in via a timestamp attribute on items and `transform.batch_time_fields`.
+
+### Added
+
+- DynamoDB CDC e2e and `skippr-regression` coverage for user `event_ts` day partitions and unpartitioned CDC (SkipprLake and DuckDB).
+
 ### Fixed
 
-- Unknown and null event-time fields on dest promote to timestamp, so DynamoDB CDC `_skippr_event_time` can compact.
+- Unknown and null event-time fields on dest promote to timestamp when `batch_time_fields` names a user column that discover left untyped.
 
 ## [16.0.9] - 2026-11-18
 
@@ -48,7 +56,7 @@ All notable changes to this project will be documented in this file.
 - Grouped compact does not send a 0-row object write when WAL is missing or empty. Missing payload keeps the catalog row and other groups still schedule. Readable empty slices Ack without a sink object.
 - Hive Glue no longer attaches partition indexes on unpartitioned deadletter `_dl_*` tables, so first compact can create them.
 - WAL catalog hydrate latches so a metrics tick cannot start a second walk while startup is still loading; compact and ingest wait until `manifests_loaded`.
-- Dynamo `snapshot_then_cdc` writes a 16-byte `_skippr_order_token` (zeros for the snapshot, then the stream sequence) and `_skippr_event_time` from `ApproximateCreationDateTime` when present, otherwise ingest time, so Iceberg MergeByKey can compact day partitions.
+- Dynamo `snapshot_then_cdc` writes a 16-byte `_skippr_order_token` (zeros for the snapshot, then the stream sequence) so Iceberg MergeByKey can upsert on business keys.
 - Deadlettered-into-WAL WARNs coalesce: the first line fires, later hits in 30s become one count line, so one-row ingest tasks cannot flood the log.
 - Default `--log` / `--log info` turns `skipprd::perf` off, so `PERF_EVENT` stays on `--log perf` only.
 

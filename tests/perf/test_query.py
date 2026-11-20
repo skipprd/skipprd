@@ -582,11 +582,15 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         apply_at = follow.find("apply_cdc_case")
         self.assertGreater(apply_at, poll_at)
 
-    def test_cdc_ddb_partitions_on_the_event_time_column_the_plugin_writes(self) -> None:
+    def test_cdc_ddb_partition_yaml_uses_user_event_ts_not_synthetic(self) -> None:
         text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         writer = text.split("def write_cdc_skippr_yml")[1].split("def _cdc_postgres_failed")[0]
-        self.assertIn("batch_time_fields: _skippr_event_time", writer)
-        self.assertNotIn("batch_time_fields: skippr_event_time\n", writer)
+        self.assertIn("batch_time_fields: event_ts", writer)
+        self.assertNotIn("batch_time_fields: _skippr_event_time", writer)
+        scenarios = db_catalog()["scenarios"]
+        self.assertIn("q-cdc-partition-day-ddb", scenarios)
+        spec = scenarios["q-cdc-partition-day-ddb"]
+        self.assertTrue(spec.get("cdc_partition_day"))
 
     def test_download_accepts_perf_db_workflow(self) -> None:
         download = (

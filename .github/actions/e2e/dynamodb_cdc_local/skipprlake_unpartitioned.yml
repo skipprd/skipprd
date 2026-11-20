@@ -1,0 +1,33 @@
+skippr:
+  workspace: test
+  skipprd_el_storage_mode: local
+pipelines:
+  dynamodb_skipprlake_cdc_unpartitioned:
+    auto_approve: true
+    env: test
+    type: cdc
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 2
+    data_source: data_sources.dynamodb_cdc
+    data_sink: data_sinks.lake
+    cdc:
+      default:
+        business_key_columns:
+        - id
+        - rmc
+data_sources:
+  dynamodb_cdc:
+    Dynamodb:
+      table_name: skippr_dynamo_cdc
+      region: us-east-1
+      endpoint_url: http://127.0.0.1:18013
+      cdc_mode: snapshot_then_cdc
+data_sinks:
+  lake:
+    SkipprLake:
+      warehouse: LAKE_WAREHOUSE_PLACEHOLDER
+      catalog_table: skippr-dynamo-cdc-catalog
+      region: us-east-1
+      table_namespace: bronze
+      object_store:
+        type: file

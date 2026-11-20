@@ -16,7 +16,7 @@ pipelines:
         - id
         - rmc
     transform:
-      batch_time_fields: _skippr_event_time
+      batch_time_fields: event_ts
       batch_time_unit: day
 data_sources:
   dynamodb_cdc:

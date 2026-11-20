@@ -137,6 +137,7 @@ jobs:
           - q-cdc-overlap-mysql
           - q-cdc-iceberg-only-mysql
           - q-cdc-union-count-ddb
+          - q-cdc-partition-day-ddb
           - q-cdc-union-update-ddb
           - q-cdc-union-delete-ddb
           - q-cdc-union-reinsert-ddb

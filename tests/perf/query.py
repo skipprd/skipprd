@@ -628,7 +628,23 @@ def docker_available() -> bool:
     return False
 
 
-def write_cdc_skippr_yml(path: Path, warehouse: Path, source: str = "pg") -> None:
+DDB_EVENT_TS_DAY_A = 1_700_000_000
+DDB_EVENT_TS_DAY_B = 1_700_086_400
+DDB_EVENT_TS_UPDATE = 1_700_172_800
+DDB_EVENT_TS_GAMMA = 1_700_086_400
+
+
+def _ddb_event_ts_attr(value: int) -> dict[str, dict[str, str]]:
+    return {"event_ts": {"N": str(value)}}
+
+
+def write_cdc_skippr_yml(
+    path: Path,
+    warehouse: Path,
+    source: str = "pg",
+    *,
+    partition_day: bool = False,
+) -> None:
     uri = f"file://{warehouse}"
     pipeline = CDC_PIPELINES[source]
     if source == "pg":
@@ -668,9 +684,11 @@ def write_cdc_skippr_yml(path: Path, warehouse: Path, source: str = "pg") -> Non
       cdc_mode: snapshot_then_cdc"""
         source_ref = "data_sources.dynamodb_cdc"
         keys = '["id", "rmc"]'
-        extra_transform = """
+        extra_transform = ""
+        if partition_day:
+            extra_transform = """
     transform:
-      batch_time_fields: _skippr_event_time
+      batch_time_fields: event_ts
       batch_time_unit: day"""
     else:
         raise perf_run.PerfError(f"unknown cdc_source {source!r}")
@@ -907,7 +925,7 @@ def ddb_cdc_client():
     )
 
 
-def start_cdc_ddb() -> None:
+def start_cdc_ddb(*, partition_day: bool = False) -> None:
     from botocore.exceptions import ClientError
 
     subprocess.run(["docker", "rm", "-f", DDB_CDC_CONTAINER], capture_output=True, check=False)
@@ -975,31 +993,30 @@ def start_cdc_ddb() -> None:
             ]
         client.create_table(**kwargs)
         client.get_waiter("table_exists").wait(TableName=name)
-    client.put_item(
-        TableName=DDB_CDC_SOURCE_TABLE,
-        Item={
-            "id": {"S": "1"},
-            "rmc": {"S": "eu"},
-            "name": {"S": "alpha"},
-            "amount": {"N": "100"},
-        },
-    )
-    client.put_item(
-        TableName=DDB_CDC_SOURCE_TABLE,
-        Item={
-            "id": {"S": "2"},
-            "rmc": {"S": "us"},
-            "name": {"S": "beta"},
-            "amount": {"N": "50"},
-        },
-    )
+    item_one: dict[str, Any] = {
+        "id": {"S": "1"},
+        "rmc": {"S": "eu"},
+        "name": {"S": "alpha"},
+        "amount": {"N": "100"},
+    }
+    item_two: dict[str, Any] = {
+        "id": {"S": "2"},
+        "rmc": {"S": "us"},
+        "name": {"S": "beta"},
+        "amount": {"N": "50"},
+    }
+    if partition_day:
+        item_one.update(_ddb_event_ts_attr(DDB_EVENT_TS_DAY_A))
+        item_two.update(_ddb_event_ts_attr(DDB_EVENT_TS_DAY_B))
+    client.put_item(TableName=DDB_CDC_SOURCE_TABLE, Item=item_one)
+    client.put_item(TableName=DDB_CDC_SOURCE_TABLE, Item=item_two)
 
 
 def stop_cdc_ddb() -> None:
     subprocess.run(["docker", "rm", "-f", DDB_CDC_CONTAINER], capture_output=True, check=False)
 
 
-def apply_cdc_case(source: str, case: str) -> None:
+def apply_cdc_case(source: str, case: str, *, partition_day: bool = False) -> None:
     if source == "pg":
         pg_sql(CDC_CASE_SQL[case])
         return
@@ -1009,26 +1026,39 @@ def apply_cdc_case(source: str, case: str) -> None:
     if source != "ddb":
         raise perf_run.PerfError(f"unknown cdc_source {source!r}")
     client = ddb_cdc_client()
+
+    def item(base: dict[str, Any], ts: int | None = None) -> dict[str, Any]:
+        out = dict(base)
+        if partition_day and ts is not None:
+            out.update(_ddb_event_ts_attr(ts))
+        return out
+
     if case in {"count", "iceberg-only"}:
         client.put_item(
             TableName=DDB_CDC_SOURCE_TABLE,
-            Item={
-                "id": {"S": "3"},
-                "rmc": {"S": "uk"},
-                "name": {"S": "gamma"},
-                "amount": {"N": "30"},
-            },
+            Item=item(
+                {
+                    "id": {"S": "3"},
+                    "rmc": {"S": "uk"},
+                    "name": {"S": "gamma"},
+                    "amount": {"N": "30"},
+                },
+                DDB_EVENT_TS_GAMMA,
+            ),
         )
         return
     if case == "update":
         client.put_item(
             TableName=DDB_CDC_SOURCE_TABLE,
-            Item={
-                "id": {"S": "1"},
-                "rmc": {"S": "eu"},
-                "name": {"S": "alpha-prime"},
-                "amount": {"N": "100"},
-            },
+            Item=item(
+                {
+                    "id": {"S": "1"},
+                    "rmc": {"S": "eu"},
+                    "name": {"S": "alpha-prime"},
+                    "amount": {"N": "100"},
+                },
+                DDB_EVENT_TS_UPDATE,
+            ),
         )
         return
     if case == "delete":
@@ -1044,43 +1074,55 @@ def apply_cdc_case(source: str, case: str) -> None:
         )
         client.put_item(
             TableName=DDB_CDC_SOURCE_TABLE,
-            Item={
-                "id": {"S": "2"},
-                "rmc": {"S": "us"},
-                "name": {"S": "beta-new"},
-                "amount": {"N": "50"},
-            },
+            Item=item(
+                {
+                    "id": {"S": "2"},
+                    "rmc": {"S": "us"},
+                    "name": {"S": "beta-new"},
+                    "amount": {"N": "50"},
+                },
+                DDB_EVENT_TS_DAY_B,
+            ),
         )
         return
     if case == "sum":
         client.put_item(
             TableName=DDB_CDC_SOURCE_TABLE,
-            Item={
-                "id": {"S": "3"},
-                "rmc": {"S": "uk"},
-                "name": {"S": "gamma"},
-                "amount": {"N": "30"},
-            },
+            Item=item(
+                {
+                    "id": {"S": "3"},
+                    "rmc": {"S": "uk"},
+                    "name": {"S": "gamma"},
+                    "amount": {"N": "30"},
+                },
+                DDB_EVENT_TS_GAMMA,
+            ),
         )
         client.put_item(
             TableName=DDB_CDC_SOURCE_TABLE,
-            Item={
-                "id": {"S": "1"},
-                "rmc": {"S": "eu"},
-                "name": {"S": "alpha"},
-                "amount": {"N": "120"},
-            },
+            Item=item(
+                {
+                    "id": {"S": "1"},
+                    "rmc": {"S": "eu"},
+                    "name": {"S": "alpha"},
+                    "amount": {"N": "120"},
+                },
+                DDB_EVENT_TS_UPDATE,
+            ),
         )
         return
     if case == "overlap":
         client.put_item(
             TableName=DDB_CDC_SOURCE_TABLE,
-            Item={
-                "id": {"S": "1"},
-                "rmc": {"S": "eu"},
-                "name": {"S": "alpha-wal"},
-                "amount": {"N": "100"},
-            },
+            Item=item(
+                {
+                    "id": {"S": "1"},
+                    "rmc": {"S": "eu"},
+                    "name": {"S": "alpha-wal"},
+                    "amount": {"N": "100"},
+                },
+                DDB_EVENT_TS_UPDATE,
+            ),
         )
         return
     raise perf_run.PerfError(f"unknown cdc_case {case!r}")
@@ -1156,7 +1198,8 @@ def run_query_after_cdc(
     warehouse.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
     config = work / "skippr.yml"
-    write_cdc_skippr_yml(config, warehouse, source)
+    partition_day = bool(scenario.get("cdc_partition_day"))
+    write_cdc_skippr_yml(config, warehouse, source, partition_day=partition_day)
     from e2e_support import dynamodb_local as ddb_local
 
     overlap_proc = None
@@ -1173,7 +1216,7 @@ def run_query_after_cdc(
             catalog_container = MYSQL_CDC_DDB_CONTAINER
             catalog_tables = [MYSQL_CDC_TABLE]
         elif source == "ddb":
-            start_cdc_ddb()
+            start_cdc_ddb(partition_day=partition_day)
             catalog_port = DDB_CDC_PORT
             catalog_container = DDB_CDC_CONTAINER
             catalog_tables = [DDB_CDC_CATALOG_TABLE]
@@ -1232,7 +1275,7 @@ def run_query_after_cdc(
                     seconds=60,
                     scenario_id=scenario_id,
                 )
-            apply_cdc_case(source, case)
+            apply_cdc_case(source, case, partition_day=partition_day)
             peek_until(
                 skipprd,
                 config,
@@ -1264,7 +1307,7 @@ def run_query_after_cdc(
                 logs += run_cdc_once(skipprd, config, env, pipeline)
         else:
             if case:
-                apply_cdc_case(source, case)
+                apply_cdc_case(source, case, partition_day=partition_day)
             if scenario.get("overlap"):
                 hold = arm_compaction_hold(data_dir, CDC_WORKSPACE, pipeline)
                 overlap_proc = start_held_ingest(

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""DynamoDB Local snapshot_then_cdc into SkipprLake (ExactOnce) and DuckDB (CdcEncoded)."""
+"""DynamoDB Local snapshot_then_cdc into SkipprLake (ExactOnce) and DuckDB (CdcEncoded).
+
+Local: from repo root,
+SKIPPRD_PATH=target/release/skipprd PLUGIN_BINARIES_DIR=... \\
+  python3 .github/actions/e2e/dynamodb_cdc_local/run.py
+"""
 
 from __future__ import annotations
 
@@ -22,6 +27,9 @@ DDB_ENDPOINT = f"http://127.0.0.1:{DDB_PORT}"
 SOURCE_TABLE = "skippr_dynamo_cdc"
 CATALOG_TABLE = "skippr-dynamo-cdc-catalog"
 CONTAINER = "skippr-dynamodb-cdc"
+EVENT_TS_DAY_A = 1_700_000_000
+EVENT_TS_DAY_B = 1_700_086_400
+EVENT_TS_STREAM_UPDATE = 1_700_172_800
 
 
 def fail(msg: str) -> None:
@@ -77,7 +85,7 @@ def recreate_table(client, name: str, attrs: list[dict], keys: list[dict], strea
     client.get_waiter("table_exists").wait(TableName=name)
 
 
-def start_dynamodb() -> None:
+def start_dynamodb(*, seed_event_ts: bool) -> None:
     subprocess.run(["docker", "rm", "-f", CONTAINER], check=False, capture_output=True)
     run(
         [
@@ -123,22 +131,21 @@ def start_dynamodb() -> None:
         ],
         stream=True,
     )
-    client.put_item(
-        TableName=SOURCE_TABLE,
-        Item={
-            "id": {"S": "1"},
-            "rmc": {"S": "eu"},
-            "name": {"S": "alpha"},
-        },
-    )
-    client.put_item(
-        TableName=SOURCE_TABLE,
-        Item={
-            "id": {"S": "2"},
-            "rmc": {"S": "us"},
-            "name": {"S": "beta"},
-        },
-    )
+    item_one: dict = {
+        "id": {"S": "1"},
+        "rmc": {"S": "eu"},
+        "name": {"S": "alpha"},
+    }
+    item_two: dict = {
+        "id": {"S": "2"},
+        "rmc": {"S": "us"},
+        "name": {"S": "beta"},
+    }
+    if seed_event_ts:
+        item_one["event_ts"] = {"N": str(EVENT_TS_DAY_A)}
+        item_two["event_ts"] = {"N": str(EVENT_TS_DAY_B)}
+    client.put_item(TableName=SOURCE_TABLE, Item=item_one)
+    client.put_item(TableName=SOURCE_TABLE, Item=item_two)
 
 
 def stage_plugins(config: Path, pipeline: str, manifests: Path) -> None:
@@ -211,6 +218,20 @@ def bronze_namespace(warehouse: Path) -> str:
     return dirs[0]
 
 
+def bronze_parquet_count(warehouse: Path) -> int:
+    ns = bronze_namespace(warehouse)
+    root = warehouse / "bronze" / ns
+    return sum(1 for _ in root.rglob("*.parquet"))
+
+
+def assert_snapshot_day_partitions(warehouse: Path) -> None:
+    n = bronze_parquet_count(warehouse)
+    if n < 2:
+        fail(
+            f"expected at least two snapshot parquet files for distinct event_ts days, found {n}"
+        )
+
+
 def wait_iceberg_parquet(warehouse: Path, deadline: float) -> None:
     while time.time() < deadline:
         if any(warehouse.rglob("*.parquet")):
@@ -251,7 +272,11 @@ def assert_hex_token(token: str) -> None:
 
 def csv_data_rows(scan_out: str) -> list[str]:
     lines = [line for line in scan_out.splitlines() if line.strip()]
-    if lines and ("order_token" in lines[0] or "skippr_event_time" in lines[0]):
+    if lines and (
+        "order_token" in lines[0]
+        or "skippr_event_time" in lines[0]
+        or "event_ts" in lines[0]
+    ):
         lines = lines[1:]
     return lines
 
@@ -300,24 +325,23 @@ def wait_sync(proc: subprocess.Popen[str], label: str) -> None:
         fail(f"{label} exited {code}")
 
 
-def put_stream_items() -> None:
+def put_stream_items(*, with_event_ts: bool) -> None:
     client = ddb_client()
-    client.put_item(
-        TableName=SOURCE_TABLE,
-        Item={
-            "id": {"S": "3"},
-            "rmc": {"S": "uk"},
-            "name": {"S": "gamma"},
-        },
-    )
-    client.put_item(
-        TableName=SOURCE_TABLE,
-        Item={
-            "id": {"S": "1"},
-            "rmc": {"S": "eu"},
-            "name": {"S": "alpha-prime"},
-        },
-    )
+    gamma: dict = {
+        "id": {"S": "3"},
+        "rmc": {"S": "uk"},
+        "name": {"S": "gamma"},
+    }
+    updated: dict = {
+        "id": {"S": "1"},
+        "rmc": {"S": "eu"},
+        "name": {"S": "alpha-prime"},
+    }
+    if with_event_ts:
+        gamma["event_ts"] = {"N": str(EVENT_TS_DAY_B)}
+        updated["event_ts"] = {"N": str(EVENT_TS_STREAM_UPDATE)}
+    client.put_item(TableName=SOURCE_TABLE, Item=gamma)
+    client.put_item(TableName=SOURCE_TABLE, Item=updated)
     client.delete_item(
         TableName=SOURCE_TABLE,
         Key={
@@ -325,6 +349,15 @@ def put_stream_items() -> None:
             "rmc": {"S": "us"},
         },
     )
+
+
+def assert_synthetic_event_time_absent(warehouse: Path, ns: str) -> None:
+    sql = "SELECT skippr_event_time FROM iceberg_scan('{scan}') LIMIT 1"
+    try:
+        iceberg_scan(warehouse, ns, sql)
+    except subprocess.CalledProcessError:
+        return
+    fail("SkipprLake still exposes skippr_event_time after synthetic field removal")
 
 
 def run_skipprlake(work: Path) -> None:
@@ -349,11 +382,12 @@ def run_skipprlake(work: Path) -> None:
         snapshot.kill()
         raise
     wait_iceberg_parquet(warehouse, time.time() + 60)
+    assert_snapshot_day_partitions(warehouse)
     stream, logs = spawn_sync(bin_path, config, pipeline, data_dir)
     try:
         wait_sync_log(stream, logs, "Starting with", time.time() + 60)
         time.sleep(0.5)
-        put_stream_items()
+        put_stream_items(with_event_ts=True)
         wait_sync(stream, "SkipprLake stream sync")
     except Exception:
         stream.kill()
@@ -375,7 +409,7 @@ def run_skipprlake(work: Path) -> None:
     if deleted.splitlines()[-1].strip() != "0":
         fail(f"expected id=2 absent after DynamoDB Remove, got {deleted!r}")
     token_sql = (
-        "SELECT _skippr_order_token, skippr_event_time, name "
+        "SELECT _skippr_order_token, event_ts, name "
         "FROM iceberg_scan('{scan}') WHERE id = '1'"
     )
     scan_out = iceberg_scan(warehouse, ns, token_sql)
@@ -383,14 +417,70 @@ def run_skipprlake(work: Path) -> None:
     if not lines:
         fail(f"SkipprLake iceberg_scan missing data: {scan_out!r}")
     body = lines[-1].split(",")
-    token, event_time, name = body[0], body[1], body[2]
+    token, event_ts, name = body[0], body[1], body[2]
     assert_hex_token(token)
     if token == "0" * len(token):
         fail("winning SkipprLake token is still the snapshot zeros")
-    if not event_time or event_time in ("0", ""):
-        fail(f"SkipprLake _skippr_event_time missing: {scan_out!r}")
+    if event_ts != str(EVENT_TS_STREAM_UPDATE):
+        fail(f"SkipprLake event_ts={event_ts!r}, want {EVENT_TS_STREAM_UPDATE}")
     if name != "alpha-prime":
         fail(f"SkipprLake name={name!r}")
+    assert_synthetic_event_time_absent(warehouse, ns)
+
+
+def run_skipprlake_unpartitioned(work: Path) -> None:
+    warehouse = work / "lake-warehouse-unpartitioned"
+    data_dir = work / "lake-data-unpartitioned"
+    manifests = work / "lake-manifests-unpartitioned"
+    warehouse.mkdir(parents=True)
+    data_dir.mkdir(parents=True)
+    config = work / "skipprlake_unpartitioned.yml"
+    write_config(
+        ACTION / "skipprlake_unpartitioned.yml",
+        config,
+        {"LAKE_WAREHOUSE_PLACEHOLDER": f"file://{warehouse}"},
+    )
+    pipeline = "dynamodb_skipprlake_cdc_unpartitioned"
+    stage_plugins(config, pipeline, manifests)
+    bin_path = skipprd_bin()
+    snapshot, _ = spawn_sync(bin_path, config, pipeline, data_dir)
+    try:
+        wait_sync(snapshot, "SkipprLake unpartitioned snapshot sync")
+    except Exception:
+        snapshot.kill()
+        raise
+    wait_iceberg_parquet(warehouse, time.time() + 60)
+    stream, logs = spawn_sync(bin_path, config, pipeline, data_dir)
+    try:
+        wait_sync_log(stream, logs, "Starting with", time.time() + 60)
+        time.sleep(0.5)
+        put_stream_items(with_event_ts=False)
+        wait_sync(stream, "SkipprLake unpartitioned stream sync")
+    except Exception:
+        stream.kill()
+        raise
+
+    ns = bronze_namespace(warehouse)
+    count = iceberg_scan(
+        warehouse,
+        ns,
+        "SELECT count(DISTINCT id) FROM iceberg_scan('{scan}')",
+    )
+    if count.splitlines()[-1].strip() != "2":
+        fail(f"unpartitioned: expected 2 distinct keys, got {count!r}")
+    token_sql = (
+        "SELECT _skippr_order_token, name FROM iceberg_scan('{scan}') WHERE id = '1'"
+    )
+    scan_out = iceberg_scan(warehouse, ns, token_sql)
+    lines = csv_data_rows(scan_out)
+    if not lines:
+        fail(f"unpartitioned SkipprLake missing data: {scan_out!r}")
+    token, name = lines[-1].split(",")[:2]
+    assert_hex_token(token)
+    if token == "0" * len(token):
+        fail("unpartitioned winning token is still the snapshot zeros")
+    if name != "alpha-prime":
+        fail(f"unpartitioned name={name!r}")
 
 
 def run_duckdb(work: Path) -> None:
@@ -418,36 +508,34 @@ def run_duckdb(work: Path) -> None:
     try:
         wait_sync_log(stream, logs, "Starting with", time.time() + 60)
         time.sleep(0.5)
-        put_stream_items()
+        put_stream_items(with_event_ts=False)
         wait_sync(stream, "DuckDB stream sync")
     except Exception:
         stream.kill()
         raise
     token_sql = (
-        "SELECT _skippr_order_token, skippr_event_time, name "
-        "FROM iceberg_scan('{scan}') WHERE id = '1'"
+        "SELECT _skippr_order_token, name FROM iceberg_scan('{scan}') WHERE id = '1'"
     )
     scan_out = iceberg_scan(warehouse, bronze_namespace(warehouse), token_sql)
     data = csv_data_rows(scan_out)
     if not data:
         fail(f"DuckDB iceberg_scan had no rows: {scan_out!r}")
-    body = data[-1].split(",")
-    token, event_time, name = body[0], body[1], body[2]
+    token, name = data[-1].split(",")[:2]
     assert_hex_token(token)
     if token == "0" * len(token):
         fail("winning DuckDB token is still the snapshot zeros")
-    if not event_time or event_time in ("",):
-        fail(f"DuckDB _skippr_event_time missing: {scan_out!r}")
     if name != "alpha-prime":
         fail(f"DuckDB name={name!r}")
 
 
 def main() -> None:
     os.chdir(REPO)
-    start_dynamodb()
     work = Path(tempfile.mkdtemp(prefix="skippr-dynamo-cdc-"))
     try:
+        start_dynamodb(seed_event_ts=True)
         run_skipprlake(work)
+        start_dynamodb(seed_event_ts=False)
+        run_skipprlake_unpartitioned(work)
         run_duckdb(work)
     finally:
         subprocess.run(["docker", "rm", "-f", CONTAINER], check=False, capture_output=True)

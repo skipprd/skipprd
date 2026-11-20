@@ -15,9 +15,6 @@ pipelines:
         business_key_columns:
         - id
         - rmc
-    transform:
-      batch_time_fields: _skippr_event_time
-      batch_time_unit: day
 data_sources:
   dynamodb_cdc:
     Dynamodb:
