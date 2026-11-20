@@ -4,15 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [16.0.10] - 2026-11-20
+
 ### Changed
 
 - Dest schema is the data plugin. `schema_sinks` YAML, `schema_sink` on a data sink, SchemaSink plugins, and `skipprd connect schema-sink` are deleted. Runtime protocol 28. Tables are created on first compact from published output metadata.
-
-## [16.0.10] - 2026-11-18
-
-### Changed
-
 - Runtime plugin crate patches (immutable CDN version paths) after the 16.0.9 host event-time filter changed the linked plugin binaries.
+
+### Fixed
+
+- Unknown and null event-time fields on dest promote to timestamp, so DynamoDB CDC `_skippr_event_time` can compact.
 
 ## [16.0.9] - 2026-11-18
 
