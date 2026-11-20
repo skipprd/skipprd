@@ -143,6 +143,8 @@ fn promotable_event_time(data_type: &crate::discover::SkipprDataType) -> bool {
             | SkipprDataType::Timestamp
             | SkipprDataType::TimestampMilli
             | SkipprDataType::String
+            | SkipprDataType::Unknown
+            | SkipprDataType::Null
     )
 }
 
@@ -715,6 +717,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("cannot be a timestamp"), "{err}");
+
+        output.fields.get_mut("event_ts").unwrap().determined_type = SkipprDataType::Unknown;
+        apply_published_dest(
+            "orders",
+            &mut output,
+            &BTreeMap::new(),
+            &["event_ts".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            output.fields["event_ts"].determined_type,
+            SkipprDataType::Timestamp
+        );
 
         output.fields.get_mut("event_ts").unwrap().determined_type = SkipprDataType::Long;
         apply_published_dest(
