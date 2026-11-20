@@ -667,7 +667,7 @@ def write_cdc_skippr_yml(path: Path, warehouse: Path, source: str = "pg") -> Non
         keys = '["id", "rmc"]'
         extra_transform = """
     transform:
-      batch_time_fields: skippr_event_time
+      batch_time_fields: _skippr_event_time
       batch_time_unit: day"""
     else:
         raise perf_run.PerfError(f"unknown cdc_source {source!r}")

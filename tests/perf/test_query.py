@@ -567,8 +567,8 @@ class PerfDbRunnerContractTests(unittest.TestCase):
     def test_cdc_ddb_partitions_on_the_event_time_column_the_plugin_writes(self) -> None:
         text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         writer = text.split("def write_cdc_skippr_yml")[1].split("def _cdc_postgres_failed")[0]
-        self.assertIn("batch_time_fields: skippr_event_time", writer)
-        self.assertNotIn("batch_time_fields: _skippr_event_time", writer)
+        self.assertIn("batch_time_fields: _skippr_event_time", writer)
+        self.assertNotIn("batch_time_fields: skippr_event_time\n", writer)
 
     def test_download_accepts_perf_db_workflow(self) -> None:
         download = (
