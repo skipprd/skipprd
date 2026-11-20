@@ -129,6 +129,7 @@ def peek_until(
 ) -> None:
     """Poll `sql` while the held ingest runs; the caller asserts the hold afterwards."""
     deadline = time.time() + seconds
+    last_peek = ""
     while time.time() < deadline and ingest.poll() is None:
         try:
             peek = perf_run.run_skipprd(
@@ -138,18 +139,20 @@ def peek_until(
                 work=work,
                 profile="none",
             )
+            last_peek = peek[-2000:]
             if done(parse_plain_query(peek)):
                 return
-        except Exception:  # noqa: BLE001 — peeks race ingest startup; the measured query asserts
-            pass
+        except Exception as err:  # noqa: BLE001 — peeks race ingest startup; the measured query asserts
+            last_peek = f"{type(err).__name__}: {err}"
         time.sleep(1)
     code = ingest.poll()
+    detail = f"\nlast peek: {last_peek}" if last_peek else ""
     if code is not None:
         raise perf_run.PerfError(
-            f"{scenario_id}: follow ingest exited rc={code} before the expected query result"
+            f"{scenario_id}: follow ingest exited rc={code} before the expected query result{detail}"
         )
     raise perf_run.PerfError(
-        f"{scenario_id}: held ingest never reached the expected query result"
+        f"{scenario_id}: held ingest never reached the expected query result{detail}"
     )
 
 

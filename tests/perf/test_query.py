@@ -368,6 +368,8 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("arm_compaction_hold", text)
         self.assertIn("OVERLAP_WAIT_SECONDS", text)
         self.assertIn("never reached the expected query result", text)
+        peek = text.split("def peek_until")[1].split("def wait_log_contains")[0]
+        self.assertIn("last_peek", peek)
         self.assertIn("follow ingest exited rc=", text)
         self.assertNotIn("CLUSTER_TENANT", text)
         self.assertIn("seconds=90", ingest)
