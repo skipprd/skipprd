@@ -545,12 +545,14 @@ mod tests {
                     "id",
                     Some("bigint"),
                     None,
-                )],
+                )
+                .unwrap()],
                 partition_columns: vec![GlueColumnIntent::from_glue_fields(
                     "day",
                     Some("string"),
                     None,
-                )],
+                )
+                .unwrap()],
                 input_format: "input".into(),
                 output_format: "output".into(),
                 serde_library: "serde".into(),

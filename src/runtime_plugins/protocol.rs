@@ -26,17 +26,19 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
+// Protocol 28: dest schema is the data plugin. SchemaSink kind and
+// HostFrame::InstallSchema / RunSchema are deleted.
 // Protocol 27: SyncContext.ties is 1:1 with CDC rows (WAL address).
 // Protocol 26: SchemaAlterRequest carries CommittedAlter.
 // Protocol 25: RuntimeOutputLayout.batch_time_fields for Iceberg identity time columns.
 // Protocol 24: IngestBatch.data is bytes; prepared IPC ingest frames are gone.
-// Protocol 23: HostFrame::ApplyAlter for SchemaSink migrations.
+// Protocol 23: HostFrame::ApplyAlter for data-plugin migrations.
 // Protocol 22: PipelineType is a bincode u32 (YAML/JSON stay lowercase names).
 // 18.3.1 keeps protocol 22 and rejects trailing frame bytes so a too-long
 // payload cannot steal the next length prefix (EU Staging COPY desync).
 // Bump every plugin crate patch when this constant changes so catalog paths
 // stay immutable.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 27;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 28;
 pub const COMMIT_RECEIPT_VERSION: u32 = 1;
 pub const CATALOG_INTENT_VERSION: u32 = 2;
 pub const GLUE_PARTITION_CATALOG_INTENT_VERSION: u32 = 1;
@@ -56,7 +58,6 @@ pub struct RuntimeSessionHello {
 pub enum RuntimePluginKind {
     DataSource,
     DataSink,
-    SchemaSink,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -280,17 +281,6 @@ impl TryFrom<DataSinkPluginConfig> for RuntimeSinkConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeSchemaConfig(pub RuntimePluginConfigEnvelope);
-
-impl TryFrom<DataSinkPluginConfig> for RuntimeSchemaConfig {
-    type Error = String;
-
-    fn try_from(value: DataSinkPluginConfig) -> Result<Self, Self::Error> {
-        Ok(Self(value.into()))
-    }
-}
-
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeOutputLayout {
     pub partition_fields: Vec<String>,
@@ -399,13 +389,6 @@ pub struct RuntimeSinkInstallRequest {
     pub context: RuntimeExecutionContext,
     pub binding: RuntimeBinding,
     pub config: RuntimeSinkConfig,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeSchemaInstallRequest {
-    pub context: RuntimeExecutionContext,
-    pub binding: RuntimeBinding,
-    pub config: RuntimeSchemaConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -654,12 +637,20 @@ pub struct GlueColumnIntent {
 }
 
 impl GlueColumnIntent {
-    pub fn from_glue_fields(name: &str, r#type: Option<&str>, comment: Option<&str>) -> Self {
-        Self {
+    pub fn from_glue_fields(
+        name: &str,
+        r#type: Option<&str>,
+        comment: Option<&str>,
+    ) -> Result<Self, String> {
+        let r#type = r#type
+            .map(str::trim)
+            .filter(|ty| !ty.is_empty())
+            .ok_or_else(|| format!("Glue column '{name}' has no type"))?;
+        Ok(Self {
             name: name.to_string(),
-            r#type: r#type.unwrap_or("string").to_string(),
+            r#type: r#type.to_string(),
             comment: comment.map(str::to_string),
-        }
+        })
     }
 }
 
@@ -800,26 +791,13 @@ pub struct FinishSink {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SchemaRunRequest {
-    pub request_id: u64,
-    pub compaction_id: String,
-    pub binding: RuntimeBinding,
-    pub required_schema_version: u64,
-    pub namespace: String,
-    #[serde(default)]
-    pub source_contract: Option<SourceNamespaceContract>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum HostFrame {
     Handshake(HandshakeRequest),
     InstallSink(RuntimeSinkInstallRequest),
-    InstallSchema(RuntimeSchemaInstallRequest),
     InstallSchemaState(RuntimeSchemaStateInstallRequest),
     InstallSchemaDelta(SchemaDelta),
     RunSource(SourceStartRequest),
     PrepareSink(PrepareSink),
-    RunSchema(SchemaRunRequest),
     IngestAck(RuntimeIngestAck),
     OffsetResponse(RuntimeOffsetRpcResponse),
     Shutdown,
@@ -831,12 +809,10 @@ impl HostFrame {
         match self {
             Self::Handshake(_) => "Handshake",
             Self::InstallSink(_) => "InstallSink",
-            Self::InstallSchema(_) => "InstallSchema",
             Self::InstallSchemaState(_) => "InstallSchemaState",
             Self::InstallSchemaDelta(_) => "InstallSchemaDelta",
             Self::RunSource(_) => "RunSource",
             Self::PrepareSink(_) => "PrepareSink",
-            Self::RunSchema(_) => "RunSchema",
             Self::IngestAck(_) => "IngestAck",
             Self::OffsetResponse(_) => "OffsetResponse",
             Self::Shutdown => "Shutdown",
@@ -847,7 +823,6 @@ impl HostFrame {
     pub fn request_id(&self) -> Option<u64> {
         match self {
             Self::PrepareSink(prepare) => Some(prepare.request_id),
-            Self::RunSchema(request) => Some(request.request_id),
             Self::ApplyAlter(request) => Some(request.request_id),
             Self::IngestAck(ack) => Some(ack.request_id),
             _ => None,
@@ -1071,9 +1046,9 @@ mod tests {
     }
 
     #[test]
-    fn prepare_sink_is_host_frame_variant_6() {
+    fn prepare_sink_is_host_frame_variant_5() {
         let payload = bincode::serialize(&HostFrame::PrepareSink(copy_prepare_sink(31))).unwrap();
-        assert_eq!(u32::from_le_bytes(payload[0..4].try_into().unwrap()), 6);
+        assert_eq!(u32::from_le_bytes(payload[0..4].try_into().unwrap()), 5);
         assert_eq!(&payload[4..10], &[0x1f, 0x00, 0x00, 0x00, 0x00, 0x00]);
     }
 
@@ -1092,8 +1067,8 @@ mod tests {
         assert!(
             message.contains("31")
                 && message.contains("expected variant index")
-                && message.contains("payload_len=6")
-                && message.contains("1f, 00, 00, 00, 00, 00"),
+                && message.contains("payload_len=5")
+                && message.contains("1f, 00, 00, 00, 00"),
             "{message}"
         );
     }
@@ -1313,39 +1288,6 @@ mod tests {
     }
 
     #[test]
-    fn schema_run_request_source_contract_roundtrips() {
-        use crate::plugins::source_contract::{FieldPath, SourceNamespaceContract, WritePolicy};
-
-        let contract = SourceNamespaceContract {
-            namespace: "google_analytics.events_daily".into(),
-            primary_key: vec![FieldPath::single("date")],
-            cursor: None,
-            partition_key: vec![FieldPath::single("date")],
-            write_policy: WritePolicy::ReplacePartition,
-            refresh_window: None,
-            description: String::new(),
-            semantics: None,
-        };
-        let request = SchemaRunRequest {
-            request_id: 3,
-            compaction_id: "schema-c1".into(),
-            binding: RuntimeBinding::Primary,
-            required_schema_version: 2,
-            namespace: "google_analytics.events_daily".into(),
-            source_contract: Some(contract),
-        };
-        let bytes = bincode::serialize(&request).unwrap();
-        let decoded: SchemaRunRequest = bincode::deserialize(&bytes).unwrap();
-        assert_eq!(
-            decoded
-                .source_contract
-                .as_ref()
-                .map(|c| c.partition_key[0].dotted()),
-            Some("date".to_string())
-        );
-    }
-
-    #[test]
     fn contracts_update_empty_clears_via_roundtrip() {
         let event = SourceEvent::ContractsUpdate(vec![]);
         let frame = PluginFrame::SourceEvent(event);
@@ -1449,12 +1391,14 @@ mod tests {
                     "id",
                     Some("bigint"),
                     None,
-                )],
+                )
+                .unwrap()],
                 partition_columns: vec![GlueColumnIntent::from_glue_fields(
                     "day",
                     Some("string"),
                     None,
-                )],
+                )
+                .unwrap()],
                 input_format: "input".into(),
                 output_format: "output".into(),
                 serde_library: "serde".into(),
@@ -1471,6 +1415,10 @@ mod tests {
                 .count(),
             1
         );
+        let err = GlueColumnIntent::from_glue_fields("day", None, None).unwrap_err();
+        assert!(err.contains("has no type"), "{err}");
+        let err = GlueColumnIntent::from_glue_fields("day", Some("  "), None).unwrap_err();
+        assert!(err.contains("has no type"), "{err}");
         assert!(intent.is_admissible());
         let mut empty_values = intent.clone();
         empty_values.payload.partition_values.clear();
@@ -1507,8 +1455,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_hard_cut_to_v27() {
-        assert_eq!(RUNTIME_PROTOCOL_VERSION, 27);
+    fn protocol_version_is_hard_cut_to_v28() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 28);
     }
 
     #[test]
@@ -1547,8 +1495,8 @@ mod tests {
         let bytes = bincode::serialize(&HostFrame::PrepareSink(prepare)).unwrap();
         let tag = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         assert_eq!(
-            tag, 6,
-            "PrepareSink is HostFrame variant 6; request_id must not be the tag"
+            tag, 5,
+            "PrepareSink is HostFrame variant 5; request_id must not be the tag"
         );
         let decoded: HostFrame = bincode::deserialize(&bytes).unwrap();
         let HostFrame::PrepareSink(decoded) = decoded else {
@@ -1598,7 +1546,7 @@ mod tests {
             bincode::deserialize::<HostFrame>(&bincode::serialize(&prepare).unwrap()).unwrap_err();
         let message = err.to_string();
         assert!(
-            message.contains("variant index 0 <= i < 12") && message.contains("54"),
+            message.contains("variant index 0 <= i < 10") && message.contains("54"),
             "{message}"
         );
     }

@@ -190,17 +190,6 @@ data_sinks:
       table_namespace: {INGEST_NS}
       object_store:
         type: file
-    schema_sink: schema_sinks.lake
-
-schema_sinks:
-  lake:
-    SkipprLake:
-      warehouse: {warehouse_uri}
-      catalog_table: {STORE_TABLE}
-      region: us-east-1
-      table_namespace: {INGEST_NS}
-      object_store:
-        type: file
 """,
         encoding="utf-8",
     )
@@ -218,7 +207,6 @@ def use_published_plugins() -> bool:
 PUBLISHED_FILE_LAKE_PLUGIN_PATTERNS = (
     "skippr-plugin-data-source-file*",
     "skippr-plugin-data-sink-skipprlake*",
-    "skippr-plugin-schema-sink-skipprlake*",
 )
 
 

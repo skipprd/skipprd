@@ -1,11 +1,11 @@
 ---
 title: skipprd doctor
-description: Check skippr.yml for missing sections, broken references, unset secrets, and mismatched sinks before you run a sync.
+description: Check skippr.yml for missing sections, broken references, and unset secrets before you run a sync.
 ---
 
 # skipprd doctor
 
-`skipprd doctor` checks your configuration before you run anything long. It loads `skippr.yml`, resolves every `${NAME}` reference, and checks that each pipeline has a source, that every reference between pipelines and entries resolves, and that paired sinks match. It does not connect to your source or destination, so it is fast and safe to run anywhere: after editing the config, in CI on every change, or as the first step of a deploy. Omit `--pipeline` to check every pipeline in the file. Pass `--pipeline <name>` to check that pipeline only. `PIPELINE_NAME` does not change the default.
+`skipprd doctor` checks your configuration before you run anything long. It loads `skippr.yml`, resolves every `${NAME}` reference, and checks that each pipeline has a source and that every reference between pipelines and entries resolves. It does not connect to your source or destination, so it is fast and safe to run anywhere: after editing the config, in CI on every change, or as the first step of a deploy. Omit `--pipeline` to check every pipeline in the file. Pass `--pipeline <name>` to check that pipeline only. `PIPELINE_NAME` does not change the default.
 
 ## Usage
 
@@ -45,7 +45,7 @@ See [CLI overview](/cli/overview) for the other global flags.
 | Sources | `data_sources` is not empty. |
 | Destinations | Always passes. A pipeline without a `data_sink` is valid: its data stays in the WAL. |
 | Each pipeline | Its `data_source`, `data_sink`, and other references point at entries that exist. |
-| Whole config | No two SkipprLake or DuckDB destinations write the same namespace, and paired sinks (SkipprLake, AthenaIceberg, DuckDB) match their schema sink. |
+| Whole config | No two SkipprLake or DuckDB destinations write the same namespace. |
 | Storage mode | Reports `skipprd_el_storage_mode` for each pipeline. |
 
 Doctor validates configuration only. To test credentials and connectivity, run [`skipprd discover`](/cli/discover), which reads the source but never writes to the destination.
@@ -118,7 +118,6 @@ Doctor needs every `${NAME}` variable to be set, so export your secrets (or test
 |---|---|---|
 | `[skippr] config failed: ... references ${NAME} at ... but that environment variable is not set` | A secret reference has no value. | `export NAME=...`, or add it to a `.env` file next to `skippr.yml`. |
 | `[FAIL] no pipelines configured` and `[FAIL] data_sources is empty` | Doctor found no config file, or the file is empty. | Run from the folder that contains `skippr.yml`, or pass `--config`. |
-| `[FAIL] ... must be equal ...` | A paired data sink and its schema sink differ. | Make the two blocks identical, or re-add them with [`skipprd connect`](/cli/connect). |
 | `[skippr] config failed: Invalid Skippr configuration in ...` | `skippr.yml` has a YAML error or an unknown key. | Fix the line named in the message. |
 
 ## Exit codes

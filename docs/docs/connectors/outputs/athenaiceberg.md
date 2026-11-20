@@ -5,7 +5,7 @@ description: Land Skipprd pipelines as Apache Iceberg tables in S3, registered i
 
 # Athena Iceberg
 
-Use Athena Iceberg when you want Iceberg tables that Athena can query: merge, replace a day, and schema evolution without rewriting Hive DDL yourself. Pair it with the [Athena Iceberg schema sink](/connectors/schema_sinks/athenaiceberg).
+Use Athena Iceberg when you want Iceberg tables that Athena can query: merge, replace a day, and schema evolution without rewriting Hive DDL yourself. The destination publishes the Iceberg table on the first compact.
 
 For Hive tables on S3, use [Athena](/connectors/outputs/athena). For a Skippr-managed catalog, use [SkipprLake](/connectors/outputs/skipprlake).
 
@@ -39,7 +39,6 @@ lake = cfg.data_sink(
         athena_results_s3_bucket="my-athena-results",
         region="us-east-1",
     ),
-    schema_sink="lake_schema",
 )
 cfg.pipeline("reports", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=lake))
 cfg.save()
@@ -54,25 +53,11 @@ skipprd connect data-sink athenaiceberg \
   --athena-workgroup-name primary \
   --athena-results-s3-bucket my-athena-results \
   --region us-east-1
-
-skipprd connect schema-sink athenaiceberg \
-  --pipeline reports \
-  --name lake_schema
 ```
 
 ```yaml [YAML]
 data_sinks:
   lake:
-    AthenaIceberg:
-      warehouse: s3://my-iceberg-warehouse/
-      glue_database_name: analytics
-      athena_workgroup_name: primary
-      athena_results_s3_bucket: my-athena-results
-      region: us-east-1
-    schema_sink: schema_sinks.lake_schema
-
-schema_sinks:
-  lake_schema:
     AthenaIceberg:
       warehouse: s3://my-iceberg-warehouse/
       glue_database_name: analytics
@@ -97,7 +82,7 @@ schema_sinks:
 
 ## How data lands
 
-Each source namespace becomes an Iceberg table in `glue_database_name`. Skipprd maintains snapshots: recent commits are kept, older ones expire, and small files are rewritten. Do not rely on time travel to old snapshots.
+Each source namespace becomes an Iceberg table in `glue_database_name` on the first compact. Ingest alone does not create the table. Skipprd maintains snapshots: recent commits are kept, older ones expire, and small files are rewritten. Do not rely on time travel to old snapshots.
 
 With `transform.batch_time_fields` and `transform.batch_time_unit`, Skipprd adds one hidden Iceberg time transform (`year`, `month`, `day`, or `hour`) on the event-time column, plus identity partitions from `batch_partition_fields`. It does not write `year`/`month`/`day` int columns. `minute` is rejected (Iceberg has no `minute()`). POSIX millis and micros in numeric columns resolve as event time, then the transform runs on the timestamp. Deadletter Iceberg tables stay unpartitioned. Filter with `WHERE event_ts >= TIMESTAMP '2026-11-07 00:00:00' AND event_ts < TIMESTAMP '2026-11-08 00:00:00'`. Recreate an existing Iceberg table if the live spec still identity-partitions calendar ints.
 
@@ -113,6 +98,5 @@ Supports `append`, `merge_by_key`, `replace_partition`, and `replace_table`. `sk
 
 ## Next steps
 
-- [Athena Iceberg schema sink](/connectors/schema_sinks/athenaiceberg)
 - [Streamhouse](/concepts/datalake)
 - [How sources land](/concepts/source-landing-semantics)

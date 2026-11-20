@@ -555,21 +555,43 @@ impl Helpers {
             .to_lowercase()
     }
 
-    fn is_millisecond_timestamp(time: i64) -> bool {
-        let num_digits = ((time as f64).log10() + 1.0).floor() as i32;
-        num_digits > 10
+    /// POSIX seconds from an untyped numeric event-time, scaled by digit count:
+    /// up to 10 digits are seconds, 11–15 milliseconds, 16–17 microseconds,
+    /// 18–19 nanoseconds.
+    pub fn posix_seconds_from_i64(time: i64) -> i64 {
+        match time
+            .unsigned_abs()
+            .checked_ilog10()
+            .map_or(1, |log| log + 1)
+        {
+            0..=10 => time,
+            11..=15 => time / 1_000,
+            16 | 17 => time / 1_000_000,
+            _ => time / 1_000_000_000,
+        }
     }
 
-    /// POSIX seconds from a numeric event-time. Values with more than 10 digits are milliseconds.
-    pub fn posix_seconds_from_i64(time: i64) -> Option<i64> {
-        if time > 999999999999999 || time < -999999999999999 {
-            return None;
+    /// Names to try when matching a configured event-time or partition field.
+    /// The host projection and Iceberg writer share this list.
+    pub fn field_name_candidates(configured: &str) -> Vec<String> {
+        let trimmed = configured.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
         }
-        if Self::is_millisecond_timestamp(time) {
-            Some(time / 1000)
-        } else {
-            Some(time)
+        let mut names = vec![trimmed.to_string()];
+        let flattened = trimmed.replace('.', "_");
+        if flattened != trimmed {
+            names.push(flattened);
         }
+        let stripped = trimmed.trim_matches('_');
+        if stripped != trimmed && !stripped.is_empty() {
+            names.push(stripped.to_string());
+            let stripped_flat = stripped.replace('.', "_");
+            if stripped_flat != stripped {
+                names.push(stripped_flat);
+            }
+        }
+        names
     }
 
     /// POSIX seconds from an RFC3339, numeric, or known date-format string.
@@ -578,12 +600,7 @@ impl Helpers {
             return Some(dt.timestamp());
         }
         if let Ok(numeric) = s.parse::<i64>() {
-            if let Some(secs) = Self::posix_seconds_from_i64(numeric) {
-                return Some(secs);
-            }
-            if Self::is_millisecond_timestamp(numeric) {
-                return None;
-            }
+            return Some(Self::posix_seconds_from_i64(numeric));
         }
         for format in DateFormats::iterator() {
             if let Ok(dt) = Helpers::parse_date_from_string(s, format.as_str()) {
@@ -615,15 +632,11 @@ impl Helpers {
                     }
                     Value::Number(n) => {
                         if let Some(ts) = n.as_i64() {
-                            if let Some(secs) = Helpers::posix_seconds_from_i64(ts) {
-                                return Some(secs);
-                            }
+                            return Some(Helpers::posix_seconds_from_i64(ts));
                         }
                         if let Some(f) = n.as_f64() {
                             if f.is_finite() && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                                if let Some(secs) = Helpers::posix_seconds_from_i64(f as i64) {
-                                    return Some(secs);
-                                }
+                                return Some(Helpers::posix_seconds_from_i64(f as i64));
                             }
                         }
                     }
@@ -1539,42 +1552,49 @@ mod clean_field_name_tests {
 mod parse_time_field_tests {
     use super::*;
     use serde_json::json;
-    use serial_test::serial;
 
     #[test]
-    #[serial]
-    fn test_parse_time_field_with_invalid_millisecond_timestamp() {
-        // Set up the environment
-        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time2");
-
-        // Create a message with the timestamp in a field matching TRANSFORM_BATCH_TIME_FIELDS
-        let message = json!({
-            "time2": 999999999999999999 as i64 // Invalid millisecond timestamp (too large)
-        });
-
-        assert_eq!(Helpers::parse_time_field(&Config::new(), &message), None);
+    fn test_parse_time_field_reads_nanosecond_timestamp() {
+        let message = json!({ "time2": 999_999_999_999_999_999_i64 });
+        assert_eq!(
+            Helpers::parse_time_field_with_fields(&message, "time2"),
+            Some(999_999_999)
+        );
     }
 
     #[test]
-    #[serial]
     fn test_parse_time_field_with_valid_millisecond_timestamp() {
-        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time1");
-
         let time = 1646901960000i64; // Valid millisecond timestamp
         let message = json!({ "time1": time });
 
         assert_eq!(
-            Helpers::parse_time_field(&Config::new(), &message),
+            Helpers::parse_time_field_with_fields(&message, "time1"),
             Some(1646901960)
         );
     }
 
     #[test]
-    fn posix_seconds_from_i64_seconds_and_millis() {
+    fn posix_seconds_from_i64_scales_by_digit_count() {
         let posix = 1_794_063_845i64;
-        assert_eq!(Helpers::posix_seconds_from_i64(posix), Some(posix));
-        assert_eq!(Helpers::posix_seconds_from_i64(posix * 1000), Some(posix));
-        assert_eq!(Helpers::posix_seconds_from_i64(posix * 1_000_000), None);
+        for scaled in [
+            posix,
+            posix * 1_000,
+            posix * 1_000_000,
+            posix * 1_000_000_000,
+        ] {
+            assert_eq!(Helpers::posix_seconds_from_i64(scaled), posix, "{scaled}");
+            assert_eq!(
+                Helpers::posix_seconds_from_str(&scaled.to_string()),
+                Some(posix),
+                "{scaled}"
+            );
+        }
+        assert_eq!(Helpers::posix_seconds_from_i64(0), 0);
+        assert_eq!(Helpers::posix_seconds_from_i64(-posix * 1_000), -posix);
+        assert_eq!(
+            Helpers::posix_seconds_from_i64(i64::MIN),
+            i64::MIN / 1_000_000_000
+        );
     }
 
     #[test]
@@ -1588,69 +1608,58 @@ mod parse_time_field_tests {
     }
 
     #[test]
-    #[serial]
     fn test_parse_time_field_with_numeric_float_millis() {
-        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time");
         let message = serde_json::json!({
             "time": serde_json::Number::from_f64(1_646_901_960_000.0).unwrap()
         });
         assert_eq!(
-            Helpers::parse_time_field(&Config::new(), &message),
+            Helpers::parse_time_field_with_fields(&message, "time"),
             Some(1_646_901_960)
         );
     }
 
     #[test]
-    #[serial]
     fn test_parse_time_field_with_valid_second_timestamp() {
-        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time3");
-
         let time = 1646901960i64; // Valid second timestamp
         let message = json!({ "time3": time });
 
         assert_eq!(
-            Helpers::parse_time_field(&Config::new(), &message),
+            Helpers::parse_time_field_with_fields(&message, "time3"),
             Some(time)
         );
     }
 
     #[test]
-    #[serial]
     fn test_parse_time_field_with_empty_config() {
-        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "");
-
         let message = json!({
             "time": 1646901960
         });
 
-        assert_eq!(Helpers::parse_time_field(&Config::new(), &message), None);
+        assert_eq!(Helpers::parse_time_field_with_fields(&message, ""), None);
     }
 
     #[test]
-    #[serial]
     fn test_parse_time_field_with_string_timestamp() {
-        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time");
-
         let message = json!({
             "time": "2022-03-10T12:00:00Z"
         });
 
         assert_eq!(
-            Helpers::parse_time_field(&Config::new(), &message),
+            Helpers::parse_time_field_with_fields(&message, "time"),
             Some(1646913600)
         );
     }
 
     #[test]
-    #[serial]
     fn test_parse_time_field_with_invalid_field() {
-        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "nonexistent");
-
         let message = json!({
             "time": 1646901960
         });
 
-        assert_eq!(Helpers::parse_time_field(&Config::new(), &message), None);
+        assert_eq!(
+            Helpers::parse_time_field_with_fields(&message, "nonexistent"),
+            None
+        );
     }
 }
 

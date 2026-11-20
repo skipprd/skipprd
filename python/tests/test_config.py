@@ -2,7 +2,6 @@ import pytest
 import skippr
 from skippr import (
     Config,
-    DataSinkAthena,
     DataSinkAthenaIceberg,
     DataSinkDuckdb,
     DataSinkPostgres,
@@ -22,7 +21,6 @@ from skippr import (
     LocalStorage,
     Pipeline,
     S3Storage,
-    SchemaSinkGlue,
     ComputeItemPy,
     ComputeItemSql,
     PipelineType,
@@ -256,12 +254,11 @@ def test_digit_strings_stay_strings(tmp_path):
             athena_results_s3_bucket="r",
             catalog_id="012345678912",
         ),
-        schema_sink="ice",
     )
     path = tmp_path / "skippr.yml"
     cfg.save(str(path))
-    assert path.read_text().count("catalog_id: '012345678912'") == 2
-    assert Config.load(str(path)).to_yaml().count("catalog_id: '012345678912'") == 2
+    assert path.read_text().count("catalog_id: '012345678912'") == 1
+    assert Config.load(str(path)).to_yaml().count("catalog_id: '012345678912'") == 1
 
 
 def test_lists_numbers_and_nested_classes_persist_typed():
@@ -335,9 +332,22 @@ def test_nested_classes_are_frozen_and_top_level_is_mutable():
     assert src.s3_prefix == "q"
 
 
-def test_paired_sink_registers_matching_schema_sink():
+def test_data_sink_does_not_take_schema_sink():
     cfg = Config()
-    cfg.data_sink(
+    with pytest.raises(TypeError):
+        cfg.data_sink(
+            "warehouse",
+            DataSinkAthenaIceberg(
+                warehouse="s3://wh/",
+                glue_database_name="analytics",
+                athena_workgroup_name="primary",
+                athena_results_s3_bucket="results",
+            ),
+            schema_sink="warehouse_schema",
+        )
+    assert not hasattr(cfg, "schema_sink")
+    assert not hasattr(cfg, "get_schema_sink")
+    raw = cfg.data_sink(
         "warehouse",
         DataSinkAthenaIceberg(
             warehouse="s3://wh/",
@@ -345,71 +355,11 @@ def test_paired_sink_registers_matching_schema_sink():
             athena_workgroup_name="primary",
             athena_results_s3_bucket="results",
         ),
-        schema_sink="warehouse_schema",
     )
-    raw = cfg.to_yaml()
-    assert "schema_sink: schema_sinks.warehouse_schema" in raw
-    assert raw.count("glue_database_name: analytics") == 2
-    assert cfg.get_schema_sink("warehouse_schema").name == "warehouse_schema"
-
-
-def test_paired_sink_schema_sink_must_be_a_name():
-    cfg = Config()
-    schema = cfg.schema_sink(
-        "glue",
-        SchemaSinkGlue(
-            s3_bucket="out",
-            s3_prefix="p",
-            athena_workgroup_name="wg",
-            athena_results_s3_bucket="out",
-            glue_database_name="db",
-        ),
-    )
-    with pytest.raises(TypeError, match="as a name"):
-        cfg.data_sink(
-            "lake",
-            DataSinkDuckdb(warehouse="file:///tmp/lake", table_namespace="bronze"),
-            schema_sink=schema,  # type: ignore[arg-type]
-        )
-
-
-def test_unpaired_sink_links_schema_sink_ref():
-    cfg = Config()
-    glue = cfg.schema_sink(
-        "glue",
-        SchemaSinkGlue(
-            s3_bucket="out",
-            s3_prefix="p",
-            athena_workgroup_name="wg",
-            athena_results_s3_bucket="out",
-            glue_database_name="db",
-        ),
-    )
-    sink = cfg.data_sink(
-        "lake",
-        DataSinkAthena(
-            s3_bucket="out",
-            s3_prefix="p",
-            athena_workgroup_name="wg",
-            athena_results_s3_bucket="out",
-        ),
-        schema_sink=glue,
-    )
-    cfg.pipeline("p", Pipeline(data_source=cfg.data_source("src", _s3()), data_sink=sink))
-    raw = cfg.to_yaml()
-    assert "schema_sink: schema_sinks.glue" in raw
-    assert "data_sink: data_sinks.lake" in raw
-    with pytest.raises(TypeError, match="SchemaSinkRef"):
-        cfg.data_sink(
-            "lake2",
-            DataSinkAthena(
-                s3_bucket="out",
-                s3_prefix="p",
-                athena_workgroup_name="wg",
-                athena_results_s3_bucket="out",
-            ),
-            schema_sink="glue",  # type: ignore[arg-type]
-        )
+    yaml = cfg.to_yaml()
+    assert "schema_sink" not in yaml
+    assert "glue_database_name: analytics" in yaml
+    assert raw.name == "warehouse"
 
 
 def test_refs_from_another_config_are_rejected():
@@ -418,27 +368,6 @@ def test_refs_from_another_config_are_rejected():
     src = a.data_source("src", _s3())
     with pytest.raises(ValueError, match="different Config"):
         b.pipeline("p", Pipeline(data_source=src))
-    glue = a.schema_sink(
-        "glue",
-        SchemaSinkGlue(
-            s3_bucket="out",
-            s3_prefix="p",
-            athena_workgroup_name="wg",
-            athena_results_s3_bucket="out",
-            glue_database_name="db",
-        ),
-    )
-    with pytest.raises(ValueError, match="different Config"):
-        b.data_sink(
-            "lake",
-            DataSinkAthena(
-                s3_bucket="out",
-                s3_prefix="p",
-                athena_workgroup_name="wg",
-                athena_results_s3_bucket="out",
-            ),
-            schema_sink=glue,
-        )
 
 
 def test_wrong_plugin_role_is_a_type_error():
@@ -565,7 +494,6 @@ def test_getters_return_refs_or_raise_key_error():
         cfg.get_data_source,
         cfg.get_data_sink,
         cfg.get_deadletter_sink,
-        cfg.get_schema_sink,
     ]:
         with pytest.raises(KeyError):
             getter("missing")

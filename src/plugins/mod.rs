@@ -23,11 +23,10 @@ pub use traits::{
     AlterSupport, AtLeastOnceMessageDelivery, ConfiguredSink, DataSink, DataSource,
     DeterministicObjectOverwrite, FinalStateIdempotentApply, GroupedBatchReader,
     GroupedBatchReaderConfig, GroupedSinkContract, GroupedSinkWriteContext, GroupedWalKind,
-    GroupedWalPartitionKey, GroupedWalRefs, HasSchemaSinkSpec, HasSinkSpec, LiveWalSegments,
-    NonRetryableDebugOutput, RecordBatchChunk, SchemaSink, SchemaSinkSpec, SchemaSource,
-    SchemaSyncRequest, SftpAtLeastOnce, SftpAtomicRename, SinkCallResult, SinkPreflightOutcome,
-    SinkPreflightResult, SinkSpec, SinkWriteContext, SinkWriteOutcome, SinkWriteRejection,
-    SinkWriteSemantics, SinkWriteSupport, SourceCdcContract, SourceCdcMode,
+    GroupedWalPartitionKey, GroupedWalRefs, HasSinkSpec, LiveWalSegments, NonRetryableDebugOutput,
+    RecordBatchChunk, SchemaSource, SftpAtLeastOnce, SftpAtomicRename, SinkCallResult,
+    SinkPreflightOutcome, SinkPreflightResult, SinkSpec, SinkWriteContext, SinkWriteOutcome,
+    SinkWriteRejection, SinkWriteSemantics, SinkWriteSupport, SourceCdcContract, SourceCdcMode,
     SourceExecutionContract, SourceOnceContract, TransactionalTableCommit,
 };
 

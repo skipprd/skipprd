@@ -15,7 +15,7 @@ use once_cell::sync::Lazy;
 use serde::Serialize;
 use skippr_wal_catalog::{CatalogFence, KvOp, SkipprStore, SkipprStoreRead, StoreFamily};
 
-use crate::connect::{DataSink, DataSource, SchemaSink};
+use crate::connect::{DataSink, DataSource};
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::live_kv_for;
 
@@ -39,7 +39,6 @@ const PAYLOAD_KEYS: &[&str] = &[
     "pipeline_type",
     "source",
     "sink",
-    "schema_sink",
     "flatten",
     "input_format",
     "output_format",
@@ -104,7 +103,6 @@ pub enum ErrorClass {
 pub enum PluginRole {
     Source,
     Sink,
-    SchemaSink,
 }
 
 pub trait TelemetryClock {
@@ -161,7 +159,6 @@ pub struct TelemetryPayload {
     pub pipeline_type: String,
     pub source: String,
     pub sink: String,
-    pub schema_sink: String,
     pub flatten: u8,
     pub input_format: String,
     pub output_format: String,
@@ -188,7 +185,6 @@ pub struct TelemetryDraft {
     pub pipeline_type: String,
     pub source: String,
     pub sink: String,
-    pub schema_sink: String,
     pub flatten: u8,
     pub input_format: String,
     pub output_format: String,
@@ -240,7 +236,6 @@ pub fn clamp_catalog_stem(raw: &str, role: PluginRole) -> String {
     let name = match role {
         PluginRole::Source => DataSource::parse(raw).map(DataSource::plugin_name),
         PluginRole::Sink => DataSink::parse(raw).map(DataSink::plugin_name),
-        PluginRole::SchemaSink => SchemaSink::parse(raw).map(SchemaSink::plugin_name),
     };
     match name {
         Some(stem) => stem.to_ascii_lowercase(),
@@ -299,7 +294,6 @@ pub fn maybe_post(
         pipeline_type: draft.pipeline_type.clone(),
         source: clamp_catalog_stem(&draft.source, PluginRole::Source),
         sink: clamp_catalog_stem(&draft.sink, PluginRole::Sink),
-        schema_sink: clamp_catalog_stem(&draft.schema_sink, PluginRole::SchemaSink),
         flatten: if draft.flatten == 0 { 0 } else { 1 },
         input_format: draft.input_format.clone(),
         output_format: draft.output_format.clone(),
@@ -399,7 +393,6 @@ impl TelemetryDraft {
             pipeline_type: config.pipeline_type_log_label().to_string(),
             source: config.get_pipeline_input_plugin_name(),
             sink: config.get_pipeline_output_plugin_name(),
-            schema_sink: config.get_pipeline_schema_plugin_name(),
             flatten: u8::from(config.get_transform_flatten_events()),
             input_format: source_format
                 .map(|format| format.as_str().to_string())
@@ -556,7 +549,6 @@ fn sample_draft() -> TelemetryDraft {
         pipeline_type: "ingest".into(),
         source: "Postgres".into(),
         sink: "AthenaIceberg".into(),
-        schema_sink: "Glue".into(),
         flatten: 1,
         input_format: "json".into(),
         output_format: "native".into(),
@@ -635,7 +627,6 @@ fn maybe_post_persists_install_id_and_allowlisted_payload() {
     assert_eq!(posted.schema, 1);
     assert_eq!(posted.source, "postgres");
     assert_eq!(posted.sink, "athenaiceberg");
-    assert_eq!(posted.schema_sink, "glue");
     assert_eq!(posted.command, Command::Sync);
     assert_eq!(posted.error_class, ErrorClass::Ok);
     assert_eq!(posted.runs, 1);
@@ -672,7 +663,10 @@ fn unknown_plugin_stem_clamps_to_other() {
         clamp_catalog_stem("Postgres", PluginRole::Source),
         "postgres"
     );
-    assert_eq!(clamp_catalog_stem("glue", PluginRole::SchemaSink), "glue");
+    assert_eq!(
+        clamp_catalog_stem("AthenaIceberg", PluginRole::Sink),
+        "athenaiceberg"
+    );
     assert_eq!(clamp_catalog_stem("", PluginRole::Sink), "");
 }
 
@@ -688,7 +682,6 @@ fn telemetry_payload_has_no_pipeline_name_field() {
         pipeline_type: "ingest".into(),
         source: "postgres".into(),
         sink: "snowflake".into(),
-        schema_sink: "glue".into(),
         flatten: 0,
         input_format: "json".into(),
         output_format: "native".into(),

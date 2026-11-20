@@ -134,7 +134,7 @@ fn reference_path_ddl_order_token_column() {
 fn reference_path_ddl_tombstone_table() {
     let sql = ddl_create_tombstone_table::<PostgresCdcBackend>(
         "\"public\".\"_skippr_tombstones_users\"",
-        &[("id".to_string(), "BIGINT".to_string())],
+        &[("id".to_string(), "BIGINT")],
     );
     assert!(sql.contains("\"_skippr_order_token\" BYTEA NOT NULL"));
     assert!(sql.contains("\"_skippr_tie_seq\" BIGINT NOT NULL"));

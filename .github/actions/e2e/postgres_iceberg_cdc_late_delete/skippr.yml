@@ -1,10 +1,9 @@
 skippr:
   skippr_s3_bucket: skippr-e2e-sample-data-output
   workspace: iceberg-cdc-late-delete
-
 pipelines:
   postgres_iceberg_cdc_late_delete:
-    auto_approve: yes
+    auto_approve: true
     env: test
     type: cdc
     buffer_threshold_bytes: 20000000
@@ -13,11 +12,12 @@ pipelines:
     data_sink: data_sinks.iceberg_types_cdc
     cdc:
       default:
-        business_key_columns: ["id"]
+        business_key_columns:
+        - id
       namespaces:
         postgres.type_matrix_orders:
-          business_key_columns: ["id"]
-
+          business_key_columns:
+          - id
 data_sources:
   postgres_types_cdc:
     Postgres:
@@ -26,10 +26,10 @@ data_sources:
       user: postgres
       password: postgres
       database: skippr_iceberg_e2e
-      tables: ["type_matrix_orders"]
+      tables:
+      - type_matrix_orders
       cdc_mode: snapshot_then_cdc
       cdc_idle_timeout_seconds: 5
-
 data_sinks:
   iceberg_types_cdc:
     AthenaIceberg:
@@ -37,16 +37,5 @@ data_sinks:
       glue_database_name: iceberg_e2e_postgres_late_delete
       athena_workgroup_name: bikehire
       athena_results_s3_bucket: skippr-e2e-sample-data-output
-      catalog_id: "353855562591"
-      region: us-east-1
-    schema_sink: schema_sinks.iceberg_glue
-
-schema_sinks:
-  iceberg_glue:
-    AthenaIceberg:
-      warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-postgres-late-delete
-      glue_database_name: iceberg_e2e_postgres_late_delete
-      athena_workgroup_name: bikehire
-      athena_results_s3_bucket: skippr-e2e-sample-data-output
-      catalog_id: "353855562591"
+      catalog_id: '353855562591'
       region: us-east-1

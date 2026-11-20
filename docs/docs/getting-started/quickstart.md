@@ -35,37 +35,27 @@ Any standard AWS credential source works instead of access keys, such as `AWS_PR
 
 ## 1. Describe the pipeline
 
-A pipeline has a **source** (where data comes from), a **destination** (where it lands), and for Athena a **schema sink** (where table definitions go — here, the Glue Data Catalog). Each tab below writes the same `skippr.yml`. Replace `your-output-bucket` with your bucket name.
+A pipeline has a **source** (where data comes from) and a **destination** (where it lands). For Athena, set `glue_database_name` on the Athena data sink so compact can publish tables to the Glue Data Catalog. Each tab below writes the same `skippr.yml`. Replace `your-output-bucket` with your bucket name.
 
 ::: code-group
 
 ```python [Python]
-from skippr import Config, DataSinkAthena, DataSourceS3, LocalStorage, Pipeline, SchemaSinkGlue
+from skippr import Config, DataSinkAthena, DataSourceS3, LocalStorage, Pipeline
 
 cfg = Config().workspace("quickstart").storage(LocalStorage())
 sample = cfg.data_source(
     "sample",
     DataSourceS3(s3_bucket="skippr-public-sample-data", s3_prefix="bike-hire"),
 )
-glue = cfg.schema_sink(
-    "glue",
-    SchemaSinkGlue(
-        s3_bucket="your-output-bucket",
-        s3_prefix="data/bikehire",
-        athena_workgroup_name="primary",
-        athena_results_s3_bucket="your-output-bucket",
-        glue_database_name="skippr_quickstart",
-    ),
-)
 athena = cfg.data_sink(
     "athena",
     DataSinkAthena(
         s3_bucket="your-output-bucket",
         s3_prefix="data/bikehire",
+        glue_database_name="skippr_quickstart",
         athena_workgroup_name="primary",
         athena_results_s3_bucket="your-output-bucket",
     ),
-    schema_sink=glue,
 )
 cfg.pipeline("bikehire", Pipeline(data_source=sample, data_sink=athena))
 cfg.save("skippr.yml")
@@ -83,17 +73,9 @@ skipprd connect data-sink athena \
   --name athena \
   --s3-bucket your-output-bucket \
   --s3-prefix data/bikehire \
+  --glue-database-name skippr_quickstart \
   --athena-workgroup-name primary \
   --athena-results-s3-bucket your-output-bucket
-
-skipprd connect schema-sink glue \
-  --pipeline bikehire \
-  --name glue \
-  --s3-bucket your-output-bucket \
-  --s3-prefix data/bikehire \
-  --athena-workgroup-name primary \
-  --athena-results-s3-bucket your-output-bucket \
-  --glue-database-name skippr_quickstart
 ```
 
 ```yaml [YAML]
@@ -114,21 +96,12 @@ data_sources:
 
 data_sinks:
   athena:
-    schema_sink: schema_sinks.glue
     Athena:
       s3_bucket: your-output-bucket
       s3_prefix: data/bikehire
-      athena_workgroup_name: primary
-      athena_results_s3_bucket: your-output-bucket
-
-schema_sinks:
-  glue:
-    Glue:
-      s3_bucket: your-output-bucket
-      s3_prefix: data/bikehire
-      athena_workgroup_name: primary
-      athena_results_s3_bucket: your-output-bucket
       glue_database_name: skippr_quickstart
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: your-output-bucket
 ```
 
 :::
@@ -136,8 +109,7 @@ schema_sinks:
 What the settings mean:
 
 - `athena_results_s3_bucket` is a bucket **name**, not an `s3://` URI.
-- `glue_database_name` on the Glue schema sink names the database the table is registered in. The Athena destination takes it from the linked schema sink, so you set it once.
-- With the CLI, add the destination before the schema sink: `connect schema-sink` attaches to the pipeline's existing destination.
+- `glue_database_name` on the Athena destination names the Glue database the table is registered in on the first compact.
 - `LocalStorage()` (`skipprd_el_storage_mode: local`) keeps Skipprd's own state, such as the discovered schema and how far it has read, in `./data`. That is fine for a trial; for production, see [Skippr Store](/configuration/skippr-store).
 
 After you save the file, check it. Doctor validates `skippr.yml`; it does not connect, so it does not replace `discover`.
@@ -233,7 +205,7 @@ For more, see [Troubleshooting](/operations/troubleshooting).
 ## Next steps
 
 - [How Skipprd works](/concepts/how-it-works) — the path from source to WAL to destination.
-- [Athena destination](/connectors/outputs/athena) and [Glue schema sink](/connectors/schema_sinks/glue) — every option.
+- [Athena destination](/connectors/outputs/athena). Every option.
 - [S3 source](/connectors/inputs/s3) — point the pipeline at your own bucket and prefix.
 - [Transforms](/configuration/transforms) — split records into tables, partition by time, and order rows.
 - [Exactly-once delivery](/concepts/exactly-once) — what a crash or retry does at each destination.

@@ -37,6 +37,4 @@ runs:
         e2e_assert_downloaded \
           'skippr-plugin-data-source-dynamodb*' \
           'skippr-plugin-data-sink-skipprlake*' \
-          'skippr-plugin-schema-sink-skipprlake*' \
-          'skippr-plugin-data-sink-duckdb*' \
-          'skippr-plugin-schema-sink-duckdb*'
+          'skippr-plugin-data-sink-duckdb*'

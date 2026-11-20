@@ -744,6 +744,42 @@ fn g_sync_admits_compute() {
 fn g_iceberg_derived_compact() {
     let apply = include_str!("../../compute/apply.rs");
     let table = include_str!("../../compute/table.rs");
+    let dest = include_str!("../../runtime_plugins/schema_state.rs");
     assert!(!apply.contains("rebuild_from_iceberg"));
     assert!(table.contains("MemTable::try_new"));
+    assert!(
+        dest.contains("fold_stateless_derive"),
+        "Iceberg dest schema must include Stateless derive columns"
+    );
+}
+
+#[test]
+fn g_published_dest_includes_stateless_derive() {
+    use crate::helpers::configuration::ComputeItem;
+    use crate::helpers::offsets::{install_live_kv, reset_live_kv};
+    use crate::runtime_plugins::schema_state::published_output_metadata;
+    use skippr_wal_catalog::{CatalogFence, SkipprStore};
+
+    let dir = tempfile::tempdir().unwrap();
+    let keyed = ComputeItem::Sql {
+        name: "invoices.positive".into(),
+        value: "SELECT *, amount * 0.8 AS amount_gbp FROM invoices.orders WHERE amount > 0".into(),
+    };
+    let mut config = compute_yaml(vec![keyed]);
+    config.pipelines.get_mut("invoices").unwrap().data_dir =
+        Some(dir.path().to_string_lossy().into_owned());
+    let metadata = invoice_metadata(&config);
+    let fence = CatalogFence::local();
+    let store = MemorySkipprStore::open(fence);
+    admit_config(&config, &store, fence, &metadata).unwrap();
+    let kv: Arc<dyn SkipprStore> = Arc::new(store);
+    install_live_kv(config.skippr_store_dir(), kv, fence);
+    let published = published_output_metadata(&config, &metadata, "orders")
+        .unwrap()
+        .expect("orders dest");
+    reset_live_kv();
+    assert!(
+        published.fields.contains_key("amount_gbp"),
+        "published dest must include SQL compose column amount_gbp"
+    );
 }

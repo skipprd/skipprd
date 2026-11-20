@@ -24,7 +24,6 @@ PLUGIN_COLLECTIONS = {
     "data_sources": "DataSource",
     "data_sinks": "DataSink",
     "deadletter_sinks": "DataSink",
-    "schema_sinks": "SchemaSink",
 }
 PIPELINE_REF_KEYS = {
     "data_source": "data_sources",
@@ -50,7 +49,6 @@ class RuntimePluginRef:
 @dataclass
 class ConfigPluginEntry:
     plugin_name: str
-    schema_sink: str | None = None
 
 
 def print_step(message: str) -> None:
@@ -186,6 +184,10 @@ def parse_plugin_collection(lines: list[str], section: str) -> dict[str, ConfigP
             continue
         indent, key, value = parsed
         if indent == 0:
+            if key in {"schema_sinks", "schema_sink"}:
+                raise LocalRuntimePluginError(
+                    "dest schema is the data plugin; schema_sinks YAML is deleted"
+                )
             in_section = key == section
             active = None
             continue
@@ -196,9 +198,11 @@ def parse_plugin_collection(lines: list[str], section: str) -> dict[str, ConfigP
             entries.setdefault(active, ConfigPluginEntry(plugin_name=""))
             continue
         if indent == 4 and active:
-            if key == "schema_sink" and value:
-                entries[active].schema_sink = reference_name(value)
-            elif key not in {"schema_sink"} and not entries[active].plugin_name:
+            if key == "schema_sink":
+                raise LocalRuntimePluginError(
+                    "dest schema is the data plugin; schema_sink on a data sink is deleted"
+                )
+            if not entries[active].plugin_name:
                 entries[active].plugin_name = key
     return {
         name: entry
@@ -242,13 +246,6 @@ def configured_runtime_plugins(config_path: Path, pipeline: str | None) -> set[R
                 )
             selected.add(RuntimePluginRef(PLUGIN_COLLECTIONS[collection_name], entry.plugin_name))
             added += 1
-            if entry.schema_sink:
-                schema_entry = collections["schema_sinks"].get(entry.schema_sink)
-                if schema_entry is None:
-                    raise LocalRuntimePluginError(
-                        f"{collection_name}.{entry_name} references schema sink {entry.schema_sink!r}, but it was not found in schema_sinks"
-                    )
-                selected.add(RuntimePluginRef("SchemaSink", schema_entry.plugin_name))
         if added == 0:
             raise LocalRuntimePluginError(
                 f"pipeline {name!r} did not reference any runtime plugins"

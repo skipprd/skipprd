@@ -72,15 +72,6 @@ class DeadletterSinkRef:
     def config(self) -> Config: ...
 
 @final
-class SchemaSinkRef:
-    """A registered `schema_sinks.<name>` entry of one `Config`."""
-
-    @property
-    def name(self) -> str: ...
-    @property
-    def config(self) -> Config: ...
-
-@final
 class PipelineRef:
     """A registered `pipelines.<name>` entry of one `Config`. Pass it to `Session`."""
 
@@ -134,35 +125,11 @@ class Config:
     def data_source(self, name: str, config: DataSourceConfig) -> DataSourceRef:
         """Register `data_sources.<name>`. Returns a ref to pass to `Pipeline`."""
         ...
-    @overload
-    def data_sink(
-        self, name: str, config: PairedDataSinkConfig, *, schema_sink: str | None = None
-    ) -> DataSinkRef:
-        """Paired sinks (AthenaIceberg, SkipprLake, Duckdb) register the same config
-        as `schema_sinks.<schema_sink>`."""
+    def data_sink(self, name: str, config: DataSinkConfig) -> DataSinkRef:
+        """Register `data_sinks.<name>`. Dest schema is this plugin."""
         ...
-    @overload
-    def data_sink(
-        self,
-        name: str,
-        config: UnpairedDataSinkConfig,
-        *,
-        schema_sink: SchemaSinkRef | None = None,
-    ) -> DataSinkRef: ...
-    @overload
-    def deadletter_sink(
-        self, name: str, config: PairedDataSinkConfig, *, schema_sink: str | None = None
-    ) -> DeadletterSinkRef: ...
-    @overload
-    def deadletter_sink(
-        self,
-        name: str,
-        config: UnpairedDataSinkConfig,
-        *,
-        schema_sink: SchemaSinkRef | None = None,
-    ) -> DeadletterSinkRef: ...
-    def schema_sink(self, name: str, config: SchemaSinkConfig) -> SchemaSinkRef:
-        """Register `schema_sinks.<name>`. Paired sinks (AthenaIceberg, SkipprLake, Duckdb) often share this name."""
+    def deadletter_sink(self, name: str, config: DataSinkConfig) -> DeadletterSinkRef:
+        """Register `deadletter_sinks.<name>`."""
         ...
     def pipeline(self, name: str, pipeline: Pipeline) -> PipelineRef:
         """Register `pipelines.<name>`. Refs on `pipeline` must come from this config. Pass the result to `Session`."""
@@ -178,9 +145,6 @@ class Config:
         ...
     def get_deadletter_sink(self, name: str) -> DeadletterSinkRef:
         """Look up a registered deadletter sink by YAML key."""
-        ...
-    def get_schema_sink(self, name: str) -> SchemaSinkRef:
-        """Look up a registered schema sink by YAML key."""
         ...
 
 @final
@@ -616,25 +580,6 @@ DataSourceConfig: TypeAlias = (
     | DataSourceXAds
     | DataSourceXeroAccounting
 )
-PairedDataSinkConfig: TypeAlias = DataSinkAthenaIceberg | DataSinkDuckdb | DataSinkSkipprLake
-UnpairedDataSinkConfig: TypeAlias = (
-    DataSinkAmqp
-    | DataSinkAthena
-    | DataSinkAzureBlob
-    | DataSinkBigquery
-    | DataSinkClickhouse
-    | DataSinkDatabricks
-    | DataSinkFile
-    | DataSinkGcs
-    | DataSinkMotherduck
-    | DataSinkPostgres
-    | DataSinkRedshift
-    | DataSinkS3
-    | DataSinkSftp
-    | DataSinkSnowflake
-    | DataSinkStdout
-    | DataSinkSynapse
-)
 DataSinkConfig: TypeAlias = (
     DataSinkAmqp
     | DataSinkAthena
@@ -655,15 +600,6 @@ DataSinkConfig: TypeAlias = (
     | DataSinkSnowflake
     | DataSinkStdout
     | DataSinkSynapse
-)
-SchemaSinkConfig: TypeAlias = (
-    SchemaSinkBigquery
-    | SchemaSinkClickhouse
-    | SchemaSinkGlue
-    | SchemaSinkMotherduck
-    | SchemaSinkPostgres
-    | SchemaSinkRedshift
-    | SchemaSinkSnowflake
 )
 
 @final
@@ -4240,7 +4176,7 @@ class DataSinkAthena:
 
 @final
 class DataSinkAthenaIceberg:
-    """Config for the `AthenaIceberg` data sink and schema sink.
+    """Config for the `AthenaIceberg` data sink.
     `skipprd query` reads Glue Iceberg ∪ WAL. Athena SQL still queries the same tables."""
     def __new__(
         cls,
@@ -4253,7 +4189,7 @@ class DataSinkAthenaIceberg:
         catalog_id: str | None = None,
         object_store: DataSinkAthenaIcebergS3CompatibleObjectStore | None = None,
     ) -> DataSinkAthenaIceberg:
-        """Config for the `AthenaIceberg` data sink and schema sink.
+        """Config for the `AthenaIceberg` data sink.
         `skipprd query` reads Glue Iceberg ∪ WAL. Athena SQL still queries the same tables.
 
         Args:
@@ -4438,7 +4374,7 @@ class DataSinkDatabricks:
 
 @final
 class DataSinkDuckdb:
-    """Config for the `Duckdb` data sink and schema sink.
+    """Config for the `Duckdb` data sink.
     `skipprd query` reads filesystem Iceberg ∪ WAL. DuckDB `iceberg_scan` still reads compacted Iceberg only."""
     def __new__(
         cls,
@@ -4446,7 +4382,7 @@ class DataSinkDuckdb:
         warehouse: str,
         table_namespace: str,
     ) -> DataSinkDuckdb:
-        """Config for the `Duckdb` data sink and schema sink.
+        """Config for the `Duckdb` data sink.
         `skipprd query` reads filesystem Iceberg ∪ WAL. DuckDB `iceberg_scan` still reads compacted Iceberg only.
 
         Args:
@@ -4694,7 +4630,7 @@ class DataSinkSftp:
 
 @final
 class DataSinkSkipprLake:
-    """Config for the `SkipprLake` data sink and schema sink.
+    """Config for the `SkipprLake` data sink.
     Query and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)
     inside `IcebergCatalogSpec`, not as a standalone query backend.
     The Skippr catalog is the only catalog: pointers live in `catalog_table`
@@ -4709,7 +4645,7 @@ class DataSinkSkipprLake:
         object_store: DataSinkSkipprLakeWarehouseObjectStore | None = None,
         table_namespace: str | None = None,
     ) -> DataSinkSkipprLake:
-        """Config for the `SkipprLake` data sink and schema sink.
+        """Config for the `SkipprLake` data sink.
         Query and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)
         inside `IcebergCatalogSpec`, not as a standalone query backend.
         The Skippr catalog is the only catalog: pointers live in `catalog_table`
@@ -4841,322 +4777,4 @@ class DataSinkSynapse:
     """YAML key `schema`."""
     table: str | None
     """YAML key `table`."""
-
-@final
-class SchemaSinkBigquery:
-    def __new__(
-        cls,
-        *,
-        project: str,
-        dataset: str,
-        location: str | None = None,
-        credentials_path: str | None = None,
-        max_concurrency: int | None = None,
-        discovery_cache_ttl_secs: int | None = None,
-    ) -> SchemaSinkBigquery:
-        """Args:
-            project: YAML key `project`.
-            dataset: YAML key `dataset`.
-            location: YAML key `location`.
-            credentials_path: YAML key `credentials_path`.
-            max_concurrency: Query/model only; ignored at ingest.
-            discovery_cache_ttl_secs: Query/model only; ignored at ingest."""
-        ...
-    project: str
-    """YAML key `project`."""
-    dataset: str
-    """YAML key `dataset`."""
-    location: str | None
-    """YAML key `location`."""
-    credentials_path: str | None
-    """YAML key `credentials_path`."""
-    max_concurrency: int | None
-    """Query/model only; ignored at ingest.
-
-    YAML key `max_concurrency`."""
-    discovery_cache_ttl_secs: int | None
-    """Query/model only; ignored at ingest.
-
-    YAML key `discovery_cache_ttl_secs`."""
-
-@final
-class SchemaSinkClickhouse:
-    def __new__(
-        cls,
-        *,
-        url: str,
-        database: str | None = None,
-        user: str | None = None,
-        password: EnvRef | None = None,
-        table: str | None = None,
-    ) -> SchemaSinkClickhouse:
-        """Args:
-            url: YAML key `url`.
-            database: YAML key `database`.
-            user: YAML key `user`.
-            password: YAML key `password`.
-            table: YAML key `table`."""
-        ...
-    url: str
-    """YAML key `url`."""
-    database: str | None
-    """YAML key `database`."""
-    user: str | None
-    """YAML key `user`."""
-    password: EnvRef | None
-    """YAML key `password`."""
-    table: str | None
-    """YAML key `table`."""
-
-@final
-class SchemaSinkGlue:
-    def __new__(
-        cls,
-        *,
-        s3_bucket: str,
-        s3_prefix: str,
-        athena_workgroup_name: str,
-        athena_results_s3_bucket: str,
-        format: str | None = None,
-        glue_database_name: str | None = None,
-        region: str | None = None,
-        catalog: str | None = None,
-        max_concurrency: int | None = None,
-        discovery_cache_ttl_secs: int | None = None,
-    ) -> SchemaSinkGlue:
-        """Args:
-            s3_bucket: YAML key `s3_bucket`.
-            s3_prefix: YAML key `s3_prefix`.
-            athena_workgroup_name: YAML key `athena_workgroup_name`.
-            athena_results_s3_bucket: YAML key `athena_results_s3_bucket`.
-            format: YAML key `format`.
-            glue_database_name: YAML key `glue_database_name`.
-            region: Query/model only; ignored at ingest.
-            catalog: Query/model only; ignored at ingest.
-            max_concurrency: Query/model only; ignored at ingest.
-            discovery_cache_ttl_secs: Query/model only; ignored at ingest."""
-        ...
-    s3_bucket: str
-    """YAML key `s3_bucket`."""
-    s3_prefix: str
-    """YAML key `s3_prefix`."""
-    athena_workgroup_name: str
-    """YAML key `athena_workgroup_name`."""
-    athena_results_s3_bucket: str
-    """YAML key `athena_results_s3_bucket`."""
-    format: str | None
-    """YAML key `format`."""
-    glue_database_name: str | None
-    """YAML key `glue_database_name`."""
-    region: str | None
-    """Query/model only; ignored at ingest.
-
-    YAML key `region`."""
-    catalog: str | None
-    """Query/model only; ignored at ingest.
-
-    YAML key `catalog`."""
-    max_concurrency: int | None
-    """Query/model only; ignored at ingest.
-
-    YAML key `max_concurrency`."""
-    discovery_cache_ttl_secs: int | None
-    """Query/model only; ignored at ingest.
-
-    YAML key `discovery_cache_ttl_secs`."""
-
-@final
-class SchemaSinkMotherduck:
-    def __new__(
-        cls,
-        *,
-        motherduck_token: EnvRef,
-        database: str | None = None,
-        table: str | None = None,
-        schema: str | None = None,
-    ) -> SchemaSinkMotherduck:
-        """Args:
-            motherduck_token: YAML key `motherduck_token`.
-            database: YAML key `database`.
-            table: YAML key `table`.
-            schema: Query/model only; ignored at ingest."""
-        ...
-    motherduck_token: EnvRef
-    """YAML key `motherduck_token`."""
-    database: str | None
-    """YAML key `database`."""
-    table: str | None
-    """YAML key `table`."""
-    schema: str | None
-    """Query/model only; ignored at ingest.
-
-    YAML key `schema`."""
-
-@final
-class SchemaSinkPostgres:
-    """Runtime / pipeline config for the Postgres data sink."""
-    def __new__(
-        cls,
-        *,
-        user: str,
-        database: str,
-        host: str | None = None,
-        port: int | None = None,
-        password: EnvRef | None = None,
-        schema: str | None = None,
-        sslmode: str | None = None,
-    ) -> SchemaSinkPostgres:
-        """Runtime / pipeline config for the Postgres data sink.
-
-        Args:
-            user: YAML key `user`.
-            database: YAML key `database`.
-            host: YAML key `host`.
-            port: YAML key `port`.
-            password: YAML key `password`.
-            schema: YAML key `schema`.
-            sslmode: YAML key `sslmode`."""
-        ...
-    user: str
-    """YAML key `user`."""
-    database: str
-    """YAML key `database`."""
-    host: str | None
-    """YAML key `host`."""
-    port: int | None
-    """YAML key `port`."""
-    password: EnvRef | None
-    """YAML key `password`."""
-    schema: str | None
-    """YAML key `schema`."""
-    sslmode: str | None
-    """YAML key `sslmode`."""
-
-@final
-class SchemaSinkRedshift:
-    def __new__(
-        cls,
-        *,
-        database: str,
-        cluster_identifier: str | None = None,
-        workgroup_name: str | None = None,
-        db_user: str | None = None,
-        table: str | None = None,
-        region: str | None = None,
-        staging_s3_bucket: str | None = None,
-        staging_s3_prefix: str | None = None,
-        iam_role_arn: str | None = None,
-        schema: str | None = None,
-    ) -> SchemaSinkRedshift:
-        """Args:
-            database: YAML key `database`.
-            cluster_identifier: YAML key `cluster_identifier`.
-            workgroup_name: YAML key `workgroup_name`.
-            db_user: YAML key `db_user`.
-            table: YAML key `table`.
-            region: YAML key `region`.
-            staging_s3_bucket: YAML key `staging_s3_bucket`.
-            staging_s3_prefix: YAML key `staging_s3_prefix`.
-            iam_role_arn: YAML key `iam_role_arn`.
-            schema: Query/model only; ignored at ingest."""
-        ...
-    database: str
-    """YAML key `database`."""
-    cluster_identifier: str | None
-    """YAML key `cluster_identifier`."""
-    workgroup_name: str | None
-    """YAML key `workgroup_name`."""
-    db_user: str | None
-    """YAML key `db_user`."""
-    table: str | None
-    """YAML key `table`."""
-    region: str | None
-    """YAML key `region`."""
-    staging_s3_bucket: str | None
-    """YAML key `staging_s3_bucket`."""
-    staging_s3_prefix: str | None
-    """YAML key `staging_s3_prefix`."""
-    iam_role_arn: str | None
-    """YAML key `iam_role_arn`."""
-    schema: str | None
-    """Query/model only; ignored at ingest.
-
-    YAML key `schema`."""
-
-@final
-class SchemaSinkSnowflake:
-    def __new__(
-        cls,
-        *,
-        account: str,
-        user: str,
-        warehouse: str,
-        database: str,
-        schema: str,
-        password: EnvRef | None = None,
-        role: str | None = None,
-        stage: str | None = None,
-        private_key_path: str | None = None,
-        staging_uri: str | None = None,
-        staging_storage_integration: str | None = None,
-        staging_azure_sas_token: EnvRef | None = None,
-        staging_azure_account_key: EnvRef | None = None,
-        staging_gcs_service_account_key_path: str | None = None,
-        max_concurrency: int | None = None,
-        discovery_cache_ttl_secs: int | None = None,
-    ) -> SchemaSinkSnowflake:
-        """Args:
-            account: YAML key `account`.
-            user: YAML key `user`.
-            warehouse: YAML key `warehouse`.
-            database: YAML key `database`.
-            schema: YAML key `schema`.
-            password: YAML key `password`.
-            role: YAML key `role`.
-            stage: YAML key `stage`.
-            private_key_path: YAML key `private_key_path`.
-            staging_uri: YAML key `staging_uri`.
-            staging_storage_integration: YAML key `staging_storage_integration`.
-            staging_azure_sas_token: YAML key `staging_azure_sas_token`.
-            staging_azure_account_key: YAML key `staging_azure_account_key`.
-            staging_gcs_service_account_key_path: YAML key `staging_gcs_service_account_key_path`.
-            max_concurrency: Query/model only; ignored at ingest.
-            discovery_cache_ttl_secs: Query/model only; ignored at ingest."""
-        ...
-    account: str
-    """YAML key `account`."""
-    user: str
-    """YAML key `user`."""
-    warehouse: str
-    """YAML key `warehouse`."""
-    database: str
-    """YAML key `database`."""
-    schema: str
-    """YAML key `schema`."""
-    password: EnvRef | None
-    """YAML key `password`."""
-    role: str | None
-    """YAML key `role`."""
-    stage: str | None
-    """YAML key `stage`."""
-    private_key_path: str | None
-    """YAML key `private_key_path`."""
-    staging_uri: str | None
-    """YAML key `staging_uri`."""
-    staging_storage_integration: str | None
-    """YAML key `staging_storage_integration`."""
-    staging_azure_sas_token: EnvRef | None
-    """YAML key `staging_azure_sas_token`."""
-    staging_azure_account_key: EnvRef | None
-    """YAML key `staging_azure_account_key`."""
-    staging_gcs_service_account_key_path: str | None
-    """YAML key `staging_gcs_service_account_key_path`."""
-    max_concurrency: int | None
-    """Query/model only; ignored at ingest.
-
-    YAML key `max_concurrency`."""
-    discovery_cache_ttl_secs: int | None
-    """Query/model only; ignored at ingest.
-
-    YAML key `discovery_cache_ttl_secs`."""
 

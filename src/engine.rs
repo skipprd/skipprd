@@ -379,7 +379,7 @@ fn pipeline_metadata_with_runtime_schema(
     config: &Config,
 ) -> Result<PipelineMetadata, String> {
     let mut updated_metadata = pipeline_metadata.clone();
-    for (namespace, output_metadata) in current_runtime_schema_state()?.namespaces {
+    for (namespace, output_metadata) in current_runtime_schema_state(config)?.namespaces {
         updated_metadata
             .metadata
             .entry(namespace)
@@ -394,7 +394,7 @@ fn pipeline_metadata_with_runtime_schema(
 
 struct OutputRouter {
     primary_sink_ref: String,
-    sinks: HashMap<String, Arc<Box<dyn DataSink + Send + Sync>>>,
+    sinks: HashMap<String, Arc<dyn DataSink + Send + Sync>>,
 }
 
 #[async_trait::async_trait]
@@ -529,6 +529,25 @@ impl DataSink for OutputRouter {
             plugin.install_schema_delta(delta).await?;
         }
         Ok(())
+    }
+
+    fn alter_support(&self) -> crate::plugins::AlterSupport {
+        self.sinks
+            .get(&self.primary_sink_ref)
+            .map(|sink| sink.alter_support())
+            .unwrap_or(crate::plugins::AlterSupport::Unsupported)
+    }
+
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        metadata: &crate::discover::OutputMetadata,
+        alter: &crate::discover::schema_alter::CommittedAlter,
+    ) -> Result<(), std::io::Error> {
+        let plugin = self.sinks.get(&self.primary_sink_ref).ok_or_else(|| {
+            std::io::Error::other("No primary output sink registered for ApplyAlter")
+        })?;
+        plugin.apply_alter(namespace, metadata, alter).await
     }
 
     fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {
@@ -671,10 +690,8 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
 
     {
         for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
-            match Ingest::prepare_arrow_schema_with_metadata_for_query(
-                &namespace,
-                &pipeline_metadata,
-            ) {
+            match Ingest::prepare_arrow_schema_with_metadata(config, &namespace, &pipeline_metadata)
+            {
                 Ok(_t) => {}
                 Err(e) => {
                     return Err(io::Error::other(format!(
@@ -727,7 +744,10 @@ pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> 
     // Discover must not force-enable a DISABLED pipeline; DISABLE is freeze-only.
     METADATA.store(Arc::new(updated_metadata.clone()));
 
-    config.set_metadata(&updated_metadata, true).await;
+    config
+        .set_metadata(&updated_metadata, true)
+        .await
+        .map_err(io::Error::other)?;
     cleanup_discover_ingest_artifacts(config, offsets_db.as_ref())
         .await
         .map_err(io::Error::other)?;
@@ -916,7 +936,10 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
                     "Seeded OTel OutputMetadata for pipeline '{}'",
                     pipeline_name
                 );
-                config.set_metadata(&seeded, false).await;
+                config
+                    .set_metadata(&seeded, false)
+                    .await
+                    .map_err(io::Error::other)?;
                 seeded
             } else if config.pipeline_type().map_err(io::Error::other)?
                 == crate::pipeline_type::PipelineType::Copy
@@ -961,7 +984,7 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
             .map_err(io::Error::other)?;
     }
     if config.get_pipeline_deadletters_ref().is_some() {
-        deadletter::ensure_namespace_registered(config);
+        deadletter::ensure_namespace_registered(config).map_err(io::Error::other)?;
     }
 
     let offsets_db = match Offsets::init(config) {
@@ -1002,6 +1025,9 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
             .unwrap_or_else(skippr_wal_catalog::CatalogFence::local);
         crate::compute::admit_config(config, store.as_ref(), fence, &pipeline_metadata)
             .map_err(|err| io::Error::other(err.to_string()))?;
+        crate::ingest_work::warm_output_schemas_for_metadata(config, &pipeline_metadata)
+            .await
+            .map_err(io::Error::other)?;
     }
 
     {
@@ -1179,10 +1205,8 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
     // every persisted namespace on process start.
     {
         for (namespace, _ns_metadata) in pipeline_metadata.metadata.iter() {
-            match Ingest::prepare_arrow_schema_with_metadata_for_query(
-                namespace,
-                &pipeline_metadata,
-            ) {
+            match Ingest::prepare_arrow_schema_with_metadata(config, namespace, &pipeline_metadata)
+            {
                 Ok(schema) => {
                     reporter.namespace_discovered(
                         namespace,
@@ -1327,9 +1351,6 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
             finalising_started.elapsed()
         );
     }
-    info!("Finalising: draining schema sync worker");
-    config.drain_schema_sync_worker();
-    info!("Finalising: schema sync worker drained");
     let catalog_drain_timeout = Duration::from_secs(
         Config::getenv("CATALOG_OUTBOX_DRAIN_TIMEOUT_SECONDS", "30")
             .parse::<u64>()
@@ -1592,7 +1613,10 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
     let updated_metadata = pipeline_metadata_with_runtime_schema(METADATA.load().as_ref(), config)
         .map_err(std::io::Error::other)?;
     METADATA.store(Arc::new(updated_metadata.clone()));
-    config.set_metadata(&updated_metadata, false).await;
+    config
+        .set_metadata(&updated_metadata, false)
+        .await
+        .map_err(io::Error::other)?;
 
     info!("Pipeline sync complete");
 
@@ -1657,30 +1681,13 @@ pub async fn sync_output_plugin(
         1 + usize::from(has_deadletter_binding),
     );
     let primary_sink_ref = config.get_pipeline_output_sink_ref();
-    let runtime_version = config
-        .get_pipeline_output_plugin_version()
+    let primary_plugin = config
+        .ensure_primary_data_sink(Arc::clone(&process_budget))
+        .await
         .map_err(io::Error::other)?;
-    let resolved = resolve_runtime_plugin(
-        RuntimePluginKind::DataSink,
-        plugin_name,
-        runtime_version.as_deref(),
-    )
-    .await?;
-    let runtime_config = resolve_runtime_sink_config(config, RuntimeBinding::Primary)?;
-    let primary_plugin = Box::new(
-        RuntimeDataSinkPlugin::new_with_process_budget(
-            config,
-            resolved,
-            pipeline_name,
-            RuntimeBinding::Primary,
-            runtime_config,
-            Arc::clone(&process_budget),
-        )
-        .await?,
-    ) as Box<dyn DataSink + Send + Sync>;
 
-    let mut sinks: HashMap<String, Arc<Box<dyn DataSink + Send + Sync>>> = HashMap::new();
-    sinks.insert(primary_sink_ref.clone(), Arc::new(primary_plugin));
+    let mut sinks: HashMap<String, Arc<dyn DataSink + Send + Sync>> = HashMap::new();
+    sinks.insert(primary_sink_ref.clone(), primary_plugin);
 
     if let Some((deadletter_sink_ref, deadletter_plugin)) =
         sync_deadletter_plugin_with_process_budget(
@@ -1690,7 +1697,7 @@ pub async fn sync_output_plugin(
         )
         .await?
     {
-        sinks.insert(deadletter_sink_ref, Arc::new(deadletter_plugin));
+        sinks.insert(deadletter_sink_ref, deadletter_plugin);
     }
 
     Ok(Box::new(OutputRouter {
@@ -1702,7 +1709,7 @@ pub async fn sync_output_plugin(
 pub async fn sync_deadletter_plugin(
     config: &Config,
     buffer_name: String,
-) -> Result<Option<(String, Box<dyn DataSink + Send + Sync>)>, io::Error> {
+) -> Result<Option<(String, Arc<dyn DataSink + Send + Sync>)>, io::Error> {
     let pipeline_name = config.get_pipeline_name();
     let process_budget = RuntimeSinkProcessBudget::for_pipeline(&pipeline_name, 2);
     sync_deadletter_plugin_with_process_budget(config, buffer_name, process_budget).await
@@ -1712,7 +1719,7 @@ async fn sync_deadletter_plugin_with_process_budget(
     config: &Config,
     _buffer_name: String,
     process_budget: Arc<RuntimeSinkProcessBudget>,
-) -> Result<Option<(String, Box<dyn DataSink + Send + Sync>)>, io::Error> {
+) -> Result<Option<(String, Arc<dyn DataSink + Send + Sync>)>, io::Error> {
     let sink_ref = match config.get_pipeline_deadletters_ref() {
         Some(sink_ref) => sink_ref,
         None => return Ok(None),
@@ -1733,7 +1740,7 @@ async fn sync_deadletter_plugin_with_process_budget(
     )
     .await?;
     let runtime_config = resolve_runtime_sink_config(config, RuntimeBinding::Deadletter)?;
-    let plugin = Box::new(
+    let plugin: Arc<dyn DataSink + Send + Sync> = Arc::new(
         RuntimeDataSinkPlugin::new_with_process_budget(
             config,
             resolved,
@@ -1743,7 +1750,7 @@ async fn sync_deadletter_plugin_with_process_budget(
             process_budget,
         )
         .await?,
-    ) as Box<dyn DataSink + Send + Sync>;
+    );
     Ok(Some((sink_ref, plugin)))
 }
 
@@ -2150,8 +2157,8 @@ mod output_router_capability_tests {
 
     fn boxed_sink(
         cap: &'static crate::plugins::cdc::SinkCapability,
-    ) -> Arc<Box<dyn DataSink + Send + Sync>> {
-        Arc::new(Box::new(StubSink(cap)))
+    ) -> Arc<dyn DataSink + Send + Sync> {
+        Arc::new(StubSink(cap))
     }
 
     #[test]

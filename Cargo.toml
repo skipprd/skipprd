@@ -25,7 +25,6 @@ members = [
     "python",
     "plugins/data_source/*",
     "plugins/data_sink/*",
-    "plugins/schema_sink/*",
     "plugins/shared/api_source",
 ]
 
@@ -130,7 +129,6 @@ urldecode = "0.1.1"
 url = "2.3.1"
 aws-sdk-glue = "1.38.0"
 md5 = "0.7.0"
-phf = { version = "0.11.1", default-features = false, features = ["macros"] }
 sled = { version = "=0.34.4" }
 zerocopy = "0.6.1"
 byteorder = "1.4.3"

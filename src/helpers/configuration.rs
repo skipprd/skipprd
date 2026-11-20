@@ -6,7 +6,6 @@ use std::io::Read;
 
 use std::path::{Path, PathBuf};
 
-use std::sync::mpsc::Receiver as StdReceiver;
 use std::sync::Arc;
 use yaml_rust::YamlLoader;
 
@@ -23,13 +22,12 @@ use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::adapters::storage::StorageAdapter;
-use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
+use crate::discover::{Metadata, PipelineMetadata};
 use crate::helpers::plugin_config::{DataSinkEntry, PluginConfigEntry};
 use crate::helpers::wal_storage::{ElStorageMode, SkipprStore, SkipprStoreKind};
 
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use toml;
 use tracing::{debug, error, info, warn};
 
@@ -42,38 +40,8 @@ const DEFAULT_CONFIG: &'static str = "NULL_VALUE";
 
 pub static DATA_DIR_INIT_ONCE: OnceCell<()> = OnceCell::new();
 
-#[derive(Clone, Debug)]
-struct SchemaPublicationRequest {
-    namespace: String,
-    version: u64,
-    config: Config,
-}
-
-impl SchemaPublicationRequest {
-    fn dirty_key(&self) -> String {
-        self.config.schema_publication_identity(&self.namespace)
-    }
-}
-
-/// Host pairing projection of plugin `AthenaIcebergConfig`. Same serde shape;
-/// skipprd cannot depend on the plugin crate.
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct AthenaIcebergPairing {
-    warehouse: String,
-    glue_database_name: String,
-    athena_workgroup_name: String,
-    athena_results_s3_bucket: String,
-    #[serde(default)]
-    region: Option<String>,
-    #[serde(default)]
-    catalog_id: Option<String>,
-    #[serde(default)]
-    object_store: skippr_iceberg_catalog::S3CompatibleObjectStore,
-}
-
-/// Host pairing projection of plugin `DuckdbConfig`. Same serde shape;
-/// skipprd cannot depend on the plugin crate.
+/// Host namespace uniqueness projection of plugin `DuckdbConfig`. Same serde
+/// shape; skipprd cannot depend on the plugin crate.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct DuckdbPairing {
@@ -100,20 +68,11 @@ impl PartialEq for DuckdbPairing {
 
 impl Eq for DuckdbPairing {}
 
-type SchemaSyncWorkerState = (
-    UnboundedSender<SchemaPublicationRequest>,
-    Option<std::thread::JoinHandle<()>>,
-    StdReceiver<()>,
-);
-static SCHEMA_SYNC_WORKER: Lazy<std::sync::Mutex<Option<SchemaSyncWorkerState>>> =
-    Lazy::new(|| std::sync::Mutex::new(None));
-static BLOCKING_PRIMARY_SCHEMA_PLUGIN: Lazy<
-    std::sync::Mutex<Option<(String, Arc<dyn crate::plugins::SchemaSink + Send + Sync>)>>,
+static BLOCKING_PRIMARY_DATA_PLUGIN: Lazy<
+    std::sync::Mutex<Option<(String, Arc<dyn crate::plugins::DataSink + Send + Sync>)>>,
 > = Lazy::new(|| std::sync::Mutex::new(None));
-static PRIMARY_SCHEMA_PLUGIN_INIT: Lazy<tokio::sync::Mutex<()>> =
+static PRIMARY_DATA_PLUGIN_INIT: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));
-static SCHEMA_COORDINATOR: Lazy<crate::schema_coordinator::SchemaCoordinator> =
-    Lazy::new(crate::schema_coordinator::SchemaCoordinator::new);
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -258,7 +217,6 @@ pub enum Registry {
     DataSources,
     DataSinks,
     DeadletterSinks,
-    SchemaSinks,
 }
 
 impl Registry {
@@ -267,7 +225,6 @@ impl Registry {
             Self::DataSources => "data_sources",
             Self::DataSinks => "data_sinks",
             Self::DeadletterSinks => "deadletter_sinks",
-            Self::SchemaSinks => "schema_sinks",
         }
     }
 
@@ -283,90 +240,6 @@ impl Registry {
 pub enum WholeConfigCheck {
     Write,
     Run,
-}
-
-/// Data sinks whose schema sink must carry the identical config (same plugin,
-/// equal config). Python registers both from one config object; the variant
-/// names are the plugin names, read by `skippr-connect-gen`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PairedSink {
-    AthenaIceberg,
-    SkipprLake,
-    Duckdb,
-}
-
-impl PairedSink {
-    pub fn of(kind: crate::connect::DataSink) -> Option<Self> {
-        use crate::connect::DataSink;
-        match kind {
-            DataSink::AthenaIceberg => Some(Self::AthenaIceberg),
-            DataSink::SkipprLake => Some(Self::SkipprLake),
-            DataSink::Duckdb => Some(Self::Duckdb),
-            DataSink::Amqp
-            | DataSink::Athena
-            | DataSink::AzureBlob
-            | DataSink::Bigquery
-            | DataSink::Clickhouse
-            | DataSink::Databricks
-            | DataSink::File
-            | DataSink::Gcs
-            | DataSink::Motherduck
-            | DataSink::Postgres
-            | DataSink::Redshift
-            | DataSink::S3
-            | DataSink::Sftp
-            | DataSink::Snowflake
-            | DataSink::Stdout
-            | DataSink::Synapse => None,
-        }
-    }
-
-    pub fn of_schema(kind: crate::connect::SchemaSink) -> Option<Self> {
-        use crate::connect::SchemaSink;
-        match kind {
-            SchemaSink::AthenaIceberg => Some(Self::AthenaIceberg),
-            SchemaSink::SkipprLake => Some(Self::SkipprLake),
-            SchemaSink::Duckdb => Some(Self::Duckdb),
-            SchemaSink::Bigquery
-            | SchemaSink::Clickhouse
-            | SchemaSink::Glue
-            | SchemaSink::Motherduck
-            | SchemaSink::Postgres
-            | SchemaSink::Redshift
-            | SchemaSink::Snowflake => None,
-        }
-    }
-
-    pub fn data_sink(self) -> crate::connect::DataSink {
-        use crate::connect::DataSink;
-        match self {
-            Self::AthenaIceberg => DataSink::AthenaIceberg,
-            Self::SkipprLake => DataSink::SkipprLake,
-            Self::Duckdb => DataSink::Duckdb,
-        }
-    }
-
-    pub fn schema_sink(self) -> crate::connect::SchemaSink {
-        use crate::connect::SchemaSink;
-        match self {
-            Self::AthenaIceberg => SchemaSink::AthenaIceberg,
-            Self::SkipprLake => SchemaSink::SkipprLake,
-            Self::Duckdb => SchemaSink::Duckdb,
-        }
-    }
-
-    pub fn plugin_name(self) -> &'static str {
-        self.data_sink().plugin_name()
-    }
-
-    /// Whether a namespace check already decodes data sinks of this plugin
-    /// and reports the ones that fail.
-    fn data_sink_decoded_elsewhere(self) -> bool {
-        match self {
-            Self::SkipprLake | Self::Duckdb => true,
-            Self::AthenaIceberg => false,
-        }
-    }
 }
 
 /// How source records are namespaced, partitioned, flattened, and ordered before the sink.
@@ -601,7 +474,6 @@ pub fn is_env_ref(raw: &str) -> bool {
 pub type DataSourcePluginConfig = PluginConfigEntry;
 
 pub type DataSinkPluginConfig = PluginConfigEntry;
-pub type SchemaSinkConfig = PluginConfigEntry;
 
 /// One skipprd pipeline: a source, optional sinks, and how sync runs.
 ///
@@ -744,8 +616,6 @@ pub struct Config {
     pub data_sinks: Option<BTreeMap<String, DataSinkEntry>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadletter_sinks: Option<BTreeMap<String, DataSinkEntry>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub schema_sinks: Option<BTreeMap<String, SchemaSinkConfig>>,
     /// Product CLI dbt naming. Ignored by the engine runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dbt: Option<ProductDbtConfig>,
@@ -797,7 +667,7 @@ impl Config {
     }
 
     /// The one pipeline admission check: name not reserved, pipeline defined,
-    /// and every registry reference (including paired schema sinks) resolves.
+    /// and every registry reference resolves.
     pub fn validate_pipeline(&self, name: &str) -> Result<(), String> {
         self.check_pipeline_not_reserved(name)?;
         let pipeline = self
@@ -815,7 +685,7 @@ impl Config {
     }
 
     /// This config narrowed to pipeline `name` and the registry entries it
-    /// references (its source, sinks, and their schema sinks). A Session runs
+    /// references (its source and sinks). A Session runs
     /// and resolves `${ENV}` for this scope only; `dbt` and `vector_sources`
     /// are product settings the engine does not read.
     pub fn scoped_to(&self, name: &str) -> Result<Config, String> {
@@ -843,20 +713,12 @@ impl Config {
         let deadletter = entry(pipeline.deadletter_sink.as_ref(), Registry::DeadletterSinks)?;
         let data_sinks = pick(self.data_sinks.as_ref(), sink.as_slice());
         let deadletter_sinks = pick(self.deadletter_sinks.as_ref(), deadletter.as_slice());
-        let schemas = data_sinks
-            .iter()
-            .chain(deadletter_sinks.iter())
-            .flat_map(BTreeMap::values)
-            .filter_map(|sink| sink.schema_sink.as_deref())
-            .map(|reference| Self::parse_registry_ref(reference, Registry::SchemaSinks))
-            .collect::<Result<Vec<_>, _>>()?;
         Ok(Config {
             skippr: self.skippr.clone(),
             pipelines: BTreeMap::from([(name.to_string(), pipeline)]),
             data_sources: pick(self.data_sources.as_ref(), source.as_slice()),
             data_sinks,
             deadletter_sinks,
-            schema_sinks: pick(self.schema_sinks.as_ref(), &schemas),
             dbt: None,
             vector_sources: None,
             active_pipeline: Some(name.to_string()),
@@ -1224,173 +1086,25 @@ impl Config {
         )?;
 
         if let Some(data_sink_ref) = pipeline.data_sink.as_ref() {
-            let data_sink_name = Self::validate_registry_ref_exists(
+            Self::validate_registry_ref_exists(
                 config.data_sinks.as_ref(),
                 data_sink_ref,
                 Registry::DataSinks,
                 pipeline_name,
                 "data_sink",
             )?;
-            if let Some(entry) = config
-                .data_sinks
-                .as_ref()
-                .and_then(|sinks| sinks.get(&data_sink_name))
-            {
-                Self::validate_schema_sink_ref(
-                    config,
-                    pipeline_name,
-                    "data_sink.schema_sink",
-                    entry,
-                )?;
-            }
         }
 
         if let Some(deadletter_ref) = pipeline.deadletter_sink.as_ref() {
-            let deadletter_name = Self::validate_registry_ref_exists(
+            Self::validate_registry_ref_exists(
                 config.deadletter_sinks.as_ref(),
                 deadletter_ref,
                 Registry::DeadletterSinks,
                 pipeline_name,
                 "deadletter_sink",
             )?;
-            if let Some(entry) = config
-                .deadletter_sinks
-                .as_ref()
-                .and_then(|sinks| sinks.get(&deadletter_name))
-            {
-                Self::validate_schema_sink_ref(
-                    config,
-                    pipeline_name,
-                    "deadletter_sink.schema_sink",
-                    entry,
-                )?;
-            }
         }
 
-        Ok(())
-    }
-
-    /// A linked schema sink must exist. Pairing is a whole-config check.
-    fn validate_schema_sink_ref(
-        config: &Config,
-        pipeline_name: &str,
-        field_name: &str,
-        sink_entry: &crate::helpers::plugin_config::DataSinkEntry,
-    ) -> Result<(), String> {
-        let Some(schema_ref) = sink_entry.schema_sink.as_ref() else {
-            return Ok(());
-        };
-        Self::validate_registry_ref_exists(
-            config.schema_sinks.as_ref(),
-            schema_ref,
-            Registry::SchemaSinks,
-            pipeline_name,
-            field_name,
-        )
-        .map(|_| ())
-    }
-
-    /// Resolve the schema sink for a `DataSinkEntry` and merge inherited
-    /// fields into its `DataSinkPluginConfig`. This is the single point where
-    /// a data sink inherits control-plane config (database name, etc.) from
-    /// its associated schema sink.
-    fn inherit_schema_sink_fields(config: &Config, entry: &DataSinkEntry) -> DataSinkPluginConfig {
-        let mut plugin_config = entry.config.clone();
-        let schema_cfg = entry.schema_sink.as_ref().and_then(|schema_ref| {
-            let schema_name = Self::parse_registry_ref(schema_ref, Registry::SchemaSinks).ok()?;
-            config.schema_sinks.as_ref()?.get(&schema_name).cloned()
-        });
-        if let Some(schema_cfg) = schema_cfg {
-            if plugin_config.plugin_name == "Athena" && schema_cfg.plugin_name == "Glue" {
-                if let Some(glue_database_name) = schema_cfg
-                    .config
-                    .as_object()
-                    .and_then(|raw| raw.get("glue_database_name"))
-                    .cloned()
-                {
-                    plugin_config =
-                        plugin_config.with_json_field("glue_database_name", glue_database_name);
-                }
-            }
-        }
-        plugin_config
-    }
-
-    /// Schema-sink install config. A [`PairedSink`] data sink must pair with a
-    /// schema sink of the same plugin and an equal config.
-    pub(crate) fn inherit_schema_install_config(
-        data_sink: &PluginConfigEntry,
-        schema: SchemaSinkConfig,
-    ) -> Result<SchemaSinkConfig, String> {
-        Self::check_pairing(("data_sink", data_sink), ("schema_sink", &schema))
-            .map_err(ConfigFinding::message)?;
-        Ok(schema)
-    }
-
-    /// `data_sink` and `schema` are labelled so a finding names the entry it
-    /// is about.
-    fn check_pairing(
-        (data_label, data_sink): (&str, &PluginConfigEntry),
-        (schema_label, schema): (&str, &SchemaSinkConfig),
-    ) -> Result<(), ConfigFinding> {
-        use crate::connect::{DataSink, SchemaSink};
-        let Some(paired) = DataSink::parse(&data_sink.plugin_name).and_then(PairedSink::of) else {
-            return Ok(());
-        };
-        let name = paired.plugin_name();
-        let schema_kind = SchemaSink::parse(&schema.plugin_name);
-        if schema_kind != Some(paired.schema_sink()) {
-            let label = schema_kind
-                .map(|kind| kind.plugin_name().to_string())
-                .unwrap_or_else(|| schema.plugin_name.clone());
-            return Err(ConfigFinding::Conflict(format!(
-                "{data_label}: {name} data sink must pair with schema_sinks.*.{name}, not {label}"
-            )));
-        }
-        fn decode<T: serde::de::DeserializeOwned>(
-            entry: &PluginConfigEntry,
-            validate: fn(&T) -> Result<(), String>,
-        ) -> Result<T, String> {
-            let cfg = entry.deserialize::<T>()?;
-            validate(&cfg)?;
-            Ok(cfg)
-        }
-        fn pair<T: serde::de::DeserializeOwned + PartialEq>(
-            paired: PairedSink,
-            (data_label, data_sink): (&str, &PluginConfigEntry),
-            (schema_label, schema): (&str, &SchemaSinkConfig),
-            validate: fn(&T) -> Result<(), String>,
-        ) -> Result<bool, ConfigFinding> {
-            let data = decode(data_sink, validate);
-            let schema = decode(schema, validate)
-                .map_err(|err| ConfigFinding::Undecodable(format!("{schema_label}: {err}")))?;
-            match data {
-                Ok(data) => Ok(data == schema),
-                Err(_) if paired.data_sink_decoded_elsewhere() => Ok(true),
-                Err(err) => Err(ConfigFinding::Undecodable(format!("{data_label}: {err}"))),
-            }
-        }
-        let data = (data_label, data_sink);
-        let schema_entry = (schema_label, schema);
-        let equal = match paired {
-            PairedSink::SkipprLake => pair::<skippr_iceberg_catalog::SkipprLakeConfig>(
-                paired,
-                data,
-                schema_entry,
-                |_| Ok(()),
-            )?,
-            PairedSink::AthenaIceberg => {
-                pair::<AthenaIcebergPairing>(paired, data, schema_entry, |_| Ok(()))?
-            }
-            PairedSink::Duckdb => {
-                pair::<DuckdbPairing>(paired, data, schema_entry, DuckdbPairing::validate)?
-            }
-        };
-        if !equal {
-            return Err(ConfigFinding::Conflict(format!(
-                "{data_label}: paired {name} data_sink and {schema_label} configs must be equal"
-            )));
-        }
         Ok(())
     }
 
@@ -1451,7 +1165,7 @@ impl Config {
             .as_ref()
             .and_then(|registry| registry.get(&deadletter_name))
         {
-            Some(entry) => Ok(Some(Self::inherit_schema_sink_fields(config, entry))),
+            Some(entry) => Ok(Some(entry.config.clone())),
             None => Err(format!(
                 "Deadletter sink '{}' was configured but not found in deadletter_sinks.",
                 reference
@@ -1493,17 +1207,6 @@ impl Config {
         }
     }
 
-    pub fn get_pipeline_deadletter_schema_plugin_name(&self) -> Result<Option<String>, String> {
-        let pipeline = self.get_pipeline_config();
-        if pipeline.deadletter_sink.is_none() {
-            return Ok(None);
-        }
-
-        Ok(Some(
-            self.get_pipeline_deadletter_schema_config()?.plugin_name,
-        ))
-    }
-
     pub fn get_pipeline_input_plugin_version(&self) -> Result<Option<String>, String> {
         Ok(self.get_pipeline_input_plugin_config()?.version())
     }
@@ -1516,47 +1219,6 @@ impl Config {
         Ok(self
             .get_pipeline_deadletter_plugin_config()?
             .and_then(|config| config.version()))
-    }
-
-    pub fn get_pipeline_schema_plugin_version(&self) -> Result<Option<String>, String> {
-        Ok(self.get_pipeline_schema_plugin_config()?.version())
-    }
-
-    pub fn get_pipeline_deadletter_schema_plugin_version(&self) -> Result<Option<String>, String> {
-        Ok(self.get_pipeline_deadletter_schema_config()?.version())
-    }
-
-    pub fn get_pipeline_schema_plugin_name(&self) -> String {
-        let Some(pipeline) = self.pipelines.get(self.pipeline_key()) else {
-            return Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
-        };
-        let schema_sink_ref = pipeline.data_sink.as_ref().and_then(|sink_ref| {
-            let sink_name = Self::parse_registry_ref(sink_ref, Registry::DataSinks).ok()?;
-            self.data_sinks
-                .as_ref()?
-                .get(&sink_name)?
-                .schema_sink
-                .clone()
-        });
-        let Some(schema_ref) = schema_sink_ref else {
-            if let Some(plugin) = Self::pipeline_output_plugin_name_for(self, pipeline) {
-                if crate::connect::DataSink::parse(&plugin)
-                    .is_some_and(crate::connect::DataSink::is_table)
-                {
-                    return plugin;
-                }
-            }
-            return Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
-        };
-        let Ok(schema_name) = Self::parse_registry_ref(&schema_ref, Registry::SchemaSinks) else {
-            return Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
-        };
-        self.schema_sinks
-            .as_ref()
-            .and_then(|sinks| sinks.get(&schema_name))
-            .map(|cfg| cfg.plugin_name.clone())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| Config::getenv("DATA_SCHEMA_PLUGIN_NAME", ""))
     }
 
     pub fn get_skippr_s3_bucket(&self) -> String {
@@ -1987,12 +1649,10 @@ impl Config {
     }
 
     /// Checks that span every sink, not one pipeline: no two sinks share a
-    /// SkipprLake or Duckdb namespace, and every sink pairs with the schema
-    /// sink it links.
+    /// SkipprLake or Duckdb namespace.
     fn whole_config_findings(&self) -> Vec<ConfigFinding> {
         let mut findings = self.skippr_lake_namespace_findings();
         findings.extend(self.duckdb_namespace_findings());
-        findings.extend(self.paired_schema_findings());
         findings
     }
 
@@ -2018,39 +1678,6 @@ impl Config {
         } else {
             Err(refused.join("\n"))
         }
-    }
-
-    /// The one pairing check. A link to a missing schema sink is left to
-    /// pipeline validation.
-    fn paired_schema_findings(&self) -> Vec<ConfigFinding> {
-        [
-            (Registry::DataSinks, self.data_sinks.as_ref()),
-            (Registry::DeadletterSinks, self.deadletter_sinks.as_ref()),
-        ]
-        .into_iter()
-        .flat_map(|(registry, sinks)| {
-            sinks
-                .into_iter()
-                .flatten()
-                .map(move |(name, entry)| (registry, name, entry))
-        })
-        .filter_map(|(registry, name, entry)| {
-            let reference = entry.schema_sink.as_deref()?;
-            let data_label = format!("{}.{name}", registry.key());
-            Self::parse_registry_ref(reference, Registry::SchemaSinks)
-                .map_err(|err| ConfigFinding::Conflict(format!("{data_label}: {err}")))
-                .and_then(|schema_name| {
-                    match self.schema_sinks.as_ref().and_then(|s| s.get(&schema_name)) {
-                        Some(schema) => Self::check_pairing(
-                            (&data_label, &entry.config),
-                            (&Registry::SchemaSinks.reference(&schema_name), schema),
-                        ),
-                        None => Ok(()),
-                    }
-                })
-                .err()
-        })
-        .collect()
     }
 
     fn skippr_lake_namespace_findings(&self) -> Vec<ConfigFinding> {
@@ -2256,9 +1883,6 @@ impl Config {
         Self::validate_env_u64(self, "WAL_BYTES_PER_FILE", &mut violations);
         Self::validate_env_u64(self, "WAL_MAX_DELAY_SECONDS", &mut violations);
         Self::validate_env_u64(self, "STATS_FLUSH_SECONDS", &mut violations);
-        Self::validate_env_u64(self, "SCHEMA_SYNC_DEBOUNCE_MS", &mut violations);
-        Self::validate_env_u64(self, "SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", &mut violations);
-        Self::validate_env_u64(self, "SCHEMA_SYNC_TIMEOUT_SECONDS", &mut violations);
         Self::validate_env_u8(self, "STATS_HLL_PRECISION", &mut violations);
 
         if self.get_transform_compute().iter().any(ComputeItem::is_py) {
@@ -2477,7 +2101,7 @@ impl Config {
                 )
             })?;
 
-        Ok(Self::inherit_schema_sink_fields(&config, entry))
+        Ok(entry.config.clone())
     }
 
     pub fn get_pipeline_deadletter_plugin_config(
@@ -2486,129 +2110,6 @@ impl Config {
         let config = self.clone();
         let pipeline = self.get_pipeline_config();
         Self::resolve_deadletter_plugin_config_for(&config, &pipeline)
-    }
-
-    pub fn get_pipeline_schema_plugin_config(&self) -> Result<SchemaSinkConfig, String> {
-        let pipeline_config = self.get_pipeline_config();
-        let config = self.clone();
-        let pipeline_name = self.get_pipeline_name();
-
-        let sink_ref = pipeline_config.data_sink.as_ref().ok_or_else(|| {
-            format!(
-                "Invalid configuration for pipeline '{}': data_sink is required.",
-                pipeline_name
-            )
-        })?;
-        let sink_name = Self::parse_registry_ref(sink_ref, Registry::DataSinks).map_err(|err| {
-            format!(
-                "Invalid configuration for pipeline '{}': data_sink must reference data_sinks.<name>. {}",
-                pipeline_name, err
-            )
-        })?;
-
-        let entry = config
-            .data_sinks
-            .as_ref()
-            .and_then(|registry| registry.get(&sink_name))
-            .ok_or_else(|| {
-                format!(
-                    "Invalid configuration for pipeline '{}': data_sink references '{}', but '{}' is not defined in data_sinks.",
-                    pipeline_name, sink_ref, sink_name
-                )
-            })?;
-
-        let schema_ref = match entry.schema_sink.as_ref() {
-            Some(schema_ref) => schema_ref,
-            None => {
-                if crate::connect::DataSink::parse(&entry.config.plugin_name)
-                    .is_some_and(crate::connect::DataSink::is_table)
-                {
-                    return Ok(entry.config.clone());
-                }
-                return Err(format!(
-                    "Invalid configuration for pipeline '{}': data sink '{}' does not configure schema_sink.",
-                    pipeline_name, sink_ref
-                ));
-            }
-        };
-        let schema_name = Self::parse_registry_ref(schema_ref, Registry::SchemaSinks).map_err(|err| {
-            format!(
-                "Invalid configuration for pipeline '{}': data sink '{}' schema_sink must reference schema_sinks.<name>. {}",
-                pipeline_name, sink_ref, err
-            )
-        })?;
-
-        let schema = config
-            .schema_sinks
-            .as_ref()
-            .and_then(|registry| registry.get(&schema_name))
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "Invalid configuration for pipeline '{}': schema_sink references '{}', but '{}' is not defined in schema_sinks.",
-                    pipeline_name, schema_ref, schema_name
-                )
-            })?;
-        Self::inherit_schema_install_config(&entry.config, schema)
-    }
-
-    pub fn get_pipeline_deadletter_schema_config(&self) -> Result<SchemaSinkConfig, String> {
-        let pipeline_config = self.get_pipeline_config();
-        let config = self.clone();
-        let pipeline_name = self.get_pipeline_name();
-
-        let sink_ref = pipeline_config.deadletter_sink.as_ref().ok_or_else(|| {
-            format!(
-                "Invalid configuration for pipeline '{}': deadletter_sink is not configured.",
-                pipeline_name
-            )
-        })?;
-        let sink_name = Self::parse_registry_ref(sink_ref, Registry::DeadletterSinks).map_err(|err| {
-            format!(
-                "Invalid configuration for pipeline '{}': deadletter_sink must reference deadletter_sinks.<name>. {}",
-                pipeline_name, err
-            )
-        })?;
-
-        let entry = config
-            .deadletter_sinks
-            .as_ref()
-            .and_then(|registry| registry.get(&sink_name))
-            .ok_or_else(|| {
-                format!(
-                    "Invalid configuration for pipeline '{}': deadletter_sink references '{}', but '{}' is not defined in deadletter_sinks.",
-                    pipeline_name, sink_ref, sink_name
-                )
-            })?;
-
-        let schema_ref = entry
-            .schema_sink
-            .as_ref()
-            .ok_or_else(|| {
-                format!(
-                    "Invalid configuration for pipeline '{}': deadletter sink '{}' does not configure schema_sink.",
-                    pipeline_name, sink_ref
-                )
-            })?;
-        let schema_name = Self::parse_registry_ref(schema_ref, Registry::SchemaSinks).map_err(|err| {
-            format!(
-                "Invalid configuration for pipeline '{}': deadletter sink '{}' schema_sink must reference schema_sinks.<name>. {}",
-                pipeline_name, sink_ref, err
-            )
-        })?;
-
-        let schema = config
-            .schema_sinks
-            .as_ref()
-            .and_then(|registry| registry.get(&schema_name))
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "Invalid configuration for pipeline '{}': schema_sink references '{}', but '{}' is not defined in schema_sinks.",
-                    pipeline_name, schema_ref, schema_name
-                )
-            })?;
-        Self::inherit_schema_install_config(&entry.config, schema)
     }
 
     pub fn deserialize_pipeline_input_plugin_config<T: DeserializeOwned>(
@@ -2629,12 +2130,6 @@ impl Config {
         self.get_pipeline_deadletter_plugin_config()?
             .map(|config| config.deserialize())
             .transpose()
-    }
-
-    pub fn deserialize_pipeline_schema_plugin_config<T: DeserializeOwned>(
-        &self,
-    ) -> Result<T, String> {
-        self.get_pipeline_schema_plugin_config()?.deserialize()
     }
 
     pub fn setenv(name: &str, value: &str) {
@@ -2827,7 +2322,10 @@ impl Config {
                         "Migrated persisted metadata to version {}",
                         pipeline_metadata.metadata_version
                     );
-                    self.set_metadata(&pipeline_metadata, false).await;
+                    if let Err(err) = self.set_metadata(&pipeline_metadata, false).await {
+                        error!("Failed to persist migrated schema: {err}");
+                        std::process::exit(1);
+                    }
                 }
                 return Ok(pipeline_metadata);
             }
@@ -2906,23 +2404,16 @@ impl Config {
         }
     }
 
-    pub async fn set_metadata(&self, pipeline_metadata: &PipelineMetadata, evolved: bool) {
+    pub async fn set_metadata(
+        &self,
+        pipeline_metadata: &PipelineMetadata,
+        evolved: bool,
+    ) -> Result<(), String> {
         // NOTE: callers are responsible for updating in-memory METADATA via
         // METADATA.store() *before* calling this function.
-        if let Err(e) = self.persist_pipeline_metadata(pipeline_metadata).await {
-            error!("{e}");
-        }
-
-        if evolved {
-            let tx = Config::ensure_schema_sync_worker(self);
-            for ns in pipeline_metadata.metadata.keys() {
-                let _ = tx.send(SchemaPublicationRequest {
-                    namespace: ns.clone(),
-                    version: Config::schema_publication_version(self, ns),
-                    config: self.clone(),
-                });
-            }
-        }
+        let _ = evolved;
+        self.persist_pipeline_metadata(pipeline_metadata).await?;
+        Ok(())
     }
 
     /// Persist pipeline metadata (source schemas plus the ALTER output log)
@@ -3076,530 +2567,75 @@ impl Config {
         Self::truth_value(&Self::getenv("CATALOG_LLM_ENABLED", "true"))
     }
 
-    fn schema_sync_debounce_duration(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(
-            Config::getenv("SCHEMA_SYNC_DEBOUNCE_MS", "400")
-                .parse::<u64>()
-                .unwrap_or(400),
-        )
-    }
-
-    fn schema_sync_drain_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(
-            Config::getenv("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", "30")
-                .parse::<u64>()
-                .unwrap_or(30),
-        )
-    }
-
-    /// Coalesce further schema-sync requests for `debounce`, but return
-    /// immediately when the channel closes so `--once` drain does not sit on
-    /// the 400ms default debounce after data and compaction have finished.
-    async fn schema_sync_debounce_or_closed(
-        rx: &mut UnboundedReceiver<SchemaPublicationRequest>,
-        dirty: &mut HashMap<String, SchemaPublicationRequest>,
-        debounce: std::time::Duration,
-    ) -> bool {
-        if debounce.is_zero() {
-            return false;
-        }
-        let sleep = tokio::time::sleep(debounce);
-        tokio::pin!(sleep);
-        loop {
-            tokio::select! {
-                _ = &mut sleep => return false,
-                maybe = rx.recv() => match maybe {
-                    Some(request) => {
-                        let key = request.dirty_key();
-                        match dirty.get(&key) {
-                            Some(existing) if existing.version >= request.version => {}
-                            _ => {
-                                dirty.insert(key, request);
-                            }
-                        }
-                    }
-                    None => return true,
-                },
-            }
-        }
-    }
-
-    fn drain_available_schema_sync_requests(
-        rx: &mut UnboundedReceiver<SchemaPublicationRequest>,
-        dirty: &mut HashMap<String, SchemaPublicationRequest>,
-    ) -> bool {
-        let mut closed = false;
-        loop {
-            match rx.try_recv() {
-                Ok(request) => {
-                    let key = request.dirty_key();
-                    match dirty.get(&key) {
-                        Some(existing) if existing.version >= request.version => {}
-                        _ => {
-                            dirty.insert(key, request);
-                        }
-                    }
-                }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    closed = true;
-                    break;
-                }
-            }
-        }
-        closed
-    }
-
-    fn ensure_schema_sync_worker(&self) -> UnboundedSender<SchemaPublicationRequest> {
-        let mut guard = SCHEMA_SYNC_WORKER.lock().unwrap();
-        if let Some((tx, _, _)) = guard.as_ref() {
-            return tx.clone();
-        }
-        let (tx, mut rx): (
-            UnboundedSender<SchemaPublicationRequest>,
-            UnboundedReceiver<SchemaPublicationRequest>,
-        ) = unbounded_channel();
-
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async move {
-                let mut deadletter_plugins: HashMap<
-                    String,
-                    Box<dyn crate::plugins::SchemaSink + Send + Sync>,
-                > = HashMap::new();
-                let mut dirty: HashMap<String, SchemaPublicationRequest> = HashMap::new();
-
-                loop {
-                    if dirty.is_empty() {
-                        match rx.recv().await {
-                            Some(request) => {
-                                dirty.insert(request.dirty_key(), request);
-                            }
-                            None => break,
-                        }
-                    }
-                    let debounce = dirty
-                        .values()
-                        .next()
-                        .map(|request| request.config.schema_sync_debounce_duration())
-                        .unwrap_or_default();
-                    let debounce_closed = if debounce.is_zero() {
-                        false
-                    } else {
-                        Config::schema_sync_debounce_or_closed(&mut rx, &mut dirty, debounce)
-                            .await
-                    };
-                    let channel_closed = debounce_closed
-                        || Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
-                    let mut requests: Vec<SchemaPublicationRequest> =
-                        dirty.drain().map(|(_, request)| request).collect();
-                    requests.sort_by(|left, right| {
-                        left.dirty_key().cmp(&right.dirty_key())
-                    });
-                    if requests.len() > 1 {
-                        info!(
-                            "Schema sync: coalesced {} namespace update requests",
-                            requests.len()
-                        );
-                    }
-                    let sync_timeout = std::time::Duration::from_secs(
-                        Config::getenv("SCHEMA_SYNC_TIMEOUT_SECONDS", "120")
-                            .parse::<u64>()
-                            .unwrap_or(120),
-                    );
-                    for request in requests {
-                    let ns = request.namespace.clone();
-                    let schema_version = request
-                        .version
-                        .max(Config::schema_publication_version(&request.config, &ns));
-                    let out_meta =
-                        match crate::runtime_plugins::schema_state::published_output_metadata(&ns) {
-                            Ok(out_meta) => out_meta,
-                            Err(err) => {
-                                error!("Schema sync: published output for {ns}: {err}");
-                                break;
-                            }
-                        };
-                    if let Some(out_meta) = out_meta {
-
-                        let deadletter_namespace =
-                            crate::ingest::deadletter::table_name(&request.config);
-                        let is_deadletter_ns = ns == deadletter_namespace;
-                        let scope = request.config.primary_schema_scope();
-
-                        if !is_deadletter_ns {
-                            if let Err(err) = Config::coordinate_primary_schema_sync(
-                                &request.config,
-                                &ns,
-                                schema_version,
-                                &out_meta,
-                                sync_timeout,
-                            )
-                            .await
-                            {
-                                warn!("Schema sync: failed for namespace {}: {}", ns, err);
-                            }
-                        }
-
-                        if is_deadletter_ns {
-                            if !deadletter_plugins.contains_key(&scope) {
-                                let dl_sink_cfg = request
-                                    .config
-                                    .get_pipeline_deadletter_plugin_config()
-                                    .ok()
-                                    .flatten();
-                                match request.config.get_pipeline_deadletter_schema_plugin_name() {
-                                    Ok(Some(schema_plugin_name)) => {
-                                        let runtime_config = dl_sink_cfg
-                                            .clone()
-                                            .and_then(|cfg| crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
-                                        let runtime_version =
-                                            match request.config.get_pipeline_deadletter_schema_plugin_version()
-                                            {
-                                                Ok(runtime_version) => runtime_version,
-                                                Err(err) => {
-                                                    warn!(
-                                                        "Schema sync: failed to resolve runtime deadletter schema plugin version: {}",
-                                                        err
-                                                    );
-                                                    None
-                                                }
-                                            };
-                                        if let Some(runtime_config) = runtime_config {
-                                            match crate::runtime_plugins::discovery::resolve_runtime_plugin(
-                                                crate::runtime_plugins::protocol::RuntimePluginKind::SchemaSink,
-                                                &schema_plugin_name,
-                                                runtime_version.as_deref(),
-                                            )
-                                            .await
-                                            {
-                                                Ok(resolved) => {
-                                                    match crate::runtime_plugins::host::RuntimeSchemaSinkPlugin::new(
-                                                        &request.config,
-                                                        resolved,
-                                                        request.config.get_pipeline_name(),
-                                                        crate::runtime_plugins::protocol::RuntimeBinding::Deadletter,
-                                                        runtime_config,
-                                                    )
-                                                    .await
-                                                    {
-                                                        Ok(plugin) => {
-                                                            deadletter_plugins.insert(scope.clone(), Box::new(plugin));
-                                                        }
-                                                        Err(err) => {
-                                                            warn!("Schema sync: failed to initialize runtime deadletter schema plugin: {}", err);
-                                                        }
-                                                    }
-                                                }
-                                                Err(err) => {
-                                                    warn!("Schema sync: failed to resolve runtime deadletter schema manifest: {}", err);
-                                                }
-                                            }
-                                        } else {
-                                            warn!("Schema sync: runtime schema plugin configured but the deadletter sink does not expose a runtime schema config");
-                                        }
-                                    }
-                                    Ok(None) => {
-                                        debug!("Schema sync: no schema sink configured for deadletter output");
-                                    }
-                                    Err(err) => {
-                                        warn!("Schema sync: failed to resolve deadletter schema plugin: {}", err);
-                                    }
-                                }
-                            }
-                            if let Some(plugin) = deadletter_plugins.get(&scope) {
-                                let deadletter_out_meta = crate::ingest::deadletter::output_metadata();
-                                info!("Schema sync: updating deadletter schema for namespace {}", ns);
-                                match tokio::time::timeout(
-                                    sync_timeout,
-                                    plugin.sync_schema(&ns, &deadletter_out_meta),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(_)) => {
-                                        info!("Schema sync: synced deadletter schema for namespace {}", ns);
-                                    }
-                                    Ok(Err(e)) => {
-                                        warn!("Schema sync: deadletter failed for namespace {}: {}", ns, e);
-                                    }
-                                    Err(_) => {
-                                        warn!(
-                                            "Schema sync: deadletter timed out for namespace {} after {:?}; skipping",
-                                            ns, sync_timeout
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        debug!("Schema sync: namespace {} missing from metadata snapshot", ns);
-                    }
-                    }
-                    if channel_closed {
-                        break;
-                    }
-                }
-            });
-            let _ = done_tx.send(());
-        });
-        *guard = Some((tx.clone(), Some(handle), done_rx));
-        tx
-    }
-
-    /// Drop the sender to close the channel, then wait for the worker to flush
-    /// pending schema updates. The drain is bounded so `--once` cannot look
-    /// hung forever after data and compaction have already completed.
-    pub fn drain_schema_sync_worker(&self) {
-        let mut guard = SCHEMA_SYNC_WORKER.lock().unwrap();
-        if let Some((tx, handle, done_rx)) = guard.take() {
-            drop(tx);
-            if let Some(h) = handle {
-                let drain_timeout = Config::schema_sync_drain_timeout(self);
-                info!(
-                    "Schema sync: waiting up to {:?} for worker drain",
-                    drain_timeout
-                );
-                match done_rx.recv_timeout(drain_timeout) {
-                    Ok(()) => {
-                        if let Err(err) = h.join() {
-                            warn!(
-                                "Schema sync: worker thread panicked during drain: {:?}",
-                                err
-                            );
-                        }
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        warn!(
-                            "Schema sync: drain timed out after {:?}; continuing shutdown",
-                            drain_timeout
-                        );
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        if let Err(err) = h.join() {
-                            warn!(
-                                "Schema sync: worker thread panicked during drain: {:?}",
-                                err
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn sync_output_schema_namespace(&self, namespace: &str) {
-        let tx = Config::ensure_schema_sync_worker(self);
-        let _ = tx.send(SchemaPublicationRequest {
-            namespace: namespace.to_string(),
-            version: Config::schema_publication_version(self, namespace),
-            config: self.clone(),
-        });
-    }
-
-    fn schema_publication_version(&self, namespace: &str) -> u64 {
-        let namespace_version = crate::ingest_work::namespace_schema_version(namespace)
-            .max(crate::runtime_plugins::schema_state::runtime_schema_namespace_version(namespace));
-        if namespace_version == 0 {
-            crate::runtime_plugins::schema_state::current_pipeline_schema_version().max(1)
-        } else {
-            namespace_version
-        }
-    }
-
-    pub(crate) fn primary_schema_scope(&self) -> String {
+    pub(crate) fn primary_data_scope(&self) -> String {
         format!(
             "{}:{}:{}:{}:{}",
             self.get_pipeline_data_dir(),
             self.get_workspace_name(),
             self.get_pipeline_name(),
             self.get_pipeline_output_sink_ref(),
-            self.get_pipeline_schema_plugin_name()
+            self.get_pipeline_output_plugin_name()
         )
     }
 
-    pub(crate) fn schema_publication_identity(&self, namespace: &str) -> String {
-        format!("{}:{}", self.primary_schema_scope(), namespace)
-    }
-
-    pub(crate) async fn primary_schema_sink(
+    pub(crate) fn cached_primary_data_sink(
         &self,
-    ) -> Result<Arc<dyn crate::plugins::SchemaSink + Send + Sync>, String> {
-        let schema_plugin_name = self.get_pipeline_schema_plugin_name();
-        if schema_plugin_name.is_empty() {
-            return Err("schema sink does not support migrations".into());
-        }
-        self.blocking_primary_schema_plugin(&self.primary_schema_scope())
-            .await
-    }
-
-    async fn blocking_primary_schema_plugin(
-        &self,
-        scope: &str,
-    ) -> Result<Arc<dyn crate::plugins::SchemaSink + Send + Sync>, String> {
-        if let Some((_, plugin)) = BLOCKING_PRIMARY_SCHEMA_PLUGIN
+    ) -> Option<Arc<dyn crate::plugins::DataSink + Send + Sync>> {
+        let scope = self.primary_data_scope();
+        BLOCKING_PRIMARY_DATA_PLUGIN
             .lock()
             .unwrap()
             .as_ref()
-            .filter(|(cached_scope, _)| cached_scope == scope)
-            .cloned()
-        {
+            .filter(|(cached_scope, _)| cached_scope == &scope)
+            .map(|(_, plugin)| Arc::clone(plugin))
+    }
+
+    pub(crate) async fn ensure_primary_data_sink(
+        &self,
+        process_budget: Arc<crate::runtime_plugins::host::RuntimeSinkProcessBudget>,
+    ) -> Result<Arc<dyn crate::plugins::DataSink + Send + Sync>, String> {
+        if let Some(plugin) = self.cached_primary_data_sink() {
             return Ok(plugin);
         }
-        let _init_guard = PRIMARY_SCHEMA_PLUGIN_INIT.lock().await;
-        if let Some((_, plugin)) = BLOCKING_PRIMARY_SCHEMA_PLUGIN
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|(cached_scope, _)| cached_scope == scope)
-            .cloned()
-        {
+        let _init_guard = PRIMARY_DATA_PLUGIN_INIT.lock().await;
+        if let Some(plugin) = self.cached_primary_data_sink() {
             return Ok(plugin);
         }
 
-        let schema_plugin_name = self.get_pipeline_schema_plugin_name();
-        let runtime_version = self.get_pipeline_schema_plugin_version().map_err(|err| {
-            format!(
-                "Schema sync: failed to resolve runtime schema plugin version: {}",
-                err
-            )
+        let plugin_name = self.get_pipeline_output_plugin_name();
+        if plugin_name.is_empty() {
+            return Err("data sink is not configured".into());
+        }
+        let runtime_version = self
+            .get_pipeline_output_plugin_version()
+            .map_err(|err| format!("failed to resolve runtime data plugin version: {err}"))?;
+        let runtime_config = self.get_pipeline_output_plugin_config().and_then(|cfg| {
+            crate::runtime_plugins::protocol::RuntimeSinkConfig::try_from(cfg)
+                .map_err(|err| format!("failed to derive runtime sink config: {err}"))
         })?;
-        let runtime_config = self
-            .get_pipeline_output_plugin_config()
-            .map_err(|err| {
-                format!(
-                    "Schema sync: failed to resolve output plugin config: {}",
-                    err
-                )
-            })
-            .and_then(|cfg| {
-                crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).map_err(
-                    |err| {
-                        format!(
-                            "Schema sync: failed to derive runtime schema config: {}",
-                            err
-                        )
-                    },
-                )
-            })?;
-
         let resolved = crate::runtime_plugins::discovery::resolve_runtime_plugin(
-            crate::runtime_plugins::protocol::RuntimePluginKind::SchemaSink,
-            &schema_plugin_name,
+            crate::runtime_plugins::protocol::RuntimePluginKind::DataSink,
+            &plugin_name,
             runtime_version.as_deref(),
         )
         .await
-        .map_err(|err| {
-            format!(
-                "Schema sync: failed to resolve runtime schema manifest: {}",
-                err
-            )
-        })?;
+        .map_err(|err| format!("failed to resolve runtime data manifest: {err}"))?;
 
-        let plugin = crate::runtime_plugins::host::RuntimeSchemaSinkPlugin::new(
+        let plugin = crate::runtime_plugins::host::RuntimeDataSinkPlugin::new_with_process_budget(
             self,
             resolved,
             self.get_pipeline_name(),
             crate::runtime_plugins::protocol::RuntimeBinding::Primary,
             runtime_config,
+            process_budget,
         )
         .await
-        .map_err(|err| {
-            format!(
-                "Schema sync: failed to initialize runtime schema plugin: {}",
-                err
-            )
-        })?;
+        .map_err(|err| format!("failed to initialize runtime data plugin: {err}"))?;
 
-        let plugin: Arc<dyn crate::plugins::SchemaSink + Send + Sync> = Arc::new(plugin);
-        *BLOCKING_PRIMARY_SCHEMA_PLUGIN.lock().unwrap() = Some((scope.to_string(), plugin.clone()));
+        let plugin: Arc<dyn crate::plugins::DataSink + Send + Sync> = Arc::new(plugin);
+        *BLOCKING_PRIMARY_DATA_PLUGIN.lock().unwrap() =
+            Some((self.primary_data_scope(), Arc::clone(&plugin)));
         Ok(plugin)
-    }
-
-    async fn coordinate_primary_schema_sync(
-        &self,
-        namespace: &str,
-        schema_version: u64,
-        out_meta: &OutputMetadata,
-        sync_timeout: std::time::Duration,
-    ) -> Result<(), String> {
-        let scope = self.primary_schema_scope();
-        SCHEMA_COORDINATOR
-            .coordinate(&scope, namespace, schema_version, || async {
-                let schema_plugin_name = self.get_pipeline_schema_plugin_name();
-                if schema_plugin_name.is_empty() {
-                    debug!("Schema sync: no schema sink configured for primary output");
-                    return Ok(());
-                }
-
-                let plugin = self.blocking_primary_schema_plugin(&scope).await?;
-                let source_contract = crate::METADATA
-                    .load()
-                    .source_contract_for_namespace(namespace);
-                let schema_request = crate::plugins::SchemaSyncRequest {
-                    namespace,
-                    compaction_id: "",
-                    source_contract: source_contract.as_ref(),
-                };
-                info!(
-                    "Schema sync: updating namespace {} version {}",
-                    namespace, schema_version
-                );
-                match tokio::time::timeout(
-                    sync_timeout,
-                    plugin.sync_schema_request(schema_request, out_meta),
-                )
-                .await
-                {
-                    Ok(Ok(_)) => {
-                        info!(
-                            "Schema sync: synced namespace {} version {}",
-                            namespace, schema_version
-                        );
-                        Ok(())
-                    }
-                    Ok(Err(err)) => Err(format!(
-                        "Schema sync: failed for namespace {}: {}",
-                        namespace, err
-                    )),
-                    Err(_) => Err(format!(
-                        "Schema sync: timed out for namespace {} after {:?}",
-                        namespace, sync_timeout
-                    )),
-                }
-            })
-            .await
-    }
-
-    pub async fn sync_output_schema_namespace_blocking(
-        &self,
-        namespace: &str,
-    ) -> Result<(), String> {
-        let ns = namespace.trim();
-        if ns.is_empty() {
-            return Err("namespace must not be empty".to_string());
-        }
-
-        let schema_plugin_name = self.get_pipeline_schema_plugin_name();
-        if schema_plugin_name.is_empty() {
-            debug!("Schema sync: no schema sink configured for primary output");
-            return Ok(());
-        }
-
-        let out_meta = crate::runtime_plugins::schema_state::published_output_metadata(ns)?
-            .ok_or_else(|| format!("Schema sync: namespace {ns} missing from metadata"))?;
-
-        let sync_timeout = std::time::Duration::from_secs(
-            Config::getenv("SCHEMA_SYNC_TIMEOUT_SECONDS", "120")
-                .parse::<u64>()
-                .unwrap_or(120),
-        );
-        let schema_version = Config::schema_publication_version(self, ns);
-        self.coordinate_primary_schema_sync(ns, schema_version, &out_meta, sync_timeout)
-            .await
     }
 
     pub async fn init(&self) {
@@ -3751,33 +2787,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn schema_sync_fails_closed_on_published_output_error() {
-        let src = include_str!("configuration.rs");
-        let prod = src.split("#[cfg(test)]").next().unwrap();
-        assert!(
-            prod.contains("error!(\"Schema sync: published output for {ns}: {err}\")"),
-            "background schema sync must fail closed on dest fold errors"
-        );
-        assert!(
-            !prod.contains("warn!(\"Schema sync: published output for {ns}: {err}\")"),
-            "must not warn-and-continue past dest fold errors"
-        );
-        let sync = prod
-            .split("Schema sync: published output")
-            .nth(1)
-            .expect("published output arm");
-        let arm = &sync[..sync.find("if let Some(out_meta)").unwrap_or(200)];
-        assert!(
-            arm.contains("break;"),
-            "coalesced schema sync must stop the batch on dest fold error"
-        );
-        assert!(
-            !arm.contains("continue;"),
-            "must not skip a dest fold error and publish the rest of the batch"
-        );
-    }
-
     const AUTHORED_YAML: &str = r#"
 skippr:
   workspace: ws
@@ -3793,14 +2802,6 @@ data_sources:
       s3_prefix: events/
       format: jsonl
 data_sinks:
-  iceberg:
-    AthenaIceberg:
-      warehouse: s3://lake/
-      glue_database_name: lake
-      athena_workgroup_name: primary
-      athena_results_s3_bucket: results
-    schema_sink: schema_sinks.iceberg
-schema_sinks:
   iceberg:
     AthenaIceberg:
       warehouse: s3://lake/
@@ -4059,7 +3060,6 @@ compute:
                         plugin_name: "File".into(),
                         config: json!({ "format": "csv" }),
                     },
-                    schema_sink: None,
                 },
             )]
             .into_iter()
@@ -4094,7 +3094,6 @@ compute:
                         plugin_name: "File".into(),
                         config: json!({ "format": "csv" }),
                     },
-                    schema_sink: None,
                 },
             )]
             .into_iter()
@@ -4108,7 +3107,6 @@ compute:
                         plugin_name: "File".into(),
                         config: json!({ "format": dl_format }),
                     },
-                    schema_sink: None,
                 },
             )]
             .into_iter()
@@ -4203,10 +3201,7 @@ compute:
         assert_eq!(reparsed, config);
         assert_eq!(reparsed.to_yaml_string().unwrap(), first);
         assert!(first.contains("flatten_events: true"), "{first}");
-        assert!(
-            first.contains("schema_sink: schema_sinks.iceberg"),
-            "{first}"
-        );
+        assert!(!first.contains("schema_sink"), "{first}");
         assert!(!first.contains("active_pipeline"));
         let mut many = config.clone();
         for name in ["zeta", "alpha", "mid"] {
@@ -4255,7 +3250,6 @@ compute:
             Registry::DataSources,
             Registry::DataSinks,
             Registry::DeadletterSinks,
-            Registry::SchemaSinks,
         ] {
             let reference = registry.reference("x");
             assert_eq!(
@@ -4315,7 +3309,6 @@ data_sources:
       path: /tmp/unused
 data_sinks:
   lake:
-    schema_sink: schema_sinks.lake
     Duckdb:
       warehouse: file:///tmp/lake
       table_namespace: main
@@ -4324,14 +3317,6 @@ data_sinks:
       user: u
       database: d
       password: ${UNRELATED_SECRET}
-schema_sinks:
-  lake:
-    Duckdb:
-      warehouse: file:///tmp/lake
-      table_namespace: main
-  glue:
-    Glue:
-      glue_database_name: g
 dbt:
   target_schema: ${UNRELATED_DBT}
 vector_sources:
@@ -4348,10 +3333,6 @@ vector_sources:
         );
         assert_eq!(
             scoped.data_sinks.unwrap().keys().collect::<Vec<_>>(),
-            ["lake"]
-        );
-        assert_eq!(
-            scoped.schema_sinks.unwrap().keys().collect::<Vec<_>>(),
             ["lake"]
         );
         assert!(scoped.deadletter_sinks.is_none());
@@ -4423,7 +3404,7 @@ vector_sources:
         assert!(checked > 10, "only {checked} config YAML files found");
     }
 
-    fn schema_sync_test_config(data_dir: &str) -> Config {
+    fn session_data_dir_config(data_dir: &str) -> Config {
         let config: Config = serde_json::from_value(serde_json::json!({
             "skippr": { "workspace": "quickstart" },
             "pipelines": {
@@ -4467,7 +3448,6 @@ vector_sources:
                     "table_namespace": namespace
                 }),
             },
-            schema_sink: None,
         }
     }
 
@@ -4524,16 +3504,6 @@ data_sources:
       path: /tmp/in
 data_sinks:
   lake:
-    schema_sink: schema_sinks.lake
-    SkipprLake:
-      version: "0.2.6"
-      warehouse: file:///tmp/w
-      catalog_table: cat
-      object_store:
-        type: file
-      table_namespace: bronze
-schema_sinks:
-  lake:
     SkipprLake:
       version: "0.2.6"
       warehouse: file:///tmp/w
@@ -4548,18 +3518,6 @@ schema_sinks:
     }
 
     #[test]
-    fn scoped_to_refuses_a_paired_schema_sink_that_does_not_decode() {
-        let config: Config = serde_yaml::from_str(
-            "pipelines:\n  p:\n    data_source: data_sources.src\n    data_sink: data_sinks.lake\ndata_sources:\n  src:\n    File:\n      path: /tmp/in\ndata_sinks:\n  lake:\n    schema_sink: schema_sinks.lake\n    Duckdb:\n      warehouse: file:///tmp/w\n      table_namespace: main\nschema_sinks:\n  lake:\n    Duckdb:\n      warehouse: file:///tmp/w\n",
-        )
-        .unwrap();
-        let err = config.scoped_to("p").unwrap_err();
-        assert!(err.contains("table_namespace"), "{err}");
-        let err = config.validate_pipeline_for_run("p").unwrap_err();
-        assert!(err.contains("table_namespace"), "{err}");
-    }
-
-    #[test]
     fn skipprlake_undecodable_config_is_a_violation() {
         let mut config = Config::new();
         config.data_sinks = Some(
@@ -4570,7 +3528,6 @@ schema_sinks:
                         plugin_name: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME.into(),
                         config: serde_json::json!({ "catalog_table": "cat" }),
                     },
-                    schema_sink: None,
                 },
             )]
             .into_iter()
@@ -4605,252 +3562,6 @@ schema_sinks:
         );
     }
 
-    fn lake_entry(warehouse: &str, namespace: &str) -> PluginConfigEntry {
-        PluginConfigEntry {
-            plugin_name: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME.into(),
-            config: serde_json::json!({
-                "catalog_table": "cat",
-                "warehouse": warehouse,
-                "table_namespace": namespace
-            }),
-        }
-    }
-
-    #[test]
-    fn skipprlake_schema_sink_must_match_data_sink_config() {
-        let data = lake_entry("file:///tmp/a", "bronze");
-        let schema = lake_entry("file:///tmp/b", "bronze");
-        let err = Config::inherit_schema_install_config(&data, schema).unwrap_err();
-        assert!(err.contains("must be equal"), "{err}");
-    }
-
-    #[test]
-    fn skipprlake_schema_sink_equal_config_is_ok() {
-        let data = lake_entry("file:///tmp/a", "bronze");
-        let schema = lake_entry("file:///tmp/a", "bronze");
-        assert!(Config::inherit_schema_install_config(&data, schema).is_ok());
-    }
-
-    #[test]
-    fn skipprlake_schema_sink_other_plugin_is_rejected() {
-        let data = lake_entry("file:///tmp/a", "bronze");
-        let schema = PluginConfigEntry {
-            plugin_name: "Athena".into(),
-            config: serde_json::json!({}),
-        };
-        let err = Config::inherit_schema_install_config(&data, schema).unwrap_err();
-        assert!(err.contains("must pair"), "{err}");
-    }
-
-    fn athena_iceberg_entry(warehouse: &str, database: &str) -> PluginConfigEntry {
-        PluginConfigEntry {
-            plugin_name: crate::plugins::cdc::sink_capabilities::ATHENA_ICEBERG
-                .name
-                .into(),
-            config: serde_json::json!({
-                "warehouse": warehouse,
-                "glue_database_name": database,
-                "athena_workgroup_name": "primary",
-                "athena_results_s3_bucket": "results"
-            }),
-        }
-    }
-
-    #[test]
-    fn athena_iceberg_schema_sink_must_match_data_sink_config() {
-        let data = athena_iceberg_entry("s3://a/", "analytics");
-        let schema = athena_iceberg_entry("s3://b/", "analytics");
-        let err = Config::inherit_schema_install_config(&data, schema).unwrap_err();
-        assert!(err.contains("must be equal"), "{err}");
-    }
-
-    #[test]
-    fn athena_iceberg_schema_sink_equal_config_is_ok() {
-        let data = athena_iceberg_entry("s3://a/", "analytics");
-        let schema = athena_iceberg_entry("s3://a/", "analytics");
-        assert!(Config::inherit_schema_install_config(&data, schema).is_ok());
-    }
-
-    #[test]
-    fn athena_iceberg_schema_sink_glue_hive_is_rejected() {
-        let data = athena_iceberg_entry("s3://a/", "analytics");
-        let schema = PluginConfigEntry {
-            plugin_name: "Glue".into(),
-            config: serde_json::json!({}),
-        };
-        let err = Config::inherit_schema_install_config(&data, schema).unwrap_err();
-        assert!(err.contains("AthenaIceberg"), "{err}");
-        assert!(err.contains("Glue"), "{err}");
-    }
-
-    #[test]
-    fn athena_iceberg_pairing_treats_omitted_optional_as_equal() {
-        let data = PluginConfigEntry {
-            plugin_name: crate::plugins::cdc::sink_capabilities::ATHENA_ICEBERG
-                .name
-                .into(),
-            config: serde_json::json!({
-                "warehouse": "s3://a/",
-                "glue_database_name": "analytics",
-                "athena_workgroup_name": "primary",
-                "athena_results_s3_bucket": "results"
-            }),
-        };
-        let schema = PluginConfigEntry {
-            plugin_name: crate::plugins::cdc::sink_capabilities::ATHENA_ICEBERG
-                .name
-                .into(),
-            config: serde_json::json!({
-                "warehouse": "s3://a/",
-                "glue_database_name": "analytics",
-                "athena_workgroup_name": "primary",
-                "athena_results_s3_bucket": "results",
-                "region": null,
-                "catalog_id": null
-            }),
-        };
-        assert!(Config::inherit_schema_install_config(&data, schema).is_ok());
-    }
-
-    #[test]
-    fn skipprlake_deadletter_schema_sink_must_match_at_load() {
-        let config = serde_json::from_value::<Config>(json!({
-            "skippr": { "workspace": "ws" },
-            "pipelines": {
-                "orders": {
-                    "data_source": "data_sources.sample",
-                    "deadletter_sink": "deadletter_sinks.dl"
-                }
-            },
-            "data_sources": {
-                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
-            },
-            "deadletter_sinks": {
-                "dl": {
-                    "SkipprLake": {
-                        "catalog_table": "cat",
-                        "warehouse": "file:///tmp/a",
-                        "object_store": { "type": "file" },
-                        "table_namespace": "bronze"
-                    },
-                    "schema_sink": "schema_sinks.dl_schema"
-                }
-            },
-            "schema_sinks": {
-                "dl_schema": {
-                    "SkipprLake": {
-                        "catalog_table": "cat",
-                        "warehouse": "file:///tmp/b",
-                        "object_store": { "type": "file" },
-                        "table_namespace": "bronze"
-                    }
-                }
-            }
-        }))
-        .unwrap()
-        .bind_pipeline("orders");
-        let violations = config.get_config_dependency_violations();
-        assert_eq!(
-            violations
-                .iter()
-                .filter(|v| v.contains("must be equal"))
-                .count(),
-            1,
-            "{violations:?}"
-        );
-    }
-
-    #[test]
-    fn a_pair_that_does_not_decode_is_reported_once_against_the_entry_that_failed() {
-        let parse = |yaml: &str| -> Vec<String> {
-            serde_yaml::from_str::<Config>(yaml)
-                .unwrap()
-                .whole_config_violations()
-        };
-        let head = "data_sinks:\n  d:\n    schema_sink: schema_sinks.s\n    Duckdb:\n";
-        let schema = "schema_sinks:\n  s:\n    Duckdb:\n";
-        let violations = parse(&format!(
-            "{head}      warehouse: file:///tmp/w\n      table_namespace: a\n{schema}      table_namespace: a\n"
-        ));
-        assert_eq!(violations.len(), 1, "{violations:?}");
-        assert!(
-            violations[0].starts_with("schema_sinks.s: "),
-            "{violations:?}"
-        );
-        assert!(violations[0].contains("warehouse"), "{violations:?}");
-
-        let violations = parse(&format!(
-            "{head}      warehouse: /tmp/w\n      table_namespace: a\n{schema}      warehouse: /tmp/w\n      table_namespace: a\n"
-        ));
-        let data_sink = violations
-            .iter()
-            .filter(|v| v.contains("'d'") || v.starts_with("data_sinks.d"))
-            .count();
-        assert_eq!(data_sink, 1, "{violations:?}");
-    }
-
-    #[test]
-    fn athena_iceberg_schema_sink_must_match_at_load() {
-        let config = serde_json::from_value::<Config>(json!({
-            "skippr": { "workspace": "ws" },
-            "pipelines": {
-                "orders": {
-                    "data_source": "data_sources.sample",
-                    "data_sink": "data_sinks.warehouse"
-                }
-            },
-            "data_sources": {
-                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
-            },
-            "data_sinks": {
-                "warehouse": {
-                    "AthenaIceberg": {
-                        "warehouse": "s3://a/",
-                        "glue_database_name": "analytics",
-                        "athena_workgroup_name": "primary",
-                        "athena_results_s3_bucket": "results"
-                    },
-                    "schema_sink": "schema_sinks.catalog"
-                }
-            },
-            "schema_sinks": {
-                "catalog": {
-                    "Glue": {
-                        "glue_database_name": "analytics"
-                    }
-                }
-            }
-        }))
-        .unwrap()
-        .bind_pipeline("orders");
-        let violations = config.get_config_dependency_violations();
-        assert_eq!(
-            violations
-                .iter()
-                .filter(|v| v.contains("AthenaIceberg") && v.contains("Glue"))
-                .count(),
-            1,
-            "{violations:?}"
-        );
-    }
-
-    #[test]
-    fn athena_iceberg_pairing_cannot_name_file_object_store() {
-        let err = serde_json::from_value::<AthenaIcebergPairing>(json!({
-            "warehouse": "s3://a/",
-            "glue_database_name": "analytics",
-            "athena_workgroup_name": "primary",
-            "athena_results_s3_bucket": "results",
-            "object_store": { "type": "file" }
-        }))
-        .unwrap_err()
-        .to_string();
-        assert!(
-            err.contains("unknown variant") || err.contains("file"),
-            "{err}"
-        );
-    }
-
     fn duckdb_entry(warehouse: &str, namespace: &str) -> PluginConfigEntry {
         PluginConfigEntry {
             plugin_name: crate::plugins::cdc::sink_capabilities::DUCKDB.name.into(),
@@ -4861,49 +3572,12 @@ schema_sinks:
         }
     }
 
-    #[test]
-    fn duckdb_schema_sink_must_match_data_sink_config() {
-        let data = duckdb_entry("file:///tmp/a", "bronze");
-        let schema = duckdb_entry("file:///tmp/b", "bronze");
-        let err = Config::inherit_schema_install_config(&data, schema).unwrap_err();
-        assert!(err.contains("must be equal"), "{err}");
-    }
-
-    #[test]
-    fn duckdb_schema_sink_equal_config_is_ok() {
-        let data = duckdb_entry("file:///tmp/a", "bronze");
-        let schema = duckdb_entry("file:///tmp/a", "bronze");
-        assert!(Config::inherit_schema_install_config(&data, schema).is_ok());
-    }
-
-    #[test]
-    fn duckdb_schema_sink_equal_after_warehouse_trim() {
-        let data = duckdb_entry("file:///tmp/a", "bronze");
-        let schema = duckdb_entry("file:///tmp/a/", "bronze");
-        assert!(Config::inherit_schema_install_config(&data, schema).is_ok());
-        let padded = duckdb_entry("  file:///tmp/a  ", "bronze");
-        assert!(Config::inherit_schema_install_config(&data, padded).is_ok());
-    }
-
-    #[test]
-    fn duckdb_schema_sink_other_plugin_is_rejected() {
-        let data = duckdb_entry("file:///tmp/a", "bronze");
-        let schema = PluginConfigEntry {
-            plugin_name: "Athena".into(),
-            config: serde_json::json!({}),
-        };
-        let err = Config::inherit_schema_install_config(&data, schema).unwrap_err();
-        assert!(err.contains("Duckdb"), "{err}");
-        assert!(err.contains("Athena"), "{err}");
-    }
-
     fn duckdb_sink(
         warehouse: &str,
         namespace: &str,
     ) -> crate::helpers::plugin_config::DataSinkEntry {
         crate::helpers::plugin_config::DataSinkEntry {
             config: duckdb_entry(warehouse, namespace),
-            schema_sink: None,
         }
     }
 
@@ -4961,255 +3635,16 @@ schema_sinks:
     }
 
     #[test]
-    fn duckdb_schema_sink_must_match_at_load() {
-        let config = serde_json::from_value::<Config>(json!({
-            "skippr": { "workspace": "ws" },
-            "pipelines": {
-                "orders": {
-                    "data_source": "data_sources.sample",
-                    "data_sink": "data_sinks.warehouse"
-                }
-            },
-            "data_sources": {
-                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
-            },
-            "data_sinks": {
-                "warehouse": {
-                    "Duckdb": {
-                        "warehouse": "file:///tmp/a",
-                        "table_namespace": "bronze"
-                    },
-                    "schema_sink": "schema_sinks.catalog"
-                }
-            },
-            "schema_sinks": {
-                "catalog": {
-                    "Glue": {
-                        "glue_database_name": "analytics"
-                    }
-                }
-            }
-        }))
-        .unwrap()
-        .bind_pipeline("orders");
-        let violations = config.get_config_dependency_violations();
-        assert!(
-            violations
-                .iter()
-                .any(|v| v.contains("Duckdb") && v.contains("Glue")),
-            "{violations:?}"
-        );
-    }
-
-    #[test]
-    fn schema_sync_worker_does_not_freeze_first_caller_config() {
-        let src = include_str!("configuration.rs");
-        let (head, worker_and_rest) = src
-            .split_once("fn ensure_schema_sync_worker")
-            .expect("ensure_schema_sync_worker");
-        let worker = worker_and_rest
-            .split("pub fn drain_schema_sync_worker")
-            .next()
-            .unwrap();
-        assert!(
-            !worker.contains("let this = self.clone()"),
-            "schema sync worker must not capture the first caller's Config"
-        );
-        let request_struct = head
-            .split("struct SchemaPublicationRequest")
-            .nth(1)
-            .unwrap()
-            .split('}')
-            .next()
-            .unwrap();
-        assert!(
-            request_struct.contains("config: Config"),
-            "SchemaPublicationRequest must carry the caller's Config"
-        );
-        assert!(
-            worker.contains("request.config"),
-            "schema sync worker must apply the request's Config, not a spawn freeze"
-        );
-    }
-
-    #[test]
-    fn get_metadata_loads_schema_from_reader_pin() {
-        let src = include_str!("configuration.rs");
-        let start = src.find("pub async fn get_metadata").expect("get_metadata");
-        let body = src[start..]
-            .split("fn pipeline_metadata_object_path")
-            .next()
-            .expect("get_metadata body");
-        assert!(
-            body.contains("FjallReadStore::open"),
-            "query schema load must pin a reader snapshot without writer.lock"
-        );
-        assert!(
-            body.contains("live_kv_for"),
-            "in-process ingest still loads schema from this pipeline's live writer"
-        );
-    }
-
-    #[test]
-    fn primary_schema_scope_isolates_session_data_dir() {
-        let a = schema_sync_test_config("/tmp/skipprd-schema-a");
-        let b = schema_sync_test_config("/tmp/skipprd-schema-b");
+    fn primary_data_scope_isolates_session_data_dir() {
+        let a = session_data_dir_config("/tmp/skipprd-schema-a");
+        let b = session_data_dir_config("/tmp/skipprd-schema-b");
         assert_ne!(
-            a.primary_schema_scope(),
-            b.primary_schema_scope(),
-            "two Sessions with different data_dirs must not share a schema-sync scope"
+            a.primary_data_scope(),
+            b.primary_data_scope(),
+            "two Sessions with different data_dirs must not share a data-plugin scope"
         );
-        assert!(a.primary_schema_scope().contains("/tmp/skipprd-schema-a"));
-        assert!(b.primary_schema_scope().contains("/tmp/skipprd-schema-b"));
-    }
-
-    #[test]
-    fn schema_sync_request_drain_coalesces_duplicate_namespaces() {
-        let config = schema_sync_test_config("/tmp/skipprd-schema-a");
-        let (tx, mut rx) = unbounded_channel();
-        tx.send(SchemaPublicationRequest {
-            namespace: "events".to_string(),
-            version: 1,
-            config: config.clone(),
-        })
-        .unwrap();
-        tx.send(SchemaPublicationRequest {
-            namespace: "events".to_string(),
-            version: 2,
-            config: config.clone(),
-        })
-        .unwrap();
-        tx.send(SchemaPublicationRequest {
-            namespace: "users".to_string(),
-            version: 1,
-            config: config.clone(),
-        })
-        .unwrap();
-
-        let mut dirty = HashMap::new();
-        let closed = Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
-
-        assert!(!closed);
-        assert_eq!(dirty.len(), 2);
-        let events = dirty
-            .values()
-            .find(|request| request.namespace == "events")
-            .unwrap();
-        let users = dirty
-            .values()
-            .find(|request| request.namespace == "users")
-            .unwrap();
-        assert_eq!(events.version, 2);
-        assert_eq!(users.version, 1);
-        assert_eq!(
-            events.config.get_pipeline_data_dir(),
-            "/tmp/skipprd-schema-a"
-        );
-    }
-
-    #[test]
-    fn schema_sync_request_drain_keeps_two_session_configs() {
-        let a = schema_sync_test_config("/tmp/skipprd-schema-a");
-        let b = schema_sync_test_config("/tmp/skipprd-schema-b");
-        let (tx, mut rx) = unbounded_channel();
-        tx.send(SchemaPublicationRequest {
-            namespace: "events".to_string(),
-            version: 1,
-            config: a,
-        })
-        .unwrap();
-        tx.send(SchemaPublicationRequest {
-            namespace: "events".to_string(),
-            version: 1,
-            config: b,
-        })
-        .unwrap();
-
-        let mut dirty = HashMap::new();
-        let closed = Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
-
-        assert!(!closed);
-        assert_eq!(dirty.len(), 2);
-        let mut dirs: Vec<String> = dirty
-            .values()
-            .map(|request| request.config.get_pipeline_data_dir())
-            .collect();
-        dirs.sort();
-        assert_eq!(
-            dirs,
-            vec![
-                "/tmp/skipprd-schema-a".to_string(),
-                "/tmp/skipprd-schema-b".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn schema_sync_request_drain_flushes_when_sender_closes() {
-        let config = schema_sync_test_config("/tmp/skipprd-schema-a");
-        let (tx, mut rx) = unbounded_channel();
-        tx.send(SchemaPublicationRequest {
-            namespace: "events".to_string(),
-            version: 1,
-            config: config.clone(),
-        })
-        .unwrap();
-        tx.send(SchemaPublicationRequest {
-            namespace: "events".to_string(),
-            version: 1,
-            config,
-        })
-        .unwrap();
-        drop(tx);
-
-        let mut dirty = HashMap::new();
-        let closed = Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
-
-        assert!(closed);
-        assert_eq!(dirty.len(), 1);
-        let events = dirty
-            .values()
-            .find(|request| request.namespace == "events")
-            .unwrap();
-        assert_eq!(events.version, 1);
-    }
-
-    #[tokio::test]
-    async fn schema_sync_drain_skips_debounce_when_the_channel_closes() {
-        let (tx, mut rx) = unbounded_channel::<SchemaPublicationRequest>();
-        let mut dirty = HashMap::new();
-        drop(tx);
-        let closed = tokio::time::timeout(
-            std::time::Duration::from_millis(80),
-            Config::schema_sync_debounce_or_closed(
-                &mut rx,
-                &mut dirty,
-                std::time::Duration::from_millis(400),
-            ),
-        )
-        .await
-        .expect("closing the schema sync channel must skip the 400ms debounce");
-        assert!(closed);
-        assert!(dirty.is_empty());
-    }
-
-    #[test]
-    #[serial]
-    fn schema_sync_drain_timeout_is_env_configurable() {
-        let original = std::env::var("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS").ok();
-        ENV_CACHE.write().clear();
-        std::env::set_var("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", "7");
-
-        assert_eq!(
-            Config::new().schema_sync_drain_timeout(),
-            std::time::Duration::from_secs(7)
-        );
-
-        match original {
-            Some(value) => std::env::set_var("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", value),
-            None => std::env::remove_var("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS"),
-        }
-        ENV_CACHE.write().clear();
+        assert!(a.primary_data_scope().contains("/tmp/skipprd-schema-a"));
+        assert!(b.primary_data_scope().contains("/tmp/skipprd-schema-b"));
     }
 
     #[test]
@@ -5427,7 +3862,7 @@ pipelines: {}
     }
 
     #[test]
-    fn schema_sink_belongs_on_the_data_sink_not_the_pipeline() {
+    fn schema_sink_on_the_pipeline_is_unknown() {
         let err = serde_yaml::from_str::<Config>(
             r#"
 pipelines:
@@ -5440,6 +3875,21 @@ pipelines:
         .unwrap_err()
         .to_string();
         assert!(err.contains("unknown field `schema_sink`"), "{err}");
+    }
+
+    #[test]
+    fn schema_sinks_is_unknown() {
+        let err = serde_yaml::from_str::<Config>(
+            "pipelines: {}
+schema_sinks:
+  g:
+    Glue:
+      glue_database_name: g
+",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown field `schema_sinks`"), "{err}");
     }
 
     #[test]
@@ -5771,29 +4221,19 @@ data_sources:
       s3_prefix: input/
 data_sinks:
   output:
-    schema_sink: schema_sinks.output_schema
     Athena:
       version: 2.3.4
       athena_workgroup_name: bikehire
       s3_bucket: output-bucket
       athena_results_s3_bucket: output-bucket
       s3_prefix: bikehire
+      glue_database_name: datalake
 deadletter_sinks:
   deadletters:
-    schema_sink: schema_sinks.deadletter_schema
     S3:
       version: 4.5.6
       s3_bucket: deadletters-bucket
       s3_prefix: deadletters/
-schema_sinks:
-  output_schema:
-    Glue:
-      version: 3.4.5
-      glue_database_name: datalake
-  deadletter_schema:
-    Glue:
-      version: 5.6.7
-      glue_database_name: deadletters
 "#,
         )
         .unwrap();
@@ -5817,26 +4257,10 @@ schema_sinks:
         assert_eq!(
             config
                 .bind_pipeline("bike_hire")
-                .get_pipeline_schema_plugin_version()
-                .unwrap()
-                .as_deref(),
-            Some("3.4.5")
-        );
-        assert_eq!(
-            config
-                .bind_pipeline("bike_hire")
                 .get_pipeline_deadletter_plugin_version()
                 .unwrap()
                 .as_deref(),
             Some("4.5.6")
-        );
-        assert_eq!(
-            config
-                .bind_pipeline("bike_hire")
-                .get_pipeline_deadletter_schema_plugin_version()
-                .unwrap()
-                .as_deref(),
-            Some("5.6.7")
         );
 
         ENV_CACHE.write().clear();
@@ -5901,7 +4325,7 @@ schema_sinks:
     }
 
     #[test]
-    fn platform_otel_cookbook_schema_sink_sibling_yaml_parses() {
+    fn platform_otel_cookbook_yaml_parses() {
         let yaml = include_str!("../../examples/otel/skippr.yml");
         let config = parse_skippr_yml_like_skipprd(yaml).expect("cookbook skippr.yml must parse");
         let lake = config
@@ -5909,10 +4333,7 @@ schema_sinks:
             .as_ref()
             .and_then(|sinks| sinks.get("lake"))
             .expect("data_sinks.lake");
-        assert_eq!(
-            lake.schema_sink.as_deref(),
-            Some("schema_sinks.lake_schema")
-        );
+        assert_eq!(lake.config.plugin_name, "SkipprLake");
     }
 
     #[test]

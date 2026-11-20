@@ -22,20 +22,18 @@ from runtime_plugin_catalog import RUNTIME_PROTOCOL_VERSION_RE  # noqa: E402
 
 
 KIND_LINE_RE = re.compile(r"^([ \t]*)(File|S3|SkipprLake):\s*$")
-SECTION_RE = re.compile(r"^([ \t]*)(data_sources|data_sinks|schema_sinks):\s*$")
+SECTION_RE = re.compile(r"^([ \t]*)(data_sources|data_sinks):\s*$")
 PACKAGE_VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"\s*$')
-PIN_KEYS = ("File", "S3", "SkipprLake", "SkipprLakeSchema")
+PIN_KEYS = ("File", "S3", "SkipprLake")
 COMPAT_MANIFESTS = {
     "file": Path("plugins/data_source/file/Cargo.toml"),
     "s3": Path("plugins/data_source/s3/Cargo.toml"),
     "skipprlake": Path("plugins/data_sink/skipprlake/Cargo.toml"),
-    "skipprlake-schema": Path("plugins/schema_sink/skipprlake/Cargo.toml"),
 }
 YAML_PIN_FROM_CRATE = {
     "file": "File",
     "s3": "S3",
     "skipprlake": "SkipprLake",
-    "skipprlake-schema": "SkipprLakeSchema",
 }
 
 
@@ -93,10 +91,7 @@ def pin_runtime_plugin_versions(text: str, pins: dict[str, str]) -> str:
             continue
         kind = kind_match.group(2)
         indent = kind_match.group(1)
-        if kind == "SkipprLake" and section == "schema_sinks":
-            version = pins.get("SkipprLakeSchema") or pins.get("SkipprLake")
-        else:
-            version = pins.get(kind)
+        version = pins.get(kind)
         if not version:
             continue
         field_indent = indent + "  "

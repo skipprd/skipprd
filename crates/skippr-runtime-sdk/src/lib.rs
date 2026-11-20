@@ -19,15 +19,7 @@ pub use skippr_plugin_macros::SkipprConfig;
 
 #[macro_export]
 macro_rules! declare_sink_spec {
-    ($spec:ident, $plugin:ty, $capability:path, $support:ty) => {
-        $crate::declare_sink_spec!($spec, $capability, $support);
-
-        impl $crate::plugins::HasSinkSpec for $plugin {
-            type Spec = $spec;
-        }
-    };
-    // Spec only: for plugins whose writer type already implements `HasSinkSpec<Spec = S>`.
-    ($spec:ident, $capability:path, $support:ty) => {
+    (@spec $spec:ident, $capability:path, $support:ty, $alter:expr) => {
         const _: () = {
             assert!(!$capability.grouping_support.is_none());
             assert!($capability
@@ -57,30 +49,38 @@ macro_rules! declare_sink_spec {
             const NAME: &'static str = $capability.name;
             const CAPABILITY: $crate::plugins::cdc::SinkCapability = $capability;
             type WriteSupport = $support;
+            const ALTER_SUPPORT: $crate::plugins::AlterSupport = $alter;
         }
     };
-}
+    ($spec:ident, $plugin:ty, $capability:path, $support:ty) => {
+        $crate::declare_sink_spec!(
+            @spec $spec,
+            $capability,
+            $support,
+            $crate::plugins::AlterSupport::Unsupported
+        );
 
-#[macro_export]
-macro_rules! declare_schema_sink_spec {
-    ($spec:ident, $plugin:ty, $name:expr) => {
-        $crate::declare_schema_sink_spec!(
-            $spec,
-            $plugin,
-            $name,
+        impl $crate::plugins::HasSinkSpec for $plugin {
+            type Spec = $spec;
+        }
+    };
+    ($spec:ident, $plugin:ty, $capability:path, $support:ty, $alter:expr) => {
+        $crate::declare_sink_spec!(@spec $spec, $capability, $support, $alter);
+
+        impl $crate::plugins::HasSinkSpec for $plugin {
+            type Spec = $spec;
+        }
+    };
+    // Spec only: for plugins whose writer type already implements `HasSinkSpec<Spec = S>`.
+    ($spec:ident, $capability:path, $support:ty) => {
+        $crate::declare_sink_spec!(
+            @spec $spec,
+            $capability,
+            $support,
             $crate::plugins::AlterSupport::Unsupported
         );
     };
-    ($spec:ident, $plugin:ty, $name:expr, $alter:expr) => {
-        pub struct $spec;
-
-        impl $crate::plugins::SchemaSinkSpec for $spec {
-            const NAME: &'static str = $name;
-            const ALTER_SUPPORT: $crate::plugins::AlterSupport = $alter;
-        }
-
-        impl $crate::plugins::HasSchemaSinkSpec for $plugin {
-            type Spec = $spec;
-        }
+    ($spec:ident, $capability:path, $support:ty, alter = $alter:expr) => {
+        $crate::declare_sink_spec!(@spec $spec, $capability, $support, $alter);
     };
 }

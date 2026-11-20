@@ -1,11 +1,9 @@
 skippr:
   skippr_s3_bucket: skippr-e2e-sample-data-output
   workspace: test
-
 pipelines:
-
   deadletters_test:
-    auto_approve: yes
+    auto_approve: true
     env: test
     buffer_threshold_bytes: 20000000
     buffer_threshold_seconds: 600
@@ -15,14 +13,12 @@ pipelines:
     data_source: data_sources.s3_deadletters_test
     data_sink: data_sinks.test_datalake
     deadletter_sink: deadletter_sinks.test_deadletters
-
 data_sources:
   s3_deadletters_test:
     S3:
       batch_size_bytes: 2048000
       s3_bucket: skippr-e2e-sample-data
       s3_prefix: deadletters/
-
 data_sinks:
   test_datalake:
     Athena:
@@ -30,8 +26,7 @@ data_sinks:
       s3_bucket: skippr-e2e-sample-data-output
       athena_results_s3_bucket: skippr-e2e-sample-data-output
       s3_prefix: deadletters
-    schema_sink: schema_sinks.glue_bikehire
-
+      glue_database_name: bikehire
 deadletter_sinks:
   test_deadletters:
     Athena:
@@ -39,12 +34,4 @@ deadletter_sinks:
       s3_bucket: skippr-e2e-sample-data-output
       athena_results_s3_bucket: skippr-e2e-sample-data-output
       s3_prefix: deadletters-archive
-    schema_sink: schema_sinks.glue_deadletters
-
-schema_sinks:
-  glue_bikehire:
-    Glue:
-      glue_database_name: bikehire
-  glue_deadletters:
-    Glue:
       glue_database_name: deadletters

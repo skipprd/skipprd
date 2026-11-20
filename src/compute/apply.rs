@@ -1,6 +1,8 @@
 //! Writer CREATE / DROP / ALTER of declared compute. Reader processes fail closed, like ALTER.
 
-use skippr_wal_catalog::{CatalogFence, KvOp, SkipprStore, StoreFamily};
+use std::sync::Arc;
+
+use skippr_wal_catalog::{CatalogFence, KvOp, SkipprStore, SkipprStoreRead, StoreFamily};
 
 use crate::discover::PipelineMetadata;
 use crate::helpers::configuration::{ComputeItem, Config, SdlDerive, SdlDoc, SdlMeasure};
@@ -967,7 +969,7 @@ fn collect_fields(
 }
 
 pub fn stateless_for_namespace(
-    store: &dyn skippr_wal_catalog::SkipprStoreRead,
+    store: &dyn SkipprStoreRead,
     workspace: &str,
     pipeline: &str,
     namespace: &str,
@@ -982,6 +984,48 @@ pub fn stateless_for_namespace(
         } if ns.as_str() == namespace => Some(select),
         _ => None,
     }))
+}
+
+/// Stateless SELECT for dest publish: live writer first, then the on-disk journal.
+pub fn published_stateless_select(
+    config: &Config,
+    namespace: &str,
+) -> Result<Option<StatelessSelect>, ComputeApplyError> {
+    let workspace = config.get_workspace_name();
+    let pipeline = config.get_pipeline_name();
+    if workspace.is_empty() || pipeline.is_empty() {
+        return Ok(None);
+    }
+    let Some(store) = journal_store_read(config)? else {
+        return Ok(None);
+    };
+    stateless_for_namespace(store.as_ref(), &workspace, &pipeline, namespace)
+}
+
+fn journal_store_read(
+    config: &Config,
+) -> Result<Option<Arc<dyn SkipprStoreRead>>, ComputeApplyError> {
+    let dir = journal_store_dir(config);
+    if let Some((kv, _)) = crate::helpers::offsets::live_kv_for(&dir) {
+        return Ok(Some(kv));
+    }
+    if !std::path::Path::new(&dir).exists() {
+        return Ok(None);
+    }
+    skippr_wal_catalog::FjallReadStore::open(&dir)
+        .map(|store| Some(Arc::new(store) as Arc<dyn SkipprStoreRead>))
+        .map_err(|err| ComputeApplyError::Message(err.to_string()))
+}
+
+fn journal_store_dir(config: &Config) -> String {
+    let mut data_dir = config.get_pipeline_data_dir();
+    if data_dir.ends_with('/') {
+        data_dir.pop();
+    }
+    if !Config::truth_value(&Config::getenv("SKIPPR_PIPELINE_DATA_ROOT", "false")) {
+        data_dir = format!("{}/{}", data_dir, config.get_full_namespace_name());
+    }
+    format!("{data_dir}/skippr-store")
 }
 
 fn event_time_col(
@@ -1201,5 +1245,11 @@ mod tests {
             },
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn published_stateless_select_skips_empty_journal_identity() {
+        let config = Config::new();
+        assert_eq!(published_stateless_select(&config, "events").unwrap(), None);
     }
 }

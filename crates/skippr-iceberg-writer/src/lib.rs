@@ -23,7 +23,7 @@ use arrow::array::{
     TimestampSecondArray, UInt32Array,
 };
 use arrow::compute::{filter_record_batch, take};
-use arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema, SchemaRef};
+use arrow::datatypes::{Schema as ArrowSchema, SchemaRef};
 use arrow::util::display::array_value_to_string;
 use async_trait::async_trait;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
@@ -40,7 +40,8 @@ use futures::StreamExt;
 use futures::TryStreamExt;
 use iceberg::spec::{
     DataContentType, DataFileBuilder, DataFileFormat, Datum, ListType, Literal, MapType,
-    NestedField, PartitionField, PrimitiveLiteral, PrimitiveType, Schema, Struct, Transform, Type,
+    NestedField, PartitionField, PrimitiveLiteral, PrimitiveType, Schema, Struct, StructType,
+    Transform, Type,
 };
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
 use iceberg::transform::create_transform_function;
@@ -138,14 +139,15 @@ fn committed_merge(
     }
 }
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
+use skippr_runtime_sdk::plugins::alter_ddl::InstalledDestSchema;
 use skippr_runtime_sdk::plugins::cdc::EffectiveGuarantee;
 use skippr_runtime_sdk::plugins::source_contract::{
     ensure_source_contract_for_policy, namespace_source_contract, validate_write_policy_for_sink,
     FieldPath, SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
 };
 use skippr_runtime_sdk::plugins::{
-    AlterSupport, DataSink, SchemaSink, SinkCallResult, SinkPreflightOutcome, SinkSpec,
-    SinkWriteContext, SinkWriteOutcome,
+    AlterSupport, DataSink, SinkCallResult, SinkPreflightOutcome, SinkSpec, SinkWriteContext,
+    SinkWriteOutcome,
 };
 use skippr_runtime_sdk::protocol::{
     RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState, SchemaDelta, SinkWriteStats,
@@ -165,66 +167,6 @@ pub struct IcebergWriterConfig {
     pub location_root: String,
 }
 
-#[derive(Default)]
-struct InstalledIcebergSchemaState {
-    installed: bool,
-    version: u64,
-    namespaces: BTreeMap<String, OutputMetadata>,
-    namespace_versions: BTreeMap<String, u64>,
-}
-
-impl InstalledIcebergSchemaState {
-    fn install(
-        &mut self,
-        schema_version: u64,
-        namespaces: &BTreeMap<String, OutputMetadata>,
-    ) -> bool {
-        if self.installed && schema_version <= self.version {
-            return false;
-        }
-        self.installed = true;
-        self.version = schema_version;
-        self.namespaces = namespaces.clone();
-        self.namespace_versions = namespaces
-            .keys()
-            .map(|namespace| (namespace.clone(), schema_version))
-            .collect();
-        true
-    }
-
-    fn install_snapshot(&mut self, schema_state: &RuntimeSchemaState) -> bool {
-        if self.installed && schema_state.version <= self.version {
-            return false;
-        }
-        self.installed = true;
-        self.version = schema_state.version;
-        self.namespaces = schema_state.namespaces.clone();
-        self.namespace_versions = schema_state.namespace_versions.clone();
-        true
-    }
-
-    fn install_delta(&mut self, delta: &SchemaDelta) -> Vec<String> {
-        let mut changed = Vec::new();
-        for (namespace, entry) in &delta.namespaces {
-            if self
-                .namespace_versions
-                .get(namespace)
-                .is_some_and(|installed| *installed >= entry.version)
-            {
-                continue;
-            }
-            self.namespaces
-                .insert(namespace.clone(), entry.metadata.clone());
-            self.namespace_versions
-                .insert(namespace.clone(), entry.version);
-            changed.push(namespace.clone());
-        }
-        self.installed = true;
-        self.version = self.version.max(delta.version);
-        changed
-    }
-}
-
 #[derive(Clone)]
 struct CachedIcebergTable {
     schema_version: u64,
@@ -238,7 +180,7 @@ pub struct IcebergWriter<S: SinkSpec> {
     buffer_name: String,
     config: IcebergWriterConfig,
     s3_client: S3Client,
-    schema_state: RwLock<InstalledIcebergSchemaState>,
+    schema_state: RwLock<InstalledDestSchema>,
     catalog: Arc<dyn Catalog>,
     table_cache: RwLock<HashMap<String, CachedIcebergTable>>,
     table_lanes: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -507,19 +449,6 @@ impl ObjectWriteBackend for S3ObjectWriteBackend {
 
 impl<S: SinkSpec> skippr_runtime_sdk::plugins::HasSinkSpec for IcebergWriter<S> {
     type Spec = S;
-}
-
-/// The schema sink for sink spec `S` carries the same plugin name.
-pub struct IcebergSchemaSpec<S>(PhantomData<fn() -> S>);
-
-impl<S: SinkSpec> skippr_runtime_sdk::plugins::SchemaSinkSpec for IcebergSchemaSpec<S> {
-    const NAME: &'static str = S::NAME;
-    const ALTER_SUPPORT: skippr_runtime_sdk::plugins::AlterSupport =
-        skippr_runtime_sdk::plugins::AlterSupport::Iceberg;
-}
-
-impl<S: SinkSpec> skippr_runtime_sdk::plugins::HasSchemaSinkSpec for IcebergWriter<S> {
-    type Spec = IcebergSchemaSpec<S>;
 }
 
 #[async_trait]
@@ -806,8 +735,8 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
     ) -> Result<(), io::Error> {
         let invalidate = {
             let mut guard = self.schema_state.write().await;
-            let previous_version = guard.version;
-            if !guard.install(schema_version, namespaces) {
+            let previous_version = guard.version();
+            if !guard.install_state(schema_version, namespaces) {
                 return Ok(());
             }
             schema_version_invalidates_table_cache(previous_version, schema_version)
@@ -842,10 +771,7 @@ impl<S: SinkSpec> DataSink for IcebergWriter<S> {
         }
         Ok(())
     }
-}
 
-#[async_trait]
-impl<S: SinkSpec> SchemaSink for IcebergWriter<S> {
     fn alter_support(&self) -> AlterSupport {
         AlterSupport::Iceberg
     }
@@ -943,33 +869,6 @@ impl<S: SinkSpec> SchemaSink for IcebergWriter<S> {
         self.table_cache.write().await.remove(namespace);
         Ok(())
     }
-
-    async fn sync_schema(
-        &self,
-        namespace: &str,
-        metadata: &OutputMetadata,
-    ) -> Result<(), io::Error> {
-        let catalog = Arc::clone(&self.catalog);
-        let table = self
-            .ensure_table(catalog.as_ref(), namespace, metadata)
-            .await?;
-        let schema_version = self
-            .schema_state
-            .read()
-            .await
-            .namespace_versions
-            .get(namespace)
-            .copied()
-            .unwrap_or(0);
-        self.table_cache.write().await.insert(
-            namespace.to_string(),
-            CachedIcebergTable {
-                schema_version,
-                table,
-            },
-        );
-        Ok(())
-    }
 }
 
 impl<S: SinkSpec> IcebergWriter<S> {
@@ -990,7 +889,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
             buffer_name,
             config,
             s3_client,
-            schema_state: RwLock::new(InstalledIcebergSchemaState::default()),
+            schema_state: RwLock::new(InstalledDestSchema::default()),
             catalog,
             table_cache: RwLock::new(HashMap::new()),
             table_lanes: Mutex::new(HashMap::new()),
@@ -1025,19 +924,18 @@ impl<S: SinkSpec> IcebergWriter<S> {
         namespace: &str,
         metadata: &OutputMetadata,
     ) -> Result<Schema, io::Error> {
-        let promote = time_partition::numeric_time_fields_to_promote(
+        iceberg_schema_from_output_metadata(
+            namespace,
             metadata,
-            &self.context.output_layout,
-            self.is_deadletter_target(namespace),
-        );
-        iceberg_schema_from_output_metadata(namespace, metadata, &promote)
+            S::CAPABILITY.can_manage_skippr_columns,
+        )
     }
 
-    fn assert_partition_spec_matches(
+    fn live_spec_matches(
         &self,
         table: &iceberg::table::Table,
         namespace: &str,
-    ) -> Result<(), io::Error> {
+    ) -> Result<bool, io::Error> {
         let live_fields: Vec<(i32, Transform)> = table
             .metadata()
             .default_partition_spec()
@@ -1045,15 +943,12 @@ impl<S: SinkSpec> IcebergWriter<S> {
             .iter()
             .map(|field| (field.source_id, field.transform))
             .collect();
-        if !time_partition::live_spec_matches_layout(
+        time_partition::live_spec_matches_layout(
             table.metadata().current_schema(),
             &live_fields,
             &self.context.output_layout,
             self.is_deadletter_target(namespace),
-        )? {
-            return Err(time_partition::spec_mismatch_error());
-        }
-        Ok(())
+        )
     }
 
     fn stamp_time_partition_for(
@@ -1076,24 +971,10 @@ impl<S: SinkSpec> IcebergWriter<S> {
         &self,
         namespace: &str,
     ) -> Result<(u64, OutputMetadata), io::Error> {
-        let guard = self.schema_state.read().await;
-        let metadata = guard.namespaces.get(namespace).cloned().ok_or_else(|| {
-            io::Error::other(format!(
-                "Iceberg sink schema state v{} is missing namespace '{}'",
-                guard.version, namespace
-            ))
-        })?;
-        Ok((
-            guard
-                .namespace_versions
-                .get(namespace)
-                .copied()
-                .unwrap_or(0),
-            metadata,
-        ))
+        self.schema_state.read().await.get(namespace)
     }
 
-    async fn table_for_write(
+    pub async fn table_for_write(
         &self,
         namespace: &str,
         schema_version: u64,
@@ -1118,63 +999,11 @@ impl<S: SinkSpec> IcebergWriter<S> {
         Ok(table)
     }
 
-    async fn evolve_table_to_arrow_schema(
+    async fn drop_table_if_exists(
         &self,
+        catalog: &dyn Catalog,
         namespace: &str,
-        table: iceberg::table::Table,
-        arrow: &ArrowSchema,
-    ) -> Result<iceberg::table::Table, io::Error> {
-        let dest = iceberg_schema_from_arrow(namespace, arrow)?;
-        let current = table.metadata().current_schema();
-        let names_ok = iceberg_schema_has_all_fields(current, &dest);
-        let types_ok = iceberg_field_types_match(current, &dest);
-        let has_snapshot = table.metadata().current_snapshot().is_some();
-        match iceberg_arrow_schema_plan(names_ok, types_ok, has_snapshot) {
-            IcebergArrowSchemaPlan::Keep => Ok(table),
-            IcebergArrowSchemaPlan::Recreate => {
-                info!(
-                    "Replacing empty Iceberg table schema namespace={} dest_fields={}",
-                    namespace,
-                    dest.as_struct().fields().len()
-                );
-                self.recreate_table_with_iceberg_schema(namespace, dest)
-                    .await
-            }
-            IcebergArrowSchemaPlan::MergeMissing => {
-                let catalog = Arc::clone(&self.catalog);
-                let next_schema_id = next_iceberg_schema_id(table.metadata());
-                let evolved = merge_iceberg_schema_missing_fields(
-                    namespace,
-                    table.metadata().current_schema(),
-                    &dest,
-                    next_schema_id,
-                )?;
-                let tx = Transaction::new(&table);
-                let tx = tx
-                    .replace_schema(evolved)
-                    .apply(tx)
-                    .map_err(|err| io::Error::other(err.to_string()))?;
-                match tx.commit(catalog.as_ref()).await {
-                    Ok(table) => {
-                        self.table_cache.write().await.remove(namespace);
-                        Ok(table)
-                    }
-                    Err(err) if err.kind() == iceberg::ErrorKind::CatalogCommitConflicts => catalog
-                        .load_table(&self.table_ident(namespace)?)
-                        .await
-                        .map_err(|err| io::Error::other(err.to_string())),
-                    Err(err) => Err(io::Error::other(err.to_string())),
-                }
-            }
-        }
-    }
-
-    async fn recreate_table_with_iceberg_schema(
-        &self,
-        namespace: &str,
-        iceberg_schema: Schema,
-    ) -> Result<iceberg::table::Table, io::Error> {
-        let catalog = Arc::clone(&self.catalog);
+    ) -> Result<(), io::Error> {
         let table_ident = self.table_ident(namespace)?;
         if catalog
             .table_exists(&table_ident)
@@ -1187,8 +1016,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
                 .map_err(|err| io::Error::other(err.to_string()))?;
         }
         self.table_cache.write().await.remove(namespace);
-        self.create_table_with_iceberg_schema(catalog.as_ref(), namespace, iceberg_schema)
-            .await
+        Ok(())
     }
 
     async fn recreate_table_for_grouped(
@@ -1198,17 +1026,8 @@ impl<S: SinkSpec> IcebergWriter<S> {
         metadata: &OutputMetadata,
     ) -> Result<iceberg::table::Table, io::Error> {
         let catalog = Arc::clone(&self.catalog);
-        let table_ident = self.table_ident(namespace)?;
-        if catalog
-            .table_exists(&table_ident)
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))?
-        {
-            catalog
-                .drop_table(&table_ident)
-                .await
-                .map_err(|err| io::Error::other(err.to_string()))?;
-        }
+        self.drop_table_if_exists(catalog.as_ref(), namespace)
+            .await?;
         let table = self
             .ensure_table(catalog.as_ref(), namespace, metadata)
             .await?;
@@ -1953,9 +1772,10 @@ impl<S: SinkSpec> IcebergWriter<S> {
                 .await?
         };
         let reader_schema = reader.schema();
-        let table = self
-            .evolve_table_to_arrow_schema(namespace, table, reader_schema.as_ref())
-            .await?;
+        assert_batch_columns_are_in_dest(
+            reader_schema.as_ref(),
+            table.metadata().current_schema(),
+        )?;
         let exact_cdc_contract = ctx
             .cdc_ctx
             .and_then(|cdc| cdc.contract.as_ref())
@@ -2531,11 +2351,13 @@ impl<S: SinkSpec> IcebergWriter<S> {
         object_stem: Option<&str>,
     ) -> Result<(), io::Error> {
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let metadata = self.namespace_metadata(&namespace).await?;
         let catalog = Arc::clone(&self.catalog);
-        let table = self
-            .ensure_table(catalog.as_ref(), &namespace, &metadata)
-            .await?;
+        let (version, metadata) = self.namespace_schema_state(&namespace).await?;
+        let table = self.table_for_write(&namespace, version, &metadata).await?;
+        assert_batch_columns_are_in_dest(
+            stream.schema().as_ref(),
+            table.metadata().current_schema(),
+        )?;
 
         let exact_once_cdc = cdc_ctx
             .and_then(|ctx| ctx.contract.as_ref())
@@ -2679,7 +2501,6 @@ impl<S: SinkSpec> IcebergWriter<S> {
         object_stem: Option<&str>,
     ) -> Result<(), io::Error> {
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let metadata = self.namespace_metadata(&namespace).await?;
         let catalog = Arc::clone(&self.catalog);
 
         if policy == WritePolicy::ReplaceTable {
@@ -2698,16 +2519,14 @@ impl<S: SinkSpec> IcebergWriter<S> {
                     table_ident
                 );
             }
-            self.ensure_table(catalog.as_ref(), &namespace, &metadata)
-                .await?;
+            self.table_cache.write().await.remove(&namespace);
             return self
                 .native_append(stream, filename, None, object_stem)
                 .await;
         }
 
-        let table = self
-            .ensure_table(catalog.as_ref(), &namespace, &metadata)
-            .await?;
+        let (version, metadata) = self.namespace_schema_state(&namespace).await?;
+        let table = self.table_for_write(&namespace, version, &metadata).await?;
         let batches = collect_record_batches(stream).await?;
         if batches.is_empty() {
             return Err(io::Error::new(
@@ -2718,6 +2537,10 @@ impl<S: SinkSpec> IcebergWriter<S> {
                 ),
             ));
         }
+        assert_batch_columns_are_in_dest(
+            batches[0].schema().as_ref(),
+            table.metadata().current_schema(),
+        )?;
 
         let schema = batches[0].schema();
         let data_batch = arrow::compute::concat_batches(&schema, &batches)
@@ -3198,16 +3021,6 @@ impl<S: SinkSpec> IcebergWriter<S> {
         Ok(Some(equality_ids))
     }
 
-    async fn namespace_metadata(&self, namespace: &str) -> Result<OutputMetadata, io::Error> {
-        let guard = self.schema_state.read().await;
-        guard.namespaces.get(namespace).cloned().ok_or_else(|| {
-            io::Error::other(format!(
-                "Iceberg sink schema state v{} is missing namespace '{}'",
-                guard.version, namespace
-            ))
-        })
-    }
-
     async fn ensure_table(
         &self,
         catalog: &dyn Catalog,
@@ -3215,6 +3028,7 @@ impl<S: SinkSpec> IcebergWriter<S> {
         metadata: &OutputMetadata,
     ) -> Result<iceberg::table::Table, io::Error> {
         let table_ident = self.table_ident(namespace)?;
+        let desired_schema = self.desired_iceberg_schema(namespace, metadata)?;
         if catalog
             .table_exists(&table_ident)
             .await
@@ -3224,72 +3038,74 @@ impl<S: SinkSpec> IcebergWriter<S> {
                 .load_table(&table_ident)
                 .await
                 .map_err(|err| io::Error::other(err.to_string()))?;
-            self.assert_partition_spec_matches(&table, namespace)?;
-            let desired_schema = self.desired_iceberg_schema(namespace, metadata)?;
-            if iceberg_schema_has_all_fields(table.metadata().current_schema(), &desired_schema) {
-                return Ok(table);
-            }
-
-            info!(
-                "Evolving Iceberg schema namespace={} table={} current_fields={} desired_fields={}",
-                namespace,
-                table_ident,
-                table.metadata().current_schema().as_struct().fields().len(),
-                desired_schema.as_struct().fields().len()
-            );
-            let next_schema_id = next_iceberg_schema_id(table.metadata());
-            let evolved_schema = merge_iceberg_schema_missing_fields(
-                namespace,
-                table.metadata().current_schema(),
-                &desired_schema,
-                next_schema_id,
-            )?;
-            let tx = Transaction::new(&table);
-            let tx = tx
-                .replace_schema(evolved_schema)
-                .apply(tx)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            return match tx.commit(catalog).await {
-                Ok(table) => Ok(table),
-                Err(err) if err.kind() == iceberg::ErrorKind::CatalogCommitConflicts => catalog
-                    .load_table(&table_ident)
-                    .await
-                    .map_err(|err| io::Error::other(err.to_string())),
-                Err(err) => Err(io::Error::other(err.to_string())),
-            };
+            return self
+                .publish_loaded(catalog, table, namespace, desired_schema)
+                .await;
         }
-
-        let catalog_namespace = self.catalog_namespace()?;
-        let namespace_ident = NamespaceIdent::from_strs([catalog_namespace.as_str()])
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        self.ensure_catalog_namespace(catalog, &namespace_ident)
-            .await?;
-
-        let iceberg_schema = self.desired_iceberg_schema(namespace, metadata)?;
-        self.create_table_with_iceberg_schema(catalog, namespace, iceberg_schema)
+        self.create_table_with_iceberg_schema(catalog, namespace, desired_schema)
             .await
     }
 
-    async fn create_table_with_iceberg_schema(
+    /// An existing table must match the layout spec, except that a table with
+    /// no snapshot is recreated. Then missing published fields are added.
+    async fn publish_loaded(
         &self,
         catalog: &dyn Catalog,
+        table: iceberg::table::Table,
+        namespace: &str,
+        desired_schema: Schema,
+    ) -> Result<iceberg::table::Table, io::Error> {
+        if self.live_spec_matches(&table, namespace)? {
+            return ensure_live_table_has_published_schema(
+                catalog,
+                table,
+                namespace,
+                &desired_schema,
+            )
+            .await;
+        }
+        if !empty_table_may_replace_spec(&table) {
+            return Err(time_partition::spec_mismatch_error());
+        }
+        info!(
+            "Replacing empty Iceberg table with mismatched partition spec namespace={}",
+            namespace
+        );
+        self.drop_table_if_exists(catalog, namespace).await?;
+        let (namespace_ident, creation) = self.table_creation(namespace, desired_schema.clone())?;
+        match catalog.create_table(&namespace_ident, creation).await {
+            Ok(table) => Ok(table),
+            Err(err) if is_table_already_present(&err) => {
+                let table = catalog
+                    .load_table(&self.table_ident(namespace)?)
+                    .await
+                    .map_err(|err| io::Error::other(err.to_string()))?;
+                if !self.live_spec_matches(&table, namespace)? {
+                    return Err(time_partition::spec_mismatch_error());
+                }
+                ensure_live_table_has_published_schema(catalog, table, namespace, &desired_schema)
+                    .await
+            }
+            Err(err) => Err(io::Error::other(err.to_string())),
+        }
+    }
+
+    fn table_creation(
+        &self,
         namespace: &str,
         iceberg_schema: Schema,
-    ) -> Result<iceberg::table::Table, io::Error> {
+    ) -> Result<(NamespaceIdent, TableCreation), io::Error> {
         let table_ident = self.table_ident(namespace)?;
-        let catalog_namespace = self.catalog_namespace()?;
-        let namespace_ident = NamespaceIdent::from_strs([catalog_namespace.as_str()])
+        let namespace_ident = NamespaceIdent::from_strs([self.catalog_namespace()?.as_str()])
             .map_err(|err| io::Error::other(err.to_string()))?;
-        self.ensure_catalog_namespace(catalog, &namespace_ident)
-            .await?;
-        let mut properties: HashMap<String, String> = HashMap::new();
-        properties.insert(
-            "skippr.pipeline".to_string(),
-            self.context.pipeline_name.clone(),
-        );
-        properties.insert("skippr.binding".to_string(), format!("{:?}", self.binding));
-        properties.insert(history::DELETE_AFTER_COMMIT.to_string(), "true".to_string());
-
+        let properties = HashMap::from([
+            (
+                "skippr.pipeline".to_string(),
+                self.context.pipeline_name.clone(),
+            ),
+            ("skippr.binding".to_string(), format!("{:?}", self.binding)),
+            (history::DELETE_AFTER_COMMIT.to_string(), "true".to_string()),
+        ]);
         let partition_spec = layout_partition_spec(
             &iceberg_schema,
             &self.context.output_layout,
@@ -3301,24 +3117,35 @@ impl<S: SinkSpec> IcebergWriter<S> {
             .partition_spec_opt(partition_spec)
             .properties(properties)
             .build();
-        let creation = TableCreation {
-            location: Some(self.table_location(namespace)),
-            ..creation
-        };
+        Ok((
+            namespace_ident,
+            TableCreation {
+                location: Some(self.table_location(namespace)),
+                ..creation
+            },
+        ))
+    }
 
+    async fn create_table_with_iceberg_schema(
+        &self,
+        catalog: &dyn Catalog,
+        namespace: &str,
+        iceberg_schema: Schema,
+    ) -> Result<iceberg::table::Table, io::Error> {
+        let (namespace_ident, creation) = self.table_creation(namespace, iceberg_schema.clone())?;
+        self.ensure_catalog_namespace(catalog, &namespace_ident)
+            .await?;
         match catalog.create_table(&namespace_ident, creation).await {
             Ok(table) => Ok(table),
-            Err(err) => {
-                if is_table_already_present(&err) {
-                    let table = catalog
-                        .load_table(&table_ident)
-                        .await
-                        .map_err(|err| io::Error::other(err.to_string()))?;
-                    self.assert_partition_spec_matches(&table, namespace)?;
-                    return Ok(table);
-                }
-                Err(io::Error::other(err.to_string()))
+            Err(err) if is_table_already_present(&err) => {
+                let table = catalog
+                    .load_table(&self.table_ident(namespace)?)
+                    .await
+                    .map_err(|err| io::Error::other(err.to_string()))?;
+                self.publish_loaded(catalog, table, namespace, iceberg_schema)
+                    .await
             }
+            Err(err) => Err(io::Error::other(err.to_string())),
         }
     }
 
@@ -4133,265 +3960,215 @@ fn next_iceberg_schema_id(metadata: &iceberg::spec::TableMetadata) -> i32 {
         + 1
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum IcebergArrowSchemaPlan {
-    Keep,
-    Recreate,
-    MergeMissing,
+/// Only a table that has never committed a snapshot may be recreated for a
+/// spec mismatch; any snapshot history, even with zero data files, fails closed.
+fn empty_table_may_replace_spec(table: &iceberg::table::Table) -> bool {
+    table.metadata().snapshots().next().is_none()
 }
 
-fn iceberg_arrow_schema_plan(
-    names_ok: bool,
-    types_ok: bool,
-    has_snapshot: bool,
-) -> IcebergArrowSchemaPlan {
-    if names_ok && types_ok {
-        return IcebergArrowSchemaPlan::Keep;
-    }
-    if !types_ok && !has_snapshot {
-        return IcebergArrowSchemaPlan::Recreate;
-    }
-    if !names_ok {
-        return IcebergArrowSchemaPlan::MergeMissing;
-    }
-    IcebergArrowSchemaPlan::Keep
-}
+const ICEBERG_SCHEMA_EVOLVE_ATTEMPTS: u32 = 4;
 
-fn iceberg_schema_has_all_fields(current: &Schema, desired: &Schema) -> bool {
-    desired
-        .as_struct()
-        .fields()
-        .iter()
-        .all(|field| current.field_by_name(&field.name).is_some())
-}
-
-fn iceberg_field_types_match(current: &Schema, desired: &Schema) -> bool {
-    desired.as_struct().fields().iter().all(|dest| {
-        current
-            .field_by_name(&dest.name)
-            .is_some_and(|cur| cur.field_type.as_ref() == dest.field_type.as_ref())
-    })
-}
-
-fn iceberg_type_from_arrow(
-    data_type: &DataType,
+async fn ensure_live_table_has_published_schema(
+    catalog: &dyn Catalog,
+    mut table: iceberg::table::Table,
     namespace: &str,
-    path: &[String],
-    seen_field_ids: &mut HashMap<i32, ()>,
-) -> Result<Type, io::Error> {
-    let primitive = match data_type {
-        DataType::Boolean => Some(PrimitiveType::Boolean),
-        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::UInt8 | DataType::UInt16 => {
-            Some(PrimitiveType::Int)
-        }
-        DataType::Int64 | DataType::UInt32 | DataType::UInt64 => Some(PrimitiveType::Long),
-        DataType::Float32 => Some(PrimitiveType::Float),
-        DataType::Float64 => Some(PrimitiveType::Double),
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Some(PrimitiveType::String),
-        DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
-            Some(PrimitiveType::Binary)
-        }
-        DataType::Date32 | DataType::Date64 => Some(PrimitiveType::Date),
-        DataType::Timestamp(_, _) => Some(PrimitiveType::Timestamp),
-        DataType::Time32(_) | DataType::Time64(_) => Some(PrimitiveType::Time),
-        DataType::Decimal128(precision, scale) => {
-            let scale = u32::try_from(*scale).map_err(|_| {
-                io::Error::other(format!(
-                    "unsupported Arrow type for Iceberg dest schema: {data_type}"
-                ))
-            })?;
-            if !(1..=38).contains(precision) {
-                return Err(io::Error::other(format!(
-                    "unsupported Arrow type for Iceberg dest schema: {data_type}"
-                )));
+    desired_schema: &Schema,
+) -> Result<iceberg::table::Table, io::Error> {
+    for _ in 0..ICEBERG_SCHEMA_EVOLVE_ATTEMPTS {
+        let Some(evolved_schema) = merge_iceberg_schema_missing_fields(
+            namespace,
+            table.metadata().current_schema(),
+            desired_schema,
+            next_iceberg_schema_id(table.metadata()),
+        )?
+        else {
+            return Ok(table);
+        };
+        info!(
+            "Evolving Iceberg schema namespace={} table={} current_fields={} desired_fields={}",
+            namespace,
+            table.identifier(),
+            table.metadata().current_schema().as_struct().fields().len(),
+            desired_schema.as_struct().fields().len()
+        );
+        let ident = table.identifier().clone();
+        let tx = Transaction::new(&table);
+        let tx = tx
+            .replace_schema(evolved_schema)
+            .apply(tx)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        match tx.commit(catalog).await {
+            Ok(committed) => return Ok(committed),
+            Err(err) if err.kind() == iceberg::ErrorKind::CatalogCommitConflicts => {
+                table = catalog
+                    .load_table(&ident)
+                    .await
+                    .map_err(|err| io::Error::other(err.to_string()))?;
             }
-            Some(PrimitiveType::Decimal {
-                precision: u32::from(*precision),
-                scale,
-            })
-        }
-        DataType::FixedSizeBinary(_) => Some(PrimitiveType::Binary),
-        DataType::Null => Some(PrimitiveType::Int),
-        _ => None,
-    };
-    if let Some(primitive) = primitive {
-        return Ok(Type::Primitive(primitive));
-    }
-    match data_type {
-        DataType::Dictionary(_, value) => {
-            iceberg_type_from_arrow(value.as_ref(), namespace, path, seen_field_ids)
-        }
-        DataType::List(field) | DataType::LargeList(field) | DataType::FixedSizeList(field, _) => {
-            iceberg_list_type_from_arrow(field, namespace, path, seen_field_ids)
-        }
-        DataType::Struct(fields) => {
-            let mut children = Vec::new();
-            for field in fields.iter() {
-                let mut child_path = path.to_vec();
-                child_path.push(field.name().to_string());
-                let field_id =
-                    iceberg_field_id_for_arrow(namespace, &child_path, field, seen_field_ids);
-                seen_field_ids.insert(field_id, ());
-                children.push(Arc::new(NestedField::new(
-                    field_id,
-                    field.name(),
-                    iceberg_type_from_arrow(
-                        field.data_type(),
-                        namespace,
-                        &child_path,
-                        seen_field_ids,
-                    )?,
-                    !field.is_nullable(),
-                )));
-            }
-            Ok(Type::Struct(iceberg::spec::StructType::new(children)))
-        }
-        DataType::Map(entries, _) => {
-            let DataType::Struct(kv) = entries.data_type() else {
-                return Err(io::Error::other(format!(
-                    "unsupported Arrow type for Iceberg dest schema: {data_type}"
-                )));
-            };
-            if kv.len() != 2 {
-                return Err(io::Error::other(format!(
-                    "unsupported Arrow type for Iceberg dest schema: {data_type}"
-                )));
-            }
-            iceberg_map_type_from_arrow(&kv[0], &kv[1], namespace, path, seen_field_ids)
-        }
-        other => Err(io::Error::other(format!(
-            "unsupported Arrow type for Iceberg dest schema: {other}"
-        ))),
-    }
-}
-
-const SKIPPR_EMPTY_STRUCT_MARKER: &str = "__skippr_empty_struct";
-
-fn arrow_parquet_field_id(field: &ArrowField) -> Option<i32> {
-    field
-        .metadata()
-        .get(PARQUET_FIELD_ID_META_KEY)
-        .and_then(|value| value.parse().ok())
-}
-
-fn iceberg_field_id_for_arrow(
-    namespace: &str,
-    path: &[String],
-    field: &ArrowField,
-    seen_field_ids: &HashMap<i32, ()>,
-) -> i32 {
-    if let Some(id) = arrow_parquet_field_id(field) {
-        if id != 0 && !seen_field_ids.contains_key(&id) {
-            return id;
+            Err(err) => return Err(io::Error::other(err.to_string())),
         }
     }
-    unique_iceberg_field_id(namespace, path, seen_field_ids)
-}
-
-fn iceberg_list_type_from_arrow(
-    field: &ArrowField,
-    namespace: &str,
-    path: &[String],
-    seen_field_ids: &mut HashMap<i32, ()>,
-) -> Result<Type, io::Error> {
-    let mut element_path = path.to_vec();
-    element_path.push("element".to_string());
-    let element_type =
-        iceberg_type_from_arrow(field.data_type(), namespace, &element_path, seen_field_ids)?;
-    let element_field_id =
-        iceberg_field_id_for_arrow(namespace, &element_path, field, seen_field_ids);
-    seen_field_ids.insert(element_field_id, ());
-    Ok(Type::List(ListType::new(Arc::new(
-        NestedField::list_element(element_field_id, element_type, true),
-    ))))
-}
-
-fn iceberg_map_type_from_arrow(
-    key_field: &ArrowField,
-    value_field: &ArrowField,
-    namespace: &str,
-    path: &[String],
-    seen_field_ids: &mut HashMap<i32, ()>,
-) -> Result<Type, io::Error> {
-    let mut key_path = path.to_vec();
-    key_path.push("key".to_string());
-    let mut value_path = path.to_vec();
-    value_path.push("value".to_string());
-    let key_type =
-        iceberg_type_from_arrow(key_field.data_type(), namespace, &key_path, seen_field_ids)?;
-    let value_type = iceberg_type_from_arrow(
-        value_field.data_type(),
+    let missing = merge_iceberg_schema_missing_fields(
         namespace,
-        &value_path,
-        seen_field_ids,
+        table.metadata().current_schema(),
+        desired_schema,
+        next_iceberg_schema_id(table.metadata()),
     )?;
-    let key_field_id = iceberg_field_id_for_arrow(namespace, &key_path, key_field, seen_field_ids);
-    seen_field_ids.insert(key_field_id, ());
-    let value_field_id =
-        iceberg_field_id_for_arrow(namespace, &value_path, value_field, seen_field_ids);
-    seen_field_ids.insert(value_field_id, ());
-    Ok(Type::Map(MapType::new(
-        Arc::new(NestedField::map_key_element(key_field_id, key_type)),
-        Arc::new(NestedField::map_value_element(
-            value_field_id,
-            value_type,
-            true,
-        )),
+    if missing.is_none() {
+        return Ok(table);
+    }
+    Err(io::Error::other(format!(
+        "Iceberg schema evolve conflicts left published columns missing for namespace {namespace}"
     )))
 }
 
-fn iceberg_schema_from_arrow(namespace: &str, schema: &ArrowSchema) -> Result<Schema, io::Error> {
-    let mut fields = Vec::new();
-    let mut seen_field_ids = HashMap::<i32, ()>::new();
-    for field in schema.fields() {
-        if field.name() == SKIPPR_EMPTY_STRUCT_MARKER {
-            continue;
-        }
-        let path = vec![field.name().to_string()];
-        let field_id = iceberg_field_id_for_arrow(namespace, &path, field, &seen_field_ids);
-        seen_field_ids.insert(field_id, ());
-        fields.push(Arc::new(NestedField::new(
-            field_id,
-            field.name(),
-            iceberg_type_from_arrow(field.data_type(), namespace, &path, &mut seen_field_ids)?,
-            !field.is_nullable(),
-        )));
-    }
-    append_cdc_encoded_fields(namespace, &mut fields, &mut seen_field_ids);
-    Schema::builder()
-        .with_schema_id(0)
-        .with_fields(fields)
-        .build()
-        .map_err(|err| io::Error::other(err.to_string()))
+fn assert_batch_columns_are_in_dest(arrow: &ArrowSchema, dest: &Schema) -> Result<(), io::Error> {
+    skippr_runtime_sdk::plugins::alter_ddl::reject_batch_columns_missing_from(arrow, |name| {
+        dest.field_by_name(name).is_some()
+    })
 }
 
+/// Live schema plus every published field it lacks. `None` when nothing is
+/// missing. A live field whose type differs from published fails closed.
 fn merge_iceberg_schema_missing_fields(
     namespace: &str,
     current: &Schema,
     desired: &Schema,
     next_schema_id: i32,
-) -> Result<Schema, io::Error> {
-    let mut fields: Vec<Arc<NestedField>> = current.as_struct().fields().iter().cloned().collect();
+) -> Result<Option<Schema>, io::Error> {
     let mut seen_field_ids = HashMap::<i32, ()>::new();
     for field in current.as_struct().fields() {
         collect_iceberg_field_ids(field, &mut seen_field_ids);
     }
-
-    for field in desired.as_struct().fields() {
-        if current.field_by_name(&field.name).is_none() {
-            fields.push(remap_iceberg_field_ids(
-                namespace,
-                field,
-                Vec::new(),
-                &mut seen_field_ids,
-            ));
-        }
+    let fields = merge_struct_fields(
+        namespace,
+        current.as_struct(),
+        desired.as_struct(),
+        Vec::new(),
+        &mut seen_field_ids,
+    )?;
+    if fields.as_slice() == current.as_struct().fields() {
+        return Ok(None);
     }
     Schema::builder()
         .with_schema_id(next_schema_id)
         .with_fields(fields)
         .build()
+        .map(Some)
         .map_err(|err| io::Error::other(err.to_string()))
+}
+
+fn merge_struct_fields(
+    namespace: &str,
+    current: &StructType,
+    desired: &StructType,
+    path: Vec<String>,
+    seen_field_ids: &mut HashMap<i32, ()>,
+) -> Result<Vec<Arc<NestedField>>, io::Error> {
+    let mut fields: Vec<Arc<NestedField>> = current.fields().iter().cloned().collect();
+    for want in desired.fields() {
+        match current.field_by_name(&want.name) {
+            None => {
+                fields.push(remap_iceberg_field_ids(
+                    namespace,
+                    want,
+                    path.clone(),
+                    seen_field_ids,
+                ));
+            }
+            Some(have) => {
+                let merged = merge_existing_iceberg_field(
+                    namespace,
+                    have,
+                    want,
+                    path.clone(),
+                    seen_field_ids,
+                )?;
+                if let Some(slot) = fields.iter_mut().find(|field| field.name == want.name) {
+                    *slot = merged;
+                }
+            }
+        }
+    }
+    Ok(fields)
+}
+
+fn merge_existing_iceberg_field(
+    namespace: &str,
+    have: &NestedField,
+    want: &NestedField,
+    mut path: Vec<String>,
+    seen_field_ids: &mut HashMap<i32, ()>,
+) -> Result<Arc<NestedField>, io::Error> {
+    path.push(have.name.clone());
+    let field_type = merge_existing_iceberg_type(
+        namespace,
+        &have.field_type,
+        &want.field_type,
+        &have.name,
+        path,
+        seen_field_ids,
+    )?;
+    Ok(Arc::new(NestedField {
+        id: have.id,
+        name: have.name.clone(),
+        required: have.required,
+        field_type: Box::new(field_type),
+        doc: have.doc.clone(),
+        initial_default: have.initial_default.clone(),
+        write_default: have.write_default.clone(),
+    }))
+}
+
+fn merge_existing_iceberg_type(
+    namespace: &str,
+    have: &Type,
+    want: &Type,
+    field_name: &str,
+    path: Vec<String>,
+    seen_field_ids: &mut HashMap<i32, ()>,
+) -> Result<Type, io::Error> {
+    match (have, want) {
+        (Type::Struct(have), Type::Struct(want)) => Ok(Type::Struct(StructType::new(
+            merge_struct_fields(namespace, have, want, path, seen_field_ids)?,
+        ))),
+        (Type::List(have), Type::List(want)) => {
+            let element = merge_existing_iceberg_field(
+                namespace,
+                &have.element_field,
+                &want.element_field,
+                path,
+                seen_field_ids,
+            )?;
+            Ok(Type::List(ListType::new(element)))
+        }
+        (Type::Map(have), Type::Map(want)) => {
+            let key = merge_existing_iceberg_field(
+                namespace,
+                &have.key_field,
+                &want.key_field,
+                path.clone(),
+                seen_field_ids,
+            )?;
+            let value = merge_existing_iceberg_field(
+                namespace,
+                &have.value_field,
+                &want.value_field,
+                path,
+                seen_field_ids,
+            )?;
+            Ok(Type::Map(MapType::new(key, value)))
+        }
+        (Type::Primitive(have_ty), Type::Primitive(want_ty)) if have_ty == want_ty => {
+            Ok(Type::Primitive(have_ty.clone()))
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Iceberg field '{field_name}' live type {have} does not match published {want}"
+            ),
+        )),
+    }
 }
 
 fn collect_iceberg_field_ids(field: &NestedField, seen_field_ids: &mut HashMap<i32, ()>) {
@@ -4811,7 +4588,7 @@ fn partition_source_datum(column: &dyn Array, row: usize) -> Option<Datum> {
         return Some(Datum::date(arr.value(row)));
     }
     if let Some(arr) = column.as_any().downcast_ref::<Int64Array>() {
-        let secs = time_partition::posix_seconds_from_numeric_i64(arr.value(row))?;
+        let secs = skippr_runtime_sdk::helpers::Helpers::posix_seconds_from_i64(arr.value(row));
         return Some(Datum::timestamp_micros(secs.saturating_mul(1_000_000)));
     }
     None
@@ -4931,7 +4708,7 @@ fn partition_struct_from_table_and_batches(
 fn iceberg_schema_from_output_metadata(
     namespace: &str,
     metadata: &OutputMetadata,
-    promote_timestamps: &HashSet<String>,
+    include_cdc_columns: bool,
 ) -> Result<Schema, io::Error> {
     let mut fields = Vec::new();
     let mut seen_field_ids = HashMap::<i32, ()>::new();
@@ -4941,10 +4718,11 @@ fn iceberg_schema_from_output_metadata(
             field,
             Vec::new(),
             &mut seen_field_ids,
-            promote_timestamps,
         )?));
     }
-    append_cdc_encoded_fields(namespace, &mut fields, &mut seen_field_ids);
+    if include_cdc_columns {
+        append_cdc_encoded_fields(namespace, &mut fields, &mut seen_field_ids);
+    }
     Schema::builder()
         .with_schema_id(0)
         .with_fields(fields)
@@ -5003,7 +4781,6 @@ fn field_to_nested_field(
     metadata: &OutputMetadata,
     mut path: Vec<String>,
     seen_field_ids: &mut HashMap<i32, ()>,
-    promote_timestamps: &HashSet<String>,
 ) -> Result<NestedField, io::Error> {
     path.push(metadata.out_field_name().to_string());
     let field_id = if metadata.field_id() != 0 && !seen_field_ids.contains_key(&metadata.field_id())
@@ -5022,7 +4799,6 @@ fn field_to_nested_field(
                     child,
                     path.clone(),
                     seen_field_ids,
-                    promote_timestamps,
                 )?));
             }
             Type::Struct(iceberg::spec::StructType::new(children))
@@ -5032,27 +4808,19 @@ fn field_to_nested_field(
             element_path.push("element".to_string());
             let element_type = if metadata.determined_type_values() == Some(&SkipprDataType::Record)
             {
-                metadata
+                let (_, child) = metadata
                     .child_fields()
                     .find(|(name, _)| name.as_str() == "0")
-                    .map(|(_, child)| {
-                        field_to_nested_field(
-                            namespace,
-                            child,
-                            path.clone(),
-                            seen_field_ids,
-                            promote_timestamps,
+                    .ok_or_else(|| {
+                        io::Error::other(
+                            "published dest schema is missing array element record metadata",
                         )
-                    })
-                    .transpose()?
-                    .map(|field| *field.field_type)
-                    .unwrap_or_else(|| Type::Struct(iceberg::spec::StructType::new(Vec::new())))
+                    })?;
+                *field_to_nested_field(namespace, child, path.clone(), seen_field_ids)?.field_type
             } else {
-                primitive_type_for_skippr(
-                    metadata
-                        .determined_type_values()
-                        .unwrap_or(&SkipprDataType::String),
-                )
+                primitive_type_for_skippr(metadata.determined_type_values().ok_or_else(|| {
+                    io::Error::other("published dest schema is missing array element type")
+                })?)?
             };
             let element_field_id =
                 unique_iceberg_field_id(namespace, &element_path, seen_field_ids);
@@ -5079,22 +4847,14 @@ fn field_to_nested_field(
                 )),
                 Arc::new(NestedField::map_value_element(
                     value_field_id,
-                    primitive_type_for_skippr(
-                        metadata
-                            .determined_type_values()
-                            .unwrap_or(&SkipprDataType::String),
-                    ),
+                    primitive_type_for_skippr(metadata.determined_type_values().ok_or_else(
+                        || io::Error::other("published dest schema is missing map value type"),
+                    )?)?,
                     true,
                 )),
             ))
         }
-        typ => {
-            if promote_timestamps.contains(metadata.out_field_name()) {
-                Type::Primitive(PrimitiveType::Timestamp)
-            } else {
-                primitive_type_for_skippr(typ)
-            }
-        }
+        typ => primitive_type_for_skippr(typ)?,
     };
     Ok(NestedField::new(
         field_id,
@@ -5112,33 +4872,9 @@ fn iceberg_date_field_names(metadata: &OutputMetadata) -> HashSet<String> {
         .collect()
 }
 
-fn primitive_type_for_skippr(value: &SkipprDataType) -> Type {
-    let primitive = match value {
-        SkipprDataType::Boolean => PrimitiveType::Boolean,
-        SkipprDataType::Byte
-        | SkipprDataType::Short
-        | SkipprDataType::Integer
-        | SkipprDataType::Unknown
-        | SkipprDataType::Null => PrimitiveType::Int,
-        SkipprDataType::Long => PrimitiveType::Long,
-        SkipprDataType::Float => PrimitiveType::Float,
-        SkipprDataType::Double => PrimitiveType::Double,
-        SkipprDataType::Decimal => PrimitiveType::Decimal {
-            precision: 38,
-            scale: 9,
-        },
-        SkipprDataType::Date => PrimitiveType::Date,
-        SkipprDataType::Timestamp | SkipprDataType::TimestampMilli => PrimitiveType::Timestamp,
-        SkipprDataType::Time => PrimitiveType::Time,
-        SkipprDataType::Binary | SkipprDataType::Fixed => PrimitiveType::Binary,
-        SkipprDataType::Uuid => PrimitiveType::Uuid,
-        SkipprDataType::String
-        | SkipprDataType::Json
-        | SkipprDataType::Array
-        | SkipprDataType::Map => PrimitiveType::String,
-        SkipprDataType::Record => PrimitiveType::String,
-    };
-    Type::Primitive(primitive)
+fn primitive_type_for_skippr(value: &SkipprDataType) -> io::Result<Type> {
+    skippr_runtime_sdk::discover::iceberg_schema::iceberg_primitive(value)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5307,19 +5043,19 @@ mod tests {
         }));
         let initial = BTreeMap::from([("events".to_string(), metadata.clone())]);
         let replacement = BTreeMap::from([("users".to_string(), metadata)]);
-        let mut state = InstalledIcebergSchemaState::default();
+        let mut state = InstalledDestSchema::default();
 
-        state.install(0, &initial);
-        state.install(0, &replacement);
-        assert_eq!(state.version, 0);
-        assert!(state.namespaces.contains_key("events"));
-        assert!(!state.namespaces.contains_key("users"));
+        state.install_state(0, &initial);
+        state.install_state(0, &replacement);
+        assert_eq!(state.version(), 0);
+        assert!(state.get("events").is_ok());
+        assert!(state.get("users").is_err());
 
-        state.install(2, &replacement);
-        state.install(1, &initial);
-        assert_eq!(state.version, 2);
-        assert!(state.namespaces.contains_key("users"));
-        assert!(!state.namespaces.contains_key("events"));
+        state.install_state(2, &replacement);
+        state.install_state(1, &initial);
+        assert_eq!(state.version(), 2);
+        assert!(state.get("users").is_ok());
+        assert!(state.get("events").is_err());
     }
 
     #[test]
@@ -5348,7 +5084,8 @@ mod tests {
             .unwrap();
 
         let merged = merge_iceberg_schema_missing_fields("cube_events", &current, &desired, 1)
-            .expect("schema merge should remap colliding field ids");
+            .expect("schema merge should remap colliding field ids")
+            .expect("new_top_level is missing");
         let appended = merged.field_by_name("new_top_level").unwrap();
 
         assert_ne!(appended.id, 20);
@@ -5365,126 +5102,70 @@ mod tests {
     }
 
     #[test]
-    fn iceberg_schema_from_arrow_folds_compose_dest() {
-        let arrow = ArrowSchema::new(vec![
-            arrow::datatypes::Field::new("id", DataType::Int64, true),
-            arrow::datatypes::Field::new("display_name", DataType::Utf8, true),
-            arrow::datatypes::Field::new("amount", DataType::Float64, true),
-            arrow::datatypes::Field::new("amount_gbp", DataType::Float64, true),
-        ]);
-        let dest = iceberg_schema_from_arrow("perf_cell", &arrow).unwrap();
-        assert!(dest.field_by_name("display_name").is_some());
-        assert!(dest.field_by_name("amount_gbp").is_some());
-        assert!(matches!(
-            dest.field_by_name("amount").unwrap().field_type.as_ref(),
-            Type::Primitive(PrimitiveType::Double)
-        ));
-    }
-
-    #[test]
-    fn iceberg_schema_from_arrow_maps_skippr_decimal128() {
-        let arrow = ArrowSchema::new(vec![arrow::datatypes::Field::new(
-            "amount",
-            DataType::Decimal128(38, 9),
-            true,
-        )]);
-        let dest = iceberg_schema_from_arrow("bike_hire_many", &arrow).unwrap();
-        assert!(matches!(
-            dest.field_by_name("amount").unwrap().field_type.as_ref(),
-            Type::Primitive(PrimitiveType::Decimal {
-                precision: 38,
-                scale: 9
-            })
-        ));
-    }
-
-    #[test]
-    fn iceberg_schema_from_arrow_maps_list_int32() {
-        let arrow = ArrowSchema::new(vec![arrow::datatypes::Field::new(
-            "tags",
-            DataType::List(Arc::new(arrow::datatypes::Field::new(
-                "item",
-                DataType::Int32,
-                true,
-            ))),
-            true,
-        )]);
-        let dest = iceberg_schema_from_arrow("bike_hire_many", &arrow).unwrap();
-        assert!(matches!(
-            dest.field_by_name("tags").unwrap().field_type.as_ref(),
-            Type::List(_)
-        ));
-    }
-
-    #[test]
-    fn iceberg_schema_from_arrow_maps_struct_including_empty_marker() {
-        let mut firmware_meta = HashMap::new();
-        firmware_meta.insert(PARQUET_FIELD_ID_META_KEY.to_string(), "1485247109".into());
-        let mut modem_meta = HashMap::new();
-        modem_meta.insert(PARQUET_FIELD_ID_META_KEY.to_string(), "1468357056".into());
-        let arrow = ArrowSchema::new(vec![arrow::datatypes::Field::new(
-            "device",
-            DataType::Struct(
-                vec![
-                    arrow::datatypes::Field::new("__skippr_empty_struct", DataType::Boolean, true),
-                    arrow::datatypes::Field::new("firmware", DataType::Utf8, true)
-                        .with_metadata(firmware_meta),
-                    arrow::datatypes::Field::new("modem", DataType::Utf8, true)
-                        .with_metadata(modem_meta),
-                ]
-                .into(),
-            ),
-            true,
-        )]);
-        let dest = iceberg_schema_from_arrow("bike_hire_many", &arrow).unwrap();
-        let Type::Struct(st) = dest.field_by_name("device").unwrap().field_type.as_ref() else {
-            panic!("expected Iceberg struct");
-        };
-        let names: Vec<&str> = st
-            .fields()
-            .iter()
-            .map(|field| field.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["__skippr_empty_struct", "firmware", "modem"]);
-        assert_eq!(st.fields()[1].id, 1485247109);
-        assert_eq!(st.fields()[2].id, 1468357056);
-    }
-
-    #[test]
-    fn iceberg_schema_from_arrow_maps_map_string_string() {
-        let arrow = ArrowSchema::new(vec![arrow::datatypes::Field::new(
-            "attrs",
-            DataType::Map(
-                Arc::new(arrow::datatypes::Field::new(
-                    "entries",
-                    DataType::Struct(
-                        vec![
-                            arrow::datatypes::Field::new("key", DataType::Utf8, false),
-                            arrow::datatypes::Field::new("value", DataType::Utf8, true),
-                        ]
-                        .into(),
-                    ),
+    fn merge_schema_adds_nested_struct_child() {
+        let current = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![Arc::new(NestedField::new(
+                10,
+                "detail",
+                Type::Struct(StructType::new(vec![Arc::new(NestedField::new(
+                    11,
+                    "inner",
+                    Type::Primitive(PrimitiveType::String),
                     false,
-                )),
+                ))])),
                 false,
-            ),
-            true,
-        )]);
-        let dest = iceberg_schema_from_arrow("bike_hire_many", &arrow).unwrap();
-        assert!(matches!(
-            dest.field_by_name("attrs").unwrap().field_type.as_ref(),
-            Type::Map(_)
-        ));
+            ))])
+            .build()
+            .unwrap();
+        let desired = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![Arc::new(NestedField::new(
+                10,
+                "detail",
+                Type::Struct(StructType::new(vec![
+                    Arc::new(NestedField::new(
+                        11,
+                        "inner",
+                        Type::Primitive(PrimitiveType::String),
+                        false,
+                    )),
+                    Arc::new(NestedField::new(
+                        12,
+                        "region",
+                        Type::Primitive(PrimitiveType::String),
+                        false,
+                    )),
+                ])),
+                false,
+            ))])
+            .build()
+            .unwrap();
+        let merged = merge_iceberg_schema_missing_fields("orders", &current, &desired, 1)
+            .unwrap()
+            .expect("region is missing");
+        assert_eq!(
+            merge_iceberg_schema_missing_fields("orders", &merged, &desired, 2).unwrap(),
+            None
+        );
+        let detail = merged.field_by_name("detail").unwrap();
+        match detail.field_type.as_ref() {
+            Type::Struct(st) => {
+                assert!(st.field_by_name("inner").is_some());
+                assert!(st.field_by_name("region").is_some());
+            }
+            other => panic!("expected struct, got {other}"),
+        }
     }
 
     #[test]
-    fn iceberg_field_types_match_rejects_int_vs_double() {
+    fn schema_merge_rejects_primitive_type_mismatch() {
         let current = Schema::builder()
             .with_schema_id(0)
             .with_fields(vec![Arc::new(NestedField::new(
                 1,
-                "amount",
-                Type::Primitive(PrimitiveType::Int),
+                "event_day",
+                Type::Primitive(PrimitiveType::String),
                 false,
             ))])
             .build()
@@ -5493,33 +5174,73 @@ mod tests {
             .with_schema_id(0)
             .with_fields(vec![Arc::new(NestedField::new(
                 1,
-                "amount",
-                Type::Primitive(PrimitiveType::Double),
+                "event_day",
+                Type::Primitive(PrimitiveType::Date),
                 false,
             ))])
             .build()
             .unwrap();
-        assert!(!iceberg_field_types_match(&current, &desired));
+        let err = merge_iceberg_schema_missing_fields("orders", &current, &desired, 1).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match published"),
+            "{err}"
+        );
     }
 
     #[test]
-    fn iceberg_arrow_schema_plan_keeps_committed_types_after_snapshot() {
-        assert_eq!(
-            iceberg_arrow_schema_plan(true, true, true),
-            IcebergArrowSchemaPlan::Keep
+    fn batch_column_absent_from_dest_fails_closed() {
+        let dest = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![Arc::new(NestedField::new(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Long),
+                false,
+            ))])
+            .build()
+            .unwrap();
+        let arrow = ArrowSchema::new(vec![
+            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int64, true),
+            arrow::datatypes::Field::new("extra", arrow::datatypes::DataType::Utf8, true),
+        ]);
+        let err = assert_batch_columns_are_in_dest(&arrow, &dest).unwrap_err();
+        assert!(
+            err.to_string().contains("extra"),
+            "error should name the extra column: {err}"
         );
-        assert_eq!(
-            iceberg_arrow_schema_plan(true, false, false),
-            IcebergArrowSchemaPlan::Recreate
-        );
-        assert_eq!(
-            iceberg_arrow_schema_plan(false, true, true),
-            IcebergArrowSchemaPlan::MergeMissing
-        );
-        assert_eq!(
-            iceberg_arrow_schema_plan(true, false, true),
-            IcebergArrowSchemaPlan::Keep
-        );
+    }
+
+    #[test]
+    fn iceberg_publish_primitive_fails_closed_on_unknown() {
+        let err = primitive_type_for_skippr(&SkipprDataType::Unknown).unwrap_err();
+        assert!(err.to_string().contains("no primitive"), "{err}");
+        let err = primitive_type_for_skippr(&SkipprDataType::Null).unwrap_err();
+        assert!(err.to_string().contains("no primitive"), "{err}");
+        assert!(primitive_type_for_skippr(&SkipprDataType::Uuid).is_ok());
+        assert!(primitive_type_for_skippr(&SkipprDataType::Binary).is_ok());
+    }
+
+    #[test]
+    fn batch_empty_struct_marker_is_not_required_on_dest() {
+        let dest = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![Arc::new(NestedField::new(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Long),
+                false,
+            ))])
+            .build()
+            .unwrap();
+        let arrow = ArrowSchema::new(vec![
+            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int64, true),
+            arrow::datatypes::Field::new(
+                skippr_runtime_sdk::converters::skippr_arrow::EMPTY_STRUCT_MARKER_FIELD,
+                arrow::datatypes::DataType::Boolean,
+                true,
+            ),
+        ]);
+        assert_batch_columns_are_in_dest(&arrow, &dest).unwrap();
     }
 
     #[test]
@@ -5542,9 +5263,40 @@ mod tests {
                 }
             }
         }));
-        let schema =
-            iceberg_schema_from_output_metadata("orders", &metadata, &HashSet::new()).unwrap();
+        let schema = iceberg_schema_from_output_metadata("orders", &metadata, true).unwrap();
         assert_eq!(schema.schema_id(), 0);
+        assert!(schema.field_by_name("_skippr_mutation").is_some());
+    }
+
+    #[test]
+    fn iceberg_schema_from_output_metadata_keeps_timestamp_from_dest() {
+        let metadata = output_metadata(json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "event_time": {
+                    "out_field_name": "event_time",
+                    "determined_type": "timestamp",
+                    "determined_type_values": "",
+                    "field_id": 11,
+                    "schema_id": 1,
+                    "lineage_id": "orders:event_time",
+                    "nullable": true,
+                    "default_value": null,
+                    "fields": {}
+                }
+            }
+        }));
+        let schema = iceberg_schema_from_output_metadata("orders", &metadata, true).unwrap();
+        assert!(matches!(
+            schema
+                .field_by_name("event_time")
+                .unwrap()
+                .field_type
+                .as_ref(),
+            Type::Primitive(PrimitiveType::Timestamp)
+        ));
     }
 
     #[test]
@@ -5562,20 +5314,76 @@ mod tests {
         }));
 
         let mut seen_field_ids = HashMap::new();
-        let field = field_to_nested_field(
-            "orders",
-            &metadata,
-            Vec::new(),
-            &mut seen_field_ids,
-            &HashSet::new(),
-        )
-        .unwrap();
+        let field =
+            field_to_nested_field("orders", &metadata, Vec::new(), &mut seen_field_ids).unwrap();
         assert_eq!(field.id, 10);
         assert!(field.required);
         assert!(matches!(
             field.field_type.as_ref(),
             Type::Primitive(PrimitiveType::Long)
         ));
+    }
+
+    #[test]
+    fn iceberg_schema_omits_cdc_columns_when_capability_forbids_them() {
+        let metadata = output_metadata(json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "id": {
+                    "out_field_name": "id",
+                    "determined_type": "long",
+                    "determined_type_values": "",
+                    "field_id": 10,
+                    "schema_id": 1,
+                    "lineage_id": "orders:id",
+                    "nullable": false,
+                    "default_value": null,
+                    "fields": {}
+                }
+            }
+        }));
+        assert!(
+            !skippr_runtime_sdk::plugins::cdc::sink_capabilities::DUCKDB.can_manage_skippr_columns
+        );
+        assert!(
+            skippr_runtime_sdk::plugins::cdc::sink_capabilities::SKIPPRLAKE
+                .can_manage_skippr_columns
+        );
+        let omit = iceberg_schema_from_output_metadata(
+            "orders",
+            &metadata,
+            skippr_runtime_sdk::plugins::cdc::sink_capabilities::DUCKDB.can_manage_skippr_columns,
+        )
+        .unwrap();
+        assert!(omit.field_by_name("id").is_some());
+        assert!(omit.field_by_name("_skippr_mutation").is_none());
+        assert!(omit.field_by_name("_skippr_order_token").is_none());
+        let keep = iceberg_schema_from_output_metadata(
+            "orders",
+            &metadata,
+            skippr_runtime_sdk::plugins::cdc::sink_capabilities::SKIPPRLAKE
+                .can_manage_skippr_columns,
+        )
+        .unwrap();
+        assert!(keep.field_by_name("_skippr_mutation").is_some());
+    }
+
+    #[test]
+    fn table_with_a_snapshot_must_not_replace_mismatched_spec() {
+        let table = make_v2_table_from_fixture("TableMetadataV2Valid.json");
+        assert!(
+            table.metadata().current_snapshot().is_some(),
+            "fixture table must have a snapshot"
+        );
+        assert!(
+            !empty_table_may_replace_spec(&table),
+            "a snapshot is SPEC_MISMATCH_RECREATE, not drop"
+        );
+        let empty = make_v2_minimal_table_for_tests();
+        assert!(empty.metadata().current_snapshot().is_none());
+        assert!(empty_table_may_replace_spec(&empty));
     }
 
     #[test]
@@ -5619,22 +5427,12 @@ mod tests {
         }));
 
         let mut seen_field_ids = HashMap::new();
-        let array_field = field_to_nested_field(
-            "orders",
-            &array_metadata,
-            Vec::new(),
-            &mut seen_field_ids,
-            &HashSet::new(),
-        )
-        .unwrap();
-        let map_field = field_to_nested_field(
-            "orders",
-            &map_metadata,
-            Vec::new(),
-            &mut seen_field_ids,
-            &HashSet::new(),
-        )
-        .unwrap();
+        let array_field =
+            field_to_nested_field("orders", &array_metadata, Vec::new(), &mut seen_field_ids)
+                .unwrap();
+        let map_field =
+            field_to_nested_field("orders", &map_metadata, Vec::new(), &mut seen_field_ids)
+                .unwrap();
 
         assert!(matches!(array_field.field_type.as_ref(), Type::List(_)));
         assert!(matches!(map_field.field_type.as_ref(), Type::Map(_)));
@@ -5650,6 +5448,12 @@ mod tests {
         assert_eq!(
             iceberg_table_suffix("dynamodb:skippr_dynamo_cdc"),
             "dynamodb_skippr_dynamo_cdc"
+        );
+        assert_eq!(iceberg_table_suffix("dynamodb:orders"), "dynamodb_orders");
+        assert_eq!(iceberg_table_suffix("dynamodb:lines"), "dynamodb_lines");
+        assert_ne!(
+            iceberg_table_suffix("dynamodb:orders"),
+            iceberg_table_suffix("dynamodb:lines")
         );
     }
 
@@ -6439,7 +6243,7 @@ mod tests {
             "determined_type_values": "",
             "fields": {}
         }));
-        let mut state = InstalledIcebergSchemaState::default();
+        let mut state = InstalledDestSchema::default();
         assert!(state.install_snapshot(&RuntimeSchemaState {
             version: 8,
             namespaces: BTreeMap::from([("events".to_string(), initial.clone())]),
@@ -6467,9 +6271,9 @@ mod tests {
         });
 
         assert_eq!(changed_namespaces, vec!["users".to_string()]);
-        assert_eq!(state.namespaces["events"], initial);
-        assert_eq!(state.namespace_versions["events"], 4);
-        assert_eq!(state.namespace_versions["users"], 2);
+        assert_eq!(state.get("events").unwrap().1, initial);
+        assert_eq!(state.namespace_versions()["events"], 4);
+        assert_eq!(state.namespace_versions()["users"], 2);
     }
 
     #[test]
@@ -6503,11 +6307,12 @@ mod tests {
     skippr_runtime_sdk::declare_sink_spec!(
         TestIcebergSpec,
         skippr_runtime_sdk::plugins::cdc::sink_capabilities::SKIPPRLAKE,
-        skippr_runtime_sdk::plugins::TransactionalTableCommit
+        skippr_runtime_sdk::plugins::TransactionalTableCommit,
+        alter = skippr_runtime_sdk::plugins::AlterSupport::Iceberg
     );
 
     #[tokio::test]
-    async fn sync_schema_creates_table_in_injected_catalog_namespace() {
+    async fn publish_creates_missing_table() {
         let catalog: Arc<dyn Catalog> = Arc::new(
             MemoryCatalogBuilder::default()
                 .load(
@@ -6573,12 +6378,122 @@ mod tests {
             }
         }));
 
-        <IcebergWriter<TestIcebergSpec> as SchemaSink>::sync_schema(&writer, "orders", &metadata)
+        writer
+            .table_for_write("orders", 1, &metadata)
             .await
             .unwrap();
 
         let ident = TableIdent::from_strs(["lake", "orders"]).unwrap();
-        assert!(catalog.table_exists(&ident).await.unwrap());
+        assert!(
+            catalog.table_exists(&ident).await.unwrap(),
+            "publish creates the table from dest metadata"
+        );
+        let first = catalog.load_table(&ident).await.unwrap();
+        writer
+            .table_for_write("orders", 1, &metadata)
+            .await
+            .unwrap();
+        let second = catalog.load_table(&ident).await.unwrap();
+        assert_eq!(
+            first.metadata().current_schema().schema_id(),
+            second.metadata().current_schema().schema_id()
+        );
+        assert_eq!(
+            first.metadata().last_sequence_number(),
+            second.metadata().last_sequence_number(),
+            "same-version publish must not create or drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_creates_day_partition_from_metadata_time_column() {
+        let catalog: Arc<dyn Catalog> = Arc::new(
+            MemoryCatalogBuilder::default()
+                .load(
+                    "test",
+                    HashMap::from([(
+                        MEMORY_CATALOG_WAREHOUSE.to_string(),
+                        "memory://warehouse-day".to_string(),
+                    )]),
+                )
+                .await
+                .unwrap(),
+        );
+        catalog
+            .create_namespace(
+                &NamespaceIdent::from_strs(["lake"]).unwrap(),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let writer = IcebergWriter::<TestIcebergSpec>::new(
+            skippr_runtime_sdk::protocol::RuntimeExecutionContext {
+                pipeline_name: "p".to_string(),
+                workspace_name: "w".to_string(),
+                data_dir: "/tmp".to_string(),
+                execution_mode: Default::default(),
+                output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout {
+                    time_partition_granularity: Some("day".into()),
+                    batch_time_fields: vec!["event_ts".into()],
+                    ..Default::default()
+                },
+                inject_fields: BTreeMap::new(),
+                pipeline_type: Default::default(),
+            },
+            skippr_runtime_sdk::protocol::RuntimeBinding::Primary,
+            "schema".to_string(),
+            Arc::clone(&catalog),
+            IcebergWriterConfig {
+                policies: SinkWritePolicySupport {
+                    supports_merge_by_key: true,
+                    supports_replace_partition: true,
+                    supports_replace_table: true,
+                },
+                table_namespace: "lake".to_string(),
+                location_root: "memory://warehouse-day/lake".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let metadata = output_metadata(json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "id": {
+                    "out_field_name": "id",
+                    "determined_type": "long",
+                    "determined_type_values": "",
+                    "field_id": 10,
+                    "schema_id": 1,
+                    "lineage_id": "orders:id",
+                    "nullable": false,
+                    "default_value": null,
+                    "fields": {}
+                },
+                "event_ts": {
+                    "out_field_name": "event_ts",
+                    "determined_type": "timestamp",
+                    "determined_type_values": "",
+                    "field_id": 11,
+                    "schema_id": 1,
+                    "lineage_id": "orders:event_ts",
+                    "nullable": true,
+                    "default_value": null,
+                    "fields": {}
+                }
+            }
+        }));
+        writer
+            .table_for_write("orders", 1, &metadata)
+            .await
+            .unwrap();
+        let ident = TableIdent::from_strs(["lake", "orders"]).unwrap();
+        let table = catalog.load_table(&ident).await.unwrap();
+        let fields = table.metadata().default_partition_spec().fields();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].transform, Transform::Day);
+        assert_eq!(fields[0].name, "event_ts_day");
     }
 
     fn long_field(name: &str, field_id: i32) -> serde_json::Value {
@@ -6648,9 +6563,11 @@ mod tests {
             "determined_type_values": "",
             "fields": { "id": long_field("id", 10) }
         }));
-        <IcebergWriter<TestIcebergSpec> as SchemaSink>::sync_schema(&writer, "orders", &create)
+        writer
+            .ensure_table(catalog.as_ref(), "orders", &create)
             .await
             .unwrap();
+        writer.table_for_write("orders", 1, &create).await.unwrap();
         let first = output_metadata(json!({
             "out_field_name": "",
             "determined_type": "record",
@@ -6660,9 +6577,7 @@ mod tests {
                 "amount": long_field("amount", 11)
             }
         }));
-        <IcebergWriter<TestIcebergSpec> as SchemaSink>::sync_schema(&writer, "orders", &first)
-            .await
-            .unwrap();
+        writer.table_for_write("orders", 1, &first).await.unwrap();
         let second = output_metadata(json!({
             "out_field_name": "",
             "determined_type": "record",
@@ -6673,9 +6588,7 @@ mod tests {
                 "region": long_field("region", 12)
             }
         }));
-        <IcebergWriter<TestIcebergSpec> as SchemaSink>::sync_schema(&writer, "orders", &second)
-            .await
-            .unwrap();
+        writer.table_for_write("orders", 2, &second).await.unwrap();
 
         let table = catalog.load_table(&ident).await.unwrap();
         assert!(
@@ -6758,7 +6671,8 @@ mod tests {
                 }
             }
         }));
-        <IcebergWriter<TestIcebergSpec> as SchemaSink>::sync_schema(&writer, "orders", &metadata)
+        writer
+            .table_for_write("orders", 1, &metadata)
             .await
             .unwrap();
         let ident = TableIdent::from_strs(["lake", "orders"]).unwrap();
@@ -6773,7 +6687,7 @@ mod tests {
             field_id, 7,
             "create_table must keep skipprd field identity, not reassign 1..N"
         );
-        <IcebergWriter<TestIcebergSpec> as SchemaSink>::apply_alter(
+        <IcebergWriter<TestIcebergSpec> as DataSink>::apply_alter(
             &writer,
             "orders",
             &metadata,
@@ -6793,7 +6707,7 @@ mod tests {
                 .map(String::as_str),
             Some("0")
         );
-        <IcebergWriter<TestIcebergSpec> as SchemaSink>::apply_alter(
+        <IcebergWriter<TestIcebergSpec> as DataSink>::apply_alter(
             &writer,
             "orders",
             &metadata,
@@ -6801,7 +6715,7 @@ mod tests {
         )
         .await
         .unwrap();
-        <IcebergWriter<TestIcebergSpec> as SchemaSink>::apply_alter(
+        <IcebergWriter<TestIcebergSpec> as DataSink>::apply_alter(
             &writer,
             "orders",
             &metadata,
@@ -7291,6 +7205,11 @@ fn partition_commit_files(
 
 #[cfg(test)]
 fn make_v2_minimal_table_for_tests() -> iceberg::table::Table {
+    make_v2_table_from_fixture("TableMetadataV2ValidMinimal.json")
+}
+
+#[cfg(test)]
+fn make_v2_table_from_fixture(file_name: &str) -> iceberg::table::Table {
     use std::fs::File;
     use std::io::BufReader;
 
@@ -7302,7 +7221,7 @@ fn make_v2_minimal_table_for_tests() -> iceberg::table::Table {
 
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../third_party/iceberg/testdata/table_metadata");
-    let file = File::open(manifest_dir.join("TableMetadataV2ValidMinimal.json")).unwrap();
+    let file = File::open(manifest_dir.join(file_name)).unwrap();
     let reader = BufReader::new(file);
     let metadata = serde_json::from_reader::<_, TableMetadata>(reader).unwrap();
     iceberg::table::Table::builder()

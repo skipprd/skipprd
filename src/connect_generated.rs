@@ -65,16 +65,6 @@ pub enum ConnectPlugin {
     DataSinkSnowflake,
     DataSinkStdout,
     DataSinkSynapse,
-    SchemaSinkAthenaIceberg,
-    SchemaSinkBigquery,
-    SchemaSinkClickhouse,
-    SchemaSinkDuckdb,
-    SchemaSinkGlue,
-    SchemaSinkMotherduck,
-    SchemaSinkPostgres,
-    SchemaSinkRedshift,
-    SchemaSinkSkipprLake,
-    SchemaSinkSnowflake,
 }
 
 impl ConnectPlugin {
@@ -143,16 +133,6 @@ impl ConnectPlugin {
             Self::DataSinkSnowflake => ConnectRole::DataSink,
             Self::DataSinkStdout => ConnectRole::DataSink,
             Self::DataSinkSynapse => ConnectRole::DataSink,
-            Self::SchemaSinkAthenaIceberg => ConnectRole::SchemaSink,
-            Self::SchemaSinkBigquery => ConnectRole::SchemaSink,
-            Self::SchemaSinkClickhouse => ConnectRole::SchemaSink,
-            Self::SchemaSinkDuckdb => ConnectRole::SchemaSink,
-            Self::SchemaSinkGlue => ConnectRole::SchemaSink,
-            Self::SchemaSinkMotherduck => ConnectRole::SchemaSink,
-            Self::SchemaSinkPostgres => ConnectRole::SchemaSink,
-            Self::SchemaSinkRedshift => ConnectRole::SchemaSink,
-            Self::SchemaSinkSkipprLake => ConnectRole::SchemaSink,
-            Self::SchemaSinkSnowflake => ConnectRole::SchemaSink,
         }
     }
     pub fn plugin_name(self) -> &'static str {
@@ -220,16 +200,6 @@ impl ConnectPlugin {
             Self::DataSinkSnowflake => "Snowflake",
             Self::DataSinkStdout => "Stdout",
             Self::DataSinkSynapse => "Synapse",
-            Self::SchemaSinkAthenaIceberg => "AthenaIceberg",
-            Self::SchemaSinkBigquery => "Bigquery",
-            Self::SchemaSinkClickhouse => "Clickhouse",
-            Self::SchemaSinkDuckdb => "Duckdb",
-            Self::SchemaSinkGlue => "Glue",
-            Self::SchemaSinkMotherduck => "Motherduck",
-            Self::SchemaSinkPostgres => "Postgres",
-            Self::SchemaSinkRedshift => "Redshift",
-            Self::SchemaSinkSkipprLake => "SkipprLake",
-            Self::SchemaSinkSnowflake => "Snowflake",
         }
     }
     pub fn secret_fields(self) -> &'static [&'static str] {
@@ -343,20 +313,6 @@ impl ConnectPlugin {
             ],
             Self::DataSinkStdout => &[],
             Self::DataSinkSynapse => &["connection_string"],
-            Self::SchemaSinkAthenaIceberg => &["object_store.secret_access_key"],
-            Self::SchemaSinkBigquery => &[],
-            Self::SchemaSinkClickhouse => &["password"],
-            Self::SchemaSinkDuckdb => &[],
-            Self::SchemaSinkGlue => &[],
-            Self::SchemaSinkMotherduck => &["motherduck_token"],
-            Self::SchemaSinkPostgres => &["password"],
-            Self::SchemaSinkRedshift => &[],
-            Self::SchemaSinkSkipprLake => &["object_store.secret_access_key"],
-            Self::SchemaSinkSnowflake => &[
-                "password",
-                "staging_azure_sas_token",
-                "staging_azure_account_key",
-            ],
         }
     }
     pub fn yaml_path_for(self, ident: &str) -> Option<&'static str> {
@@ -1065,118 +1021,6 @@ impl ConnectPlugin {
             (Self::DataSinkSynapse, "connection_string") => Some("connection_string"),
             (Self::DataSinkSynapse, "schema") => Some("schema"),
             (Self::DataSinkSynapse, "table") => Some("table"),
-            (Self::SchemaSinkAthenaIceberg, "warehouse") => Some("warehouse"),
-            (Self::SchemaSinkAthenaIceberg, "glue_database_name") => Some("glue_database_name"),
-            (Self::SchemaSinkAthenaIceberg, "athena_workgroup_name") => {
-                Some("athena_workgroup_name")
-            }
-            (Self::SchemaSinkAthenaIceberg, "athena_results_s3_bucket") => {
-                Some("athena_results_s3_bucket")
-            }
-            (Self::SchemaSinkAthenaIceberg, "region") => Some("region"),
-            (Self::SchemaSinkAthenaIceberg, "catalog_id") => Some("catalog_id"),
-            (Self::SchemaSinkAthenaIceberg, "object_store_type") => Some("object_store.type"),
-            (Self::SchemaSinkAthenaIceberg, "object_store_endpoint") => {
-                Some("object_store.endpoint")
-            }
-            (Self::SchemaSinkAthenaIceberg, "object_store_region") => Some("object_store.region"),
-            (Self::SchemaSinkAthenaIceberg, "object_store_access_key_id") => {
-                Some("object_store.access_key_id")
-            }
-            (Self::SchemaSinkAthenaIceberg, "object_store_secret_access_key") => {
-                Some("object_store.secret_access_key")
-            }
-            (Self::SchemaSinkAthenaIceberg, "object_store_path_style") => {
-                Some("object_store.path_style")
-            }
-            (Self::SchemaSinkBigquery, "project") => Some("project"),
-            (Self::SchemaSinkBigquery, "dataset") => Some("dataset"),
-            (Self::SchemaSinkBigquery, "location") => Some("location"),
-            (Self::SchemaSinkBigquery, "credentials_path") => Some("credentials_path"),
-            (Self::SchemaSinkBigquery, "max_concurrency") => Some("max_concurrency"),
-            (Self::SchemaSinkBigquery, "discovery_cache_ttl_secs") => {
-                Some("discovery_cache_ttl_secs")
-            }
-            (Self::SchemaSinkClickhouse, "url") => Some("url"),
-            (Self::SchemaSinkClickhouse, "database") => Some("database"),
-            (Self::SchemaSinkClickhouse, "user") => Some("user"),
-            (Self::SchemaSinkClickhouse, "password") => Some("password"),
-            (Self::SchemaSinkClickhouse, "table") => Some("table"),
-            (Self::SchemaSinkDuckdb, "warehouse") => Some("warehouse"),
-            (Self::SchemaSinkDuckdb, "table_namespace") => Some("table_namespace"),
-            (Self::SchemaSinkGlue, "format") => Some("format"),
-            (Self::SchemaSinkGlue, "s3_bucket") => Some("s3_bucket"),
-            (Self::SchemaSinkGlue, "s3_prefix") => Some("s3_prefix"),
-            (Self::SchemaSinkGlue, "athena_workgroup_name") => Some("athena_workgroup_name"),
-            (Self::SchemaSinkGlue, "glue_database_name") => Some("glue_database_name"),
-            (Self::SchemaSinkGlue, "athena_results_s3_bucket") => Some("athena_results_s3_bucket"),
-            (Self::SchemaSinkGlue, "region") => Some("region"),
-            (Self::SchemaSinkGlue, "catalog") => Some("catalog"),
-            (Self::SchemaSinkGlue, "max_concurrency") => Some("max_concurrency"),
-            (Self::SchemaSinkGlue, "discovery_cache_ttl_secs") => Some("discovery_cache_ttl_secs"),
-            (Self::SchemaSinkMotherduck, "motherduck_token") => Some("motherduck_token"),
-            (Self::SchemaSinkMotherduck, "database") => Some("database"),
-            (Self::SchemaSinkMotherduck, "table") => Some("table"),
-            (Self::SchemaSinkMotherduck, "schema") => Some("schema"),
-            (Self::SchemaSinkPostgres, "host") => Some("host"),
-            (Self::SchemaSinkPostgres, "port") => Some("port"),
-            (Self::SchemaSinkPostgres, "user") => Some("user"),
-            (Self::SchemaSinkPostgres, "password") => Some("password"),
-            (Self::SchemaSinkPostgres, "database") => Some("database"),
-            (Self::SchemaSinkPostgres, "schema") => Some("schema"),
-            (Self::SchemaSinkPostgres, "sslmode") => Some("sslmode"),
-            (Self::SchemaSinkRedshift, "cluster_identifier") => Some("cluster_identifier"),
-            (Self::SchemaSinkRedshift, "workgroup_name") => Some("workgroup_name"),
-            (Self::SchemaSinkRedshift, "database") => Some("database"),
-            (Self::SchemaSinkRedshift, "db_user") => Some("db_user"),
-            (Self::SchemaSinkRedshift, "table") => Some("table"),
-            (Self::SchemaSinkRedshift, "region") => Some("region"),
-            (Self::SchemaSinkRedshift, "staging_s3_bucket") => Some("staging_s3_bucket"),
-            (Self::SchemaSinkRedshift, "staging_s3_prefix") => Some("staging_s3_prefix"),
-            (Self::SchemaSinkRedshift, "iam_role_arn") => Some("iam_role_arn"),
-            (Self::SchemaSinkRedshift, "schema") => Some("schema"),
-            (Self::SchemaSinkSkipprLake, "warehouse") => Some("warehouse"),
-            (Self::SchemaSinkSkipprLake, "catalog_table") => Some("catalog_table"),
-            (Self::SchemaSinkSkipprLake, "region") => Some("region"),
-            (Self::SchemaSinkSkipprLake, "object_store_type") => Some("object_store.type"),
-            (Self::SchemaSinkSkipprLake, "object_store_endpoint") => Some("object_store.endpoint"),
-            (Self::SchemaSinkSkipprLake, "object_store_region") => Some("object_store.region"),
-            (Self::SchemaSinkSkipprLake, "object_store_access_key_id") => {
-                Some("object_store.access_key_id")
-            }
-            (Self::SchemaSinkSkipprLake, "object_store_secret_access_key") => {
-                Some("object_store.secret_access_key")
-            }
-            (Self::SchemaSinkSkipprLake, "object_store_path_style") => {
-                Some("object_store.path_style")
-            }
-            (Self::SchemaSinkSkipprLake, "table_namespace") => Some("table_namespace"),
-            (Self::SchemaSinkSnowflake, "account") => Some("account"),
-            (Self::SchemaSinkSnowflake, "user") => Some("user"),
-            (Self::SchemaSinkSnowflake, "password") => Some("password"),
-            (Self::SchemaSinkSnowflake, "warehouse") => Some("warehouse"),
-            (Self::SchemaSinkSnowflake, "database") => Some("database"),
-            (Self::SchemaSinkSnowflake, "schema") => Some("schema"),
-            (Self::SchemaSinkSnowflake, "role") => Some("role"),
-            (Self::SchemaSinkSnowflake, "stage") => Some("stage"),
-            (Self::SchemaSinkSnowflake, "private_key_path") => Some("private_key_path"),
-            (Self::SchemaSinkSnowflake, "staging_uri") => Some("staging_uri"),
-            (Self::SchemaSinkSnowflake, "staging_storage_integration") => {
-                Some("staging_storage_integration")
-            }
-            (Self::SchemaSinkSnowflake, "staging_azure_sas_token") => {
-                Some("staging_azure_sas_token")
-            }
-            (Self::SchemaSinkSnowflake, "staging_azure_account_key") => {
-                Some("staging_azure_account_key")
-            }
-            (Self::SchemaSinkSnowflake, "staging_gcs_service_account_key_path") => {
-                Some("staging_gcs_service_account_key_path")
-            }
-            (Self::SchemaSinkSnowflake, "max_concurrency") => Some("max_concurrency"),
-            (Self::SchemaSinkSnowflake, "discovery_cache_ttl_secs") => {
-                Some("discovery_cache_ttl_secs")
-            }
             _ => None,
         }
     }
@@ -1401,55 +1245,6 @@ impl DataSink {
             "snowflake" => Some(Self::Snowflake),
             "stdout" => Some(Self::Stdout),
             "synapse" => Some(Self::Synapse),
-            _ => None,
-        }
-    }
-    pub fn plugin_name(self) -> &'static str {
-        self.plugin().plugin_name()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SchemaSink {
-    AthenaIceberg,
-    Bigquery,
-    Clickhouse,
-    Duckdb,
-    Glue,
-    Motherduck,
-    Postgres,
-    Redshift,
-    SkipprLake,
-    Snowflake,
-}
-
-impl SchemaSink {
-    pub fn plugin(self) -> ConnectPlugin {
-        match self {
-            Self::AthenaIceberg => ConnectPlugin::SchemaSinkAthenaIceberg,
-            Self::Bigquery => ConnectPlugin::SchemaSinkBigquery,
-            Self::Clickhouse => ConnectPlugin::SchemaSinkClickhouse,
-            Self::Duckdb => ConnectPlugin::SchemaSinkDuckdb,
-            Self::Glue => ConnectPlugin::SchemaSinkGlue,
-            Self::Motherduck => ConnectPlugin::SchemaSinkMotherduck,
-            Self::Postgres => ConnectPlugin::SchemaSinkPostgres,
-            Self::Redshift => ConnectPlugin::SchemaSinkRedshift,
-            Self::SkipprLake => ConnectPlugin::SchemaSinkSkipprLake,
-            Self::Snowflake => ConnectPlugin::SchemaSinkSnowflake,
-        }
-    }
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "athenaiceberg" => Some(Self::AthenaIceberg),
-            "bigquery" => Some(Self::Bigquery),
-            "clickhouse" => Some(Self::Clickhouse),
-            "duckdb" => Some(Self::Duckdb),
-            "glue" => Some(Self::Glue),
-            "motherduck" => Some(Self::Motherduck),
-            "postgres" => Some(Self::Postgres),
-            "redshift" => Some(Self::Redshift),
-            "skipprlake" => Some(Self::SkipprLake),
-            "snowflake" => Some(Self::Snowflake),
             _ => None,
         }
     }

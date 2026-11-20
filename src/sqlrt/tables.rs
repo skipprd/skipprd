@@ -84,23 +84,12 @@ pub(crate) async fn wal_table_for_namespace(
     let Ok(pipeline_metadata) = bound.get_metadata().await else {
         return Ok(None);
     };
-    let schema = crate::ingest_work::Ingest::prepare_arrow_schema_with_metadata_for_query(
+    let schema = crate::ingest_work::Ingest::prepare_arrow_schema_with_metadata(
+        config,
         namespace,
         &pipeline_metadata,
     )
     .map_err(|err| DataFusionError::Plan(err.to_string()))?;
-    let select = match skippr_store_read(config, pipeline)? {
-        Some(kv) => crate::compute::stateless_for_namespace(
-            kv.as_ref(),
-            &bound.get_workspace_name(),
-            pipeline,
-            namespace,
-        )
-        .map_err(|err| DataFusionError::Plan(err.to_string()))?,
-        None => None,
-    };
-    let schema =
-        crate::compute::dest_schema(&[], select.as_ref(), schema).map_err(DataFusionError::Plan)?;
     let key =
         skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
             .map_err(|err| DataFusionError::Plan(err.to_string()))?;
@@ -933,7 +922,7 @@ mod tests {
             "WAL-only File pipelines must register a WAL TableProvider"
         );
         assert!(
-            prod.contains("prepare_arrow_schema_with_metadata_for_query"),
+            prod.contains("prepare_arrow_schema_with_metadata("),
             "empty WAL after reclaim must still register the metadata schema so query/migrate work"
         );
         assert!(
@@ -962,6 +951,10 @@ mod tests {
             "CatalogWalReader MemTable path is deleted"
         );
         assert!(!prod.contains("build_wal_df"));
+        assert!(
+            !prod.contains("crate::compute::dest_schema"),
+            "WAL schema is published dest; do not fold SQL compose a second time"
+        );
     }
 
     #[test]

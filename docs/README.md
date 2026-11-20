@@ -47,7 +47,6 @@ Neither audience needs to know how Skipprd is built. Explain what happens to the
 | CLI (`cli/*.md`, not overview) | Usage, Options, Examples (then Troubleshooting when useful) |
 | Data source (`connectors/inputs/*`) | Before you begin, Configure, Options, What gets synced, Troubleshooting |
 | Destination (`connectors/outputs/*`) | Before you begin, Configure, Options, How data lands, Troubleshooting |
-| Schema sink (`connectors/schema_sinks/*`) | Before you begin, Configure, Options, Troubleshooting |
 | Concept, configuration, operations, CDC | Guide sections, Next steps |
 
 Every page has frontmatter `title` and `description` and exactly one `#` heading.
@@ -56,4 +55,4 @@ Every page has frontmatter `title` and `description` and exactly one `#` heading
 
 The first column is the YAML key in backticks. Columns: Key, Type, Required/Default, Description. Nested keys use dots (`privacy.mode`). Engine environment variables that tune the connector go under `### Environment variables` inside `## Options`.
 
-Pages whose config shape is another class (paired schema sinks) set frontmatter `config_class`, for example `config_class: DataSinkDuckdb`.
+Pages whose config shape is another class set frontmatter `config_class`, for example `config_class: DataSinkDuckdb`.

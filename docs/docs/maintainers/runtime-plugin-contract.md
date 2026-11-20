@@ -36,10 +36,10 @@ There is no stdio compatibility path. Runtime plugins now speak the same TCP pro
 - emitting prepared batches, raw batches, or sink-write requests
 - asking the host to validate resume state
 
-### Sink and schema plugins own
+### Sink plugins own
 
 - destination-specific writes
-- destination-specific DDL/schema sync
+- dest-schema publish and `ApplyAlter`
 - replay-safe handling of repeated compaction work
 
 ## Recovery contract

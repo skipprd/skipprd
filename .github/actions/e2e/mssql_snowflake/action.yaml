@@ -159,7 +159,6 @@ runs:
           if (-not [string]::IsNullOrWhiteSpace($env:SNOWFLAKE_ROLE)) {
             $configLines += "      role: `${SNOWFLAKE_ROLE}"
           }
-          $configLines += "schema_sinks: {}"
           Set-Content -Path $configPath -Value ($configLines -join "`n") -Encoding utf8
 
           Push-Location $workdir

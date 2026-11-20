@@ -255,99 +255,40 @@ def test_session_does_not_resolve_dbt_or_vector_sources(tmp_path, monkeypatch):
     assert skippr.Session(Config.load(path).get_pipeline("p")).pipeline == "p"
 
 
-def test_reregistering_a_paired_sink_keeps_its_schema_sink_in_step(tmp_path):
+def test_reregistering_a_sink_replaces_its_config(tmp_path):
     cfg = Config().workspace("w").storage(LocalStorage())
     src = cfg.data_source("s", _file_source(tmp_path))
-    cfg.data_sink("lake", DataSinkDuckdb(warehouse="file:///tmp/w1", table_namespace="main"), schema_sink="lake")
+    cfg.data_sink("lake", DataSinkDuckdb(warehouse="file:///tmp/w1", table_namespace="main"))
     lake = cfg.data_sink("lake", DataSinkDuckdb(warehouse="file:///tmp/w2", table_namespace="main"))
     p = cfg.pipeline("p", Pipeline(data_source=src, data_sink=lake, data_dir=str(tmp_path / "d")))
     raw = cfg.to_yaml()
-    assert "w1" not in raw and raw.count("warehouse: file:///tmp/w2") == 2
+    assert "w1" not in raw and raw.count("warehouse: file:///tmp/w2") == 1
     assert skippr.Session(p).pipeline == "p"
 
 
-def test_save_refuses_a_file_whose_pipelines_no_longer_validate(tmp_path):
+def test_load_refuses_schema_sinks(tmp_path):
     path = tmp_path / "skippr.yml"
-    ice = textwrap.indent(
-        "AthenaIceberg:\n  warehouse: s3://w/\n  glue_database_name: g\n"
-        "  athena_workgroup_name: primary\n  athena_results_s3_bucket: r\n  region: eu-west-1\n",
-        "    ",
+    path.write_text(
+        "data_sinks:\n  ice:\n    AthenaIceberg:\n      warehouse: s3://w/\n"
+        "      glue_database_name: g\n      athena_workgroup_name: primary\n"
+        "      athena_results_s3_bucket: r\n"
+        "schema_sinks:\n  ice:\n    AthenaIceberg:\n      warehouse: s3://w/\n"
+        "      glue_database_name: g\n      athena_workgroup_name: primary\n"
+        "      athena_results_s3_bucket: r\n"
     )
-    base = (
-        "pipelines:\n  p:\n    data_source: data_sources.src\n    data_sink: data_sinks.ice\n"
-        "data_sources:\n  src:\n    File:\n      path: /tmp/in\n"
-        "data_sinks:\n  ice:\n    schema_sink: schema_sinks.ice\n" + ice
-        + "schema_sinks:\n  ice:\n" + ice
-    )
-    path.write_text(base)
-    cfg = Config()
-    src = cfg.data_source("src", DataSourceFile(path="/tmp/in"))
-    sink = cfg.data_sink(
-        "ice",
-        skippr.DataSinkAthenaIceberg(
-            warehouse="s3://w/", glue_database_name="g", athena_workgroup_name="primary", athena_results_s3_bucket="r"
-        ),
-        schema_sink="other",
-    )
-    cfg.pipeline("p", Pipeline(data_source=src, data_sink=sink))
-    with pytest.raises(ValueError, match="must be equal"):
-        cfg.save(str(path))
-    assert path.read_text() == base
+    with pytest.raises(ValueError, match="unknown field `schema_sinks`"):
+        Config.load(str(path))
 
 
-def test_save_never_rewrites_a_pair_the_caller_did_not_touch(tmp_path):
+def test_load_refuses_schema_sink_on_a_data_sink(tmp_path):
     path = tmp_path / "skippr.yml"
-    duck = "    Duckdb:\n      warehouse: file:///tmp/{}\n      table_namespace: main\n"
-    base = (
-        "data_sinks:\n  lake:\n    schema_sink: schema_sinks.lake\n" + duck.format("w1")
-        + "schema_sinks:\n  lake:\n" + duck.format("w2")
-    )
-    path.write_text(base)
-    with pytest.raises(ValueError, match="must be equal"):
-        Config.load(str(path)).save()
-    assert path.read_text() == base
-
-
-def _iceberg(**overrides):
-    fields = dict(warehouse="s3://w/", glue_database_name="g", athena_workgroup_name="primary", athena_results_s3_bucket="r")
-    return skippr.DataSinkAthenaIceberg(**{**fields, **overrides})
-
-
-def test_shared_schema_sink_matches_a_lowercase_kind_in_the_file(tmp_path):
-    path = tmp_path / "skippr.yml"
-    body = (
+    path.write_text(
+        "data_sinks:\n  ice:\n    schema_sink: schema_sinks.ice\n    AthenaIceberg:\n"
         "      warehouse: s3://w/\n      glue_database_name: g\n"
         "      athena_workgroup_name: primary\n      athena_results_s3_bucket: r\n"
     )
-    path.write_text(
-        "data_sinks:\n  a:\n    schema_sink: schema_sinks.lake\n    athenaiceberg:\n" + body
-        + "schema_sinks:\n  lake:\n    athenaiceberg:\n" + body
-    )
-    cfg = Config.load(str(path))
-    cfg.data_sink("b", _iceberg(), schema_sink="lake")
-    assert cfg.to_yaml().count("schema_sink: schema_sinks.lake") == 2
-
-
-def test_a_shared_paired_sink_is_one_config_across_every_member(tmp_path):
-    cfg = Config()
-    cfg.data_sink("a", _iceberg(region="eu-west-1"), schema_sink="shared")
-    cfg.data_sink("b", _iceberg(), schema_sink="shared")
-    assert cfg.to_yaml().count("region: eu-west-1") == 3
-    cfg.data_sink("a", _iceberg(region="us-east-1"), schema_sink="shared")
-    raw = cfg.to_yaml()
-    assert raw.count("region: us-east-1") == 3 and "eu-west-1" not in raw
-
-
-def test_a_loaded_pair_that_already_differs_is_refused_not_overwritten(tmp_path):
-    path = tmp_path / "skippr.yml"
-    duck = "    Duckdb:\n      warehouse: file:///tmp/w\n      table_namespace: {}\n"
-    path.write_text(
-        "data_sinks:\n  d:\n    schema_sink: schema_sinks.s\n" + duck.format("a")
-        + "schema_sinks:\n  s:\n" + duck.format("b")
-    )
-    cfg = Config.load(str(path))
-    with pytest.raises(ValueError, match="must be equal"):
-        cfg.data_sink("d", DataSinkDuckdb(warehouse="file:///tmp/w", table_namespace="c"), schema_sink="s")
+    with pytest.raises(ValueError, match="unknown field `schema_sink`"):
+        Config.load(str(path))
 
 
 def test_two_sinks_cannot_share_a_duckdb_namespace(tmp_path):

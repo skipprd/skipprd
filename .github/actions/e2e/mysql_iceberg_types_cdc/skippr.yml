@@ -1,10 +1,9 @@
 skippr:
   skippr_s3_bucket: skippr-e2e-sample-data-output
   workspace: iceberg-types-cdc-mysql
-
 pipelines:
   mysql_iceberg_types_cdc:
-    auto_approve: yes
+    auto_approve: true
     env: test
     type: cdc
     buffer_threshold_bytes: 20000000
@@ -13,20 +12,21 @@ pipelines:
     data_sink: data_sinks.iceberg_types_cdc
     cdc:
       default:
-        business_key_columns: ["id"]
+        business_key_columns:
+        - id
       namespaces:
         type_matrix_orders:
-          business_key_columns: ["id"]
-
+          business_key_columns:
+          - id
 data_sources:
   mysql_types_cdc:
     Mysql:
       connection_string: mysql://root:mysql@127.0.0.1:3306/skippr_iceberg_e2e
-      tables: ["type_matrix_orders"]
+      tables:
+      - type_matrix_orders
       cdc_mode: snapshot_then_cdc
       server_id: 4242
       cdc_idle_timeout_seconds: 5
-
 data_sinks:
   iceberg_types_cdc:
     AthenaIceberg:
@@ -34,16 +34,5 @@ data_sinks:
       glue_database_name: iceberg_e2e_mysql
       athena_workgroup_name: bikehire
       athena_results_s3_bucket: skippr-e2e-sample-data-output
-      catalog_id: "353855562591"
-      region: us-east-1
-    schema_sink: schema_sinks.iceberg_glue
-
-schema_sinks:
-  iceberg_glue:
-    AthenaIceberg:
-      warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-mysql
-      glue_database_name: iceberg_e2e_mysql
-      athena_workgroup_name: bikehire
-      athena_results_s3_bucket: skippr-e2e-sample-data-output
-      catalog_id: "353855562591"
+      catalog_id: '353855562591'
       region: us-east-1

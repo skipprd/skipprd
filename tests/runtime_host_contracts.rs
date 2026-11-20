@@ -17,14 +17,11 @@ use serial_test::serial;
 use sha2::{Digest, Sha256};
 use skipprd::discover::OutputMetadata;
 use skipprd::helpers::configuration::Config;
-use skipprd::plugins::{DataSink, SchemaSink};
-use skipprd::runtime_plugins::host::{
-    ResolvedRuntimePlugin, RuntimeDataSinkPlugin, RuntimeSchemaSinkPlugin,
-};
+use skipprd::plugins::DataSink;
+use skipprd::runtime_plugins::host::{ResolvedRuntimePlugin, RuntimeDataSinkPlugin};
 use skipprd::runtime_plugins::manifest::RuntimePluginManifest;
 use skipprd::runtime_plugins::protocol::{
-    RuntimeBinding, RuntimePluginConfigEnvelope, RuntimeSchemaConfig, RuntimeSinkConfig,
-    RUNTIME_PROTOCOL_VERSION,
+    RuntimeBinding, RuntimePluginConfigEnvelope, RuntimeSinkConfig, RUNTIME_PROTOCOL_VERSION,
 };
 use tempfile::tempdir;
 
@@ -128,81 +125,12 @@ fn write_sink_manifest(
     manifest_path
 }
 
-fn write_schema_manifest(
-    dir: &Path,
-    name: &str,
-    plugin_name: &str,
-    scenario: &str,
-    sha256: Option<&str>,
-    executable: &Path,
-    marker_path: Option<&Path>,
-) -> PathBuf {
-    let args = if let Some(marker_path) = marker_path {
-        json!([
-            "--kind",
-            "schema_sink",
-            "--plugin-name",
-            plugin_name,
-            "--scenario",
-            scenario,
-            "--marker-path",
-            marker_path.display().to_string()
-        ])
-    } else {
-        json!([
-            "--kind",
-            "schema_sink",
-            "--plugin-name",
-            plugin_name,
-            "--scenario",
-            scenario
-        ])
-    };
-
-    let mut artifacts = serde_json::Map::new();
-    artifacts.insert(
-        RuntimePluginManifest::current_target(),
-        json!({
-            "executable": executable.display().to_string(),
-            "sha256": sha256
-        }),
-    );
-
-    let manifest_path = dir.join(format!("{}.json", name));
-    let manifest = json!({
-        "name": name,
-        "kind": "SchemaSink",
-        "plugin_name": plugin_name,
-        "version": "test",
-        "protocol_version": RUNTIME_PROTOCOL_VERSION,
-        "config_schema_version": 1,
-        "artifacts": artifacts,
-        "args": args,
-        "supports_schema": false
-    });
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-    manifest_path
-}
-
 fn runtime_file_sink_config() -> RuntimeSinkConfig {
     RuntimeSinkConfig(RuntimePluginConfigEnvelope::new(
         "File",
         json!({
             "format": "parquet",
             "output_dir": null
-        }),
-    ))
-}
-
-fn runtime_glue_schema_config() -> RuntimeSchemaConfig {
-    RuntimeSchemaConfig(RuntimePluginConfigEnvelope::new(
-        "Glue",
-        json!({
-            "glue_database_name": "runtime_host_contracts"
         }),
     ))
 }
@@ -1744,176 +1672,5 @@ async fn runtime_sink_reuses_compaction_id_across_replays() {
     assert_eq!(
         compaction_ids,
         vec!["replay-42".to_string(), "replay-42".to_string()]
-    );
-}
-
-#[tokio::test]
-async fn runtime_schema_sink_restarts_after_io_disconnect() {
-    let temp = tempdir().unwrap();
-    let marker_path = temp.path().join("schema-disconnect-once.marker");
-    let manifest_path = write_schema_manifest(
-        temp.path(),
-        "disconnect-runtime-schema-sink",
-        "Glue",
-        "disconnect_once",
-        Some(&helper_sha256()),
-        &helper_binary(),
-        Some(&marker_path),
-    );
-
-    let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
-    let sink = RuntimeSchemaSinkPlugin::new(
-        &Config::new(),
-        resolved,
-        "runtime_schema_host_disconnect".to_string(),
-        RuntimeBinding::Primary,
-        runtime_glue_schema_config(),
-    )
-    .await
-    .unwrap();
-
-    sink.sync_schema("people", &sample_output_metadata())
-        .await
-        .unwrap();
-
-    assert!(
-        marker_path.exists(),
-        "schema helper should have disconnected once before restart"
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn runtime_schema_ddl_shares_global_catalog_operation_budget() {
-    struct BudgetOverrideGuard;
-    impl Drop for BudgetOverrideGuard {
-        fn drop(&mut self) {
-            skipprd::catalog_budget::set_catalog_operation_budget_override_for_test(None);
-        }
-    }
-
-    skipprd::catalog_budget::set_catalog_operation_budget_override_for_test(Some(1));
-    let _override = BudgetOverrideGuard;
-    let budget = skipprd::catalog_budget::process_catalog_operation_budget();
-    let held_partition_permit = budget.acquire().await;
-    let temp = tempdir().unwrap();
-    let marker_path = temp.path().join("schema-global-catalog-budget.json");
-    let manifest_path = write_schema_manifest(
-        temp.path(),
-        "schema-global-catalog-budget",
-        "Glue",
-        "record_state",
-        Some(&helper_sha256()),
-        &helper_binary(),
-        Some(&marker_path),
-    );
-    let sink = RuntimeSchemaSinkPlugin::new(
-        &Config::new(),
-        ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
-        "runtime_schema_global_catalog_budget".to_string(),
-        RuntimeBinding::Primary,
-        runtime_glue_schema_config(),
-    )
-    .await
-    .unwrap();
-
-    let run =
-        tokio::spawn(async move { sink.sync_schema("people", &sample_output_metadata()).await });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(
-        !run.is_finished(),
-        "schema DDL must wait while partition work owns the global catalog permit"
-    );
-
-    drop(held_partition_permit);
-    run.await.unwrap().unwrap();
-    let state: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
-    assert_eq!(state["run_count"], 1);
-}
-
-#[tokio::test]
-async fn runtime_schema_sink_reuses_compaction_id_across_replays() {
-    let temp = tempdir().unwrap();
-    let marker_path = temp.path().join("schema-compaction-ids.json");
-    let manifest_path = write_schema_manifest(
-        temp.path(),
-        "schema-compaction-id-runtime-schema-sink",
-        "Glue",
-        "record_state",
-        Some(&helper_sha256()),
-        &helper_binary(),
-        Some(&marker_path),
-    );
-
-    let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
-    let sink = RuntimeSchemaSinkPlugin::new(
-        &Config::new(),
-        resolved,
-        "runtime_schema_host_compaction_id".to_string(),
-        RuntimeBinding::Primary,
-        runtime_glue_schema_config(),
-    )
-    .await
-    .unwrap();
-
-    sink.sync_schema("people", &sample_output_metadata())
-        .await
-        .unwrap();
-    sink.sync_schema("people", &sample_output_metadata())
-        .await
-        .unwrap();
-
-    let state: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker_path).unwrap())
-        .expect("helper should write schema replay state as JSON");
-    assert_eq!(state["run_count"], 2);
-
-    let request_ids = json_u64_array(&state, "request_ids");
-    assert_eq!(request_ids.len(), 2);
-    assert_ne!(request_ids[0], request_ids[1]);
-
-    let compaction_ids = json_string_array(&state, "compaction_ids");
-    assert_eq!(compaction_ids.len(), 2);
-    assert_eq!(compaction_ids[0], compaction_ids[1]);
-    assert!(compaction_ids[0].starts_with("schema:primary:v"));
-    assert!(compaction_ids[0].ends_with(":people"));
-}
-
-#[tokio::test]
-async fn runtime_schema_sink_retries_schema_state_install_after_disconnect() {
-    let temp = tempdir().unwrap();
-    let marker_path = temp
-        .path()
-        .join("schema-state-install-disconnect-once.marker");
-    let manifest_path = write_schema_manifest(
-        temp.path(),
-        "schema-install-disconnect-runtime-schema-sink",
-        "Glue",
-        "disconnect_on_schema_install_once",
-        Some(&helper_sha256()),
-        &helper_binary(),
-        Some(&marker_path),
-    );
-
-    let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
-    let sink = RuntimeSchemaSinkPlugin::new(
-        &Config::new(),
-        resolved,
-        "runtime_schema_host_install_disconnect".to_string(),
-        RuntimeBinding::Primary,
-        runtime_glue_schema_config(),
-    )
-    .await
-    .unwrap();
-
-    let namespaces = BTreeMap::from([("people".to_string(), sample_output_metadata())]);
-    sink.install_schema_state(7, &namespaces).await.unwrap();
-    sink.sync_schema("people", &sample_output_metadata())
-        .await
-        .unwrap();
-
-    assert!(
-        marker_path.exists(),
-        "schema helper should have disconnected once during schema install"
     );
 }

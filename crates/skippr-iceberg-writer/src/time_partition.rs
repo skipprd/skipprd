@@ -168,7 +168,7 @@ fn fail_closed_time_source(
     }
     transform.result_type(field_type).map_err(|_| {
         io::Error::other(format!(
-            "{SPEC_MISMATCH_RECREATE} (time field '{field_name}' cannot take {transform})"
+            "{SPEC_MISMATCH_RECREATE} (time field '{field_name}' type {field_type} cannot take {transform})"
         ))
     })?;
     Ok(())
@@ -187,64 +187,9 @@ pub(crate) fn resolve_schema_field<'a>(
     schema: &'a Schema,
     configured: &str,
 ) -> Option<&'a NestedField> {
-    field_name_candidates(configured)
+    Helpers::field_name_candidates(configured)
         .into_iter()
         .find_map(|name| schema.field_by_name(&name).map(|field| field.as_ref()))
-}
-
-pub(crate) fn field_name_candidates(configured: &str) -> Vec<String> {
-    let trimmed = configured.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-    let mut names = vec![trimmed.to_string()];
-    let flattened = trimmed.replace('.', "_");
-    if flattened != trimmed {
-        names.push(flattened.clone());
-    }
-    let stripped = trimmed.trim_matches('_');
-    if stripped != trimmed && !stripped.is_empty() {
-        names.push(stripped.to_string());
-        let stripped_flat = stripped.replace('.', "_");
-        if stripped_flat != stripped {
-            names.push(stripped_flat);
-        }
-    }
-    names
-}
-
-pub(crate) fn numeric_time_fields_to_promote(
-    metadata: &skippr_runtime_sdk::discover::OutputMetadata,
-    layout: &RuntimeOutputLayout,
-    deadletter: bool,
-) -> std::collections::HashSet<String> {
-    use skippr_runtime_sdk::discover::SkipprDataType;
-    let mut names = std::collections::HashSet::new();
-    if deadletter || !layout_has_iceberg_time_partition(layout) {
-        return names;
-    }
-    for configured in &layout.batch_time_fields {
-        for (_, child) in metadata.child_fields() {
-            let child_name = child.out_field_name();
-            if !field_name_candidates(configured)
-                .iter()
-                .any(|alias| alias == child_name)
-            {
-                continue;
-            }
-            match child.determined_type() {
-                SkipprDataType::Long
-                | SkipprDataType::Integer
-                | SkipprDataType::Byte
-                | SkipprDataType::Short
-                | SkipprDataType::TimestampMilli => {
-                    names.insert(child_name.to_string());
-                }
-                _ => {}
-            }
-        }
-    }
-    names
 }
 
 /// Coerce the event-time column to timestamp micros. Does not materialize calendar ints.
@@ -341,22 +286,9 @@ pub(crate) fn event_time_posix_seconds(
 }
 
 fn column_index_for_time_field(schema: &ArrowSchema, field: &str) -> Option<usize> {
-    field_name_candidates(field)
+    Helpers::field_name_candidates(field)
         .into_iter()
         .find_map(|name| schema.index_of(&name).ok())
-}
-
-pub(crate) fn posix_seconds_from_numeric_i64(time: i64) -> Option<i64> {
-    if let Some(secs) = Helpers::posix_seconds_from_i64(time) {
-        return Some(secs);
-    }
-    let abs = time.unsigned_abs();
-    let digits = if abs == 0 { 1 } else { abs.ilog10() + 1 };
-    match digits {
-        16 | 17 => Some(time / 1_000_000),
-        18 | 19 => Some(time / 1_000_000_000),
-        _ => None,
-    }
 }
 
 fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> {
@@ -364,27 +296,27 @@ fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> 
         return None;
     }
     if let Some(arr) = column.as_any().downcast_ref::<Int64Array>() {
-        return posix_seconds_from_numeric_i64(arr.value(row));
+        return Some(Helpers::posix_seconds_from_i64(arr.value(row)));
     }
     if let Some(arr) = column.as_any().downcast_ref::<Int32Array>() {
-        return Helpers::posix_seconds_from_i64(i64::from(arr.value(row)));
+        return Some(Helpers::posix_seconds_from_i64(i64::from(arr.value(row))));
     }
     if let Some(arr) = column.as_any().downcast_ref::<UInt32Array>() {
-        return Helpers::posix_seconds_from_i64(i64::from(arr.value(row)));
+        return Some(Helpers::posix_seconds_from_i64(i64::from(arr.value(row))));
     }
     if let Some(arr) = column.as_any().downcast_ref::<UInt64Array>() {
         let value = arr.value(row);
         if value > i64::MAX as u64 {
             return None;
         }
-        return posix_seconds_from_numeric_i64(value as i64);
+        return Some(Helpers::posix_seconds_from_i64(value as i64));
     }
     if let Some(arr) = column.as_any().downcast_ref::<Float64Array>() {
         let value = arr.value(row);
         if !value.is_finite() || value > i64::MAX as f64 || value < i64::MIN as f64 {
             return None;
         }
-        return posix_seconds_from_numeric_i64(value as i64);
+        return Some(Helpers::posix_seconds_from_i64(value as i64));
     }
     if let Some(arr) = column.as_any().downcast_ref::<Float32Array>() {
         let value = arr.value(row);
@@ -394,7 +326,7 @@ fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> 
         {
             return None;
         }
-        return posix_seconds_from_numeric_i64(value as i64);
+        return Some(Helpers::posix_seconds_from_i64(value as i64));
     }
     if let Some(arr) = column.as_any().downcast_ref::<Decimal128Array>() {
         let DataType::Decimal128(_, scale) = column.data_type() else {
@@ -409,7 +341,7 @@ fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> 
         if scaled > i64::MAX as i128 || scaled < i64::MIN as i128 {
             return None;
         }
-        return posix_seconds_from_numeric_i64(scaled as i64);
+        return Some(Helpers::posix_seconds_from_i64(scaled as i64));
     }
     if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
         return Helpers::posix_seconds_from_str(arr.value(row));
@@ -421,7 +353,7 @@ fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> 
         return Some(arr.value(row));
     }
     if let Some(arr) = column.as_any().downcast_ref::<TimestampMillisecondArray>() {
-        return Helpers::posix_seconds_from_i64(arr.value(row));
+        return Some(arr.value(row) / 1_000);
     }
     if let Some(arr) = column.as_any().downcast_ref::<TimestampMicrosecondArray>() {
         return Some(arr.value(row) / 1_000_000);
@@ -433,7 +365,7 @@ fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> 
         return Some(i64::from(arr.value(row)) * 86_400);
     }
     if let Some(arr) = column.as_any().downcast_ref::<Date64Array>() {
-        return Helpers::posix_seconds_from_i64(arr.value(row));
+        return Some(arr.value(row) / 1_000);
     }
     match column.data_type() {
         DataType::Timestamp(TimeUnit::Second, _) => column
@@ -443,7 +375,7 @@ fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> 
         DataType::Timestamp(TimeUnit::Millisecond, _) => column
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .and_then(|arr| Helpers::posix_seconds_from_i64(arr.value(row))),
+            .map(|arr| arr.value(row) / 1_000),
         DataType::Timestamp(TimeUnit::Microsecond, _) => column
             .as_any()
             .downcast_ref::<TimestampMicrosecondArray>()
@@ -454,12 +386,7 @@ fn posix_seconds_from_arrow_cell(column: &dyn Array, row: usize) -> Option<i64> 
             .map(|arr| arr.value(row) / 1_000_000_000),
         _ => {
             let displayed = array_value_to_string(column, row).ok()?;
-            Helpers::posix_seconds_from_str(&displayed).or_else(|| {
-                displayed
-                    .parse::<i64>()
-                    .ok()
-                    .and_then(posix_seconds_from_numeric_i64)
-            })
+            Helpers::posix_seconds_from_str(&displayed)
         }
     }
 }

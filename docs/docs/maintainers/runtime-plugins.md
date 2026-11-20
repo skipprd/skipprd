@@ -1,12 +1,12 @@
 # Runtime Plugins
 
-Skippr treats runtime plugins as independently versioned packages. The host binary is published separately, while source, sink, and schema plugins are resolved from published manifests by default.
+Skippr treats runtime plugins as independently versioned packages. The host binary is published separately, while source and sink plugins are resolved from published manifests by default.
 
 The runtime boundary is intentionally narrow:
 
 - the **host** owns WAL durability, recovery, schema distribution, and live resume
 - **source plugins** read external systems and emit work to the host
-- **sink/schema plugins** perform destination-specific writes that must tolerate replay
+- **sink plugins** perform destination-specific writes and dest-schema publish that must tolerate replay
 
 The exact contract is documented in [Runtime Plugin Contract](runtime-plugin-contract.md).
 
@@ -26,7 +26,7 @@ plugin_name = "Athena"
 
 That Cargo metadata is the source of truth for:
 
-- plugin kind (`DataSource`, `DataSink`, `SchemaSink`)
+- plugin kind (`DataSource`, `DataSink`)
 - human-facing plugin name
 - manifest filename and manifest name
 - per-plugin package version
@@ -127,13 +127,12 @@ Current behavior:
 
 This keeps the offsets DB as a host-owned materialized view of committed WAL state instead of a second durability authority.
 
-## Source, sink, and schema roles
+## Source and sink roles
 
 - **Source plugins** read external systems, emit raw or prepared batches, emit checkpoints, and emit offset hints.
-- **Sink plugins** receive Arrow streams from the host and perform replay-safe destination writes.
-- **Schema sink plugins** synchronize destination schema/catalog state and must also tolerate replay.
+- **Sink plugins** receive Arrow streams from the host, publish dest schema from installed output metadata, and perform replay-safe destination writes.
 
-The host may resend sink or schema work after reconnect, restart, or crash. Stable `compaction_id` values are the semantic idempotency key for that replay.
+The host may resend sink work after reconnect, restart, or crash. Stable `compaction_id` values are the semantic idempotency key for that replay.
 
 ## Source execution contracts
 

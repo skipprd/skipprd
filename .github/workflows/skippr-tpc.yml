@@ -76,8 +76,7 @@ jobs:
           cargo build --release -p skipprd --bin skipprd
           cargo build --release \
             -p skippr-plugin-data-source-file \
-            -p skippr-plugin-data-sink-duckdb \
-            -p skippr-plugin-schema-sink-duckdb
+            -p skippr-plugin-data-sink-duckdb
           rm -rf target/release/{build,deps,incremental,.fingerprint} target/debug ~/.cargo/registry ~/.cargo/git
       - name: TPC-H SF10 Q1 Q3 Q6 vs DuckDB vs DataFusion vs skipprd query
         env:

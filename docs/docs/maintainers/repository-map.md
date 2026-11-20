@@ -13,7 +13,6 @@ This repository is a Cargo workspace with a single host binary and many separate
 | `src/sqlrt/` | Local Iceberg∪WAL query planner, Iceberg lake catalog, SkipprLake REST. |
 | `plugins/data_source/*/` | Runtime source plugin crates. Each crate owns its connector implementation and Cargo metadata. |
 | `plugins/data_sink/*/` | Runtime sink plugin crates. Each crate owns its connector implementation and Cargo metadata. |
-| `plugins/schema_sink/*/` | Runtime schema sink plugin crates. |
 | `plugins/shared/` | Small connector-agnostic helper modules reused by multiple plugin crates. These helpers do not replace direct crate dependencies in the consuming plugins. |
 | `tests/` | Host integration tests plus runtime plugin guard tests. |
 | `.github/scripts/` | CI and release scripts, including runtime plugin catalog generation, release planning, publishing, and the runtime e2e harness. |

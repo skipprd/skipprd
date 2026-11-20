@@ -238,6 +238,7 @@ struct WaitingEntry {
 struct ManifestRecord {
     txn: CompactionTransaction,
     reserved: bool,
+    counted_refs: usize,
 }
 
 #[derive(Default)]
@@ -246,6 +247,8 @@ struct ManifestIndex {
     fences: HashMap<CompactionSliceId, BTreeSet<String>>,
     lane_last_served: BTreeMap<CompactionLaneKey, u64>,
     service_ticket: u64,
+    /// Unreserved manifest refs. Maintained on insert, remove, reserve, and release.
+    ready_refs: usize,
 }
 
 impl ManifestIndex {
@@ -272,19 +275,30 @@ impl ManifestIndex {
             .map(|record| record.reserved)
             .unwrap_or(reserve_if_new);
         if let Some(old) = self.records.remove(&id) {
+            self.ready_refs = self.ready_refs.saturating_sub(old.counted_refs);
             self.remove_fences(&id, &old.txn.refs);
         }
         if matches!(txn.state, CompactionTransactionState::Acked) {
             return;
         }
+        let counted_refs = if reserved { 0 } else { txn.refs.len() };
+        self.ready_refs = self.ready_refs.saturating_add(counted_refs);
         self.add_fences(&id, &txn.refs);
-        self.records.insert(id, ManifestRecord { txn, reserved });
+        self.records.insert(
+            id,
+            ManifestRecord {
+                txn,
+                reserved,
+                counted_refs,
+            },
+        );
     }
 
     fn remove(&mut self, id: &str) -> Vec<CompactionSliceId> {
         let Some(record) = self.records.remove(id) else {
             return Vec::new();
         };
+        self.ready_refs = self.ready_refs.saturating_sub(record.counted_refs);
         let refs = record
             .txn
             .refs
@@ -296,9 +310,16 @@ impl ManifestIndex {
     }
 
     fn release(&mut self, id: &str) {
-        if let Some(record) = self.records.get_mut(id) {
-            record.reserved = false;
+        let Some(record) = self.records.get_mut(id) else {
+            return;
+        };
+        if !record.reserved {
+            return;
         }
+        record.reserved = false;
+        let counted_refs = record.txn.refs.len();
+        record.counted_refs = counted_refs;
+        self.ready_refs = self.ready_refs.saturating_add(counted_refs);
     }
 
     fn reserve_ready(
@@ -362,6 +383,8 @@ impl ManifestIndex {
                 record.txn.updated_at_secs = now_secs;
             }
             record.reserved = true;
+            self.ready_refs = self.ready_refs.saturating_sub(record.counted_refs);
+            record.counted_refs = 0;
             *scheduled_by_sink
                 .entry(record.txn.sink_ref.clone())
                 .or_default() += 1;
@@ -376,14 +399,8 @@ impl ManifestIndex {
         out
     }
 
-    fn ready_ref_count(&self, now_secs: u64, sent_stale_secs: u64) -> usize {
-        self.records
-            .values()
-            .filter(|record| {
-                !record.reserved && manifest_is_ready(&record.txn, now_secs, sent_stale_secs)
-            })
-            .map(|record| record.txn.refs.len())
-            .sum()
+    fn ready_ref_count(&self) -> usize {
+        self.ready_refs
     }
 
     fn add_fences(&mut self, txn_id: &str, refs: &[WalPartRef]) {
@@ -825,20 +842,13 @@ impl CompactionIndex {
         self.slices.len()
     }
 
-    pub(crate) fn reclaimable_slice_count(
-        &mut self,
-        force: bool,
-        now_secs: u64,
-        sent_stale_secs: u64,
-        limit: usize,
-    ) -> usize {
+    pub(crate) fn reclaimable_slice_count(&mut self, force: bool, now_secs: u64) -> usize {
         if !force {
             self.promote_due(now_secs);
         }
         self.ready_count
             .saturating_add(if force { self.waiting.len() } else { 0 })
-            .saturating_add(self.manifests.ready_ref_count(now_secs, sent_stale_secs))
-            .min(limit)
+            .saturating_add(self.manifests.ready_ref_count())
     }
 
     pub(crate) fn ready_queue_depth(&self) -> usize {
@@ -1385,7 +1395,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(sizes, vec![vec![400], vec![100]]);
-        assert_eq!(index.reclaimable_slice_count(true, 1_000, 60, 10), 0);
+        assert_eq!(index.reclaimable_slice_count(true, 1_000), 0);
     }
 
     #[test]
@@ -1434,10 +1444,7 @@ mod tests {
         assert_eq!(planned.groups.len(), 1);
         assert_eq!(planned.groups[0].slices.len(), 2);
         assert_eq!(index.ready_queue_depth(), 1);
-        assert_eq!(
-            index.reclaimable_slice_count(false, 1_000, 300, usize::MAX),
-            1
-        );
+        assert_eq!(index.reclaimable_slice_count(false, 1_000), 1);
     }
 
     #[test]
@@ -1757,8 +1764,7 @@ mod tests {
             .is_empty());
     }
 
-    #[test]
-    fn hard_caps_hold_when_per_sink_limit_is_reached() {
+    fn eight_slice_index() -> CompactionIndex {
         let mut index = CompactionIndex::default();
         let slices = (0..8)
             .map(|part| {
@@ -1775,18 +1781,50 @@ mod tests {
             })
             .collect();
         index.register_segment("seg", slices, 1, 100, 1_000);
-        let planned = index.plan_ready(
-            8,
+        index
+    }
+
+    fn plan_with_sink_limit(
+        index: &mut CompactionIndex,
+        limit: usize,
+        per_sink_limit: usize,
+        active: HashMap<CompactionLaneKey, usize>,
+    ) -> CompactionPlan {
+        index.plan_ready(
+            limit,
             false,
             1_000,
             100,
             100,
             250,
             2,
-            1,
-            HashMap::new(),
+            per_sink_limit,
+            active,
             HashSet::new(),
-        );
+        )
+    }
+
+    #[test]
+    fn hard_caps_hold_when_per_sink_limit_is_reached() {
+        use crate::buffer::flush_execution_budget::FlushExecutionBudget;
+        use crate::ingest::tuner::FlushBudgetSnapshot;
+        use crate::plugins::cdc::sink_capabilities;
+
+        let snapshot = FlushBudgetSnapshot {
+            scheduler_jobs: 8,
+            decode_jobs: 8,
+            sink_sessions: 1,
+            ..FlushBudgetSnapshot::default()
+        };
+        let native = FlushExecutionBudget::from_snapshot(snapshot, &sink_capabilities::POSTGRES);
+        let file = FlushExecutionBudget::from_snapshot(snapshot, &sink_capabilities::S3);
+        assert_eq!(native.sink_limit(), 1);
+        assert_eq!(file.sink_limit(), snapshot.scheduler_jobs);
+        assert_eq!(file.decode_limit(), snapshot.decode_jobs);
+
+        let mut native_index = eight_slice_index();
+        let planned =
+            plan_with_sink_limit(&mut native_index, 8, native.sink_limit(), HashMap::new());
         assert_eq!(planned.groups.len(), 1);
         assert_eq!(planned.groups[0].slices.len(), 2);
         assert!(
@@ -1797,28 +1835,103 @@ mod tests {
                 .sum::<u64>()
                 <= 250
         );
-        assert_eq!(index.ready_queue_depth(), 1);
+        assert_eq!(native_index.ready_queue_depth(), 1);
+
+        let mut file_index = eight_slice_index();
+        let planned = plan_with_sink_limit(&mut file_index, 8, file.sink_limit(), HashMap::new());
+        assert_eq!(planned.groups.len(), 4);
+        for group in &planned.groups {
+            assert_eq!(group.slices.len(), 2);
+            assert!(
+                group
+                    .slices
+                    .iter()
+                    .map(|slice| slice.index_entry.bytes)
+                    .sum::<u64>()
+                    <= 250
+            );
+        }
+        assert_eq!(file_index.ready_queue_depth(), 0);
     }
 
     #[test]
     fn per_sink_cap_includes_already_active_namespaces() {
-        let mut index = CompactionIndex::default();
-        index.register_segment(
-            "seg-a",
-            vec![slice(
-                "seg-a",
-                "sink.a",
-                "ready-ns",
-                "v1",
-                CompactionKind::Append,
-                0,
-                100,
-                1,
-            )],
+        use crate::buffer::flush_execution_budget::FlushExecutionBudget;
+        use crate::ingest::tuner::FlushBudgetSnapshot;
+        use crate::plugins::cdc::sink_capabilities;
+
+        let snapshot = FlushBudgetSnapshot {
+            scheduler_jobs: 4,
+            decode_jobs: 4,
+            sink_sessions: 1,
+            ..FlushBudgetSnapshot::default()
+        };
+        let native = FlushExecutionBudget::from_snapshot(snapshot, &sink_capabilities::CLICKHOUSE);
+        let file = FlushExecutionBudget::from_snapshot(snapshot, &sink_capabilities::FILE);
+        assert_eq!(native.sink_limit(), 1);
+        assert_eq!(file.sink_limit(), 4);
+
+        let active = HashMap::from([(
+            CompactionLaneKey {
+                sink_ref: "sink.a".to_string(),
+                namespace: "running-ns".to_string(),
+            },
             1,
-            100,
-            1_000,
+        )]);
+        let mut native_index = namespaced_sink_index();
+        let planned =
+            plan_with_sink_limit(&mut native_index, 8, native.sink_limit(), active.clone());
+        assert_eq!(planned.groups.len(), 1);
+        assert_eq!(planned.groups[0].key.sink_ref, "sink.b");
+
+        let mut file_index = namespaced_sink_index();
+        let planned = plan_with_sink_limit(&mut file_index, 8, file.sink_limit(), active);
+        let sink_a = planned
+            .groups
+            .iter()
+            .filter(|group| group.key.sink_ref == "sink.a")
+            .map(|group| group.key.namespace.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            sink_a.len(),
+            3,
+            "file-format fills to scheduler_jobs across namespaces"
         );
+        assert!(planned
+            .groups
+            .iter()
+            .any(|group| group.key.sink_ref == "sink.b"));
+        assert_eq!(
+            planned
+                .groups
+                .iter()
+                .filter(|group| group.key.sink_ref == "sink.a")
+                .count()
+                + 1,
+            snapshot.scheduler_jobs
+        );
+    }
+
+    fn namespaced_sink_index() -> CompactionIndex {
+        let mut index = CompactionIndex::default();
+        for namespace in ["a1", "a2", "a3", "a4"] {
+            index.register_segment(
+                &format!("seg-{namespace}"),
+                vec![slice(
+                    &format!("seg-{namespace}"),
+                    "sink.a",
+                    namespace,
+                    "v1",
+                    CompactionKind::Append,
+                    0,
+                    100,
+                    1,
+                )],
+                1,
+                100,
+                1_000,
+            );
+        }
         index.register_segment(
             "seg-b",
             vec![slice(
@@ -1835,18 +1948,7 @@ mod tests {
             100,
             1_000,
         );
-        let active = HashMap::from([(
-            CompactionLaneKey {
-                sink_ref: "sink.a".to_string(),
-                namespace: "running-ns".to_string(),
-            },
-            1,
-        )]);
-
-        let planned = index.plan_ready(2, false, 1_000, 1, 100, 250, 1, 1, active, HashSet::new());
-
-        assert_eq!(planned.groups.len(), 1);
-        assert_eq!(planned.groups[0].key.sink_ref, "sink.b");
+        index
     }
 
     #[test]
@@ -2166,5 +2268,101 @@ mod tests {
         );
         assert_eq!(index.complete_ordinals("seg", &[0]), 1);
         assert_eq!(index.indexed_slice_count(), 1);
+    }
+
+    #[test]
+    fn heartbeat_remaining_is_the_index_counter_including_manifest_refs() {
+        use crate::buffer::compaction_progress::format_compactor_drain_status_summary;
+        use crate::buffer::compaction_progress::WalCompactionCounterSnapshot;
+        use crate::metrics::counters;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let mut index = CompactionIndex::default();
+        let proto = slice(
+            "manifest",
+            "sink.a",
+            "ns",
+            "v1",
+            CompactionKind::Append,
+            0,
+            1,
+            1,
+        );
+        let refs = (0..10_001u64)
+            .map(|start| {
+                let mut wal_ref = proto.wal_ref.clone();
+                wal_ref.start = start;
+                wal_ref.ordinal = start as u32;
+                wal_ref
+            })
+            .collect::<Vec<_>>();
+        let txn = CompactionTransaction::new(
+            "sink.a".to_string(),
+            "ns".to_string(),
+            "v1".to_string(),
+            crate::plugins::source_contract::WritePolicy::Append,
+            crate::buffer::compaction_transaction::SinkWriteSemantics::ExactOnce,
+            refs,
+            "out".to_string(),
+        );
+        index.upsert_manifest(txn.clone());
+        let remaining = index.reclaimable_slice_count(false, 1_000);
+        assert_eq!(remaining, 10_001);
+        assert!(remaining > 10_000);
+
+        counters::add_upload(1);
+        counters::add_parquet_rows(7);
+        let puts = counters::UPLOADS_TOTAL.load(Ordering::Relaxed);
+        let rows = counters::PARQUET_PERSISTED_ROWS_TOTAL.load(Ordering::Relaxed);
+        let summary = format_compactor_drain_status_summary(
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            WalCompactionCounterSnapshot {
+                wal_parts_started: 3,
+                wal_parts_completed: 5,
+                txn_started: 1,
+                txn_completed: 1,
+                txn_failed: 0,
+            },
+            WalCompactionCounterSnapshot::default(),
+            remaining,
+            0,
+            0,
+        );
+        assert!(summary.contains("5/10006"), "{summary}");
+        assert!(summary.contains("remaining=10001"), "{summary}");
+        assert!(summary.contains(&format!("puts={puts}")), "{summary}");
+        assert!(summary.contains(&format!("rows={rows}")), "{summary}");
+
+        index.register_segment(
+            "free",
+            vec![slice(
+                "free",
+                "sink.b",
+                "other",
+                "v1",
+                CompactionKind::Append,
+                0,
+                1,
+                1,
+            )],
+            100,
+            10_000,
+            1_000,
+        );
+        assert_eq!(index.reclaimable_slice_count(true, 1_000), 10_002);
+
+        assert_eq!(
+            index
+                .reserve_ready_manifests(1, 1, 1_000, 300, &HashMap::new(), &HashSet::new())
+                .len(),
+            1
+        );
+        assert_eq!(index.reclaimable_slice_count(true, 1_000), 1);
+        index.release_manifest(&txn.id);
+        assert_eq!(index.reclaimable_slice_count(true, 1_000), 10_002);
+        index.remove_manifest(&txn.id, 1_000);
+        assert_eq!(index.reclaimable_slice_count(true, 1_000), 1);
     }
 }

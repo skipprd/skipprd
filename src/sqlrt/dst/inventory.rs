@@ -321,3 +321,98 @@ fn c_complete_slices_and_reclaim() {
         .unwrap()
         .is_none());
 }
+
+fn dest_schema_wal(id: i64, name: &str, amount: i64, seq: u64) -> super::WalEvent {
+    super::WalEvent {
+        row: super::UserRow {
+            id,
+            name: name.into(),
+            amount,
+        },
+        mutation: Some(crate::plugins::cdc::MutationKind::Insert),
+        order: 1,
+        seq,
+        ordinal: 0,
+        row_i: 0,
+    }
+}
+
+#[test]
+fn d_wal_ingest_succeeds_with_no_dest_table() {
+    let world = super::run(&[super::Op::IngestWal(dest_schema_wal(1, "a", 10, 1))]);
+    assert!(
+        world.snapshots.is_empty(),
+        "WAL ingest must not create a dest table"
+    );
+    assert_eq!(super::catalog_segments(&world).len(), 1);
+    assert_eq!(world.payloads.len(), 1);
+}
+
+#[test]
+fn d_first_compact_creates_lake_second_slice_does_not_drop() {
+    let world = super::run(&[
+        super::Op::IngestWal(dest_schema_wal(1, "d1", 1, 1)),
+        super::Op::CompactThru(1),
+        super::Op::IngestWal(dest_schema_wal(2, "d2", 2, 2)),
+        super::Op::CompactThru(2),
+    ]);
+    assert!(
+        world.snapshots.len() >= 2,
+        "second compact must not drop the first lake snapshot"
+    );
+    assert_eq!(
+        super::current_table(&world),
+        [(1, ("d1".to_string(), 1)), (2, ("d2".to_string(), 2)),]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
+fn d_apply_alter_rename_visible_to_next_compact() {
+    use crate::discover::schema_alter::SchemaAlterOp;
+    use crate::sqlrt::iceberg_table::snapshot_scan_names;
+    use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
+    let snapshot = Schema::builder()
+        .with_schema_id(0)
+        .with_fields(vec![
+            NestedField::optional(1, "name", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::optional(3, "region", Type::Primitive(PrimitiveType::String)).into(),
+        ])
+        .build()
+        .unwrap();
+    let current = Schema::builder()
+        .with_schema_id(1)
+        .with_fields(vec![
+            NestedField::optional(1, "name", Type::Primitive(PrimitiveType::String)).into(),
+            NestedField::optional(3, "region_code", Type::Primitive(PrimitiveType::String)).into(),
+        ])
+        .build()
+        .unwrap();
+    assert_eq!(
+        snapshot_scan_names(&current, &snapshot, &["region_code".into(), "name".into()]),
+        vec!["region".to_string(), "name".to_string()]
+    );
+    let world = super::run(&[
+        super::Op::IngestWal(dest_schema_wal(1, "a", 10, 1)),
+        super::Op::CompactThru(1),
+        super::Op::Alter(SchemaAlterOp::Rename {
+            from: "name".into(),
+            to: "display_name".into(),
+        }),
+        super::Op::IngestWal(dest_schema_wal(2, "b", 20, 2)),
+        super::Op::CompactThru(2),
+    ]);
+    assert!(world.alter_error.is_none(), "{:?}", world.alter_error);
+    assert!(
+        world.snapshots.len() >= 2,
+        "alter must not drop the lake; next compact still appends"
+    );
+    assert_eq!(
+        super::current_table(&world)
+            .get(&1)
+            .map(|row| row.0.as_str()),
+        Some("a"),
+        "rename keeps field id 2; next compact query still sees the lake value"
+    );
+}

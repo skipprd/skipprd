@@ -20,7 +20,10 @@ skippr_runtime_sdk::declare_sink_spec!(
     PostgresSinkSpec,
     PostgresSinkRuntimePlugin,
     skippr_runtime_sdk::plugins::cdc::sink_capabilities::POSTGRES,
-    skippr_runtime_sdk::plugins::FinalStateIdempotentApply
+    skippr_runtime_sdk::plugins::FinalStateIdempotentApply,
+    skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
+        skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Postgres
+    )
 );
 
 #[async_trait::async_trait]
@@ -59,6 +62,28 @@ impl DataSink for PostgresSinkRuntimePlugin {
 
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::POSTGRES
+    }
+
+    fn installed_dest_schema(
+        &self,
+    ) -> Option<&tokio::sync::RwLock<skippr_runtime_sdk::plugins::alter_ddl::InstalledDestSchema>>
+    {
+        Some(self.inner.installed_dest_schema())
+    }
+
+    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
+        skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
+            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Postgres,
+        )
+    }
+
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        metadata: &skippr_runtime_sdk::discover::OutputMetadata,
+        alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
+    ) -> Result<(), io::Error> {
+        self.inner.apply_alter(namespace, metadata, alter).await
     }
 }
 

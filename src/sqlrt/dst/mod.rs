@@ -229,6 +229,21 @@ fn parquet_id(field: Field, id: i32) -> Field {
     field.with_metadata(meta)
 }
 
+fn column_by_field_id(batch: &RecordBatch, id: i32) -> Option<&arrow::array::ArrayRef> {
+    batch
+        .schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .find_map(|(i, field)| {
+            let meta = field.metadata();
+            let got = meta
+                .get("PARQUET:field_id")
+                .or_else(|| meta.get("iceberg.field-id"))?;
+            (got.parse::<i32>().ok()? == id).then(|| batch.column(i))
+        })
+}
+
 pub fn user_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         parquet_id(Field::new("id", DataType::Int64, true), 1),
@@ -695,21 +710,18 @@ pub fn sum_amount(world: &World) -> i64 {
 fn rows_from_batches(batches: &[RecordBatch]) -> Vec<UserRow> {
     let mut rows = Vec::new();
     for batch in batches {
-        let ids = batch
-            .column_by_name("id")
-            .unwrap()
+        let ids = column_by_field_id(batch, 1)
+            .expect("id is PARQUET:field_id 1")
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
-        let names = batch
-            .column_by_name("name")
-            .unwrap()
+        let names = column_by_field_id(batch, 2)
+            .expect("name identity is PARQUET:field_id 2 across ApplyAlter rename")
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        let amounts = batch
-            .column_by_name("amount")
-            .and_then(|col| col.as_any().downcast_ref::<Int64Array>());
+        let amounts =
+            column_by_field_id(batch, 3).and_then(|col| col.as_any().downcast_ref::<Int64Array>());
         for i in 0..batch.num_rows() {
             if ids.is_null(i) {
                 continue;

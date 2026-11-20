@@ -66,7 +66,7 @@ fn d_handshake_prepare_sink_rawbytes() {
         request,
     };
     let payload = bincode::serialize(&HostFrame::PrepareSink(prepare)).unwrap();
-    assert_eq!(u32::from_le_bytes(payload[0..4].try_into().unwrap()), 6);
+    assert_eq!(u32::from_le_bytes(payload[0..4].try_into().unwrap()), 5);
     let decoded: HostFrame = decode_payload(&payload).unwrap();
     let HostFrame::PrepareSink(got) = decoded else {
         panic!("expected PrepareSink");

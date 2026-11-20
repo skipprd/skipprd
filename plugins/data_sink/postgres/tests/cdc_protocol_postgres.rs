@@ -187,7 +187,7 @@ async fn cdc_sink_creates_order_token_and_tombstone() {
     let ts_table = tombstone_table_name("cdc_target");
     let ddl2 = ddl_create_tombstone_table::<PostgresCdcBackend>(
         &ts_table,
-        &[("id".to_string(), "BIGINT".to_string())],
+        &[("id".to_string(), "BIGINT")],
     );
     client.batch_execute(&ddl2).await.unwrap();
 }
@@ -208,7 +208,7 @@ async fn cdc_upsert_rejects_stale_write() {
     let ts_table = tombstone_table_name("cdc_stale");
     let ddl = ddl_create_tombstone_table::<PostgresCdcBackend>(
         &ts_table,
-        &[("id".to_string(), "BIGINT".to_string())],
+        &[("id".to_string(), "BIGINT")],
     );
     client.batch_execute(&ddl).await.unwrap();
 
@@ -272,7 +272,7 @@ async fn cdc_delete_then_stale_insert_blocked_by_tombstone() {
     let ts_table = tombstone_table_name("cdc_del");
     let ddl = ddl_create_tombstone_table::<PostgresCdcBackend>(
         &ts_table,
-        &[("id".to_string(), "BIGINT".to_string())],
+        &[("id".to_string(), "BIGINT")],
     );
     client.batch_execute(&ddl).await.unwrap();
 
@@ -353,8 +353,8 @@ async fn cdc_bulk_stage_preserves_exact_final_state_contract() {
     let tombstone_ddl = ddl_create_tombstone_table::<PostgresCdcBackend>(
         &tombstone,
         &[
-            ("tenant_id".to_string(), "BIGINT".to_string()),
-            ("id".to_string(), "BIGINT".to_string()),
+            ("tenant_id".to_string(), "BIGINT"),
+            ("id".to_string(), "BIGINT"),
         ],
     );
     client.batch_execute(&tombstone_ddl).await.unwrap();
@@ -599,7 +599,7 @@ async fn cdc_bulk_stage_rolls_back_bad_row_and_cleans_staging() {
     let tombstone = tombstone_table_name("cdc_bulk_rollback");
     let tombstone_ddl = ddl_create_tombstone_table::<PostgresCdcBackend>(
         &tombstone,
-        &[("id".to_string(), "BIGINT".to_string())],
+        &[("id".to_string(), "BIGINT")],
     );
     client.batch_execute(&tombstone_ddl).await.unwrap();
 

@@ -1,6 +1,4 @@
 use async_trait::async_trait;
-use datafusion::arrow::array::*;
-use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use reqwest::Client;
@@ -12,7 +10,11 @@ use dashmap::DashSet;
 use once_cell::sync::Lazy;
 
 use crate::helpers::configuration::DataSinkPluginConfig;
-use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
+use skippr_runtime_sdk::plugins::alter_ddl::{
+    dest_table_name, publish_warehouse_table, DestPublishCache, InstalledDestSchema,
+    PublishedBatchColumns, WarehouseDialect,
+};
+use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
@@ -54,19 +56,15 @@ pub struct DataSinkMotherduckPlugin {
     #[allow(dead_code)]
     buffer_name: String,
     client: Client,
+    installed: tokio::sync::RwLock<InstalledDestSchema>,
+    publish_cache: DestPublishCache,
 }
 
 skippr_runtime_sdk::declare_sink_spec!(
     MotherduckSinkSpec,
     DataSinkMotherduckPlugin,
     skippr_runtime_sdk::plugins::cdc::sink_capabilities::MOTHERDUCK,
-    skippr_runtime_sdk::plugins::FinalStateIdempotentApply
-);
-
-skippr_runtime_sdk::declare_schema_sink_spec!(
-    MotherduckSchemaSinkSpec,
-    DataSinkMotherduckPlugin,
-    "Motherduck",
+    skippr_runtime_sdk::plugins::FinalStateIdempotentApply,
     skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
         skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::MotherDuck
     )
@@ -83,138 +81,105 @@ impl DataSinkMotherduckPlugin {
             config,
             buffer_name,
             client: Client::new(),
+            installed: tokio::sync::RwLock::new(InstalledDestSchema::default()),
+            publish_cache: DestPublishCache::default(),
         }
     }
 
-    fn namespace_to_table_name(namespace: &str) -> String {
-        namespace.replace('.', "_").to_lowercase()
+    fn table_name(&self, namespace: &str) -> String {
+        self.config
+            .table
+            .clone()
+            .unwrap_or_else(|| dest_table_name(namespace))
     }
 
-    fn arrow_type_to_duckdb(dt: &ArrowDataType) -> &'static str {
-        match dt {
-            ArrowDataType::Boolean => "BOOLEAN",
-            ArrowDataType::Int8 => "TINYINT",
-            ArrowDataType::Int16 => "SMALLINT",
-            ArrowDataType::Int32 => "INTEGER",
-            ArrowDataType::Int64 => "BIGINT",
-            ArrowDataType::UInt8 => "UTINYINT",
-            ArrowDataType::UInt16 => "USMALLINT",
-            ArrowDataType::UInt32 => "UINTEGER",
-            ArrowDataType::UInt64 => "UBIGINT",
-            ArrowDataType::Float16 | ArrowDataType::Float32 => "FLOAT",
-            ArrowDataType::Float64 => "DOUBLE",
-            ArrowDataType::Date32 | ArrowDataType::Date64 => "DATE",
-            ArrowDataType::Timestamp(_, _) => "TIMESTAMP",
-            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => "VARCHAR",
-            _ => "VARCHAR",
-        }
+    fn fq_table(&self, namespace: &str) -> String {
+        format!("\"{}\"", self.table_name(namespace))
     }
 
-    fn arrow_value_to_sql(array: &dyn Array, row: usize) -> String {
-        if array.is_null(row) {
-            return "NULL".to_string();
-        }
-        match array.data_type() {
-            ArrowDataType::Boolean => {
-                let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-                if a.value(row) { "TRUE" } else { "FALSE" }.to_string()
-            }
-            ArrowDataType::Int8 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int8Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Int16 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int16Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Int32 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Int64 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt8 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt8Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt16 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt16Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt32 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt64 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Float32 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Float32Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Float64 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Utf8 => {
-                let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-                format!("'{}'", a.value(row).replace('\'', "''"))
-            }
-            ArrowDataType::LargeUtf8 => {
-                let a = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
-                format!("'{}'", a.value(row).replace('\'', "''"))
-            }
-            _ => {
-                if let Some(s) = array.as_any().downcast_ref::<StringArray>() {
-                    format!("'{}'", s.value(row).replace('\'', "''"))
-                } else {
-                    "NULL".to_string()
+    async fn publish_namespace(&self, namespace: &str) -> Result<(), std::io::Error> {
+        let (version, metadata) = self.installed.read().await.get(namespace)?;
+        publish_warehouse_table(
+            &self.publish_cache,
+            self,
+            WarehouseDialect::MotherDuck,
+            &self.fq_table(namespace),
+            namespace,
+            version,
+            &metadata,
+        )
+        .await
+    }
+
+    async fn batch_columns(
+        &self,
+        namespace: &str,
+        batch: &datafusion::arrow::datatypes::Schema,
+    ) -> Result<PublishedBatchColumns, std::io::Error> {
+        self.installed.read().await.warehouse_batch_columns(
+            WarehouseDialect::MotherDuck,
+            namespace,
+            batch,
+        )
+    }
+
+    async fn sync_append(
+        &self,
+        mut stream: SendableRecordBatchStream,
+        filename: &str,
+    ) -> Result<(), std::io::Error> {
+        use skippr_runtime_sdk::metrics::counters;
+        let namespace = BufferChunker::decode_file_namespace(filename);
+        let col_defs = self.batch_columns(&namespace, &stream.schema()).await?;
+        let fq_table = self.fq_table(&namespace);
+        let col_list = col_defs
+            .columns()
+            .iter()
+            .map(|(name, _)| WarehouseDialect::MotherDuck.quote_ident(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        counters::inc_uploads_in_flight();
+        let mut total_rows = 0usize;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::other(format!("stream error: {}", e))
+            })?;
+            let num_rows = batch.num_rows();
+            for chunk_start in (0..num_rows).step_by(1000) {
+                let chunk_end = (chunk_start + 1000).min(num_rows);
+                let value_rows = (chunk_start..chunk_end)
+                    .map(|row| {
+                        crate::cdc_apply::sql_values_row::<MotherduckCdcBackend>(&batch, row)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| {
+                        counters::dec_uploads_in_flight();
+                        std::io::Error::from(e)
+                    })?;
+                let insert_sql = format!(
+                    "INSERT INTO {} ({}) VALUES {}",
+                    fq_table,
+                    col_list,
+                    value_rows.join(", ")
+                );
+                if let Err(e) = self.execute_sql(&insert_sql).await {
+                    error!("MotherDuck INSERT failed: {}", e);
+                    counters::dec_uploads_in_flight();
+                    return Err(e);
                 }
+                let chunk_rows = chunk_end - chunk_start;
+                total_rows += chunk_rows;
+                counters::add_parquet_rows(chunk_rows as u64);
             }
         }
+        counters::add_upload(1);
+        counters::dec_uploads_in_flight();
+        info!(
+            "MotherDuck sync complete: {} total rows into {}",
+            total_rows, fq_table
+        );
+        Ok(())
     }
 
     async fn execute_sql(&self, sql: &str) -> Result<serde_json::Value, std::io::Error> {
@@ -256,27 +221,6 @@ impl DataSinkMotherduckPlugin {
         Ok(body)
     }
 
-    async fn ensure_table(
-        &self,
-        table_name: &str,
-        col_defs: &[(String, &str)],
-    ) -> Result<(), std::io::Error> {
-        if col_defs.is_empty() {
-            return Ok(());
-        }
-        let cols_sql: Vec<String> = col_defs
-            .iter()
-            .map(|(name, dk_type)| format!("\"{}\" {}", name, dk_type))
-            .collect();
-        let ddl = format!(
-            "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
-            table_name,
-            cols_sql.join(", ")
-        );
-        info!("MotherDuck DDL: {}", ddl);
-        self.execute_sql(&ddl).await.map(|_| ())
-    }
-
     async fn sync_cdc(
         &self,
         mut stream: SendableRecordBatchStream,
@@ -299,107 +243,16 @@ impl DataSinkMotherduckPlugin {
             Some(c) if !c.business_key_columns.is_empty() => c,
             _ => {
                 info!(target: "motherduck", "CDC context without contract or business keys; falling back to append");
-                counters::inc_uploads_in_flight();
-                let namespace = BufferChunker::decode_file_namespace(&filename);
-                let table_name = self
-                    .config
-                    .table
-                    .clone()
-                    .unwrap_or_else(|| Self::namespace_to_table_name(&namespace));
-                let arrow_schema = stream.schema();
-                let col_defs: Vec<(String, &str)> = arrow_schema
-                    .fields()
-                    .iter()
-                    .map(|f| {
-                        (
-                            f.name().to_lowercase(),
-                            Self::arrow_type_to_duckdb(f.data_type()),
-                        )
-                    })
-                    .collect();
-                let col_names: Vec<String> = arrow_schema
-                    .fields()
-                    .iter()
-                    .map(|f| format!("\"{}\"", f.name().to_lowercase()))
-                    .collect();
-                let col_list = col_names.join(", ");
-                self.ensure_table(&table_name, &col_defs)
-                    .await
-                    .map_err(|e| {
-                        counters::dec_uploads_in_flight();
-                        e
-                    })?;
-                let mut total_rows = 0usize;
-                let mut stream = stream;
-                while let Some(batch_result) = stream.next().await {
-                    let batch = batch_result
-                        .map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
-                    let num_rows = batch.num_rows();
-                    if num_rows == 0 {
-                        continue;
-                    }
-                    let value_rows: Vec<String> = (0..num_rows)
-                        .map(|row| {
-                            let vals: Vec<String> = (0..batch.num_columns())
-                                .map(|col| {
-                                    Self::arrow_value_to_sql(batch.column(col).as_ref(), row)
-                                })
-                                .collect();
-                            format!("({})", vals.join(", "))
-                        })
-                        .collect();
-                    let insert_sql = format!(
-                        "INSERT INTO \"{}\" ({}) VALUES {}",
-                        table_name,
-                        col_list,
-                        value_rows.join(", ")
-                    );
-                    self.execute_sql(&insert_sql).await.map_err(|e| {
-                        counters::dec_uploads_in_flight();
-                        e
-                    })?;
-                    total_rows += num_rows;
-                    counters::add_parquet_rows(num_rows as u64);
-                }
-                counters::add_upload(1);
-                counters::dec_uploads_in_flight();
-                info!(
-                    "MotherDuck CDC fallback append: {} rows into {}",
-                    total_rows, table_name
-                );
-                return Ok(());
+                return self.sync_append(stream, &filename).await;
             }
         };
 
-        counters::inc_uploads_in_flight();
-
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let table_name = self
-            .config
-            .table
-            .clone()
-            .unwrap_or_else(|| Self::namespace_to_table_name(&namespace));
-        let arrow_schema = stream.schema();
-
-        let col_defs: Vec<(String, &str)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_lowercase(),
-                    Self::arrow_type_to_duckdb(f.data_type()),
-                )
-            })
-            .collect();
-
-        let fq_table = format!("\"{}\"", table_name);
-
-        self.ensure_table(&table_name, &col_defs)
-            .await
-            .map_err(|e| {
-                counters::dec_uploads_in_flight();
-                e
-            })?;
+        let table_name = self.table_name(&namespace);
+        let fq_table = self.fq_table(&namespace);
+        let col_defs = self.batch_columns(&namespace, &stream.schema()).await?;
+        let key_types = col_defs.key_types(&contract.business_key_columns)?;
+        counters::inc_uploads_in_flight();
 
         if CDC_DDL_ENSURED.insert(fq_table.clone()) {
             let order_col_ddl = ddl_add_order_token_column::<MotherduckCdcBackend>(&fq_table);
@@ -410,20 +263,8 @@ impl DataSinkMotherduckPlugin {
             })?;
 
             let tombstone_tbl = tombstone_table_name(&fq_table);
-            let bk_type_pairs: Vec<(String, String)> = contract
-                .business_key_columns
-                .iter()
-                .map(|bk| {
-                    let dk_type = col_defs
-                        .iter()
-                        .find(|(name, _)| name == bk)
-                        .map(|(_, t)| (*t).to_string())
-                        .unwrap_or_else(|| "VARCHAR".to_string());
-                    (bk.clone(), dk_type)
-                })
-                .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table::<MotherduckCdcBackend>(&tombstone_tbl, &bk_type_pairs);
+                ddl_create_tombstone_table::<MotherduckCdcBackend>(&tombstone_tbl, &key_types);
             self.execute_sql(&tombstone_ddl).await.map_err(|e| {
                 CDC_DDL_ENSURED.remove(&fq_table);
                 counters::dec_uploads_in_flight();
@@ -438,19 +279,26 @@ impl DataSinkMotherduckPlugin {
         let mut row_offset = 0usize;
         let mut apply_batch = CdcApplyBatch {
             columns: col_defs
+                .columns()
                 .iter()
                 .map(|(name, target_type)| CdcApplyColumn {
                     name: name.clone(),
                     target_type: (*target_type).to_string(),
                 })
                 .collect(),
-            business_key_columns: contract.business_key_columns.clone(),
+            business_key_columns: key_types.iter().map(|(name, _)| name.clone()).collect(),
             rows: Vec::new(),
         };
 
+        let ties = ctx.decoded_ties().map_err(|e| {
+            counters::dec_uploads_in_flight();
+            std::io::Error::other(e)
+        })?;
         while let Some(batch_result) = stream.next().await {
-            let batch =
-                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+            let batch = batch_result.map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::other(format!("stream error: {}", e))
+            })?;
             let num_rows = batch.num_rows();
             if num_rows == 0 {
                 continue;
@@ -459,10 +307,13 @@ impl DataSinkMotherduckPlugin {
                 &mut apply_batch,
                 &batch,
                 &ctx.part_meta.rows,
-                &ctx.decoded_ties().map_err(std::io::Error::other)?,
+                &ties,
                 row_offset,
             )
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            .map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::from(e)
+            })?;
             row_offset += num_rows;
         }
 
@@ -500,8 +351,7 @@ impl DataSinkMotherduckPlugin {
                             &tombstone_table,
                             &collapsed,
                             row,
-                        )
-                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        )?;
                         self.execute_sql(&statement).await.map_err(|error| {
                             counters::dec_uploads_in_flight();
                             error
@@ -540,96 +390,12 @@ impl DataSink for DataSinkMotherduckPlugin {
         filename: String,
         cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
-        if let Some(ctx) = cdc_ctx {
-            return self.sync_cdc(stream, filename, ctx).await;
-        }
-        use skippr_runtime_sdk::metrics::counters;
-        counters::inc_uploads_in_flight();
-
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let table_name = self
-            .config
-            .table
-            .clone()
-            .unwrap_or_else(|| Self::namespace_to_table_name(&namespace));
-        let arrow_schema = stream.schema();
-
-        let col_defs: Vec<(String, &str)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_lowercase(),
-                    Self::arrow_type_to_duckdb(f.data_type()),
-                )
-            })
-            .collect();
-
-        let col_names: Vec<String> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| format!("\"{}\"", f.name().to_lowercase()))
-            .collect();
-        let col_list = col_names.join(", ");
-
-        self.ensure_table(&table_name, &col_defs)
-            .await
-            .map_err(|e| {
-                counters::dec_uploads_in_flight();
-                e
-            })?;
-
-        let mut total_rows = 0usize;
-        let mut stream = stream;
-
-        while let Some(batch_result) = stream.next().await {
-            let batch =
-                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
-            let num_rows = batch.num_rows();
-            if num_rows == 0 {
-                continue;
-            }
-
-            for chunk_start in (0..num_rows).step_by(1000) {
-                let chunk_end = (chunk_start + 1000).min(num_rows);
-                let value_rows: Vec<String> = (chunk_start..chunk_end)
-                    .map(|row| {
-                        let vals: Vec<String> = (0..batch.num_columns())
-                            .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
-                            .collect();
-                        format!("({})", vals.join(", "))
-                    })
-                    .collect();
-
-                let insert_sql = format!(
-                    "INSERT INTO \"{}\" ({}) VALUES {}",
-                    table_name,
-                    col_list,
-                    value_rows.join(", ")
-                );
-
-                match self.execute_sql(&insert_sql).await {
-                    Ok(_) => {
-                        let chunk_rows = chunk_end - chunk_start;
-                        total_rows += chunk_rows;
-                        counters::add_parquet_rows(chunk_rows as u64);
-                    }
-                    Err(e) => {
-                        error!("MotherDuck INSERT failed: {}", e);
-                        counters::dec_uploads_in_flight();
-                        return Err(e);
-                    }
-                }
-            }
+        self.publish_namespace(&namespace).await?;
+        match cdc_ctx {
+            Some(ctx) => self.sync_cdc(stream, filename, ctx).await,
+            None => self.sync_append(stream, &filename).await,
         }
-
-        counters::add_upload(1);
-        counters::dec_uploads_in_flight();
-        info!(
-            "MotherDuck sync complete: {} total rows into {}",
-            total_rows, table_name
-        );
-        Ok(())
     }
 
     async fn sync_grouped(
@@ -658,14 +424,40 @@ impl DataSink for DataSinkMotherduckPlugin {
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::MOTHERDUCK
     }
+
+    fn installed_dest_schema(&self) -> Option<&tokio::sync::RwLock<InstalledDestSchema>> {
+        Some(&self.installed)
+    }
+
+    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
+        skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
+            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::MotherDuck,
+        )
+    }
+
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
+        alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
+    ) -> Result<(), std::io::Error> {
+        skippr_runtime_sdk::plugins::alter_ddl::apply_warehouse_alter(
+            self,
+            WarehouseDialect::MotherDuck,
+            &self.fq_table(namespace),
+            namespace,
+            alter,
+        )
+        .await
+    }
 }
 
 #[async_trait]
 impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkMotherduckPlugin {
     async fn columns(&self, namespace: &str) -> std::io::Result<Vec<String>> {
-        let table_name = Self::namespace_to_table_name(namespace);
+        let table_name = self.table_name(namespace);
         let sql = format!(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = '{}'",
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '{}'",
             table_name.replace('\'', "''"),
         );
         let body = self.execute_sql(&sql).await?;
@@ -679,74 +471,6 @@ impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkMotherduc
     async fn query_first(&self, sql: &str) -> std::io::Result<Option<String>> {
         let body = self.execute_sql(sql).await?;
         skippr_runtime_sdk::plugins::alter_ddl::json_result_first(&body)
-    }
-}
-
-#[async_trait]
-impl SchemaSink for DataSinkMotherduckPlugin {
-    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
-        skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
-            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::MotherDuck,
-        )
-    }
-
-    async fn apply_alter(
-        &self,
-        namespace: &str,
-        _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
-        alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
-    ) -> Result<(), std::io::Error> {
-        let table_name = Self::namespace_to_table_name(namespace);
-        let fq_table = format!("\"{}\"", table_name);
-        skippr_runtime_sdk::plugins::alter_ddl::apply_warehouse_alter(
-            self,
-            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::MotherDuck,
-            &fq_table,
-            namespace,
-            alter,
-        )
-        .await
-    }
-
-    async fn sync_schema(
-        &self,
-        namespace: &str,
-        metadata: &skippr_runtime_sdk::discover::OutputMetadata,
-    ) -> Result<(), std::io::Error> {
-        use skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow;
-
-        let fields: std::collections::HashMap<
-            String,
-            skippr_runtime_sdk::discover::OutputMetadata,
-        > = metadata
-            .child_fields()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        let arrow_schema = convert_skippr_to_arrow(Box::new(fields)).map_err(|e| {
-            std::io::Error::other(format!(
-                "Arrow schema conversion for '{}': {}",
-                namespace, e
-            ))
-        })?;
-
-        let table_name = self
-            .config
-            .table
-            .clone()
-            .unwrap_or_else(|| Self::namespace_to_table_name(namespace));
-        let col_defs: Vec<(String, &str)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_lowercase(),
-                    Self::arrow_type_to_duckdb(f.data_type()),
-                )
-            })
-            .collect();
-
-        self.ensure_table(&table_name, &col_defs).await
     }
 }
 
@@ -766,8 +490,8 @@ mod tests {
 
         assert!(script.starts_with("BEGIN TRANSACTION;"));
         assert!(script.contains("CREATE TEMP TABLE"));
-        assert!(script.contains("'\\x01'::BLOB"));
-        assert_eq!(script.matches("MERGE INTO").count(), 4);
+        assert!(script.contains("'\\x02'::BLOB"));
+        assert_eq!(script.matches("MERGE INTO").count(), 5);
         assert_eq!(script.matches("DROP TABLE IF EXISTS").count(), 2);
         assert!(script.ends_with("COMMIT;"));
     }
@@ -826,5 +550,33 @@ mod tests {
         .unwrap();
         assert_eq!(guarded.len(), 1_001);
         assert!(super::MOTHERDUCK_NATIVE_STAGE_BLOCKER.contains("no DuckDB appender"));
+    }
+
+    #[test]
+    fn motherduck_insert_row_quotes_published_date_timestamp_and_binary() {
+        use datafusion::arrow::array::{
+            ArrayRef, BinaryArray, Date32Array, TimestampMicrosecondArray,
+        };
+        use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use datafusion::arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("day", DataType::Date32, true),
+                Field::new("at", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+                Field::new("raw", DataType::Binary, true),
+            ])),
+            vec![
+                Arc::new(Date32Array::from(vec![Some(19_723)])) as ArrayRef,
+                Arc::new(TimestampMicrosecondArray::from(vec![Some(0)])),
+                Arc::new(BinaryArray::from_vec(vec![b"ab".as_slice()])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::cdc_apply::sql_values_row::<super::MotherduckCdcBackend>(&batch, 0).unwrap(),
+            "('2024-01-01', '1970-01-01T00:00:00', '\\x6162'::BLOB)"
+        );
     }
 }

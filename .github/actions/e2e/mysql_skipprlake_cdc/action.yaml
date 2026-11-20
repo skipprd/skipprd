@@ -163,5 +163,4 @@ runs:
         echo "${updated}" | tail -n 1 | grep -qx 'alpha-prime'
         e2e_assert_downloaded \
           'skippr-plugin-data-source-mysql*' \
-          'skippr-plugin-data-sink-skipprlake*' \
-          'skippr-plugin-schema-sink-skipprlake*'
+          'skippr-plugin-data-sink-skipprlake*'

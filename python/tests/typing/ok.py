@@ -18,7 +18,6 @@ from skippr import (
     Migration,
     Pipeline,
     PipelineRef,
-    SchemaSinkGlue,
     Transform,
 )
 
@@ -29,17 +28,6 @@ def build() -> PipelineRef:
     lake = cfg.data_sink(
         "lake",
         DataSinkDuckdb(warehouse="file:///tmp/lake", table_namespace="bronze"),
-        schema_sink="lake",
-    )
-    glue = cfg.schema_sink(
-        "glue",
-        SchemaSinkGlue(
-            s3_bucket="out",
-            s3_prefix="p",
-            athena_workgroup_name="wg",
-            athena_results_s3_bucket="out",
-            glue_database_name="db",
-        ),
     )
     cfg.data_sink(
         "athena",
@@ -48,8 +36,8 @@ def build() -> PipelineRef:
             s3_prefix="p",
             athena_workgroup_name="wg",
             athena_results_s3_bucket="out",
+            glue_database_name="db",
         ),
-        schema_sink=glue,
     )
     cfg.data_sink(
         "db",

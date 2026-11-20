@@ -11,7 +11,7 @@ use crate::migration::journal::{
     MigrationPhase,
 };
 use crate::migration::migrations_dir;
-use crate::plugins::SchemaSink;
+use crate::plugins::DataSink;
 use crate::sqlrt::parser::AlterTableStatement;
 use crate::METADATA;
 use skippr_lease::DurableError;
@@ -117,8 +117,11 @@ async fn apply_loaded(
         checksum: loaded.checksum.clone(),
         direction,
     };
+    let pipeline_name = config.get_pipeline_name();
+    let process_budget =
+        crate::runtime_plugins::host::RuntimeSinkProcessBudget::for_pipeline(&pipeline_name, 1);
     let plugin = config
-        .primary_schema_sink()
+        .ensure_primary_data_sink(process_budget)
         .await
         .map_err(MigrationError::Pipeline)?;
     apply_with(config, offsets, plugin.as_ref(), &apply, stmts).await
@@ -144,7 +147,7 @@ struct Planned {
 async fn apply_with(
     config: &Config,
     offsets: &Arc<Offsets>,
-    plugin: &dyn SchemaSink,
+    plugin: &dyn DataSink,
     apply: &MigrationApply,
     stmts: &[AlterStmt],
 ) -> Result<(), MigrationError> {
@@ -324,6 +327,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::ipc::reader::StreamReader;
     use async_trait::async_trait;
+    use datafusion::execution::SendableRecordBatchStream;
     use serial_test::serial;
     use std::io::{Read, Seek};
     use std::sync::Mutex;
@@ -358,7 +362,29 @@ mod tests {
     }
 
     #[async_trait]
-    impl SchemaSink for RecordingSink {
+    impl DataSink for RecordingSink {
+        async fn sync(
+            &self,
+            _stream: SendableRecordBatchStream,
+            _filename: String,
+            _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        ) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        async fn sync_grouped(
+            &self,
+            mut reader: crate::plugins::GroupedBatchReader,
+            _ctx: crate::plugins::GroupedSinkWriteContext<'_>,
+        ) -> Result<crate::plugins::SinkWriteOutcome, std::io::Error> {
+            while let Some(_chunk) = reader.next_chunk().await? {}
+            Ok(crate::plugins::SinkWriteOutcome::Applied)
+        }
+
+        fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {
+            &crate::plugins::cdc::sink_capabilities::SKIPPRLAKE
+        }
+
         fn alter_support(&self) -> AlterSupport {
             self.support
         }
@@ -384,14 +410,6 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((namespace.to_string(), alter.clone()));
-            Ok(())
-        }
-
-        async fn sync_schema(
-            &self,
-            _namespace: &str,
-            _metadata: &OutputMetadata,
-        ) -> Result<(), std::io::Error> {
             Ok(())
         }
     }

@@ -1,25 +1,23 @@
 skippr:
   skippr_s3_bucket: skippr-e2e-sample-data-output
   workspace: iceberg-stripe-merge-by-key
-
 pipelines:
   stripe_iceberg_merge_by_key:
-    auto_approve: yes
+    auto_approve: true
     env: test
     buffer_threshold_bytes: 20000000
     buffer_threshold_seconds: 60
     data_source: data_sources.stripe_fixture
     data_sink: data_sinks.iceberg_stripe
-
 data_sources:
   stripe_fixture:
     Stripe:
       stripe_account_id: acct_fixture
-      streams: ["payments"]
-      start_date: "2024-01-01"
+      streams:
+      - payments
+      start_date: '2024-01-01'
       lookback_days: 1
       write_policy: merge_by_key
-
 data_sinks:
   iceberg_stripe:
     AthenaIceberg:
@@ -27,16 +25,5 @@ data_sinks:
       glue_database_name: iceberg_e2e_stripe_merge_by_key
       athena_workgroup_name: bikehire
       athena_results_s3_bucket: skippr-e2e-sample-data-output
-      catalog_id: "353855562591"
-      region: us-east-1
-    schema_sink: schema_sinks.iceberg_glue
-
-schema_sinks:
-  iceberg_glue:
-    AthenaIceberg:
-      warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-stripe-merge-by-key
-      glue_database_name: iceberg_e2e_stripe_merge_by_key
-      athena_workgroup_name: bikehire
-      athena_results_s3_bucket: skippr-e2e-sample-data-output
-      catalog_id: "353855562591"
+      catalog_id: '353855562591'
       region: us-east-1

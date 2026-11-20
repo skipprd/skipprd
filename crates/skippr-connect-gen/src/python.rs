@@ -390,10 +390,6 @@ pub fn plugin_class_name(plugin: &PluginSpec) -> String {
     format!("{}{}", plugin.kind.as_str(), plugin.plugin_name)
 }
 
-fn is_paired(plugin: &PluginSpec, engine: &EngineSpec) -> bool {
-    engine.paired_sinks.contains(&plugin.plugin_name)
-}
-
 /// Everything generated for Python, before rendering.
 pub struct PythonModel {
     plugin_classes: Vec<(PluginKind, String, bool, ClassSpec)>,
@@ -411,26 +407,8 @@ pub fn python_model(plugins: &[PluginSpec], engine: &EngineSpec) -> Result<Pytho
         unions: Vec::new(),
         engine_classes: Vec::new(),
     };
-    for paired in &engine.paired_sinks {
-        for kind in [PluginKind::DataSink, PluginKind::SchemaSink] {
-            if !plugins
-                .iter()
-                .any(|p| p.kind == kind && &p.plugin_name == paired)
-            {
-                return Err(format!(
-                    "PairedSink::{paired} has no {} plugin",
-                    kind.as_str()
-                ));
-            }
-        }
-    }
     let mut errors = Vec::new();
-    // A paired schema sink shares its data sink's config and registers
-    // through `Config.data_sink(schema_sink=...)`, so it has no class.
-    let python_plugins = plugins
-        .iter()
-        .filter(|p| !(p.kind == PluginKind::SchemaSink && is_paired(p, engine)));
-    for plugin in python_plugins {
+    for plugin in plugins {
         let py = plugin_class_name(plugin);
         let mut scope = Scope::new(&plugin.types, &plugin.crate_name, py.clone());
         let class = match scope.class(py, &plugin.doc, "", &plugin.config_fields, false) {
@@ -440,12 +418,9 @@ pub fn python_model(plugins: &[PluginSpec], engine: &EngineSpec) -> Result<Pytho
                 continue;
             }
         };
-        model.plugin_classes.push((
-            plugin.kind,
-            plugin.plugin_name.clone(),
-            plugin.kind == PluginKind::DataSink && is_paired(plugin, engine),
-            class,
-        ));
+        model
+            .plugin_classes
+            .push((plugin.kind, plugin.plugin_name.clone(), false, class));
         model.scopes_classes.extend(scope.classes);
         model.unit_enums.extend(scope.unit_enums);
         model.unions.extend(scope.unions);
@@ -691,27 +666,15 @@ pub fn emit_python_rs(model: &PythonModel) -> String {
     out.push_str("    Err(wrong_config_kind(\"DataSource\", obj))\n}\n\n");
 
     out.push_str(
-        "pub fn extract_data_sink_config(obj: &Bound<'_, PyAny>) -> PyResult<SinkConfig> {\n",
+        "pub fn extract_data_sink_config(obj: &Bound<'_, PyAny>) -> PyResult<PluginConfigEntry> {\n",
     );
-    for (_, plugin_name, paired, class) in model.plugins_of(PluginKind::DataSink) {
-        let variant = if *paired { "Paired" } else { "Unpaired" };
-        out.push_str(&format!(
-            "    if let Ok(config) = obj.cast::<{}>() {{\n        return plugin_entry(\"{plugin_name}\", &*config.borrow()).map(SinkConfig::{variant});\n    }}\n",
-            class.rust
-        ));
-    }
-    out.push_str("    Err(wrong_config_kind(\"DataSink\", obj))\n}\n\n");
-
-    out.push_str(
-        "pub fn extract_schema_sink_config(obj: &Bound<'_, PyAny>) -> PyResult<PluginConfigEntry> {\n",
-    );
-    for (_, plugin_name, _, class) in model.plugins_of(PluginKind::SchemaSink) {
+    for (_, plugin_name, _, class) in model.plugins_of(PluginKind::DataSink) {
         out.push_str(&format!(
             "    if let Ok(config) = obj.cast::<{}>() {{\n        return plugin_entry(\"{plugin_name}\", &*config.borrow());\n    }}\n",
             class.rust
         ));
     }
-    out.push_str("    Err(wrong_config_kind(\"SchemaSink\", obj))\n}\n\n");
+    out.push_str("    Err(wrong_config_kind(\"DataSink\", obj))\n}\n\n");
 
     out.push_str("pub fn register_generated_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {\n");
     for class in model.every_class() {
@@ -751,16 +714,7 @@ impl PythonModel {
         };
         vec![
             ("DataSourceConfig", rust(PluginKind::DataSource, None)),
-            (
-                "PairedDataSinkConfig",
-                rust(PluginKind::DataSink, Some(true)),
-            ),
-            (
-                "UnpairedDataSinkConfig",
-                rust(PluginKind::DataSink, Some(false)),
-            ),
             ("DataSinkConfig", rust(PluginKind::DataSink, None)),
-            ("SchemaSinkConfig", rust(PluginKind::SchemaSink, None)),
         ]
     }
 }

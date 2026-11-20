@@ -177,5 +177,4 @@ runs:
         echo "${gone}" | tail -n 1 | grep -qx '0'
         e2e_assert_downloaded \
           'skippr-plugin-data-source-postgres*' \
-          'skippr-plugin-data-sink-skipprlake*' \
-          'skippr-plugin-schema-sink-skipprlake*'
+          'skippr-plugin-data-sink-skipprlake*'

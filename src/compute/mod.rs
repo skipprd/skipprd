@@ -19,8 +19,8 @@ mod table;
 #[cfg(test)]
 pub(crate) use apply::drop_copy_py;
 pub use apply::{
-    admit_config, apply_query_statement, bind_catalog, prefix_deletes, resolve_ddl_pipeline,
-    stateless_for_namespace, ComputeApplyError,
+    admit_config, apply_query_statement, bind_catalog, prefix_deletes, published_stateless_select,
+    resolve_ddl_pipeline, stateless_for_namespace, ComputeApplyError,
 };
 
 pub use bind::{bind_drop_compute, bind_statement, BindCatalog, BindError};

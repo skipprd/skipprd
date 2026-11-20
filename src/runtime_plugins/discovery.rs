@@ -47,7 +47,6 @@ fn runtime_plugin_kind_label(kind: RuntimePluginKind) -> &'static str {
     match kind {
         RuntimePluginKind::DataSource => "data source",
         RuntimePluginKind::DataSink => "data sink",
-        RuntimePluginKind::SchemaSink => "schema sink",
     }
 }
 
@@ -636,8 +635,12 @@ mod tests {
     #[test]
     fn resolved_runtime_plugin_cache_key_includes_kind_name_and_version() {
         assert_eq!(
-            resolved_runtime_plugin_cache_key(RuntimePluginKind::SchemaSink, "Glue", Some("0.1.2"),),
-            "SchemaSink:Glue:0.1.2"
+            resolved_runtime_plugin_cache_key(
+                RuntimePluginKind::DataSource,
+                "Postgres",
+                Some("0.1.2"),
+            ),
+            "DataSource:Postgres:0.1.2"
         );
         assert_eq!(
             resolved_runtime_plugin_cache_key(RuntimePluginKind::DataSink, "Athena", None),

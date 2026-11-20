@@ -1,11 +1,11 @@
 ---
 title: skipprd connect
-description: Build skippr.yml from the command line by adding sources, destinations, and schema sinks, with secrets kept as ${ENV} references.
+description: Build skippr.yml from the command line by adding sources and destinations, with secrets kept as ${ENV} references.
 ---
 
 # skipprd connect
 
-`skipprd connect` adds a source, destination, or schema sink to `skippr.yml` and wires it into a pipeline. Use it instead of hand-editing YAML, in setup scripts, or in CI. Each run merges into the existing file and checks the result before writing, so a typo never leaves you with a half-written config. Python `Config.save()` uses the same merge, so the CLI and Python produce identical files.
+`skipprd connect` adds a source or destination to `skippr.yml` and wires it into a pipeline. Use it instead of hand-editing YAML, in setup scripts, or in CI. Each run merges into the existing file and checks the result before writing, so a typo never leaves you with a half-written config. Python `Config.save()` uses the same merge, so the CLI and Python produce identical files.
 
 ## Usage
 
@@ -26,7 +26,6 @@ cfg.save()
 ```bash [CLI]
 skipprd [GLOBAL FLAGS] connect data-source <kind> --pipeline <pipeline> --name <entry> [--<field> <value> ...]
 skipprd [GLOBAL FLAGS] connect data-sink   <kind> --pipeline <pipeline> --name <entry> [--<field> <value> ...]
-skipprd [GLOBAL FLAGS] connect schema-sink <kind> --pipeline <pipeline> --name <entry> [--<field> <value> ...]
 ```
 
 ```yaml [YAML]
@@ -47,15 +46,14 @@ data_sources:
 
 :::
 
-The three roles write to three sections of `skippr.yml`:
+The two roles write to two sections of `skippr.yml`:
 
 | Command | Writes the entry to | Links it from the pipeline as |
 |---|---|---|
 | `connect data-source` | `data_sources.<name>` | `pipelines.<pipeline>.data_source` |
 | `connect data-sink` | `data_sinks.<name>` | `pipelines.<pipeline>.data_sink` |
-| `connect schema-sink` | `schema_sinks.<name>` | `schema_sink` on the pipeline's data sink |
 
-Run `skipprd connect data-source --help` (or `data-sink`, `schema-sink`) to list every kind, and `skipprd connect data-sink snowflake --help` to list a kind's flags.
+Run `skipprd connect data-source --help` (or `data-sink`) to list every kind, and `skipprd connect data-sink snowflake --help` to list a kind's flags. There is no `connect schema-sink`. Dest schema is the data plugin.
 
 ## Options
 
@@ -64,7 +62,7 @@ These flags apply to every `connect` command.
 | Flag | Default | Description |
 |---|---|---|
 | `--pipeline <NAME>` | Required | Pipeline to add the entry to. Created if it does not exist. On an interactive terminal Skipprd prompts for it if you leave it out. |
-| `--name <NAME>` | Required | Entry name inside `data_sources`, `data_sinks`, or `schema_sinks`. Must be non-empty and contain no `.`. Prompted for on a terminal if missing. |
+| `--name <NAME>` | Required | Entry name inside `data_sources` or `data_sinks`. Must be non-empty and contain no `.`. Prompted for on a terminal if missing. |
 | `--config <PATH>` | `./skippr.yml` | File to write. Must end in `.yml` or `.yaml`. Without it, `connect` writes to the config file in the current directory, or creates `./skippr.yml`. |
 | `--workspace <NAME>` | None | Sets `skippr.workspace`. |
 | `--tenant <NAME>` | None | Sets `skippr.tenant`. |
@@ -90,12 +88,11 @@ Every other flag is a connector field. The flag is the YAML key with underscores
 
 ### Kind names
 
-Kinds are the connector name in lowercase with hyphens. Most are what you expect; these are the destinations and schema sinks:
+Kinds are the connector name in lowercase with hyphens. Most are what you expect; these are the destinations:
 
 | Role | Kinds |
 |---|---|
 | `data-sink` | `amqp`, `athena`, `athena-iceberg`, `azure-blob`, `bigquery`, `clickhouse`, `databricks`, `duckdb`, `file`, `gcs`, `motherduck`, `postgres`, `redshift`, `s3`, `sftp`, `skippr-lake`, `snowflake`, `stdout`, `synapse` |
-| `schema-sink` | `athena-iceberg`, `bigquery`, `clickhouse`, `duckdb`, `glue`, `motherduck`, `postgres`, `redshift`, `skippr-lake`, `snowflake` |
 
 Source kinds with names you might not guess: `mssql` (SQL Server), `delta-lake`, `linked-in-ads`, `sum-up`, `ad-roll-ads`, `x-ads`, `google-analytics` (GA4).
 
@@ -108,12 +105,7 @@ Each `connect` run reads the file, merges your change, validates the result, and
 - Other pipelines and entries are left alone.
 - An entry keeps its connector kind. You cannot turn a `Postgres` entry into a `Snowflake` entry; choose a new `--name`.
 - Secret fields must be exactly `${NAME}`. Plaintext secrets are refused, so they never land in `skippr.yml`.
-- `connect schema-sink` needs a data sink on the pipeline first, because it links the schema sink to that sink.
 - A pipeline you are still building one entry at a time is allowed. Full checks run when `discover`, `sync`, or `doctor` reads the file.
-
-### Paired sinks
-
-SkipprLake, AthenaIceberg, and DuckDB destinations share one configuration with their schema sink. When you add the schema sink with no fields, it starts as a copy of the data sink. Later field changes to either one are applied to both. If the two have already drifted apart, `connect` refuses to write until you make them match.
 
 ## Examples
 
@@ -177,9 +169,9 @@ data_sinks:
 
 :::
 
-### Add a SkipprLake destination and its schema sink
+### Add a SkipprLake destination
 
-Nested `object_store` fields are flattened into `--object-store-*` flags. The schema sink is added second and copies the data sink's configuration.
+Nested `object_store` fields are flattened into `--object-store-*` flags. Dest schema is the data plugin; compact creates the table from published output metadata.
 
 ```bash
 export OBJECTS_S3_ENDPOINT='https://<account>.r2.cloudflarestorage.com'
@@ -198,8 +190,6 @@ skipprd connect data-sink skippr-lake \
   --object-store-endpoint '${OBJECTS_S3_ENDPOINT}' \
   --object-store-access-key-id '${OBJECTS_ACCESS_KEY_ID}' \
   --object-store-secret-access-key '${OBJECTS_SECRET_ACCESS_KEY}'
-
-skipprd connect schema-sink skippr-lake --pipeline bikehire --name lake_schema
 ```
 
 The resulting `skippr.yml` contains:
@@ -207,19 +197,6 @@ The resulting `skippr.yml` contains:
 ```yaml
 data_sinks:
   lake:
-    schema_sink: schema_sinks.lake_schema
-    SkipprLake:
-      catalog_table: my-iceberg-catalog
-      warehouse: s3://my-iceberg-warehouse/
-      table_namespace: bronze
-      object_store:
-        type: r2
-        endpoint: ${OBJECTS_S3_ENDPOINT}
-        access_key_id: ${OBJECTS_ACCESS_KEY_ID}
-        secret_access_key: ${OBJECTS_SECRET_ACCESS_KEY}
-
-schema_sinks:
-  lake_schema:
     SkipprLake:
       catalog_table: my-iceberg-catalog
       warehouse: s3://my-iceberg-warehouse/
@@ -231,22 +208,12 @@ schema_sinks:
         secret_access_key: ${OBJECTS_SECRET_ACCESS_KEY}
 ```
 
-### Add an Athena destination with a Glue schema sink
-
-Add the data sink first, then the schema sink.
+### Add an Athena destination
 
 ```bash
 skipprd connect data-sink athena \
   --pipeline bikehire \
   --name athena \
-  --s3-bucket your-output-bucket \
-  --s3-prefix data/bikehire \
-  --athena-workgroup-name primary \
-  --athena-results-s3-bucket your-athena-results
-
-skipprd connect schema-sink glue \
-  --pipeline bikehire \
-  --name glue \
   --s3-bucket your-output-bucket \
   --s3-prefix data/bikehire \
   --glue-database-name skippr_quickstart \
@@ -292,8 +259,7 @@ skipprd doctor
 |---|---|---|
 | `secret field 'password' must be an unresolved ${ENV} reference like ${NAME}` | You passed a plaintext secret, or your shell expanded `${NAME}` before Skipprd saw it. | Pass `'${NAME}'` in single quotes and `export NAME=...` separately. |
 | `plugin name 'warehouse' already uses Postgres, not Snowflake` | That `--name` is already a different connector in `skippr.yml`. | Use a new `--name`, or remove the old entry. |
-| `connect schema-sink requires a data_sink on this pipeline` | The schema sink was added before the destination. | Run `connect data-sink` for the pipeline first. |
-| `paired ... configs must be equal before a write changes them` | A paired data sink and schema sink were edited apart by hand. | Make the two blocks in `skippr.yml` identical, then rerun. |
+| `unknown field \`schema_sinks\`` | Leftover catalog YAML. Dest schema is the data plugin. | Remove `schema_sinks` and any `schema_sink:` on data sinks. |
 | `entry name "a.b" must be non-empty and contain no '.'` | Entry names are referenced as `<section>.<name>`, so dots are not allowed. | Use underscores or hyphens. |
 | `connect requires --pipeline` | No `--pipeline` and no terminal to prompt on (for example in CI). | Pass `--pipeline` and `--name` explicitly. |
 | `... is not a YAML (.yml / .yaml) file` | `--config` points at a JSON or TOML file. | `connect` writes YAML only. Point `--config` at a `.yml` file. |

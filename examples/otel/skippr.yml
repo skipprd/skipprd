@@ -1,7 +1,6 @@
 skippr:
   workspace: otel
   tenant: acme
-
 pipelines:
   otel-traces:
     data_source: data_sources.otlp_traces
@@ -30,8 +29,6 @@ pipelines:
       batch_partition_fields: hour,service_name,tenant_id
       inject_fields:
         tenant_id: acme
-  # Derived 1m/5m grains are materialized by skippr query / CloudQuery (see cookbook.sql).
-  # They are not extra OTLP listeners.
   otel-metrics-1m:
     data_source: data_sources.otlp_metrics
     data_sink: data_sinks.lake
@@ -52,35 +49,27 @@ pipelines:
       inject_fields:
         tenant_id: acme
         rollup_grain: 5m
-
 data_sources:
   otlp_traces:
     Otlp:
-      listen_address_grpc: "0.0.0.0:4317"
-      listen_address_http: "0.0.0.0:4318"
-      signals: [traces]
+      listen_address_grpc: 0.0.0.0:4317
+      listen_address_http: 0.0.0.0:4318
+      signals:
+      - traces
   otlp_logs:
     Otlp:
-      listen_address_grpc: "0.0.0.0:4319"
-      listen_address_http: "0.0.0.0:4320"
-      signals: [logs]
+      listen_address_grpc: 0.0.0.0:4319
+      listen_address_http: 0.0.0.0:4320
+      signals:
+      - logs
   otlp_metrics:
     Otlp:
-      listen_address_grpc: "0.0.0.0:4321"
-      listen_address_http: "0.0.0.0:4322"
-      signals: [metrics]
-
+      listen_address_grpc: 0.0.0.0:4321
+      listen_address_http: 0.0.0.0:4322
+      signals:
+      - metrics
 data_sinks:
   lake:
-    SkipprLake:
-      table_namespace: otel
-      catalog_table: otel-iceberg-catalog
-      warehouse: s3://example-otel-warehouse/
-      region: us-east-1
-    schema_sink: schema_sinks.lake_schema
-
-schema_sinks:
-  lake_schema:
     SkipprLake:
       table_namespace: otel
       catalog_table: otel-iceberg-catalog

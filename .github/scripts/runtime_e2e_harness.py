@@ -57,82 +57,63 @@ EXPECTED_RUNTIME_PLUGIN_PATTERNS = (
     "skippr-plugin-data-source-dynamodb*",
     "skippr-plugin-data-sink-athena*",
     "skippr-plugin-data-sink-skipprlake*",
-    "skippr-plugin-schema-sink-glue*",
-    "skippr-plugin-schema-sink-skipprlake*",
-    "skippr-plugin-schema-sink-athena-iceberg*",
     "skippr-plugin-data-sink-duckdb*",
-    "skippr-plugin-schema-sink-duckdb*",
 )
 LOCAL_SCENARIO_RUNTIME_MANIFESTS = (
     ("runtime_s3_source", "s3-source.json"),
     ("runtime_athena_sink", "athena-sink.json"),
-    ("runtime_glue_schema", "glue-schema.json"),
     ("runtime_postgres_source", "postgres-source.json"),
     ("runtime_mssql_source", "mssql-source.json"),
     ("runtime_mysql_source", "mysql-source.json"),
     ("runtime_dynamodb_source", "dynamodb-source.json"),
     ("runtime_skipprlake_sink", "skipprlake-sink.json"),
-    ("runtime_skipprlake_schema", "skipprlake-schema.json"),
     ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
-    ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ("runtime_snowflake_sink", "snowflake-sink.json"),
-    ("runtime_snowflake_schema", "snowflake-schema.json"),
 )
 DEFAULT_LOCAL_SCENARIO_RUNTIME_MANIFESTS = (
     ("runtime_s3_source", "s3-source.json"),
     ("runtime_athena_sink", "athena-sink.json"),
-    ("runtime_glue_schema", "glue-schema.json"),
 )
 LOCAL_SCENARIO_RUNTIME_MANIFESTS_BY_SCENARIO = {
     "postgres_iceberg_types_cdc": (
         ("runtime_postgres_source", "postgres-source.json"),
         ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
-        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "mysql_iceberg_types_cdc": (
         ("runtime_mysql_source", "mysql-source.json"),
         ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
-        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "dynamodb_iceberg_types_cdc": (
         ("runtime_dynamodb_source", "dynamodb-source.json"),
         ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
-        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "postgres_iceberg_cdc_late_delete": (
         ("runtime_postgres_source", "postgres-source.json"),
         ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
-        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "stripe_iceberg_replace_partition": (
         ("runtime_stripe_source", "stripe-source.json"),
         ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
-        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "stripe_iceberg_merge_by_key": (
         ("runtime_stripe_source", "stripe-source.json"),
         ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
-        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "mssql_iceberg_debug_linux": (
         ("runtime_mssql_source", "mssql-source.json"),
         ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
-        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "mssql_iceberg_debug_windows": (
         ("runtime_mssql_source", "mssql-source.json"),
         ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
-        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "mssql_snowflake": (
         ("runtime_mssql_source", "mssql-source.json"),
         ("runtime_snowflake_sink", "snowflake-sink.json"),
-        ("runtime_snowflake_schema", "snowflake-schema.json"),
     ),
     "bike_hire_many": (
         ("runtime_s3_source", "s3-source.json"),
         ("runtime_skipprlake_sink", "skipprlake-sink.json"),
-        ("runtime_skipprlake_schema", "skipprlake-schema.json"),
     ),
 }
 LOCAL_SCENARIO_RUNTIME_PIPELINE_ANCHORS = {
@@ -152,19 +133,15 @@ LOCAL_SCENARIO_RUNTIME_PIPELINE_ANCHORS = {
 BIKE_HIRE_RUNTIME_VERSION_ANCHORS = (
     ("  s3_bike_hire:\n    S3:\n", "S3"),
     ("  test_datalake:\n    Athena:\n", "Athena"),
-    ("  glue_bikehire:\n    Glue:\n", "Glue"),
 )
 BIKE_HIRE_MANY_RUNTIME_VERSION_ANCHORS = (
     ("  s3_bike_hire:\n    S3:\n", "S3"),
     ("  lake:\n    SkipprLake:\n", "SkipprLake"),
-    ("  lake_schema:\n    SkipprLake:\n", "SkipprLake"),
 )
 DEADLETTERS_RUNTIME_VERSION_ANCHORS = (
     ("  s3_deadletters_test:\n    S3:\n", "S3"),
     ("  test_datalake:\n    Athena:\n", "Athena"),
     ("  test_deadletters:\n    Athena:\n", "Athena"),
-    ("  glue_bikehire:\n    Glue:\n", "Glue"),
-    ("  glue_deadletters:\n    Glue:\n", "Glue"),
 )
 SCENARIO_RUNTIME_VERSION_ANCHORS = {
     "bike_hire": BIKE_HIRE_RUNTIME_VERSION_ANCHORS,
@@ -174,42 +151,34 @@ SCENARIO_RUNTIME_VERSION_ANCHORS = {
     "postgres_iceberg_types_cdc": (
         ("  postgres_types_cdc:\n    Postgres:\n", "Postgres"),
         ("  iceberg_types_cdc:\n    AthenaIceberg:\n", "AthenaIceberg"),
-        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "mysql_iceberg_types_cdc": (
         ("  mysql_types_cdc:\n    Mysql:\n", "Mysql"),
         ("  iceberg_types_cdc:\n    AthenaIceberg:\n", "AthenaIceberg"),
-        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "dynamodb_iceberg_types_cdc": (
         ("  dynamodb_types_cdc:\n    Dynamodb:\n", "Dynamodb"),
         ("  iceberg_types_cdc:\n    AthenaIceberg:\n", "AthenaIceberg"),
-        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "postgres_iceberg_cdc_late_delete": (
         ("  postgres_types_cdc:\n    Postgres:\n", "Postgres"),
         ("  iceberg_types_cdc:\n    AthenaIceberg:\n", "AthenaIceberg"),
-        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "stripe_iceberg_replace_partition": (
         ("  stripe_fixture:\n    Stripe:\n", "Stripe"),
         ("  iceberg_stripe:\n    AthenaIceberg:\n", "AthenaIceberg"),
-        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "stripe_iceberg_merge_by_key": (
         ("  stripe_fixture:\n    Stripe:\n", "Stripe"),
         ("  iceberg_stripe:\n    AthenaIceberg:\n", "AthenaIceberg"),
-        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "mssql_iceberg_debug_linux": (
         ("  mssql_debug:\n    Mssql:\n", "Mssql"),
         ("  iceberg_debug:\n    AthenaIceberg:\n", "AthenaIceberg"),
-        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "mssql_iceberg_debug_windows": (
         ("  mssql_debug:\n    Mssql:\n", "Mssql"),
         ("  iceberg_debug:\n    AthenaIceberg:\n", "AthenaIceberg"),
-        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
 }
 RUNTIME_PLUGIN_SMOKE_DOWNLOAD_MANIFESTS = {
@@ -225,7 +194,6 @@ RUNTIME_PLUGIN_SMOKE_DOWNLOAD_MANIFESTS = {
             "file-sink.json",
             "postgres-source.json",
             "postgres-sink.json",
-            "postgres-schema.json",
         }
     ),
 }
@@ -236,7 +204,6 @@ RUNTIME_FILE_SMOKE_PLUGIN_PATTERNS = (
 RUNTIME_POSTGRES_SMOKE_PLUGIN_PATTERNS = (
     "skippr-plugin-data-source-postgres*",
     "skippr-plugin-data-sink-postgres*",
-    "skippr-plugin-schema-sink-postgres*",
 )
 RUNTIME_ACCEPTANCE_WORKSPACE = "runtime-plugin-acceptance"
 RUNTIME_ACCEPTANCE_POSTGRES_SERVICES = ("postgres", "postgres-target")
@@ -1824,16 +1791,6 @@ data_sources:
 
 data_sinks:
   postgres_sink:
-    Postgres:
-      host: 127.0.0.1
-      port: 15433
-      user: postgres
-      password: testpass
-      database: skippr_test
-    schema_sink: schema_sinks.postgres_schema
-
-schema_sinks:
-  postgres_schema:
     Postgres:
       host: 127.0.0.1
       port: 15433

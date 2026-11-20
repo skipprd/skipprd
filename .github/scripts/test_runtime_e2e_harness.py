@@ -411,7 +411,6 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             {"manifest_filename": "s3-source.json", "manifest_kind": "DataSource"},
             {"manifest_filename": "file-sink.json", "manifest_kind": "DataSink"},
             {"manifest_filename": "duckdb-sink.json", "manifest_kind": "DataSink"},
-            {"manifest_filename": "glue-schema.json", "manifest_kind": "SchemaSink"},
         ]
 
         manifest_filenames = runtime_e2e_harness.runtime_release_manifest_filenames(catalog)
@@ -422,7 +421,6 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
                 "duckdb-sink.json",
                 "file-sink.json",
                 "file-source.json",
-                "glue-schema.json",
                 "s3-source.json",
             ],
         )
@@ -457,9 +455,6 @@ data_sinks:
   test_datalake:
     Athena:
       s3_bucket: skippr-e2e-sample-data-output
-schema_sinks:
-  glue_bikehire:
-    Glue:
       glue_database_name: bikehire
 """
 
@@ -469,13 +464,13 @@ schema_sinks:
             {
                 "S3": "8.1.0",
                 "Athena": "8.2.0",
-                "Glue": "8.3.0",
             },
         )
 
         self.assertIn('S3:\n      version: "8.1.0"\n', rewritten)
         self.assertIn('Athena:\n      version: "8.2.0"\n', rewritten)
-        self.assertIn('Glue:\n      version: "8.3.0"\n', rewritten)
+        self.assertNotIn("Glue:", rewritten)
+        self.assertNotIn("schema_sinks", rewritten)
 
     def test_runtime_plugin_version_config_text_ignores_missing_values(self) -> None:
         config_text = """data_sources:
@@ -486,9 +481,6 @@ data_sinks:
   test_datalake:
     Athena:
       s3_bucket: skippr-e2e-sample-data-output
-schema_sinks:
-  glue_bikehire:
-    Glue:
       glue_database_name: bikehire
 """
 
@@ -513,12 +505,10 @@ schema_sinks:
             manifest_paths={
                 "runtime_s3_source": Path("/tmp/local-runtime/s3-source.json"),
                 "runtime_athena_sink": Path("/tmp/local-runtime/athena-sink.json"),
-                "runtime_glue_schema": Path("/tmp/local-runtime/glue-schema.json"),
             },
             manifest_versions={
                 "runtime_s3_source": "0.1.1",
                 "runtime_athena_sink": "0.1.1",
-                "runtime_glue_schema": "0.1.1",
             },
         )
 
@@ -543,27 +533,14 @@ schema_sinks:
                 / "0.2.0"
                 / "athena-sink.json"
             )
-            glue_manifest = (
-                manifest_dir
-                / "plugins"
-                / "glue-schema"
-                / "versions"
-                / "0.3.0"
-                / "glue-schema.json"
-            )
             s3_manifest.parent.mkdir(parents=True, exist_ok=True)
             athena_manifest.parent.mkdir(parents=True, exist_ok=True)
-            glue_manifest.parent.mkdir(parents=True, exist_ok=True)
             s3_manifest.write_text(
                 '{"version":"0.1.1"}\n',
                 encoding="utf-8",
             )
             athena_manifest.write_text(
                 '{"version":"0.2.0"}\n',
-                encoding="utf-8",
-            )
-            glue_manifest.write_text(
-                '{"version":"0.3.0"}\n',
                 encoding="utf-8",
             )
 
@@ -580,11 +557,6 @@ schema_sinks:
                         "manifest_filename": "athena-sink.json",
                         "manifest_stem": "athena-sink",
                         "package_version": "0.2.0",
-                    },
-                    {
-                        "manifest_filename": "glue-schema.json",
-                        "manifest_stem": "glue-schema",
-                        "package_version": "0.3.0",
                     },
                     {
                         "manifest_filename": "postgres-source.json",
@@ -612,29 +584,14 @@ schema_sinks:
                         "package_version": "0.7.1",
                     },
                     {
-                        "manifest_filename": "skipprlake-schema.json",
-                        "manifest_stem": "skipprlake-schema",
-                        "package_version": "0.7.2",
-                    },
-                    {
                         "manifest_filename": "athena-iceberg-sink.json",
                         "manifest_stem": "athena-iceberg-sink",
                         "package_version": "0.8.0",
                     },
                     {
-                        "manifest_filename": "athena-iceberg-schema.json",
-                        "manifest_stem": "athena-iceberg-schema",
-                        "package_version": "0.9.0",
-                    },
-                    {
                         "manifest_filename": "snowflake-sink.json",
                         "manifest_stem": "snowflake-sink",
                         "package_version": "0.10.0",
-                    },
-                    {
-                        "manifest_filename": "snowflake-schema.json",
-                        "manifest_stem": "snowflake-schema",
-                        "package_version": "0.11.0",
                     },
                 ],
             ):
@@ -645,14 +602,12 @@ schema_sinks:
                 {
                     "runtime_s3_source": "0.1.1",
                     "runtime_athena_sink": "0.2.0",
-                    "runtime_glue_schema": "0.3.0",
                 },
             )
             self.assertEqual(
                 sorted(loaded.manifest_paths.keys()),
                 [
                     "runtime_athena_sink",
-                    "runtime_glue_schema",
                     "runtime_s3_source",
                 ],
             )
@@ -1116,7 +1071,6 @@ schema_sinks:
             (
                 ("  s3_bike_hire:\n    S3:\n", "S3"),
                 ("  lake:\n    SkipprLake:\n", "SkipprLake"),
-                ("  lake_schema:\n    SkipprLake:\n", "SkipprLake"),
             ),
         )
 

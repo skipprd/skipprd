@@ -7,7 +7,7 @@ use arrow::array::{ArrayRef, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 
-use crate::discover::{Metadata, OutputMetadata, SkipprDataType};
+use crate::discover::{Metadata, SkipprDataType};
 use crate::helpers::configuration::Config;
 use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
 use crate::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA};
@@ -32,67 +32,67 @@ pub fn table_name_for_pipeline(pipeline: &str) -> String {
     format!("_dl_{pipeline}")
 }
 
-pub(crate) fn arrow_schema() -> Arc<ArrowSchema> {
-    Arc::new(ArrowSchema::new(vec![
-        ArrowField::new("id", ArrowDataType::Utf8, false),
-        ArrowField::new("namespace", ArrowDataType::Utf8, false),
-        ArrowField::new("record", ArrowDataType::Utf8, false),
-        ArrowField::new("error", ArrowDataType::Utf8, false),
-        ArrowField::new("failure_code", ArrowDataType::Utf8, false),
-        ArrowField::new("event_time", ArrowDataType::Int64, true),
-        ArrowField::new("processed_time", ArrowDataType::Int64, false),
-        ArrowField::new("source_uri", ArrowDataType::Utf8, true),
-        ArrowField::new("offset_key", ArrowDataType::Utf8, true),
-        ArrowField::new("offset_pos", ArrowDataType::Int64, true),
-    ]))
+pub fn is_deadletter_namespace(namespace: &str) -> bool {
+    namespace.starts_with("_dl_")
 }
 
-pub(crate) fn output_metadata() -> OutputMetadata {
-    let mut output_metadata = OutputMetadata::new();
-    output_metadata.determined_type = SkipprDataType::Record;
+const DEADLETTER_COLUMNS: &[(&str, SkipprDataType, bool)] = &[
+    ("id", SkipprDataType::String, false),
+    ("namespace", SkipprDataType::String, false),
+    ("record", SkipprDataType::String, false),
+    ("error", SkipprDataType::String, false),
+    ("failure_code", SkipprDataType::String, false),
+    ("event_time", SkipprDataType::Long, true),
+    ("processed_time", SkipprDataType::Long, false),
+    ("source_uri", SkipprDataType::String, true),
+    ("offset_key", SkipprDataType::String, true),
+    ("offset_pos", SkipprDataType::Long, true),
+];
 
-    fn field(name: &str, dt: SkipprDataType) -> OutputMetadata {
-        let mut field = OutputMetadata::new();
-        field.out_field_name = name.to_string();
-        field.source_field_name = name.to_string();
-        field.determined_type = dt;
-        field
+fn deadletter_arrow_type(data_type: &SkipprDataType) -> Result<ArrowDataType, String> {
+    match data_type {
+        SkipprDataType::String => Ok(ArrowDataType::Utf8),
+        SkipprDataType::Long => Ok(ArrowDataType::Int64),
+        other => Err(format!(
+            "deadletter column type {} has no Arrow mapping",
+            other.as_str()
+        )),
     }
+}
 
-    let mut fields: HashMap<String, OutputMetadata> = HashMap::new();
-    fields.insert("id".into(), field("id", SkipprDataType::String));
-    fields.insert(
-        "namespace".into(),
-        field("namespace", SkipprDataType::String),
-    );
-    fields.insert("record".into(), field("record", SkipprDataType::String));
-    fields.insert("error".into(), field("error", SkipprDataType::String));
-    fields.insert(
-        "failure_code".into(),
-        field("failure_code", SkipprDataType::String),
-    );
-    fields.insert(
-        "event_time".into(),
-        field("event_time", SkipprDataType::Long),
-    );
-    fields.insert(
-        "processed_time".into(),
-        field("processed_time", SkipprDataType::Long),
-    );
-    fields.insert(
-        "source_uri".into(),
-        field("source_uri", SkipprDataType::String),
-    );
-    fields.insert(
-        "offset_key".into(),
-        field("offset_key", SkipprDataType::String),
-    );
-    fields.insert(
-        "offset_pos".into(),
-        field("offset_pos", SkipprDataType::Long),
-    );
-    output_metadata.fields = Box::new(fields);
-    output_metadata
+pub(crate) fn arrow_schema() -> Arc<ArrowSchema> {
+    let fields = DEADLETTER_COLUMNS
+        .iter()
+        .map(|(name, data_type, nullable)| {
+            Ok(ArrowField::new(
+                *name,
+                deadletter_arrow_type(data_type)?,
+                *nullable,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .expect("deadletter columns map to Arrow");
+    Arc::new(ArrowSchema::new(fields))
+}
+
+/// One deadletter record. Root id stays 0. Children have distinct ids ≥ 1.
+pub(crate) fn namespace_metadata(namespace: &str, schema_id: u64) -> Result<Metadata, String> {
+    let mut fields = HashMap::new();
+    for (name, data_type, nullable) in DEADLETTER_COLUMNS {
+        let mut field = Metadata::new().map_err(|err| err.to_string())?;
+        field.determined_type = data_type.clone();
+        field.out_field_name = (*name).to_string();
+        field.source_field_name = (*name).to_string();
+        field.nullable = *nullable;
+        fields.insert((*name).to_string(), field);
+    }
+    let mut root = Metadata::new().map_err(|err| err.to_string())?;
+    root.determined_type = SkipprDataType::Record;
+    root.fields = Box::new(fields);
+    Metadata::migrate_tree(namespace, &mut root, schema_id, Vec::new());
+    Metadata::repair_field_identity(namespace, &mut root);
+    Metadata::validate_field_identity(namespace, &root)?;
+    Ok(root)
 }
 
 pub(crate) fn build_batch(records: &[DeadletterRecord]) -> Option<RecordBatch> {
@@ -163,10 +163,10 @@ pub(crate) fn build_batch(records: &[DeadletterRecord]) -> Option<RecordBatch> {
 
 /// Lazily registers the deadletter namespace schema in ARROW_SCHEMA and METADATA
 /// so the table is created alongside normal pipeline tables with no special branches.
-pub fn ensure_namespace_registered(config: &Config) {
+pub fn ensure_namespace_registered(config: &Config) -> Result<(), String> {
     let dl_ns = table_name(config);
     if ARROW_SCHEMA.get(&dl_ns).is_some() {
-        return;
+        return Ok(());
     }
     let schema = arrow_schema();
     ARROW_SCHEMA
@@ -176,60 +176,52 @@ pub fn ensure_namespace_registered(config: &Config) {
         .entry(dl_ns.clone())
         .or_insert_with(|| AtomicU64::new(0));
 
-    fn dl_field(config: &Config, name: &str, dt: SkipprDataType) -> Metadata {
-        let mut m = Metadata::new().unwrap();
-        m.determined_type = dt;
-        m.out_field_name = name.to_string();
-        m
-    }
-
-    let mut fields: HashMap<String, Metadata> = HashMap::new();
-    fields.insert("id".into(), dl_field(config, "id", SkipprDataType::String));
-    fields.insert(
-        "namespace".into(),
-        dl_field(config, "namespace", SkipprDataType::String),
-    );
-    fields.insert(
-        "record".into(),
-        dl_field(config, "record", SkipprDataType::String),
-    );
-    fields.insert(
-        "error".into(),
-        dl_field(config, "error", SkipprDataType::String),
-    );
-    fields.insert(
-        "failure_code".into(),
-        dl_field(config, "failure_code", SkipprDataType::String),
-    );
-    fields.insert(
-        "event_time".into(),
-        dl_field(config, "event_time", SkipprDataType::Long),
-    );
-    fields.insert(
-        "processed_time".into(),
-        dl_field(config, "processed_time", SkipprDataType::Long),
-    );
-    fields.insert(
-        "source_uri".into(),
-        dl_field(config, "source_uri", SkipprDataType::String),
-    );
-    fields.insert(
-        "offset_key".into(),
-        dl_field(config, "offset_key", SkipprDataType::String),
-    );
-    fields.insert(
-        "offset_pos".into(),
-        dl_field(config, "offset_pos", SkipprDataType::Long),
-    );
-
-    let mut ns_meta = Metadata::new().unwrap();
-    ns_meta.fields = Box::new(fields);
-    ns_meta.determined_type = SkipprDataType::Record;
-
     let mut pm = METADATA.load().as_ref().clone();
+    let schema_id = if pm.schema_id == 0 { 1 } else { pm.schema_id };
+    let ns_meta = namespace_metadata(&dl_ns, schema_id)?;
     pm.metadata.insert(dl_ns.clone(), ns_meta);
     METADATA.store(Arc::new(pm));
     bump_pipeline_schema_version();
+    Ok(())
+}
 
-    config.sync_output_schema_namespace(&dl_ns);
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::discover::PipelineMetadata;
+    use crate::helpers::schema_store::persist_pipeline_schema;
+    use skippr_wal_catalog::{CatalogFence, MemorySkipprStore};
+
+    #[test]
+    fn deadletter_namespace_persists_unique_field_ids() {
+        let fence = CatalogFence::local();
+        let store = MemorySkipprStore::open(fence);
+        let mut pipeline = PipelineMetadata::new(&Config::new());
+        pipeline.name = "device_data".into();
+        let namespace = "_dl_device_data";
+        let root = namespace_metadata(namespace, 1).unwrap();
+        let ids: Vec<i32> = root.fields.values().map(|field| field.field_id).collect();
+        assert_eq!(ids.len(), DEADLETTER_COLUMNS.len());
+        assert!(ids.iter().all(|id| *id >= 1), "{ids:?}");
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), ids.len());
+        pipeline.metadata.insert(namespace.to_string(), root);
+        persist_pipeline_schema(&store, fence, &pipeline).unwrap();
+    }
+
+    #[test]
+    fn deadletter_arrow_schema_matches_column_catalog() {
+        let schema = arrow_schema();
+        assert_eq!(schema.fields().len(), DEADLETTER_COLUMNS.len());
+        for (index, (name, data_type, nullable)) in DEADLETTER_COLUMNS.iter().enumerate() {
+            let field = schema.field(index);
+            assert_eq!(field.name(), *name);
+            assert_eq!(
+                field.data_type(),
+                &deadletter_arrow_type(data_type).unwrap()
+            );
+            assert_eq!(field.is_nullable(), *nullable);
+        }
+    }
 }

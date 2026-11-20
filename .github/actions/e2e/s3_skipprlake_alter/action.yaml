@@ -99,5 +99,4 @@ runs:
         python3 .github/actions/e2e/s3_skipprlake_alter/run_matrix.py
         e2e_assert_downloaded \
           'skippr-plugin-data-source-s3*' \
-          'skippr-plugin-data-sink-skipprlake*' \
-          'skippr-plugin-schema-sink-skipprlake*'
+          'skippr-plugin-data-sink-skipprlake*'

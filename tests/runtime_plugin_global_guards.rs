@@ -10,11 +10,7 @@ fn runtime_plugin_binaries_use_bounded_sdk_main() {
     let mut main_count = 0;
     let mut violations = Vec::new();
 
-    for relative_dir in [
-        "plugins/data_source",
-        "plugins/data_sink",
-        "plugins/schema_sink",
-    ] {
+    for relative_dir in ["plugins/data_source", "plugins/data_sink"] {
         for entry in WalkDir::new(root.join(relative_dir))
             .into_iter()
             .filter_map(Result::ok)
@@ -53,7 +49,7 @@ fn runtime_sink_and_schema_plugins_do_not_reintroduce_host_globals() {
         !root.join("plugins/skippr-plugin-runtime-link").exists(),
         "legacy runtime-link crate should be deleted"
     );
-    let monitored_dirs = ["plugins/data_sink", "plugins/schema_sink"];
+    let monitored_dirs = ["plugins/data_sink"];
     let banned_patterns = [
         ("Config::", Regex::new(r"\bConfig::").unwrap()),
         ("METADATA", Regex::new(r"\bMETADATA\b").unwrap()),
@@ -148,10 +144,11 @@ fn runtime_sink_and_schema_plugins_use_sdk_entrypoints() {
     ];
     let mut violations = Vec::new();
 
-    for (relative_dir, helper_call) in [
-        ("plugins/data_sink", "run_runtime_data_sink_plugin("),
-        ("plugins/schema_sink", "run_runtime_schema_sink_plugin("),
-    ] {
+    assert!(
+        !root.join("plugins/schema_sink").exists(),
+        "schema sink plugin crates must be deleted"
+    );
+    for (relative_dir, helper_call) in [("plugins/data_sink", "run_runtime_data_sink_plugin(")] {
         for entry in WalkDir::new(root.join(relative_dir))
             .into_iter()
             .filter_map(Result::ok)

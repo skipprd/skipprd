@@ -71,15 +71,6 @@ class DeadletterSinkRef:
     def config(self) -> Config: ...
 
 @final
-class SchemaSinkRef:
-    """A registered `schema_sinks.<name>` entry of one `Config`."""
-
-    @property
-    def name(self) -> str: ...
-    @property
-    def config(self) -> Config: ...
-
-@final
 class PipelineRef:
     """A registered `pipelines.<name>` entry of one `Config`. Pass it to `Session`."""
 
@@ -133,35 +124,11 @@ class Config:
     def data_source(self, name: str, config: DataSourceConfig) -> DataSourceRef:
         """Register `data_sources.<name>`. Returns a ref to pass to `Pipeline`."""
         ...
-    @overload
-    def data_sink(
-        self, name: str, config: PairedDataSinkConfig, *, schema_sink: str | None = None
-    ) -> DataSinkRef:
-        """Paired sinks (AthenaIceberg, SkipprLake, Duckdb) register the same config
-        as `schema_sinks.<schema_sink>`."""
+    def data_sink(self, name: str, config: DataSinkConfig) -> DataSinkRef:
+        """Register `data_sinks.<name>`. Dest schema is this plugin."""
         ...
-    @overload
-    def data_sink(
-        self,
-        name: str,
-        config: UnpairedDataSinkConfig,
-        *,
-        schema_sink: SchemaSinkRef | None = None,
-    ) -> DataSinkRef: ...
-    @overload
-    def deadletter_sink(
-        self, name: str, config: PairedDataSinkConfig, *, schema_sink: str | None = None
-    ) -> DeadletterSinkRef: ...
-    @overload
-    def deadletter_sink(
-        self,
-        name: str,
-        config: UnpairedDataSinkConfig,
-        *,
-        schema_sink: SchemaSinkRef | None = None,
-    ) -> DeadletterSinkRef: ...
-    def schema_sink(self, name: str, config: SchemaSinkConfig) -> SchemaSinkRef:
-        """Register `schema_sinks.<name>`. Paired sinks (AthenaIceberg, SkipprLake, Duckdb) often share this name."""
+    def deadletter_sink(self, name: str, config: DataSinkConfig) -> DeadletterSinkRef:
+        """Register `deadletter_sinks.<name>`."""
         ...
     def pipeline(self, name: str, pipeline: Pipeline) -> PipelineRef:
         """Register `pipelines.<name>`. Refs on `pipeline` must come from this config. Pass the result to `Session`."""
@@ -177,9 +144,6 @@ class Config:
         ...
     def get_deadletter_sink(self, name: str) -> DeadletterSinkRef:
         """Look up a registered deadletter sink by YAML key."""
-        ...
-    def get_schema_sink(self, name: str) -> SchemaSinkRef:
-        """Look up a registered schema sink by YAML key."""
         ...
 
 @final

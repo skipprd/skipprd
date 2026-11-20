@@ -5,7 +5,7 @@ description: Land Skipprd pipelines as local Iceberg tables and query them with 
 
 # DuckDB
 
-Use DuckDB for local analytics, CI, and laptops. Skipprd writes Iceberg tables under `warehouse` and names them with `table_namespace`. Pair with the [DuckDB schema sink](/connectors/schema_sinks/duckdb).
+Use DuckDB for local analytics, CI, and laptops. Skipprd writes Iceberg tables under `warehouse` and names them with `table_namespace`. The destination publishes those tables on the first compact.
 
 ## Before you begin
 
@@ -23,7 +23,6 @@ cfg = Config.discover()
 local = cfg.data_sink(
     "local",
     DataSinkDuckdb(warehouse="file:///var/lib/skipprd/duckdb", table_namespace="bronze"),
-    schema_sink="local_schema",
 )
 cfg.pipeline("bikehire", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=local))
 cfg.save()
@@ -35,22 +34,11 @@ skipprd connect data-sink duckdb \
   --name local \
   --warehouse file:///var/lib/skipprd/duckdb \
   --table-namespace bronze
-
-skipprd connect schema-sink duckdb \
-  --pipeline bikehire \
-  --name local_schema
 ```
 
 ```yaml [YAML]
 data_sinks:
   local:
-    Duckdb:
-      warehouse: file:///var/lib/skipprd/duckdb
-      table_namespace: bronze
-    schema_sink: schema_sinks.local_schema
-
-schema_sinks:
-  local_schema:
     Duckdb:
       warehouse: file:///var/lib/skipprd/duckdb
       table_namespace: bronze
@@ -67,7 +55,7 @@ schema_sinks:
 
 ## How data lands
 
-Supports `append` and `replace_table`. It does not `replace_partition` or `merge_by_key` — use [SkipprLake](/connectors/outputs/skipprlake) or [Athena Iceberg](/connectors/outputs/athenaiceberg) for those. Retries are exactly once. `skipprd query` reads the local tables plus in-flight WAL rows.
+Supports `append` and `replace_table`. It does not `replace_partition` or `merge_by_key`. Use [SkipprLake](/connectors/outputs/skipprlake) or [Athena Iceberg](/connectors/outputs/athenaiceberg) for those. Retries are exactly once. Tables exist after the first compact. `skipprd query` reads the local tables plus in-flight WAL rows.
 
 ## Troubleshooting
 
@@ -79,6 +67,5 @@ Supports `append` and `replace_table`. It does not `replace_partition` or `merge
 
 ## Next steps
 
-- [DuckDB schema sink](/connectors/schema_sinks/duckdb)
 - [Streamhouse](/concepts/datalake)
 - [skipprd query](/cli/query)

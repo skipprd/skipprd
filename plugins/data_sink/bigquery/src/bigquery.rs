@@ -1,7 +1,5 @@
 use async_trait::async_trait;
 use dashmap::DashSet;
-use datafusion::arrow::array::*;
-use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
@@ -9,11 +7,14 @@ use serde_derive::Deserialize;
 use skippr_runtime_sdk::SkipprConfig;
 use tracing::{error, info, warn};
 
-use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
+use skippr_runtime_sdk::plugins::alter_ddl::{
+    dest_table_name, publish_warehouse_table, DestPublishCache, InstalledDestSchema,
+    PublishedBatchColumns, WarehouseDialect,
+};
+use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 static ENSURED_DATASETS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
-static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 const BIGQUERY_CDC_LOAD_JOB_BLOCKER: &str =
     "the connector currently exposes query jobs only and has no CDC-enriched load-job path";
@@ -44,6 +45,10 @@ impl super::cdc_apply::CdcApplyBackend for BigqueryCdcBackend {
         format!("FROM_HEX('{hex}')")
     }
 
+    fn string_literal(value: &str) -> String {
+        super::cdc_apply::bigquery_string_literal(value)
+    }
+
     fn tx_begin() -> &'static str {
         "BEGIN TRANSACTION;\n"
     }
@@ -68,7 +73,7 @@ impl super::cdc_apply::CdcApplyBackend for BigqueryCdcBackend {
 
     fn ddl_create_tombstone_table(
         fq_tombstone_table: &str,
-        business_key_cols: &[(String, String)],
+        business_key_cols: &[(String, &str)],
     ) -> String {
         let mut column_defs = business_key_cols
             .iter()
@@ -104,19 +109,15 @@ pub struct DataSinkBigqueryPlugin {
     buffer_name: String,
     client: reqwest::Client,
     token: tokio::sync::RwLock<Option<(String, std::time::Instant)>>,
+    installed: tokio::sync::RwLock<InstalledDestSchema>,
+    publish_cache: DestPublishCache,
 }
 
 skippr_runtime_sdk::declare_sink_spec!(
     BigquerySinkSpec,
     DataSinkBigqueryPlugin,
     skippr_runtime_sdk::plugins::cdc::sink_capabilities::BIGQUERY,
-    skippr_runtime_sdk::plugins::FinalStateIdempotentApply
-);
-
-skippr_runtime_sdk::declare_schema_sink_spec!(
-    BigquerySchemaSinkSpec,
-    DataSinkBigqueryPlugin,
-    "Bigquery",
+    skippr_runtime_sdk::plugins::FinalStateIdempotentApply,
     skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
         skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::BigQuery
     )
@@ -132,11 +133,45 @@ impl DataSinkBigqueryPlugin {
             buffer_name,
             client: reqwest::Client::new(),
             token: tokio::sync::RwLock::new(None),
+            installed: tokio::sync::RwLock::new(InstalledDestSchema::default()),
+            publish_cache: DestPublishCache::default(),
         }
     }
 
-    fn namespace_to_table_name(namespace: &str) -> String {
-        namespace.replace('.', "_").to_lowercase()
+    fn fq_table(&self, namespace: &str) -> String {
+        format!(
+            "`{}.{}.{}`",
+            self.config.project,
+            self.config.dataset,
+            dest_table_name(namespace)
+        )
+    }
+
+    async fn publish_namespace(&self, namespace: &str) -> Result<(), std::io::Error> {
+        let (version, metadata) = self.installed.read().await.get(namespace)?;
+        self.ensure_dataset().await?;
+        publish_warehouse_table(
+            &self.publish_cache,
+            self,
+            WarehouseDialect::BigQuery,
+            &self.fq_table(namespace),
+            namespace,
+            version,
+            &metadata,
+        )
+        .await
+    }
+
+    async fn batch_columns(
+        &self,
+        namespace: &str,
+        batch: &datafusion::arrow::datatypes::Schema,
+    ) -> Result<PublishedBatchColumns, std::io::Error> {
+        self.installed.read().await.warehouse_batch_columns(
+            WarehouseDialect::BigQuery,
+            namespace,
+            batch,
+        )
     }
 
     fn resolve_credentials_path(&self) -> Result<String, String> {
@@ -363,204 +398,6 @@ impl DataSinkBigqueryPlugin {
         .into())
     }
 
-    fn arrow_type_to_bigquery(dt: &ArrowDataType) -> &'static str {
-        match dt {
-            ArrowDataType::Boolean => "BOOL",
-            ArrowDataType::Int8
-            | ArrowDataType::Int16
-            | ArrowDataType::Int32
-            | ArrowDataType::Int64
-            | ArrowDataType::UInt8
-            | ArrowDataType::UInt16
-            | ArrowDataType::UInt32
-            | ArrowDataType::UInt64 => "INT64",
-            ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => "FLOAT64",
-            ArrowDataType::Date32 | ArrowDataType::Date64 => "DATE",
-            ArrowDataType::Timestamp(_, _) => "TIMESTAMP",
-            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => "STRING",
-            _ => "STRING",
-        }
-    }
-
-    fn arrow_value_to_sql(array: &dyn Array, row: usize) -> String {
-        if array.is_null(row) {
-            return "NULL".to_string();
-        }
-        match array.data_type() {
-            ArrowDataType::Boolean => {
-                let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-                if a.value(row) { "TRUE" } else { "FALSE" }.to_string()
-            }
-            ArrowDataType::Int8 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int8Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Int16 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int16Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Int32 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Int64 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt8 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt8Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt16 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt16Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt32 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt64 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Float32 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Float32Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Float64 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Date32 => {
-                let days = array
-                    .as_any()
-                    .downcast_ref::<Date32Array>()
-                    .unwrap()
-                    .value(row);
-                let date = chrono::NaiveDate::from_num_days_from_ce_opt(days + 719_163)
-                    .unwrap_or_default();
-                format!("DATE '{}'", date.format("%Y-%m-%d"))
-            }
-            ArrowDataType::Date64 => {
-                let ms = array
-                    .as_any()
-                    .downcast_ref::<Date64Array>()
-                    .unwrap()
-                    .value(row);
-                let secs = ms / 1000;
-                let dt = chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default();
-                format!("DATE '{}'", dt.format("%Y-%m-%d"))
-            }
-            ArrowDataType::Timestamp(unit, _) => {
-                let ts = match unit {
-                    datafusion::arrow::datatypes::TimeUnit::Second => {
-                        let a = array
-                            .as_any()
-                            .downcast_ref::<TimestampSecondArray>()
-                            .unwrap();
-                        chrono::DateTime::from_timestamp(a.value(row), 0)
-                    }
-                    datafusion::arrow::datatypes::TimeUnit::Millisecond => {
-                        let a = array
-                            .as_any()
-                            .downcast_ref::<TimestampMillisecondArray>()
-                            .unwrap();
-                        let v = a.value(row);
-                        chrono::DateTime::from_timestamp(v / 1000, ((v % 1000) * 1_000_000) as u32)
-                    }
-                    datafusion::arrow::datatypes::TimeUnit::Microsecond => {
-                        let a = array
-                            .as_any()
-                            .downcast_ref::<TimestampMicrosecondArray>()
-                            .unwrap();
-                        let v = a.value(row);
-                        chrono::DateTime::from_timestamp(
-                            v / 1_000_000,
-                            ((v % 1_000_000) * 1000) as u32,
-                        )
-                    }
-                    datafusion::arrow::datatypes::TimeUnit::Nanosecond => {
-                        let a = array
-                            .as_any()
-                            .downcast_ref::<TimestampNanosecondArray>()
-                            .unwrap();
-                        let v = a.value(row);
-                        chrono::DateTime::from_timestamp(
-                            v / 1_000_000_000,
-                            (v % 1_000_000_000) as u32,
-                        )
-                    }
-                };
-                let dt = ts.unwrap_or_default();
-                format!("TIMESTAMP '{}'", dt.format("%Y-%m-%d %H:%M:%S%.6f"))
-            }
-            ArrowDataType::Utf8 => {
-                let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-                format!(
-                    "'{}'",
-                    a.value(row).replace('\'', "\\'").replace('\\', "\\\\")
-                )
-            }
-            ArrowDataType::LargeUtf8 => {
-                let a = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
-                format!(
-                    "'{}'",
-                    a.value(row).replace('\'', "\\'").replace('\\', "\\\\")
-                )
-            }
-            _ => {
-                let a = array.as_any().downcast_ref::<StringArray>();
-                match a {
-                    Some(s) => format!(
-                        "'{}'",
-                        s.value(row).replace('\'', "\\'").replace('\\', "\\\\")
-                    ),
-                    None => "NULL".to_string(),
-                }
-            }
-        }
-    }
-
     async fn ensure_dataset(&self) -> Result<(), std::io::Error> {
         let key = format!("{}.{}", self.config.project, self.config.dataset);
         if !ENSURED_DATASETS.insert(key.clone()) {
@@ -591,121 +428,44 @@ impl DataSinkBigqueryPlugin {
         Ok(())
     }
 
-    async fn ensure_table(
-        &self,
-        fq_table: &str,
-        col_defs: &[(String, &str)],
-    ) -> Result<(), std::io::Error> {
-        if col_defs.is_empty() {
-            return Ok(());
-        }
-
-        if !ENSURED_TABLES.insert(fq_table.to_string()) {
-            return Ok(());
-        }
-
-        let cols_sql: Vec<String> = col_defs
-            .iter()
-            .map(|(name, bq_type)| format!("`{}` {}", name, bq_type))
-            .collect();
-
-        let create_ddl = format!(
-            "CREATE TABLE IF NOT EXISTS {} ({})",
-            fq_table,
-            cols_sql.join(", ")
-        );
-        info!("BigQuery DDL: {}", create_ddl);
-        if let Err(e) = self.execute_sql(&create_ddl).await {
-            ENSURED_TABLES.remove(&fq_table.to_string());
-            error!("BigQuery CREATE TABLE failed: {}", e);
-            return Err(std::io::Error::other(format!(
-                "BigQuery CREATE TABLE: {}",
-                e
-            )));
-        }
-
-        for (col_name, bq_type) in col_defs {
-            let alter_ddl = format!(
-                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS `{}` {}",
-                fq_table, col_name, bq_type
-            );
-            if let Err(e) = self.execute_sql(&alter_ddl).await {
-                let msg = e.to_string();
-                if !msg.contains("already exists") && !msg.contains("duplicate column") {
-                    ENSURED_TABLES.remove(&fq_table.to_string());
-                    error!("BigQuery ALTER TABLE ADD COLUMN failed: {}", e);
-                    return Err(std::io::Error::other(format!(
-                        "BigQuery ALTER TABLE: {}",
-                        e
-                    )));
-                }
-            }
-        }
-
-        info!("Ensured table {}", fq_table);
-        Ok(())
-    }
-
     async fn inner_sync(
         &self,
         mut stream: SendableRecordBatchStream,
         filename: String,
     ) -> Result<(), std::io::Error> {
         use skippr_runtime_sdk::metrics::counters;
+        let namespace = BufferChunker::decode_file_namespace(&filename);
+        let table_name = dest_table_name(&namespace);
+        let col_defs = self.batch_columns(&namespace, &stream.schema()).await?;
+        let fq_table = self.fq_table(&namespace);
+        self.ensure_dataset().await?;
         counters::inc_uploads_in_flight();
 
-        let namespace = BufferChunker::decode_file_namespace(&filename);
-        let table_name = Self::namespace_to_table_name(&namespace);
-        let arrow_schema = stream.schema();
-
-        let col_defs: Vec<(String, &str)> = arrow_schema
-            .fields()
+        let col_list = col_defs
+            .columns()
             .iter()
-            .map(|f| {
-                (
-                    f.name().to_lowercase(),
-                    Self::arrow_type_to_bigquery(f.data_type()),
-                )
-            })
-            .collect();
-
-        let fq_table = format!(
-            "`{}.{}.{}`",
-            self.config.project, self.config.dataset, table_name
-        );
-
-        self.ensure_dataset().await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
-        self.ensure_table(&fq_table, &col_defs).await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
-
-        let col_names: Vec<String> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| format!("`{}`", f.name().to_lowercase()))
-            .collect();
-        let col_list = col_names.join(", ");
+            .map(|(name, _)| WarehouseDialect::BigQuery.quote_ident(name))
+            .collect::<Vec<_>>()
+            .join(", ");
 
         let mut total_rows = 0usize;
         while let Some(batch_result) = stream.next().await {
-            let batch =
-                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+            let batch = batch_result.map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::other(format!("stream error: {}", e))
+            })?;
             let num_rows = batch.num_rows();
             if num_rows == 0 {
                 continue;
             }
 
-            let mut value_rows = Vec::with_capacity(num_rows);
-            for row in 0..num_rows {
-                let vals: Vec<String> = (0..batch.num_columns())
-                    .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
-                    .collect();
-                value_rows.push(format!("({})", vals.join(", ")));
-            }
+            let value_rows = (0..num_rows)
+                .map(|row| crate::cdc_apply::sql_values_row::<BigqueryCdcBackend>(&batch, row))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    counters::dec_uploads_in_flight();
+                    std::io::Error::from(e)
+                })?;
 
             let insert_sql = format!(
                 "INSERT INTO {} ({}) VALUES {}",
@@ -766,39 +526,13 @@ impl DataSinkBigqueryPlugin {
             }
         };
 
-        counters::inc_uploads_in_flight();
-
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let table_name = Self::namespace_to_table_name(&namespace);
-        let arrow_schema = stream.schema();
-
-        let col_defs: Vec<(String, &str)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_lowercase(),
-                    Self::arrow_type_to_bigquery(f.data_type()),
-                )
-            })
-            .collect();
-
-        let fq_table_ddl = format!(
-            "`{}.{}.{}`",
-            self.config.project, self.config.dataset, table_name
-        );
-        let fq_table = fq_table_ddl.clone();
-
-        self.ensure_dataset().await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
-        self.ensure_table(&fq_table_ddl, &col_defs)
-            .await
-            .map_err(|e| {
-                counters::dec_uploads_in_flight();
-                e
-            })?;
+        let table_name = dest_table_name(&namespace);
+        let col_defs = self.batch_columns(&namespace, &stream.schema()).await?;
+        let key_types = col_defs.key_types(&contract.business_key_columns)?;
+        let fq_table = self.fq_table(&namespace);
+        self.ensure_dataset().await?;
+        counters::inc_uploads_in_flight();
 
         let tombstone_table = format!(
             "`{}.{}._skippr_tombstones_{}`",
@@ -813,20 +547,8 @@ impl DataSinkBigqueryPlugin {
                 return Err(std::io::Error::other(format!("BigQuery CDC DDL: {}", e)));
             }
 
-            let bk_type_pairs: Vec<(String, String)> = contract
-                .business_key_columns
-                .iter()
-                .map(|bk| {
-                    let bq_type = col_defs
-                        .iter()
-                        .find(|(name, _)| name == bk)
-                        .map(|(_, t)| (*t).to_string())
-                        .unwrap_or_else(|| "STRING".to_string());
-                    (bk.clone(), bq_type)
-                })
-                .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table::<BigqueryCdcBackend>(&tombstone_table, &bk_type_pairs);
+                ddl_create_tombstone_table::<BigqueryCdcBackend>(&tombstone_table, &key_types);
             if let Err(e) = self.execute_sql(&tombstone_ddl).await {
                 CDC_DDL_ENSURED.remove(&fq_table);
                 counters::dec_uploads_in_flight();
@@ -839,19 +561,26 @@ impl DataSinkBigqueryPlugin {
         let mut row_offset = 0usize;
         let mut apply_batch = CdcApplyBatch {
             columns: col_defs
+                .columns()
                 .iter()
                 .map(|(name, target_type)| CdcApplyColumn {
                     name: name.clone(),
                     target_type: (*target_type).to_string(),
                 })
                 .collect(),
-            business_key_columns: contract.business_key_columns.clone(),
+            business_key_columns: key_types.iter().map(|(name, _)| name.clone()).collect(),
             rows: Vec::new(),
         };
 
+        let ties = ctx.decoded_ties().map_err(|e| {
+            counters::dec_uploads_in_flight();
+            std::io::Error::other(e)
+        })?;
         while let Some(batch_result) = stream.next().await {
-            let batch =
-                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+            let batch = batch_result.map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::other(format!("stream error: {}", e))
+            })?;
             let num_rows = batch.num_rows();
             if num_rows == 0 {
                 continue;
@@ -860,10 +589,13 @@ impl DataSinkBigqueryPlugin {
                 &mut apply_batch,
                 &batch,
                 &ctx.part_meta.rows,
-                &ctx.decoded_ties().map_err(std::io::Error::other)?,
+                &ties,
                 row_offset,
             )
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            .map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::from(e)
+            })?;
             row_offset += num_rows;
         }
 
@@ -897,8 +629,7 @@ impl DataSinkBigqueryPlugin {
                             &tombstone_table,
                             &collapsed,
                             row,
-                        )
-                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        )?;
                         self.execute_sql(&statement).await.map_err(|error| {
                             counters::dec_uploads_in_flight();
                             std::io::Error::other(format!("BigQuery guarded CDC apply: {error}"))
@@ -937,6 +668,8 @@ impl DataSink for DataSinkBigqueryPlugin {
         filename: String,
         cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
+        let namespace = BufferChunker::decode_file_namespace(&filename);
+        self.publish_namespace(&namespace).await?;
         match cdc_ctx {
             Some(ctx) => self.sync_cdc(stream, filename, ctx).await,
             None => self.inner_sync(stream, filename).await,
@@ -969,17 +702,43 @@ impl DataSink for DataSinkBigqueryPlugin {
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::BIGQUERY
     }
+
+    fn installed_dest_schema(&self) -> Option<&tokio::sync::RwLock<InstalledDestSchema>> {
+        Some(&self.installed)
+    }
+
+    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
+        skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
+            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::BigQuery,
+        )
+    }
+
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
+        alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
+    ) -> Result<(), std::io::Error> {
+        skippr_runtime_sdk::plugins::alter_ddl::apply_warehouse_alter(
+            self,
+            WarehouseDialect::BigQuery,
+            &self.fq_table(namespace),
+            namespace,
+            alter,
+        )
+        .await
+    }
 }
 
 #[async_trait]
 impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkBigqueryPlugin {
     async fn columns(&self, namespace: &str) -> std::io::Result<Vec<String>> {
-        let table_name = Self::namespace_to_table_name(namespace);
+        let table_name = dest_table_name(namespace);
         let sql = format!(
-            "SELECT column_name FROM `{project}.{dataset}.INFORMATION_SCHEMA.COLUMNS` WHERE table_name = '{table}'",
+            "SELECT column_name FROM `{project}.{dataset}.INFORMATION_SCHEMA.COLUMNS` WHERE table_name = {table}",
             project = self.config.project.replace('`', ""),
             dataset = self.config.dataset.replace('`', ""),
-            table = table_name.replace('\'', "''"),
+            table = crate::cdc_apply::bigquery_string_literal(&table_name),
         );
         let body = self
             .execute_sql_limited(&sql, 10_000)
@@ -1004,77 +763,6 @@ impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkBigqueryP
     }
 }
 
-#[async_trait]
-impl SchemaSink for DataSinkBigqueryPlugin {
-    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
-        skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
-            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::BigQuery,
-        )
-    }
-
-    async fn apply_alter(
-        &self,
-        namespace: &str,
-        _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
-        alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
-    ) -> Result<(), std::io::Error> {
-        let table_name = Self::namespace_to_table_name(namespace);
-        let fq_table = format!("`{}`.`{}`", self.config.dataset, table_name);
-        skippr_runtime_sdk::plugins::alter_ddl::apply_warehouse_alter(
-            self,
-            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::BigQuery,
-            &fq_table,
-            namespace,
-            alter,
-        )
-        .await
-    }
-
-    async fn sync_schema(
-        &self,
-        namespace: &str,
-        metadata: &skippr_runtime_sdk::discover::OutputMetadata,
-    ) -> Result<(), std::io::Error> {
-        use skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow;
-
-        self.ensure_dataset().await?;
-
-        let fields: std::collections::HashMap<
-            String,
-            skippr_runtime_sdk::discover::OutputMetadata,
-        > = metadata
-            .child_fields()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        let arrow_schema = convert_skippr_to_arrow(Box::new(fields)).map_err(|e| {
-            std::io::Error::other(format!(
-                "Arrow schema conversion for '{}': {}",
-                namespace, e
-            ))
-        })?;
-
-        let table_name = Self::namespace_to_table_name(namespace);
-        let col_defs: Vec<(String, &str)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_lowercase(),
-                    Self::arrow_type_to_bigquery(f.data_type()),
-                )
-            })
-            .collect();
-
-        let fq_table = format!(
-            "`{}.{}.{}`",
-            self.config.project, self.config.dataset, table_name
-        );
-
-        self.ensure_table(&fq_table, &col_defs).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1092,8 +780,13 @@ mod tests {
         assert!(script.starts_with("BEGIN TRANSACTION;"));
         assert!(script.contains("CREATE TEMP TABLE"));
         assert!(script.contains("FROM_HEX"));
-        assert!(script.contains("PARTITION BY stage.`tenant_id`, stage.`id`"));
-        assert_eq!(script.matches("MERGE INTO").count(), 4);
+        assert!(
+            script.contains(
+                "ON target.`tenant_id` = source.`tenant_id` AND target.`id` = source.`id`"
+            ),
+            "{script}"
+        );
+        assert_eq!(script.matches("MERGE INTO").count(), 5);
         assert!(script.contains("DROP TABLE IF EXISTS"));
         assert!(script.ends_with("COMMIT TRANSACTION;"));
     }
@@ -1152,5 +845,31 @@ mod tests {
         .unwrap();
         assert_eq!(guarded.len(), 2);
         assert!(super::BIGQUERY_CDC_LOAD_JOB_BLOCKER.contains("query jobs only"));
+    }
+
+    #[test]
+    fn bigquery_insert_row_escapes_with_backslash_and_encodes_binary() {
+        use datafusion::arrow::array::{ArrayRef, BinaryArray, Date32Array, StringArray};
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("day", DataType::Date32, true),
+                Field::new("name", DataType::Utf8, true),
+                Field::new("raw", DataType::Binary, true),
+            ])),
+            vec![
+                Arc::new(Date32Array::from(vec![Some(19_723)])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("it's")])),
+                Arc::new(BinaryArray::from_vec(vec![b"ab".as_slice()])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::cdc_apply::sql_values_row::<super::BigqueryCdcBackend>(&batch, 0).unwrap(),
+            r"('2024-01-01', 'it\'s', FROM_HEX('6162'))"
+        );
     }
 }

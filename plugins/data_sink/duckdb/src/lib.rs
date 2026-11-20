@@ -13,10 +13,11 @@ use skippr_runtime_sdk::SkipprConfig;
 skippr_runtime_sdk::declare_sink_spec!(
     DuckdbSinkSpec,
     skippr_runtime_sdk::plugins::cdc::sink_capabilities::DUCKDB,
-    skippr_runtime_sdk::plugins::TransactionalTableCommit
+    skippr_runtime_sdk::plugins::TransactionalTableCommit,
+    alter = skippr_runtime_sdk::plugins::AlterSupport::Iceberg
 );
 
-/// The Duckdb data sink and schema sink: Iceberg on `file://`, read by DuckDB.
+/// The Duckdb data sink: Iceberg on `file://`, read by DuckDB. Dest schema is this plugin.
 pub type DuckdbWriter = IcebergWriter<DuckdbSinkSpec>;
 
 const DUCKDB_WRITE_POLICIES: SinkWritePolicySupport = SinkWritePolicySupport {
@@ -25,7 +26,7 @@ const DUCKDB_WRITE_POLICIES: SinkWritePolicySupport = SinkWritePolicySupport {
     supports_replace_table: true,
 };
 
-/// Config for the `Duckdb` data sink and schema sink.
+/// Config for the `Duckdb` data sink.
 /// `skipprd query` reads filesystem Iceberg ∪ WAL. DuckDB `iceberg_scan` still reads compacted Iceberg only.
 #[derive(Debug, Deserialize, Serialize, Clone, SkipprConfig)]
 #[serde(deny_unknown_fields)]
@@ -304,7 +305,7 @@ mod tests {
             MigrationDirection, MigrationId, OutputName,
         };
         use skippr_runtime_sdk::discover::SkipprDataType;
-        use skippr_runtime_sdk::plugins::{AlterSupport, SchemaSink};
+        use skippr_runtime_sdk::plugins::{AlterSupport, DataSink};
 
         let dir = tempfile::tempdir().unwrap();
         let warehouse = format!("file://{}", dir.path().display());
@@ -323,16 +324,19 @@ mod tests {
         assert_eq!(writer.alter_support(), AlterSupport::Iceberg);
 
         let metadata = region_metadata();
-        writer.sync_schema("orders", &metadata).await.unwrap();
+        writer
+            .table_for_write("orders", 1, &metadata)
+            .await
+            .unwrap();
         let catalog = open_fs_catalog(&cfg).await.unwrap();
         let ident = TableIdent::from_strs(["bronze", "orders"]).unwrap();
         let created = catalog.load_table(&ident).await.unwrap();
-        let field_id = created
-            .metadata()
-            .current_schema()
-            .field_by_name("region")
-            .unwrap()
-            .id;
+        let created_schema = created.metadata().current_schema();
+        assert!(
+            created_schema.field_by_name("_skippr_mutation").is_none(),
+            "DuckDB cannot manage Skippr CDC columns"
+        );
+        let field_id = created_schema.field_by_name("region").unwrap().id;
         assert_eq!(
             field_id, 7,
             "create_table must keep skipprd field identity, not reassign 1..N"

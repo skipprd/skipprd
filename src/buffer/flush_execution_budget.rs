@@ -6,6 +6,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::ingest::tuner::FlushBudgetSnapshot;
 use crate::metrics::counters;
+use crate::plugins::cdc::SinkCapability;
+use crate::serdes::output_format::OutputFormat;
 
 /// One scheduler-cycle view of the authoritative flush budget.
 ///
@@ -36,10 +38,20 @@ impl FlushExecutionBudget {
         }
     }
 
-    pub(crate) fn from_snapshot(snapshot: FlushBudgetSnapshot) -> Self {
+    /// Native table sinks share `sink_sessions`. File-format sinks use
+    /// `scheduler_jobs` for both the sink semaphore and the per-`sink_ref`
+    /// plan limit so a group is not decoded and then parked on a smaller permit.
+    pub(crate) fn from_snapshot(
+        snapshot: FlushBudgetSnapshot,
+        capability: &SinkCapability,
+    ) -> Self {
         let scheduler_limit = snapshot.scheduler_jobs.max(1);
         let decode_limit = snapshot.decode_jobs.max(1);
-        let sink_limit = snapshot.sink_sessions.max(1);
+        let sink_limit = if OutputFormat::is_native_set(capability.supported_formats) {
+            snapshot.sink_sessions.max(1)
+        } else {
+            scheduler_limit
+        };
         Self {
             decode: Arc::new(Semaphore::new(decode_limit)),
             sink: Arc::new(Semaphore::new(sink_limit)),
@@ -91,6 +103,28 @@ impl FlushExecutionBudget {
     }
 }
 
+/// Latest flush budget. Jobs load it when they acquire. A swap replaces the
+/// `Arc`; permits already held on the previous semaphore run to completion.
+pub(crate) struct FlushBudgetSlot {
+    current: std::sync::Mutex<Arc<FlushExecutionBudget>>,
+}
+
+impl FlushBudgetSlot {
+    pub(crate) fn new(budget: Arc<FlushExecutionBudget>) -> Arc<Self> {
+        Arc::new(Self {
+            current: std::sync::Mutex::new(budget),
+        })
+    }
+
+    pub(crate) fn load(&self) -> Arc<FlushExecutionBudget> {
+        self.current.lock().expect("flush budget slot").clone()
+    }
+
+    pub(crate) fn store(&self, budget: Arc<FlushExecutionBudget>) {
+        *self.current.lock().expect("flush budget slot") = budget;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,19 +146,99 @@ mod tests {
         );
     }
 
-    #[test]
-    fn one_snapshot_sets_all_scheduler_stage_limits() {
-        let snapshot = FlushBudgetSnapshot {
-            scheduler_jobs: 7,
-            decode_jobs: 5,
-            sink_sessions: 3,
+    fn snapshot(
+        scheduler_jobs: usize,
+        decode_jobs: usize,
+        sink_sessions: usize,
+    ) -> FlushBudgetSnapshot {
+        FlushBudgetSnapshot {
+            scheduler_jobs,
+            decode_jobs,
+            sink_sessions,
             generation: 42,
             ..FlushBudgetSnapshot::default()
-        };
-        let budget = FlushExecutionBudget::from_snapshot(snapshot);
+        }
+    }
+
+    #[test]
+    fn native_snapshot_keeps_sink_sessions_and_decode_jobs() {
+        use crate::plugins::cdc::sink_capabilities;
+        let budget =
+            FlushExecutionBudget::from_snapshot(snapshot(7, 5, 3), &sink_capabilities::POSTGRES);
         assert_eq!(budget.scheduler_limit(), 7);
         assert_eq!(budget.decode_limit(), 5);
         assert_eq!(budget.sink_limit(), 3);
         assert_eq!(budget.generation(), 42);
+    }
+
+    #[test]
+    fn supported_formats_choose_compact_sink_limit() {
+        use crate::plugins::cdc::sink_capabilities;
+        let snapshot = snapshot(6, 4, 2);
+        for capability in [
+            &sink_capabilities::S3,
+            &sink_capabilities::GCS,
+            &sink_capabilities::AZURE_BLOB,
+            &sink_capabilities::FILE,
+            &sink_capabilities::SFTP,
+            &sink_capabilities::ATHENA,
+            &sink_capabilities::AMQP,
+            &sink_capabilities::STDOUT,
+        ] {
+            let budget = FlushExecutionBudget::from_snapshot(snapshot, capability);
+            assert_eq!(
+                budget.sink_limit(),
+                budget.scheduler_limit(),
+                "{}",
+                capability.name
+            );
+            assert_eq!(budget.decode_limit(), 4, "{}", capability.name);
+            assert_ne!(
+                budget.sink_limit(),
+                snapshot.sink_sessions,
+                "{}",
+                capability.name
+            );
+        }
+        for capability in [
+            &sink_capabilities::POSTGRES,
+            &sink_capabilities::SNOWFLAKE,
+            &sink_capabilities::BIGQUERY,
+            &sink_capabilities::REDSHIFT,
+            &sink_capabilities::DATABRICKS,
+            &sink_capabilities::MOTHERDUCK,
+            &sink_capabilities::CLICKHOUSE,
+            &sink_capabilities::SYNAPSE,
+            &sink_capabilities::SKIPPRLAKE,
+            &sink_capabilities::ATHENA_ICEBERG,
+            &sink_capabilities::DUCKDB,
+        ] {
+            let budget = FlushExecutionBudget::from_snapshot(snapshot, capability);
+            assert_eq!(
+                budget.sink_limit(),
+                snapshot.sink_sessions,
+                "{}",
+                capability.name
+            );
+            assert_eq!(budget.decode_limit(), 4, "{}", capability.name);
+            assert_eq!(budget.scheduler_limit(), 6, "{}", capability.name);
+        }
+    }
+
+    #[tokio::test]
+    async fn file_format_sink_semaphore_equals_scheduler_jobs() {
+        use crate::plugins::cdc::sink_capabilities;
+        let budget =
+            FlushExecutionBudget::from_snapshot(snapshot(3, 2, 1), &sink_capabilities::FILE);
+        assert_eq!(budget.sink_limit(), 3);
+        assert_eq!(budget.decode_limit(), 2);
+        let _a = budget.acquire_sink().await.unwrap();
+        let _b = budget.acquire_sink().await.unwrap();
+        let _c = budget.acquire_sink().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), budget.acquire_sink())
+                .await
+                .is_err()
+        );
     }
 }

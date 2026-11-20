@@ -56,7 +56,7 @@ jobs:
           architecture_name: linux_x86
           workspace-root: skipprd
           runtime_plugin_packages_json: >-
-            ["skippr-plugin-data-source-file","skippr-plugin-data-sink-file","skippr-plugin-data-sink-duckdb","skippr-plugin-schema-sink-duckdb","skippr-plugin-data-sink-skipprlake","skippr-plugin-schema-sink-skipprlake","skippr-plugin-data-source-postgres","skippr-plugin-data-sink-postgres","skippr-plugin-schema-sink-postgres","skippr-plugin-data-source-mysql","skippr-plugin-data-source-dynamodb","skippr-plugin-data-source-stdin","skippr-plugin-data-source-socket","skippr-plugin-data-source-s3","skippr-plugin-data-sink-s3"]
+            ["skippr-plugin-data-source-file","skippr-plugin-data-sink-file","skippr-plugin-data-sink-duckdb","skippr-plugin-data-sink-skipprlake","skippr-plugin-data-source-postgres","skippr-plugin-data-sink-postgres","skippr-plugin-data-source-mysql","skippr-plugin-data-source-dynamodb","skippr-plugin-data-source-stdin","skippr-plugin-data-source-socket","skippr-plugin-data-source-s3","skippr-plugin-data-sink-s3"]
 
   linux_matrix:
     name: ${{ matrix.scenario }}
@@ -263,9 +263,7 @@ jobs:
             -p skippr-plugin-data-source-dynamodb \
             -p skippr-plugin-data-sink-file \
             -p skippr-plugin-data-sink-duckdb \
-            -p skippr-plugin-schema-sink-duckdb \
-            -p skippr-plugin-data-sink-skipprlake \
-            -p skippr-plugin-schema-sink-skipprlake
+            -p skippr-plugin-data-sink-skipprlake
           mkdir -p skipprd-linux_x86-profile runtime-plugin-binaries-linux_x86-profile
           cp target/profiling/skipprd skipprd-linux_x86-profile/skipprd
           cp target/profiling/skippr-plugin-data-source-file \
@@ -275,9 +273,7 @@ jobs:
              target/profiling/skippr-plugin-data-source-dynamodb \
              target/profiling/skippr-plugin-data-sink-file \
              target/profiling/skippr-plugin-data-sink-duckdb \
-             target/profiling/skippr-plugin-schema-sink-duckdb \
              target/profiling/skippr-plugin-data-sink-skipprlake \
-             target/profiling/skippr-plugin-schema-sink-skipprlake \
              runtime-plugin-binaries-linux_x86-profile/
       - name: Install inferno
         run: |

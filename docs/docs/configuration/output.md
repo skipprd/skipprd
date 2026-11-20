@@ -1,6 +1,6 @@
 ---
 title: Destinations
-description: Choose a destination, wire it and an optional schema sink into a pipeline, and route failed records to a deadletter sink.
+description: Choose a destination, wire it into a pipeline, and route failed records to a deadletter sink.
 ---
 
 # Destinations
@@ -109,37 +109,25 @@ SELECT table_name FROM information_schema.tables WHERE table_schema = 'raw';
 
 How tables are named and which columns Skipprd adds differ by destination; see the "How data lands" section of the connector page.
 
-## Schema sinks
+## Dest schema
 
-Some destinations keep table definitions in a separate catalog. A schema sink keeps that catalog in step with the schemas Skipprd discovers. Link it from the data sink entry with `schema_sink:`, not from the pipeline.
-
-The most common case is Athena, which reads Parquet from S3 through tables in AWS Glue:
+The destination publishes its own tables on the first compact. Athena Hive needs `glue_database_name` on that Athena entry:
 
 ::: code-group
 
 ```python [Python]
-from skippr import Config, DataSinkAthena, Pipeline, SchemaSinkGlue
+from skippr import Config, DataSinkAthena, Pipeline
 
 cfg = Config.load("skippr.yml")
-glue = cfg.schema_sink(
-    "glue",
-    SchemaSinkGlue(
-        s3_bucket="acme-lake",
-        s3_prefix="bronze/orders",
-        athena_workgroup_name="primary",
-        athena_results_s3_bucket="acme-athena-results",
-        glue_database_name="bronze",
-    ),
-)
 lake = cfg.data_sink(
     "lake",
     DataSinkAthena(
         s3_bucket="acme-lake",
         s3_prefix="bronze/orders",
+        glue_database_name="bronze",
         athena_workgroup_name="primary",
         athena_results_s3_bucket="acme-athena-results",
     ),
-    schema_sink=glue,
 )
 cfg.pipeline("orders", Pipeline(data_source=cfg.get_data_source("app_db"), data_sink=lake))
 cfg.save()
@@ -151,17 +139,9 @@ skipprd connect data-sink athena \
   --name lake \
   --s3-bucket acme-lake \
   --s3-prefix bronze/orders \
+  --glue-database-name bronze \
   --athena-workgroup-name primary \
   --athena-results-s3-bucket acme-athena-results
-
-skipprd connect schema-sink glue \
-  --pipeline orders \
-  --name glue \
-  --s3-bucket acme-lake \
-  --s3-prefix bronze/orders \
-  --athena-workgroup-name primary \
-  --athena-results-s3-bucket acme-athena-results \
-  --glue-database-name bronze
 ```
 
 ```yaml [YAML]
@@ -172,28 +152,15 @@ pipelines:
 
 data_sinks:
   lake:
-    schema_sink: schema_sinks.glue
     Athena:
       s3_bucket: acme-lake
       s3_prefix: bronze/orders
-      athena_workgroup_name: primary
-      athena_results_s3_bucket: acme-athena-results
-
-schema_sinks:
-  glue:
-    Glue:
-      s3_bucket: acme-lake
-      s3_prefix: bronze/orders
-      athena_workgroup_name: primary
-      athena_results_s3_bucket: acme-athena-results
       glue_database_name: bronze
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: acme-athena-results
 ```
 
 :::
-
-`skipprd connect schema-sink` links the schema sink to the pipeline's existing data sink, so add the data sink first.
-
-AthenaIceberg, SkipprLake, and DuckDB are paired: the data sink and its schema sink must hold identical settings. Python registers both from one `data_sink(...)` call, and `skipprd connect` writes both. If the two copies differ, Skipprd refuses to run. The connector pages show the pairing.
 
 ## Run without a destination
 

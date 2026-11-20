@@ -35,7 +35,6 @@ def load_toml_document(path: Path) -> dict:
 PLUGIN_ROOT_PREFIXES = (
     "plugins/data_source/",
     "plugins/data_sink/",
-    "plugins/schema_sink/",
 )
 PLAIN_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 RUNTIME_PROTOCOL_VERSION_RE = re.compile(r"pub const RUNTIME_PROTOCOL_VERSION: u32 = (\d+);")
@@ -68,7 +67,6 @@ RUNTIME_PLUGIN_BUILD_INPUTS = (
 PLUGIN_KIND_SUFFIX = {
     "DataSource": "source",
     "DataSink": "sink",
-    "SchemaSink": "schema",
 }
 
 
@@ -574,10 +572,6 @@ def validate_plugin_metadata(package: dict, plugin_metadata: dict) -> dict:
                     f"runtime sink plugin package {package['name']} sink_capability must declare {required_key}"
                 )
         sink_capability = normalize_sink_capability(sink_capability)
-    if kind == "SchemaSink" and (source_capability or sink_capability):
-        raise SystemExit(
-            f"runtime schema plugin package {package['name']} cannot declare source/sink capabilities"
-        )
 
     supports_schema = plugin_metadata.get("supports_schema", False)
     if not isinstance(supports_schema, bool):

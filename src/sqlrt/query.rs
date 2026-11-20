@@ -65,7 +65,7 @@ async fn apply_pipeline_toggle(
         PipelineToggle::Disable => false,
     };
     METADATA.store(Arc::new(metadata.clone()));
-    bound.set_metadata(&metadata, false).await;
+    bound.set_metadata(&metadata, false).await?;
     Ok(format!(
         "Toggled pipeline '{}' to: {}d",
         stmt.pipeline, stmt.toggle
@@ -759,7 +759,10 @@ pub async fn query_with_options(
                 }
             }
             println!("Pipeline reset, on next sync run all data will be re-ingested");
-            config.set_metadata(&metadata, false).await;
+            if let Err(err) = config.set_metadata(&metadata, false).await {
+                println!("schema persist: {err}");
+                return;
+            }
         }
         Ok(Statement::PipelineToggle(_)) => {
             unreachable!("ENABLE/DISABLE routed through query_collect");
@@ -779,7 +782,10 @@ pub async fn query_with_options(
                 Some(_) => {
                     println!("Dropping schema: '{}' for pipeline: '{}', on next sync schema will be re-discovered", schema, &stmt.pipeline);
                     METADATA.store(Arc::new(metadata.clone()));
-                    config.set_metadata(&metadata, true).await;
+                    if let Err(err) = config.set_metadata(&metadata, true).await {
+                        println!("schema persist: {err}");
+                        return;
+                    }
                     println!("Dropped Schema, on next sync schema will be re-discovered");
                 }
                 None => {
@@ -868,7 +874,10 @@ pub async fn query_with_options(
             }
 
             METADATA.store(Arc::new(skippr_metadata.clone()));
-            config.set_metadata(&skippr_metadata, true).await;
+            if let Err(err) = config.set_metadata(&skippr_metadata, true).await {
+                println!("schema persist: {err}");
+                return;
+            }
 
             let count = tables.len();
             println!("Schema loaded: {} namespace(s) updated.", count);
@@ -970,7 +979,10 @@ pub async fn query_with_options(
                         METADATA.store(Arc::new(skippr_metadata.clone()));
                     }
 
-                    config.set_metadata(&skippr_metadata, false).await;
+                    if let Err(err) = config.set_metadata(&skippr_metadata, false).await {
+                        println!("schema persist: {err}");
+                        return;
+                    }
                     println!("Dropped table: {}", table_str);
                 }
                 Err(e) => {
@@ -1148,8 +1160,8 @@ pub async fn query_with_options(
                         let _keys: Vec<String> = pm.metadata.keys().cloned().collect();
                         METADATA.store(Arc::new(pm.clone()));
                         if pm.metadata.contains_key(&namespace) {
-                            match Ingest::prepare_arrow_schema_with_metadata_for_query(
-                                &namespace, &pm,
+                            match Ingest::prepare_arrow_schema_with_metadata(
+                                &config, &namespace, &pm,
                             ) {
                                 Ok(schema) => {
                                     ARROW_SCHEMA

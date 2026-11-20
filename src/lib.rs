@@ -43,7 +43,6 @@ pub mod plugins;
 pub mod processor;
 pub mod query_flight;
 pub mod runtime_plugins;
-mod schema_coordinator;
 pub mod serdes;
 pub mod serve;
 pub mod sink_apply_identity;

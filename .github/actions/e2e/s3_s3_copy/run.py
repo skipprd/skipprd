@@ -34,7 +34,7 @@ DESYNC_MARKERS = (
     CONTROL_FRAME_ERROR,
     "expected variant index",
     "skipped length prefix",
-    "payload_len=6",
+    "payload_len=5",
 )
 BURST_FILES = 16
 NAMESPACE_TRANSFORM = """      flatten_events: false

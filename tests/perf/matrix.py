@@ -10,8 +10,8 @@ cells ALTER already-ingested data, ingest more, then query.
 from __future__ import annotations
 
 SQL_SELECTS = ("filter", "derive", "compose")
-# Iceberg dest schema is discovered from source columns. Derive/compose add
-# columns, so those cells write File parquet so dest_has matches the folded batch.
+# Stateless derive/compose columns are published dest. File parquet ingest cells
+# still assert dest_has on the folded batch; Iceberg compact uses that dest.
 SCHEMA_CHANGING_SQL = ("derive", "compose")
 INGEST_MODES = ("historical", "stream")
 AGG_MEASURES = ("sum", "count", "both")

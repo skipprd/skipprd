@@ -54,7 +54,7 @@ These live on the pipeline in `skippr.yml` (see [Pipelines](/configuration/pipel
 2. Skips the pipeline if it was disabled with `DISABLE PIPELINE`.
 3. Opens the pipeline's Skippr Store catalog. A second `sync` of the same pipeline fails closed.
 4. Reads the source in batches and buffers each batch in the WAL.
-5. Writes buffered batches to the destination, if the pipeline has one, and publishes schema changes to the schema sink.
+5. Compacts buffered batches to the destination, if the pipeline has one. First compact of a namespace publishes the dest table from output metadata.
 6. With `--once`, drains everything still buffered, then exits.
 
 ## Examples

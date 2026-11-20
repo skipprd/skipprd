@@ -16,7 +16,6 @@ pub mod python;
 pub enum PluginKind {
     DataSource,
     DataSink,
-    SchemaSink,
 }
 
 impl PluginKind {
@@ -24,7 +23,6 @@ impl PluginKind {
         match self {
             Self::DataSource => "DataSource",
             Self::DataSink => "DataSink",
-            Self::SchemaSink => "SchemaSink",
         }
     }
 
@@ -32,7 +30,6 @@ impl PluginKind {
         match self {
             Self::DataSource => "data-source",
             Self::DataSink => "data-sink",
-            Self::SchemaSink => "schema-sink",
         }
     }
 }
@@ -134,8 +131,6 @@ pub struct PluginSpec {
 #[derive(Clone, Debug)]
 pub struct EngineSpec {
     pub types: TypeCatalog,
-    /// `PairedSink` variants: plugin names whose data and schema sink share one config.
-    pub paired_sinks: Vec<String>,
 }
 
 pub fn workspace_root(from: &Path) -> PathBuf {
@@ -144,7 +139,7 @@ pub fn workspace_root(from: &Path) -> PathBuf {
 
 pub fn discover_plugins(root: &Path) -> Result<Vec<PluginSpec>, String> {
     let mut plugins = Vec::new();
-    for kind_dir in ["data_source", "data_sink", "schema_sink"] {
+    for kind_dir in ["data_source", "data_sink"] {
         let dir = root.join("plugins").join(kind_dir);
         if !dir.exists() {
             continue;
@@ -182,7 +177,6 @@ fn load_plugin(root: &Path, crate_dir: &Path) -> Result<PluginSpec, String> {
     let kind = match meta.get("kind").and_then(|v| v.as_str()) {
         Some("DataSource") => PluginKind::DataSource,
         Some("DataSink") => PluginKind::DataSink,
-        Some("SchemaSink") => PluginKind::SchemaSink,
         other => {
             return Err(format!(
                 "{} unknown plugin kind {other:?}",
@@ -203,11 +197,6 @@ fn load_plugin(root: &Path, crate_dir: &Path) -> Result<PluginSpec, String> {
         .to_string();
 
     let mut reflected = reflect_crate(crate_dir)?;
-    if reflected.is_none() && kind == PluginKind::SchemaSink {
-        if let Some(dep_dir) = schema_sink_dep_dir(crate_dir, &cargo) {
-            reflected = reflect_crate(&dep_dir)?;
-        }
-    }
     if reflected.is_none() && plugin_name == "Stdout" {
         reflected = Some(ReflectedConfig::default());
     }
@@ -265,18 +254,6 @@ fn dependency_type_files(
         files.push(root.join("src/plugins/source_contract.rs"));
     }
     Ok(files)
-}
-
-fn schema_sink_dep_dir(crate_dir: &Path, cargo: &toml::Value) -> Option<PathBuf> {
-    let deps = cargo.get("dependencies")?.as_table()?;
-    for (name, spec) in deps {
-        if !name.starts_with("skippr-plugin-data-") {
-            continue;
-        }
-        let path = spec.get("path").and_then(|v| v.as_str())?;
-        return Some(crate_dir.join(path));
-    }
-    None
 }
 
 #[derive(Clone, Debug, Default)]
@@ -990,7 +967,6 @@ pub fn emit_kinds_rs(plugins: &[PluginSpec]) -> String {
         let role = match plugin.kind {
             PluginKind::DataSource => "DataSource",
             PluginKind::DataSink => "DataSink",
-            PluginKind::SchemaSink => "SchemaSink",
         };
         out.push_str(&format!(
             "            Self::{variant} => ConnectRole::{role},\n"
@@ -1085,14 +1061,8 @@ pub fn emit_kinds_rs(plugins: &[PluginSpec]) -> String {
         .filter(|p| p.kind == PluginKind::DataSink)
         .cloned()
         .collect();
-    let schemas: Vec<_> = plugins
-        .iter()
-        .filter(|p| p.kind == PluginKind::SchemaSink)
-        .cloned()
-        .collect();
     emit_kind_enum(&mut out, "DataSource", &sources);
     emit_kind_enum(&mut out, "DataSink", &sinks);
-    emit_kind_enum(&mut out, "SchemaSink", &schemas);
     out
 }
 
@@ -1110,9 +1080,8 @@ pub fn emit_cli_rs(plugins: &[PluginSpec]) -> String {
     out.push_str("pub enum ConnectRoleCmd {\n");
     out.push_str("    DataSource {\n        #[command(subcommand)]\n        kind: DataSourceKindCmd,\n    },\n");
     out.push_str(
-        "    DataSink {\n        #[command(subcommand)]\n        kind: DataSinkKindCmd,\n    },\n",
+        "    DataSink {\n        #[command(subcommand)]\n        kind: DataSinkKindCmd,\n    },\n}\n\n",
     );
-    out.push_str("    SchemaSink {\n        #[command(subcommand)]\n        kind: SchemaSinkKindCmd,\n    },\n}\n\n");
 
     fn args_name(plugin: &PluginSpec) -> String {
         format!("{:?}{}Args", plugin.kind, plugin.plugin_name)
@@ -1174,14 +1143,8 @@ pub fn emit_cli_rs(plugins: &[PluginSpec]) -> String {
         .filter(|p| p.kind == PluginKind::DataSink)
         .cloned()
         .collect();
-    let schemas: Vec<_> = plugins
-        .iter()
-        .filter(|p| p.kind == PluginKind::SchemaSink)
-        .cloned()
-        .collect();
     emit_kind_enum(&mut out, "DataSourceKindCmd", &sources);
     emit_kind_enum(&mut out, "DataSinkKindCmd", &sinks);
-    emit_kind_enum(&mut out, "SchemaSinkKindCmd", &schemas);
     for plugin in plugins {
         emit_args_struct(&mut out, plugin);
     }
@@ -1191,7 +1154,6 @@ pub fn emit_cli_rs(plugins: &[PluginSpec]) -> String {
     );
     out.push_str("            Self::DataSource { .. } => ConnectRole::DataSource,\n");
     out.push_str("            Self::DataSink { .. } => ConnectRole::DataSink,\n");
-    out.push_str("            Self::SchemaSink { .. } => ConnectRole::SchemaSink,\n");
     out.push_str(
         "        }\n    }\n    pub fn plugin(&self) -> ConnectPlugin {\n        match self {\n",
     );
@@ -1205,13 +1167,6 @@ pub fn emit_cli_rs(plugins: &[PluginSpec]) -> String {
     for plugin in &sinks {
         out.push_str(&format!(
             "            Self::DataSink {{ kind: DataSinkKindCmd::{}(_) }} => ConnectPlugin::DataSink{},\n",
-            ident_ok(&plugin.plugin_name),
-            plugin.plugin_name
-        ));
-    }
-    for plugin in &schemas {
-        out.push_str(&format!(
-            "            Self::SchemaSink {{ kind: SchemaSinkKindCmd::{}(_) }} => ConnectPlugin::SchemaSink{},\n",
             ident_ok(&plugin.plugin_name),
             plugin.plugin_name
         ));
@@ -1231,12 +1186,6 @@ pub fn emit_cli_rs(plugins: &[PluginSpec]) -> String {
             ident_ok(&plugin.plugin_name)
         ));
     }
-    for plugin in &schemas {
-        out.push_str(&format!(
-            "            Self::SchemaSink {{ kind: SchemaSinkKindCmd::{}(args) }} => args.pipeline.as_deref(),\n",
-            ident_ok(&plugin.plugin_name)
-        ));
-    }
     out.push_str(
         "        }\n    }\n    pub fn name(&self) -> Option<&str> {\n        match self {\n",
     );
@@ -1252,12 +1201,6 @@ pub fn emit_cli_rs(plugins: &[PluginSpec]) -> String {
             ident_ok(&plugin.plugin_name)
         ));
     }
-    for plugin in &schemas {
-        out.push_str(&format!(
-            "            Self::SchemaSink {{ kind: SchemaSinkKindCmd::{}(args) }} => args.name.as_deref(),\n",
-            ident_ok(&plugin.plugin_name)
-        ));
-    }
     out.push_str(
         "        }\n    }\n    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {\n        match self {\n",
     );
@@ -1270,12 +1213,6 @@ pub fn emit_cli_rs(plugins: &[PluginSpec]) -> String {
     for plugin in &sinks {
         out.push_str(&format!(
             "            Self::DataSink {{ kind: DataSinkKindCmd::{}(args) }} => args.to_yaml_map(),\n",
-            ident_ok(&plugin.plugin_name)
-        ));
-    }
-    for plugin in &schemas {
-        out.push_str(&format!(
-            "            Self::SchemaSink {{ kind: SchemaSinkKindCmd::{}(args) }} => args.to_yaml_map(),\n",
             ident_ok(&plugin.plugin_name)
         ));
     }
@@ -1363,7 +1300,7 @@ fn is_yaml_arg_ty(ty: &str) -> bool {
 fn clap_skip_field(ident: &str) -> bool {
     matches!(
         ident,
-        "name" | "pipeline" | "save" | "data_source" | "data_sink" | "schema_sink"
+        "name" | "pipeline" | "save" | "data_source" | "data_sink"
     )
 }
 
@@ -1393,35 +1330,15 @@ pub fn format_generated_rs(src: &str) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|err| format!("rustfmt stdout: {err}"))
 }
 
-/// Engine config structs (`Pipeline`, `Transform`, ...) and `PairedSink`.
+/// Engine config structs (`Pipeline`, `Transform`, ...).
 pub fn discover_engine(root: &Path) -> Result<EngineSpec, String> {
     let path = root.join("src/helpers/configuration.rs");
-    let text =
-        fs::read_to_string(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
-    let parsed =
-        syn::parse_file(&text).map_err(|err| format!("parse {}: {err}", path.display()))?;
-    let paired_sinks = parsed
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::Enum(item) if item.ident == "PairedSink" => Some(
-                item.variants
-                    .iter()
-                    .map(|v| v.ident.to_string())
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        })
-        .ok_or_else(|| format!("{}: enum PairedSink not found", path.display()))?;
     let mut types = reflect_source_file(&path)?;
     let pipeline_type = root.join("src/pipeline_type.rs");
     let extra = reflect_source_file(&pipeline_type)?;
     types.structs.extend(extra.structs);
     types.enums.extend(extra.enums);
-    Ok(EngineSpec {
-        types,
-        paired_sinks,
-    })
+    Ok(EngineSpec { types })
 }
 
 /// Every generated file, relative to the workspace root, with its contents.
@@ -1537,6 +1454,28 @@ mod tests {
     }
 
     #[test]
+    fn connect_schema_sink_is_not_a_command() {
+        let plugins = discover_plugins(&root()).expect("plugins");
+        let cli = emit_cli_rs(&plugins);
+        assert!(
+            !cli.contains("SchemaSink"),
+            "ConnectRoleCmd must not keep a schema-sink role"
+        );
+        assert!(
+            !cli.contains("schema-sink"),
+            "skipprd connect schema-sink is not a command"
+        );
+        assert!(cli.contains("DataSource {"), "{cli}");
+        assert!(cli.contains("DataSink {"), "{cli}");
+        assert!(
+            plugins
+                .iter()
+                .all(|plugin| matches!(plugin.kind, PluginKind::DataSource | PluginKind::DataSink)),
+            "catalog plugins are sources and destinations"
+        );
+    }
+
+    #[test]
     fn kinds_map_typed_connect_plugin_not_names() {
         let plugins = discover_plugins(&root()).expect("plugins");
         let kinds = emit_kinds_rs(&plugins);
@@ -1554,7 +1493,7 @@ mod tests {
         );
         assert!(
             kinds.contains("pub fn parse(raw: &str) -> Option<Self>"),
-            "DataSource/DataSink/SchemaSink must parse plugin names"
+            "DataSource/DataSink must parse plugin names"
         );
         assert!(
             kinds.contains("\"skipprlake\" => Some(Self::SkipprLake)"),
@@ -1882,7 +1821,7 @@ mod tests {
             "DataSinkS3",
             "DataSinkFile",
             "DataSourcePostgres",
-            "SchemaSinkGlue",
+            "DataSinkSkipprLake",
         ] {
             assert!(
                 rs.contains(&format!("name = \"{class}\"")),
@@ -1893,41 +1832,21 @@ mod tests {
                 "{class} must be in the stub"
             );
         }
-        for paired in [
-            "SchemaSinkSkipprLake",
-            "SchemaSinkAthenaIceberg",
-            "SchemaSinkDuckdb",
-        ] {
-            assert!(
-                !rs.contains(&format!("name = \"{paired}\"")),
-                "{paired} shares its data sink's config; it registers through data_sink(schema_sink=...)"
-            );
-        }
-        for paired in ["AthenaIceberg", "SkipprLake", "Duckdb"] {
-            assert!(
-                rs.contains(&format!(
-                    "plugin_entry(\"{paired}\", &*config.borrow()).map(SinkConfig::Paired)"
-                )),
-                "{paired} data sink must dispatch as a paired sink"
-            );
-        }
-        assert!(rs.contains("map(SinkConfig::Unpaired)"));
         for gone in [
             "enum PyDataSource",
             "enum PyDataSink",
             "enum PySchemaSink",
+            "SchemaSinkGlue",
             "PyConnect",
             "config_yaml",
+            "SinkConfig::Paired",
+            "extract_schema_sink_config",
         ] {
             assert!(
                 !rs.contains(gone),
                 "{gone} is the deleted kind-enum dispatch"
             );
         }
-        assert!(
-            stub.contains("PairedDataSinkConfig: TypeAlias = DataSinkAthenaIceberg | DataSinkDuckdb | DataSinkSkipprLake\n"),
-            "paired sinks get their own alias for the data_sink overload"
-        );
         let kinds = emit_kinds_rs(&discover_plugins(&root()).expect("plugins"));
         assert!(
             !kinds.contains("required_fields"),
@@ -2063,8 +1982,16 @@ mod tests {
     #[test]
     fn python_docs_flow_into_stub_and_help() {
         let (rs, stub) = python_outputs();
-        assert!(stub.contains("Config for the `SkipprLake` data sink and schema sink."));
-        assert!(rs.contains("#[doc = \"Config for the `SkipprLake` data sink and schema sink."));
+        assert!(stub.contains("Config for the `SkipprLake` data sink."));
+        assert!(rs.contains("#[doc = \"Config for the `SkipprLake` data sink."));
+        assert!(
+            !stub.contains("data sink and schema sink"),
+            "schema sink is not a live Python identity"
+        );
+        assert!(
+            !rs.contains("data sink and schema sink"),
+            "schema sink is not a live Python identity"
+        );
         assert!(stub.contains("YAML key `object_store`."));
         assert!(
             stub.contains(
@@ -2147,7 +2074,6 @@ mod tests {
             types,
         };
         let engine = EngineSpec {
-            paired_sinks: Vec::new(),
             ..discover_engine(&root()).expect("engine")
         };
         let err = python::python_model(&[plugin], &engine)
@@ -2244,7 +2170,12 @@ mod tests {
                 for cmd in connect_doc_commands(part) {
                     let tokens: Vec<&str> = cmd.split_whitespace().collect();
                     for window in tokens.windows(2) {
-                        if matches!(window[0], "data-source" | "data-sink" | "schema-sink")
+                        if window[0] == "schema-sink" {
+                            findings.push(
+                                "schema-sink is deleted; dest schema is the data plugin".into(),
+                            );
+                        }
+                        if matches!(window[0], "data-source" | "data-sink")
                             && !window[1].starts_with('-')
                             && window[1] != "<kebab-name>"
                             && !allowed_kinds.contains(window[1])

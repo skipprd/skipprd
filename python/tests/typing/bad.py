@@ -15,7 +15,6 @@ from skippr import (
     DataSourceS3,
     EnvRef,
     Pipeline,
-    SchemaSinkGlue,
 )
 
 cfg = Config()
@@ -48,8 +47,8 @@ DataSourceStripe(
     stream_profile="minimal",  # type: ignore[arg-type]
 )
 
-# Unpaired sinks link a SchemaSinkRef, not a name.
-cfg.data_sink(  # type: ignore[call-overload]
+# Dest schema is the data plugin; schema_sink is not a builder argument.
+cfg.data_sink(  # type: ignore[call-arg]
     "athena",
     DataSinkAthena(
         s3_bucket="o", s3_prefix="p", athena_workgroup_name="w", athena_results_s3_bucket="o"
@@ -62,13 +61,6 @@ skippr.Session("events")  # type: ignore[arg-type]
 
 # Engine storage is a typed class, not a string.
 cfg.storage("local")  # type: ignore[arg-type]
-
-# Paired sinks name their schema sink; a SchemaSinkRef is the unpaired form.
-glue = cfg.schema_sink(
-    "glue",
-    SchemaSinkGlue(s3_bucket="o", s3_prefix="p", athena_workgroup_name="w", athena_results_s3_bucket="o"),
-)
-cfg.data_sink("lake2", DataSinkDuckdb(warehouse="w", table_namespace="n"), schema_sink=glue)  # type: ignore[call-overload]
 
 # List getters return a copy, so in-place mutation is not offered.
 DataSourcePostgres(host="h", password=EnvRef("PG")).tables.append("x")  # type: ignore[union-attr]

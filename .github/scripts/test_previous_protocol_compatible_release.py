@@ -24,11 +24,6 @@ data_sinks:
   lake:
     SkipprLake:
       warehouse: file:///tmp
-    schema_sink: schema_sinks.lake_schema
-schema_sinks:
-  lake_schema:
-    SkipprLake:
-      warehouse: file:///tmp
 """
 
 
@@ -56,14 +51,12 @@ class PreviousProtocolCompatibleReleaseTests(unittest.TestCase):
                     "file": "0.1.4",
                     "s3": "0.1.6",
                     "skipprlake": "0.2.1",
-                    "skipprlake-schema": "0.2.1",
                 }
             },
             current_versions={
                 "file": "0.1.5",
                 "s3": "0.1.7",
                 "skipprlake": "0.2.2",
-                "skipprlake-schema": "0.2.2",
             },
         )
         self.assertFalse(result["skip"])
@@ -126,15 +119,11 @@ class PreviousProtocolCompatibleReleaseTests(unittest.TestCase):
                 "File": "0.1.4",
                 "S3": "0.1.6",
                 "SkipprLake": "0.2.1",
-                "SkipprLakeSchema": "0.2.0",
             },
         )
         self.assertIn('    S3:\n      version: "0.1.6"\n', pinned)
         self.assertIn("data_sinks:\n  lake:\n    SkipprLake:\n      version: \"0.2.1\"\n", pinned)
-        self.assertIn(
-            "schema_sinks:\n  lake_schema:\n    SkipprLake:\n      version: \"0.2.0\"\n",
-            pinned,
-        )
+        self.assertNotIn("schema_sinks", pinned)
         self.assertNotIn("File:", pinned)
 
     def test_pin_is_idempotent_when_version_already_present(self) -> None:

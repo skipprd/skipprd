@@ -42,13 +42,11 @@ export const BANNED = [
 const CONNECTOR_SECTIONS = {
   'connectors/inputs/': ['Before you begin', 'Configure', 'Options', 'What gets synced', 'Troubleshooting'],
   'connectors/outputs/': ['Before you begin', 'Configure', 'Options', 'How data lands', 'Troubleshooting'],
-  'connectors/schema_sinks/': ['Before you begin', 'Configure', 'Options', 'Troubleshooting'],
 }
 
 const CLASS_PREFIX = {
   'connectors/inputs/': 'DataSource',
   'connectors/outputs/': 'DataSink',
-  'connectors/schema_sinks/': 'SchemaSink',
 }
 
 export function requiredSections(page) {

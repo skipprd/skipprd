@@ -1,6 +1,6 @@
 //! Iceberg schema after one [`CanonicalAlter`]. Columns are found by output
 //! name and must carry the alter's field id. Destination apply lives on
-//! IcebergWriter (`SchemaSink::apply_alter`).
+//! IcebergWriter (`DataSink::apply_alter`).
 
 use std::sync::Arc;
 
@@ -48,7 +48,7 @@ pub fn iceberg_schema_after_alter(
         CanonicalAlter::Promote { column, to } => {
             edit(&mut fields, column, |siblings, idx| {
                 let mut promoted = siblings[idx].as_ref().clone();
-                promoted.field_type = Box::new(iceberg_primitive(to));
+                promoted.field_type = Box::new(iceberg_primitive(to)?);
                 siblings[idx] = Arc::new(promoted);
                 Ok(())
             })?;
@@ -110,14 +110,12 @@ fn descend(
     Ok(())
 }
 
-fn iceberg_primitive(value: &SkipprDataType) -> Type {
+pub fn iceberg_primitive(value: &SkipprDataType) -> Result<Type, SchemaAlterError> {
     let primitive = match value {
         SkipprDataType::Boolean => PrimitiveType::Boolean,
-        SkipprDataType::Byte
-        | SkipprDataType::Short
-        | SkipprDataType::Integer
-        | SkipprDataType::Unknown
-        | SkipprDataType::Null => PrimitiveType::Int,
+        SkipprDataType::Byte | SkipprDataType::Short | SkipprDataType::Integer => {
+            PrimitiveType::Int
+        }
         SkipprDataType::Long => PrimitiveType::Long,
         SkipprDataType::Float => PrimitiveType::Float,
         SkipprDataType::Double => PrimitiveType::Double,
@@ -128,15 +126,45 @@ fn iceberg_primitive(value: &SkipprDataType) -> Type {
         SkipprDataType::Date => PrimitiveType::Date,
         SkipprDataType::Timestamp | SkipprDataType::TimestampMilli => PrimitiveType::Timestamp,
         SkipprDataType::Time => PrimitiveType::Time,
-        _ => PrimitiveType::String,
+        SkipprDataType::Binary | SkipprDataType::Fixed => PrimitiveType::Binary,
+        SkipprDataType::Uuid => PrimitiveType::Uuid,
+        SkipprDataType::String | SkipprDataType::Json => PrimitiveType::String,
+        SkipprDataType::Array
+        | SkipprDataType::Map
+        | SkipprDataType::Record
+        | SkipprDataType::Unknown
+        | SkipprDataType::Null => {
+            return Err(SchemaAlterError::Iceberg(format!(
+                "Iceberg has no primitive for '{}'",
+                value.as_str()
+            )))
+        }
     };
-    Type::Primitive(primitive)
+    Ok(Type::Primitive(primitive))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::discover::schema_alter::{FlattenMode, OutputName};
+
+    #[test]
+    fn iceberg_primitive_matches_publish_uuid_and_binary() {
+        assert_eq!(
+            iceberg_primitive(&SkipprDataType::Uuid).unwrap(),
+            Type::Primitive(PrimitiveType::Uuid)
+        );
+        assert_eq!(
+            iceberg_primitive(&SkipprDataType::Binary).unwrap(),
+            Type::Primitive(PrimitiveType::Binary)
+        );
+        assert_eq!(
+            iceberg_primitive(&SkipprDataType::Fixed).unwrap(),
+            Type::Primitive(PrimitiveType::Binary)
+        );
+        assert!(iceberg_primitive(&SkipprDataType::Unknown).is_err());
+        assert!(iceberg_primitive(&SkipprDataType::Record).is_err());
+    }
 
     fn prim(id: i32, name: &str, ty: PrimitiveType) -> Arc<NestedField> {
         Arc::new(NestedField::optional(id, name, Type::Primitive(ty)))

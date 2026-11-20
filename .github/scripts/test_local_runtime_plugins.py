@@ -22,7 +22,7 @@ SPEC.loader.exec_module(local_runtime_plugins)
 
 
 class LocalRuntimePluginsTests(unittest.TestCase):
-    def test_configured_runtime_plugins_selects_pipeline_source_sink_and_schema(self) -> None:
+    def test_configured_runtime_plugins_selects_pipeline_source_and_sink(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = Path(temp_dir) / "skippr.yml"
             config.write_text(
@@ -38,11 +38,6 @@ data_sources:
       tables: [dbo.orders]
 data_sinks:
   snowflake:
-    schema_sink: schema_sinks.snowflake_schema
-    Snowflake:
-      database: ANALYTICS
-schema_sinks:
-  snowflake_schema:
     Snowflake:
       database: ANALYTICS
 """,
@@ -56,9 +51,29 @@ schema_sinks:
             {
                 local_runtime_plugins.RuntimePluginRef("DataSource", "Mssql"),
                 local_runtime_plugins.RuntimePluginRef("DataSink", "Snowflake"),
-                local_runtime_plugins.RuntimePluginRef("SchemaSink", "Snowflake"),
             },
         )
+
+    def test_configured_runtime_plugins_refuses_schema_sinks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = Path(temp_dir) / "skippr.yml"
+            config.write_text(
+                """data_sinks:
+  snowflake:
+    Snowflake:
+      database: ANALYTICS
+schema_sinks:
+  snowflake_schema:
+    Snowflake:
+      database: ANALYTICS
+""",
+                encoding="utf-8",
+            )
+            with self.assertRaises(local_runtime_plugins.LocalRuntimePluginError) as err:
+                local_runtime_plugins.parse_plugin_collection(
+                    config.read_text(encoding="utf-8").splitlines(), "data_sinks"
+                )
+        self.assertIn("schema_sinks", str(err.exception))
 
     def test_configured_runtime_plugins_unions_every_pipeline_when_pipeline_omitted(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

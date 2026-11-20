@@ -10,10 +10,11 @@ use skippr_runtime_sdk::plugins::source_contract::SinkWritePolicySupport;
 skippr_runtime_sdk::declare_sink_spec!(
     SkipprLakeSinkSpec,
     skippr_runtime_sdk::plugins::cdc::sink_capabilities::SKIPPRLAKE,
-    skippr_runtime_sdk::plugins::TransactionalTableCommit
+    skippr_runtime_sdk::plugins::TransactionalTableCommit,
+    alter = skippr_runtime_sdk::plugins::AlterSupport::Iceberg
 );
 
-/// The SkipprLake data sink and schema sink: the shared writer bound to this capability.
+/// The SkipprLake data sink: the shared writer bound to this capability. Dest schema is this plugin.
 pub type SkipprLakeWriter = IcebergWriter<SkipprLakeSinkSpec>;
 
 const SKIPPRLAKE_WRITE_POLICIES: SinkWritePolicySupport = SinkWritePolicySupport {
@@ -114,7 +115,7 @@ mod tests {
             MigrationDirection, MigrationId, OutputName,
         };
         use skippr_runtime_sdk::discover::SkipprDataType;
-        use skippr_runtime_sdk::plugins::{AlterSupport, SchemaSink};
+        use skippr_runtime_sdk::plugins::{AlterSupport, DataSink};
 
         let catalog: Arc<dyn Catalog> = Arc::new(
             MemoryCatalogBuilder::default()
@@ -154,15 +155,18 @@ mod tests {
         assert_eq!(writer.alter_support(), AlterSupport::Iceberg);
 
         let metadata = region_metadata();
-        writer.sync_schema("orders", &metadata).await.unwrap();
+        writer
+            .table_for_write("orders", 1, &metadata)
+            .await
+            .unwrap();
         let ident = TableIdent::from_strs(["lake", "orders"]).unwrap();
         let created = catalog.load_table(&ident).await.unwrap();
-        let field_id = created
-            .metadata()
-            .current_schema()
-            .field_by_name("region")
-            .unwrap()
-            .id;
+        let created_schema = created.metadata().current_schema();
+        assert!(
+            created_schema.field_by_name("_skippr_mutation").is_some(),
+            "SkipprLake publishes Iceberg CDC columns"
+        );
+        let field_id = created_schema.field_by_name("region").unwrap().id;
         writer
             .apply_alter(
                 "orders",

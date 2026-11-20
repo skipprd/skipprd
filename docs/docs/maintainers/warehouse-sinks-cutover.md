@@ -1,6 +1,6 @@
 # Spec 1: Exclusive warehouse sinks (hard cutover)
 
-Status: draft for implementation. Companion: [Spec 2: SkipprLake dbt + REST](./skipprlake-dbt-rest.md).
+Status: draft for implementation. Companion: [Spec 2: SkipprLake dbt + REST](./skipprlake-dbt-rest.md). Dest schema is the data plugin; `plugins/schema_sink/*` is gone. W1–W8 below is the pairing history.
 Repos touched: `skipprd` (primary), `sde`, `cloud` (docs and decisions only), `skippr-web` (docs only).
 
 **Skippr Store** is not this page. Authority: [skippr-store-kv.md](./skippr-store-kv.md). Do not select an Iceberg catalog backend via `skippr.store.type`. Lake Dynamo (if any) is destination catalog config, not Skippr Store.
@@ -39,7 +39,7 @@ Confirmed 2026-09-30: **D3** (`AthenaIceberg` is a separate plugin key; `Athena`
 | # | Decision | Why |
 |---|---|---|
 | D1 | Plugin key selects warehouse family. No `query_engine` anywhere. | One authority per job. |
-| D2 | `Iceberg` becomes **`SkipprLake`**, for both the data sink and the schema sink. Flat config, Skippr catalog only. | The plugin is only ever used for the Skippr warehouse. The nested `catalog: {type: ...}` block runs against the flat encapsulated shape used by `Athena`. |
+| D2 | `Iceberg` becomes **`SkipprLake`**, the data sink. Dest schema is that plugin. Flat config, Skippr catalog only. | The plugin is only ever used for the Skippr warehouse. The nested `catalog: {type: ...}` block runs against the flat encapsulated shape used by `Athena`. |
 | D3 | Athena on Iceberg is a **separate plugin key `AthenaIceberg`**. `Athena` stays Hive only. No `table_format` switch on `Athena`. | Sink capability is static per plugin name (`[package.metadata.skippr-plugin.sink_capability]` in the plugin `Cargo.toml` plus `sink_capabilities::by_name` in `src/plugins/cdc.rs`). Hive is `CdcEncodedOnly / DeterministicOverwrite`; Iceberg is `ExactOnceCdcEligible / TransactionalIdempotent`. A `table_format` switch on one key would force config-aware capabilities and lose the compile-time guarantee. |
 | D4 | `skipprd query` resolves a typed `QueryBackend { Iceberg(IcebergLake), WalOnly }` once, at the edge. `IcebergLake` holds serializable `IcebergCatalogSpec` (Skippr / Glue / filesystem) plus ingest namespace. | Compile-time exhaustiveness. No string compares in sqlrt. Catalogs open asynchronously. |
 | D6 | `Duckdb` writes Hadoop-style filesystem Iceberg. `skipprd query` serves Iceberg ∪ WAL; `skipprd serve` Flight serves Iceberg `namespace.table`. SDE does not model DuckDB. | Same Iceberg catalog opener as SkipprLake and AthenaIceberg. |
@@ -54,7 +54,7 @@ Confirmed 2026-09-30: **D3** (`AthenaIceberg` is a separate plugin key; `Athena`
 
 ## 3. Pre-cutover audit (historical)
 
-W1–W8 replaced this world. Do not treat this section as current code. `skipprd query` is `QueryBackend::{Iceberg, WalOnly}`. Statement copy is `sqlrt::docs::get_sql_docs()`; checked-in `sql-docs.md` is generated from it (W9). Hive Glue remains the Athena Hive schema sink, not the engine query catalog.
+W1–W8 replaced this world. Do not treat this section as current code. `skipprd query` is `QueryBackend::{Iceberg, WalOnly}`. Statement copy is `sqlrt::docs::get_sql_docs()`; checked-in `sql-docs.md` is generated from it (W9). Athena Hive Glue database name is on the Athena data sink.
 
 ### 3.1 skipprd query knew other sinks
 
@@ -119,13 +119,10 @@ crates/
   skippr-iceberg-rest/            Iceberg REST for skipprd serve
 plugins/
   data_sink/skipprlake/           RENAMED from data_sink/iceberg
-  schema_sink/skipprlake/         RENAMED from schema_sink/iceberg
   data_sink/athena_iceberg/       NEW
-  schema_sink/athena_iceberg/     NEW
   data_sink/duckdb/               NEW
-  schema_sink/duckdb/             NEW
-  data_sink/athena/               KEEP (Hive), manifest write removed
-  schema_sink/glue/               KEEP (Hive)
+  data_sink/athena/               KEEP (Hive), dest schema via glue_database_name
+  # plugins/schema_sink/* deleted; dest schema is the data plugin
 ```
 
 ## 5. Landing units
@@ -1068,8 +1065,8 @@ Those production greps are clean.
 
 ## 10. Removed and renamed (checklist)
 
-- Removed: `IcebergQueryEngineConfig`, `IcebergCatalogConfig`, `Iceberg` plugin key, `query_engine`, Glue/REST/Unity/Polaris catalog variants in the lake plugin, `build_s3_df`, manifest prefix listing, `athena_admin`, `SkipprHive` in sqlrt, `Manifest::ensure_prefix_and_db`, SDE `Duckdb` warehouse (`WarehouseKind`, `WarehouseFile`, CLI, connector schema, profile arm, provider wiring), `SKIPPRD_BINARY`/`SKIPPR_BINARY`.
-- Renamed: `Iceberg` → `SkipprLake` (data and schema sinks, packages, capability, connect symbols).
+- Removed: `IcebergQueryEngineConfig`, `IcebergCatalogConfig`, `Iceberg` plugin key, `query_engine`, Glue/REST/Unity/Polaris catalog variants in the lake plugin, `build_s3_df`, manifest prefix listing, `athena_admin`, `SkipprHive` in sqlrt, `Manifest::ensure_prefix_and_db`, SDE `Duckdb` warehouse (`WarehouseKind`, `WarehouseFile`, CLI, connector schema, profile arm, provider wiring), `SKIPPRD_BINARY`/`SKIPPR_BINARY`, SchemaSink plugins, `schema_sinks` YAML, `skipprd connect schema-sink`.
+- Renamed: `Iceberg` → `SkipprLake` (data sink, packages, capability, connect symbols). Dest schema is that plugin.
 - Added: `AthenaIceberg`, `Duckdb` (skipprd sinks), `skippr-iceberg-writer`, `skippr-iceberg-catalog-fs`, `QueryBackend`, `AthenaTableFormat`.
 
 ## 11. Handoff to Spec 2

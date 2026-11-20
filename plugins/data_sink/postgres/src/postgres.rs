@@ -1,25 +1,25 @@
 use dashmap::DashSet;
-use datafusion::arrow::array::*;
-use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
 use tracing::{error, info};
 
 use crate::cdc_apply::{
-    apply_postgres_cdc_batch, ddl_add_order_token_column, ddl_create_tombstone_table,
-    tombstone_table_name, CdcApplyBatch, CdcApplyColumn, CdcApplyMutation, CdcApplyRow,
-    CdcApplyRowMetadata, CdcApplyValue,
+    append_record_batch_to_cdc_apply, apply_postgres_cdc_batch, ddl_add_order_token_column,
+    ddl_create_tombstone_table, sql_values_row, tombstone_table_name, CdcApplyBatch,
+    CdcApplyColumn,
 };
 use crate::config::DataSinkPostgresPluginConfig;
-use skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow;
 use skippr_runtime_sdk::discover::OutputMetadata;
 use skippr_runtime_sdk::metrics::counters;
-use skippr_runtime_sdk::plugins::cdc::{MutationKind, SyncContext};
+use skippr_runtime_sdk::plugins::alter_ddl::{
+    dest_table_name, publish_warehouse_table, DestPublishCache, InstalledDestSchema,
+    WarehouseDialect,
+};
+use skippr_runtime_sdk::plugins::cdc::SyncContext;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 static ENSURED_SCHEMAS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
-static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
 pub struct PostgresCdcBackend;
@@ -194,6 +194,8 @@ pub struct DataSinkPostgresPlugin {
     #[allow(dead_code)]
     buffer_name: String,
     client: tokio::sync::Mutex<Option<tokio_postgres::Client>>,
+    installed: tokio::sync::RwLock<InstalledDestSchema>,
+    publish_cache: DestPublishCache,
 }
 
 impl DataSinkPostgresPlugin {
@@ -205,6 +207,8 @@ impl DataSinkPostgresPlugin {
             config,
             buffer_name,
             client: tokio::sync::Mutex::new(None),
+            installed: tokio::sync::RwLock::new(InstalledDestSchema::default()),
+            publish_cache: DestPublishCache::default(),
         }
     }
 
@@ -214,46 +218,39 @@ impl DataSinkPostgresPlugin {
         filename: String,
         cdc_ctx: Option<&SyncContext>,
     ) -> Result<(), std::io::Error> {
+        let namespace = BufferChunker::decode_file_namespace(&filename);
+        self.publish_namespace(&namespace).await?;
         match cdc_ctx {
             Some(ctx) => self.sync_cdc(stream, filename, ctx).await,
             None => self.inner_sync(stream, filename).await,
         }
     }
 
-    pub async fn sync_schema(
-        &self,
-        namespace: &str,
-        metadata: &OutputMetadata,
-    ) -> Result<(), std::io::Error> {
+    pub fn installed_dest_schema(&self) -> &tokio::sync::RwLock<InstalledDestSchema> {
+        &self.installed
+    }
+
+    fn fq_table(&self, namespace: &str) -> String {
+        format!(
+            "\"{}\".\"{}\"",
+            self.config.schema,
+            dest_table_name(namespace)
+        )
+    }
+
+    async fn publish_namespace(&self, namespace: &str) -> Result<(), std::io::Error> {
+        let (version, metadata) = self.installed.read().await.get(namespace)?;
         self.ensure_schema().await?;
-
-        let fields: std::collections::HashMap<String, OutputMetadata> = metadata
-            .child_fields()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        let arrow_schema = convert_skippr_to_arrow(Box::new(fields)).map_err(|e| {
-            std::io::Error::other(format!(
-                "Arrow schema conversion for '{}': {}",
-                namespace, e
-            ))
-        })?;
-
-        let table_name = Self::namespace_to_table_name(namespace);
-        let col_defs: Vec<(String, &str)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_lowercase(),
-                    Self::arrow_type_to_postgres(f.data_type()),
-                )
-            })
-            .collect();
-
-        let fq_table = format!("\"{}\".\"{}\"", self.config.schema, table_name);
-
-        self.ensure_table(&fq_table, &col_defs).await
+        publish_warehouse_table(
+            &self.publish_cache,
+            self,
+            WarehouseDialect::Postgres,
+            &self.fq_table(namespace),
+            namespace,
+            version,
+            &metadata,
+        )
+        .await
     }
 
     pub async fn apply_alter(
@@ -262,20 +259,14 @@ impl DataSinkPostgresPlugin {
         _metadata: &OutputMetadata,
         alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
     ) -> Result<(), std::io::Error> {
-        let table_name = Self::namespace_to_table_name(namespace);
-        let fq_table = format!("\"{}\".\"{}\"", self.config.schema, table_name);
         skippr_runtime_sdk::plugins::alter_ddl::apply_warehouse_alter(
             self,
-            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Postgres,
-            &fq_table,
+            WarehouseDialect::Postgres,
+            &self.fq_table(namespace),
             namespace,
             alter,
         )
         .await
-    }
-
-    fn namespace_to_table_name(namespace: &str) -> String {
-        namespace.replace('.', "_").to_lowercase()
     }
 
     fn build_connection_string(&self) -> String {
@@ -372,211 +363,6 @@ impl DataSinkPostgresPlugin {
         result
     }
 
-    fn arrow_type_to_postgres(dt: &ArrowDataType) -> &'static str {
-        match dt {
-            ArrowDataType::Boolean => "BOOLEAN",
-            ArrowDataType::Int8 | ArrowDataType::Int16 => "SMALLINT",
-            ArrowDataType::Int32 | ArrowDataType::UInt8 | ArrowDataType::UInt16 => "INTEGER",
-            ArrowDataType::Int64 | ArrowDataType::UInt32 | ArrowDataType::UInt64 => "BIGINT",
-            ArrowDataType::Float16 | ArrowDataType::Float32 => "REAL",
-            ArrowDataType::Float64 => "DOUBLE PRECISION",
-            ArrowDataType::Date32 | ArrowDataType::Date64 => "DATE",
-            ArrowDataType::Timestamp(_, _) => "TIMESTAMP",
-            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => "TEXT",
-            _ => "TEXT",
-        }
-    }
-
-    fn arrow_value_to_cdc_value(array: &dyn Array, row: usize) -> CdcApplyValue {
-        if array.is_null(row) {
-            return CdcApplyValue::Null;
-        }
-        match array.data_type() {
-            ArrowDataType::Boolean => {
-                let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-                CdcApplyValue::Boolean(a.value(row))
-            }
-            ArrowDataType::Int8 => CdcApplyValue::Signed(
-                array
-                    .as_any()
-                    .downcast_ref::<Int8Array>()
-                    .unwrap()
-                    .value(row) as i64,
-            ),
-            ArrowDataType::Int16 => CdcApplyValue::Signed(
-                array
-                    .as_any()
-                    .downcast_ref::<Int16Array>()
-                    .unwrap()
-                    .value(row) as i64,
-            ),
-            ArrowDataType::Int32 => CdcApplyValue::Signed(
-                array
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .unwrap()
-                    .value(row) as i64,
-            ),
-            ArrowDataType::Int64 => CdcApplyValue::Signed(
-                array
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .value(row),
-            ),
-            ArrowDataType::UInt8 => CdcApplyValue::Unsigned(
-                array
-                    .as_any()
-                    .downcast_ref::<UInt8Array>()
-                    .unwrap()
-                    .value(row) as u64,
-            ),
-            ArrowDataType::UInt16 => CdcApplyValue::Unsigned(
-                array
-                    .as_any()
-                    .downcast_ref::<UInt16Array>()
-                    .unwrap()
-                    .value(row) as u64,
-            ),
-            ArrowDataType::UInt32 => CdcApplyValue::Unsigned(
-                array
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .unwrap()
-                    .value(row) as u64,
-            ),
-            ArrowDataType::UInt64 => CdcApplyValue::Unsigned(
-                array
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap()
-                    .value(row),
-            ),
-            ArrowDataType::Float32 => CdcApplyValue::Float(
-                array
-                    .as_any()
-                    .downcast_ref::<Float32Array>()
-                    .unwrap()
-                    .value(row)
-                    .to_string(),
-            ),
-            ArrowDataType::Float64 => CdcApplyValue::Float(
-                array
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap()
-                    .value(row)
-                    .to_string(),
-            ),
-            ArrowDataType::Date32 => {
-                let days = array
-                    .as_any()
-                    .downcast_ref::<Date32Array>()
-                    .unwrap()
-                    .value(row);
-                let date = chrono::NaiveDate::from_num_days_from_ce_opt(days + 719_163)
-                    .unwrap_or_default();
-                CdcApplyValue::Date(date.format("%Y-%m-%d").to_string())
-            }
-            ArrowDataType::Date64 => {
-                let ms = array
-                    .as_any()
-                    .downcast_ref::<Date64Array>()
-                    .unwrap()
-                    .value(row);
-                let secs = ms / 1000;
-                let dt = chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default();
-                CdcApplyValue::Date(dt.format("%Y-%m-%d").to_string())
-            }
-            ArrowDataType::Timestamp(unit, _) => {
-                let ts = match unit {
-                    datafusion::arrow::datatypes::TimeUnit::Second => {
-                        let a = array
-                            .as_any()
-                            .downcast_ref::<TimestampSecondArray>()
-                            .unwrap();
-                        chrono::DateTime::from_timestamp(a.value(row), 0)
-                    }
-                    datafusion::arrow::datatypes::TimeUnit::Millisecond => {
-                        let a = array
-                            .as_any()
-                            .downcast_ref::<TimestampMillisecondArray>()
-                            .unwrap();
-                        let v = a.value(row);
-                        chrono::DateTime::from_timestamp(v / 1000, ((v % 1000) * 1_000_000) as u32)
-                    }
-                    datafusion::arrow::datatypes::TimeUnit::Microsecond => {
-                        let a = array
-                            .as_any()
-                            .downcast_ref::<TimestampMicrosecondArray>()
-                            .unwrap();
-                        let v = a.value(row);
-                        chrono::DateTime::from_timestamp(
-                            v / 1_000_000,
-                            ((v % 1_000_000) * 1000) as u32,
-                        )
-                    }
-                    datafusion::arrow::datatypes::TimeUnit::Nanosecond => {
-                        let a = array
-                            .as_any()
-                            .downcast_ref::<TimestampNanosecondArray>()
-                            .unwrap();
-                        let v = a.value(row);
-                        chrono::DateTime::from_timestamp(
-                            v / 1_000_000_000,
-                            (v % 1_000_000_000) as u32,
-                        )
-                    }
-                };
-                let dt = ts.unwrap_or_default();
-                CdcApplyValue::Timestamp(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
-            }
-            ArrowDataType::Utf8 => {
-                let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-                CdcApplyValue::Text(a.value(row).to_string())
-            }
-            ArrowDataType::LargeUtf8 => {
-                let a = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
-                CdcApplyValue::Text(a.value(row).to_string())
-            }
-            _ => {
-                let a = array.as_any().downcast_ref::<StringArray>();
-                match a {
-                    Some(s) => CdcApplyValue::Text(s.value(row).to_string()),
-                    None => CdcApplyValue::Null,
-                }
-            }
-        }
-    }
-
-    fn arrow_value_to_sql(array: &dyn Array, row: usize) -> String {
-        match Self::arrow_value_to_cdc_value(array, row) {
-            CdcApplyValue::Null => "NULL".to_string(),
-            CdcApplyValue::Boolean(value) => {
-                if value {
-                    "TRUE".to_string()
-                } else {
-                    "FALSE".to_string()
-                }
-            }
-            CdcApplyValue::Signed(value) => value.to_string(),
-            CdcApplyValue::Unsigned(value) => value.to_string(),
-            CdcApplyValue::Float(value) => value,
-            CdcApplyValue::Text(value)
-            | CdcApplyValue::Date(value)
-            | CdcApplyValue::Timestamp(value) => {
-                format!("'{}'", value.replace('\'', "''"))
-            }
-            CdcApplyValue::Binary(value) => {
-                let encoded = value
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
-                format!("decode('{encoded}', 'hex')")
-            }
-        }
-    }
-
     async fn ensure_schema(&self) -> Result<(), std::io::Error> {
         let key = format!("{}.{}", self.config.database, self.config.schema);
         if !ENSURED_SCHEMAS.insert(key.clone()) {
@@ -594,111 +380,47 @@ impl DataSinkPostgresPlugin {
         Ok(())
     }
 
-    async fn ensure_table(
-        &self,
-        fq_table: &str,
-        col_defs: &[(String, &str)],
-    ) -> Result<(), std::io::Error> {
-        if col_defs.is_empty() {
-            return Ok(());
-        }
-
-        if !ENSURED_TABLES.insert(fq_table.to_string()) {
-            return Ok(());
-        }
-
-        let cols_sql: Vec<String> = col_defs
-            .iter()
-            .map(|(name, pg_type)| format!("\"{}\" {}", name, pg_type))
-            .collect();
-
-        let create_ddl = format!(
-            "CREATE TABLE IF NOT EXISTS {} ({})",
-            fq_table,
-            cols_sql.join(", ")
-        );
-        info!("Postgres DDL: {}", create_ddl);
-        if let Err(e) = self.execute_sql(&create_ddl).await {
-            ENSURED_TABLES.remove(&fq_table.to_string());
-            error!("Postgres CREATE TABLE failed: {}", e);
-            return Err(e);
-        }
-
-        for (col_name, pg_type) in col_defs {
-            let alter_ddl = format!(
-                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS \"{}\" {}",
-                fq_table, col_name, pg_type
-            );
-            if let Err(e) = self.execute_sql(&alter_ddl).await {
-                let msg = e.to_string();
-                if !msg.contains("already exists") {
-                    ENSURED_TABLES.remove(&fq_table.to_string());
-                    error!("Postgres ALTER TABLE ADD COLUMN failed: {}", e);
-                    return Err(e);
-                }
-            }
-        }
-
-        info!("Ensured table {}", fq_table);
-        Ok(())
-    }
-
     async fn inner_sync(
         &self,
         mut stream: SendableRecordBatchStream,
         filename: String,
     ) -> Result<(), std::io::Error> {
+        let namespace = BufferChunker::decode_file_namespace(&filename);
+        let table_name = dest_table_name(&namespace);
+        let col_defs = self.installed.read().await.warehouse_batch_columns(
+            WarehouseDialect::Postgres,
+            &namespace,
+            &stream.schema(),
+        )?;
+        let fq_table = self.fq_table(&namespace);
+        self.ensure_schema().await?;
         counters::inc_uploads_in_flight();
 
-        let namespace = BufferChunker::decode_file_namespace(&filename);
-        let table_name = Self::namespace_to_table_name(&namespace);
-        let arrow_schema = stream.schema();
-
-        let col_defs: Vec<(String, &str)> = arrow_schema
-            .fields()
+        let col_names: Vec<String> = col_defs
+            .columns()
             .iter()
-            .map(|f| {
-                (
-                    f.name().to_lowercase(),
-                    Self::arrow_type_to_postgres(f.data_type()),
-                )
-            })
-            .collect();
-
-        let fq_table = format!("\"{}\".\"{}\"", self.config.schema, table_name);
-
-        self.ensure_schema().await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
-        self.ensure_table(&fq_table, &col_defs).await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
-
-        let col_names: Vec<String> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| format!("\"{}\"", f.name().to_lowercase()))
+            .map(|(name, _)| WarehouseDialect::Postgres.quote_ident(name))
             .collect();
         let col_list = col_names.join(", ");
 
         let mut total_rows = 0usize;
         while let Some(batch_result) = stream.next().await {
-            let batch =
-                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+            let batch = batch_result.map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::other(format!("stream error: {}", e))
+            })?;
             let num_rows = batch.num_rows();
             if num_rows == 0 {
                 continue;
             }
 
-            let mut value_rows = Vec::with_capacity(num_rows);
-            for row in 0..num_rows {
-                let vals: Vec<String> = (0..batch.num_columns())
-                    .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
-                    .collect();
-                value_rows.push(format!("({})", vals.join(", ")));
-            }
+            let value_rows = (0..num_rows)
+                .map(|row| sql_values_row::<PostgresCdcBackend>(&batch, row))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    counters::dec_uploads_in_flight();
+                    std::io::Error::from(e)
+                })?;
 
             let insert_sql = format!(
                 "INSERT INTO {} ({}) VALUES {}",
@@ -747,33 +469,17 @@ impl DataSinkPostgresPlugin {
             }
         };
 
-        counters::inc_uploads_in_flight();
-
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let table_name = Self::namespace_to_table_name(&namespace);
-        let arrow_schema = stream.schema();
-
-        let col_defs: Vec<(String, &str)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_lowercase(),
-                    Self::arrow_type_to_postgres(f.data_type()),
-                )
-            })
-            .collect();
-
-        let fq_table = format!("\"{}\".\"{}\"", self.config.schema, table_name);
-
-        self.ensure_schema().await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
-        self.ensure_table(&fq_table, &col_defs).await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
+        let table_name = dest_table_name(&namespace);
+        let col_defs = self.installed.read().await.warehouse_batch_columns(
+            WarehouseDialect::Postgres,
+            &namespace,
+            &stream.schema(),
+        )?;
+        let key_types = col_defs.key_types(&contract.business_key_columns)?;
+        let fq_table = self.fq_table(&namespace);
+        self.ensure_schema().await?;
+        counters::inc_uploads_in_flight();
 
         if CDC_DDL_ENSURED.insert(fq_table.clone()) {
             let order_col_ddl = ddl_add_order_token_column::<PostgresCdcBackend>(&fq_table);
@@ -784,20 +490,8 @@ impl DataSinkPostgresPlugin {
             }
 
             let tombstone_tbl = tombstone_table_name(&fq_table);
-            let bk_type_pairs: Vec<(String, String)> = contract
-                .business_key_columns
-                .iter()
-                .map(|bk| {
-                    let pg_type = col_defs
-                        .iter()
-                        .find(|(name, _)| name == bk)
-                        .map(|(_, t)| (*t).to_string())
-                        .unwrap_or_else(|| "TEXT".to_string());
-                    (bk.clone(), pg_type)
-                })
-                .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table::<PostgresCdcBackend>(&tombstone_tbl, &bk_type_pairs);
+                ddl_create_tombstone_table::<PostgresCdcBackend>(&tombstone_tbl, &key_types);
             if let Err(e) = self.execute_sql(&tombstone_ddl).await {
                 CDC_DDL_ENSURED.remove(&fq_table);
                 counters::dec_uploads_in_flight();
@@ -810,18 +504,22 @@ impl DataSinkPostgresPlugin {
         let tombstone_table = tombstone_table_name(&fq_table);
         let mut apply_batch = CdcApplyBatch {
             columns: col_defs
+                .columns()
                 .iter()
                 .map(|(name, target_type)| CdcApplyColumn {
                     name: name.clone(),
                     target_type: (*target_type).to_string(),
                 })
                 .collect(),
-            business_key_columns: contract.business_key_columns.clone(),
+            business_key_columns: key_types.iter().map(|(name, _)| name.clone()).collect(),
             rows: Vec::new(),
         };
 
+        let ties = ctx.decoded_ties().map_err(|e| {
+            counters::dec_uploads_in_flight();
+            std::io::Error::other(e)
+        })?;
         let mut row_offset = 0usize;
-
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.map_err(|e| {
                 counters::dec_uploads_in_flight();
@@ -831,40 +529,17 @@ impl DataSinkPostgresPlugin {
             if num_rows == 0 {
                 continue;
             }
-
-            for row in 0..num_rows {
-                let meta_idx = row_offset + row;
-                let row_meta = ctx.part_meta.rows.get(meta_idx).ok_or_else(|| {
-                    counters::dec_uploads_in_flight();
-                    std::io::Error::other(format!(
-                        "CDC row metadata missing at index {} (have {})",
-                        meta_idx,
-                        ctx.part_meta.rows.len()
-                    ))
-                })?;
-
-                let mutation = match row_meta.mutation {
-                    MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
-                        CdcApplyMutation::Upsert
-                    }
-                    MutationKind::Delete => CdcApplyMutation::Delete,
-                };
-                let values = (0..batch.num_columns())
-                    .map(|column| {
-                        Self::arrow_value_to_cdc_value(batch.column(column).as_ref(), row)
-                    })
-                    .collect();
-                apply_batch.rows.push(CdcApplyRow {
-                    metadata: CdcApplyRowMetadata {
-                        mutation,
-                        event_id: row_meta.event_id.clone(),
-                        order_token: row_meta.order_token.clone(),
-                        tie: ctx.row_tie(meta_idx).map_err(std::io::Error::other)?,
-                    },
-                    values,
-                });
-            }
-
+            append_record_batch_to_cdc_apply(
+                &mut apply_batch,
+                &batch,
+                &ctx.part_meta.rows,
+                &ties,
+                row_offset,
+            )
+            .map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::from(e)
+            })?;
             row_offset += num_rows;
         }
 
@@ -900,7 +575,7 @@ impl DataSinkPostgresPlugin {
 #[async_trait::async_trait]
 impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkPostgresPlugin {
     async fn columns(&self, namespace: &str) -> std::io::Result<Vec<String>> {
-        let table_name = Self::namespace_to_table_name(namespace);
+        let table_name = dest_table_name(namespace);
         self.get_client().await?;
         let guard = self.client.lock().await;
         let client = guard.as_ref().unwrap();
@@ -933,5 +608,53 @@ impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkPostgresP
             .or_else(|_| row.try_get::<_, i64>(0).map(|value| value.to_string()))
             .map(Some)
             .map_err(|err| std::io::Error::other(format!("Postgres query cell: {err}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn postgres_insert_row_quotes_published_date_and_encodes_binary() {
+        use datafusion::arrow::array::{
+            ArrayRef, BinaryArray, Date32Array, Time32MillisecondArray,
+        };
+        use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use datafusion::arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("day", DataType::Date32, true),
+                Field::new("raw", DataType::Binary, true),
+            ])),
+            vec![
+                Arc::new(Date32Array::from(vec![Some(19_723)])) as ArrayRef,
+                Arc::new(BinaryArray::from_vec(vec![b"ab".as_slice()])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::cdc_apply::sql_values_row::<super::PostgresCdcBackend>(&batch, 0).unwrap(),
+            "('2024-01-01', decode('6162', 'hex'))"
+        );
+
+        let times = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "t",
+                DataType::Time32(TimeUnit::Millisecond),
+                true,
+            )])),
+            vec![Arc::new(Time32MillisecondArray::from(vec![Some(0)])) as ArrayRef],
+        )
+        .unwrap();
+        let err =
+            crate::cdc_apply::sql_values_row::<super::PostgresCdcBackend>(&times, 0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::cdc_apply::CdcApplyBatchError::UnsupportedArrow { .. }
+            ),
+            "{err}"
+        );
     }
 }

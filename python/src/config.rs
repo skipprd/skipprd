@@ -208,12 +208,6 @@ fn wrong_config_kind(role: &str, obj: &Bound<'_, PyAny>) -> PyErr {
     ))
 }
 
-/// A data sink config, split by whether its schema sink must share it.
-pub enum SinkConfig {
-    Paired(PluginConfigEntry),
-    Unpaired(PluginConfigEntry),
-}
-
 /// A unit string enum: constructors take the class member, not a `str`.
 macro_rules! config_enum {
     ($name:ident, $alias:literal, { $($ident:ident = $py:literal => $wire:literal),+ $(,)? }) => {
@@ -347,7 +341,6 @@ config_ref!(
     "DeadletterSinkRef",
     Registry::DeadletterSinks
 );
-config_ref!(PySchemaSinkRef, "SchemaSinkRef", Registry::SchemaSinks);
 config_ref!(PyPipelineRef, "PipelineRef");
 
 impl PyPipelineRef {
@@ -464,55 +457,10 @@ impl PyConfig {
         registry: SinkRegistry,
         name: &str,
         config: &Bound<'_, PyAny>,
-        schema_sink: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         check_entry_name(name)?;
-        let (entry, schema_name) = match extract_data_sink_config(config)? {
-            SinkConfig::Paired(entry) => {
-                let schema_name = match schema_sink {
-                    None => sink_entries(registry, &slf.borrow().inner)
-                        .and_then(|entries| entries.get(name))
-                        .and_then(|existing| existing.schema_sink.as_deref())
-                        .map(|reference| Config::parse_registry_ref(reference, Registry::SchemaSinks))
-                        .transpose()
-                        .map_err(value_err)?,
-                    Some(value) => Some(value.extract::<String>().map_err(|_| {
-                        PyTypeError::new_err(format!(
-                            "{} shares its config with its schema sink; pass schema_sink as a name, not {}",
-                            entry.plugin_name,
-                            type_name(value)
-                        ))
-                    })?),
-                };
-                if let Some(schema) = &schema_name {
-                    check_entry_name(schema)?;
-                }
-                (entry, schema_name)
-            }
-            SinkConfig::Unpaired(entry) => {
-                let schema_name = match schema_sink {
-                    None => None,
-                    Some(value) => {
-                        let schema = value.cast::<PySchemaSinkRef>().map_err(|_| {
-                            PyTypeError::new_err(format!(
-                                "schema_sink for {} must be a skippr.SchemaSinkRef, got {}",
-                                entry.plugin_name,
-                                type_name(value)
-                            ))
-                        })?;
-                        let schema = schema.get();
-                        Self::owns(slf, &schema.config, "schema_sink")?;
-                        Some(schema.name.clone())
-                    }
-                };
-                (entry, schema_name)
-            }
-        };
         let entry = DataSinkEntry {
-            config: entry,
-            schema_sink: schema_name
-                .as_ref()
-                .map(|schema| Registry::SchemaSinks.reference(schema)),
+            config: extract_data_sink_config(config)?,
         };
         let mut this = slf.borrow_mut();
         this.inner =
@@ -535,11 +483,6 @@ impl PyConfig {
             Registry::DeadletterSinks => self
                 .inner
                 .deadletter_sinks
-                .as_ref()
-                .is_some_and(|e| e.contains_key(name)),
-            Registry::SchemaSinks => self
-                .inner
-                .schema_sinks
                 .as_ref()
                 .is_some_and(|e| e.contains_key(name)),
         }
@@ -676,46 +619,25 @@ impl PyConfig {
         })
     }
 
-    #[pyo3(signature = (name, config, *, schema_sink = None))]
     fn data_sink(
         slf: &Bound<'_, Self>,
         name: String,
         config: &Bound<'_, PyAny>,
-        schema_sink: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataSinkRef> {
-        Self::register_sink(slf, SinkRegistry::Data, &name, config, schema_sink)?;
+        Self::register_sink(slf, SinkRegistry::Data, &name, config)?;
         Ok(PyDataSinkRef {
             config: slf.clone().unbind(),
             name,
         })
     }
 
-    #[pyo3(signature = (name, config, *, schema_sink = None))]
     fn deadletter_sink(
         slf: &Bound<'_, Self>,
         name: String,
         config: &Bound<'_, PyAny>,
-        schema_sink: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDeadletterSinkRef> {
-        Self::register_sink(slf, SinkRegistry::Deadletter, &name, config, schema_sink)?;
+        Self::register_sink(slf, SinkRegistry::Deadletter, &name, config)?;
         Ok(PyDeadletterSinkRef {
-            config: slf.clone().unbind(),
-            name,
-        })
-    }
-
-    fn schema_sink(
-        slf: &Bound<'_, Self>,
-        name: String,
-        config: &Bound<'_, PyAny>,
-    ) -> PyResult<PySchemaSinkRef> {
-        check_entry_name(&name)?;
-        let entry = extract_schema_sink_config(config)?;
-        slf.borrow_mut().merge(&Config {
-            schema_sinks: entries_update(&name, entry),
-            ..Config::default()
-        })?;
-        Ok(PySchemaSinkRef {
             config: slf.clone().unbind(),
             name,
         })
@@ -775,11 +697,6 @@ impl PyConfig {
         Ok(PyDeadletterSinkRef { config, name })
     }
 
-    fn get_schema_sink(slf: &Bound<'_, Self>, name: String) -> PyResult<PySchemaSinkRef> {
-        let config = Self::lookup(slf, Registry::SchemaSinks, &name)?;
-        Ok(PySchemaSinkRef { config, name })
-    }
-
     fn __repr__(&self) -> String {
         match &self.origin {
             Some(path) => format!("Config(path={:?})", path.display().to_string()),
@@ -797,7 +714,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataSourceRef>()?;
     m.add_class::<PyDataSinkRef>()?;
     m.add_class::<PyDeadletterSinkRef>()?;
-    m.add_class::<PySchemaSinkRef>()?;
     m.add_class::<PyPipelineRef>()?;
     let py = m.py();
     m.add(

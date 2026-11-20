@@ -169,7 +169,6 @@ class SkipprLakeE2eHarnessTests(unittest.TestCase):
             with self.assertRaises(harness.HarnessError):
                 harness.assert_published_file_lake_plugins(str(plugin_dir))
             (plugin_dir / "skippr-plugin-data-sink-skipprlake").write_text("", encoding="utf-8")
-            (plugin_dir / "skippr-plugin-schema-sink-skipprlake").write_text("", encoding="utf-8")
             harness.assert_published_file_lake_plugins(str(plugin_dir))
 
     def test_published_plugins_omits_local_manifest_env(self) -> None:

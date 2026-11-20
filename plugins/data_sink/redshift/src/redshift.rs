@@ -3,8 +3,6 @@ use aws_config::BehaviorVersion;
 use aws_sdk_redshiftdata::Client as RedshiftClient;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
-use datafusion::arrow::array::*;
-use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use serde_derive::Deserialize;
@@ -17,7 +15,11 @@ use once_cell::sync::Lazy;
 
 use super::parquet_util::serialize_to_parquet;
 use crate::helpers::configuration::DataSinkPluginConfig;
-use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
+use skippr_runtime_sdk::plugins::alter_ddl::{
+    dest_table_name, publish_warehouse_table, DestPublishCache, InstalledDestSchema,
+    PublishedBatchColumns, WarehouseDialect,
+};
+use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
@@ -66,19 +68,15 @@ pub struct DataSinkRedshiftPlugin {
     redshift_client: RedshiftClient,
     s3_client: Option<S3Client>,
     order_fields: Vec<String>,
+    installed: tokio::sync::RwLock<InstalledDestSchema>,
+    publish_cache: DestPublishCache,
 }
 
 skippr_runtime_sdk::declare_sink_spec!(
     RedshiftSinkSpec,
     DataSinkRedshiftPlugin,
     skippr_runtime_sdk::plugins::cdc::sink_capabilities::REDSHIFT,
-    skippr_runtime_sdk::plugins::FinalStateIdempotentApply
-);
-
-skippr_runtime_sdk::declare_schema_sink_spec!(
-    RedshiftSchemaSinkSpec,
-    DataSinkRedshiftPlugin,
-    "Redshift",
+    skippr_runtime_sdk::plugins::FinalStateIdempotentApply,
     skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
         skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Redshift
     )
@@ -107,11 +105,77 @@ impl DataSinkRedshiftPlugin {
             redshift_client,
             s3_client,
             order_fields,
+            installed: tokio::sync::RwLock::new(InstalledDestSchema::default()),
+            publish_cache: DestPublishCache::default(),
         }
     }
 
-    fn namespace_to_table_name(namespace: &str) -> String {
-        namespace.replace('.', "_").to_lowercase()
+    fn table_name(&self, namespace: &str) -> String {
+        self.config
+            .table
+            .clone()
+            .unwrap_or_else(|| dest_table_name(namespace))
+    }
+
+    fn fq_table(&self, namespace: &str) -> String {
+        let table_name = self.table_name(namespace);
+        match &self.config.schema {
+            Some(schema) => format!("\"{}\".\"{}\"", schema, table_name),
+            None => format!("\"{}\"", table_name),
+        }
+    }
+
+    async fn publish_namespace(&self, namespace: &str) -> Result<(), std::io::Error> {
+        let (version, metadata) = self.installed.read().await.get(namespace)?;
+        publish_warehouse_table(
+            &self.publish_cache,
+            self,
+            WarehouseDialect::Redshift,
+            &self.fq_table(namespace),
+            namespace,
+            version,
+            &metadata,
+        )
+        .await
+    }
+
+    async fn batch_columns(
+        &self,
+        namespace: &str,
+        batch: &datafusion::arrow::datatypes::Schema,
+    ) -> Result<PublishedBatchColumns, std::io::Error> {
+        self.installed.read().await.warehouse_batch_columns(
+            WarehouseDialect::Redshift,
+            namespace,
+            batch,
+        )
+    }
+
+    async fn sync_append(
+        &self,
+        stream: SendableRecordBatchStream,
+        filename: &str,
+    ) -> Result<(), std::io::Error> {
+        use skippr_runtime_sdk::metrics::counters;
+        let namespace = BufferChunker::decode_file_namespace(filename);
+        let col_defs = self.batch_columns(&namespace, &stream.schema()).await?;
+        let fq_table = self.fq_table(&namespace);
+        counters::inc_uploads_in_flight();
+        let result = if self.config.staging_s3_bucket.is_some() {
+            self.sync_via_s3(stream, filename, &fq_table, &col_defs)
+                .await
+        } else {
+            self.sync_via_insert(stream, &fq_table, &col_defs).await
+        };
+        match &result {
+            Ok(_) => {
+                counters::add_upload(1);
+                info!("Redshift sync complete for {}", fq_table);
+            }
+            Err(e) => error!("Redshift sync failed for {}: {}", fq_table, e),
+        }
+        counters::dec_uploads_in_flight();
+        result
     }
 
     async fn execute_statement(&self, sql: &str) -> Result<String, std::io::Error> {
@@ -215,117 +279,12 @@ impl DataSinkRedshiftPlugin {
         }
     }
 
-    fn arrow_value_to_sql(array: &dyn Array, row: usize) -> String {
-        if array.is_null(row) {
-            return "NULL".to_string();
-        }
-        match array.data_type() {
-            ArrowDataType::Boolean => {
-                let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-                if a.value(row) { "TRUE" } else { "FALSE" }.to_string()
-            }
-            ArrowDataType::Int8 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int8Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Int16 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int16Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Int32 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Int64 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt32 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt64 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Float32 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Float32Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Float64 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Utf8 => {
-                let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-                format!("'{}'", a.value(row).replace('\'', "''"))
-            }
-            ArrowDataType::LargeUtf8 => {
-                let a = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
-                format!("'{}'", a.value(row).replace('\'', "''"))
-            }
-            _ => {
-                if let Some(s) = array.as_any().downcast_ref::<StringArray>() {
-                    format!("'{}'", s.value(row).replace('\'', "''"))
-                } else {
-                    "NULL".to_string()
-                }
-            }
-        }
-    }
-
-    fn arrow_type_to_redshift(dt: &ArrowDataType) -> &'static str {
-        match dt {
-            ArrowDataType::Boolean => "BOOLEAN",
-            ArrowDataType::Int8 | ArrowDataType::Int16 => "SMALLINT",
-            ArrowDataType::Int32 | ArrowDataType::UInt8 | ArrowDataType::UInt16 => "INTEGER",
-            ArrowDataType::Int64 | ArrowDataType::UInt32 | ArrowDataType::UInt64 => "BIGINT",
-            ArrowDataType::Float16 | ArrowDataType::Float32 => "REAL",
-            ArrowDataType::Float64 => "DOUBLE PRECISION",
-            ArrowDataType::Date32 | ArrowDataType::Date64 => "DATE",
-            ArrowDataType::Timestamp(_, _) => "TIMESTAMP",
-            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => "VARCHAR(65535)",
-            _ => "VARCHAR(65535)",
-        }
-    }
-
     async fn sync_via_s3(
         &self,
         stream: SendableRecordBatchStream,
         filename: &str,
         table_name: &str,
+        col_defs: &PublishedBatchColumns,
     ) -> Result<(), std::io::Error> {
         let s3_client = self.s3_client.as_ref().unwrap();
         let bucket = self.config.staging_s3_bucket.as_deref().unwrap();
@@ -338,12 +297,8 @@ impl DataSinkRedshiftPlugin {
         let parquet_bytes = serialize_to_parquet(stream, &self.order_fields).await?;
         let row_count = parquet_bytes.num_rows as u64;
 
-        let md5_digest = md5::compute(filename.as_bytes());
-        let s3_key = format!(
-            "{}/{}.parquet",
-            prefix.trim_matches('/'),
-            hex::encode(&md5_digest.0)
-        );
+        let file_id = hex::encode(md5::compute(filename.as_bytes()).0);
+        let s3_key = format!("{}/{}.parquet", prefix.trim_matches('/'), file_id);
 
         s3_client
             .put_object()
@@ -364,12 +319,14 @@ impl DataSinkRedshiftPlugin {
                 std::io::Error::other("Redshift: iam_role_arn required for S3 COPY")
             })?;
 
-        let copy_sql = format!(
-            "COPY {} FROM 's3://{}/{}' IAM_ROLE '{}' FORMAT AS PARQUET",
-            table_name, bucket, s3_key, iam_role
+        let statements = s3_copy_statements(
+            table_name,
+            col_defs.columns(),
+            &format!("s3://{bucket}/{s3_key}"),
+            iam_role,
+            &file_id,
         );
-
-        self.execute_statement(&copy_sql).await?;
+        self.execute_transaction(statements, &file_id).await?;
         info!(
             "Redshift: COPY INTO {} complete ({} rows)",
             table_name, row_count
@@ -383,14 +340,14 @@ impl DataSinkRedshiftPlugin {
         &self,
         mut stream: SendableRecordBatchStream,
         table_name: &str,
+        col_defs: &PublishedBatchColumns,
     ) -> Result<(), std::io::Error> {
-        let arrow_schema = stream.schema();
-        let col_names: Vec<String> = arrow_schema
-            .fields()
+        let col_list = col_defs
+            .columns()
             .iter()
-            .map(|f| format!("\"{}\"", f.name().to_lowercase()))
-            .collect();
-        let col_list = col_names.join(", ");
+            .map(|(name, _)| WarehouseDialect::Redshift.quote_ident(name))
+            .collect::<Vec<_>>()
+            .join(", ");
 
         let mut total_rows = 0usize;
         while let Some(batch_result) = stream.next().await {
@@ -401,13 +358,9 @@ impl DataSinkRedshiftPlugin {
                 continue;
             }
 
-            let mut value_rows = Vec::with_capacity(num_rows);
-            for row in 0..num_rows {
-                let vals: Vec<String> = (0..batch.num_columns())
-                    .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
-                    .collect();
-                value_rows.push(format!("({})", vals.join(", ")));
-            }
+            let value_rows = (0..num_rows)
+                .map(|row| crate::cdc_apply::sql_values_row::<RedshiftCdcBackend>(&batch, row))
+                .collect::<Result<Vec<_>, _>>()?;
 
             let insert_sql = format!(
                 "INSERT INTO {} ({}) VALUES {}",
@@ -430,33 +383,6 @@ impl DataSinkRedshiftPlugin {
 }
 
 impl DataSinkRedshiftPlugin {
-    async fn ensure_table(
-        &self,
-        table_name: &str,
-        col_defs: &[(String, &str)],
-    ) -> Result<(), std::io::Error> {
-        if col_defs.is_empty() {
-            return Ok(());
-        }
-        let cols_sql: Vec<String> = col_defs
-            .iter()
-            .map(|(name, rs_type)| format!("\"{}\" {}", name, rs_type))
-            .collect();
-        let create_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {} ({})",
-            table_name,
-            cols_sql.join(", ")
-        );
-        info!("Redshift DDL: {}", create_sql);
-        if let Err(e) = self.execute_statement(&create_sql).await {
-            let msg = e.to_string();
-            if !msg.contains("already exists") {
-                return Err(e);
-            }
-        }
-        Ok(())
-    }
-
     async fn sync_cdc(
         &self,
         mut stream: SendableRecordBatchStream,
@@ -479,73 +405,16 @@ impl DataSinkRedshiftPlugin {
             Some(c) if !c.business_key_columns.is_empty() => c,
             _ => {
                 info!(target: "redshift", "CDC context without contract or business keys; falling back to append");
-                counters::inc_uploads_in_flight();
-                let namespace = BufferChunker::decode_file_namespace(&filename);
-                let table_name = self
-                    .config
-                    .table
-                    .clone()
-                    .unwrap_or_else(|| Self::namespace_to_table_name(&namespace));
-                let arrow_schema = stream.schema();
-                let col_defs: Vec<(String, &str)> = arrow_schema
-                    .fields()
-                    .iter()
-                    .map(|f| {
-                        (
-                            f.name().to_lowercase(),
-                            Self::arrow_type_to_redshift(f.data_type()),
-                        )
-                    })
-                    .collect();
-                self.ensure_table(&table_name, &col_defs)
-                    .await
-                    .map_err(|e| {
-                        counters::dec_uploads_in_flight();
-                        e
-                    })?;
-                let result = if self.config.staging_s3_bucket.is_some() {
-                    self.sync_via_s3(stream, &filename, &table_name).await
-                } else {
-                    self.sync_via_insert(stream, &table_name).await
-                };
-                match &result {
-                    Ok(_) => counters::add_upload(1),
-                    Err(e) => error!("Redshift sync failed for {}: {}", table_name, e),
-                }
-                counters::dec_uploads_in_flight();
-                return result;
+                return self.sync_append(stream, &filename).await;
             }
         };
 
-        counters::inc_uploads_in_flight();
-
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let table_name = self
-            .config
-            .table
-            .clone()
-            .unwrap_or_else(|| Self::namespace_to_table_name(&namespace));
-        let arrow_schema = stream.schema();
-
-        let col_defs: Vec<(String, &str)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_lowercase(),
-                    Self::arrow_type_to_redshift(f.data_type()),
-                )
-            })
-            .collect();
-
-        let fq_table = format!("\"{}\"", table_name);
-
-        self.ensure_table(&table_name, &col_defs)
-            .await
-            .map_err(|e| {
-                counters::dec_uploads_in_flight();
-                e
-            })?;
+        let table_name = self.table_name(&namespace);
+        let fq_table = self.fq_table(&namespace);
+        let col_defs = self.batch_columns(&namespace, &stream.schema()).await?;
+        let key_types = col_defs.key_types(&contract.business_key_columns)?;
+        counters::inc_uploads_in_flight();
 
         if CDC_DDL_ENSURED.insert(fq_table.clone()) {
             let order_col_ddl = ddl_add_order_token_column::<RedshiftCdcBackend>(&fq_table);
@@ -559,20 +428,8 @@ impl DataSinkRedshiftPlugin {
             }
 
             let tombstone_tbl = tombstone_table_name(&fq_table);
-            let bk_type_pairs: Vec<(String, String)> = contract
-                .business_key_columns
-                .iter()
-                .map(|bk| {
-                    let rs_type = col_defs
-                        .iter()
-                        .find(|(name, _)| name == bk)
-                        .map(|(_, t)| (*t).to_string())
-                        .unwrap_or_else(|| "VARCHAR(65535)".to_string());
-                    (bk.clone(), rs_type)
-                })
-                .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table::<RedshiftCdcBackend>(&tombstone_tbl, &bk_type_pairs);
+                ddl_create_tombstone_table::<RedshiftCdcBackend>(&tombstone_tbl, &key_types);
             if let Err(e) = self.execute_statement(&tombstone_ddl).await {
                 let msg = e.to_string();
                 if !msg.contains("already exists") {
@@ -590,19 +447,26 @@ impl DataSinkRedshiftPlugin {
         let mut row_offset = 0usize;
         let mut apply_batch = CdcApplyBatch {
             columns: col_defs
+                .columns()
                 .iter()
                 .map(|(name, target_type)| CdcApplyColumn {
                     name: name.clone(),
                     target_type: (*target_type).to_string(),
                 })
                 .collect(),
-            business_key_columns: contract.business_key_columns.clone(),
+            business_key_columns: key_types.iter().map(|(name, _)| name.clone()).collect(),
             rows: Vec::new(),
         };
 
+        let ties = ctx.decoded_ties().map_err(|e| {
+            counters::dec_uploads_in_flight();
+            std::io::Error::other(e)
+        })?;
         while let Some(batch_result) = stream.next().await {
-            let batch =
-                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+            let batch = batch_result.map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::other(format!("stream error: {}", e))
+            })?;
             let num_rows = batch.num_rows();
             if num_rows == 0 {
                 continue;
@@ -611,10 +475,13 @@ impl DataSinkRedshiftPlugin {
                 &mut apply_batch,
                 &batch,
                 &ctx.part_meta.rows,
-                &ctx.decoded_ties().map_err(std::io::Error::other)?,
+                &ties,
                 row_offset,
             )
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            .map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::from(e)
+            })?;
             row_offset += num_rows;
         }
 
@@ -649,8 +516,7 @@ impl DataSinkRedshiftPlugin {
                             &tombstone_table,
                             &collapsed,
                             row,
-                        )
-                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        )?;
                         self.execute_statement(&statement).await.map_err(|error| {
                             counters::dec_uploads_in_flight();
                             error
@@ -681,6 +547,37 @@ impl DataSinkRedshiftPlugin {
     }
 }
 
+/// Parquet COPY maps columns by position and needs an equal column count, so
+/// it loads a stage in batch order and inserts into the target by name.
+fn s3_copy_statements(
+    table_name: &str,
+    columns: &[(String, &'static str)],
+    s3_uri: &str,
+    iam_role: &str,
+    file_id: &str,
+) -> Vec<String> {
+    let stage = WarehouseDialect::Redshift.quote_ident(&format!("_skippr_copy_{file_id}"));
+    let defs = columns
+        .iter()
+        .map(|(name, ty)| format!("{} {ty}", WarehouseDialect::Redshift.quote_ident(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let names = columns
+        .iter()
+        .map(|(name, _)| WarehouseDialect::Redshift.quote_ident(name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![
+        format!("CREATE TEMP TABLE {stage} ({defs})"),
+        format!(
+            "COPY {stage} FROM '{}' IAM_ROLE '{}' FORMAT AS PARQUET",
+            s3_uri.replace('\'', "''"),
+            iam_role.replace('\'', "''")
+        ),
+        format!("INSERT INTO {table_name} ({names}) SELECT {names} FROM {stage}"),
+    ]
+}
+
 #[async_trait]
 impl DataSink for DataSinkRedshiftPlugin {
     async fn sync(
@@ -689,56 +586,12 @@ impl DataSink for DataSinkRedshiftPlugin {
         filename: String,
         cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
-        if let Some(ctx) = cdc_ctx {
-            return self.sync_cdc(stream, filename, ctx).await;
-        }
-        use skippr_runtime_sdk::metrics::counters;
-        counters::inc_uploads_in_flight();
-
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let table_name = self
-            .config
-            .table
-            .clone()
-            .unwrap_or_else(|| Self::namespace_to_table_name(&namespace));
-
-        let arrow_schema = stream.schema();
-        let col_defs: Vec<(String, &str)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_lowercase(),
-                    Self::arrow_type_to_redshift(f.data_type()),
-                )
-            })
-            .collect();
-
-        self.ensure_table(&table_name, &col_defs)
-            .await
-            .map_err(|e| {
-                counters::dec_uploads_in_flight();
-                e
-            })?;
-
-        let result = if self.config.staging_s3_bucket.is_some() {
-            self.sync_via_s3(stream, &filename, &table_name).await
-        } else {
-            self.sync_via_insert(stream, &table_name).await
-        };
-
-        match &result {
-            Ok(_) => {
-                counters::add_upload(1);
-                info!("Redshift sync complete for {}", table_name);
-            }
-            Err(e) => {
-                error!("Redshift sync failed for {}: {}", table_name, e);
-            }
+        self.publish_namespace(&namespace).await?;
+        match cdc_ctx {
+            Some(ctx) => self.sync_cdc(stream, filename, ctx).await,
+            None => self.sync_append(stream, &filename).await,
         }
-
-        counters::dec_uploads_in_flight();
-        result
     }
 
     async fn sync_grouped(
@@ -767,16 +620,38 @@ impl DataSink for DataSinkRedshiftPlugin {
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::REDSHIFT
     }
+
+    fn installed_dest_schema(&self) -> Option<&tokio::sync::RwLock<InstalledDestSchema>> {
+        Some(&self.installed)
+    }
+
+    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
+        skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
+            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Redshift,
+        )
+    }
+
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
+        alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
+    ) -> Result<(), std::io::Error> {
+        skippr_runtime_sdk::plugins::alter_ddl::apply_warehouse_alter(
+            self,
+            WarehouseDialect::Redshift,
+            &self.fq_table(namespace),
+            namespace,
+            alter,
+        )
+        .await
+    }
 }
 
 #[async_trait]
 impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkRedshiftPlugin {
     async fn columns(&self, namespace: &str) -> std::io::Result<Vec<String>> {
-        let table_name = self
-            .config
-            .table
-            .clone()
-            .unwrap_or_else(|| Self::namespace_to_table_name(namespace));
+        let table_name = self.table_name(namespace);
         let sql = match &self.config.schema {
             Some(schema) => format!(
                 "SELECT column_name FROM information_schema.columns WHERE table_schema = '{}' AND table_name = '{}'",
@@ -784,22 +659,30 @@ impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkRedshiftP
                 table_name.replace('\'', "''"),
             ),
             None => format!(
-                "SELECT column_name FROM information_schema.columns WHERE table_name = '{}'",
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '{}'",
                 table_name.replace('\'', "''"),
             ),
         };
         let statement_id = self.execute_statement(&sql).await?;
-        let page = self
-            .redshift_client
-            .get_statement_result()
-            .id(&statement_id)
-            .send()
-            .await
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-        page.records()
-            .iter()
-            .map(|row| redshift_row_text(row))
-            .collect::<std::io::Result<Vec<_>>>()
+        let mut names = Vec::new();
+        let mut next_token = None;
+        loop {
+            let page = self
+                .redshift_client
+                .get_statement_result()
+                .id(&statement_id)
+                .set_next_token(next_token)
+                .send()
+                .await
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+            for row in page.records() {
+                names.push(redshift_row_text(row)?);
+            }
+            match page.next_token() {
+                Some(token) if !token.is_empty() => next_token = Some(token.to_string()),
+                _ => return Ok(names),
+            }
+        }
     }
 
     async fn execute(&self, sql: &str) -> std::io::Result<()> {
@@ -836,81 +719,6 @@ fn redshift_row_text(row: &[aws_sdk_redshiftdata::types::Field]) -> std::io::Res
             std::io::ErrorKind::InvalidData,
             format!("Redshift cell is not text or long: {other:?}"),
         )),
-    }
-}
-
-#[async_trait]
-impl SchemaSink for DataSinkRedshiftPlugin {
-    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
-        skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
-            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Redshift,
-        )
-    }
-
-    async fn apply_alter(
-        &self,
-        namespace: &str,
-        _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
-        alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
-    ) -> Result<(), std::io::Error> {
-        let table_name = self
-            .config
-            .table
-            .clone()
-            .unwrap_or_else(|| Self::namespace_to_table_name(namespace));
-        let fq_table = match &self.config.schema {
-            Some(schema) => format!("\"{}\".\"{}\"", schema, table_name),
-            None => format!("\"{}\"", table_name),
-        };
-        skippr_runtime_sdk::plugins::alter_ddl::apply_warehouse_alter(
-            self,
-            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Redshift,
-            &fq_table,
-            namespace,
-            alter,
-        )
-        .await
-    }
-
-    async fn sync_schema(
-        &self,
-        namespace: &str,
-        metadata: &skippr_runtime_sdk::discover::OutputMetadata,
-    ) -> Result<(), std::io::Error> {
-        use skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow;
-
-        let fields: std::collections::HashMap<
-            String,
-            skippr_runtime_sdk::discover::OutputMetadata,
-        > = metadata
-            .child_fields()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        let arrow_schema = convert_skippr_to_arrow(Box::new(fields)).map_err(|e| {
-            std::io::Error::other(format!(
-                "Arrow schema conversion for '{}': {}",
-                namespace, e
-            ))
-        })?;
-
-        let table_name = self
-            .config
-            .table
-            .clone()
-            .unwrap_or_else(|| Self::namespace_to_table_name(namespace));
-        let col_defs: Vec<(String, &str)> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_lowercase(),
-                    Self::arrow_type_to_redshift(f.data_type()),
-                )
-            })
-            .collect();
-
-        self.ensure_table(&table_name, &col_defs).await
     }
 }
 
@@ -1008,5 +816,55 @@ mod tests {
         );
         assert!(super::redshift_row_text(&[]).is_err());
         assert!(super::redshift_row_text(&[Field::IsNull(true)]).is_err());
+    }
+
+    #[test]
+    fn redshift_insert_row_quotes_published_date_timestamp_and_binary() {
+        use datafusion::arrow::array::{
+            ArrayRef, BinaryArray, Date32Array, TimestampMicrosecondArray,
+        };
+        use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use datafusion::arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("day", DataType::Date32, true),
+                Field::new("at", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+                Field::new("raw", DataType::Binary, true),
+            ])),
+            vec![
+                Arc::new(Date32Array::from(vec![Some(19_723)])) as ArrayRef,
+                Arc::new(TimestampMicrosecondArray::from(vec![Some(0)])),
+                Arc::new(BinaryArray::from_vec(vec![b"ab".as_slice()])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::cdc_apply::sql_values_row::<super::RedshiftCdcBackend>(&batch, 0).unwrap(),
+            "('2024-01-01', '1970-01-01T00:00:00', FROM_HEX('6162'))"
+        );
+    }
+
+    #[test]
+    fn s3_copy_loads_a_batch_ordered_stage_then_inserts_by_name() {
+        let statements = super::s3_copy_statements(
+            "\"public\".\"trips\"",
+            &[
+                ("amount".to_string(), "DOUBLE PRECISION"),
+                ("id".to_string(), "BIGINT"),
+            ],
+            "s3://bucket/stage/abc.parquet",
+            "arn:aws:iam::1:role/r",
+            "abc",
+        );
+        assert_eq!(
+            statements,
+            vec![
+                "CREATE TEMP TABLE \"_skippr_copy_abc\" (\"amount\" DOUBLE PRECISION, \"id\" BIGINT)",
+                "COPY \"_skippr_copy_abc\" FROM 's3://bucket/stage/abc.parquet' IAM_ROLE 'arn:aws:iam::1:role/r' FORMAT AS PARQUET",
+                "INSERT INTO \"public\".\"trips\" (\"amount\", \"id\") SELECT \"amount\", \"id\" FROM \"_skippr_copy_abc\"",
+            ]
+        );
     }
 }

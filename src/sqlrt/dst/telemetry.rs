@@ -12,7 +12,6 @@ fn j_telemetry_payload_has_no_pipeline_name() {
         pipeline_type: "ingest".into(),
         source: clamp_catalog_stem("Postgres", PluginRole::Source),
         sink: clamp_catalog_stem("custom_lake", PluginRole::Sink),
-        schema_sink: clamp_catalog_stem("Glue", PluginRole::SchemaSink),
         flatten: 0,
         input_format: "json".into(),
         output_format: "native".into(),
@@ -34,7 +33,6 @@ fn j_telemetry_payload_has_no_pipeline_name() {
     };
     assert_eq!(payload.source, "postgres");
     assert_eq!(payload.sink, "other");
-    assert_eq!(payload.schema_sink, "glue");
     let encoded = serde_json::to_string(&payload).unwrap();
     assert!(
         !encoded.contains("pipeline_name"),

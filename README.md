@@ -226,13 +226,6 @@ data_sources:
 
 data_sinks:
   lake:
-    schema_sink: schema_sinks.lake_schema
-    SkipprLake:
-      warehouse: s3://acme-iceberg-lake/warehouse/
-      catalog_table: acme-skippr-lake-catalog
-
-schema_sinks:
-  lake_schema:
     SkipprLake:
       warehouse: s3://acme-iceberg-lake/warehouse/
       catalog_table: acme-skippr-lake-catalog
@@ -284,10 +277,6 @@ skipprd connect data-sink skippr-lake \
   --catalog-table my-iceberg-catalog \
   --region us-east-1 \
   --table-namespace bronze
-
-skipprd connect schema-sink skippr-lake \
-  --pipeline bikehire \
-  --name lake_schema
 ```
 
 #### Real-Time SQL Over Committed Iceberg + Live WAL
@@ -392,20 +381,12 @@ data_sources:
 
 data_sinks:
   lake:
-    schema_sink: schema_sinks.lake_schema
     SkipprLake:
       warehouse: s3://acme-iceberg-lake/commerce/
       catalog_table: acme-skippr-lake-catalog
       region: us-east-1
       table_namespace: replica
 
-schema_sinks:
-  lake_schema:
-    SkipprLake:
-      warehouse: s3://acme-iceberg-lake/commerce/
-      catalog_table: acme-skippr-lake-catalog
-      region: us-east-1
-      table_namespace: replica
 ```
 
 Equivalent configuration in Python:
@@ -450,7 +431,6 @@ lake = cfg.data_sink(
         region="us-east-1",
         table_namespace="replica",
     ),
-    schema_sink="lake_schema",
 )
 cfg.pipeline(
     "orders_cdc",
@@ -508,7 +488,6 @@ Progress and schemas are keyed by `(skippr.workspace, pipeline_name)`:
 ```yaml
 data_sinks:
   r2_lake:
-    schema_sink: schema_sinks.r2_lake_schema
     SkipprLake:
       warehouse: s3://acme-r2-lake/warehouse/
       catalog_table: acme-skippr-lake-catalog
@@ -521,19 +500,6 @@ data_sinks:
         secret_access_key: ${R2_SECRET_ACCESS_KEY}
         path_style: true
 
-schema_sinks:
-  r2_lake_schema:
-    SkipprLake:
-      warehouse: s3://acme-r2-lake/warehouse/
-      catalog_table: acme-skippr-lake-catalog
-      table_namespace: bronze
-      object_store:
-        type: r2
-        endpoint: ${R2_S3_ENDPOINT}
-        region: auto
-        access_key_id: ${R2_ACCESS_KEY_ID}
-        secret_access_key: ${R2_SECRET_ACCESS_KEY}
-        path_style: true
 ```
 
 #### Promoting One `skippr.yml` from Laptop to Stateless Container
@@ -570,9 +536,9 @@ Full configuration guides for every connector are in the [Connector Catalog](htt
 | **Sources** | Files & Storage | `S3`, `Sftp`, `File` |
 | **Sources** | Network & Telemetry | `Otlp` (Traces, Logs, Metrics), `HttpClient`, `HttpServer`, `Statsd`, `Socket`, `Pcap`, `Stdin` |
 | **Sources** | SaaS, Ads & Finance | `Stripe`, `ShopifyAdmin`, `HubspotCrm`, `GoogleAnalytics` (GA4), `GoogleAds`, `GoogleSearchConsole`, `GooglePageSpeed`, `BingWebmasterTools`, `AppleSearchAds`, `MetaAds`, `MetaInstagramAds`, `LinkedInAds`, `XAds`, `AdrollAds`, `XeroAccounting`, `RevolutBusiness`, `SumUp` |
-| **Destinations** | Open Iceberg *(Exactly-Once)* | `SkipprLake`, `AthenaIceberg`, `Duckdb` (paired with matching `schema_sinks`) |
+| **Destinations** | Open Iceberg *(Exactly-Once)* | `SkipprLake`, `AthenaIceberg`, `Duckdb` |
 | **Destinations** | Warehouses *(Exactly-Once)* | `Snowflake`, `Bigquery`, `Postgres`, `Redshift`, `Databricks`, `Synapse`, `Motherduck` |
-| **Destinations** | Object Storage *(Overwrite-on-Retry)* | `Athena` (with `Glue` schema sink), `S3`, `Gcs`, `AzureBlob`, `Sftp`, `File` |
+| **Destinations** | Object Storage *(Overwrite-on-Retry)* | `Athena` (Hive Glue on the data plugin), `S3`, `Gcs`, `AzureBlob`, `Sftp`, `File` |
 | **Destinations** | Other | `Clickhouse` *(At-least-once)*, `Amqp` *(At-least-once)*, `Stdout` *(Debug)* |
 
 ---
@@ -581,7 +547,7 @@ Full configuration guides for every connector are in the [Connector Catalog](htt
 
 | Command | Purpose |
 |---|---|
-| `skipprd connect <role> <kind>` | Merge a `data-source`, `data-sink`, or `schema-sink` into `skippr.yml`. |
+| `skipprd connect <role> <kind>` | Merge a `data-source` or `data-sink` into `skippr.yml`. |
 | `skipprd doctor` | Validate `skippr.yml`, connector links, and `${ENV}` variables (`--output text\|json`). |
 | `skipprd discover --pipeline <p>` | Sample source records and infer schemas without writing to destinations. |
 | `skipprd schema --pipeline <p>` | Print discovered columns and types. |

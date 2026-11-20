@@ -25,7 +25,7 @@ If the command is not found, follow [Install](/getting-started/install).
 
 | Command | Use it to |
 |---|---|
-| [`skipprd connect`](/cli/connect) | Add a source, destination, or schema sink to `skippr.yml` without hand-editing YAML. |
+| [`skipprd connect`](/cli/connect) | Add a source or destination to `skippr.yml` without hand-editing YAML. |
 | [`skipprd discover`](/cli/discover) | Read the source and infer the schema of each namespace. Never writes to the destination. |
 | [`skipprd schema`](/cli/schema) | Print the columns of Parquet files a pipeline wrote to its local data directory. |
 | [`skipprd metadata`](/cli/metadata) | Show the schema `discover` saved, or apply a reviewed schema for one namespace. |

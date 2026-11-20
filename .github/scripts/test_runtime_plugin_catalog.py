@@ -392,16 +392,16 @@ skipprd = { path = "../.." }
     def test_package_build_checksum_includes_plugin_path_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
-            plugin_dir = workspace / "plugins" / "schema_sink" / "glue"
+            plugin_dir = workspace / "plugins" / "data_sink" / "postgres"
             dependency_dir = workspace / "plugins" / "data_sink" / "athena"
             self.write_workspace_file(
                 workspace,
-                "plugins/schema_sink/glue/Cargo.toml",
-                "[package]\nname = 'skippr-plugin-schema-sink-glue'\n",
+                "plugins/data_sink/postgres/Cargo.toml",
+                "[package]\nname = 'skippr-plugin-data-sink-postgres'\n",
             )
             self.write_workspace_file(
                 workspace,
-                "plugins/schema_sink/glue/src/main.rs",
+                "plugins/data_sink/postgres/src/main.rs",
                 "fn main() {}\n",
             )
             self.write_workspace_file(
@@ -439,9 +439,9 @@ skipprd = { path = "../.." }
         )
         self.assertEqual(
             runtime_plugin_catalog.manifest_name_for_plugin(
-                "plugins/schema_sink/motherduck", "SchemaSink"
+                "plugins/data_sink/motherduck", "DataSink"
             ),
-            "motherduck-runtime-schema",
+            "motherduck-runtime-sink",
         )
 
     def test_validate_plugin_metadata_requires_source_capability_for_sources(self) -> None:
@@ -643,15 +643,17 @@ skipprd = { path = "../.." }
             connectors / "schema_sinks" / "iceberg.md",
             connectors / "outputs" / "athena_iceberg.md",
             connectors / "schema_sinks" / "athena_iceberg.md",
+            connectors / "schema_sinks" / "skipprlake.md",
+            connectors / "schema_sinks" / "athenaiceberg.md",
+            connectors / "schema_sinks" / "duckdb.md",
+            connectors / "schema_sinks" / "glue.md",
         ):
             self.assertFalse(gone.exists(), f"{gone} must be deleted")
+        self.assertFalse((connectors / "schema_sinks").exists(), "schema_sinks docs must be deleted")
         for present in (
             connectors / "outputs" / "skipprlake.md",
-            connectors / "schema_sinks" / "skipprlake.md",
             connectors / "outputs" / "athenaiceberg.md",
-            connectors / "schema_sinks" / "athenaiceberg.md",
             connectors / "outputs" / "duckdb.md",
-            connectors / "schema_sinks" / "duckdb.md",
         ):
             self.assertTrue(present.is_file(), f"{present} must exist")
         index = (connectors / "index.md").read_text(encoding="utf-8")
@@ -718,14 +720,48 @@ skipprd = { path = "../.." }
             "skippr-plugin-data-sink-file",
             "skippr-plugin-data-sink-s3",
             "skippr-plugin-data-sink-athena-iceberg",
-            "skippr-plugin-schema-sink-athena-iceberg",
             "skippr-plugin-data-sink-skipprlake",
-            "skippr-plugin-schema-sink-skipprlake",
         ):
             self.assertIn(package, names)
+        for package in (
+            "skippr-plugin-schema-sink-athena-iceberg",
+            "skippr-plugin-schema-sink-skipprlake",
+        ):
+            self.assertNotIn(package, names)
         targets = (repo / "runtime_plugins" / "targets.json").read_text(encoding="utf-8")
         self.assertIn('"runner_baseline": "skippr-darwin-arm64"', targets)
         self.assertNotIn("skippr-darwin-arm64-8", targets)
+
+    def test_workspace_runtime_protocol_version_is_28(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        self.assertEqual(
+            runtime_plugin_catalog.workspace_runtime_protocol_version(repo),
+            28,
+        )
+
+    def test_e2e_yaml_has_no_schema_sinks(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        hits = []
+        roots = [
+            repo / ".github" / "actions",
+            repo / "examples",
+            repo / "tests",
+        ]
+        for root in roots:
+            if not root.exists():
+                continue
+            for path in root.rglob("*"):
+                if path.suffix not in {".yml", ".yaml"}:
+                    continue
+                text = path.read_text(encoding="utf-8")
+                if "schema_sinks" in text or "schema_sink:" in text:
+                    hits.append(str(path.relative_to(repo)))
+        sample = repo / "skippr-sample.yml"
+        if sample.is_file():
+            text = sample.read_text(encoding="utf-8")
+            if "schema_sinks" in text or "schema_sink:" in text:
+                hits.append("skippr-sample.yml")
+        self.assertEqual(hits, [], "dest schema is the data plugin")
 
     def test_workspace_runtime_protocol_version_supports_legacy_sdk_location(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

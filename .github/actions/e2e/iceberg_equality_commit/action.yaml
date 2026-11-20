@@ -23,8 +23,7 @@ runs:
           -p skipprd \
           -p skippr-plugin-data-source-postgres \
           -p skippr-plugin-data-source-stripe \
-          -p skippr-plugin-data-sink-athena-iceberg \
-          -p skippr-plugin-schema-sink-athena-iceberg
+          -p skippr-plugin-data-sink-athena-iceberg
 
     - name: Stage local runtime manifests
       id: local_runtime

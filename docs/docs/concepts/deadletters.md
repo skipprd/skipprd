@@ -35,7 +35,7 @@ data_sinks:
       s3_bucket: my-main-bucket
       athena_results_s3_bucket: my-query-results
       s3_prefix: warehouse/events
-    schema_sink: schema_sinks.glue_analytics
+      glue_database_name: analytics
 
 deadletter_sinks:
   analytics_deadletters:
@@ -44,49 +44,13 @@ deadletter_sinks:
       s3_bucket: my-deadletter-bucket
       athena_results_s3_bucket: my-query-results
       s3_prefix: warehouse/deadletters
-    schema_sink: schema_sinks.glue_analytics_deadletters
-
-schema_sinks:
-  glue_analytics:
-    Glue:
-      s3_bucket: my-main-bucket
-      s3_prefix: warehouse/events
-      athena_workgroup_name: analytics
-      athena_results_s3_bucket: my-query-results
-      glue_database_name: analytics
-  glue_analytics_deadletters:
-    Glue:
-      s3_bucket: my-deadletter-bucket
-      s3_prefix: warehouse/deadletters
-      athena_workgroup_name: analytics
-      athena_results_s3_bucket: my-query-results
       glue_database_name: analytics_deadletters
 ```
 
 ```python [Python]
-from skippr import Config, DataSinkAthena, Pipeline, SchemaSinkGlue
+from skippr import Config, DataSinkAthena, Pipeline
 
 cfg = Config.discover()
-glue = cfg.schema_sink(
-    "glue_analytics",
-    SchemaSinkGlue(
-        s3_bucket="my-main-bucket",
-        s3_prefix="warehouse/events",
-        athena_workgroup_name="analytics",
-        athena_results_s3_bucket="my-query-results",
-        glue_database_name="analytics",
-    ),
-)
-glue_dl = cfg.schema_sink(
-    "glue_analytics_deadletters",
-    SchemaSinkGlue(
-        s3_bucket="my-deadletter-bucket",
-        s3_prefix="warehouse/deadletters",
-        athena_workgroup_name="analytics",
-        athena_results_s3_bucket="my-query-results",
-        glue_database_name="analytics_deadletters",
-    ),
-)
 warehouse = cfg.data_sink(
     "analytics",
     DataSinkAthena(
@@ -94,8 +58,8 @@ warehouse = cfg.data_sink(
         s3_bucket="my-main-bucket",
         athena_results_s3_bucket="my-query-results",
         s3_prefix="warehouse/events",
+        glue_database_name="analytics",
     ),
-    schema_sink=glue,
 )
 dl = cfg.deadletter_sink(
     "analytics_deadletters",
@@ -104,8 +68,8 @@ dl = cfg.deadletter_sink(
         s3_bucket="my-deadletter-bucket",
         athena_results_s3_bucket="my-query-results",
         s3_prefix="warehouse/deadletters",
+        glue_database_name="analytics_deadletters",
     ),
-    schema_sink=glue_dl,
 )
 cfg.pipeline(
     "bike_hire",
@@ -125,15 +89,7 @@ skipprd connect data-sink athena \
   --athena-workgroup-name analytics \
   --s3-bucket my-main-bucket \
   --athena-results-s3-bucket my-query-results \
-  --s3-prefix warehouse/events
-
-skipprd connect schema-sink glue \
-  --pipeline bike_hire \
-  --name glue_analytics \
-  --s3-bucket my-main-bucket \
   --s3-prefix warehouse/events \
-  --athena-workgroup-name analytics \
-  --athena-results-s3-bucket my-query-results \
   --glue-database-name analytics
 ```
 

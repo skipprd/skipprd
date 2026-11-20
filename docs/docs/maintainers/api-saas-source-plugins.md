@@ -6,8 +6,7 @@ This page defines the **generic** contract between:
 
 - **Source plugins** — extract from an HTTP/API (or similar) system and declare landing semantics per namespace
 - **Host (skipprd)** — persist contracts, ingest bronze data, run schema discovery
-- **Data sink plugins** — land compacted batches according to each contract’s `write_policy`
-- **Schema sink plugins** — align destination catalog/DDL with contracts and output metadata
+- **Data sink plugins** — land compacted batches according to each contract’s `write_policy`, and publish dest DDL from `OutputMetadata` on first compact
 
 Plugin-specific examples appear only under [Reference implementations](#reference-implementations).
 
@@ -26,11 +25,11 @@ See also [Runtime plugins](./runtime-plugins.md) and [Runtime Plugin Contract](.
 ## End-to-end flow
 
 ```text
-Source plugin                    Host (skipprd)                    Sinks
-─────────────                    ──────────────                    ─────
+Source plugin                    Host (skipprd)                    Data plugin
+─────────────                    ──────────────                    ───────────
 source_namespace_contracts()  →  ContractsUpdate (control)      →  METADATA.source_contracts
 sync() emits payloads         →  WAL / ingest / discover      →  sync_with_context + contract
-                                schema sync worker           →  SchemaSink.sync_schema_request
+                                published_output_metadata     →  publish on first compact
 ```
 
 **Contracts** describe *how* data is landed (append, replace by partition, etc.). **Output metadata / Arrow schema** describes *column shapes*. Both must be consistent for mutable report-style APIs.
@@ -193,7 +192,7 @@ The host invokes `sync_with_context` for compaction and WAL replay. Contract-awa
 
 Additional requirements for any sink:
 
-- [ ] Partition columns in the **write path** must match partition columns in the **catalog** (schema sink responsibility for initial create)
+- [ ] Partition columns in the **write path** must match partition columns in the **catalog** (data plugin publish on first compact)
 - [ ] Contract partition columns should be ordered consistently with catalog partition key order when both are used
 - [ ] Runtime protocol: optional `source_contract` on `SinkRunRequest` must roundtrip over bincode (no `skip_serializing_if` on contract fields)
 
@@ -220,43 +219,6 @@ Additional requirements for any sink:
 - [ ] Partition scope derivation from batch (happy + empty batch + null key + missing column)
 - [ ] Catalog partition metadata includes contract `partition_key` columns (where testable without cloud)
 - [ ] Unsupported policy returns error
-
----
-
-## Implementation checklist: schema sink plugin
-
-**Core types:** `SchemaSink`, `SchemaSyncRequest` — `src/plugins/traits.rs`.
-
-Schema sinks run as separate runtime subprocesses (`kind = "SchemaSink"`). They update destination DDL/catalog from `OutputMetadata` and must honor `source_contract` when partition semantics depend on it.
-
-### Cargo / manifest
-
-- [ ] `kind = "SchemaSink"`, `supports_schema = true`
-- [ ] Pipeline config pairs `schema_plugin` with the primary data sink for that destination family
-
-### `SchemaSink` implementation
-
-- [ ] Override `sync_schema_request` (default implementation **ignores** `source_contract`)
-- [ ] Resolve contract: `request.source_contract` → else `namespace_source_contract(namespace)`
-- [ ] Thread contract into create/update catalog logic
-
-### Catalog DDL (generic)
-
-- [ ] **Create:** column definitions from `OutputMetadata`; add **partition key columns** from `contract.partition_key` when `write_policy` is `replace_partition` (or whenever the data sink expects catalog partitions to match contract paths)
-- [ ] Partition names use contract dotted paths (e.g. `report_date`), not only pipeline `output_layout` derived names, when the data sink uses contract-driven paths
-- [ ] **Update:** if the catalog cannot change partition keys in place, document that new namespaces require correct initial create; updates may only change data columns
-- [ ] Partition column types: map from `OutputMetadata` where possible; sensible default otherwise
-
-### Host integration
-
-- [ ] Schema sync worker supplies `SchemaSyncRequest.source_contract` from `METADATA`
-- [ ] `RuntimeSchemaSinkPlugin` passes `SchemaRunRequest.source_contract` to the child process
-- [ ] Protocol tests: `SchemaRunRequest` and `SinkRunRequest` roundtrip with optional contract
-
-### Tests (schema sink)
-
-- [ ] Unit tests for “contract partition keys → catalog partition definition” (in schema crate or shared helper with data sink)
-- [ ] Protocol roundtrips in `skipprd` (not plugin-specific)
 
 ---
 
@@ -435,9 +397,8 @@ Use these for end-to-end examples only; new connectors should follow the generic
 | Source | `plugins/data_source/meta_instagram_ads/` | **Five** Instagram-scoped Marketing API insights namespaces; discover auto-samples 3 days × `account_daily`; `replace_partition` on `date`; fixtures via `SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR`. See [Meta Instagram Ads plugin](./meta-instagram-ads-plugin.md). |
 | Source | `plugins/data_source/bing_webmaster_tools/` | Bing Webmaster read APIs (`GetQueryStats`, `GetRankAndTrafficStats`, `GetPageStats`, `GetCrawlStats`); client-side date filtering; `replace_partition` on `date`; fixtures via `SKIPPR_BING_WEBMASTER_TOOLS_FIXTURE_DIR`. See [Bing Webmaster Tools plugin](./bing-webmaster-tools-plugin.md). |
 | Source | `plugins/data_source/google_search_console/` | GSC Search Analytics daily grains; same mutable-report pattern as Bing. See [Google Search Console plugin](./google-search-console-plugin.md). |
-| Data sink | `plugins/data_sink/athena/` | S3 + Glue; contract-driven partition delete; rejects `merge_by_key` |
+| Data sink | `plugins/data_sink/athena/` | S3 + Glue; publishes Hive tables on first compact; contract-driven partition delete; rejects `merge_by_key` |
 | Data sink | `plugins/data_sink/skipprlake/` | Native merge / replace partition / replace table |
-| Schema sink | `plugins/schema_sink/glue/` | Glue DDL; merges `partition_key` into table on create (shared Athena helpers) |
 
 ---
 
@@ -448,5 +409,5 @@ Use these for end-to-end examples only; new connectors should follow the generic
 - Sources do not define output schemas; discover after sample data exists
 - Mutable HTTP report APIs: prefer `replace_partition` + `refresh_window` over append
 - `merge_by_key` only when the API is true entity state **and** the sink manifest supports it
-- Ship **source + data sink + schema sink** contract wiring together; partial integration fails at runtime or leaves catalog paths inconsistent with writes
+- Ship **source + data sink** contract wiring together; dest DDL is the data plugin on first compact
 - Implement **discover auto-sampling** and **rate-limit pacing** for every new report API connector — see [Lessons learned](#lessons-learned-operations--design)

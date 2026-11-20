@@ -7,9 +7,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub(crate) const MAX_RUNTIME_FRAME_BYTES: usize = 256 * 1024 * 1024;
 const CLEAN_RUNTIME_EOF: &str = "runtime channel closed before next frame";
-/// HostFrame::PrepareSink is variant 6. A 6-byte payload whose first u32 is a
+/// HostFrame::PrepareSink is variant 5. A 5-byte payload whose first u32 is a
 /// request_id means the plugin treated that tag as the next length prefix.
-const PREPARE_SINK_VARIANT_TAG: u32 = 6;
+const PREPARE_SINK_VARIANT_TAG: u32 = 5;
 
 pub(crate) fn looks_like_omitted_prepare_sink_length_prefix(bytes: &[u8]) -> bool {
     // PluginFrame::Installed is a 4-byte unit variant (`[01,00,00,00]`). Warning
@@ -232,15 +232,15 @@ mod tests {
     }
 
     #[test]
-    fn omitted_prepare_sink_length_warns_on_six_byte_eu_staging_payload() {
-        let eu = [0x1f, 0x00, 0x00, 0x00, 0x00, 0x00];
+    fn omitted_prepare_sink_length_warns_on_five_byte_eu_staging_payload() {
+        let eu = [0x1f, 0x00, 0x00, 0x00, 0x00];
         assert!(looks_like_omitted_prepare_sink_length_prefix(&eu));
         let logged = capture_warns(|| {
             let _ = decode_payload::<HostFrame>(&eu);
         });
         assert!(
             logged.contains("short frame")
-                && logged.contains("payload_len=6")
+                && logged.contains("payload_len=5")
                 && logged.contains("1f"),
             "{logged}"
         );

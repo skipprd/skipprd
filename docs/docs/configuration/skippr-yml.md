@@ -141,7 +141,6 @@ YAML, TOML, and JSON files share the same structure. If none is found, Skipprd s
 | `data_sources` | Yes | Source connectors, keyed by a name you choose. See [Sources](/configuration/input). |
 | `data_sinks` | No | Destination connectors that receive synced records. See [Destinations](/configuration/output). |
 | `deadletter_sinks` | No | Destinations for records that fail to transform or load. See [Deadletters](/concepts/deadletters). |
-| `schema_sinks` | No | Catalogs that receive table definitions, such as AWS Glue for Athena. |
 | `dbt`, `vector_sources` | No | Read by Skippr Data Engineer. Skipprd accepts and ignores them. |
 
 Skipprd rejects any other root key, and any unknown key inside these sections, with `Invalid Skippr configuration in '<file>': unknown field ...`. That catches typos before a run starts.
@@ -166,23 +165,22 @@ In Python, `Config().storage(LocalStorage())` writes `skipprd_el_storage_mode: l
 
 ## Connector entries
 
-Every entry under `data_sources`, `data_sinks`, `deadletter_sinks`, and `schema_sinks` has the same shape: a logical name, then exactly one connector type, then that connector's fields.
+Every entry under `data_sources`, `data_sinks`, and `deadletter_sinks` has the same shape: a logical name, then exactly one connector type, then that connector's fields.
 
 ```yaml
 data_sinks:
   lake:                          # logical name
-    schema_sink: schema_sinks.glue   # data and deadletter sinks only: link a catalog
     Athena:                      # connector type
       s3_bucket: my-lake
       s3_prefix: bronze/events
+      glue_database_name: my_database
       athena_workgroup_name: primary
       athena_results_s3_bucket: my-athena-results
-    # glue_database_name lives on schema_sinks.glue, not here
 ```
 
 - Write the connector type with the casing shown on its page (`Postgres`, `S3`, `Snowflake`, `AthenaIceberg`).
 - Each connector page lists its fields, types, and defaults. Start at the [connector catalog](/connectors/).
-- `schema_sink` sits beside the connector type, not inside it.
+- A leftover `schema_sinks` section or `schema_sink` on a data sink is a load error. Dest schema is the data plugin.
 
 ## Logical names and references
 
@@ -195,7 +193,6 @@ Pipelines and data sinks refer to entries as `<section>.<name>`:
 | `pipelines.<name>.data_source` | `data_sources.<name>` |
 | `pipelines.<name>.data_sink` | `data_sinks.<name>` |
 | `pipelines.<name>.deadletter_sink` | `deadletter_sinks.<name>` |
-| `<sink>.schema_sink` | `schema_sinks.<name>` |
 
 An entry name cannot contain a dot. A reference to an entry that does not exist stops the run with `... references '<ref>', but '<name>' is not defined.`
 

@@ -10,8 +10,7 @@ use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
 use skippr_core::helpers::logging::init_logging;
 use skippr_core::plugins::{
-    DataSink, HasSchemaSinkSpec, HasSinkSpec, RecordBatchChunk, SchemaSink, SchemaSyncRequest,
-    SinkCallResult, SinkPreflightOutcome, SinkWriteOutcome,
+    DataSink, HasSinkSpec, RecordBatchChunk, SinkCallResult, SinkPreflightOutcome, SinkWriteOutcome,
 };
 #[cfg(test)]
 use tokio::io::AsyncRead;
@@ -24,12 +23,11 @@ use crate::protocol::FinishSink;
 use crate::protocol::{
     CommitReceipt, CommitReceiptAuthority, HandshakeResponse, HostDataFrame, HostFrame,
     PluginFrame, PrepareAck, PrepareSink, PrepareSinkResult, RuntimeBinding, RuntimePluginKind,
-    RuntimeRequestAck, RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest,
-    RuntimeSchemaState, RuntimeSchemaStateInstallRequest, RuntimeSessionHello,
-    RuntimeSinkCapabilityDescriptor, RuntimeSinkError, RuntimeSinkInstallRequest,
-    RuntimeSinkPayloadMode, SchemaDelta, SchemaRunRequest, SinkAck, SinkChunk, SinkRunRequest,
-    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
-    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimeRequestAck, RuntimeSchemaRefreshRequest, RuntimeSchemaState,
+    RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkCapabilityDescriptor,
+    RuntimeSinkError, RuntimeSinkInstallRequest, RuntimeSinkPayloadMode, SchemaDelta, SinkAck,
+    SinkChunk, SinkRunRequest, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
+    SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::sdk::decode_record_batch_stream;
 use crate::sink_idempotency::ObjectWriteManifest;
@@ -720,7 +718,7 @@ where
             source_capability: None,
             sink_capability: Some(spec_descriptor),
             supports_schema,
-            alter_support: skippr_core::plugins::AlterSupport::Unsupported,
+            alter_support: <P::Spec as skippr_core::plugins::SinkSpec>::ALTER_SUPPORT,
         }))
         .await
         .map_err(|err| with_io_context(err, "runtime sink handshake ack write failed"))?;
@@ -928,6 +926,29 @@ where
                             .await;
                     }
                 });
+            }
+            HostFrame::ApplyAlter(request) => {
+                let _global = Arc::clone(&apply_fences.global).write_owned().await;
+                let _namespace = apply_fences
+                    .namespace(&request.namespace)
+                    .write_owned()
+                    .await;
+                let plugin = primary_plugin
+                    .as_ref()
+                    .or(deadletter_plugin.as_ref())
+                    .ok_or_else(|| io::Error::other("data sink is not installed"))?;
+                plugin
+                    .apply_alter(&request.namespace, &request.metadata, &request.alter)
+                    .await
+                    .map_err(|err| with_io_context(err, "runtime sink apply alter failed"))?;
+                control_writer
+                    .write(&PluginFrame::SchemaAck(RuntimeRequestAck {
+                        request_id: request.request_id,
+                    }))
+                    .await
+                    .map_err(|err| {
+                        with_io_context(err, "runtime sink apply alter ack write failed")
+                    })?;
             }
             HostFrame::Shutdown => {
                 data_demux.abort();
@@ -1504,319 +1525,6 @@ fn write_local_idempotency_manifest(manifest: &ObjectWriteManifest) -> io::Resul
     Ok(())
 }
 
-pub async fn run_runtime_schema_sink_plugin<P, F, Fut>(
-    expect_plugin_name: &'static str,
-    handshake_display_name: &'static str,
-    bin_name: &'static str,
-    mut build: F,
-) -> io::Result<()>
-where
-    P: SchemaSink + HasSchemaSinkSpec + Send + Sync,
-    F: FnMut(RuntimeSchemaInstallRequest) -> Fut,
-    Fut: Future<Output = io::Result<P>>,
-{
-    let log_level =
-        std::env::var("SKIPPR_RUNTIME_LOG_LEVEL").unwrap_or_else(|_| "warn".to_string());
-    init_logging(Some(log_level));
-
-    let control_stream = connect_runtime_channel(SKIPPR_RUNTIME_CONTROL_ADDR_ENV).await?;
-    let data_stream = connect_runtime_channel(SKIPPR_RUNTIME_DATA_ADDR_ENV).await?;
-    let (mut control_reader, control_writer_raw) = control_stream.into_split();
-    let (_data_reader, _data_writer) = data_stream.into_split();
-    let control_writer = ControlWriter::new(control_writer_raw);
-
-    let Some(handshake_frame) = read_frame_or_eof::<_, HostFrame>(&mut control_reader).await?
-    else {
-        return Ok(());
-    };
-    let handshake = match handshake_frame {
-        HostFrame::Handshake(handshake) => handshake,
-        other => {
-            control_writer
-                .write(&PluginFrame::Error(format!(
-                    "expected handshake as first frame, got {:?}",
-                    other
-                )))
-                .await?;
-            return Err(io::Error::other(format!(
-                "{}: runtime schema sink did not receive a handshake",
-                bin_name
-            )));
-        }
-    };
-
-    if handshake.protocol_version != RUNTIME_PROTOCOL_VERSION {
-        control_writer
-            .write(&PluginFrame::Error(format!(
-                "protocol version mismatch: host={} child={}",
-                handshake.protocol_version, RUNTIME_PROTOCOL_VERSION
-            )))
-            .await?;
-        return Err(io::Error::other("runtime protocol version mismatch"));
-    }
-    if <P::Spec as skippr_core::plugins::SchemaSinkSpec>::NAME != handshake_display_name {
-        return Err(io::Error::other(format!(
-            "{}: runtime schema sink display name '{}' does not match SchemaSinkSpec '{}'",
-            bin_name,
-            handshake_display_name,
-            <P::Spec as skippr_core::plugins::SchemaSinkSpec>::NAME
-        )));
-    }
-
-    control_writer
-        .write(&PluginFrame::HandshakeAck(HandshakeResponse {
-            protocol_version: RUNTIME_PROTOCOL_VERSION,
-            kind: RuntimePluginKind::SchemaSink,
-            plugin_name: handshake_display_name.to_string(),
-            source_capability: None,
-            sink_capability: None,
-            supports_schema: true,
-            alter_support: <P::Spec as skippr_core::plugins::SchemaSinkSpec>::ALTER_SUPPORT,
-        }))
-        .await?;
-
-    let mut primary_plugin: Option<P> = None;
-    let mut deadletter_plugin: Option<P> = None;
-    let mut schema_state: Option<RuntimeSchemaState> = None;
-    let mut schema_namespace_versions = BTreeMap::new();
-
-    loop {
-        let Some(frame) = read_frame_or_eof::<_, HostFrame>(&mut control_reader).await? else {
-            return Ok(());
-        };
-        match frame {
-            HostFrame::InstallSchema(request) => {
-                install_schema_sink(
-                    expect_plugin_name,
-                    request,
-                    &mut primary_plugin,
-                    &mut deadletter_plugin,
-                    schema_state.as_ref(),
-                    &mut build,
-                )
-                .await?;
-                control_writer.write(&PluginFrame::Installed).await?;
-            }
-            HostFrame::InstallSchemaState(request) => {
-                apply_schema_state_to_schema_sinks(
-                    &request,
-                    &mut primary_plugin,
-                    &mut deadletter_plugin,
-                    &mut schema_state,
-                    &mut schema_namespace_versions,
-                )
-                .await?;
-                control_writer.write(&PluginFrame::Installed).await?;
-            }
-            HostFrame::InstallSchemaDelta(delta) => {
-                apply_schema_delta_to_schema_sinks(
-                    &delta,
-                    &mut primary_plugin,
-                    &mut deadletter_plugin,
-                    &mut schema_state,
-                    &mut schema_namespace_versions,
-                )
-                .await?;
-                control_writer.write(&PluginFrame::Installed).await?;
-            }
-            HostFrame::RunSchema(request) => {
-                if schema_refresh_needed(
-                    &schema_state,
-                    &schema_namespace_versions,
-                    &request.namespace,
-                    request.required_schema_version,
-                ) {
-                    write_schema_refresh_required(
-                        &control_writer,
-                        request.request_id,
-                        &request.namespace,
-                        request.required_schema_version,
-                        installed_schema_version(
-                            &schema_state,
-                            &schema_namespace_versions,
-                            &request.namespace,
-                        ),
-                    )
-                    .await?;
-                    continue;
-                }
-                run_schema_request(
-                    request.clone(),
-                    &schema_state,
-                    &primary_plugin,
-                    &deadletter_plugin,
-                )
-                .await?;
-                control_writer
-                    .write(&PluginFrame::SchemaAck(RuntimeRequestAck {
-                        request_id: request.request_id,
-                    }))
-                    .await?;
-            }
-            HostFrame::ApplyAlter(request) => {
-                let plugin = primary_plugin
-                    .as_ref()
-                    .or(deadletter_plugin.as_ref())
-                    .ok_or_else(|| io::Error::other("schema sink is not installed"))?;
-                plugin
-                    .apply_alter(&request.namespace, &request.metadata, &request.alter)
-                    .await?;
-                control_writer
-                    .write(&PluginFrame::SchemaAck(RuntimeRequestAck {
-                        request_id: request.request_id,
-                    }))
-                    .await?;
-            }
-            HostFrame::Shutdown => return Ok(()),
-            other => {
-                control_writer
-                    .write(&PluginFrame::Error(format!(
-                        "unexpected schema frame after handshake: {:?}",
-                        other
-                    )))
-                    .await?;
-                return Err(io::Error::other("unexpected schema frame"));
-            }
-        }
-    }
-}
-
-async fn install_schema_sink<P, F, Fut>(
-    expect_plugin_name: &'static str,
-    request: RuntimeSchemaInstallRequest,
-    primary_plugin: &mut Option<P>,
-    deadletter_plugin: &mut Option<P>,
-    schema_state: Option<&RuntimeSchemaState>,
-    build: &mut F,
-) -> io::Result<()>
-where
-    P: SchemaSink + HasSchemaSinkSpec + Send + Sync,
-    F: FnMut(RuntimeSchemaInstallRequest) -> Fut,
-    Fut: Future<Output = io::Result<P>>,
-{
-    request
-        .config
-        .0
-        .expect_plugin(expect_plugin_name)
-        .map_err(io::Error::other)?;
-    let plugin_slot = match request.binding {
-        RuntimeBinding::Primary => primary_plugin,
-        RuntimeBinding::Deadletter => deadletter_plugin,
-    };
-    let plugin = build(request).await?;
-    if let Some(schema_state) = schema_state {
-        plugin
-            .install_schema_state(schema_state.version, &schema_state.namespaces)
-            .await?;
-    }
-    *plugin_slot = Some(plugin);
-    Ok(())
-}
-
-async fn apply_schema_state_to_schema_sinks<P>(
-    request: &RuntimeSchemaStateInstallRequest,
-    primary_plugin: &mut Option<P>,
-    deadletter_plugin: &mut Option<P>,
-    schema_state: &mut Option<RuntimeSchemaState>,
-    schema_namespace_versions: &mut BTreeMap<String, u64>,
-) -> io::Result<()>
-where
-    P: SchemaSink + HasSchemaSinkSpec + Send + Sync,
-{
-    if let Some(plugin) = primary_plugin.as_ref() {
-        plugin
-            .install_schema_state(
-                request.schema_state.version,
-                &request.schema_state.namespaces,
-            )
-            .await?;
-    }
-    if let Some(plugin) = deadletter_plugin.as_ref() {
-        plugin
-            .install_schema_state(
-                request.schema_state.version,
-                &request.schema_state.namespaces,
-            )
-            .await?;
-    }
-    *schema_namespace_versions = request.schema_state.namespace_versions.clone();
-    *schema_state = Some(request.schema_state.clone());
-    Ok(())
-}
-
-async fn apply_schema_delta_to_schema_sinks<P>(
-    delta: &SchemaDelta,
-    primary_plugin: &mut Option<P>,
-    deadletter_plugin: &mut Option<P>,
-    schema_state: &mut Option<RuntimeSchemaState>,
-    schema_namespace_versions: &mut BTreeMap<String, u64>,
-) -> io::Result<()>
-where
-    P: SchemaSink + HasSchemaSinkSpec + Send + Sync,
-{
-    let state = schema_state.as_mut().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "runtime schema sink received SchemaDelta before initial SchemaState",
-        )
-    })?;
-    for (namespace, entry) in &delta.namespaces {
-        if schema_namespace_versions
-            .get(namespace)
-            .is_some_and(|installed| *installed >= entry.version)
-        {
-            continue;
-        }
-        state
-            .namespaces
-            .insert(namespace.clone(), entry.metadata.clone());
-        state
-            .namespace_versions
-            .insert(namespace.clone(), entry.version);
-        schema_namespace_versions.insert(namespace.clone(), entry.version);
-    }
-    state.version = state.version.max(delta.version);
-    let _ = (primary_plugin, deadletter_plugin);
-    Ok(())
-}
-
-async fn run_schema_request<P>(
-    request: SchemaRunRequest,
-    schema_state: &Option<RuntimeSchemaState>,
-    primary_plugin: &Option<P>,
-    deadletter_plugin: &Option<P>,
-) -> io::Result<()>
-where
-    P: SchemaSink + HasSchemaSinkSpec + Send + Sync,
-{
-    let plugin_slot = match request.binding {
-        RuntimeBinding::Primary => primary_plugin,
-        RuntimeBinding::Deadletter => deadletter_plugin,
-    };
-    let plugin = plugin_slot
-        .as_ref()
-        .ok_or_else(|| io::Error::other("runtime schema binding was not installed"))?;
-    let metadata = schema_state
-        .as_ref()
-        .and_then(|state| state.namespaces.get(&request.namespace))
-        .ok_or_else(|| {
-            io::Error::other(format!(
-                "runtime schema state does not contain namespace '{}'",
-                request.namespace
-            ))
-        })?;
-    plugin
-        .sync_schema_request(
-            SchemaSyncRequest {
-                namespace: &request.namespace,
-                compaction_id: &request.compaction_id,
-                source_contract: request.source_contract.as_ref(),
-            },
-            metadata,
-        )
-        .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2121,5 +1829,16 @@ mod tests {
         } else {
             std::env::remove_var("DATA_DIR");
         }
+    }
+
+    #[tokio::test]
+    async fn apply_alter_and_prepare_sink_do_not_run_together_on_one_namespace_fence() {
+        let fences = SchemaApplyFences::default();
+        let namespace = fences.namespace("orders");
+        let _write = namespace.clone().write_owned().await;
+        assert!(
+            namespace.try_read().is_err(),
+            "PrepareSink must not share a namespace with ApplyAlter"
+        );
     }
 }

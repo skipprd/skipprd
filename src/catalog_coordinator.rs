@@ -155,6 +155,7 @@ impl GlueExecutor for AwsGlueExecutor {
         })?;
         let to_column = |column: &Column| {
             GlueColumnIntent::from_glue_fields(column.name(), column.r#type(), column.comment())
+                .map_err(|err| GlueApiError::new(GlueApiErrorKind::Terminal, err))
         };
         Ok(GlueTableLayout {
             partition_columns: table
@@ -163,14 +164,14 @@ impl GlueExecutor for AwsGlueExecutor {
                 .unwrap_or_default()
                 .iter()
                 .map(to_column)
-                .collect(),
+                .collect::<Result<Vec<_>, _>>()?,
             storage_columns: table
                 .storage_descriptor()
                 .and_then(|descriptor| descriptor.columns.as_deref())
                 .unwrap_or_default()
                 .iter()
                 .map(to_column)
-                .collect(),
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 
@@ -455,8 +456,35 @@ impl CatalogCoordinator {
                 .await?;
                 continue;
             }
-            let mut intent = intent;
-            intent.payload.storage_columns = live_layout.storage_columns.clone();
+            if !same_column_layout(
+                &live_layout.storage_columns,
+                &intent.payload.storage_columns,
+            ) {
+                tracing::warn!(
+                    database = %target.database,
+                    table = %target.table,
+                    schema_namespace = %intent.payload.schema_namespace,
+                    schema_version = intent.payload.schema_version,
+                    actual_storage_columns = ?live_layout.storage_columns,
+                    expected_storage_columns = ?intent.payload.storage_columns,
+                    "Glue table storage layout is not ready for catalog intent; retrying"
+                );
+                self.record_glue_failure(
+                    &intent.pending,
+                    &GlueApiError::new(
+                        GlueApiErrorKind::Transient,
+                        format!(
+                            "Glue table storage layout mismatch for '{}.{}': actual={:?} expected={:?}",
+                            target.database,
+                            target.table,
+                            live_layout.storage_columns,
+                            intent.payload.storage_columns
+                        ),
+                    ),
+                )
+                .await?;
+                continue;
+            }
             valid.push(intent);
         }
         let executor = Arc::clone(&self.executor);
@@ -976,7 +1004,7 @@ mod tests {
     }
 
     fn column(name: &str, r#type: &str) -> GlueColumnIntent {
-        GlueColumnIntent::from_glue_fields(name, Some(r#type), None)
+        GlueColumnIntent::from_glue_fields(name, Some(r#type), None).unwrap()
     }
 
     fn expected_layout(storage_type: &str) -> GlueTableLayout {
@@ -1260,7 +1288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_column_mismatch_uses_live_table_layout_and_creates() {
+    async fn storage_column_mismatch_is_retryable() {
         let temp = tempfile::tempdir().unwrap();
         let executor = Arc::new(MockGlueExecutor::default());
         executor.state.lock().unwrap().layout = Some(Ok(expected_layout("string")));
@@ -1271,10 +1299,15 @@ mod tests {
 
         coordinator.drain_once().await.unwrap();
 
-        assert!(coordinator.outbox.scan_pending(1).unwrap().is_empty());
-        let created = executor.state.lock().unwrap().created.clone();
-        assert_eq!(created.len(), 1);
-        assert_eq!(created[0].storage_columns, vec![column("id", "string")]);
+        let pending = coordinator.outbox.scan_pending(1).unwrap().remove(0);
+        assert!(!pending.terminal);
+        assert!(pending.next_attempt_at_ms > now_ms());
+        assert!(pending
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("storage layout mismatch"));
+        assert!(executor.state.lock().unwrap().created.is_empty());
     }
 
     #[tokio::test]
@@ -1373,8 +1406,15 @@ mod tests {
         coordinator.drain_once().await.unwrap();
 
         let created = executor.state.lock().unwrap().created.clone();
-        assert_eq!(created.len(), 2);
-        assert_eq!(created[1].storage_columns, vec![column("id", "string")]);
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].storage_columns, vec![column("id", "bigint")]);
+        let pending = coordinator.outbox.scan_pending(1).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("storage layout mismatch"));
         assert_eq!(executor.state.lock().unwrap().layout_calls, 2);
     }
 

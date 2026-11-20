@@ -40,7 +40,7 @@ pub struct MetadataApplyArgs {
     /// Inline schema JSON (same shape as `--schema` file).
     #[arg(long = "schema-json")]
     pub schema_json: Option<String>,
-    /// Mark schema as evolved so schema sinks are synced (default: true).
+    /// Mark schema as evolved so the next compact publishes dest columns (default: true).
     #[arg(long, default_value_t = true)]
     pub evolved: bool,
     /// Output mode: json or text.

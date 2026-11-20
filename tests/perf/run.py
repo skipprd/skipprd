@@ -370,12 +370,6 @@ def write_skippr_yml(
         sink_block = f"""    Duckdb:
       warehouse: {uri}
       table_namespace: bronze
-    schema_sink: schema_sinks.local
-schema_sinks:
-  local:
-    Duckdb:
-      warehouse: {uri}
-      table_namespace: bronze
 """
     elif sink == "skipprlake":
         uri = f"file://{warehouse}"
@@ -386,30 +380,9 @@ schema_sinks:
       table_namespace: bronze
       object_store:
         type: file
-    schema_sink: schema_sinks.local
-schema_sinks:
-  local:
-    SkipprLake:
-      warehouse: {uri}
-      catalog_table: {STORE_TABLE}
-      region: us-east-1
-      table_namespace: bronze
-      object_store:
-        type: file
 """
     elif sink == "postgres":
         sink_block = f"""    Postgres:
-      host: 127.0.0.1
-      port: {PG_APPEND_PORT}
-      user: postgres
-      password: postgres
-      database: skippr_sink
-      schema: public
-      sslmode: disable
-    schema_sink: schema_sinks.local
-schema_sinks:
-  local:
-    Postgres:
       host: 127.0.0.1
       port: {PG_APPEND_PORT}
       user: postgres

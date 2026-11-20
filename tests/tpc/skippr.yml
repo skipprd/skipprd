@@ -1,24 +1,22 @@
 skippr:
   workspace: tpc
   skipprd_el_storage_mode: local
-
 pipelines:
   lineitem:
-    auto_approve: yes
+    auto_approve: true
     env: test
     data_source: data_sources.lineitem
     data_sink: data_sinks.local
   orders:
-    auto_approve: yes
+    auto_approve: true
     env: test
     data_source: data_sources.orders
     data_sink: data_sinks.local
   customer:
-    auto_approve: yes
+    auto_approve: true
     env: test
     data_source: data_sources.customer
     data_sink: data_sinks.local
-
 data_sources:
   lineitem:
     File:
@@ -32,15 +30,7 @@ data_sources:
     File:
       path: SOURCE_CUSTOMER
       format: parquet
-
 data_sinks:
-  local:
-    Duckdb:
-      warehouse: WAREHOUSE_URI
-      table_namespace: bronze
-    schema_sink: schema_sinks.local
-
-schema_sinks:
   local:
     Duckdb:
       warehouse: WAREHOUSE_URI

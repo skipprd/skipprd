@@ -6,7 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-const BUDGET_RETUNE_INTERVAL: Duration = Duration::from_secs(10);
+pub(crate) const BUDGET_RETUNE_INTERVAL: Duration = Duration::from_secs(10);
 const BUDGET_RETUNE_WAVES: usize = 4;
 
 pub(crate) enum CompactorCommand {
@@ -83,12 +83,20 @@ impl Drop for ScheduledCompactionMetricGuard {
     }
 }
 
-pub(crate) async fn drive_work_conserving<W, P, E>(
+enum SchedulerStep {
+    Finished(Option<(CompactionLaneKey, bool)>),
+    Retune,
+    Idle,
+}
+
+pub(crate) async fn drive_work_conserving<W, P, E, R>(
     concurrency: usize,
     initial_force: bool,
     mut planner: P,
     mut execute: E,
     mut control: Option<&mut CompactionCycleControl<'_>>,
+    retune_interval: Duration,
+    mut retune: R,
 ) -> bool
 where
     W: SchedulableCompactionWork + Send + 'static,
@@ -99,12 +107,13 @@ where
         &HashSet<CompactionLaneKey>,
     ) -> CompactionPlanBatch<W>,
     E: FnMut(W) -> Pin<Box<dyn Future<Output = bool> + Send>>,
+    R: FnMut() -> usize,
 {
-    let concurrency = concurrency.max(1);
-    let cycle_started = Instant::now();
-    let max_completions_before_retune = concurrency.saturating_mul(BUDGET_RETUNE_WAVES).max(1);
+    let mut concurrency = concurrency.max(1);
+    let mut cycle_started = Instant::now();
+    let mut max_completions_before_retune = concurrency.saturating_mul(BUDGET_RETUNE_WAVES).max(1);
     let mut completions = 0usize;
-    let mut retune_requested = false;
+    let mut retune_deadline = tokio::time::Instant::now() + retune_interval;
     let mut made_progress = false;
     let mut active_by_lane = HashMap::<CompactionLaneKey, usize>::new();
     let mut blocked_lanes = HashSet::<CompactionLaneKey>::new();
@@ -116,12 +125,25 @@ where
         control.drain_pending_commands();
     }
 
+    let swap_budget = |concurrency: &mut usize,
+                       completions: &mut usize,
+                       cycle_started: &mut Instant,
+                       max_completions_before_retune: &mut usize,
+                       retune_deadline: &mut tokio::time::Instant,
+                       retune: &mut R| {
+        *concurrency = retune().max(1);
+        *completions = 0;
+        *cycle_started = Instant::now();
+        *max_completions_before_retune = concurrency.saturating_mul(BUDGET_RETUNE_WAVES).max(1);
+        *retune_deadline = tokio::time::Instant::now() + retune_interval;
+    };
+
     loop {
         let stopping = control
             .as_deref()
             .map(CompactionCycleControl::stopping)
             .unwrap_or(false);
-        if !stopping && !retune_requested {
+        if !stopping {
             loop {
                 let slots = concurrency.saturating_sub(in_flight.len());
                 if slots == 0 {
@@ -157,54 +179,69 @@ where
             break;
         }
 
-        let completed = if control
-            .as_deref()
-            .map(CompactionCycleControl::stopping)
-            .unwrap_or(false)
-        {
-            Some(in_flight.next().await)
+        let step = if stopping {
+            SchedulerStep::Finished(in_flight.next().await)
         } else if let Some(control) = control.as_deref_mut() {
             tokio::select! {
-                result = in_flight.next() => Some(result),
+                result = in_flight.next() => SchedulerStep::Finished(result),
                 command = control.rx.recv() => {
                     control.handle_command(command);
-                    None
+                    SchedulerStep::Idle
                 }
+                _ = tokio::time::sleep_until(retune_deadline), if !stopping => SchedulerStep::Retune,
             }
         } else {
-            Some(in_flight.next().await)
+            tokio::select! {
+                result = in_flight.next() => SchedulerStep::Finished(result),
+                _ = tokio::time::sleep_until(retune_deadline) => SchedulerStep::Retune,
+            }
         };
 
-        let Some(completed) = completed else {
-            continue;
-        };
-        let Some((lane, compacted)) = completed else {
-            break;
-        };
-        let remove_lane = if let Some(active) = active_by_lane.get_mut(&lane) {
-            *active = active.saturating_sub(1);
-            *active == 0
-        } else {
-            false
-        };
-        if remove_lane {
-            active_by_lane.remove(&lane);
-        }
-        if compacted {
-            made_progress = true;
-        } else {
-            // Retry at most once per lane per cycle. Other namespaces and sinks
-            // remain eligible, so one failure cannot stop useful work.
-            blocked_lanes.insert(lane);
-        }
-        completions = completions.saturating_add(1);
-        if completions >= max_completions_before_retune
-            || cycle_started.elapsed() >= BUDGET_RETUNE_INTERVAL
-        {
-            // Return to the compactor loop after draining work already in flight.
-            // The next cycle samples a fresh FlushBudget generation, so a
-            // continuously non-empty ready queue cannot pin startup concurrency.
-            retune_requested = true;
+        match step {
+            SchedulerStep::Retune => {
+                swap_budget(
+                    &mut concurrency,
+                    &mut completions,
+                    &mut cycle_started,
+                    &mut max_completions_before_retune,
+                    &mut retune_deadline,
+                    &mut retune,
+                );
+                continue;
+            }
+            SchedulerStep::Idle => continue,
+            SchedulerStep::Finished(None) => break,
+            SchedulerStep::Finished(Some((lane, compacted))) => {
+                let remove_lane = if let Some(active) = active_by_lane.get_mut(&lane) {
+                    *active = active.saturating_sub(1);
+                    *active == 0
+                } else {
+                    false
+                };
+                if remove_lane {
+                    active_by_lane.remove(&lane);
+                }
+                if compacted {
+                    made_progress = true;
+                } else {
+                    // Retry at most once per lane per cycle. Other namespaces and sinks
+                    // remain eligible, so one failure cannot stop useful work.
+                    blocked_lanes.insert(lane);
+                }
+                completions = completions.saturating_add(1);
+                if completions >= max_completions_before_retune
+                    || cycle_started.elapsed() >= retune_interval
+                {
+                    swap_budget(
+                        &mut concurrency,
+                        &mut completions,
+                        &mut cycle_started,
+                        &mut max_completions_before_retune,
+                        &mut retune_deadline,
+                        &mut retune,
+                    );
+                }
+            }
         }
     }
 

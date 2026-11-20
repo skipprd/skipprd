@@ -287,7 +287,7 @@ class RustCiTests(unittest.TestCase):
         self.assertNotIn("year, month, day", dynamodb_cdc_run)
         self.assertNotIn("day partition columns missing", dynamodb_cdc_run)
         self.assertIn("snapshot_then_cdc", dynamodb_cdc_lake)
-        self.assertIn('business_key_columns: ["id", "rmc"]', dynamodb_cdc_lake)
+        self.assertIn("business_key_columns:\n        - id\n        - rmc", dynamodb_cdc_lake)
         self.assertIn("batch_time_fields: _skippr_event_time", dynamodb_cdc_lake)
         self.assertIn("SkipprLake:", dynamodb_cdc_lake)
         self.assertIn("snapshot_then_cdc", dynamodb_cdc_duckdb)
@@ -304,7 +304,7 @@ class RustCiTests(unittest.TestCase):
         self.assertIn("-p 3307:3306", mysql_cdc)
         self.assertIn("skippr-plugin-data-source-mysql", mysql_cdc)
         self.assertIn("snapshot_then_cdc", mysql_cdc_yml)
-        self.assertIn("business_key_columns: [\"id\"]", mysql_cdc_yml)
+        self.assertIn("business_key_columns:\n        - id", mysql_cdc_yml)
         postgres_cdc_job = text.split("\n  e2e_postgres_cdc:", 1)[1].split(
             "\n  e2e_mysql_cdc:", 1
         )[0]

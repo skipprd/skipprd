@@ -198,14 +198,4 @@ export const engineSections = [
       },
     ],
   },
-  {
-    text: 'Schema sinks',
-    collapsed: true,
-    items: [
-      { text: 'Athena Iceberg', link: '/connectors/schema_sinks/athenaiceberg' },
-      { text: 'DuckDB', link: '/connectors/schema_sinks/duckdb' },
-      { text: 'Glue', link: '/connectors/schema_sinks/glue' },
-      { text: 'SkipprLake', link: '/connectors/schema_sinks/skipprlake' },
-    ],
-  },
 ]

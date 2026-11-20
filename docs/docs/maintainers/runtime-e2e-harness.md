@@ -7,7 +7,7 @@ The runtime e2e harness lives at `.github/scripts/runtime_e2e_harness.py`. It is
 The harness validates the release path that matters after the hard cutover:
 
 - published or staged runtime manifest discovery
-- download and execution of runtime source, sink, and schema plugins
+- download and execution of runtime source and sink plugins
 - chaos-mode crash recovery
 - deadletter routing
 - Soda assertions for the long-running acceptance cases

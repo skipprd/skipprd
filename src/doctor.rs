@@ -192,24 +192,6 @@ mod tests {
     }
 
     #[test]
-    fn doctor_fails_a_paired_sink_that_differs_from_its_schema_sink() {
-        let config: Config = serde_yaml::from_str(
-            "pipelines:\n  p:\n    data_source: data_sources.src\n    data_sink: data_sinks.lake\ndata_sources:\n  src:\n    File:\n      path: /tmp/in\ndata_sinks:\n  lake:\n    schema_sink: schema_sinks.lake\n    Duckdb:\n      warehouse: file:///tmp/w1\n      table_namespace: main\nschema_sinks:\n  lake:\n    Duckdb:\n      warehouse: file:///tmp/w2\n      table_namespace: main\n",
-        )
-        .unwrap();
-        let result = run(&config, None);
-        assert!(!result.ok);
-        assert!(
-            result
-                .checks
-                .iter()
-                .any(|c| !c.ok && c.message.contains("must be equal")),
-            "{:?}",
-            result.checks
-        );
-    }
-
-    #[test]
     fn doctor_fails_when_skippr_yml_is_missing() {
         let result = run(&Config::new(), None);
         assert!(!result.ok);

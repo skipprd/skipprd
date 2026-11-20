@@ -76,7 +76,7 @@ This works only if `skippr.yml` does not set `skippr.store` or `skippr.wal_s3_bu
 | Look up any key in the file | [skippr.yml reference](/configuration/skippr-yml) |
 | Define a pipeline, its schedule, and its buffers | [Pipelines](/configuration/pipeline) |
 | Pick and wire a source | [Sources](/configuration/input) |
-| Pick and wire a destination, schema sink, or deadletter sink | [Destinations](/configuration/output) |
+| Pick and wire a destination or deadletter sink | [Destinations](/configuration/output) |
 | Split, partition, flatten, sort, filter, or derive records | [Transforms](/configuration/transforms) |
 | Keyed running aggregates in Skippr Store | [Materialised views](/concepts/materialised-views) |
 | Choose disk or S3 WAL | [WAL and buffering](/configuration/buffering) |

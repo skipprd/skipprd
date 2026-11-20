@@ -30,8 +30,7 @@ runs:
         cargo build \
           -p skipprd \
           -p skippr-plugin-data-source-file \
-          -p skippr-plugin-data-sink-duckdb \
-          -p skippr-plugin-schema-sink-duckdb
+          -p skippr-plugin-data-sink-duckdb
 
     - name: Stage local runtime manifests
       id: local_runtime

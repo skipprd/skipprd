@@ -2,7 +2,6 @@ use skippr_runtime_sdk::SkipprConfig;
 #[path = "../../../shared/cdc_encode.rs"]
 mod cdc_encode;
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -311,17 +310,6 @@ impl DataSink for FileSinkRuntimePlugin {
         .await
         .map_err(|error| io::Error::other(error.to_string()))?;
         Ok(SinkWriteOutcome::Applied)
-    }
-
-    async fn install_schema_state(
-        &self,
-        _schema_version: u64,
-        _namespaces: &std::collections::BTreeMap<
-            String,
-            skippr_runtime_sdk::discover::OutputMetadata,
-        >,
-    ) -> Result<(), io::Error> {
-        Ok(())
     }
 
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {

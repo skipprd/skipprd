@@ -1,9 +1,7 @@
 use crate::buffer::BufferChunker;
-use crate::discover::{
-    AnalyseSchema, Metadata, OutputMetadata, PipelineMetadata, NUM_ANALYSED_RECORDS,
-};
+use crate::discover::{AnalyseSchema, Metadata, PipelineMetadata, NUM_ANALYSED_RECORDS};
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::{OffsetKey, OffsetTypes, OffsetValue, Offsets};
+use crate::helpers::offsets::{OffsetKey, OffsetValue, Offsets};
 use crate::helpers::{Helpers, IngestTransformSnapshot};
 use crate::ingest::deny::{failure_code_from_error, ARRAY_MIXED_TYPES};
 use crate::ingest::ingest::ingest;
@@ -22,10 +20,6 @@ use std::sync::atomic::AtomicBool;
 static SCHEMA_READY: once_cell::sync::Lazy<DashMap<String, AtomicBool>> =
     once_cell::sync::Lazy::new(|| DashMap::new());
 static SCHEMA_PREP_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::Mutex<()>>>> =
-    once_cell::sync::Lazy::new(|| DashMap::new());
-static SCHEMA_SYNC_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::Mutex<()>>>> =
-    once_cell::sync::Lazy::new(|| DashMap::new());
-static SCHEMA_SYNCED_VERSION: once_cell::sync::Lazy<DashMap<String, AtomicU64>> =
     once_cell::sync::Lazy::new(|| DashMap::new());
 // Single-flight guard for metadata evolution per namespace
 static EVOLUTION_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<tokio::sync::Mutex<()>>>> =
@@ -249,9 +243,9 @@ fn ensure_slow_ingest_worker(config: &Config) {
                     if updated == "yes" {
                         // Monotonic schema evolution is an ingest-time contract:
                         // this per-namespace worker is the only place that mutates
-                        // metadata for incoming records. Normalize field identity,
-                        // publish metadata/Arrow templates, and wait for the schema
-                        // sink before returning records to the write path.
+                        // metadata for incoming records. Normalize field identity
+                        // and publish Arrow templates. Dest tables are created
+                        // on the first compact of the namespace.
                         match md_local.normalize_namespace(&task.namespace) {
                             Ok(_) => {
                                 METADATA.store(Arc::new(md_local.clone()));
@@ -264,27 +258,14 @@ fn ensure_slow_ingest_worker(config: &Config) {
                                         &task.namespace,
                                         &err.to_string(),
                                     ))
-                                } else if let Err(err) = worker_config
-                                    .sync_output_schema_namespace_blocking(&task.namespace)
-                                    .await
-                                {
-                                    Err(slow_ingest_evolution_error(&task.namespace, &err))
                                 } else {
-                                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                                        let md_clone = md_local.clone();
-                                        let sem = METADATA_WRITE_SEM.clone();
-                                        let cfg = worker_config.clone();
-                                        handle.spawn(async move {
-                                            let _permit = sem.acquire().await;
-                                            cfg.set_metadata(&md_clone, false).await;
-                                        });
-                                    } else {
-                                        error!(
-                                            "No tokio runtime to persist metadata for namespace {}",
-                                            task.namespace
-                                        );
+                                    let _permit = METADATA_WRITE_SEM.acquire().await;
+                                    match worker_config.set_metadata(&md_local, false).await {
+                                        Ok(()) => Ok(v),
+                                        Err(err) => {
+                                            Err(slow_ingest_evolution_error(&task.namespace, &err))
+                                        }
                                     }
-                                    Ok(v)
                                 }
                             }
                             Err(err) => Err(slow_ingest_evolution_error(&task.namespace, &err)),
@@ -409,19 +390,47 @@ fn inject_fields_into_record_batch(
         if batch.schema().index_of(name).is_ok() {
             continue;
         }
-        let text = match value {
-            Value::String(text) => text.clone(),
-            other => other.to_string(),
+        let data_type = crate::runtime_plugins::schema_state::inject_json_data_type(name, value)?;
+        let (arrow_type, column) = match data_type {
+            crate::discover::SkipprDataType::String => {
+                let text = value.as_str().unwrap_or("").to_string();
+                (
+                    arrow::datatypes::DataType::Utf8,
+                    std::sync::Arc::new(arrow::array::StringArray::from(vec![text; n]))
+                        as arrow::array::ArrayRef,
+                )
+            }
+            crate::discover::SkipprDataType::Double => {
+                let number = value
+                    .as_f64()
+                    .ok_or_else(|| format!("inject field '{name}' is not a finite number"))?;
+                (
+                    arrow::datatypes::DataType::Float64,
+                    std::sync::Arc::new(arrow::array::Float64Array::from(vec![number; n]))
+                        as arrow::array::ArrayRef,
+                )
+            }
+            crate::discover::SkipprDataType::Boolean => {
+                let flag = value
+                    .as_bool()
+                    .ok_or_else(|| format!("inject field '{name}' is not a boolean"))?;
+                (
+                    arrow::datatypes::DataType::Boolean,
+                    std::sync::Arc::new(arrow::array::BooleanArray::from(vec![flag; n]))
+                        as arrow::array::ArrayRef,
+                )
+            }
+            other => {
+                return Err(format!(
+                    "inject field '{name}' type {} has no ingest Arrow mapping",
+                    other.as_str()
+                ))
+            }
         };
         schema_fields.push(std::sync::Arc::new(arrow::datatypes::Field::new(
-            name,
-            arrow::datatypes::DataType::Utf8,
-            true,
+            name, arrow_type, true,
         )));
-        columns.push(std::sync::Arc::new(arrow::array::StringArray::from(vec![
-            text;
-            n
-        ])));
+        columns.push(column);
     }
     let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(schema_fields));
     arrow::record_batch::RecordBatch::try_new(schema, columns).map_err(|err| err.to_string())
@@ -905,57 +914,21 @@ pub(crate) fn namespace_schema_version(ns: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Pre-create Arrow templates and blocking Glue/Iceberg schema for every bundled namespace
-/// before parallel ingest. Without this, fast-path ingest fails with "No default message
+/// Pre-create Arrow templates for every bundled namespace before parallel
+/// ingest. Without this, fast-path ingest fails with "No default message
 /// template found" on namespaces that have not yet flushed a successful batch.
+/// Dest tables are created on the first compact of that namespace.
 pub(crate) async fn warm_output_schemas_for_metadata(
     config: &Config,
     pipeline: &PipelineMetadata,
 ) -> Result<(), String> {
     for ns in pipeline.metadata.keys() {
-        if ns.is_empty() || ns.starts_with("_dl_") {
+        if ns.is_empty() {
             continue;
         }
         Ingest::prepare_arrow_schema_with_metadata(config, ns, pipeline)
             .map_err(|err| err.to_string())?;
-        config
-            .sync_output_schema_namespace_blocking(ns.as_str())
-            .await?;
     }
-    Ok(())
-}
-
-fn ensure_output_schema_synced_for_namespace(config: &Config, ns: &str) -> Result<(), String> {
-    if ns.is_empty() || ns.starts_with("_dl_") {
-        return Ok(());
-    }
-
-    let key = config.schema_publication_identity(ns);
-    let target_version = std::cmp::max(namespace_schema_version(ns), 1);
-    if SCHEMA_SYNCED_VERSION
-        .get(&key)
-        .map(|v| v.value().load(Ordering::Acquire) >= target_version)
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
-
-    let lock = SCHEMA_SYNC_LOCKS
-        .entry(key.clone())
-        .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
-        .clone();
-    let _guard = lock.lock().unwrap();
-
-    let target_version = std::cmp::max(namespace_schema_version(ns), 1);
-    let synced_entry = SCHEMA_SYNCED_VERSION
-        .entry(key)
-        .or_insert_with(|| AtomicU64::new(0));
-    if synced_entry.load(Ordering::Acquire) >= target_version {
-        return Ok(());
-    }
-
-    INGEST_RT.block_on(config.sync_output_schema_namespace_blocking(ns))?;
-    synced_entry.store(target_version, Ordering::Release);
     Ok(())
 }
 
@@ -1402,7 +1375,10 @@ fn commit_deadletters(
     metrics_hot::add_deadletters(dl_count as u64);
     let mut dl_offsets_committed = false;
     if config.get_pipeline_deadletters_ref().is_some() {
-        deadletter::ensure_namespace_registered(config);
+        if let Err(err) = deadletter::ensure_namespace_registered(config) {
+            error!("deadletter schema: {err}");
+            return false;
+        }
     }
     if let Some(deadletter_sink_ref) = config.get_pipeline_deadletters_ref() {
         let dl_ns = deadletter::table_name(config);
@@ -2970,7 +2946,19 @@ impl Ingest {
                                 stored.enabled = true;
                                 METADATA.store(Arc::new(stored));
                             }
-                            INGEST_RT.block_on(config.set_metadata(&pipeline_metadata, false));
+                            if let Err(err) =
+                                INGEST_RT.block_on(config.set_metadata(&pipeline_metadata, false))
+                            {
+                                error!("schema persist: {err}");
+                                return ThroughputMetrics {
+                                    bytes_per_second: self.get_current_throughput(),
+                                    active_cores: self.active_count.load(Ordering::Acquire),
+                                    queue_length: self.queue_length.load(Ordering::Acquire),
+                                    optimal_chunk_size: self
+                                        .optimal_chunk_size
+                                        .load(Ordering::Acquire),
+                                };
+                            }
                         }
                         DISCOVERY_COMPLETE.store(true, Ordering::Release);
                     }
@@ -3704,7 +3692,13 @@ impl Ingest {
         let primary_sink_ref = config.get_pipeline_output_sink_ref();
         let deadletter_sink_ref = config.get_pipeline_deadletters_ref();
         if deadletter_sink_ref.is_some() {
-            deadletter::ensure_namespace_registered(config);
+            if let Err(err) = deadletter::ensure_namespace_registered(config) {
+                error!("deadletter schema: {err}");
+                if submit_id != 0 {
+                    crate::buffer::wal_writer::fail_request(submit_id, err);
+                }
+                return;
+            }
         }
         let mut dl_records: Vec<DeadletterRecord> = Vec::new();
         let mut dl_offsets: HashMap<OffsetKey, u64> = HashMap::new();
@@ -4731,36 +4725,6 @@ impl Ingest {
 
         // Batch write: aggregate all partition batches and enqueue once for the WAL writer.
         let all_batches: Vec<IngestBufferBatch> = buf.into_values().collect();
-        let mut schema_sync_namespaces = HashSet::new();
-        for batch in &all_batches {
-            if !batch._namespace.starts_with("_dl_") {
-                schema_sync_namespaces.insert(batch._namespace.clone());
-            }
-        }
-        for namespace in schema_sync_namespaces {
-            if matches!(
-                config.pipeline_type(),
-                Ok(crate::pipeline_type::PipelineType::Copy)
-            ) {
-                continue;
-            }
-            if let Err(err) = ensure_output_schema_synced_for_namespace(config, &namespace) {
-                warn!(
-                    "Schema sync barrier failed for namespace {}; deferring batch without committing offsets: {}",
-                    namespace, err
-                );
-                if submit_id != 0 {
-                    crate::buffer::wal_writer::fail_request(
-                        submit_id,
-                        format!(
-                            "schema sync barrier failed for namespace {}: {}",
-                            namespace, err
-                        ),
-                    );
-                }
-                return;
-            }
-        }
         if Config::debug_enabled() {
             debug!(
                 "Ingest: final buffered partition count before WAL flush = {}",
@@ -4853,20 +4817,21 @@ impl Ingest {
     }
 
     fn published_arrow_schema(
+        config: &Config,
         pipeline: &PipelineMetadata,
         skpr_namespace: &str,
     ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
-        let output_metadata = match pipeline.output_metadata(skpr_namespace) {
-            Ok(output) => output,
-            Err(crate::discover::schema_alter::SchemaAlterError::NamespaceNotFound(_)) => {
-                OutputMetadata::new()
-            }
-            Err(err) => {
-                return Err(ArrowError::ExternalError(Box::new(std::io::Error::other(
-                    err.to_string(),
-                ))))
-            }
-        };
+        let output_metadata = crate::runtime_plugins::schema_state::published_output_metadata(
+            config,
+            pipeline,
+            skpr_namespace,
+        )
+        .map_err(|err| ArrowError::ExternalError(Box::new(std::io::Error::other(err))))?
+        .ok_or_else(|| {
+            ArrowError::ExternalError(Box::new(std::io::Error::other(format!(
+                "published dest schema is missing namespace '{skpr_namespace}'"
+            ))))
+        })?;
         convert_skippr_to_arrow(output_metadata.fields).map(Arc::new)
     }
 
@@ -4915,24 +4880,7 @@ impl Ingest {
         skpr_namespace: &str,
         pipeline: &PipelineMetadata,
     ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
-        let dest = Self::published_arrow_schema(pipeline, skpr_namespace)?;
-        let did_update_schema = Self::install_dest_arrow_schema(skpr_namespace, &dest, pipeline);
-        if did_update_schema {
-            config.sync_output_schema_namespace(skpr_namespace);
-        }
-        SCHEMA_READY
-            .entry(skpr_namespace.to_string())
-            .or_insert_with(|| AtomicBool::new(true))
-            .store(true, Ordering::Relaxed);
-        Ok(dest)
-    }
-
-    // Version for read-only query context: builds/publishes Arrow schema without external side effects
-    pub fn prepare_arrow_schema_with_metadata_for_query(
-        skpr_namespace: &str,
-        pipeline: &PipelineMetadata,
-    ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
-        let dest = Self::published_arrow_schema(pipeline, skpr_namespace)?;
+        let dest = Self::published_arrow_schema(config, pipeline, skpr_namespace)?;
         Self::install_dest_arrow_schema(skpr_namespace, &dest, pipeline);
         SCHEMA_READY
             .entry(skpr_namespace.to_string())
@@ -5134,6 +5082,20 @@ mod warm_output_schemas_tests {
     }
 
     #[test]
+    fn prepare_arrow_schema_fails_when_published_dest_is_missing() {
+        crate::runtime_plugins::schema_state::clear_runtime_source_schema_state();
+        let pipeline = PipelineMetadata::new(&Config::new());
+        let err =
+            Ingest::prepare_arrow_schema_with_metadata(&Config::new(), "no_such_ns", &pipeline)
+                .expect_err("missing dest");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing namespace") || msg.contains("no_such_ns"),
+            "{msg}"
+        );
+    }
+
+    #[test]
     fn dest_arrow_prepare_errors_are_not_discarded() {
         let src = include_str!("ingest_work.rs");
         let prod = src
@@ -5158,7 +5120,7 @@ mod warm_output_schemas_tests {
             .split("pub(crate) async fn warm_output_schemas_for_metadata")
             .nth(1)
             .expect("warm");
-        let body = &warm[..warm.find("fn ensure_output_schema_synced").unwrap()];
+        let body = &warm[..warm.find("#[cfg(test)]").unwrap_or(warm.len())];
         assert!(
             body.contains("-> Result<(), String>"),
             "warm must fail closed"
@@ -5168,12 +5130,12 @@ mod warm_output_schemas_tests {
             "warm must surface dest fold errors"
         );
         assert!(
-            body.contains(".await?;"),
-            "warm must surface dest publish errors"
+            !body.contains("sync_output_schema"),
+            "warm must not publish dest schema; compact creates tables"
         );
         assert!(
             !body.contains("warn!"),
-            "must not warn-and-continue past dest fold or dest publish errors"
+            "must not warn-and-continue past dest fold errors"
         );
     }
 
@@ -5217,73 +5179,6 @@ mod warm_output_schemas_tests {
             err.to_lowercase().contains("flatten") || err.contains("Flatten"),
             "{err}"
         );
-    }
-}
-
-#[cfg(test)]
-mod schema_sync_skip_key_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn schema_sync_test_config(data_dir: &str) -> Config {
-        let config: Config = serde_json::from_value(json!({
-            "skippr": { "workspace": "quickstart" },
-            "pipelines": {
-                "orders": {
-                    "data_source": "data_sources.sample",
-                    "data_dir": data_dir
-                }
-            },
-            "data_sources": {
-                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
-            }
-        }))
-        .unwrap();
-        config.bind_pipeline("orders")
-    }
-
-    #[test]
-    fn schema_synced_version_does_not_skip_second_session_by_namespace() {
-        let ns = "skip_key_isolation_events";
-        SCHEMA_SYNCED_VERSION.insert(ns.to_string(), AtomicU64::new(u64::MAX));
-
-        let a = schema_sync_test_config("/tmp/skipprd-schema-skip-a");
-        let b = schema_sync_test_config("/tmp/skipprd-schema-skip-b");
-        let a_key = a.schema_publication_identity(ns);
-        let b_key = b.schema_publication_identity(ns);
-        assert_ne!(a_key, ns);
-        assert_ne!(b_key, ns);
-        assert_ne!(a_key, b_key);
-
-        ensure_output_schema_synced_for_namespace(&b, ns).unwrap();
-        assert!(
-            SCHEMA_SYNCED_VERSION.get(&b_key).is_some(),
-            "session B must record its own skip key even when the namespace-only slot is already synced"
-        );
-        assert!(
-            SCHEMA_SYNC_LOCKS.get(&b_key).is_some(),
-            "session B must take its own schema-sync lock, not the namespace-only lock"
-        );
-
-        ensure_output_schema_synced_for_namespace(&a, ns).unwrap();
-        assert!(SCHEMA_SYNCED_VERSION.get(&a_key).is_some());
-        assert!(SCHEMA_SYNC_LOCKS.get(&a_key).is_some());
-    }
-
-    #[test]
-    fn schema_publication_identity_isolates_session_data_dir() {
-        let a = schema_sync_test_config("/tmp/skipprd-schema-a");
-        let b = schema_sync_test_config("/tmp/skipprd-schema-b");
-        assert_ne!(
-            a.schema_publication_identity("events"),
-            b.schema_publication_identity("events")
-        );
-        assert!(a
-            .schema_publication_identity("events")
-            .contains("/tmp/skipprd-schema-a"));
-        assert!(b
-            .schema_publication_identity("events")
-            .contains("/tmp/skipprd-schema-b"));
     }
 }
 
@@ -5653,6 +5548,44 @@ mod transform_inject_fields_tests {
             .unwrap();
         assert_eq!(col.value(0), "acme");
         assert_eq!(col.value(1), "acme");
+    }
+
+    #[test]
+    fn inject_fields_into_record_batch_uses_published_dest_types() {
+        use arrow::array::{BooleanArray, Float64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        let schema =
+            std::sync::Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![std::sync::Arc::new(arrow::array::Int64Array::from(vec![
+                1i64,
+            ]))],
+        )
+        .unwrap();
+        let fields = std::collections::BTreeMap::from([
+            ("score".to_string(), json!(1.5)),
+            ("ok".to_string(), json!(true)),
+        ]);
+        let out = inject_fields_into_record_batch(batch, &fields).unwrap();
+        let score = out
+            .column(out.schema().index_of("score").unwrap())
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(score.value(0), 1.5);
+        let ok = out
+            .column(out.schema().index_of("ok").unwrap())
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert!(ok.value(0));
+        let err = inject_fields_into_record_batch(
+            out,
+            &std::collections::BTreeMap::from([("bad".to_string(), json!({"a": 1}))]),
+        )
+        .unwrap_err();
+        assert!(err.contains("inject field 'bad'"), "{err}");
     }
 
     #[test]

@@ -1,10 +1,9 @@
 skippr:
   skippr_s3_bucket: skippr-e2e-sample-data-output
   workspace: iceberg-types-cdc-dynamodb
-
 pipelines:
   dynamodb_iceberg_types_cdc:
-    auto_approve: yes
+    auto_approve: true
     env: test
     type: cdc
     buffer_threshold_bytes: 20000000
@@ -13,15 +12,14 @@ pipelines:
     data_sink: data_sinks.iceberg_types_cdc
     cdc:
       default:
-        business_key_columns: ["id"]
-
+        business_key_columns:
+        - id
 data_sources:
   dynamodb_types_cdc:
     Dynamodb:
       table_name: skippr_iceberg_dynamodb_types_cdc
       region: us-east-1
       cdc_mode: snapshot_then_cdc
-
 data_sinks:
   iceberg_types_cdc:
     AthenaIceberg:
@@ -29,16 +27,5 @@ data_sinks:
       glue_database_name: iceberg_e2e_dynamodb
       athena_workgroup_name: bikehire
       athena_results_s3_bucket: skippr-e2e-sample-data-output
-      catalog_id: "353855562591"
-      region: us-east-1
-    schema_sink: schema_sinks.iceberg_glue
-
-schema_sinks:
-  iceberg_glue:
-    AthenaIceberg:
-      warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-dynamodb
-      glue_database_name: iceberg_e2e_dynamodb
-      athena_workgroup_name: bikehire
-      athena_results_s3_bucket: skippr-e2e-sample-data-output
-      catalog_id: "353855562591"
+      catalog_id: '353855562591'
       region: us-east-1

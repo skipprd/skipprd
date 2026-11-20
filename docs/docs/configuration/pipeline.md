@@ -156,6 +156,6 @@ With `--once`, it runs each pipeline once and exits. Without `--once`, it keeps 
 ## Next steps
 
 - [Sources](/configuration/input) — choose and wire a source.
-- [Destinations](/configuration/output) — choose a destination, schema sink, and deadletter sink.
+- [Destinations](/configuration/output) — choose a destination and deadletter sink.
 - [Transforms](/configuration/transforms) — shape records before they land.
 - [skipprd sync](/cli/sync) — every sync flag.

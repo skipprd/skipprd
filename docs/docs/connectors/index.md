@@ -1,11 +1,11 @@
 ---
 title: Connector catalog
-description: Every Skipprd source, destination, and schema sink — pick a connector and open its setup guide.
+description: Every Skipprd source and destination. Pick a connector and open its setup guide.
 ---
 
 # Connectors
 
-A pipeline reads from one **source** and writes to one **destination**. Some destinations also need a **schema sink** so the warehouse catalog stays in step with the tables Skipprd creates.
+A pipeline reads from one **source** and writes to one **destination**. The destination publishes its own tables on the first compact.
 
 Configure them in `skippr.yml`, Python, or `skipprd connect`. Skipprd downloads the connector catalog published with that engine release. Pin a connector with `version:` on that entry only when you need a specific published build.
 
@@ -102,17 +102,6 @@ Configure them in `skippr.yml`, Python, or `skipprd connect`. Skipprd downloads 
 | `File` | [Local file](/connectors/outputs/file) |
 | `Amqp` | [AMQP](/connectors/outputs/amqp) |
 | `Stdout` | [Stdout](/connectors/outputs/stdout) |
-
-## Schema sinks
-
-Pair these with the matching destination so tables and columns appear in the catalog.
-
-| Connector | Guide | Pair with |
-|---|---|---|
-| `Glue` | [Glue](/connectors/schema_sinks/glue) | Athena |
-| `AthenaIceberg` | [Athena Iceberg schema](/connectors/schema_sinks/athenaiceberg) | Athena Iceberg |
-| `Duckdb` | [DuckDB schema](/connectors/schema_sinks/duckdb) | DuckDB |
-| `SkipprLake` | [SkipprLake schema](/connectors/schema_sinks/skipprlake) | SkipprLake |
 
 ## Next steps
 

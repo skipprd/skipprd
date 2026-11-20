@@ -22,7 +22,10 @@ use skippr_object_writer::{
 use skippr_runtime_sdk::converters::skippr_hive::SkipprHive;
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::metrics::counters as metrics_counters;
-use skippr_runtime_sdk::plugins::{SchemaSink, SchemaSyncRequest, SinkWriteOutcome};
+use skippr_runtime_sdk::plugins::alter_ddl::{
+    reject_unpublished_batch_columns, DestPublishCache, InstalledDestSchema,
+};
+use skippr_runtime_sdk::plugins::SinkWriteOutcome;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, sidecar_manifest_object_key, GroupedWriteReceipt,
@@ -52,7 +55,7 @@ use rand::Rng;
 use serde_derive::Deserialize;
 use skippr_runtime_sdk::plugins::source_contract::{
     ensure_source_contract_for_policy, namespace_source_contract, validate_write_policy_for_sink,
-    SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
+    FieldPath, SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
 };
 use skippr_runtime_sdk::plugins::{
     DataSink, SinkCallResult, SinkPreflightOutcome, SinkPreflightResult, SinkWriteContext,
@@ -60,11 +63,10 @@ use skippr_runtime_sdk::plugins::{
 use skippr_runtime_sdk::protocol::{
     CatalogIntent, CatalogIntentIdentity, CatalogIntentKind, GlueColumnIntent,
     GluePartitionCatalogIntentV1, RuntimeBinding, RuntimeExecutionContext, RuntimeOutputLayout,
-    RuntimeSchemaState, SchemaDelta, SinkWriteStats, CATALOG_INTENT_VERSION,
-    GLUE_PARTITION_CATALOG_INTENT_VERSION,
+    SinkWriteStats, CATALOG_INTENT_VERSION, GLUE_PARTITION_CATALOG_INTENT_VERSION,
 };
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use tracing::{debug, info, warn};
@@ -102,13 +104,7 @@ fn athena_object_writer_config() -> ObjectWriterConfig {
     }
 }
 
-fn sum_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (None, None) => None,
-        (left, right) => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
-    }
-}
-
+#[cfg(test)]
 fn published_catalog_schema_version(
     namespace_versions: &BTreeMap<String, u64>,
     namespace: &str,
@@ -119,6 +115,7 @@ fn published_catalog_schema_version(
         .and_then(NonZeroU64::new)
 }
 
+#[cfg(test)]
 fn catalog_intent_schema_version(
     namespace_versions: &BTreeMap<String, u64>,
     namespace: &str,
@@ -482,8 +479,10 @@ pub struct DataSinkAthenaPlugin {
     #[allow(dead_code)]
     max_async_uploads: i64,
     upload_sem: Arc<Semaphore>,
-    deadletter_schema_ready: AtomicBool,
-    schema_state: RwLock<InstalledAthenaSchemaState>,
+    installed: RwLock<InstalledDestSchema>,
+    publish_cache: DestPublishCache,
+    /// Contract partition keys each namespace's Glue table was published with.
+    partition_layouts: std::sync::Mutex<BTreeMap<String, Vec<FieldPath>>>,
 }
 
 skippr_runtime_sdk::declare_sink_spec!(
@@ -493,135 +492,113 @@ skippr_runtime_sdk::declare_sink_spec!(
     skippr_runtime_sdk::plugins::DeterministicObjectOverwrite
 );
 
-#[derive(Debug, Default)]
-struct InstalledAthenaSchemaState {
-    installed: bool,
-    version: u64,
-    namespaces: BTreeMap<String, OutputMetadata>,
-    namespace_versions: BTreeMap<String, u64>,
-}
-
-impl InstalledAthenaSchemaState {
-    fn install(&mut self, schema_version: u64, namespaces: &BTreeMap<String, OutputMetadata>) {
-        if self.installed && schema_version <= self.version {
-            return;
-        }
-        self.installed = true;
-        self.version = schema_version;
-        self.namespaces = namespaces.clone();
-        self.namespace_versions = namespaces
-            .keys()
-            .map(|namespace| (namespace.clone(), schema_version))
-            .collect();
-    }
-
-    fn install_snapshot(&mut self, schema_state: &RuntimeSchemaState) {
-        if self.installed && schema_state.version <= self.version {
-            return;
-        }
-        self.installed = true;
-        self.version = schema_state.version;
-        self.namespaces = schema_state.namespaces.clone();
-        self.namespace_versions = schema_state.namespace_versions.clone();
-    }
-
-    fn install_delta(&mut self, delta: &SchemaDelta) -> usize {
-        let mut changed = 0;
-        for (namespace, entry) in &delta.namespaces {
-            if self
-                .namespace_versions
-                .get(namespace)
-                .is_some_and(|installed| *installed >= entry.version)
-            {
-                continue;
-            }
-            self.namespaces
-                .insert(namespace.clone(), entry.metadata.clone());
-            self.namespace_versions
-                .insert(namespace.clone(), entry.version);
-            changed += 1;
-        }
-        self.installed = true;
-        self.version = self.version.max(delta.version);
-        changed
-    }
-}
-
 fn is_deadletter_athena_target(binding: RuntimeBinding, namespace: &str, pipeline: &str) -> bool {
     binding == RuntimeBinding::Deadletter
         && namespace
             == skippr_runtime_sdk::sink_compat::deadletter::table_name_for_pipeline(pipeline)
 }
 
-fn deadletter_output_metadata() -> OutputMetadata {
-    serde_json::from_value(serde_json::json!({
-        "out_field_name": "",
-        "determined_type": "record",
-        "determined_type_values": "",
-        "fields": {
-            "id": {
-                "out_field_name": "id",
-                "determined_type": "string",
-                "determined_type_values": "",
-                "fields": {}
-            },
-            "namespace": {
-                "out_field_name": "namespace",
-                "determined_type": "string",
-                "determined_type_values": "",
-                "fields": {}
-            },
-            "record": {
-                "out_field_name": "record",
-                "determined_type": "string",
-                "determined_type_values": "",
-                "fields": {}
-            },
-            "error": {
-                "out_field_name": "error",
-                "determined_type": "string",
-                "determined_type_values": "",
-                "fields": {}
-            },
-            "failure_code": {
-                "out_field_name": "failure_code",
-                "determined_type": "string",
-                "determined_type_values": "",
-                "fields": {}
-            },
-            "event_time": {
-                "out_field_name": "event_time",
-                "determined_type": "long",
-                "determined_type_values": "",
-                "fields": {}
-            },
-            "processed_time": {
-                "out_field_name": "processed_time",
-                "determined_type": "long",
-                "determined_type_values": "",
-                "fields": {}
-            },
-            "source_uri": {
-                "out_field_name": "source_uri",
-                "determined_type": "string",
-                "determined_type_values": "",
-                "fields": {}
-            },
-            "offset_key": {
-                "out_field_name": "offset_key",
-                "determined_type": "string",
-                "determined_type_values": "",
-                "fields": {}
-            },
-            "offset_pos": {
-                "out_field_name": "offset_pos",
-                "determined_type": "long",
-                "determined_type_values": "",
-                "fields": {}
-            }
+fn require_glue_database(config: &DataSinkAthenaPluginConfig) -> io::Result<()> {
+    if config.glue_database_name.trim().is_empty() {
+        return Err(io::Error::other(
+            "glue_database_name is empty; dest schema is this data sink",
+        ));
+    }
+    Ok(())
+}
+
+fn deadletter_rebuild_allowed(has_registered_partitions: bool) -> Result<(), String> {
+    if has_registered_partitions {
+        return Err(
+            "deadletter Glue table has registered partitions; cannot drop to rebuild unpartitioned"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// One Glue partition layout per namespace per process; a second layout fails
+/// closed instead of re-healing the table back and forth.
+fn record_partition_layout(
+    layouts: &std::sync::Mutex<BTreeMap<String, Vec<FieldPath>>>,
+    namespace: &str,
+    layout: Vec<FieldPath>,
+) -> Result<(), io::Error> {
+    let mut layouts = layouts.lock().expect("Athena partition layouts poisoned");
+    match layouts.get(namespace) {
+        Some(published) if *published != layout => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "namespace '{namespace}' is written with Glue partition keys {published:?} and {layout:?}"
+            ),
+        )),
+        Some(_) => Ok(()),
+        None => {
+            layouts.insert(namespace.to_string(), layout);
+            Ok(())
         }
-    }))
-    .expect("deadletter metadata shape must remain valid")
+    }
+}
+
+/// Published storage columns the live table lacks. Overlapping names must
+/// already match published types; recasts and renames are `ApplyAlter`.
+fn glue_missing_storage_columns(
+    live_storage: &[Column],
+    desired_storage: Vec<Column>,
+) -> Result<Vec<Column>, String> {
+    let live_store: HashMap<String, String> = live_storage
+        .iter()
+        .map(glue_column_name_type)
+        .collect::<Result<_, _>>()?;
+    let mut missing = Vec::new();
+    for want in desired_storage {
+        let (name, ty) = glue_column_name_type(&want)?;
+        match live_store.get(&name) {
+            Some(live_ty) if live_ty != &ty => {
+                return Err(format!(
+                    "Glue table storage column '{name}' type '{live_ty}' does not match published '{ty}'"
+                ));
+            }
+            Some(_) => {}
+            None => missing.push(want),
+        }
+    }
+    Ok(missing)
+}
+
+fn glue_column_name_type(column: &Column) -> Result<(String, String), String> {
+    let ty = column
+        .r#type()
+        .ok_or_else(|| format!("Glue column '{}' is missing a type", column.name()))?;
+    Ok((column.name().to_string(), ty.to_string()))
+}
+
+fn glue_live_matches_published(
+    live_storage: &[Column],
+    live_partitions: &[Column],
+    desired_storage: &[Column],
+    desired_partitions: &[Column],
+) -> Result<(), String> {
+    let live_parts: Vec<(String, String)> = live_partitions
+        .iter()
+        .map(glue_column_name_type)
+        .collect::<Result<_, _>>()?;
+    let want_parts: Vec<(String, String)> = desired_partitions
+        .iter()
+        .map(glue_column_name_type)
+        .collect::<Result<_, _>>()?;
+    if live_parts != want_parts {
+        return Err(format!(
+            "Glue table partition layout mismatch: actual={live_parts:?} expected={want_parts:?}"
+        ));
+    }
+    match glue_missing_storage_columns(live_storage, desired_storage.to_vec())?.first() {
+        Some(column) => Err(format!(
+            "Glue table is missing published storage column '{}'",
+            column.name()
+        )),
+        None => Ok(()),
+    }
 }
 
 #[async_trait]
@@ -887,69 +864,8 @@ impl DataSink for DataSinkAthenaPlugin {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::ATHENA
     }
 
-    async fn install_schema_state(
-        &self,
-        schema_version: u64,
-        namespaces: &BTreeMap<String, OutputMetadata>,
-    ) -> Result<(), std::io::Error> {
-        let mut guard = self.schema_state.write().await;
-        guard.install(schema_version, namespaces);
-        Ok(())
-    }
-
-    async fn install_schema_snapshot(
-        &self,
-        schema_state: &RuntimeSchemaState,
-    ) -> Result<(), std::io::Error> {
-        self.schema_state
-            .write()
-            .await
-            .install_snapshot(schema_state);
-        Ok(())
-    }
-
-    async fn install_schema_delta(&self, delta: &SchemaDelta) -> Result<(), std::io::Error> {
-        self.schema_state.write().await.install_delta(delta);
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl SchemaSink for DataSinkAthenaPlugin {
-    async fn sync_schema(
-        &self,
-        namespace: &str,
-        metadata: &OutputMetadata,
-    ) -> Result<(), io::Error> {
-        self.sync_schema_request(
-            SchemaSyncRequest {
-                namespace,
-                compaction_id: "",
-                source_contract: None,
-            },
-            metadata,
-        )
-        .await
-    }
-
-    async fn sync_schema_request(
-        &self,
-        request: SchemaSyncRequest<'_>,
-        metadata: &OutputMetadata,
-    ) -> Result<(), io::Error> {
-        let source_contract = request
-            .source_contract
-            .cloned()
-            .or_else(|| namespace_source_contract(request.namespace));
-        AwsAthena::create_or_update_schema_with_config(
-            request.namespace,
-            metadata,
-            &self.context,
-            self.binding,
-            self.config.clone(),
-            source_contract.as_ref(),
-        )
-        .await
+    fn installed_dest_schema(&self) -> Option<&RwLock<InstalledDestSchema>> {
+        Some(&self.installed)
     }
 }
 
@@ -1223,19 +1139,42 @@ impl DataSinkAthenaPlugin {
             buffer_name: buffer_name,
             max_async_uploads: max_async_uploads as i64,
             upload_sem: Arc::new(Semaphore::new(max_async_uploads)),
-            deadletter_schema_ready: AtomicBool::new(false),
-            schema_state: RwLock::new(InstalledAthenaSchemaState::default()),
+            installed: RwLock::new(InstalledDestSchema::default()),
+            publish_cache: DestPublishCache::default(),
+            partition_layouts: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
+    async fn publish_namespace(
+        &self,
+        namespace: &str,
+        source_contract: Option<&SourceNamespaceContract>,
+    ) -> Result<(), io::Error> {
+        require_glue_database(&self.config)?;
+        let (version, metadata) = self.installed.read().await.get(namespace)?;
+        record_partition_layout(
+            &self.partition_layouts,
+            namespace,
+            source_contract
+                .map(|contract| contract.partition_key.clone())
+                .unwrap_or_default(),
+        )?;
+        self.publish_cache
+            .publish(namespace, version, || {
+                AwsAthena::create_or_update_schema_with_config(
+                    namespace,
+                    &metadata,
+                    &self.context,
+                    self.binding,
+                    self.config.clone(),
+                    source_contract,
+                )
+            })
+            .await
+    }
+
     async fn namespace_metadata(&self, namespace: &str) -> Result<OutputMetadata, io::Error> {
-        let guard = self.schema_state.read().await;
-        guard.namespaces.get(namespace).cloned().ok_or_else(|| {
-            io::Error::other(format!(
-                "Athena sink schema state v{} is missing namespace '{}'",
-                guard.version, namespace
-            ))
-        })
+        Ok(self.installed.read().await.get(namespace)?.1)
     }
 
     async fn partition_catalog_intent(
@@ -1256,7 +1195,7 @@ impl DataSinkAthenaPlugin {
             source_contract,
             metadata,
             None,
-        );
+        )?;
         if partition_columns.len() != partition_values.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1270,18 +1209,23 @@ impl DataSinkAthenaPlugin {
         }
         let storage_columns =
             SkipprHive::storage_columns_excluding_partition_keys(metadata, &partition_columns)
-                .map_err(|_| {
+                .map_err(|err| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("failed to derive Glue storage columns for '{namespace}'"),
+                        format!("failed to derive Glue storage columns for '{namespace}': {err}"),
                     )
                 })?;
-        let schema_version = catalog_intent_schema_version(
-            &self.schema_state.read().await.namespace_versions,
-            namespace,
-        )?;
+        let schema_version = {
+            let (version, _) = self.installed.read().await.get(namespace)?;
+            NonZeroU64::new(version).ok_or_else(|| {
+                io::Error::other(format!(
+                    "Athena catalog intent for '{namespace}' requires an installed schema version"
+                ))
+            })?
+        };
         let column_intent = |column: &Column| {
             GlueColumnIntent::from_glue_fields(column.name(), column.r#type(), column.comment())
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
         };
         let location = format!(
             "s3://{}/{}/",
@@ -1296,8 +1240,14 @@ impl DataSinkAthenaPlugin {
             table: namespace.to_string(),
             partition_values: partition_values.clone(),
             location,
-            storage_columns: storage_columns.iter().map(column_intent).collect(),
-            partition_columns: partition_columns.iter().map(column_intent).collect(),
+            storage_columns: storage_columns
+                .iter()
+                .map(column_intent)
+                .collect::<io::Result<Vec<_>>>()?,
+            partition_columns: partition_columns
+                .iter()
+                .map(column_intent)
+                .collect::<io::Result<Vec<_>>>()?,
             input_format: "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
                 .to_string(),
             output_format: "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
@@ -1395,18 +1345,7 @@ impl DataSinkAthenaPlugin {
         let is_deadletter_target =
             is_deadletter_athena_target(self.binding, &namespace, &self.context.pipeline_name);
 
-        if is_deadletter_target && !self.deadletter_schema_ready.load(Ordering::Acquire) {
-            AwsAthena::create_or_update_schema_with_config(
-                &namespace,
-                &deadletter_output_metadata(),
-                &self.context,
-                self.binding,
-                self.config.clone(),
-                None,
-            )
-            .await?;
-            self.deadletter_schema_ready.store(true, Ordering::Release);
-        }
+        self.publish_namespace(&namespace, source_contract).await?;
 
         let trimmed_key = &key.trim_matches('/').to_string();
 
@@ -1679,6 +1618,8 @@ impl DataSinkAthenaPlugin {
         // Resolve ordering. For bounded grouped writes, ordering is applied
         // within each incoming batch/row group only; no global sort metadata is emitted.
         let schema = stream.schema();
+        let metadata = self.namespace_metadata(&namespace).await?;
+        reject_unpublished_batch_columns(&metadata, &schema)?;
         let order_fields =
             skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
                 &schema,
@@ -1889,6 +1830,7 @@ impl AwsAthena {
         config: DataSinkAthenaPluginConfig,
         source_contract: Option<&SourceNamespaceContract>,
     ) -> io::Result<()> {
+        require_glue_database(&config)?;
         // Serialize workgroup changes to avoid Athena InvalidRequestException on concurrent updates
         let _wg_guard = ATHENA_WG_LOCK.lock().await;
         match AwsAthena::get_work_group(&config).await {
@@ -1947,6 +1889,18 @@ impl AwsAthena {
                             .and_then(|t| t.partition_keys.as_ref())
                             .is_some_and(|keys| !keys.is_empty());
                 if deadletter_table_needs_rebuild {
+                    let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                        .load()
+                        .await;
+                    let glue_client = GlueClient::new(&aws_config);
+                    let has_partitions = glue_has_registered_partitions(
+                        &glue_client,
+                        &config.glue_database_name,
+                        namespace,
+                    )
+                    .await
+                    .map_err(io::Error::other)?;
+                    deadletter_rebuild_allowed(has_partitions).map_err(io::Error::other)?;
                     info!(
                         "Rebuilding deadletter Glue table '{}' in database '{}' without partitions",
                         namespace, config.glue_database_name
@@ -2535,8 +2489,9 @@ impl AwsAthena {
 
     fn get_partition_by_fields(
         output_layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
+        metadata: &OutputMetadata,
         partitions: &mut Vec<Column>,
-    ) {
+    ) -> Result<(), io::Error> {
         for field_dot in &output_layout.partition_fields {
             let entity_name = match field_dot.rfind('.') {
                 Some(index) => format!("p_{}", &field_dot[index + 1..]),
@@ -2546,15 +2501,17 @@ impl AwsAthena {
                 &crate::helpers::configuration::runtime_child_config(),
                 entity_name.to_string(),
             );
+            let hive_type = partition_hive_type_for_layout_field(metadata, field_dot)?;
 
             partitions.push(
                 Column::builder()
                     .name(clean_field_name.to_string())
-                    .r#type("string")
+                    .r#type(hive_type)
                     .build()
                     .unwrap(),
             );
         }
+        Ok(())
     }
 
     fn time_partition_name_for_layout(
@@ -2679,11 +2636,13 @@ impl AwsAthena {
             source_contract,
             metadata,
             partition_columns_override,
-        );
+        )
+        .map_err(|err| err.to_string())?;
         let partition_indexes = build_glue_partition_indexes(&context.output_layout, &partitions);
 
-        let columns =
-            SkipprHive::storage_columns_excluding_partition_keys(metadata, &partitions).unwrap();
+        let columns = SkipprHive::storage_columns_excluding_partition_keys(metadata, &partitions)?;
+        let published_storage = columns.clone();
+        let published_partitions = partitions.clone();
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -2734,6 +2693,24 @@ impl AwsAthena {
             Err(err) => {
                 let s = err.into_service_error().to_string();
                 if s.contains("AlreadyExistsException") {
+                    let existing = Self::glue_get_table(config, namespace)
+                        .await
+                        .map_err(|err| format!("Glue GetTable after AlreadyExists: {err}"))?;
+                    let live_storage = existing
+                        .table()
+                        .and_then(|table| table.storage_descriptor())
+                        .and_then(|sd| sd.columns.clone())
+                        .unwrap_or_default();
+                    let live_partitions = existing
+                        .table()
+                        .and_then(|table| table.partition_keys.clone())
+                        .unwrap_or_default();
+                    glue_live_matches_published(
+                        &live_storage,
+                        &live_partitions,
+                        &published_storage,
+                        &published_partitions,
+                    )?;
                     return Ok(true);
                 }
                 Err(s)
@@ -2764,11 +2741,18 @@ impl AwsAthena {
             .table()
             .and_then(|table| table.partition_keys.clone())
             .unwrap_or_default();
-        let columns = SkipprHive::storage_columns_excluding_partition_keys(
+        let existing_columns = existing_table
+            .table()
+            .and_then(|table| table.storage_descriptor())
+            .and_then(|descriptor| descriptor.columns.clone())
+            .unwrap_or_default();
+        let desired = SkipprHive::storage_columns_excluding_partition_keys(
             metadata,
             &existing_partition_keys,
         )
-        .unwrap();
+        .map_err(|err| format!("failed to convert dest metadata to Glue columns: {err}"))?;
+        let missing = glue_missing_storage_columns(&existing_columns, desired)?;
+        let columns: Vec<Column> = existing_columns.into_iter().chain(missing).collect();
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -2916,25 +2900,15 @@ impl RecordBatchStream for EmptyRecordBatchStream {
     }
 }
 
-fn hive_type_for_skippr_data_type(dtype: &SkipprDataType) -> &'static str {
-    match dtype {
-        SkipprDataType::Boolean => "boolean",
-        SkipprDataType::Integer => "int",
-        SkipprDataType::Short => "smallint",
-        SkipprDataType::Byte => "tinyint",
-        SkipprDataType::Long => "bigint",
-        SkipprDataType::Float => "float",
-        SkipprDataType::Double => "double",
-        SkipprDataType::Decimal => "decimal(38,9)",
-        SkipprDataType::Date | SkipprDataType::Timestamp | SkipprDataType::TimestampMilli => {
-            "timestamp"
-        }
-        SkipprDataType::Binary | SkipprDataType::Fixed => "binary",
-        _ => "string",
-    }
+fn hive_type_for_skippr_data_type(dtype: &SkipprDataType) -> Result<&'static str, io::Error> {
+    skippr_runtime_sdk::converters::skippr_hive::hive_primitive_type(dtype)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
-fn hive_partition_type_for_column(metadata: &OutputMetadata, column: &str) -> String {
+fn published_partition_field<'a>(
+    metadata: &'a OutputMetadata,
+    column: &str,
+) -> Result<&'a OutputMetadata, io::Error> {
     let segments: Vec<&str> = column.split('.').collect();
     let mut current = metadata;
     for (index, segment) in segments.iter().enumerate() {
@@ -2943,14 +2917,49 @@ fn hive_partition_type_for_column(metadata: &OutputMetadata, column: &str) -> St
             .find(|(_, field)| field.out_field_name() == *segment)
             .map(|(_, field)| field);
         let Some(child) = child else {
-            return "string".to_string();
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("published dest schema is missing partition column '{column}'"),
+            ));
         };
         if index + 1 == segments.len() {
-            return hive_type_for_skippr_data_type(child.determined_type()).to_string();
+            return Ok(child);
         }
         current = child;
     }
-    "string".to_string()
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("published dest schema is missing partition column '{column}'"),
+    ))
+}
+
+fn hive_partition_type_for_column(
+    metadata: &OutputMetadata,
+    column: &str,
+) -> Result<String, io::Error> {
+    let field = published_partition_field(metadata, column)?;
+    Ok(hive_type_for_skippr_data_type(field.determined_type())?.to_string())
+}
+
+fn partition_hive_type_for_layout_field(
+    metadata: &OutputMetadata,
+    field_dot: &str,
+) -> Result<String, io::Error> {
+    let mut missing = None;
+    for candidate in Helpers::field_name_candidates(field_dot) {
+        match published_partition_field(metadata, &candidate) {
+            Ok(field) => {
+                return Ok(hive_type_for_skippr_data_type(field.determined_type())?.to_string());
+            }
+            Err(err) => missing = Some(err),
+        }
+    }
+    Err(missing.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("published dest schema is missing partition column '{field_dot}'"),
+        )
+    }))
 }
 
 fn glue_partition_column_names(columns: &[Column]) -> Vec<String> {
@@ -2960,20 +2969,23 @@ fn glue_partition_column_names(columns: &[Column]) -> Vec<String> {
         .collect()
 }
 
-fn glue_partition_column_layout(columns: &[Column]) -> Vec<(String, String)> {
+fn glue_partition_column_layout(columns: &[Column]) -> Result<Vec<(String, String)>, io::Error> {
     columns
         .iter()
         .map(|column| {
-            (
-                column.name().to_string(),
-                column.r#type().unwrap_or("string").to_string(),
-            )
+            let ty = column.r#type().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Glue partition column '{}' has no type", column.name()),
+                )
+            })?;
+            Ok((column.name().to_string(), ty.to_string()))
         })
         .collect()
 }
 
-fn partition_layout_mismatch(existing: &[Column], expected: &[Column]) -> bool {
-    glue_partition_column_layout(existing) != glue_partition_column_layout(expected)
+fn partition_layout_mismatch(existing: &[Column], expected: &[Column]) -> Result<bool, io::Error> {
+    Ok(glue_partition_column_layout(existing)? != glue_partition_column_layout(expected)?)
 }
 
 fn build_glue_partition_indexes(
@@ -3016,20 +3028,20 @@ fn build_glue_partition_keys(
     source_contract: Option<&SourceNamespaceContract>,
     metadata: &OutputMetadata,
     partition_columns_override: Option<&[Column]>,
-) -> Vec<Column> {
+) -> Result<Vec<Column>, io::Error> {
     let is_deadletter = is_deadletter_athena_target(binding, namespace, &context.pipeline_name);
     if is_deadletter {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut partitions = Vec::new();
     if let Some(override_columns) = partition_columns_override {
         partitions.extend(override_columns.iter().cloned());
     } else if let Some(contract) = source_contract {
-        append_contract_glue_partition_keys(&mut partitions, contract, metadata);
-        AwsAthena::get_partition_by_fields(&context.output_layout, &mut partitions);
+        append_contract_glue_partition_keys(&mut partitions, contract, metadata)?;
+        AwsAthena::get_partition_by_fields(&context.output_layout, metadata, &mut partitions)?;
     } else {
-        AwsAthena::get_partition_by_fields(&context.output_layout, &mut partitions);
+        AwsAthena::get_partition_by_fields(&context.output_layout, metadata, &mut partitions)?;
     }
 
     let granularity_target = context
@@ -3051,7 +3063,7 @@ fn build_glue_partition_keys(
             }
         }
     }
-    partitions
+    Ok(partitions)
 }
 
 async fn glue_has_registered_partitions(
@@ -3070,6 +3082,17 @@ async fn glue_has_registered_partitions(
         Ok(output) => Ok(!output.partitions().is_empty()),
         Err(err) => Err(err.into_service_error().to_string()),
     }
+}
+
+fn stale_glue_partition_layout_error(
+    database: &str,
+    namespace: &str,
+    existing: &[String],
+    expected: &[String],
+) -> String {
+    format!(
+        "Glue table '{database}.{namespace}' partition layout {existing:?} does not match published dest {expected:?}; recreate the table"
+    )
 }
 
 async fn try_heal_glue_partition_layout(
@@ -3093,8 +3116,11 @@ async fn try_heal_glue_partition_layout(
         source_contract,
         metadata,
         partition_columns_override,
-    );
-    if !partition_layout_mismatch(existing_partition_keys, &expected_partition_keys) {
+    )
+    .map_err(|err| err.to_string())?;
+    if !partition_layout_mismatch(existing_partition_keys, &expected_partition_keys)
+        .map_err(|err| err.to_string())?
+    {
         return Ok(false);
     }
 
@@ -3102,12 +3128,17 @@ async fn try_heal_glue_partition_layout(
         .load()
         .await;
     let glue_client = GlueClient::new(&aws_config);
-    if glue_has_registered_partitions(&glue_client, &config.glue_database_name, namespace).await? {
-        return Ok(false);
-    }
-
     let existing_names = glue_partition_column_names(existing_partition_keys);
     let expected_names = glue_partition_column_names(&expected_partition_keys);
+    if glue_has_registered_partitions(&glue_client, &config.glue_database_name, namespace).await? {
+        return Err(stale_glue_partition_layout_error(
+            &config.glue_database_name,
+            namespace,
+            &existing_names,
+            &expected_names,
+        ));
+    }
+
     info!(
         "Rebuilding Glue table '{}.{}' to heal partition layout: {:?} -> {:?}",
         config.glue_database_name, namespace, existing_names, expected_names
@@ -3140,9 +3171,9 @@ fn append_contract_glue_partition_keys(
     partitions: &mut Vec<Column>,
     contract: &SourceNamespaceContract,
     metadata: &OutputMetadata,
-) {
+) -> Result<(), io::Error> {
     if contract.partition_key.is_empty() {
-        return;
+        return Ok(());
     }
     let existing: std::collections::HashSet<String> = partitions
         .iter()
@@ -3153,7 +3184,7 @@ fn append_contract_glue_partition_keys(
         if existing.contains(&name) {
             continue;
         }
-        let hive_type = hive_partition_type_for_column(metadata, &name);
+        let hive_type = hive_partition_type_for_column(metadata, &name)?;
         partitions.push(
             Column::builder()
                 .name(name)
@@ -3162,6 +3193,7 @@ fn append_contract_glue_partition_keys(
                 .unwrap(),
         );
     }
+    Ok(())
 }
 
 fn contract_partition_key_values(
@@ -3254,6 +3286,91 @@ mod contract_schema_tests {
     }
 
     #[test]
+    fn glue_publish_adds_missing_columns_when_live_types_match() {
+        let existing = vec![Column::builder()
+            .name("id")
+            .r#type("bigint")
+            .build()
+            .unwrap()];
+        let desired = vec![
+            Column::builder()
+                .name("id")
+                .r#type("bigint")
+                .build()
+                .unwrap(),
+            Column::builder()
+                .name("region")
+                .r#type("string")
+                .build()
+                .unwrap(),
+        ];
+        let missing = glue_missing_storage_columns(&existing, desired).unwrap();
+        let columns: Vec<Column> = existing.into_iter().chain(missing).collect();
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].name, "id");
+        assert_eq!(columns[0].r#type(), Some("bigint"));
+        assert_eq!(columns[1].name, "region");
+        assert_eq!(columns[1].r#type(), Some("string"));
+    }
+
+    #[test]
+    fn glue_update_rejects_storage_type_mismatch() {
+        let existing = vec![Column::builder()
+            .name("id")
+            .r#type("string")
+            .build()
+            .unwrap()];
+        let desired = vec![Column::builder()
+            .name("id")
+            .r#type("bigint")
+            .build()
+            .unwrap()];
+        let err = glue_missing_storage_columns(&existing, desired).unwrap_err();
+        assert!(err.contains("does not match published"), "{err}");
+    }
+
+    #[test]
+    fn a_second_partition_layout_for_one_namespace_fails_closed() {
+        let layouts = std::sync::Mutex::new(BTreeMap::new());
+        let tenant = vec![FieldPath::single("tenant_id")];
+        super::record_partition_layout(&layouts, "orders", tenant.clone()).unwrap();
+        super::record_partition_layout(&layouts, "orders", tenant).unwrap();
+        super::record_partition_layout(&layouts, "lines", Vec::new()).unwrap();
+        let err = super::record_partition_layout(&layouts, "orders", Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("Glue partition keys"), "{err}");
+    }
+
+    #[test]
+    fn deadletter_rebuild_fails_when_partitions_are_registered() {
+        deadletter_rebuild_allowed(false).unwrap();
+        let err = deadletter_rebuild_allowed(true).unwrap_err();
+        assert!(err.contains("registered partitions"), "{err}");
+    }
+
+    #[test]
+    fn empty_glue_database_name_fails_publish() {
+        let config = DataSinkAthenaPluginConfig {
+            format: None,
+            s3_bucket: "b".into(),
+            s3_prefix: "p".into(),
+            athena_workgroup_name: "wg".into(),
+            glue_database_name: "  ".into(),
+            athena_results_s3_bucket: "r".into(),
+            region: None,
+            catalog: None,
+            max_concurrency: None,
+            discovery_cache_ttl_secs: None,
+        };
+        let err = require_glue_database(&config).unwrap_err();
+        assert!(err.to_string().contains("glue_database_name"), "{err}");
+        let ok = DataSinkAthenaPluginConfig {
+            glue_database_name: "skippr".into(),
+            ..config
+        };
+        require_glue_database(&ok).unwrap();
+    }
+
+    #[test]
     fn unpublished_schema_version_cannot_mint_catalog_intent() {
         assert_eq!(
             published_catalog_schema_version(&BTreeMap::new(), "events"),
@@ -3275,62 +3392,6 @@ mod contract_schema_tests {
                 .unwrap(),
             NonZeroU64::new(3).unwrap()
         );
-    }
-
-    #[test]
-    fn equal_or_older_schema_state_install_is_a_noop() {
-        let mut state = InstalledAthenaSchemaState::default();
-        let initial = BTreeMap::from([("events".to_string(), deadletter_output_metadata())]);
-        let replacement = BTreeMap::from([("users".to_string(), deadletter_output_metadata())]);
-
-        state.install(0, &initial);
-        state.install(0, &replacement);
-        assert_eq!(state.version, 0);
-        assert!(state.namespaces.contains_key("events"));
-        assert!(!state.namespaces.contains_key("users"));
-
-        state.install(2, &replacement);
-        state.install(1, &initial);
-        assert_eq!(state.version, 2);
-        assert!(state.namespaces.contains_key("users"));
-        assert!(!state.namespaces.contains_key("events"));
-    }
-
-    #[test]
-    fn schema_delta_uses_each_namespace_version_and_merges_only_changes() {
-        let initial = deadletter_output_metadata();
-        let changed = OutputMetadata::new();
-        let mut state = InstalledAthenaSchemaState::default();
-        state.install_snapshot(&RuntimeSchemaState {
-            version: 7,
-            namespaces: BTreeMap::from([("events".to_string(), initial.clone())]),
-            namespace_versions: BTreeMap::from([("events".to_string(), 3)]),
-        });
-
-        let applied = state.install_delta(&SchemaDelta {
-            version: 99,
-            namespaces: BTreeMap::from([
-                (
-                    "events".to_string(),
-                    skippr_runtime_sdk::protocol::SchemaNamespaceDelta {
-                        version: 3,
-                        metadata: changed.clone(),
-                    },
-                ),
-                (
-                    "users".to_string(),
-                    skippr_runtime_sdk::protocol::SchemaNamespaceDelta {
-                        version: 1,
-                        metadata: changed,
-                    },
-                ),
-            ]),
-        });
-
-        assert_eq!(applied, 1);
-        assert_eq!(state.namespaces["events"], initial);
-        assert_eq!(state.namespace_versions["events"], 3);
-        assert_eq!(state.namespace_versions["users"], 1);
     }
 
     fn wat_append_partition_contract() -> SourceNamespaceContract {
@@ -3455,8 +3516,8 @@ mod contract_schema_tests {
                 .unwrap(),
             Column::builder().name("day").r#type("int").build().unwrap(),
         ];
-        assert!(partition_layout_mismatch(&existing, &expected));
-        assert!(!partition_layout_mismatch(&expected, &expected));
+        assert!(partition_layout_mismatch(&existing, &expected).unwrap());
+        assert!(!partition_layout_mismatch(&expected, &expected).unwrap());
         let same_names_wrong_types = vec![
             Column::builder()
                 .name("year")
@@ -3474,10 +3535,20 @@ mod contract_schema_tests {
                 .build()
                 .unwrap(),
         ];
-        assert!(partition_layout_mismatch(
-            &same_names_wrong_types,
-            &expected
-        ));
+        assert!(partition_layout_mismatch(&same_names_wrong_types, &expected).unwrap());
+        let missing_type = vec![Column::builder().name("year").build().unwrap()];
+        let err = partition_layout_mismatch(&missing_type, &expected).unwrap_err();
+        assert!(err.to_string().contains("has no type"), "{err}");
+        let err = stale_glue_partition_layout_error(
+            "bikehire",
+            "rides",
+            &["year".into()],
+            &["year".into(), "month".into(), "day".into()],
+        );
+        assert!(
+            err.contains("does not match published dest") && err.contains("recreate the table"),
+            "{err}"
+        );
     }
 
     fn day_grain_context(pipeline: &str) -> RuntimeExecutionContext {
@@ -3517,11 +3588,171 @@ mod contract_schema_tests {
             None,
             &OutputMetadata::new(),
             None,
-        );
+        )
+        .unwrap();
         assert_eq!(
             glue_partition_column_names(&keys),
             vec!["year", "month", "day"]
         );
+    }
+
+    #[test]
+    fn layout_partition_fields_use_published_dest_hive_types() {
+        let mut context = day_grain_context("device_data");
+        context.output_layout.time_partition_granularity = None;
+        context.output_layout.partition_fields = vec!["date".into()];
+        let metadata = serde_json::from_value(serde_json::json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "date": {
+                    "out_field_name": "date",
+                    "determined_type": "date",
+                    "determined_type_values": "",
+                    "fields": {}
+                }
+            }
+        }))
+        .unwrap();
+        let keys = build_glue_partition_keys(
+            &context,
+            RuntimeBinding::Primary,
+            "device_data",
+            None,
+            &metadata,
+            None,
+        )
+        .unwrap();
+        assert_eq!(glue_partition_column_names(&keys), vec!["p_date"]);
+        assert_eq!(keys[0].r#type(), Some("timestamp"));
+    }
+
+    #[test]
+    fn hive_partition_type_fails_closed_on_record() {
+        let metadata = serde_json::from_value(serde_json::json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "payload": {
+                    "out_field_name": "payload",
+                    "determined_type": "record",
+                    "determined_type_values": "",
+                    "fields": {}
+                }
+            }
+        }))
+        .unwrap();
+        let err = hive_partition_type_for_column(&metadata, "payload").unwrap_err();
+        assert!(err.to_string().contains("no Hive primitive type"), "{err}");
+    }
+
+    fn glue_col(name: &str, ty: &str) -> Column {
+        Column::builder().name(name).r#type(ty).build().unwrap()
+    }
+
+    #[test]
+    fn glue_already_exists_adopts_matching_layout() {
+        glue_live_matches_published(
+            &[glue_col("id", "bigint"), glue_col("region", "string")],
+            &[glue_col("p_date", "timestamp")],
+            &[glue_col("id", "bigint"), glue_col("region", "string")],
+            &[glue_col("p_date", "timestamp")],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn glue_already_exists_rejects_storage_type_mismatch() {
+        let err = glue_live_matches_published(
+            &[glue_col("id", "string")],
+            &[],
+            &[glue_col("id", "bigint")],
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.contains("does not match published"), "{err}");
+    }
+
+    #[test]
+    fn glue_already_exists_rejects_missing_published_column() {
+        let err = glue_live_matches_published(
+            &[glue_col("id", "bigint")],
+            &[],
+            &[glue_col("id", "bigint"), glue_col("region", "string")],
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.contains("missing published storage column"), "{err}");
+    }
+
+    #[test]
+    fn layout_partition_record_field_fails_closed() {
+        let mut context = day_grain_context("device_data");
+        context.output_layout.time_partition_granularity = None;
+        context.output_layout.partition_fields = vec!["payload".into()];
+        let metadata = serde_json::from_value(serde_json::json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "payload": {
+                    "out_field_name": "payload",
+                    "determined_type": "record",
+                    "determined_type_values": "",
+                    "fields": {}
+                }
+            }
+        }))
+        .unwrap();
+        let err = build_glue_partition_keys(
+            &context,
+            RuntimeBinding::Primary,
+            "device_data",
+            None,
+            &metadata,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no Hive primitive type"), "{err}");
+    }
+
+    #[test]
+    fn layout_partition_does_not_steal_alias_type_after_record_match() {
+        let mut context = day_grain_context("device_data");
+        context.output_layout.time_partition_granularity = None;
+        context.output_layout.partition_fields = vec!["_region".into()];
+        let metadata = serde_json::from_value(serde_json::json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "_region": {
+                    "out_field_name": "_region",
+                    "determined_type": "record",
+                    "determined_type_values": "",
+                    "fields": {}
+                },
+                "region": {
+                    "out_field_name": "region",
+                    "determined_type": "string",
+                    "determined_type_values": "",
+                    "fields": {}
+                }
+            }
+        }))
+        .unwrap();
+        let err = build_glue_partition_keys(
+            &context,
+            RuntimeBinding::Primary,
+            "device_data",
+            None,
+            &metadata,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no Hive primitive type"), "{err}");
     }
 
     #[test]
@@ -3534,7 +3765,8 @@ mod contract_schema_tests {
             None,
             &OutputMetadata::new(),
             None,
-        );
+        )
+        .unwrap();
         assert!(
             keys.is_empty(),
             "deadletter Glue tables must stay unpartitioned"
@@ -3561,7 +3793,8 @@ mod contract_schema_tests {
             None,
             &OutputMetadata::new(),
             None,
-        );
+        )
+        .unwrap();
         let indexes = build_glue_partition_indexes(&context.output_layout, &keys);
         assert_eq!(
             glue_partition_index_names(&indexes),
@@ -3572,12 +3805,30 @@ mod contract_schema_tests {
     #[test]
     fn contract_partition_key_becomes_glue_partition_column() {
         let contract = ga4_replace_partition_contract();
-        let metadata = OutputMetadata::new();
+        let metadata = serde_json::from_value(serde_json::json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "date": {
+                    "out_field_name": "date",
+                    "determined_type": "string",
+                    "determined_type_values": "",
+                    "fields": {}
+                }
+            }
+        }))
+        .unwrap();
         let mut partitions = Vec::new();
-        append_contract_glue_partition_keys(&mut partitions, &contract, &metadata);
+        append_contract_glue_partition_keys(&mut partitions, &contract, &metadata).unwrap();
         assert_eq!(partitions.len(), 1);
         assert_eq!(partitions[0].name(), "date");
         assert_eq!(partitions[0].r#type(), Some("string"));
+        let err = hive_partition_type_for_column(&OutputMetadata::new(), "date").unwrap_err();
+        assert!(
+            err.to_string().contains("missing partition column"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3589,7 +3840,7 @@ mod contract_schema_tests {
             .r#type("string")
             .build()
             .unwrap()];
-        append_contract_glue_partition_keys(&mut partitions, &contract, &metadata);
+        append_contract_glue_partition_keys(&mut partitions, &contract, &metadata).unwrap();
         assert_eq!(partitions.len(), 1);
     }
 

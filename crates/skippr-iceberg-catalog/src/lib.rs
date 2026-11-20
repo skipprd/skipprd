@@ -95,7 +95,7 @@ fn default_lake_namespace() -> String {
     "default".to_string()
 }
 
-/// Config for the `SkipprLake` data sink and schema sink.
+/// Config for the `SkipprLake` data sink.
 /// Query and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)
 /// inside `IcebergCatalogSpec`, not as a standalone query backend.
 /// The Skippr catalog is the only catalog: pointers live in `catalog_table`

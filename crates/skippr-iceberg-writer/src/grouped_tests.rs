@@ -14,8 +14,8 @@ use iceberg::TableCreation;
 use serde_json::json;
 use skippr_iceberg_catalog_fs::FsCatalog;
 use skippr_runtime_sdk::plugins::{
-    GroupedBatchReader, GroupedBatchReaderConfig, GroupedSinkWriteContext, LiveWalSegments,
-    SinkCallResult,
+    DataSink, GroupedBatchReader, GroupedBatchReaderConfig, GroupedSinkWriteContext,
+    LiveWalSegments, SinkCallResult,
 };
 use skippr_runtime_sdk::protocol::RuntimeOutputLayout;
 use skippr_runtime_sdk::protocol::RuntimeWalPartRef;
@@ -25,7 +25,8 @@ use std::collections::BTreeSet;
 skippr_runtime_sdk::declare_sink_spec!(
     GroupedTestSpec,
     skippr_runtime_sdk::plugins::cdc::sink_capabilities::SKIPPRLAKE,
-    skippr_runtime_sdk::plugins::TransactionalTableCommit
+    skippr_runtime_sdk::plugins::TransactionalTableCommit,
+    alter = skippr_runtime_sdk::plugins::AlterSupport::Iceberg
 );
 
 pub(crate) const NAMESPACE: &str = "orders";
@@ -36,11 +37,26 @@ pub(crate) const NAMESPACE: &str = "orders";
 pub(crate) struct CountingCatalog {
     inner: FsCatalog,
     loads: std::sync::atomic::AtomicUsize,
+    /// Next `update_table` calls that fail with `CatalogCommitConflicts`.
+    conflicts: std::sync::atomic::AtomicUsize,
 }
 
 impl CountingCatalog {
+    fn new(inner: FsCatalog) -> Self {
+        Self {
+            inner,
+            loads: Default::default(),
+            conflicts: Default::default(),
+        }
+    }
+
     pub fn loads(&self) -> usize {
         self.loads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn inject_conflicts(&self, count: usize) {
+        self.conflicts
+            .store(count, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -112,6 +128,20 @@ impl Catalog for CountingCatalog {
         &self,
         commit: iceberg::TableCommit,
     ) -> iceberg::Result<iceberg::table::Table> {
+        let conflicted = self
+            .conflicts
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok();
+        if conflicted {
+            return Err(iceberg::Error::new(
+                iceberg::ErrorKind::CatalogCommitConflicts,
+                "injected conflict",
+            ));
+        }
         self.inner.update_table(commit).await
     }
 }
@@ -126,10 +156,9 @@ pub(crate) struct Harness {
 impl Harness {
     pub async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let counting = Arc::new(CountingCatalog {
-            inner: FsCatalog::new(Self::warehouse_of(&dir), FileIO::new_with_fs()).unwrap(),
-            loads: Default::default(),
-        });
+        let counting = Arc::new(CountingCatalog::new(
+            FsCatalog::new(Self::warehouse_of(&dir), FileIO::new_with_fs()).unwrap(),
+        ));
         let catalog: Arc<dyn Catalog> = counting.clone();
         catalog
             .create_namespace(&NamespaceIdent::new("lake".into()), HashMap::new())
@@ -766,7 +795,7 @@ fn time_partition_metadata() -> serde_json::Value {
             },
             "event_ts": {
                 "out_field_name": "event_ts",
-                "determined_type": "long",
+                "determined_type": "timestamp",
                 "determined_type_values": "",
                 "field_id": 2,
                 "schema_id": 1,
@@ -821,14 +850,13 @@ async fn time_partition_harness_with(
     layout: RuntimeOutputLayout,
 ) -> Harness {
     let dir = tempfile::tempdir().unwrap();
-    let counting = Arc::new(CountingCatalog {
-        inner: FsCatalog::new(
+    let counting = Arc::new(CountingCatalog::new(
+        FsCatalog::new(
             format!("file://{}", dir.path().display()),
             FileIO::new_with_fs(),
         )
         .unwrap(),
-        loads: Default::default(),
-    });
+    ));
     let catalog: Arc<dyn Catalog> = counting.clone();
     catalog
         .create_namespace(&NamespaceIdent::new("lake".into()), HashMap::new())
@@ -1010,7 +1038,7 @@ fn numeric_time_metadata() -> serde_json::Value {
             },
             "time": {
                 "out_field_name": "time",
-                "determined_type": "long",
+                "determined_type": "timestamp",
                 "determined_type_values": "",
                 "field_id": 2,
                 "schema_id": 1,
@@ -1213,7 +1241,7 @@ fn skippr_event_time_metadata() -> serde_json::Value {
             },
             "_skippr_event_time": {
                 "out_field_name": "_skippr_event_time",
-                "determined_type": "long",
+                "determined_type": "timestamp",
                 "determined_type_values": "",
                 "field_id": 2,
                 "schema_id": 1,
@@ -1558,18 +1586,19 @@ async fn iceberg_recreate_when_live_spec_is_identity_calendar_ints() {
         ],
     )
     .unwrap();
-    let err = {
-        let stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
-            batch.schema(),
-            futures::stream::iter(vec![Ok(batch)]),
-        ));
-        harness
-            .writer
-            .sync(stream, filename, None)
-            .await
-            .unwrap_err()
-    };
-    assert!(err.to_string().contains("recreate the table"), "{err}");
+    harness.native_write_batch(&filename, batch).await;
+    let table = harness.table().await;
+    assert_hidden_time_spec(&table, "event_ts", Transform::Day);
+    for calendar in ["year", "month", "day"] {
+        assert!(
+            table
+                .metadata()
+                .current_schema()
+                .field_by_name(calendar)
+                .is_none(),
+            "{calendar}"
+        );
+    }
 }
 
 fn alter_field(name: &str, ty: &str, field_id: i32) -> serde_json::Value {
@@ -1608,7 +1637,7 @@ async fn apply_alter_renames_live_schema_without_rewrite() {
         .unwrap()
         .id;
     let metadata = alter_metadata(json!({ "id": alter_field("id", "long", field_id) }));
-    <IcebergWriter<GroupedTestSpec> as SchemaSink>::apply_alter(
+    <IcebergWriter<GroupedTestSpec> as DataSink>::apply_alter(
         &harness.writer,
         NAMESPACE,
         &metadata,
@@ -1671,7 +1700,7 @@ async fn apply_alter_merge_rewrites_live_data_files() {
         .current_snapshot()
         .map(|snap| snap.snapshot_id());
     let migrate = harness.migrate_writer().await;
-    <IcebergWriter<GroupedTestSpec> as SchemaSink>::apply_alter(
+    <IcebergWriter<GroupedTestSpec> as DataSink>::apply_alter(
         &migrate,
         NAMESPACE,
         &metadata,
@@ -1717,7 +1746,7 @@ async fn apply_alter_rename_keeps_equality_deletes() {
         .unwrap()
         .id;
     let metadata = alter_metadata(json!({ "id": alter_field("id", "long", field_id) }));
-    <IcebergWriter<GroupedTestSpec> as SchemaSink>::apply_alter(
+    <IcebergWriter<GroupedTestSpec> as DataSink>::apply_alter(
         &harness.writer,
         NAMESPACE,
         &metadata,
@@ -1792,7 +1821,7 @@ async fn apply_alter_rename_rejects_position_deletes() {
         .unwrap()
         .id;
     let metadata = alter_metadata(json!({ "id": alter_field("id", "long", field_id) }));
-    let err = <IcebergWriter<GroupedTestSpec> as SchemaSink>::apply_alter(
+    let err = <IcebergWriter<GroupedTestSpec> as DataSink>::apply_alter(
         &harness.writer,
         NAMESPACE,
         &metadata,
@@ -1827,4 +1856,94 @@ async fn leftover_legacy_grouped_object_is_not_replayed() {
             .contains("legacy grouped compaction objects are not replayed"),
         "{err}"
     );
+}
+
+async fn evolve_fixture(harness: &Harness) -> (iceberg::table::Table, Schema) {
+    let live = Schema::builder()
+        .with_schema_id(0)
+        .with_fields(vec![NestedField::optional(
+            1,
+            "id",
+            Type::Primitive(PrimitiveType::Long),
+        )
+        .into()])
+        .build()
+        .unwrap();
+    let creation = TableCreation::builder()
+        .name(harness.writer.table_name(NAMESPACE))
+        .schema(live)
+        .build();
+    let creation = TableCreation {
+        location: Some(harness.writer.table_location(NAMESPACE)),
+        ..creation
+    };
+    let table = harness
+        .catalog
+        .create_table(&NamespaceIdent::new("lake".into()), creation)
+        .await
+        .unwrap();
+    let desired = Schema::builder()
+        .with_schema_id(0)
+        .with_fields(vec![
+            NestedField::optional(1, "id", Type::Primitive(PrimitiveType::Long)).into(),
+            NestedField::optional(2, "region", Type::Primitive(PrimitiveType::String)).into(),
+        ])
+        .build()
+        .unwrap();
+    (table, desired)
+}
+
+#[tokio::test]
+async fn schema_evolve_retries_catalog_conflict_until_published_columns_land() {
+    let harness = Harness::new().await;
+    let (table, desired) = evolve_fixture(&harness).await;
+    harness.counting.inject_conflicts(1);
+    let evolved = super::ensure_live_table_has_published_schema(
+        harness.catalog.as_ref(),
+        table,
+        NAMESPACE,
+        &desired,
+    )
+    .await
+    .unwrap();
+    assert!(evolved
+        .metadata()
+        .current_schema()
+        .field_by_name("region")
+        .is_some());
+}
+
+#[tokio::test]
+async fn schema_evolve_fails_closed_when_conflicts_outlast_attempts() {
+    let harness = Harness::new().await;
+    let (table, desired) = evolve_fixture(&harness).await;
+    harness.counting.inject_conflicts(usize::MAX);
+    let err = super::ensure_live_table_has_published_schema(
+        harness.catalog.as_ref(),
+        table,
+        NAMESPACE,
+        &desired,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("left published columns missing"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn create_race_on_existing_table_adds_missing_published_fields() {
+    let harness = Harness::new().await;
+    let (_, desired) = evolve_fixture(&harness).await;
+    let table = harness
+        .writer
+        .create_table_with_iceberg_schema(harness.catalog.as_ref(), NAMESPACE, desired)
+        .await
+        .unwrap();
+    assert!(table
+        .metadata()
+        .current_schema()
+        .field_by_name("region")
+        .is_some());
 }

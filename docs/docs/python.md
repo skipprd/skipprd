@@ -71,7 +71,7 @@ When you create a `Session`, it takes a snapshot of its pipeline's config and re
 
 ## Build a config
 
-Every connector is a typed class named for its role: `DataSourceS3`, `DataSinkPostgres`, `SchemaSinkGlue`. Required fields are required keyword arguments. Registering a connector returns a typed ref, and `Pipeline` takes refs, not `"data_sources.x"` strings, so a typo is an error in your editor.
+Every connector is a typed class named for its role: `DataSourceS3`, `DataSinkPostgres`. Required fields are required keyword arguments. Registering a connector returns a typed ref, and `Pipeline` takes refs, not `"data_sources.x"` strings, so a typo is an error in your editor.
 
 ::: code-group
 
@@ -164,7 +164,7 @@ Registration and `save` check the whole merged config, so you find problems when
 - every secret is a `${NAME}` reference — a plaintext secret already in the file blocks `save` until you replace it;
 - every pipeline with a source is valid;
 - no two SkipprLake or DuckDB destinations write to the same table namespace;
-- every destination matches the schema sink it links to.
+- leftover `schema_sinks` YAML or `schema_sink` on a data sink is a load error.
 
 ## Keep secrets out of the file
 
@@ -237,44 +237,29 @@ lake = cfg.data_sink(
             secret_access_key=EnvRef("OBJECTS_SECRET_ACCESS_KEY"),
         ),
     ),
-    schema_sink="lake",
 )
 ```
 
 Fields with a fixed set of values are frozen enum classes. Pass the class member, not a string. `Pipeline(data_source=src, type="copy")` is a type error; use `type=PipelineType.COPY`. Time partitions take `batch_time_unit=BatchTimeUnit.DAY`, not `"day"`. Connector fields such as `cdc_mode` and `stream_profile` follow the same pattern.
 
-## Schema sinks
+## Dest schema
 
-A schema sink is where Skipprd writes table definitions. How you attach one depends on the destination.
-
-`SkipprLake`, `AthenaIceberg`, and `Duckdb` use one config for both roles. Pass `schema_sink=` a name, and the same config is registered under `schema_sinks.<name>`, as in the example above.
-
-Other destinations link a schema sink you registered first. Athena with Glue:
+The destination publishes its own tables on the first compact. Athena Hive takes `glue_database_name` on that entry:
 
 ```python
-from skippr import Config, DataSinkAthena, Pipeline, SchemaSinkGlue
+from skippr import Config, DataSinkAthena, Pipeline
 
 cfg = Config.discover()
 src = cfg.get_data_source("sample")
-glue = cfg.schema_sink(
-    "glue",
-    SchemaSinkGlue(
-        s3_bucket="your-output-bucket",
-        s3_prefix="bikehire",
-        athena_workgroup_name="primary",
-        athena_results_s3_bucket="your-output-bucket",
-        glue_database_name="bikehire",
-    ),
-)
 athena = cfg.data_sink(
     "athena",
     DataSinkAthena(
         s3_bucket="your-output-bucket",
         s3_prefix="bikehire",
+        glue_database_name="bikehire",
         athena_workgroup_name="primary",
         athena_results_s3_bucket="your-output-bucket",
     ),
-    schema_sink=glue,
 )
 cfg.pipeline("bikehire", Pipeline(data_source=src, data_sink=athena))
 cfg.save()
@@ -284,7 +269,7 @@ Refs belong to the `Config` that returned them. Passing a ref from one `Config` 
 
 ## Read data with df and query
 
-`df()` and `query()` read the data Skipprd holds for this pipeline — the same views [`skipprd query`](/cli/query) shows. They read the WAL, combined with the destination's Iceberg tables when the destination is SkipprLake, AthenaIceberg, or DuckDB. For any other destination they read the WAL only.
+`df()` and `query()` read the data Skipprd holds for this pipeline — the same views [`skipprd query`](/cli/query) shows. They read the WAL, combined with the destination's Iceberg tables when the destination is `SkipprLake`, `AthenaIceberg`, or `Duckdb`. For any other destination they read the WAL only.
 
 ::: code-group
 

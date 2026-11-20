@@ -12,10 +12,11 @@ use skippr_runtime_sdk::SkipprConfig;
 skippr_runtime_sdk::declare_sink_spec!(
     AthenaIcebergSinkSpec,
     skippr_runtime_sdk::plugins::cdc::sink_capabilities::ATHENA_ICEBERG,
-    skippr_runtime_sdk::plugins::TransactionalTableCommit
+    skippr_runtime_sdk::plugins::TransactionalTableCommit,
+    alter = skippr_runtime_sdk::plugins::AlterSupport::Iceberg
 );
 
-/// The AthenaIceberg data sink and schema sink: Iceberg on S3 via Glue, queried by Athena.
+/// The AthenaIceberg data sink: Iceberg on S3 via Glue, queried by Athena. Dest schema is this plugin.
 pub type AthenaIcebergWriter = IcebergWriter<AthenaIcebergSinkSpec>;
 
 const ATHENA_ICEBERG_WRITE_POLICIES: SinkWritePolicySupport = SinkWritePolicySupport {
@@ -24,7 +25,7 @@ const ATHENA_ICEBERG_WRITE_POLICIES: SinkWritePolicySupport = SinkWritePolicySup
     supports_replace_table: true,
 };
 
-/// Config for the `AthenaIceberg` data sink and schema sink.
+/// Config for the `AthenaIceberg` data sink.
 /// `skipprd query` reads Glue Iceberg ∪ WAL. Athena SQL still queries the same tables.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, SkipprConfig)]
 #[serde(deny_unknown_fields)]

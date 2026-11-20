@@ -70,4 +70,4 @@ runs:
         DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 DATA_DIR_HIGH_WATERMARK_PCT=0 \
           "${{ inputs.skipprd_path }}" --config "${work}/skippr.yml" \
           sync --log --pipeline file_postgres_append --once
-        e2e_assert_downloaded 'skippr-plugin-data-source-file*' 'skippr-plugin-data-sink-postgres*' 'skippr-plugin-schema-sink-postgres*'
+        e2e_assert_downloaded 'skippr-plugin-data-source-file*' 'skippr-plugin-data-sink-postgres*'

@@ -88,7 +88,6 @@ pub struct PipelineConfigView {
     pub data_root: PathBuf,
     pub source_plugin: String,
     pub sink_plugin: String,
-    pub schema_plugin: Option<String>,
     pub sink_ref: Option<String>,
     pub backend: QueryBackend,
     pub flatten_events: bool,
@@ -106,7 +105,7 @@ impl PipelineConfigView {
         let key = PipelineKey::new(tenant, workspace, pipeline)
             .map_err(|err| ConfigError::InvalidIdentity(err.to_string()))?;
         let data_root = data_root_for_pipeline(config, pipeline_cfg);
-        let (sink_ref, sink_plugin, schema_plugin) = resolve_sink(config, pipeline_cfg);
+        let (sink_ref, sink_plugin) = resolve_sink(config, pipeline_cfg);
         let source_plugin = resolve_source(config, pipeline_cfg);
         let backend = QueryBackend::for_pipeline(config, pipeline)?;
         let flatten_events = config
@@ -117,7 +116,6 @@ impl PipelineConfigView {
             data_root,
             source_plugin,
             sink_plugin,
-            schema_plugin,
             sink_ref,
             backend,
             flatten_events,
@@ -186,9 +184,9 @@ fn resolve_source(config: &Config, pipeline: &Pipeline) -> String {
         .unwrap_or_default()
 }
 
-fn resolve_sink(config: &Config, pipeline: &Pipeline) -> (Option<String>, String, Option<String>) {
+fn resolve_sink(config: &Config, pipeline: &Pipeline) -> (Option<String>, String) {
     let Some(data_sink_ref) = pipeline.data_sink.as_ref() else {
-        return (None, String::new(), None);
+        return (None, String::new());
     };
     let name = Config::parse_registry_ref(data_sink_ref, Registry::DataSinks)
         .unwrap_or_else(|_| data_sink_ref.clone());
@@ -200,9 +198,8 @@ fn resolve_sink(config: &Config, pipeline: &Pipeline) -> (Option<String>, String
         Some(entry) => (
             Some(data_sink_ref.clone()),
             entry.config.plugin_name().unwrap_or_default(),
-            entry.schema_sink.clone(),
         ),
-        None => (Some(data_sink_ref.clone()), String::new(), None),
+        None => (Some(data_sink_ref.clone()), String::new()),
     }
 }
 

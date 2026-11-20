@@ -134,10 +134,12 @@ pub fn plan_for_namespace(
     let mut columns = Vec::with_capacity(schema.fields().len());
     for field in schema.fields() {
         let out_name = field.name();
-        if out_name == "__skippr_empty_struct" {
+        if out_name == crate::converters::skippr_arrow::EMPTY_STRUCT_MARKER_FIELD {
             continue;
         }
-        let (source_field, meta) = bind_source_field(fields, field)?;
+        let Some((source_field, meta)) = bind_source_field(fields, field) else {
+            continue;
+        };
         columns.push(ExactColumnSpec {
             source_field: source_field.clone(),
             out_field_name: out_name.clone(),
@@ -162,6 +164,11 @@ pub fn plan_for_namespace(
     }
 
     let allowed_source_fields = columns.iter().map(|col| col.source_field.clone()).collect();
+    let mut dest_fields = Vec::with_capacity(columns.len());
+    for col in &columns {
+        dest_fields.push(schema.field_with_name(&col.out_field_name).ok()?.clone());
+    }
+    let schema = Arc::new(Schema::new(dest_fields));
 
     Some(ExactArrowPlan {
         schema,
@@ -267,7 +274,7 @@ impl ExactArrowBuilders {
     pub fn new(plan: &ExactArrowPlan, capacity: usize) -> Result<Self, ArrowError> {
         let mut builders = Vec::with_capacity(plan.schema.fields().len());
         for field in plan.schema.fields() {
-            if field.name() == "__skippr_empty_struct" {
+            if field.name() == crate::converters::skippr_arrow::EMPTY_STRUCT_MARKER_FIELD {
                 continue;
             }
             builders.push(ColumnBuilder::with_capacity(capacity, field.data_type())?);
@@ -298,7 +305,7 @@ impl ExactArrowBuilders {
             .schema
             .fields()
             .iter()
-            .filter(|f| f.name() != "__skippr_empty_struct")
+            .filter(|f| f.name() != crate::converters::skippr_arrow::EMPTY_STRUCT_MARKER_FIELD)
             .map(|f| f.as_ref().clone())
             .collect();
         let batch_schema = Arc::new(Schema::new(fields));
@@ -883,6 +890,29 @@ mod tests {
             .expect("display_name");
         assert_eq!(display.source_field, "name");
         assert!(plan.allowed_source_fields.contains("name"));
+    }
+
+    #[test]
+    fn plan_skips_dest_only_derived_columns() {
+        let mut amount = Metadata::new_with_type(SkipprDataType::Long, "amount");
+        amount.field_id = 2;
+        let mut fields = HashMap::new();
+        fields.insert("amount".to_string(), amount);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("amount", DataType::Int64, true).with_metadata(HashMap::from([(
+                crate::compute::PARQUET_FIELD_ID.to_string(),
+                "2".to_string(),
+            )])),
+            Field::new("amount_gbp", DataType::Float64, true).with_metadata(HashMap::from([(
+                crate::compute::PARQUET_FIELD_ID.to_string(),
+                "99".to_string(),
+            )])),
+        ]));
+        let plan = plan_for_namespace(&fields, false, schema).expect("plan");
+        assert_eq!(plan.columns.len(), 1);
+        assert_eq!(plan.schema.fields().len(), 1);
+        assert_eq!(plan.columns[0].out_field_name, "amount");
+        assert!(!plan.allowed_source_fields.contains("amount_gbp"));
     }
 
     #[test]

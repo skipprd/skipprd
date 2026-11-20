@@ -214,6 +214,18 @@ pub trait CdcApplyBackend {
 
     fn binary_literal(hex: &str) -> String;
 
+    fn string_literal(value: &str) -> String {
+        sql_string_literal(value)
+    }
+
+    fn boolean_literal(value: bool) -> &'static str {
+        if value {
+            "TRUE"
+        } else {
+            "FALSE"
+        }
+    }
+
     fn tx_begin() -> &'static str {
         "BEGIN;\n"
     }
@@ -242,7 +254,7 @@ pub trait CdcApplyBackend {
 
     fn ddl_create_tombstone_table(
         fq_tombstone_table: &str,
-        business_key_cols: &[(String, String)],
+        business_key_cols: &[(String, &str)],
     ) -> String {
         let mut col_defs: Vec<String> = business_key_cols
             .iter()
@@ -478,7 +490,7 @@ pub fn ddl_add_order_token_column<B: CdcApplyBackend>(fq_table: &str) -> String 
 
 pub fn ddl_create_tombstone_table<B: CdcApplyBackend>(
     fq_tombstone_table: &str,
-    business_key_cols: &[(String, String)],
+    business_key_cols: &[(String, &str)],
 ) -> String {
     B::ddl_create_tombstone_table(fq_tombstone_table, business_key_cols)
 }
@@ -605,6 +617,12 @@ pub enum CdcApplyBatchError {
         actual: usize,
         limit: usize,
     },
+    UnsupportedArrow {
+        data_type: String,
+    },
+    DisplayFailed {
+        data_type: String,
+    },
 }
 
 impl std::fmt::Display for CdcApplyBatchError {
@@ -645,11 +663,23 @@ impl std::fmt::Display for CdcApplyBatchError {
                 f,
                 "{dialect} CDC staging {resource} is {actual}; limit is {limit}"
             ),
+            Self::UnsupportedArrow { data_type } => {
+                write!(f, "CDC apply has no encoding for Arrow type {data_type}")
+            }
+            Self::DisplayFailed { data_type } => {
+                write!(f, "CDC apply failed to display Arrow type {data_type}")
+            }
         }
     }
 }
 
 impl std::error::Error for CdcApplyBatchError {}
+
+impl From<CdcApplyBatchError> for std::io::Error {
+    fn from(error: CdcApplyBatchError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+    }
+}
 
 impl CdcApplyBatch {
     pub fn validate(&self) -> Result<(), CdcApplyBatchError> {
@@ -749,7 +779,7 @@ pub fn append_record_batch_to_cdc_apply(
             .columns()
             .iter()
             .map(|column| arrow_value_to_cdc_apply(column.as_ref(), row))
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         apply_batch.rows.push(CdcApplyRow {
             metadata: CdcApplyRowMetadata {
                 mutation,
@@ -764,18 +794,18 @@ pub fn append_record_batch_to_cdc_apply(
     Ok(())
 }
 
-fn arrow_value_to_cdc_apply(
+pub fn arrow_value_to_cdc_apply(
     array: &dyn datafusion::arrow::array::Array,
     row: usize,
-) -> CdcApplyValue {
+) -> Result<CdcApplyValue, CdcApplyBatchError> {
     use datafusion::arrow::array::*;
     use datafusion::arrow::datatypes::DataType;
 
     if array.is_null(row) {
-        return CdcApplyValue::Null;
+        return Ok(CdcApplyValue::Null);
     }
 
-    match array.data_type() {
+    Ok(match array.data_type() {
         DataType::Boolean => CdcApplyValue::Boolean(
             array
                 .as_any()
@@ -839,13 +869,25 @@ fn arrow_value_to_cdc_apply(
                 .expect("uint64 Arrow array")
                 .value(row),
         ),
-        DataType::Float16
-        | DataType::Float32
-        | DataType::Float64
-        | DataType::Decimal128(_, _)
-        | DataType::Decimal256(_, _) => CdcApplyValue::Float(
-            datafusion::arrow::util::display::array_value_to_string(array, row).unwrap_or_default(),
+        DataType::Float32 => CdcApplyValue::Float(
+            array
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .expect("float32 Arrow array")
+                .value(row)
+                .to_string(),
         ),
+        DataType::Float64 => CdcApplyValue::Float(
+            array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("float64 Arrow array")
+                .value(row)
+                .to_string(),
+        ),
+        DataType::Float16 | DataType::Decimal128(_, _) | DataType::Decimal256(_, _) => {
+            CdcApplyValue::Float(required_arrow_display(array, row)?)
+        }
         DataType::Utf8 => CdcApplyValue::Text(
             array
                 .as_any()
@@ -878,16 +920,57 @@ fn arrow_value_to_cdc_apply(
                 .value(row)
                 .to_vec(),
         ),
-        DataType::Date32 | DataType::Date64 => CdcApplyValue::Date(
-            datafusion::arrow::util::display::array_value_to_string(array, row).unwrap_or_default(),
+        DataType::FixedSizeBinary(_) => CdcApplyValue::Binary(
+            array
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .expect("fixed-size binary Arrow array")
+                .value(row)
+                .to_vec(),
         ),
-        DataType::Timestamp(_, _) => CdcApplyValue::Timestamp(
-            datafusion::arrow::util::display::array_value_to_string(array, row).unwrap_or_default(),
-        ),
-        _ => CdcApplyValue::Text(
-            datafusion::arrow::util::display::array_value_to_string(array, row).unwrap_or_default(),
-        ),
+        DataType::Date32 | DataType::Date64 => {
+            CdcApplyValue::Date(required_arrow_display(array, row)?)
+        }
+        DataType::Timestamp(_, _) => CdcApplyValue::Timestamp(required_arrow_display(array, row)?),
+        other => {
+            return Err(CdcApplyBatchError::UnsupportedArrow {
+                data_type: other.to_string(),
+            })
+        }
+    })
+}
+
+fn required_arrow_display(
+    array: &dyn datafusion::arrow::array::Array,
+    row: usize,
+) -> Result<String, CdcApplyBatchError> {
+    let displayed =
+        datafusion::arrow::util::display::array_value_to_string(array, row).map_err(|_| {
+            CdcApplyBatchError::DisplayFailed {
+                data_type: array.data_type().to_string(),
+            }
+        })?;
+    if displayed.is_empty() {
+        return Err(CdcApplyBatchError::DisplayFailed {
+            data_type: array.data_type().to_string(),
+        });
     }
+    Ok(displayed)
+}
+
+/// `(v1, v2, ...)` for one batch row, quoted for backend `B`.
+pub fn sql_values_row<B: CdcApplyBackend>(
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+    row: usize,
+) -> Result<String, CdcApplyBatchError> {
+    let values = batch
+        .columns()
+        .iter()
+        .map(|column| {
+            arrow_value_to_cdc_apply(column.as_ref(), row).map(|v| format_cdc_apply_value::<B>(&v))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("({})", values.join(", ")))
 }
 
 /// SQL warehouse families whose exact-final-state adapters can atomically
@@ -1770,11 +1853,19 @@ impl CdcWarehouseDialect {
             CdcApplyValue::Signed(value) => value.to_string(),
             CdcApplyValue::Unsigned(value) => value.to_string(),
             CdcApplyValue::Float(value) => value.clone(),
-            CdcApplyValue::Text(value) => sql_string_literal(value),
+            CdcApplyValue::Text(value) => self.string_literal(value),
             CdcApplyValue::Binary(value) => self.binary_literal(&encode_hex_bytes(value)),
             CdcApplyValue::Date(value) | CdcApplyValue::Timestamp(value) => {
-                format!("CAST({} AS {target_type})", sql_string_literal(value))
+                format!("CAST({} AS {target_type})", self.string_literal(value))
             }
+        }
+    }
+
+    fn string_literal(self, value: &str) -> String {
+        match self {
+            Self::BigQuery => bigquery_string_literal(value),
+            Self::Synapse => nvarchar_string_literal(value),
+            Self::Snowflake | Self::Redshift | Self::MotherDuck => sql_string_literal(value),
         }
     }
 }
@@ -1791,11 +1882,21 @@ fn key_match_aliases(left: &str, right: &str, business_keys: &[String]) -> Strin
         .join(" AND ")
 }
 
-fn sql_string_literal(value: &str) -> String {
+pub fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn encode_hex_bytes(bytes: &[u8]) -> String {
+/// GoogleSQL string literals escape with backslashes; `''` is not an escape.
+pub fn bigquery_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+/// T-SQL Unicode literal for NVARCHAR targets.
+pub fn nvarchar_string_literal(value: &str) -> String {
+    format!("N{}", sql_string_literal(value))
+}
+
+pub fn encode_hex_bytes(bytes: &[u8]) -> String {
     use std::fmt::Write;
 
     let mut encoded = String::with_capacity(bytes.len() * 2);
@@ -1805,22 +1906,17 @@ fn encode_hex_bytes(bytes: &[u8]) -> String {
     encoded
 }
 
-pub(crate) fn format_cdc_apply_value<B: CdcApplyBackend>(value: &CdcApplyValue) -> String {
+pub fn format_cdc_apply_value<B: CdcApplyBackend>(value: &CdcApplyValue) -> String {
     match value {
         CdcApplyValue::Null => "NULL".to_string(),
-        CdcApplyValue::Boolean(value) => {
-            if *value {
-                "TRUE".to_string()
-            } else {
-                "FALSE".to_string()
-            }
-        }
+        CdcApplyValue::Boolean(value) => B::boolean_literal(*value).to_string(),
         CdcApplyValue::Signed(value) => value.to_string(),
         CdcApplyValue::Unsigned(value) => value.to_string(),
         CdcApplyValue::Float(value) => value.clone(),
-        CdcApplyValue::Text(value) => sql_string_literal(value),
         CdcApplyValue::Binary(value) => B::binary_literal(&encode_hex_bytes(value)),
-        CdcApplyValue::Date(value) | CdcApplyValue::Timestamp(value) => sql_string_literal(value),
+        CdcApplyValue::Text(value)
+        | CdcApplyValue::Date(value)
+        | CdcApplyValue::Timestamp(value) => B::string_literal(value),
     }
 }
 
@@ -2378,5 +2474,111 @@ mod tests {
         .unwrap();
         assert_eq!(guarded.len(), batch.rows.len());
         assert!(guarded.iter().all(|statement| statement.contains("BEGIN;")));
+    }
+
+    #[test]
+    fn arrow_value_to_cdc_apply_encodes_date_timestamp_and_fixed_binary() {
+        use datafusion::arrow::array::{
+            Date32Array, FixedSizeBinaryArray, TimestampMicrosecondArray,
+        };
+
+        let dates = Date32Array::from(vec![Some(19_723)]);
+        match super::arrow_value_to_cdc_apply(&dates, 0).unwrap() {
+            super::CdcApplyValue::Date(value) => {
+                assert!(!value.is_empty(), "{value}");
+                assert_ne!(value, "NULL");
+            }
+            other => panic!("expected Date, got {other:?}"),
+        }
+        let timestamps = TimestampMicrosecondArray::from(vec![Some(0)]);
+        match super::arrow_value_to_cdc_apply(&timestamps, 0).unwrap() {
+            super::CdcApplyValue::Timestamp(value) => {
+                assert!(!value.is_empty(), "{value}");
+                assert_ne!(value, "NULL");
+            }
+            other => panic!("expected Timestamp, got {other:?}"),
+        }
+        let fixed =
+            FixedSizeBinaryArray::try_from_iter(std::iter::once(b"0123456789abcdef".as_slice()))
+                .unwrap();
+        match super::arrow_value_to_cdc_apply(&fixed, 0).unwrap() {
+            super::CdcApplyValue::Binary(bytes) => {
+                assert_eq!(bytes, b"0123456789abcdef");
+            }
+            other => panic!("expected Binary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sql_values_row_quotes_every_type_through_the_backend() {
+        use datafusion::arrow::array::{
+            ArrayRef, BinaryArray, BooleanArray, Date32Array, StringArray,
+            TimestampMicrosecondArray,
+        };
+        use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use datafusion::arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("flag", DataType::Boolean, true),
+                Field::new("name", DataType::Utf8, true),
+                Field::new("day", DataType::Date32, true),
+                Field::new("at", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+                Field::new("raw", DataType::Binary, true),
+            ])),
+            vec![
+                Arc::new(BooleanArray::from(vec![Some(true)])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("it's")])),
+                Arc::new(Date32Array::from(vec![Some(0)])),
+                Arc::new(TimestampMicrosecondArray::from(vec![Some(0)])),
+                Arc::new(BinaryArray::from_vec(vec![b"ab".as_slice()])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            super::sql_values_row::<TestBackend>(&batch, 0).unwrap(),
+            "(TRUE, 'it''s', '1970-01-01', '1970-01-01T00:00:00', X'6162')"
+        );
+    }
+
+    #[test]
+    fn dialect_string_literals_match_the_warehouse_escape() {
+        assert_eq!(super::sql_string_literal("it's"), "'it''s'");
+        assert_eq!(super::bigquery_string_literal(r"it's \"), r"'it\'s \\'");
+        assert_eq!(super::nvarchar_string_literal("é'"), "N'é'''");
+        let text = super::CdcApplyValue::Text("it's".into());
+        assert_eq!(
+            super::CdcWarehouseDialect::BigQuery.value_literal(&text, "STRING"),
+            r"'it\'s'"
+        );
+        assert_eq!(
+            super::CdcWarehouseDialect::Synapse.value_literal(&text, "NVARCHAR(4000)"),
+            "N'it''s'"
+        );
+    }
+
+    #[test]
+    fn arrow_value_to_cdc_apply_fails_closed_on_time_and_struct() {
+        use datafusion::arrow::array::{Int32Array, StructArray, Time32MillisecondArray};
+        use datafusion::arrow::datatypes::{DataType, Field};
+        use std::sync::Arc;
+
+        let times = Time32MillisecondArray::from(vec![Some(0)]);
+        let err = super::arrow_value_to_cdc_apply(&times, 0).unwrap_err();
+        assert!(
+            matches!(err, super::CdcApplyBatchError::UnsupportedArrow { .. }),
+            "{err}"
+        );
+
+        let nested = StructArray::from(vec![(
+            Arc::new(Field::new("id", DataType::Int32, true)),
+            Arc::new(Int32Array::from(vec![Some(1)])) as Arc<dyn datafusion::arrow::array::Array>,
+        )]);
+        let err = super::arrow_value_to_cdc_apply(&nested, 0).unwrap_err();
+        assert!(
+            matches!(err, super::CdcApplyBatchError::UnsupportedArrow { .. }),
+            "{err}"
+        );
     }
 }

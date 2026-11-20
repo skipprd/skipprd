@@ -3,8 +3,6 @@ use aws_credential_types::provider::ProvideCredentials;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use dashmap::{DashMap, DashSet};
-use datafusion::arrow::array::*;
-use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use object_store::aws::AmazonS3Builder;
@@ -18,22 +16,21 @@ use once_cell::sync::Lazy;
 use serde_derive::Deserialize;
 use skippr_runtime_sdk::SkipprConfig;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 use url::Url;
 
-use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
-use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
-use skippr_runtime_sdk::protocol::{RuntimeSchemaState, SchemaDelta};
+use skippr_runtime_sdk::plugins::alter_ddl::{
+    dest_table_name, publish_warehouse_table, DestPublishCache, InstalledDestSchema,
+    PublishedBatchColumns, WarehouseDialect,
+};
+use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 static ENSURED_SCHEMAS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
     Lazy::new(DashMap::new);
-static TABLE_DDL_GUARDS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
-    Lazy::new(DashMap::new);
-static ENSURED_TABLES: Lazy<DashMap<String, Vec<(String, String)>>> = Lazy::new(DashMap::new);
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 const SNOWFLAKE_CDC_FILE_STAGE_BLOCKER: &str = "the current PUT/COPY path serializes target-only \
     Parquet and does not load CDC metadata into a transaction-local staging table";
@@ -91,9 +88,6 @@ const ASYNC_POLL_INTERVAL_MS: u64 = 500;
 const SNOWFLAKE_HTTP_MAX_ATTEMPTS: usize = 3;
 const SNOWFLAKE_HTTP_RETRY_BASE_MS: u64 = 250;
 
-const INSERT_CHUNK_STRUCTURED: usize = 100;
-const INSERT_CHUNK_FLAT: usize = 1000;
-
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,21 +137,15 @@ pub struct DataSinkSnowflakePlugin {
     token: tokio::sync::RwLock<Option<(String, std::time::Instant)>>,
     /// Cached v1 session token (always a session token, works for PUT)
     session_token: tokio::sync::RwLock<Option<(String, std::time::Instant)>>,
-    schema_state: tokio::sync::RwLock<BTreeMap<String, OutputMetadata>>,
-    schema_versions: tokio::sync::RwLock<BTreeMap<String, u64>>,
+    installed: tokio::sync::RwLock<InstalledDestSchema>,
+    publish_cache: DestPublishCache,
 }
 
 skippr_runtime_sdk::declare_sink_spec!(
     SnowflakeSinkSpec,
     DataSinkSnowflakePlugin,
     skippr_runtime_sdk::plugins::cdc::sink_capabilities::SNOWFLAKE,
-    skippr_runtime_sdk::plugins::FinalStateIdempotentApply
-);
-
-skippr_runtime_sdk::declare_schema_sink_spec!(
-    SnowflakeSchemaSinkSpec,
-    DataSinkSnowflakePlugin,
-    "Snowflake",
+    skippr_runtime_sdk::plugins::FinalStateIdempotentApply,
     skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
         skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Snowflake
     )
@@ -280,28 +268,45 @@ impl DataSinkSnowflakePlugin {
             client: reqwest::Client::new(),
             token: Default::default(),
             session_token: Default::default(),
-            schema_state: Default::default(),
-            schema_versions: Default::default(),
+            installed: Default::default(),
+            publish_cache: DestPublishCache::default(),
         }
     }
 
-    pub fn namespace_to_table_name(namespace: &str) -> String {
-        namespace.replace('.', "_").to_lowercase()
+    fn fq_table(&self, namespace: &str) -> String {
+        format!(
+            "\"{}\".\"{}\".\"{}\"",
+            self.config.database,
+            self.config.schema,
+            dest_table_name(namespace).to_uppercase()
+        )
     }
 
-    #[allow(dead_code)]
-    fn skippr_type_to_snowflake(data_type: &SkipprDataType) -> &'static str {
-        match data_type {
-            SkipprDataType::String => "VARCHAR",
-            SkipprDataType::Integer => "NUMBER(38,0)",
-            SkipprDataType::Long => "NUMBER(38,0)",
-            SkipprDataType::Double => "DOUBLE",
-            SkipprDataType::Boolean => "BOOLEAN",
-            SkipprDataType::Date => "DATE",
-            SkipprDataType::Timestamp | SkipprDataType::TimestampMilli => "TIMESTAMP_NTZ",
-            SkipprDataType::Array | SkipprDataType::Record | SkipprDataType::Map => "VARIANT",
-            _ => "VARCHAR",
-        }
+    async fn publish_namespace(&self, namespace: &str) -> Result<(), std::io::Error> {
+        let (version, metadata) = self.installed.read().await.get(namespace)?;
+        self.ensure_schema().await?;
+        publish_warehouse_table(
+            &self.publish_cache,
+            self,
+            WarehouseDialect::Snowflake,
+            &self.fq_table(namespace),
+            namespace,
+            version,
+            &metadata,
+        )
+        .await
+    }
+
+    async fn batch_columns(
+        &self,
+        namespace: &str,
+        batch: &datafusion::arrow::datatypes::Schema,
+    ) -> Result<PublishedBatchColumns, std::io::Error> {
+        self.installed.read().await.warehouse_batch_columns(
+            WarehouseDialect::Snowflake,
+            namespace,
+            batch,
+        )
     }
 
     // ── Authentication ──────────────────────────────────────────────────
@@ -1527,254 +1532,6 @@ impl DataSinkSnowflakePlugin {
         STANDARD.encode(hasher.finalize())
     }
 
-    // ── DDL helpers ─────────────────────────────────────────────────────
-
-    fn arrow_type_to_snowflake_ddl(dt: &ArrowDataType) -> String {
-        match dt {
-            ArrowDataType::Boolean => "BOOLEAN".into(),
-            ArrowDataType::Int8
-            | ArrowDataType::Int16
-            | ArrowDataType::Int32
-            | ArrowDataType::Int64
-            | ArrowDataType::UInt8
-            | ArrowDataType::UInt16
-            | ArrowDataType::UInt32
-            | ArrowDataType::UInt64 => "NUMBER(38,0)".into(),
-            ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => {
-                "DOUBLE".into()
-            }
-            ArrowDataType::Decimal128(precision, scale)
-            | ArrowDataType::Decimal256(precision, scale) => {
-                format!("NUMBER({},{})", precision, scale)
-            }
-            ArrowDataType::Date32 | ArrowDataType::Date64 => "DATE".into(),
-            ArrowDataType::Timestamp(_, _) => "TIMESTAMP_NTZ".into(),
-            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => "VARCHAR".into(),
-            ArrowDataType::Struct(_)
-            | ArrowDataType::List(_)
-            | ArrowDataType::LargeList(_)
-            | ArrowDataType::Map(_, _) => "VARIANT".into(),
-            _ => "VARCHAR".into(),
-        }
-    }
-
-    fn arrow_value_to_sql(array: &dyn Array, row: usize) -> String {
-        if array.is_null(row) {
-            return "NULL".to_string();
-        }
-        match array.data_type() {
-            ArrowDataType::Boolean => {
-                let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-                if a.value(row) { "TRUE" } else { "FALSE" }.to_string()
-            }
-            ArrowDataType::Int8 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int8Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Int16 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int16Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Int32 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int32Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Int64 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt8 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt8Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt16 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt16Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt32 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::UInt64 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Float32 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Float32Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Float64 => format!(
-                "{}",
-                array
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap()
-                    .value(row)
-            ),
-            ArrowDataType::Date32 => {
-                let days = array
-                    .as_any()
-                    .downcast_ref::<Date32Array>()
-                    .unwrap()
-                    .value(row);
-                let date = chrono::NaiveDate::from_num_days_from_ce_opt(days + 719_163)
-                    .unwrap_or_default();
-                format!("'{}'", date.format("%Y-%m-%d"))
-            }
-            ArrowDataType::Date64 => {
-                let ms = array
-                    .as_any()
-                    .downcast_ref::<Date64Array>()
-                    .unwrap()
-                    .value(row);
-                let secs = ms / 1000;
-                let dt = chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default();
-                format!("'{}'", dt.format("%Y-%m-%d"))
-            }
-            ArrowDataType::Timestamp(unit, _) => {
-                let ts = match unit {
-                    datafusion::arrow::datatypes::TimeUnit::Second => {
-                        let a = array
-                            .as_any()
-                            .downcast_ref::<TimestampSecondArray>()
-                            .unwrap();
-                        chrono::DateTime::from_timestamp(a.value(row), 0)
-                    }
-                    datafusion::arrow::datatypes::TimeUnit::Millisecond => {
-                        let a = array
-                            .as_any()
-                            .downcast_ref::<TimestampMillisecondArray>()
-                            .unwrap();
-                        let v = a.value(row);
-                        chrono::DateTime::from_timestamp(v / 1000, ((v % 1000) * 1_000_000) as u32)
-                    }
-                    datafusion::arrow::datatypes::TimeUnit::Microsecond => {
-                        let a = array
-                            .as_any()
-                            .downcast_ref::<TimestampMicrosecondArray>()
-                            .unwrap();
-                        let v = a.value(row);
-                        chrono::DateTime::from_timestamp(
-                            v / 1_000_000,
-                            ((v % 1_000_000) * 1000) as u32,
-                        )
-                    }
-                    datafusion::arrow::datatypes::TimeUnit::Nanosecond => {
-                        let a = array
-                            .as_any()
-                            .downcast_ref::<TimestampNanosecondArray>()
-                            .unwrap();
-                        let v = a.value(row);
-                        chrono::DateTime::from_timestamp(
-                            v / 1_000_000_000,
-                            (v % 1_000_000_000) as u32,
-                        )
-                    }
-                };
-                let dt = ts.unwrap_or_default();
-                format!("'{}'", dt.format("%Y-%m-%d %H:%M:%S%.f"))
-            }
-            ArrowDataType::Utf8 => {
-                let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-                format!("'{}'", a.value(row).replace('\'', "''"))
-            }
-            ArrowDataType::LargeUtf8 => {
-                let a = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
-                format!("'{}'", a.value(row).replace('\'', "''"))
-            }
-            ArrowDataType::Struct(fields) => {
-                let sa = array.as_any().downcast_ref::<StructArray>().unwrap();
-                let args: Vec<String> = fields
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(i, f)| {
-                        let val = Self::arrow_value_to_sql(sa.column(i).as_ref(), row);
-                        [format!("'{}'", f.name().replace('\'', "''")), val]
-                    })
-                    .collect();
-                format!("OBJECT_CONSTRUCT({})", args.join(", "))
-            }
-            ArrowDataType::List(_) => {
-                let la = array.as_any().downcast_ref::<ListArray>().unwrap();
-                let values = la.value(row);
-                let elems: Vec<String> = (0..values.len())
-                    .map(|i| Self::arrow_value_to_sql(values.as_ref(), i))
-                    .collect();
-                format!("ARRAY_CONSTRUCT({})", elems.join(", "))
-            }
-            ArrowDataType::LargeList(_) => {
-                let la = array.as_any().downcast_ref::<LargeListArray>().unwrap();
-                let values = la.value(row);
-                let elems: Vec<String> = (0..values.len())
-                    .map(|i| Self::arrow_value_to_sql(values.as_ref(), i))
-                    .collect();
-                format!("ARRAY_CONSTRUCT({})", elems.join(", "))
-            }
-            ArrowDataType::Map(_, _) => {
-                let ma = array.as_any().downcast_ref::<MapArray>().unwrap();
-                let entries = ma.value(row);
-                let sa = entries.as_any().downcast_ref::<StructArray>().unwrap();
-                let keys = sa.column(0);
-                let vals = sa.column(1);
-                let args: Vec<String> = (0..entries.len())
-                    .flat_map(|i| {
-                        let key = if let Some(s) = keys.as_any().downcast_ref::<StringArray>() {
-                            format!("'{}'", s.value(i).replace('\'', "''"))
-                        } else {
-                            format!("'{}'", i)
-                        };
-                        let val = Self::arrow_value_to_sql(vals.as_ref(), i);
-                        [key, val]
-                    })
-                    .collect();
-                format!("OBJECT_CONSTRUCT({})", args.join(", "))
-            }
-            _ => {
-                let a = array.as_any().downcast_ref::<StringArray>();
-                match a {
-                    Some(s) => format!("'{}'", s.value(row).replace('\'', "''")),
-                    None => "NULL".to_string(),
-                }
-            }
-        }
-    }
-
     async fn ensure_schema(&self) -> Result<(), std::io::Error> {
         let key = format!("{}.{}", self.config.database, self.config.schema);
         let cell = ENSURED_SCHEMAS
@@ -1796,57 +1553,6 @@ impl DataSinkSnowflakePlugin {
         .await?;
 
         Ok(())
-    }
-
-    fn col_defs_hash(col_defs: &[(String, String)]) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        col_defs.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn col_defs_for_arrow_schema(
-        arrow_schema: &datafusion::arrow::datatypes::Schema,
-    ) -> Vec<(String, String)> {
-        arrow_schema
-            .fields()
-            .iter()
-            .map(|f| {
-                (
-                    f.name().to_uppercase(),
-                    Self::arrow_type_to_snowflake_ddl(f.data_type()),
-                )
-            })
-            .collect()
-    }
-
-    async fn col_defs_for_namespace(
-        &self,
-        namespace: &str,
-        arrow_schema: &datafusion::arrow::datatypes::Schema,
-    ) -> Vec<(String, String)> {
-        let installed = self.schema_state.read().await.get(namespace).cloned();
-        if let Some(metadata) = installed {
-            let fields: HashMap<String, OutputMetadata> = metadata
-                .child_fields()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            match skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow(Box::new(
-                fields,
-            )) {
-                Ok(installed_schema) => {
-                    return Self::col_defs_for_arrow_schema(&installed_schema);
-                }
-                Err(err) => {
-                    warn!(
-                        "Falling back to stream schema for Snowflake DDL: namespace={} err={}",
-                        namespace, err
-                    );
-                }
-            }
-        }
-
-        Self::col_defs_for_arrow_schema(arrow_schema)
     }
 
     fn parquet_file_format_clause() -> &'static str {
@@ -1883,89 +1589,6 @@ impl DataSinkSnowflakePlugin {
         )
     }
 
-    async fn ensure_table(
-        &self,
-        fq_table: &str,
-        col_defs: &[(String, String)],
-    ) -> Result<(), std::io::Error> {
-        if col_defs.is_empty() {
-            return Ok(());
-        }
-
-        if let Some(cached) = ENSURED_TABLES.get(fq_table) {
-            let cached_set: std::collections::HashSet<(&str, &str)> = cached
-                .value()
-                .iter()
-                .map(|(n, t)| (n.as_str(), t.as_str()))
-                .collect();
-            if col_defs
-                .iter()
-                .all(|(n, t)| cached_set.contains(&(n.as_str(), t.as_str())))
-            {
-                return Ok(());
-            }
-        }
-
-        let hash = Self::col_defs_hash(col_defs);
-        let guard_key = format!("{}:{:x}", fq_table, hash);
-        let cell = TABLE_DDL_GUARDS
-            .entry(guard_key)
-            .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
-            .clone();
-
-        cell.get_or_try_init(|| async {
-            let cols_sql: Vec<String> = col_defs
-                .iter()
-                .map(|(name, sf_type)| format!("\"{}\" {}", name, sf_type))
-                .collect();
-
-            let create_ddl = format!(
-                "CREATE TABLE IF NOT EXISTS {} ({})",
-                fq_table,
-                cols_sql.join(", ")
-            );
-            info!("Snowflake DDL: {}", create_ddl);
-            self.execute_sql(&create_ddl)
-                .await
-                .map(|_| ())
-                .map_err(|e| {
-                    error!("Snowflake CREATE TABLE failed: {}", e);
-                    std::io::Error::other(format!("Snowflake CREATE TABLE: {}", e))
-                })?;
-
-            for (col_name, sf_type) in col_defs {
-                let alter_ddl = format!(
-                    "ALTER TABLE {} ADD COLUMN IF NOT EXISTS \"{}\" {}",
-                    fq_table, col_name, sf_type
-                );
-                if let Err(e) = self.execute_sql(&alter_ddl).await {
-                    let msg = e.to_string();
-                    if !msg.contains("already exists") {
-                        error!("Snowflake ALTER TABLE ADD COLUMN failed: {}", e);
-                        return Err(std::io::Error::other(format!(
-                            "Snowflake ALTER TABLE: {}",
-                            e
-                        )));
-                    }
-                }
-            }
-
-            let mut merged: std::collections::HashMap<String, String> = ENSURED_TABLES
-                .get(fq_table)
-                .map(|e| e.value().iter().cloned().collect())
-                .unwrap_or_default();
-            for (name, sf_type) in col_defs {
-                merged.insert(name.clone(), sf_type.clone());
-            }
-            ENSURED_TABLES.insert(fq_table.to_string(), merged.into_iter().collect());
-            info!("Ensured table {}", fq_table);
-            Ok(())
-        })
-        .await?;
-
-        Ok(())
-    }
-
     // ── Data sync paths ─────────────────────────────────────────────────
 
     async fn inner_sync(
@@ -1991,27 +1614,12 @@ impl DataSinkSnowflakePlugin {
         use super::parquet_util::serialize_to_parquet;
         use skippr_runtime_sdk::metrics::counters;
 
-        counters::inc_uploads_in_flight();
-
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let table_name = Self::namespace_to_table_name(&namespace);
-        let arrow_schema = stream.schema();
-        let col_defs = self.col_defs_for_namespace(&namespace, &arrow_schema).await;
-        let fq_table = format!(
-            "\"{}\".\"{}\".\"{}\"",
-            self.config.database,
-            self.config.schema,
-            table_name.to_uppercase()
-        );
-
-        self.ensure_schema().await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
-        self.ensure_table(&fq_table, &col_defs).await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
+        let table_name = dest_table_name(&namespace);
+        self.batch_columns(&namespace, &stream.schema()).await?;
+        let fq_table = self.fq_table(&namespace);
+        self.ensure_schema().await?;
+        counters::inc_uploads_in_flight();
 
         let parquet = match serialize_to_parquet(stream, &self.order_fields).await {
             Ok(p) => p,
@@ -2096,27 +1704,12 @@ impl DataSinkSnowflakePlugin {
         use super::parquet_util::serialize_to_parquet;
         use skippr_runtime_sdk::metrics::counters;
 
-        counters::inc_uploads_in_flight();
-
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let table_name = Self::namespace_to_table_name(&namespace);
-        let arrow_schema = stream.schema();
-        let col_defs = self.col_defs_for_namespace(&namespace, &arrow_schema).await;
-        let fq_table = format!(
-            "\"{}\".\"{}\".\"{}\"",
-            self.config.database,
-            self.config.schema,
-            table_name.to_uppercase()
-        );
-
-        self.ensure_schema().await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
-        self.ensure_table(&fq_table, &col_defs).await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
+        let table_name = dest_table_name(&namespace);
+        self.batch_columns(&namespace, &stream.schema()).await?;
+        let fq_table = self.fq_table(&namespace);
+        self.ensure_schema().await?;
+        counters::inc_uploads_in_flight();
 
         let parquet = match serialize_to_parquet(stream, &self.order_fields).await {
             Ok(p) => p,
@@ -2253,137 +1846,6 @@ impl DataSinkSnowflakePlugin {
         }
     }
 
-    /// Legacy INSERT path kept as last-resort fallback.
-    #[allow(dead_code)]
-    async fn inner_sync_insert(
-        &self,
-        mut stream: SendableRecordBatchStream,
-        filename: String,
-    ) -> Result<(), std::io::Error> {
-        use skippr_runtime_sdk::metrics::counters;
-        counters::inc_uploads_in_flight();
-
-        let namespace = BufferChunker::decode_file_namespace(&filename);
-        let table_name = Self::namespace_to_table_name(&namespace);
-        let arrow_schema = stream.schema();
-
-        let col_defs = self.col_defs_for_namespace(&namespace, &arrow_schema).await;
-
-        let fq_table = format!(
-            "\"{}\".\"{}\".\"{}\"",
-            self.config.database,
-            self.config.schema,
-            table_name.to_uppercase()
-        );
-
-        self.ensure_schema().await?;
-        self.ensure_table(&fq_table, &col_defs).await?;
-
-        let table_col_types: std::collections::HashMap<String, String> = ENSURED_TABLES
-            .get(&fq_table)
-            .map(|entry| entry.value().iter().cloned().collect())
-            .unwrap_or_default();
-
-        let col_list: String = col_defs
-            .iter()
-            .map(|(name, _)| format!("\"{}\"", name))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let has_structured_cols = col_defs.iter().any(|(_, t)| {
-            t.starts_with("OBJECT(") || t.starts_with("ARRAY(") || t.starts_with("MAP(")
-        });
-
-        let _chunk_size = if has_structured_cols {
-            INSERT_CHUNK_STRUCTURED
-        } else {
-            INSERT_CHUNK_FLAT
-        };
-
-        let mut total_rows = 0usize;
-        while let Some(batch_result) = stream.next().await {
-            let batch =
-                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
-            let num_rows = batch.num_rows();
-            if num_rows == 0 {
-                continue;
-            }
-
-            let insert_sql = if has_structured_cols {
-                let select_rows: Vec<String> = (0..num_rows)
-                    .map(|row| {
-                        let vals: Vec<String> = (0..batch.num_columns())
-                            .map(|col_idx| {
-                                let raw =
-                                    Self::arrow_value_to_sql(batch.column(col_idx).as_ref(), row);
-                                let col_name = &col_defs[col_idx].0;
-                                let cast_type = table_col_types
-                                    .get(col_name)
-                                    .map(String::as_str)
-                                    .unwrap_or(col_defs[col_idx].1.as_str());
-                                if raw != "NULL"
-                                    && (cast_type.starts_with("OBJECT(")
-                                        || cast_type.starts_with("ARRAY(")
-                                        || cast_type.starts_with("MAP("))
-                                {
-                                    format!("{}::{}", raw, cast_type)
-                                } else {
-                                    raw
-                                }
-                            })
-                            .collect();
-                        format!("SELECT {}", vals.join(", "))
-                    })
-                    .collect();
-                format!(
-                    "INSERT INTO {} ({}) {}",
-                    fq_table,
-                    col_list,
-                    select_rows.join(" UNION ALL ")
-                )
-            } else {
-                let value_rows: Vec<String> = (0..num_rows)
-                    .map(|row| {
-                        let vals: Vec<String> = (0..batch.num_columns())
-                            .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
-                            .collect();
-                        format!("({})", vals.join(", "))
-                    })
-                    .collect();
-                format!(
-                    "INSERT INTO {} ({}) VALUES {}",
-                    fq_table,
-                    col_list,
-                    value_rows.join(", ")
-                )
-            };
-
-            match self.execute_sql(&insert_sql).await {
-                Ok(_) => {
-                    total_rows += num_rows;
-                    counters::add_parquet_rows(num_rows as u64);
-                    info!(
-                        "Inserted {} rows into {} (total: {})",
-                        num_rows, table_name, total_rows
-                    );
-                }
-                Err(e) => {
-                    error!("Snowflake INSERT failed: {}", e);
-                    counters::dec_uploads_in_flight();
-                    return Err(std::io::Error::other(format!("Snowflake INSERT: {}", e)));
-                }
-            }
-        }
-
-        counters::add_upload(1);
-        counters::dec_uploads_in_flight();
-        info!(
-            "Snowflake sync complete: {} total rows into {}",
-            total_rows, table_name
-        );
-        Ok(())
-    }
-
     async fn sync_cdc(
         &self,
         mut stream: SendableRecordBatchStream,
@@ -2412,40 +1874,15 @@ impl DataSinkSnowflakePlugin {
             }
         };
 
-        counters::inc_uploads_in_flight();
-
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let table_name = Self::namespace_to_table_name(&namespace);
-        let arrow_schema = stream.schema();
-
-        let col_defs = self.col_defs_for_namespace(&namespace, &arrow_schema).await;
-        let business_key_columns = contract
-            .business_key_columns
-            .iter()
-            .map(|business_key| {
-                col_defs
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(business_key))
-                    .map(|(name, _)| name.clone())
-                    .unwrap_or_else(|| business_key.to_uppercase())
-            })
-            .collect::<Vec<_>>();
-
-        let fq_table = format!(
-            "\"{}\".\"{}\".\"{}\"",
-            self.config.database,
-            self.config.schema,
-            table_name.to_uppercase()
-        );
-
-        self.ensure_schema().await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
-        self.ensure_table(&fq_table, &col_defs).await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
+        let table_name = dest_table_name(&namespace);
+        let col_defs = self.batch_columns(&namespace, &stream.schema()).await?;
+        let key_types = col_defs.key_types(&contract.business_key_columns)?;
+        let business_key_columns: Vec<String> =
+            key_types.iter().map(|(name, _)| name.clone()).collect();
+        let fq_table = self.fq_table(&namespace);
+        self.ensure_schema().await?;
+        counters::inc_uploads_in_flight();
 
         if CDC_DDL_ENSURED.insert(fq_table.clone()) {
             let order_col_ddl = ddl_add_order_token_column::<SnowflakeCdcBackend>(&fq_table);
@@ -2456,19 +1893,8 @@ impl DataSinkSnowflakePlugin {
             }
 
             let tombstone_tbl = tombstone_table_name(&fq_table);
-            let bk_type_pairs: Vec<(String, String)> = business_key_columns
-                .iter()
-                .map(|bk| {
-                    let sf_type = col_defs
-                        .iter()
-                        .find(|(name, _)| name.eq_ignore_ascii_case(bk))
-                        .map(|(_, t)| t.clone())
-                        .unwrap_or_else(|| "VARCHAR".to_string());
-                    (bk.clone(), sf_type)
-                })
-                .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table::<SnowflakeCdcBackend>(&tombstone_tbl, &bk_type_pairs);
+                ddl_create_tombstone_table::<SnowflakeCdcBackend>(&tombstone_tbl, &key_types);
             if let Err(e) = self.execute_sql(&tombstone_ddl).await {
                 CDC_DDL_ENSURED.remove(&fq_table);
                 counters::dec_uploads_in_flight();
@@ -2480,51 +1906,40 @@ impl DataSinkSnowflakePlugin {
 
         let tombstone_table = tombstone_table_name(&fq_table);
 
-        let bk_names_quoted: Vec<String> = contract
-            .business_key_columns
+        let bk_names_quoted: Vec<String> = business_key_columns
             .iter()
-            .zip(business_key_columns.iter())
-            .map(|(_, resolved)| format!("\"{}\"", resolved))
+            .map(|name| WarehouseDialect::Snowflake.quote_ident(name))
             .collect();
+        let bk_types: Vec<String> = key_types.iter().map(|(_, ty)| ty.to_string()).collect();
 
-        let bk_types: Vec<String> = business_key_columns
+        let col_names_quoted: Vec<String> = col_defs
+            .columns()
             .iter()
-            .map(|bk| {
-                col_defs
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(bk))
-                    .map(|(_, t)| t.clone())
-                    .unwrap_or_else(|| "VARCHAR".to_string())
-            })
-            .collect();
-
-        let col_names_quoted: Vec<String> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| format!("\"{}\"", f.name().to_uppercase()))
+            .map(|(name, _)| WarehouseDialect::Snowflake.quote_ident(name))
             .collect();
 
         let mut apply_batch = CdcApplyBatch {
-            columns: arrow_schema
-                .fields()
+            columns: col_defs
+                .columns()
                 .iter()
-                .map(|field| {
-                    let name = field.name().to_uppercase();
-                    let target_type = col_defs
-                        .iter()
-                        .find(|(column, _)| column.eq_ignore_ascii_case(&name))
-                        .map(|(_, target_type)| target_type.clone())
-                        .unwrap_or_else(|| Self::arrow_type_to_snowflake_ddl(field.data_type()));
-                    CdcApplyColumn { name, target_type }
+                .map(|(name, target_type)| CdcApplyColumn {
+                    name: name.clone(),
+                    target_type: (*target_type).to_string(),
                 })
                 .collect(),
             business_key_columns: business_key_columns.clone(),
             rows: Vec::new(),
         };
         let mut row_offset = 0usize;
+        let ties = ctx.decoded_ties().map_err(|e| {
+            counters::dec_uploads_in_flight();
+            std::io::Error::other(e)
+        })?;
         while let Some(batch_result) = stream.next().await {
-            let batch =
-                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+            let batch = batch_result.map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::other(format!("stream error: {}", e))
+            })?;
             let num_rows = batch.num_rows();
             if num_rows == 0 {
                 continue;
@@ -2533,14 +1948,18 @@ impl DataSinkSnowflakePlugin {
                 &mut apply_batch,
                 &batch,
                 &ctx.part_meta.rows,
-                &ctx.decoded_ties().map_err(std::io::Error::other)?,
+                &ties,
                 row_offset,
             )
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            .map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::from(e)
+            })?;
             row_offset += num_rows;
         }
         let total_rows = apply_batch.rows.len();
         let bulk_scalar_batch = !col_defs
+            .columns()
             .iter()
             .any(|(_, target_type)| target_type.eq_ignore_ascii_case("VARIANT"));
         if total_rows > 0 && bulk_scalar_batch {
@@ -2574,8 +1993,7 @@ impl DataSinkSnowflakePlugin {
                             &tombstone_table,
                             &collapsed,
                             row,
-                        )
-                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        )?;
                         self.execute_sql_script(&statement).await.map_err(|error| {
                             counters::dec_uploads_in_flight();
                             std::io::Error::other(format!("Snowflake guarded CDC apply: {error}"))
@@ -2694,6 +2112,8 @@ impl DataSink for DataSinkSnowflakePlugin {
         filename: String,
         cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
+        let namespace = BufferChunker::decode_file_namespace(&filename);
+        self.publish_namespace(&namespace).await?;
         match cdc_ctx {
             Some(ctx) => self.sync_cdc(stream, filename, ctx).await,
             None => self.inner_sync(stream, filename).await,
@@ -2727,49 +2147,37 @@ impl DataSink for DataSinkSnowflakePlugin {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::SNOWFLAKE
     }
 
-    async fn install_schema_state(
-        &self,
-        _schema_version: u64,
-        namespaces: &BTreeMap<String, OutputMetadata>,
-    ) -> Result<(), std::io::Error> {
-        *self.schema_state.write().await = namespaces.clone();
-        *self.schema_versions.write().await = namespaces
-            .keys()
-            .map(|namespace| (namespace.clone(), _schema_version))
-            .collect();
-        Ok(())
+    fn installed_dest_schema(&self) -> Option<&tokio::sync::RwLock<InstalledDestSchema>> {
+        Some(&self.installed)
     }
 
-    async fn install_schema_snapshot(
-        &self,
-        schema_state: &RuntimeSchemaState,
-    ) -> Result<(), std::io::Error> {
-        *self.schema_state.write().await = schema_state.namespaces.clone();
-        *self.schema_versions.write().await = schema_state.namespace_versions.clone();
-        Ok(())
+    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
+        skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
+            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Snowflake,
+        )
     }
 
-    async fn install_schema_delta(&self, delta: &SchemaDelta) -> Result<(), std::io::Error> {
-        let mut versions = self.schema_versions.write().await;
-        let mut schemas = self.schema_state.write().await;
-        for (namespace, entry) in &delta.namespaces {
-            if versions
-                .get(namespace)
-                .is_some_and(|installed| *installed >= entry.version)
-            {
-                continue;
-            }
-            schemas.insert(namespace.clone(), entry.metadata.clone());
-            versions.insert(namespace.clone(), entry.version);
-        }
-        Ok(())
+    async fn apply_alter(
+        &self,
+        namespace: &str,
+        _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
+        alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
+    ) -> Result<(), std::io::Error> {
+        skippr_runtime_sdk::plugins::alter_ddl::apply_warehouse_alter(
+            self,
+            WarehouseDialect::Snowflake,
+            &self.fq_table(namespace),
+            namespace,
+            alter,
+        )
+        .await
     }
 }
 
 #[async_trait]
 impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkSnowflakePlugin {
     async fn columns(&self, namespace: &str) -> std::io::Result<Vec<String>> {
-        let table_name = Self::namespace_to_table_name(namespace).to_uppercase();
+        let table_name = dest_table_name(namespace).to_uppercase();
         let sql = format!(
             "SELECT COLUMN_NAME FROM \"{}\".INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}'",
             self.config.database,
@@ -2796,75 +2204,6 @@ impl skippr_runtime_sdk::plugins::alter_ddl::WarehouseExec for DataSinkSnowflake
             .await
             .map_err(|err| std::io::Error::other(err.to_string()))?;
         skippr_runtime_sdk::plugins::alter_ddl::json_result_first(&body)
-    }
-}
-
-#[async_trait]
-impl SchemaSink for DataSinkSnowflakePlugin {
-    fn alter_support(&self) -> skippr_runtime_sdk::plugins::AlterSupport {
-        skippr_runtime_sdk::plugins::AlterSupport::Warehouse(
-            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Snowflake,
-        )
-    }
-
-    async fn apply_alter(
-        &self,
-        namespace: &str,
-        _metadata: &skippr_runtime_sdk::discover::OutputMetadata,
-        alter: &skippr_runtime_sdk::discover::schema_alter::CommittedAlter,
-    ) -> Result<(), std::io::Error> {
-        let table_name = Self::namespace_to_table_name(namespace);
-        let fq_table = format!(
-            "\"{}\".\"{}\".\"{}\"",
-            self.config.database,
-            self.config.schema,
-            table_name.to_uppercase()
-        );
-        skippr_runtime_sdk::plugins::alter_ddl::apply_warehouse_alter(
-            self,
-            skippr_runtime_sdk::plugins::alter_ddl::WarehouseDialect::Snowflake,
-            &fq_table,
-            namespace,
-            alter,
-        )
-        .await
-    }
-
-    async fn sync_schema(
-        &self,
-        namespace: &str,
-        metadata: &skippr_runtime_sdk::discover::OutputMetadata,
-    ) -> Result<(), std::io::Error> {
-        use skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow;
-
-        self.ensure_schema().await?;
-
-        let fields: std::collections::HashMap<
-            String,
-            skippr_runtime_sdk::discover::OutputMetadata,
-        > = metadata
-            .child_fields()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        let arrow_schema = convert_skippr_to_arrow(Box::new(fields)).map_err(|e| {
-            std::io::Error::other(format!(
-                "Arrow schema conversion for '{}': {}",
-                namespace, e
-            ))
-        })?;
-
-        let table_name = Self::namespace_to_table_name(namespace);
-        let col_defs = Self::col_defs_for_arrow_schema(&arrow_schema);
-
-        let fq_table = format!(
-            "\"{}\".\"{}\".\"{}\"",
-            self.config.database,
-            self.config.schema,
-            table_name.to_uppercase()
-        );
-
-        self.ensure_table(&fq_table, &col_defs).await
     }
 }
 
@@ -2915,6 +2254,8 @@ mod tests {
             staging_azure_sas_token: None,
             staging_azure_account_key: None,
             staging_gcs_service_account_key_path: None,
+            max_concurrency: None,
+            discovery_cache_ttl_secs: None,
         }
     }
 
@@ -2945,22 +2286,6 @@ mod tests {
         assert!(!DataSinkSnowflakePlugin::is_transient_http_message(
             "Incorrect username or password"
         ));
-    }
-
-    #[test]
-    fn maps_arrow_decimal_types_to_snowflake_number() {
-        assert_eq!(
-            DataSinkSnowflakePlugin::arrow_type_to_snowflake_ddl(&ArrowDataType::Decimal128(10, 2)),
-            "NUMBER(10,2)"
-        );
-        assert_eq!(
-            DataSinkSnowflakePlugin::arrow_type_to_snowflake_ddl(&ArrowDataType::Decimal128(38, 9)),
-            "NUMBER(38,9)"
-        );
-        assert_eq!(
-            DataSinkSnowflakePlugin::arrow_type_to_snowflake_ddl(&ArrowDataType::Decimal256(38, 9)),
-            "NUMBER(38,9)"
-        );
     }
 
     #[test]
@@ -3171,9 +2496,8 @@ mod tests {
         assert!(script.contains("CREATE TEMPORARY TABLE"));
         assert!(script.contains("HEX_DECODE_BINARY"));
         assert!(script.contains("BEGIN TRANSACTION"));
-        assert_eq!(script.matches("MERGE INTO").count(), 4);
+        assert_eq!(script.matches("MERGE INTO").count(), 5);
         assert!(script.contains("DROP TABLE IF EXISTS"));
-        assert!(script.contains("'O''Brien'"));
     }
 
     #[test]

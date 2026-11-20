@@ -1,11 +1,9 @@
 skippr:
   workspace: test
   skipprd_el_storage_mode: local
-
 pipelines:
-
   bike_hire_many:
-    auto_approve: yes
+    auto_approve: true
     env: test
     buffer_threshold_bytes: 4000000000
     buffer_threshold_seconds: 7200
@@ -13,7 +11,6 @@ pipelines:
       batch_order_fields: bike_id
     data_source: data_sources.s3_bike_hire
     data_sink: data_sinks.lake
-
 data_sources:
   s3_bike_hire:
     S3:
@@ -22,20 +19,8 @@ data_sources:
       s3_prefix: bike-hire/
       endpoint_url: R2_S3_ENDPOINT_PLACEHOLDER
       region: auto
-
 data_sinks:
   lake:
-    SkipprLake:
-      warehouse: LAKE_WAREHOUSE_PLACEHOLDER
-      catalog_table: skippr-chaos-catalog
-      region: us-east-1
-      table_namespace: bronze
-      object_store:
-        type: file
-    schema_sink: schema_sinks.lake_schema
-
-schema_sinks:
-  lake_schema:
     SkipprLake:
       warehouse: LAKE_WAREHOUSE_PLACEHOLDER
       catalog_table: skippr-chaos-catalog

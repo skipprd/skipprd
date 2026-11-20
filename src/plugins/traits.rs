@@ -946,19 +946,11 @@ pub trait SinkSpec: 'static {
     const NAME: &'static str;
     const CAPABILITY: SinkCapability;
     type WriteSupport: SinkWriteSupport;
+    const ALTER_SUPPORT: AlterSupport = AlterSupport::Unsupported;
 }
 
 pub trait HasSinkSpec {
     type Spec: SinkSpec;
-}
-
-pub trait SchemaSinkSpec: 'static {
-    const NAME: &'static str;
-    const ALTER_SUPPORT: crate::plugins::AlterSupport = crate::plugins::AlterSupport::Unsupported;
-}
-
-pub trait HasSchemaSinkSpec {
-    type Spec: SchemaSinkSpec;
 }
 
 pub struct ConfiguredSink<S: SinkSpec, P> {
@@ -1006,30 +998,6 @@ macro_rules! declare_sink_spec {
         }
 
         impl $crate::plugins::HasSinkSpec for $plugin {
-            type Spec = $spec;
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! declare_schema_sink_spec {
-    ($spec:ident, $plugin:ty, $name:expr) => {
-        $crate::declare_schema_sink_spec!(
-            $spec,
-            $plugin,
-            $name,
-            $crate::plugins::AlterSupport::Unsupported
-        );
-    };
-    ($spec:ident, $plugin:ty, $name:expr, $alter:expr) => {
-        pub struct $spec;
-
-        impl $crate::plugins::SchemaSinkSpec for $spec {
-            const NAME: &'static str = $name;
-            const ALTER_SUPPORT: $crate::plugins::AlterSupport = $alter;
-        }
-
-        impl $crate::plugins::HasSchemaSinkSpec for $plugin {
             type Spec = $spec;
         }
     };
@@ -1384,11 +1352,8 @@ mod tests {
     }
 }
 
-/// Writes record batches to a destination (S3, disk, database, etc.).
-///
-/// This trait handles the DATA plane only. Schema/DDL operations belong
-/// to [`SchemaSink`]. The schema_sink pairing is declared on the config
-/// entry, not on this trait.
+/// Writes record batches to a destination and publishes dest schema
+/// (`install_schema_*` / `apply_alter`). Dest schema is this plugin.
 #[async_trait]
 pub trait DataSink: Send + Sync {
     /// Validate a sink apply before the runtime reads or encodes its payload.
@@ -1491,11 +1456,25 @@ pub trait DataSink: Send + Sync {
         Some(self.capability())
     }
 
+    /// Dest schema store that the default `install_schema_*` methods write.
+    /// Table sinks that publish from installed metadata return theirs.
+    fn installed_dest_schema(
+        &self,
+    ) -> Option<&tokio::sync::RwLock<crate::plugins::alter_ddl::InstalledDestSchema>> {
+        None
+    }
+
     async fn install_schema_state(
         &self,
-        _schema_version: u64,
-        _namespaces: &BTreeMap<String, OutputMetadata>,
+        schema_version: u64,
+        namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> Result<(), std::io::Error> {
+        if let Some(installed) = self.installed_dest_schema() {
+            installed
+                .write()
+                .await
+                .install_state(schema_version, namespaces);
+        }
         Ok(())
     }
 
@@ -1505,13 +1484,24 @@ pub trait DataSink: Send + Sync {
         &self,
         schema_state: &RuntimeSchemaState,
     ) -> Result<(), std::io::Error> {
-        self.install_schema_state(schema_state.version, &schema_state.namespaces)
-            .await
+        match self.installed_dest_schema() {
+            Some(installed) => {
+                installed.write().await.install_snapshot(schema_state);
+                Ok(())
+            }
+            None => {
+                self.install_schema_state(schema_state.version, &schema_state.namespaces)
+                    .await
+            }
+        }
     }
 
-    /// Apply only changed namespaces. Sinks that cache schema state should
-    /// override this to merge entries and compare each entry's own version.
+    /// Apply only changed namespaces, each compared at its own version.
     async fn install_schema_delta(&self, delta: &SchemaDelta) -> Result<(), std::io::Error> {
+        if let Some(installed) = self.installed_dest_schema() {
+            installed.write().await.install_delta(delta);
+            return Ok(());
+        }
         let namespaces = delta
             .namespaces
             .iter()
@@ -1519,38 +1509,7 @@ pub trait DataSink: Send + Sync {
             .collect();
         self.install_schema_state(delta.version, &namespaces).await
     }
-}
 
-/// Creates or updates schema definitions at a destination (Glue catalog,
-/// SQL DDL, REST API, Iceberg catalog, etc.).
-///
-/// Paired with a [`DataSink`] via the sink's config entry. The schema sync
-/// background worker calls this independently of data writes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SchemaSyncRequest<'a> {
-    pub namespace: &'a str,
-    pub compaction_id: &'a str,
-    pub source_contract: Option<&'a SourceNamespaceContract>,
-}
-
-/// What a schema sink does with `ALTER TABLE`. Table sinks (Iceberg family and
-/// warehouses) take migrations and forbid YAML `project`/`rename`/`cast`.
-/// Stream sinks (`Unsupported`) are the reverse.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AlterSupport {
-    Unsupported,
-    Iceberg,
-    Warehouse(crate::plugins::alter_ddl::WarehouseDialect),
-}
-
-impl AlterSupport {
-    pub fn is_table(self) -> bool {
-        !matches!(self, Self::Unsupported)
-    }
-}
-
-#[async_trait]
-pub trait SchemaSink: Send + Sync {
     fn alter_support(&self) -> AlterSupport {
         AlterSupport::Unsupported
     }
@@ -1565,31 +1524,24 @@ pub trait SchemaSink: Send + Sync {
         let _ = (namespace, metadata, alter);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "schema sink does not support migrations",
+            "data sink does not support migrations",
         ))
     }
+}
 
-    async fn sync_schema(
-        &self,
-        namespace: &str,
-        metadata: &OutputMetadata,
-    ) -> Result<(), std::io::Error>;
+/// What a data plugin does with `ALTER TABLE`. Table sinks (Iceberg family and
+/// warehouses) take migrations and forbid YAML `project`/`rename`/`cast`.
+/// Stream sinks (`Unsupported`) are the reverse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlterSupport {
+    Unsupported,
+    Iceberg,
+    Warehouse(crate::plugins::alter_ddl::WarehouseDialect),
+}
 
-    async fn sync_schema_request(
-        &self,
-        request: SchemaSyncRequest<'_>,
-        metadata: &OutputMetadata,
-    ) -> Result<(), std::io::Error> {
-        let _ = request.source_contract;
-        self.sync_schema(request.namespace, metadata).await
-    }
-
-    async fn install_schema_state(
-        &self,
-        _schema_version: u64,
-        _namespaces: &BTreeMap<String, OutputMetadata>,
-    ) -> Result<(), std::io::Error> {
-        Ok(())
+impl AlterSupport {
+    pub fn is_table(self) -> bool {
+        !matches!(self, Self::Unsupported)
     }
 }
 

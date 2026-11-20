@@ -164,17 +164,12 @@ impl<'de> Deserialize<'de> for PluginConfigEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataSinkEntry {
     pub config: PluginConfigEntry,
-    pub schema_sink: Option<String>,
 }
 
 impl Serialize for DataSinkEntry {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let len = 1 + usize::from(self.schema_sink.is_some());
-        let mut map = serializer.serialize_map(Some(len))?;
+        let mut map = serializer.serialize_map(Some(1))?;
         map.serialize_entry(&self.config.plugin_name, &self.config.config)?;
-        if let Some(schema_sink) = &self.schema_sink {
-            map.serialize_entry("schema_sink", schema_sink)?;
-        }
         map.end()
     }
 }
@@ -184,16 +179,15 @@ impl<'de> Deserialize<'de> for DataSinkEntry {
     where
         D: Deserializer<'de>,
     {
-        let mut map = HashMap::<String, Value>::deserialize(deserializer)?;
-        let schema_sink = map
-            .remove("schema_sink")
-            .and_then(|value| value.as_str().map(str::to_string));
+        let map = HashMap::<String, Value>::deserialize(deserializer)?;
+        if map.contains_key("schema_sink") {
+            return Err(<D::Error as serde::de::Error>::custom(
+                "unknown field `schema_sink`; dest schema is the data plugin",
+            ));
+        }
         let config = plugin_entry_from_map(map, &[])
             .map_err(|err| <D::Error as serde::de::Error>::custom(err.to_string()))?;
-        Ok(Self {
-            config,
-            schema_sink,
-        })
+        Ok(Self { config })
     }
 }
 
@@ -456,5 +450,15 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("writes rows into tables"));
         assert!(err.contains("Remove `format: jsonl`"));
+    }
+
+    #[test]
+    fn schema_sink_on_a_data_sink_fails_load() {
+        let err = serde_yaml::from_str::<super::DataSinkEntry>(
+            "schema_sink: schema_sinks.lake\nDuckdb:\n  warehouse: file:///tmp/w\n  table_namespace: main\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown field `schema_sink`"), "{err}");
     }
 }

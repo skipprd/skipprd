@@ -200,19 +200,25 @@ pub fn format_compactor_drain_status_summary(
     interval: Duration,
     counters: WalCompactionCounterSnapshot,
     since_last: WalCompactionCounterSnapshot,
-    reclaimable_partitions: usize,
+    remaining: usize,
     wal_in_flight: usize,
     uploads_in_flight: usize,
 ) -> String {
-    let wal_bar = format_progress_bar(counters.wal_parts_completed, counters.wal_parts_started, 20);
+    let wal_total = counters
+        .wal_parts_completed
+        .saturating_add(remaining as u64);
+    let wal_bar = format_progress_bar(counters.wal_parts_completed, wal_total, 20);
     let wal_delta = format_delta_per_interval(since_last.wal_parts_completed, interval);
     let txn_delta = format_delta_per_interval(since_last.txn_completed, interval);
+    let puts = crate::metrics::counters::UPLOADS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let rows = crate::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     let mut out = format!(
-        "Compactor drain: elapsed={}s | wal {}/{} [{}] {wal_delta} | txns {}/{} {txn_delta}",
+        "Compactor drain: elapsed={}s | wal {}/{} [{}] {wal_delta} | txns {}/{} {txn_delta} | puts={puts} rows={rows}",
         drain_elapsed.as_secs(),
         counters.wal_parts_completed,
-        counters.wal_parts_started,
+        wal_total,
         wal_bar,
         counters.txn_completed,
         counters.txn_started,
@@ -224,7 +230,7 @@ pub fn format_compactor_drain_status_summary(
 
     let _ = write!(
         out,
-        " | backlog={reclaimable_partitions} wal_in_flight={wal_in_flight} uploads_in_flight={uploads_in_flight}"
+        " | remaining={remaining} wal_in_flight={wal_in_flight} uploads_in_flight={uploads_in_flight}"
     );
 
     if GROUPED_COMPACTION_JOBS.is_empty() {
@@ -442,9 +448,9 @@ mod tests {
         );
 
         assert!(summary.contains("elapsed=2421s"));
-        assert!(summary.contains("4302/4343"));
+        assert!(summary.contains("4302/6241"));
         assert!(summary.contains("+0/5s"));
-        assert!(summary.contains("backlog=1939"));
+        assert!(summary.contains("remaining=1939"));
         assert!(summary.contains("no wal/txn progress/5s"));
         assert!(summary.contains("device_data uploading"));
         assert!(summary.contains("wal_parts=41"));

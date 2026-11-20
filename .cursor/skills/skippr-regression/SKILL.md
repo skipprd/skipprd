@@ -87,8 +87,7 @@ cargo build --release -p skipprd --bin skipprd \
   -p skippr-plugin-data-source-file \
   -p skippr-plugin-data-source-stdin \
   -p skippr-plugin-data-sink-file \
-  -p skippr-plugin-data-sink-duckdb \
-  -p skippr-plugin-schema-sink-duckdb
+  -p skippr-plugin-data-sink-duckdb
 export SKIPPRD_BIN="$PWD/target/release/skipprd"
 python3 tests/perf/run.py --scenario ingest-a-duckdb,copy-b-json-json,copy-py-stamp-json-json,copy-py-site-lookup,ingest-py-site-duckdb,ingest-py-sql-compose-duckdb,ingest-json-parquet,ingest-csv-duckdb,duckdb-ndjson,duckdb-csv,duckdb-json-array,duckdb-insert-values,ingest-sql-compose-duckdb,ingest-sql-filter-duckdb,ingest-sql-compose-stream-duckdb,ingest-create-table-both-duckdb,ingest-create-table-both-stream-duckdb,ingest-migrate-rename-duckdb,ingest-migrate-rename-stream-duckdb --scale smoke
 ```
@@ -191,9 +190,7 @@ cargo build --release \
   -p skippr-plugin-data-source-mysql \
   -p skippr-plugin-data-source-dynamodb \
   -p skippr-plugin-data-sink-duckdb \
-  -p skippr-plugin-schema-sink-duckdb \
-  -p skippr-plugin-data-sink-skipprlake \
-  -p skippr-plugin-schema-sink-skipprlake
+  -p skippr-plugin-data-sink-skipprlake
 export SKIPPRD_BIN="$PWD/target/release/skipprd"
 python3 tests/perf/run.py \
   --scenario q-wal-count-iceberg,q-wal-point-iceberg,q-union-count-duckdb,q-sql-compose-duckdb,q-create-table-duckdb,q-migrate-rename-duckdb,q-cdc-union-update-pg,q-cdc-union-update-mysql,q-cdc-union-update-ddb,q-cdc-migrate-rename-pg --scale smoke

@@ -33,7 +33,7 @@ There is no Python equivalent; call the CLI from Python with `subprocess` if you
 | `--namespace <NAME>` | Required | Namespace to replace. It is created if it does not exist. |
 | `--schema <PATH>` | None | JSON file with the fields, or `-` to read from stdin. |
 | `--schema-json <JSON>` | None | The same JSON inline. Takes precedence over `--schema`. One of the two is required. |
-| `--evolved` | On | Marks the schema as evolved so schema sinks are synced. Always on; the flag takes no value. |
+| `--evolved` | On | Marks the schema as evolved so the next compact publishes the new dest columns. Always on; the flag takes no value. |
 | `--output <MODE>` | `json` | Accepts `json` or `text`. Output is JSON in both cases. |
 
 ### Global flags

@@ -4,9 +4,9 @@
 
 use std::sync::Arc;
 
-use iceberg::spec::{NestedField, PrimitiveType, Schema, StructType, Type};
+use iceberg::spec::{NestedField, Schema, StructType, Type};
 
-use crate::discover::iceberg_schema::iceberg_schema_after_alter;
+use crate::discover::iceberg_schema::{iceberg_primitive, iceberg_schema_after_alter};
 use crate::discover::schema_alter::{
     apply, canonicalize, is_iceberg_legal_promote, FlattenMode, SchemaAlterOp,
 };
@@ -100,25 +100,6 @@ fn fixture_meta() -> Metadata {
     root
 }
 
-fn iceberg_type(ty: &SkipprDataType) -> Type {
-    Type::Primitive(match ty {
-        SkipprDataType::Long => PrimitiveType::Long,
-        SkipprDataType::Float => PrimitiveType::Float,
-        SkipprDataType::Double => PrimitiveType::Double,
-        SkipprDataType::Decimal => PrimitiveType::Decimal {
-            precision: 38,
-            scale: 9,
-        },
-        SkipprDataType::Timestamp | SkipprDataType::TimestampMilli => PrimitiveType::Timestamp,
-        SkipprDataType::Date => PrimitiveType::Date,
-        SkipprDataType::Byte | SkipprDataType::Short | SkipprDataType::Integer => {
-            PrimitiveType::Int
-        }
-        SkipprDataType::Boolean => PrimitiveType::Boolean,
-        _ => PrimitiveType::String,
-    })
-}
-
 fn field_id(mode: IdMode, skippr_id: i32, seq: i32) -> i32 {
     match mode {
         IdMode::Matching => skippr_id,
@@ -136,7 +117,7 @@ fn leaf(
     Arc::new(NestedField::new(
         field_id(mode, skippr_id, seq),
         name,
-        iceberg_type(&ty),
+        iceberg_primitive(&ty).expect("alter-matrix fixture type is an Iceberg primitive"),
         false,
     ))
 }

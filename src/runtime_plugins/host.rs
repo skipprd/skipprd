@@ -31,7 +31,7 @@ use crate::helpers::configuration::Config;
 use crate::helpers::offsets::Offsets;
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use crate::plugins::cdc;
-use crate::plugins::{DataSink, SchemaSink, SchemaSyncRequest, SinkWriteOutcome};
+use crate::plugins::{DataSink, SinkWriteOutcome};
 use crate::runtime_plugins::artifact::resolve_plugin_executable;
 use crate::runtime_plugins::manifest::RuntimePluginManifest;
 use crate::runtime_plugins::offset_service::OffsetServiceEndpoint;
@@ -39,14 +39,13 @@ use crate::runtime_plugins::protocol::{
     CommitReceipt, FinishSink, HandshakeRequest, HostDataFrame, HostFrame, PluginDataFrame,
     PluginFrame, PrepareAck, PrepareSink, PrepareSinkResult, RuntimeBinding,
     RuntimeExecutionContext, RuntimeExecutionMode, RuntimeIngestAck, RuntimeOutputLayout,
-    RuntimePluginKind, RuntimeRequestAck, RuntimeSchemaConfig, RuntimeSchemaInstallRequest,
-    RuntimeSchemaState, RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkConfig,
-    RuntimeSinkError, RuntimeSinkInstallRequest, RuntimeSinkPayloadMode, RuntimeSourceConfig,
-    RuntimeSourceIngestWindow, SchemaDelta, SchemaNamespaceDelta, SchemaRunRequest, SinkAck,
-    SinkChunk, SinkRunRequest, SinkWriteStats, SourceEvent, SourceStartRequest,
-    COMMIT_RECEIPT_VERSION, MAX_RUNTIME_SINK_CHUNK_BYTES, RUNTIME_PROTOCOL_VERSION,
-    SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_OFFSET_ADDR_ENV,
-    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimePluginKind, RuntimeRequestAck, RuntimeSchemaState, RuntimeSchemaStateInstallRequest,
+    RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkError, RuntimeSinkInstallRequest,
+    RuntimeSinkPayloadMode, RuntimeSourceConfig, RuntimeSourceIngestWindow, SchemaDelta,
+    SchemaNamespaceDelta, SinkAck, SinkChunk, SinkRunRequest, SinkWriteStats, SourceEvent,
+    SourceStartRequest, COMMIT_RECEIPT_VERSION, MAX_RUNTIME_SINK_CHUNK_BYTES,
+    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
+    SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::runtime_plugins::schema_state::{
     apply_runtime_source_schema_state, bump_pipeline_schema_version, current_runtime_schema_state,
@@ -160,7 +159,6 @@ impl Drop for RuntimePluginChild {
 }
 
 struct RuntimeChildConnection {
-    app_config: Config,
     resolved: ResolvedRuntimePlugin,
     pipeline_name: String,
     sink_session_capacity: usize,
@@ -235,24 +233,6 @@ fn runtime_compaction_id(filename: &str) -> String {
         .rsplit_once("-c=")
         .map(|(_, suffix)| suffix.to_string())
         .unwrap_or_else(|| filename.to_string())
-}
-
-fn runtime_schema_compaction_id(
-    binding: RuntimeBinding,
-    schema_fingerprint: &str,
-    namespace: &str,
-) -> String {
-    let binding = match binding {
-        RuntimeBinding::Primary => "primary",
-        RuntimeBinding::Deadletter => "deadletter",
-    };
-    format!("schema:{binding}:v{schema_fingerprint}:{namespace}")
-}
-
-fn runtime_schema_compaction_fingerprint(metadata: &OutputMetadata) -> String {
-    let bytes =
-        serde_json::to_vec(metadata).unwrap_or_else(|_| metadata.lineage_id().as_bytes().to_vec());
-    format!("{:x}", md5::compute(bytes))
 }
 
 fn sink_apply_envelope(request: &SinkRunRequest) -> SinkApplyEnvelopeV2 {
@@ -407,7 +387,6 @@ impl RuntimeChildConnection {
         .await
         .map_err(|_| io::Error::other("timed out waiting for runtime data channel"))??;
         let mut connection = Self {
-            app_config: config.clone(),
             resolved,
             pipeline_name,
             sink_session_capacity: sink_session_capacity.max(1),
@@ -424,23 +403,6 @@ impl RuntimeChildConnection {
         }
         crate::metrics::counters::record_plugin_spawn(spawn_started.elapsed());
         Ok(connection)
-    }
-
-    async fn restart(&mut self) -> io::Result<()> {
-        let child_pid = self.child.id();
-        let _ = self.child.kill().await;
-        unregister_runtime_plugin_child(child_pid);
-        let replacement = Self::spawn(
-            &self.app_config,
-            self.resolved.clone(),
-            self.pipeline_name.clone(),
-            None,
-            None,
-            self.sink_session_capacity,
-        )
-        .await?;
-        *self = replacement;
-        Ok(())
     }
 
     async fn handshake(&mut self) -> io::Result<()> {
@@ -704,7 +666,7 @@ fn apply_derived_runtime_schema(
     namespace: String,
     schema: &SchemaRef,
 ) -> io::Result<()> {
-    if current_runtime_schema_state()
+    if current_runtime_schema_state(config)
         .map_err(io::Error::other)?
         .namespaces
         .contains_key(&namespace)
@@ -1013,22 +975,7 @@ pub async fn sync_runtime_input_plugin(
                                 changed_namespaces.len()
                             );
                         }
-                        if Config::truth_value(&Config::getenv(
-                            "SCHEMA_SYNC_RUNTIME_SOURCE_STATE",
-                            "false",
-                        )) {
-                            for namespace in changed_namespaces {
-                                config.sync_output_schema_namespace(&namespace);
-                            }
-                        } else if !changed_namespaces.is_empty() {
-                            crate::metrics::counters::add_runtime_schema_state_publication_skipped(
-                                1,
-                            );
-                            debug!(
-                                "Runtime source schema state publication skipped for {} namespaces",
-                                changed_namespaces.len()
-                            );
-                        }
+                        let _ = changed_namespaces;
                     }
                     PluginFrame::SourceEvent(SourceEvent::SchemaDelta(delta)) => {
                         let namespace_count = delta.namespaces.len();
@@ -2011,10 +1958,12 @@ struct RuntimeSinkMultiplexConnection {
     admin_gate: Mutex<()>,
     shared: Arc<RuntimeSinkConnectionShared>,
     control_reader_task: tokio::task::JoinHandle<()>,
+    alter_support: crate::plugins::AlterSupport,
 }
 
 impl RuntimeSinkMultiplexConnection {
     fn start(connection: RuntimeChildConnection) -> Arc<Self> {
+        let alter_support = connection.alter_support;
         let RuntimeChildConnection {
             child,
             control,
@@ -2047,6 +1996,7 @@ impl RuntimeSinkMultiplexConnection {
             admin_gate: Mutex::new(()),
             shared,
             control_reader_task,
+            alter_support,
         })
     }
 
@@ -2230,7 +2180,7 @@ async fn run_runtime_sink_control_demux(
             continue;
         }
         match frame {
-            PluginFrame::Installed => {
+            PluginFrame::Installed | PluginFrame::SchemaAck(_) => {
                 let waiter = shared
                     .admin_waiter
                     .lock()
@@ -2239,11 +2189,11 @@ async fn run_runtime_sink_control_demux(
                 let Some(waiter) = waiter else {
                     shared.fail(
                         ErrorKind::InvalidData,
-                        "stale runtime sink install acknowledgement",
+                        "stale runtime sink administrative acknowledgement",
                     );
                     return;
                 };
-                let _ = waiter.send(Ok(PluginFrame::Installed));
+                let _ = waiter.send(Ok(frame));
             }
             PluginFrame::Error(message) => {
                 shared.fail(ErrorKind::Other, format!("runtime sink error: {message}"));
@@ -2435,6 +2385,7 @@ struct RuntimeSinkConnectionPool {
     schema_namespace_apply_fences: std::sync::Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
     published_schema_versions: std::sync::Mutex<BTreeMap<String, u64>>,
     maintenance_abort: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    alter_support: crate::plugins::AlterSupport,
 }
 
 struct RuntimeSinkWorkerLease {
@@ -2492,7 +2443,7 @@ async fn spawn_installed_runtime_sink_connection(
                 .send(&HostFrame::InstallSink(install_request.clone()))
                 .await?;
             expect_install_ack(&mut connection, "sink").await?;
-            let schema_state = current_runtime_schema_state().map_err(io::Error::other)?;
+            let schema_state = current_runtime_schema_state(config).map_err(io::Error::other)?;
             connection
                 .send(&HostFrame::InstallSchemaState(
                     RuntimeSchemaStateInstallRequest {
@@ -2549,6 +2500,7 @@ impl RuntimeSinkConnectionPool {
             session_capacity,
         )
         .await?;
+        let alter_support = connection.alter_support;
         let slots = RuntimeSinkSlotQueue::new(session_capacity);
         let first_worker = Arc::new(RuntimeSinkWorker {
             id: 0,
@@ -2576,6 +2528,7 @@ impl RuntimeSinkConnectionPool {
             schema_namespace_apply_fences: std::sync::Mutex::new(HashMap::new()),
             published_schema_versions: std::sync::Mutex::new(schema_state.namespace_versions),
             maintenance_abort: std::sync::Mutex::new(None),
+            alter_support,
         });
         pool.start_idle_maintenance();
         Ok(pool)
@@ -3025,11 +2978,41 @@ impl RuntimeDataSinkPlugin {
         }
     }
 
+    async fn send_apply_alter(
+        &self,
+        connection: &Arc<RuntimeSinkMultiplexConnection>,
+        request: &crate::runtime_plugins::protocol::SchemaAlterRequest,
+    ) -> io::Result<()> {
+        let frame = timeout(
+            runtime_sink_schema_timeout(),
+            connection.send_admin(&HostFrame::ApplyAlter(request.clone())),
+        )
+        .await
+        .map_err(|_| {
+            connection
+                .shared
+                .fail(ErrorKind::TimedOut, "runtime sink apply alter timed out");
+            io::Error::new(ErrorKind::TimedOut, "runtime sink apply alter timed out")
+        })??;
+        match frame {
+            PluginFrame::SchemaAck(RuntimeRequestAck { request_id })
+                if request_id == request.request_id =>
+            {
+                Ok(())
+            }
+            other => Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!("unexpected runtime sink apply alter response: {other:?}"),
+            )),
+        }
+    }
+
     async fn ensure_namespace_schema_state(&self, namespace: &str) -> io::Result<u64> {
         if namespace.is_empty() {
             return Ok(0);
         }
-        let schema_state = current_runtime_schema_state().map_err(io::Error::other)?;
+        let schema_state =
+            current_runtime_schema_state(&self.app_config).map_err(io::Error::other)?;
         let required_version = schema_state
             .namespace_versions
             .get(namespace)
@@ -3603,12 +3586,6 @@ impl DataSink for RuntimeDataSinkPlugin {
         stream: datafusion::execution::SendableRecordBatchStream,
         ctx: crate::plugins::SinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, io::Error> {
-        if let Some(namespace) = query_value_from_runtime_filename(&ctx.filename, "namespace") {
-            let schema = stream.schema();
-            if !schema.fields().is_empty() {
-                apply_derived_runtime_schema(&self.app_config, namespace, &schema)?;
-            }
-        }
         let namespace =
             query_value_from_runtime_filename(&ctx.filename, "namespace").or_else(|| {
                 ctx.wal_refs
@@ -3660,12 +3637,6 @@ impl DataSink for RuntimeDataSinkPlugin {
         reader: crate::plugins::GroupedBatchReader,
         ctx: crate::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, io::Error> {
-        if let Some(namespace) = query_value_from_runtime_filename(&ctx.filename, "namespace") {
-            let schema = reader.schema();
-            if !schema.fields().is_empty() {
-                apply_derived_runtime_schema(&self.app_config, namespace, &schema)?;
-            }
-        }
         let namespace =
             query_value_from_runtime_filename(&ctx.filename, "namespace").or_else(|| {
                 ctx.wal_refs
@@ -3794,7 +3765,7 @@ impl DataSink for RuntimeDataSinkPlugin {
             },
         )
         .map_err(io::Error::other)?;
-        let current = current_runtime_schema_state().map_err(io::Error::other)?;
+        let current = current_runtime_schema_state(&self.app_config).map_err(io::Error::other)?;
         for namespace in changed {
             let metadata = current.namespaces.get(&namespace).cloned().ok_or_else(|| {
                 io::Error::other(format!(
@@ -3828,274 +3799,9 @@ impl DataSink for RuntimeDataSinkPlugin {
         }
         Ok(())
     }
-}
 
-pub struct RuntimeSchemaSinkPlugin {
-    install_request: RuntimeSchemaInstallRequest,
-    connection: Mutex<RuntimeChildConnection>,
-    alter_support: std::sync::Mutex<crate::plugins::AlterSupport>,
-}
-
-impl RuntimeSchemaSinkPlugin {
-    pub async fn new(
-        app_cfg: &Config,
-        resolved: ResolvedRuntimePlugin,
-        pipeline_name: String,
-        binding: RuntimeBinding,
-        config: RuntimeSchemaConfig,
-    ) -> io::Result<Self> {
-        let install_request = RuntimeSchemaInstallRequest {
-            context: runtime_execution_context(
-                app_cfg,
-                &pipeline_name,
-                RuntimeExecutionMode::Sync,
-                binding,
-            ),
-            binding,
-            config,
-        };
-        let connection =
-            RuntimeChildConnection::spawn(app_cfg, resolved, pipeline_name, None, None, 1).await?;
-        let plugin = Self {
-            install_request,
-            alter_support: std::sync::Mutex::new(connection.alter_support),
-            connection: Mutex::new(connection),
-        };
-        {
-            let mut guard = plugin.connection.lock().await;
-            match plugin.install_runtime_state(&mut guard).await {
-                Ok(()) => {}
-                Err(err) if guard.has_exited()? || should_retry_runtime_connection(&err) => {
-                    warn!(
-                        "runtime schema sink startup install failed, restarting child: {}",
-                        err
-                    );
-                    plugin.restart_and_reinstall(&mut guard).await?;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Ok(plugin)
-    }
-
-    async fn install_runtime_state(
-        &self,
-        connection: &mut RuntimeChildConnection,
-    ) -> io::Result<()> {
-        self.install_schema_binding(connection).await?;
-        self.install_latest_schema_state(connection).await
-    }
-
-    async fn restart_and_reinstall(
-        &self,
-        connection: &mut RuntimeChildConnection,
-    ) -> io::Result<()> {
-        connection.restart().await?;
-        *self
-            .alter_support
-            .lock()
-            .expect("schema sink alter_support lock") = connection.alter_support;
-        self.install_runtime_state(connection).await
-    }
-
-    async fn ensure_connection_ready(
-        &self,
-        connection: &mut RuntimeChildConnection,
-    ) -> io::Result<()> {
-        if connection.has_exited()? {
-            self.restart_and_reinstall(connection).await?;
-        }
-        Ok(())
-    }
-
-    async fn install_schema_binding(
-        &self,
-        connection: &mut RuntimeChildConnection,
-    ) -> io::Result<()> {
-        connection
-            .send(&HostFrame::InstallSchema(self.install_request.clone()))
-            .await?;
-        expect_install_ack(connection, "schema").await
-    }
-
-    async fn send_schema_state_install(
-        &self,
-        connection: &mut RuntimeChildConnection,
-        schema_state: &RuntimeSchemaState,
-    ) -> io::Result<()> {
-        connection
-            .send(&HostFrame::InstallSchemaState(
-                RuntimeSchemaStateInstallRequest {
-                    schema_state: schema_state.clone(),
-                },
-            ))
-            .await?;
-        expect_install_ack(connection, "schema state").await?;
-        connection.installed_schema_versions = schema_state.namespace_versions.clone();
-        Ok(())
-    }
-
-    async fn send_schema_delta_install(
-        &self,
-        connection: &mut RuntimeChildConnection,
-        namespace: &str,
-        version: u64,
-        metadata: &OutputMetadata,
-    ) -> io::Result<()> {
-        if connection
-            .installed_schema_versions
-            .get(namespace)
-            .is_some_and(|installed| *installed >= version)
-        {
-            crate::metrics::counters::add_runtime_schema_state_publication_skipped(1);
-            return Ok(());
-        }
-        let schema_state = current_runtime_schema_state().map_err(io::Error::other)?;
-        connection
-            .send(&HostFrame::InstallSchemaDelta(SchemaDelta {
-                version: schema_state.version,
-                namespaces: BTreeMap::from([(
-                    namespace.to_string(),
-                    SchemaNamespaceDelta {
-                        version,
-                        metadata: metadata.clone(),
-                    },
-                )]),
-            }))
-            .await?;
-        expect_install_ack(connection, "schema delta").await?;
-        connection
-            .installed_schema_versions
-            .insert(namespace.to_string(), version);
-        Ok(())
-    }
-
-    async fn install_latest_schema_state(
-        &self,
-        connection: &mut RuntimeChildConnection,
-    ) -> io::Result<()> {
-        let schema_state = current_runtime_schema_state().map_err(io::Error::other)?;
-        self.send_schema_state_install(connection, &schema_state)
-            .await
-    }
-
-    async fn send_schema_request(
-        &self,
-        request: SchemaRunRequest,
-        metadata: &OutputMetadata,
-    ) -> io::Result<()> {
-        let mut retried = false;
-        let mut schema_refreshes = 0usize;
-        loop {
-            let mut guard = self.connection.lock().await;
-            self.ensure_connection_ready(&mut guard).await?;
-            self.send_schema_delta_install(
-                &mut guard,
-                &request.namespace,
-                request.required_schema_version,
-                metadata,
-            )
-            .await?;
-
-            crate::catalog_budget::refresh_process_catalog_operation_budget();
-            let _catalog_permit = crate::catalog_budget::acquire_catalog_operation_permit().await;
-            let send_result = guard.send(&HostFrame::RunSchema(request.clone())).await;
-            let recv_result = match send_result {
-                Ok(_) => guard.recv().await,
-                Err(err) => Err(err),
-            };
-
-            match recv_result {
-                Ok(PluginFrame::SchemaAck(RuntimeRequestAck { request_id }))
-                    if request_id == request.request_id =>
-                {
-                    return Ok(())
-                }
-                Ok(PluginFrame::Error(err)) => return Err(io::Error::other(err)),
-                Ok(PluginFrame::SchemaStateRefreshRequired(refresh)) => {
-                    if schema_refreshes >= 3 {
-                        return Err(io::Error::other(
-                            "runtime schema sink repeatedly requested schema refresh",
-                        ));
-                    }
-                    if refresh.namespace != request.namespace {
-                        return Err(io::Error::new(
-                            ErrorKind::InvalidData,
-                            "runtime schema refresh namespace does not match request",
-                        ));
-                    }
-                    guard.installed_schema_versions.remove(&refresh.namespace);
-                    schema_refreshes += 1;
-                    continue;
-                }
-                Ok(other) => {
-                    let err =
-                        io::Error::other(format!("unexpected runtime schema frame: {:?}", other));
-                    if !retried && should_retry_runtime_connection(&err) {
-                        warn!(
-                            "runtime schema request got stale frame, restarting child: {}",
-                            err
-                        );
-                        self.restart_and_reinstall(&mut guard).await?;
-                        retried = true;
-                        continue;
-                    }
-                    return Err(err);
-                }
-                Err(err)
-                    if !retried
-                        && (guard.has_exited()? || should_retry_runtime_connection(&err)) =>
-                {
-                    warn!("runtime schema request failed, restarting child: {}", err);
-                    self.restart_and_reinstall(&mut guard).await?;
-                    retried = true;
-                    continue;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-    }
-
-    async fn install_schema_delta_with_retry(
-        &self,
-        namespace: &str,
-        schema_version: u64,
-        metadata: &OutputMetadata,
-    ) -> io::Result<()> {
-        let mut retried = false;
-        loop {
-            let mut guard = self.connection.lock().await;
-            self.ensure_connection_ready(&mut guard).await?;
-            match self
-                .send_schema_delta_install(&mut guard, namespace, schema_version, metadata)
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(err)
-                    if !retried
-                        && (guard.has_exited()? || should_retry_runtime_connection(&err)) =>
-                {
-                    warn!(
-                        "runtime schema sink schema delta install failed, restarting child: {}",
-                        err
-                    );
-                    self.restart_and_reinstall(&mut guard).await?;
-                    retried = true;
-                    continue;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl SchemaSink for RuntimeSchemaSinkPlugin {
     fn alter_support(&self) -> crate::plugins::AlterSupport {
-        *self
-            .alter_support
-            .lock()
-            .expect("schema sink alter_support lock")
+        self.pool.alter_support
     }
 
     async fn apply_alter(
@@ -4104,109 +3810,35 @@ impl SchemaSink for RuntimeSchemaSinkPlugin {
         metadata: &crate::discover::OutputMetadata,
         alter: &crate::discover::schema_alter::CommittedAlter,
     ) -> Result<(), io::Error> {
+        let _global = Arc::clone(&self.pool.schema_apply_fence)
+            .write_owned()
+            .await;
+        let _namespace = self
+            .pool
+            .schema_namespace_apply_fence(namespace)
+            .write_owned()
+            .await;
         let request = crate::runtime_plugins::protocol::SchemaAlterRequest {
             request_id: next_runtime_request_id(),
             namespace: namespace.to_string(),
             alter: alter.clone(),
             metadata: metadata.clone(),
         };
-        let mut retried = false;
-        loop {
-            let mut guard = self.connection.lock().await;
-            self.ensure_connection_ready(&mut guard).await?;
-            let send_result = guard.send(&HostFrame::ApplyAlter(request.clone())).await;
-            let recv_result = match send_result {
-                Ok(_) => guard.recv().await,
-                Err(err) => Err(err),
-            };
-            match recv_result {
-                Ok(PluginFrame::SchemaAck(RuntimeRequestAck { request_id }))
-                    if request_id == request.request_id =>
-                {
-                    return Ok(());
-                }
-                Ok(PluginFrame::Error(err)) => return Err(io::Error::other(err)),
-                Ok(other) => {
-                    return Err(io::Error::other(format!(
-                        "unexpected runtime schema alter frame: {:?}",
-                        other
-                    )));
-                }
-                Err(err)
-                    if !retried
-                        && (guard.has_exited()? || should_retry_runtime_connection(&err)) =>
-                {
-                    self.restart_and_reinstall(&mut guard).await?;
-                    retried = true;
-                    continue;
-                }
-                Err(err) => return Err(err),
+        let workers = {
+            let workers = self.pool.workers.lock().await;
+            workers.iter().cloned().collect::<Vec<_>>()
+        };
+        for worker in workers {
+            let mut connection = worker.connection().await;
+            if !connection.is_alive() {
+                connection = self.restart_worker_inner(&worker).await?;
+            }
+            if let Err(err) = self.send_apply_alter(&connection, &request).await {
+                warn!("runtime sink apply alter failed, restarting child: {}", err);
+                connection = self.restart_worker_inner(&worker).await?;
+                self.send_apply_alter(&connection, &request).await?;
             }
         }
-    }
-
-    async fn sync_schema(
-        &self,
-        namespace: &str,
-        metadata: &crate::discover::OutputMetadata,
-    ) -> Result<(), io::Error> {
-        self.sync_schema_request(
-            SchemaSyncRequest {
-                namespace,
-                compaction_id: "",
-                source_contract: None,
-            },
-            metadata,
-        )
-        .await
-    }
-
-    async fn sync_schema_request(
-        &self,
-        request_ctx: SchemaSyncRequest<'_>,
-        metadata: &crate::discover::OutputMetadata,
-    ) -> Result<(), io::Error> {
-        let schema_version = crate::ingest_work::namespace_schema_version(request_ctx.namespace)
-            .max(runtime_schema_namespace_version(request_ctx.namespace))
-            .max(1);
-        let schema_fingerprint = runtime_schema_compaction_fingerprint(metadata);
-        let request = SchemaRunRequest {
-            request_id: next_runtime_request_id(),
-            compaction_id: if request_ctx.compaction_id.is_empty() {
-                runtime_schema_compaction_id(
-                    self.install_request.binding,
-                    &schema_fingerprint,
-                    request_ctx.namespace,
-                )
-            } else {
-                request_ctx.compaction_id.to_string()
-            },
-            binding: self.install_request.binding,
-            required_schema_version: schema_version,
-            namespace: request_ctx.namespace.to_string(),
-            source_contract: request_ctx.source_contract.cloned().or_else(|| {
-                crate::plugins::source_contract::namespace_source_contract(request_ctx.namespace)
-            }),
-        };
-        self.send_schema_request(request, metadata).await
-    }
-
-    async fn install_schema_state(
-        &self,
-        schema_version: u64,
-        namespaces: &BTreeMap<String, OutputMetadata>,
-    ) -> Result<(), io::Error> {
-        for (namespace, metadata) in namespaces {
-            self.install_schema_delta_with_retry(
-                namespace,
-                crate::ingest_work::namespace_schema_version(namespace)
-                    .max(runtime_schema_namespace_version(namespace))
-                    .max(1),
-                metadata,
-            )
-            .await?;
-        }
-        let _ = schema_version;
         Ok(())
     }
 }
@@ -4319,7 +3951,6 @@ mod tests {
                         plugin_name: "File".into(),
                         config: serde_json::json!({ "format": "csv" }),
                     },
-                    schema_sink: None,
                 },
             )]
             .into_iter()
@@ -4333,7 +3964,6 @@ mod tests {
                         plugin_name: "File".into(),
                         config: serde_json::json!({ "format": "jsonl" }),
                     },
-                    schema_sink: None,
                 },
             )]
             .into_iter()
@@ -4587,11 +4217,11 @@ mod tests {
     }
 
     #[test]
-    fn schema_sink_host_alter_support_comes_from_handshake() {
+    fn data_sink_host_alter_support_comes_from_handshake() {
         let src = include_str!("host.rs");
         let start = src
-            .find("impl SchemaSink for RuntimeSchemaSinkPlugin")
-            .expect("RuntimeSchemaSinkPlugin SchemaSink");
+            .find("fn alter_support(&self) -> crate::plugins::AlterSupport")
+            .expect("RuntimeDataSinkPlugin alter_support");
         let body = src[start..].split("async fn apply_alter").next().unwrap();
         let forbidden = concat!("AlterSupport::", "Native");
         assert!(
@@ -4599,8 +4229,46 @@ mod tests {
             "host must not hardcode Native; guest handshake is SoT"
         );
         assert!(
-            body.contains(".lock()"),
+            body.contains("self.pool.alter_support"),
             "host alter_support must be the handshake-cached value"
+        );
+    }
+
+    #[test]
+    fn data_sink_write_does_not_derive_dest_schema_from_arrow() {
+        let src = include_str!("host.rs");
+        let sink_sync = src
+            .split("async fn sync_with_context_result")
+            .nth(1)
+            .unwrap()
+            .split("async fn sync_grouped")
+            .next()
+            .unwrap();
+        assert!(
+            !sink_sync.contains("apply_derived_runtime_schema"),
+            "data-sink compact must use published dest metadata, not the write-batch Arrow schema"
+        );
+        let sink_grouped = src
+            .split("async fn sync_grouped")
+            .nth(1)
+            .unwrap()
+            .split("async fn send_sink_request")
+            .next()
+            .unwrap();
+        assert!(
+            !sink_grouped.contains("apply_derived_runtime_schema"),
+            "grouped data-sink write must use published dest metadata"
+        );
+        let source_write = src
+            .split("PluginDataFrame::SinkWrite(write)")
+            .nth(1)
+            .unwrap()
+            .split("PluginDataFrame::CheckpointUpdate")
+            .next()
+            .unwrap();
+        assert!(
+            source_write.contains("apply_derived_runtime_schema"),
+            "runtime source SinkWrite may still derive source schema"
         );
     }
 }

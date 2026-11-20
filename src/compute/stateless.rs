@@ -134,6 +134,10 @@ pub fn apply_stateless(
         if name.trim().is_empty() {
             return Err("derive column name must be non-empty".into());
         }
+        if let Ok(idx) = current.schema().index_of(name) {
+            let keep: Vec<usize> = (0..current.num_columns()).filter(|&i| i != idx).collect();
+            current = current.project(&keep).map_err(|err| err.to_string())?;
+        }
         let table = unique_table();
         let sql = format!("SELECT *, ({expr}) AS {} FROM {table}", quote_ident(name));
         current = run_sql(current, &table, &sql)?;
@@ -294,6 +298,37 @@ mod tests {
         .unwrap();
         assert_eq!(aligned.batch.num_rows(), 0);
         assert!(aligned.batch.schema().field_with_name("double").is_ok());
+    }
+
+    #[test]
+    fn derive_replaces_an_existing_dest_column() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("amount", DataType::Int64, false),
+            Field::new("amount_gbp", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![10i64])) as arrow::array::ArrayRef,
+                Arc::new(arrow::array::Float64Array::from(vec![None])) as arrow::array::ArrayRef,
+            ],
+        )
+        .unwrap();
+        let select = StatelessSelect {
+            filter: None,
+            derive: vec![("amount_gbp".into(), "amount * 0.8".into())],
+        };
+        let aligned = apply_stateless(&[], Some(&select), batch, None).unwrap();
+        assert_eq!(aligned.batch.num_columns(), 2);
+        assert!(aligned.batch.schema().field_with_name("amount_gbp").is_ok());
+        assert!(aligned.batch.schema().field_with_name("amount").is_ok());
+        let gbp = aligned
+            .batch
+            .column(aligned.batch.schema().index_of("amount_gbp").unwrap())
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+        assert_eq!(gbp.value(0), 8.0);
     }
 
     #[test]

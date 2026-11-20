@@ -27,7 +27,7 @@ use skipprd::runtime_plugins::protocol::{
     CatalogIntent, CatalogIntentIdentity, CatalogIntentKind, CommitReceipt, CommitReceiptAuthority,
     GlueColumnIntent, GluePartitionCatalogIntentV1, HandshakeResponse, HostDataFrame, HostFrame,
     PluginDataFrame, PluginFrame, PrepareAck, PrepareSinkResult, RuntimeCheckpointUpdate,
-    RuntimePluginKind, RuntimeRequestAck, RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest,
+    RuntimePluginKind, RuntimeRequestAck, RuntimeSchemaRefreshRequest,
     RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkError,
     RuntimeSinkInstallRequest, RuntimeSourceSinkWrite, SinkAck, SinkWriteStats, SourceEvent,
     CATALOG_INTENT_VERSION, GLUE_PARTITION_CATALOG_INTENT_VERSION, RUNTIME_PROTOCOL_VERSION,
@@ -136,9 +136,6 @@ async fn run() -> io::Result<()> {
                 .await
             }
         }
-        RuntimePluginKind::SchemaSink => {
-            run_schema_loop(&cli, &mut control_reader, &mut control_writer).await
-        }
         RuntimePluginKind::DataSource => {
             run_source_loop(
                 &cli,
@@ -176,7 +173,6 @@ fn parse_kind(value: &str) -> io::Result<RuntimePluginKind> {
     match value {
         "data_source" | "DataSource" => Ok(RuntimePluginKind::DataSource),
         "data_sink" | "DataSink" => Ok(RuntimePluginKind::DataSink),
-        "schema_sink" | "SchemaSink" => Ok(RuntimePluginKind::SchemaSink),
         _ => Err(io::Error::other(format!(
             "unsupported runtime plugin kind '{}'",
             value
@@ -673,12 +669,14 @@ async fn run_sink_loop(
                                     "id",
                                     Some("bigint"),
                                     None,
-                                )],
+                                )
+                                .unwrap()],
                                 partition_columns: vec![GlueColumnIntent::from_glue_fields(
                                     "day",
                                     Some("string"),
                                     None,
-                                )],
+                                )
+                                .unwrap()],
                                 input_format: "input".to_string(),
                                 output_format: "output".to_string(),
                                 serde_library: "serde".to_string(),
@@ -785,139 +783,6 @@ fn sink_scenario(cli: &TestHelperCli) -> SinkScenario {
         "write_output_parquet" => SinkScenario::WriteOutputParquet,
         _ => SinkScenario::AckOnly,
     }
-}
-
-async fn run_schema_loop(
-    cli: &TestHelperCli,
-    control_reader: &mut OwnedReadHalf,
-    control_writer: &mut OwnedWriteHalf,
-) -> io::Result<()> {
-    let mut state = SchemaHelperState::default();
-    loop {
-        let Some(frame) = read_frame_or_eof::<_, HostFrame>(control_reader).await? else {
-            return Ok(());
-        };
-        match frame {
-            HostFrame::InstallSchema(request) => {
-                state.install_request = Some(request);
-                write_schema_state_snapshot(cli, &state)?;
-                write_frame(control_writer, &PluginFrame::Installed).await?;
-            }
-            HostFrame::InstallSchemaState(request) => {
-                if cli.scenario == "disconnect_on_schema_install_once"
-                    && should_crash_once(cli.marker_path.as_ref())?
-                {
-                    return Ok(());
-                }
-                record_schema_state_install(cli, request.schema_state.version)?;
-                state.schema_state = Some(request);
-                write_schema_state_snapshot(cli, &state)?;
-                write_frame(control_writer, &PluginFrame::Installed).await?;
-            }
-            HostFrame::InstallSchemaDelta(delta) => {
-                if let Some(schema_state) = state.schema_state.as_mut() {
-                    schema_state.schema_state.version =
-                        schema_state.schema_state.version.max(delta.version);
-                    for (namespace, entry) in delta.namespaces {
-                        if schema_state
-                            .schema_state
-                            .namespace_versions
-                            .get(&namespace)
-                            .is_some_and(|installed| *installed >= entry.version)
-                        {
-                            continue;
-                        }
-                        schema_state
-                            .schema_state
-                            .namespaces
-                            .insert(namespace.clone(), entry.metadata);
-                        schema_state
-                            .schema_state
-                            .namespace_versions
-                            .insert(namespace, entry.version);
-                    }
-                }
-                write_schema_state_snapshot(cli, &state)?;
-                write_frame(control_writer, &PluginFrame::Installed).await?;
-            }
-            HostFrame::RunSchema(request) => {
-                if cli.scenario == "crash_once" && should_crash_once(cli.marker_path.as_ref())? {
-                    std::process::exit(1);
-                }
-                if cli.scenario == "disconnect_once" && should_crash_once(cli.marker_path.as_ref())?
-                {
-                    return Ok(());
-                }
-                state.request_ids.push(request.request_id);
-                state.compaction_ids.push(request.compaction_id.clone());
-                if cli.scenario == "refresh_once" && !state.refresh_requested_once {
-                    state.refresh_requested_once = true;
-                    write_schema_state_snapshot(cli, &state)?;
-                    write_frame(
-                        control_writer,
-                        &PluginFrame::SchemaStateRefreshRequired(RuntimeSchemaRefreshRequest {
-                            request_id: request.request_id,
-                            namespace: request.namespace.clone(),
-                            required_version: request.required_schema_version,
-                            installed_version: state
-                                .schema_state
-                                .as_ref()
-                                .and_then(|schema| {
-                                    schema
-                                        .schema_state
-                                        .namespace_versions
-                                        .get(&request.namespace)
-                                        .copied()
-                                })
-                                .unwrap_or(0),
-                        }),
-                    )
-                    .await?;
-                    continue;
-                }
-                state.run_count += 1;
-                write_schema_state_snapshot(cli, &state)?;
-                write_frame(
-                    control_writer,
-                    &PluginFrame::SchemaAck(RuntimeRequestAck {
-                        request_id: request.request_id,
-                    }),
-                )
-                .await?;
-            }
-            HostFrame::ApplyAlter(request) => {
-                write_frame(
-                    control_writer,
-                    &PluginFrame::SchemaAck(RuntimeRequestAck {
-                        request_id: request.request_id,
-                    }),
-                )
-                .await?;
-            }
-            HostFrame::Shutdown => return Ok(()),
-            other => {
-                write_frame(
-                    control_writer,
-                    &PluginFrame::Error(format!(
-                        "unexpected schema frame after handshake: {:?}",
-                        other
-                    )),
-                )
-                .await?;
-                return Err(io::Error::other("unexpected schema frame"));
-            }
-        }
-    }
-}
-
-#[derive(Default)]
-struct SchemaHelperState {
-    install_request: Option<RuntimeSchemaInstallRequest>,
-    schema_state: Option<RuntimeSchemaStateInstallRequest>,
-    refresh_requested_once: bool,
-    run_count: usize,
-    request_ids: Vec<u64>,
-    compaction_ids: Vec<String>,
 }
 
 async fn run_source_loop(
@@ -1183,37 +1048,6 @@ fn write_sink_state_snapshot(cli: &TestHelperCli, state: &SinkHelperState) -> io
             "request_ids": state.request_ids,
             "compaction_ids": state.compaction_ids,
             "payload_bytes": state.payload_bytes,
-        }))
-        .map_err(|err| io::Error::other(err.to_string()))?,
-    )?;
-    Ok(())
-}
-
-fn write_schema_state_snapshot(cli: &TestHelperCli, state: &SchemaHelperState) -> io::Result<()> {
-    if matches!(
-        cli.scenario.as_str(),
-        "crash_once"
-            | "disconnect_once"
-            | "disconnect_on_schema_install_once"
-            | "record_schema_installs"
-    ) {
-        return Ok(());
-    }
-    let Some(marker_path) = cli.marker_path.as_ref() else {
-        return Ok(());
-    };
-    if let Some(parent) = marker_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(
-        marker_path,
-        serde_json::to_vec_pretty(&json!({
-            "install_request": state.install_request,
-            "schema_state": state.schema_state.as_ref().map(|request| &request.schema_state),
-            "refresh_requested_once": state.refresh_requested_once,
-            "run_count": state.run_count,
-            "request_ids": state.request_ids,
-            "compaction_ids": state.compaction_ids,
         }))
         .map_err(|err| io::Error::other(err.to_string()))?,
     )?;

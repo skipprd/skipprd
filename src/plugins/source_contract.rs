@@ -332,14 +332,17 @@ pub async fn validate_active_sink_supports_contracts(
     Ok(())
 }
 
-async fn persist_pipeline_metadata(config: &Config, pipeline: &PipelineMetadata) {
+async fn persist_pipeline_metadata(
+    config: &Config,
+    pipeline: &PipelineMetadata,
+) -> Result<(), String> {
     use std::sync::Arc;
 
     use crate::helpers::configuration::Config;
     use crate::METADATA;
 
     METADATA.store(Arc::new(pipeline.clone()));
-    config.set_metadata(pipeline, false).await;
+    config.set_metadata(pipeline, false).await
 }
 
 /// Authoritatively apply runtime-published contracts (empty vec clears all).
@@ -361,7 +364,11 @@ pub async fn apply_runtime_source_namespace_contracts(
             crate::plugins::cdc::reinstall_resolved_contracts(key, resolved)
                 .map_err(|err| SourceContractError::CdcContracts(err.to_string()))?;
         }
-        persist_pipeline_metadata(config, &pipeline).await;
+        persist_pipeline_metadata(config, &pipeline)
+            .await
+            .map_err(|err| {
+                SourceContractError::SinkPolicyUnsupported(format!("schema persist: {err}"))
+            })?;
     }
     Ok(changed)
 }

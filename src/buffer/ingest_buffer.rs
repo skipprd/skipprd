@@ -9,14 +9,14 @@ use crate::buffer::compaction_progress::{
 };
 use crate::buffer::compaction_scheduler::{
     drive_work_conserving, CompactionCycleControl, CompactionPlanBatch, CompactorCommand,
-    SchedulableCompactionWork,
+    SchedulableCompactionWork, BUDGET_RETUNE_INTERVAL,
 };
 use crate::buffer::compaction_transaction::{
     CompactionTransaction, CompactionTransactionState, SegmentSourceDescriptor, SinkRetrySemantics,
     SinkWriteSemantics, WalPartRef,
 };
 use crate::buffer::direct_io::DirectIoFile;
-use crate::buffer::flush_execution_budget::FlushExecutionBudget;
+use crate::buffer::flush_execution_budget::{FlushBudgetSlot, FlushExecutionBudget};
 use crate::buffer::s3_wal_body_cache;
 #[cfg(test)]
 use crate::buffer::segment_file::SegmentPartMetaSummary;
@@ -371,6 +371,34 @@ mod work_conserving_scheduler_tests {
         }
     }
 
+    async fn drive_steady<P, E>(
+        concurrency: usize,
+        initial_force: bool,
+        planner: P,
+        execute: E,
+        control: Option<&mut CompactionCycleControl<'_>>,
+    ) -> bool
+    where
+        P: FnMut(
+            usize,
+            bool,
+            &std::collections::HashMap<CompactionLaneKey, usize>,
+            &std::collections::HashSet<CompactionLaneKey>,
+        ) -> CompactionPlanBatch<TestWork>,
+        E: FnMut(TestWork) -> Pin<Box<dyn Future<Output = bool> + Send>>,
+    {
+        drive_work_conserving(
+            concurrency,
+            initial_force,
+            planner,
+            execute,
+            control,
+            TokioDuration::from_secs(600),
+            move || concurrency,
+        )
+        .await
+    }
+
     fn test_executor(
         state: Arc<TestExecutionState>,
     ) -> impl FnMut(TestWork) -> Pin<Box<dyn Future<Output = bool> + Send>> {
@@ -418,7 +446,7 @@ mod work_conserving_scheduler_tests {
         let planner_queue = queue.clone();
         let state = Arc::new(TestExecutionState::default());
 
-        let made_progress = drive_work_conserving(
+        let made_progress = drive_steady(
             2,
             false,
             move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
@@ -453,7 +481,7 @@ mod work_conserving_scheduler_tests {
         let planner_queue = queue.clone();
         let state = Arc::new(TestExecutionState::default());
 
-        drive_work_conserving(
+        drive_steady(
             2,
             false,
             move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
@@ -473,37 +501,130 @@ mod work_conserving_scheduler_tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn scheduler_yields_periodically_to_refresh_the_flush_budget() {
+    async fn retune_with_in_flight_work_still_accepts_new_file_format_groups() {
+        use crate::ingest::tuner::FlushBudgetSnapshot;
+        use crate::plugins::cdc::sink_capabilities;
+        use std::sync::atomic::AtomicBool;
+
         metrics_hot::reset_flush_metrics();
-        let ids = [
-            "retune-0", "retune-1", "retune-2", "retune-3", "retune-4", "retune-5", "retune-6",
-            "retune-7", "retune-8", "retune-9",
-        ];
-        let queue = Arc::new(Mutex::new(
-            (0..10)
-                .map(|id| TestWork {
-                    id: ids[id],
-                    lane: lane(&format!("sink.{id}"), "ns"),
-                    delay: TokioDuration::from_millis(1),
-                    compacted: true,
-                })
-                .collect::<VecDeque<_>>(),
+        let initial_snapshot = FlushBudgetSnapshot {
+            scheduler_jobs: 1,
+            decode_jobs: 1,
+            sink_sessions: 1,
+            generation: 1,
+            ..FlushBudgetSnapshot::default()
+        };
+        let initial = Arc::new(FlushExecutionBudget::from_snapshot(
+            initial_snapshot,
+            &sink_capabilities::S3,
         ));
+        assert_eq!(initial.sink_limit(), initial.scheduler_limit());
+        let grown_snapshot = FlushBudgetSnapshot {
+            scheduler_jobs: 4,
+            decode_jobs: 2,
+            sink_sessions: 1,
+            generation: 2,
+            ..FlushBudgetSnapshot::default()
+        };
+        let grown = Arc::new(FlushExecutionBudget::from_snapshot(
+            grown_snapshot,
+            &sink_capabilities::S3,
+        ));
+        assert_eq!(grown.sink_limit(), 4);
+        assert_eq!(grown.decode_limit(), 2);
+        let native =
+            FlushExecutionBudget::from_snapshot(grown_snapshot, &sink_capabilities::POSTGRES);
+        assert_eq!(native.sink_limit(), grown_snapshot.sink_sessions);
+
+        let slot = FlushBudgetSlot::new(initial);
+        let retune_slot = slot.clone();
+        let grown_for_retune = grown.clone();
+        let queue = Arc::new(Mutex::new(VecDeque::from([
+            TestWork {
+                id: "held",
+                lane: lane("file.sink", "held"),
+                delay: TokioDuration::from_millis(250),
+                compacted: true,
+            },
+            TestWork {
+                id: "ns-1",
+                lane: lane("file.sink", "ns-1"),
+                delay: TokioDuration::from_millis(40),
+                compacted: true,
+            },
+            TestWork {
+                id: "ns-2",
+                lane: lane("file.sink", "ns-2"),
+                delay: TokioDuration::from_millis(40),
+                compacted: true,
+            },
+            TestWork {
+                id: "ns-3",
+                lane: lane("file.sink", "ns-3"),
+                delay: TokioDuration::from_millis(40),
+                compacted: true,
+            },
+        ])));
         let planner_queue = queue.clone();
-        let state = Arc::new(TestExecutionState::default());
+        let held_done = Arc::new(AtomicBool::new(false));
+        let admitted_while_held = Arc::new(AtomicUsize::new(0));
+        let gen2_inflight = Arc::new(AtomicUsize::new(0));
+        let gen2_max = Arc::new(AtomicUsize::new(0));
+        let execute_held_done = held_done.clone();
+        let execute_admitted = admitted_while_held.clone();
+        let execute_inflight = gen2_inflight.clone();
+        let execute_max = gen2_max.clone();
+        let execute_slot = slot.clone();
 
         drive_work_conserving(
             1,
-            true,
+            false,
             move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
-            test_executor(state.clone()),
+            move |work| {
+                let slot = execute_slot.clone();
+                let held_done = execute_held_done.clone();
+                let admitted = execute_admitted.clone();
+                let inflight = execute_inflight.clone();
+                let gen2_max = execute_max.clone();
+                Box::pin(async move {
+                    let budget = slot.load();
+                    let generation = budget.generation();
+                    let _permit = budget.acquire_sink().await.expect("sink permit");
+                    if generation == 2 {
+                        let now = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                        gen2_max.fetch_max(now, Ordering::SeqCst);
+                        if !held_done.load(Ordering::SeqCst) {
+                            admitted.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    tokio_sleep(work.delay).await;
+                    if generation == 2 {
+                        inflight.fetch_sub(1, Ordering::SeqCst);
+                    } else {
+                        held_done.store(true, Ordering::SeqCst);
+                    }
+                    work.compacted
+                })
+            },
             None,
+            TokioDuration::from_millis(30),
+            move || {
+                retune_slot.store(grown_for_retune.clone());
+                grown_for_retune.scheduler_limit()
+            },
         )
         .await;
 
-        assert_eq!(state.completed.lock().unwrap().len(), 4);
-        assert_eq!(queue.lock().unwrap().len(), 6);
-        assert_eq!(state.reservations.load(Ordering::SeqCst), 0);
+        assert!(
+            admitted_while_held.load(Ordering::SeqCst) >= 3,
+            "file-format groups must start while the held permit is still in flight"
+        );
+        assert!(
+            gen2_max.load(Ordering::SeqCst) >= 3,
+            "the swapped file-format semaphore must be scheduler_jobs wide"
+        );
+        assert!(queue.lock().unwrap().is_empty());
+        assert!(held_done.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -540,7 +661,7 @@ mod work_conserving_scheduler_tests {
         let planner_queue = queue.clone();
         let state = Arc::new(TestExecutionState::default());
 
-        let made_progress = drive_work_conserving(
+        let made_progress = drive_steady(
             2,
             false,
             move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
@@ -595,7 +716,7 @@ mod work_conserving_scheduler_tests {
             stop_requested: &mut stop_requested,
         };
 
-        drive_work_conserving(
+        drive_steady(
             2,
             false,
             move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
@@ -658,7 +779,7 @@ mod work_conserving_scheduler_tests {
             stop_requested: &mut stop_requested,
         };
 
-        drive_work_conserving(
+        drive_steady(
             2,
             false,
             move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
@@ -697,7 +818,7 @@ mod work_conserving_scheduler_tests {
         let state = Arc::new(TestExecutionState::default());
 
         // Quiet ingest headroom: multiple grouped jobs run concurrently.
-        drive_work_conserving(
+        drive_steady(
             3,
             false,
             move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
@@ -722,9 +843,9 @@ mod work_conserving_scheduler_tests {
         let planner_remaining = remaining.clone();
         let preempted = Arc::new(TestExecutionState::default());
 
-        // Ingest pressure shrinks the immutable cycle budget to the ingest-safe
-        // cap; only that many jobs are admitted before the cycle retunes.
-        drive_work_conserving(
+        // A one-slot budget still drains the queue. Retune swaps the limit
+        // without abandoning work already admitted.
+        drive_steady(
             1,
             true,
             move |slots, _, _, blocked| plan_test_work(&planner_remaining, slots, blocked),
@@ -1384,7 +1505,7 @@ impl Buffers {
                         wal_in_flight > 0 || uploads_in_flight > 0 || reclaimable_wal;
                     if last_progress_log.elapsed() >= std::time::Duration::from_secs(5) {
                         let interval = last_progress_log.elapsed();
-                        let remaining_sample = Self::reclaimable_wal_partition_count(config, 10_000);
+                        let remaining = Self::reclaimable_wal_partition_count(config);
                         let counters = WalCompactionCounterSnapshot::capture();
                         let since_drain = drain_progress.deltas_since_drain_start();
                         let since_last = drain_heartbeat.deltas_since_last_log();
@@ -1394,17 +1515,17 @@ impl Buffers {
                             interval,
                             counters,
                             since_last,
-                            remaining_sample,
+                            remaining,
                             wal_in_flight,
                             uploads_in_flight,
                         );
                         info!("{status_summary}");
                         debug!(
-                            "Compactor drain: waiting drain_elapsed={}s wal_in_flight={} uploads_in_flight={} reclaimable_partitions={} wal_parts_started={} wal_parts_completed={} wal_parts_since_drain=+{} wal_parts_since_last=+{} txn_started={} txn_completed={} txn_failed={} txn_since_drain=+{} txn_since_last=+{} active_grouped=[{}]",
+                            "Compactor drain: waiting drain_elapsed={}s wal_in_flight={} uploads_in_flight={} remaining={} wal_parts_started={} wal_parts_completed={} wal_parts_since_drain=+{} wal_parts_since_last=+{} txn_started={} txn_completed={} txn_failed={} txn_since_drain=+{} txn_since_last=+{} active_grouped=[{}]",
                             drain_started.elapsed().as_secs(),
                             wal_in_flight,
                             uploads_in_flight,
-                            remaining_sample,
+                            remaining,
                             counters.wal_parts_started,
                             counters.wal_parts_completed,
                             since_drain.wal_parts_completed,
@@ -1590,12 +1711,7 @@ impl Buffers {
         } else {
             crate::ingest::tuner::FlushMode::Ingest
         };
-        let ready_work = compaction_index().reclaimable_slice_count(
-            force,
-            Self::now_secs(),
-            Self::sent_manifest_stale_secs(),
-            usize::MAX,
-        );
+        let ready_work = compaction_index().reclaimable_slice_count(force, Self::now_secs());
         metrics_hot::set_compaction_planner_ready_work_count(ready_work);
         let measured_backlog = force
             || ready_work > 0
@@ -1608,11 +1724,13 @@ impl Buffers {
             || crate::metrics::counters::COMPACTION_INFLIGHT_SLICE_COUNT
                 .load(std::sync::atomic::Ordering::Relaxed)
                 > 0;
+        let capability = shared_output.capability();
         let snapshot = crate::ingest::tuner::update_flush_budget(mode, measured_backlog, None);
-        let budget = Arc::new(FlushExecutionBudget::from_snapshot(snapshot));
-        let concurrency = budget.scheduler_limit();
+        let slot = FlushBudgetSlot::new(Arc::new(FlushExecutionBudget::from_snapshot(
+            snapshot, capability,
+        )));
+        let concurrency = slot.load().scheduler_limit();
 
-        let _output_capability = shared_output.capability();
         let currently_in_flight = crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
             .load(std::sync::atomic::Ordering::Relaxed);
         let executable_slots = concurrency.saturating_sub(currently_in_flight);
@@ -1620,6 +1738,7 @@ impl Buffers {
             return false;
         }
 
+        let budget = slot.load();
         debug!(
             "Compactor: execution budget generation={} scheduler={} decode={} sink={} executable_slots={}",
             budget.generation(),
@@ -1630,9 +1749,10 @@ impl Buffers {
         );
 
         let planner_output = shared_output.clone();
-        let planner_sink_limit = budget.sink_limit();
+        let planner_slot = slot.clone();
         let executor_output = shared_output.clone();
-        let executor_budget = budget.clone();
+        let executor_slot = slot.clone();
+        let retune_slot = slot.clone();
         let made_progress = drive_work_conserving(
             executable_slots,
             force,
@@ -1644,7 +1764,7 @@ impl Buffers {
                     planner_output.as_ref().as_ref(),
                     active_by_lane,
                     blocked_lanes,
-                    planner_sink_limit,
+                    planner_slot.load().sink_limit(),
                 );
                 CompactionPlanBatch {
                     works,
@@ -1656,10 +1776,18 @@ impl Buffers {
                     config.clone(),
                     work,
                     executor_output.clone(),
-                    executor_budget.clone(),
+                    executor_slot.load(),
                 )
             },
             control.as_deref_mut(),
+            BUDGET_RETUNE_INTERVAL,
+            move || {
+                let snapshot = crate::ingest::tuner::update_flush_budget(mode, true, None);
+                let budget = Arc::new(FlushExecutionBudget::from_snapshot(snapshot, capability));
+                let limit = budget.scheduler_limit();
+                retune_slot.store(budget);
+                limit
+            },
         )
         .await;
 
@@ -1705,12 +1833,7 @@ impl Buffers {
 
     fn has_ready_compaction_work(config: &Config, force: bool) -> bool {
         Self::hydrate_planner(config);
-        compaction_index().reclaimable_slice_count(
-            force,
-            Self::now_secs(),
-            Self::sent_manifest_stale_secs(),
-            1,
-        ) > 0
+        compaction_index().reclaimable_slice_count(force, Self::now_secs()) > 0
     }
 
     pub(crate) const GROUPED_COMPACTION_TIMEOUT_SECS: u64 = 900;
@@ -1731,7 +1854,7 @@ impl Buffers {
     }
 
     pub fn has_reclaimable_wal(config: &Config) -> bool {
-        Self::reclaimable_wal_partition_count(config, 1) > 0
+        Self::reclaimable_wal_partition_count(config) > 0
     }
 
     /// Flush-tuner backlog for ingest ticks. Does not hydrate the planner.
@@ -1748,28 +1871,17 @@ impl Buffers {
         let started = COMPACTOR_STARTED.load(AO::Relaxed);
         let mut index = compaction_index();
         let loaded = index.manifests_loaded();
-        let reclaimable = loaded
-            && index.reclaimable_slice_count(
-                true,
-                Self::now_secs(),
-                Self::sent_manifest_stale_secs(),
-                1,
-            ) > 0;
+        let reclaimable = loaded && index.reclaimable_slice_count(true, Self::now_secs()) > 0;
         crate::ingest::tuner::ingest_tick_has_backlog(started, loaded, false, reclaimable)
     }
 
-    pub(crate) fn reclaimable_wal_partition_count(config: &Config, limit: usize) -> usize {
+    pub(crate) fn reclaimable_wal_partition_count(config: &Config) -> usize {
         Self::hydrate_planner(config);
-        Self::reclaimable_wal_partition_count_in_memory(limit)
+        Self::reclaimable_wal_partition_count_in_memory()
     }
 
-    fn reclaimable_wal_partition_count_in_memory(limit: usize) -> usize {
-        compaction_index().reclaimable_slice_count(
-            true,
-            Self::now_secs(),
-            Self::sent_manifest_stale_secs(),
-            limit,
-        )
+    fn reclaimable_wal_partition_count_in_memory() -> usize {
+        compaction_index().reclaimable_slice_count(true, Self::now_secs())
     }
 
     fn grouped_write_semantics(capability: &SinkCapability) -> SinkWriteSemantics {
@@ -2196,12 +2308,7 @@ impl Buffers {
             }
         }
         if !out.is_empty() {
-            let ready_work = compaction_index().reclaimable_slice_count(
-                force,
-                now_secs,
-                sent_stale_secs,
-                usize::MAX,
-            );
+            let ready_work = compaction_index().reclaimable_slice_count(force, now_secs);
             metrics_hot::set_compaction_planner_ready_work_count(ready_work);
             return out;
         }
@@ -2236,12 +2343,7 @@ impl Buffers {
                 compaction_index().release_refs(&refs, now_secs);
             }
         }
-        let ready_work = compaction_index().reclaimable_slice_count(
-            force,
-            now_secs,
-            sent_stale_secs,
-            usize::MAX,
-        );
+        let ready_work = compaction_index().reclaimable_slice_count(force, now_secs);
         metrics_hot::set_compaction_planner_ready_work_count(ready_work);
         out
     }
@@ -2687,7 +2789,7 @@ impl Buffers {
             }
         }
         result.indexed_refs = Self::indexed_wal_ref_count();
-        result.schedulable_refs = Self::reclaimable_wal_partition_count(config, usize::MAX);
+        result.schedulable_refs = Self::reclaimable_wal_partition_count(config);
         result
     }
 
@@ -2707,7 +2809,7 @@ impl Buffers {
             pipeline: config.get_pipeline_name(),
             committed_segments: Self::segs_remaining(config),
             indexed_refs: Self::indexed_wal_ref_count(),
-            schedulable_refs: Self::reclaimable_wal_partition_count_in_memory(usize::MAX),
+            schedulable_refs: Self::reclaimable_wal_partition_count_in_memory(),
             sink_work_in_flight: crate::buffer::compaction_progress::sink_work_in_flight_count(),
             wal_compactions_in_flight: crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
                 .load(AtomicOrdering::Relaxed),
@@ -5165,7 +5267,7 @@ mod tests_wal_commit {
             for _ in 0..8 {
                 scope.spawn(|| {
                     Buffers::hydrate_planner(&Config::new());
-                    let _ = Buffers::reclaimable_wal_partition_count(&Config::new(), 10_000);
+                    let _ = Buffers::reclaimable_wal_partition_count(&Config::new());
                     let _ = Buffers::wal_pressure_snapshot(&Config::new());
                 });
             }

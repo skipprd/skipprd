@@ -24,7 +24,7 @@ Check the name matches `pipelines:` in `skippr.yml`.
 
 **Cause:** The destination table does not exist yet. Common on the first sync, or when discover never finished.
 
-**Fix:** Confirm discover completed and the destination is paired with its schema sink (Athena needs [Glue](/connectors/schema_sinks/glue)). Then run sync again so tables can be created.
+**Fix:** Confirm discover completed, then wait for the first compact. Athena Hive needs `glue_database_name` on the Athena destination. Tables are not created during ingest.
 
 ## Destination credential errors
 

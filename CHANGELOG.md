@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Dest schema is the data plugin. `schema_sinks` YAML, `schema_sink` on a data sink, SchemaSink plugins, and `skipprd connect schema-sink` are deleted. Runtime protocol 28. Tables are created on first compact from published output metadata.
+
 ## [16.0.10] - 2026-11-18
 
 ### Changed

@@ -701,17 +701,6 @@ data_sinks:
       table_namespace: bronze
       object_store:
         type: file
-    schema_sink: schema_sinks.lake_schema
-
-schema_sinks:
-  lake_schema:
-    SkipprLake:
-      warehouse: {uri}
-      catalog_table: {catalog_table}
-      region: us-east-1
-      table_namespace: bronze
-      object_store:
-        type: file
 """,
         encoding="utf-8",
     )

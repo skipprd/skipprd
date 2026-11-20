@@ -5316,7 +5316,7 @@ impl PyDataSinkAthena {
     }
 }
 
-#[doc = "Config for the `AthenaIceberg` data sink and schema sink.\n`skipprd query` reads Glue Iceberg ∪ WAL. Athena SQL still queries the same tables."]
+#[doc = "Config for the `AthenaIceberg` data sink.\n`skipprd query` reads Glue Iceberg ∪ WAL. Athena SQL still queries the same tables."]
 #[pyclass(from_py_object, name = "DataSinkAthenaIceberg", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyDataSinkAthenaIceberg {
@@ -5349,7 +5349,7 @@ pub struct PyDataSinkAthenaIceberg {
 #[pymethods]
 impl PyDataSinkAthenaIceberg {
     #[new]
-    #[doc = "Config for the `AthenaIceberg` data sink and schema sink.\n`skipprd query` reads Glue Iceberg ∪ WAL. Athena SQL still queries the same tables.\n\nArgs:\n    warehouse: Table storage root: `s3://bucket/prefix/`.\n    glue_database_name: Glue database. Also the Iceberg namespace.\n    athena_workgroup_name: Athena workgroup that runs SQL against these tables.\n    athena_results_s3_bucket: Bucket name only (not an `s3://` URI), same as `Athena:`.\n    region: AWS region of the Glue catalog and Athena workgroup.\n    catalog_id: Glue catalog id when it is not the account default.\n    object_store: YAML key `object_store`."]
+    #[doc = "Config for the `AthenaIceberg` data sink.\n`skipprd query` reads Glue Iceberg ∪ WAL. Athena SQL still queries the same tables.\n\nArgs:\n    warehouse: Table storage root: `s3://bucket/prefix/`.\n    glue_database_name: Glue database. Also the Iceberg namespace.\n    athena_workgroup_name: Athena workgroup that runs SQL against these tables.\n    athena_results_s3_bucket: Bucket name only (not an `s3://` URI), same as `Athena:`.\n    region: AWS region of the Glue catalog and Athena workgroup.\n    catalog_id: Glue catalog id when it is not the account default.\n    object_store: YAML key `object_store`."]
     #[pyo3(signature = (*, warehouse, glue_database_name, athena_workgroup_name, athena_results_s3_bucket, region = None, catalog_id = None, object_store = None))]
     fn new(
         warehouse: String,
@@ -5605,7 +5605,7 @@ impl PyDataSinkDatabricks {
     }
 }
 
-#[doc = "Config for the `Duckdb` data sink and schema sink.\n`skipprd query` reads filesystem Iceberg ∪ WAL. DuckDB `iceberg_scan` still reads compacted Iceberg only."]
+#[doc = "Config for the `Duckdb` data sink.\n`skipprd query` reads filesystem Iceberg ∪ WAL. DuckDB `iceberg_scan` still reads compacted Iceberg only."]
 #[pyclass(from_py_object, name = "DataSinkDuckdb", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyDataSinkDuckdb {
@@ -5620,7 +5620,7 @@ pub struct PyDataSinkDuckdb {
 #[pymethods]
 impl PyDataSinkDuckdb {
     #[new]
-    #[doc = "Config for the `Duckdb` data sink and schema sink.\n`skipprd query` reads filesystem Iceberg ∪ WAL. DuckDB `iceberg_scan` still reads compacted Iceberg only.\n\nArgs:\n    warehouse: `file:///abs/path`.\n    table_namespace: Iceberg namespace for sink-managed tables. Unique per warehouse."]
+    #[doc = "Config for the `Duckdb` data sink.\n`skipprd query` reads filesystem Iceberg ∪ WAL. DuckDB `iceberg_scan` still reads compacted Iceberg only.\n\nArgs:\n    warehouse: `file:///abs/path`.\n    table_namespace: Iceberg namespace for sink-managed tables. Unique per warehouse."]
     #[pyo3(signature = (*, warehouse, table_namespace))]
     fn new(warehouse: String, table_namespace: String) -> Self {
         Self {
@@ -5994,7 +5994,7 @@ impl PyDataSinkSftp {
     }
 }
 
-#[doc = "Config for the `SkipprLake` data sink and schema sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(a DynamoDB Iceberg catalog table). That table is not Skippr Store and\nMUST NOT be selected via `skippr.store.type`."]
+#[doc = "Config for the `SkipprLake` data sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(a DynamoDB Iceberg catalog table). That table is not Skippr Store and\nMUST NOT be selected via `skippr.store.type`."]
 #[pyclass(from_py_object, name = "DataSinkSkipprLake", module = "skippr")]
 #[derive(Clone, Serialize)]
 pub struct PyDataSinkSkipprLake {
@@ -6021,7 +6021,7 @@ pub struct PyDataSinkSkipprLake {
 #[pymethods]
 impl PyDataSinkSkipprLake {
     #[new]
-    #[doc = "Config for the `SkipprLake` data sink and schema sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(a DynamoDB Iceberg catalog table). That table is not Skippr Store and\nMUST NOT be selected via `skippr.store.type`.\n\nArgs:\n    warehouse: Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.\n    catalog_table: DynamoDB table for Iceberg catalog pointers. Not Skippr Store.\n    region: YAML key `region`.\n    object_store: YAML key `object_store`.\n    table_namespace: Iceberg namespace for sink-managed tables. Unique per `(catalog_table, table_namespace)`."]
+    #[doc = "Config for the `SkipprLake` data sink.\nQuery and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)\ninside `IcebergCatalogSpec`, not as a standalone query backend.\nThe Skippr catalog is the only catalog: pointers live in `catalog_table`\n(a DynamoDB Iceberg catalog table). That table is not Skippr Store and\nMUST NOT be selected via `skippr.store.type`.\n\nArgs:\n    warehouse: Iceberg warehouse root: `s3://bucket/path` or `file:///abs/path`.\n    catalog_table: DynamoDB table for Iceberg catalog pointers. Not Skippr Store.\n    region: YAML key `region`.\n    object_store: YAML key `object_store`.\n    table_namespace: Iceberg namespace for sink-managed tables. Unique per `(catalog_table, table_namespace)`."]
     #[pyo3(signature = (*, warehouse, catalog_table, region = None, object_store = None, table_namespace = None))]
     fn new(
         warehouse: String,
@@ -6206,486 +6206,6 @@ impl PyDataSinkSynapse {
     }
 }
 
-#[pyclass(from_py_object, name = "SchemaSinkBigquery", module = "skippr")]
-#[derive(Clone, Serialize)]
-pub struct PySchemaSinkBigquery {
-    #[doc = "YAML key `project`."]
-    #[pyo3(get, set)]
-    pub project: String,
-    #[doc = "YAML key `dataset`."]
-    #[pyo3(get, set)]
-    pub dataset: String,
-    #[doc = "YAML key `location`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub location: Option<String>,
-    #[doc = "YAML key `credentials_path`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credentials_path: Option<String>,
-    #[doc = "Query/model only; ignored at ingest.\n\nYAML key `max_concurrency`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_concurrency: Option<usize>,
-    #[doc = "Query/model only; ignored at ingest.\n\nYAML key `discovery_cache_ttl_secs`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discovery_cache_ttl_secs: Option<u64>,
-}
-
-#[pymethods]
-impl PySchemaSinkBigquery {
-    #[new]
-    #[doc = "Args:\n    project: YAML key `project`.\n    dataset: YAML key `dataset`.\n    location: YAML key `location`.\n    credentials_path: YAML key `credentials_path`.\n    max_concurrency: Query/model only; ignored at ingest.\n    discovery_cache_ttl_secs: Query/model only; ignored at ingest."]
-    #[pyo3(signature = (*, project, dataset, location = None, credentials_path = None, max_concurrency = None, discovery_cache_ttl_secs = None))]
-    fn new(
-        project: String,
-        dataset: String,
-        location: Option<String>,
-        credentials_path: Option<String>,
-        max_concurrency: Option<usize>,
-        discovery_cache_ttl_secs: Option<u64>,
-    ) -> Self {
-        Self {
-            project,
-            dataset,
-            location,
-            credentials_path,
-            max_concurrency,
-            discovery_cache_ttl_secs,
-        }
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
-        config_repr("SchemaSinkBigquery", self)
-    }
-}
-
-#[pyclass(from_py_object, name = "SchemaSinkClickhouse", module = "skippr")]
-#[derive(Clone, Serialize)]
-pub struct PySchemaSinkClickhouse {
-    #[doc = "YAML key `url`."]
-    #[pyo3(get, set)]
-    pub url: String,
-    #[doc = "YAML key `database`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub database: Option<String>,
-    #[doc = "YAML key `user`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user: Option<String>,
-    #[doc = "YAML key `password`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub password: Option<PyEnvRef>,
-    #[doc = "YAML key `table`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table: Option<String>,
-}
-
-#[pymethods]
-impl PySchemaSinkClickhouse {
-    #[new]
-    #[doc = "Args:\n    url: YAML key `url`.\n    database: YAML key `database`.\n    user: YAML key `user`.\n    password: YAML key `password`.\n    table: YAML key `table`."]
-    #[pyo3(signature = (*, url, database = None, user = None, password = None, table = None))]
-    fn new(
-        url: String,
-        database: Option<String>,
-        user: Option<String>,
-        password: Option<PyEnvRef>,
-        table: Option<String>,
-    ) -> Self {
-        Self {
-            url,
-            database,
-            user,
-            password,
-            table,
-        }
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
-        config_repr("SchemaSinkClickhouse", self)
-    }
-}
-
-#[pyclass(from_py_object, name = "SchemaSinkGlue", module = "skippr")]
-#[derive(Clone, Serialize)]
-pub struct PySchemaSinkGlue {
-    #[doc = "YAML key `s3_bucket`."]
-    #[pyo3(get, set)]
-    pub s3_bucket: String,
-    #[doc = "YAML key `s3_prefix`."]
-    #[pyo3(get, set)]
-    pub s3_prefix: String,
-    #[doc = "YAML key `athena_workgroup_name`."]
-    #[pyo3(get, set)]
-    pub athena_workgroup_name: String,
-    #[doc = "YAML key `athena_results_s3_bucket`."]
-    #[pyo3(get, set)]
-    pub athena_results_s3_bucket: String,
-    #[doc = "YAML key `format`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    #[doc = "YAML key `glue_database_name`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub glue_database_name: Option<String>,
-    #[doc = "Query/model only; ignored at ingest.\n\nYAML key `region`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
-    #[doc = "Query/model only; ignored at ingest.\n\nYAML key `catalog`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog: Option<String>,
-    #[doc = "Query/model only; ignored at ingest.\n\nYAML key `max_concurrency`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_concurrency: Option<usize>,
-    #[doc = "Query/model only; ignored at ingest.\n\nYAML key `discovery_cache_ttl_secs`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discovery_cache_ttl_secs: Option<u64>,
-}
-
-#[pymethods]
-impl PySchemaSinkGlue {
-    #[new]
-    #[doc = "Args:\n    s3_bucket: YAML key `s3_bucket`.\n    s3_prefix: YAML key `s3_prefix`.\n    athena_workgroup_name: YAML key `athena_workgroup_name`.\n    athena_results_s3_bucket: YAML key `athena_results_s3_bucket`.\n    format: YAML key `format`.\n    glue_database_name: YAML key `glue_database_name`.\n    region: Query/model only; ignored at ingest.\n    catalog: Query/model only; ignored at ingest.\n    max_concurrency: Query/model only; ignored at ingest.\n    discovery_cache_ttl_secs: Query/model only; ignored at ingest."]
-    #[pyo3(signature = (*, s3_bucket, s3_prefix, athena_workgroup_name, athena_results_s3_bucket, format = None, glue_database_name = None, region = None, catalog = None, max_concurrency = None, discovery_cache_ttl_secs = None))]
-    fn new(
-        s3_bucket: String,
-        s3_prefix: String,
-        athena_workgroup_name: String,
-        athena_results_s3_bucket: String,
-        format: Option<String>,
-        glue_database_name: Option<String>,
-        region: Option<String>,
-        catalog: Option<String>,
-        max_concurrency: Option<usize>,
-        discovery_cache_ttl_secs: Option<u64>,
-    ) -> Self {
-        Self {
-            s3_bucket,
-            s3_prefix,
-            athena_workgroup_name,
-            athena_results_s3_bucket,
-            format,
-            glue_database_name,
-            region,
-            catalog,
-            max_concurrency,
-            discovery_cache_ttl_secs,
-        }
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
-        config_repr("SchemaSinkGlue", self)
-    }
-}
-
-#[pyclass(from_py_object, name = "SchemaSinkMotherduck", module = "skippr")]
-#[derive(Clone, Serialize)]
-pub struct PySchemaSinkMotherduck {
-    #[doc = "YAML key `motherduck_token`."]
-    #[pyo3(get, set)]
-    pub motherduck_token: PyEnvRef,
-    #[doc = "YAML key `database`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub database: Option<String>,
-    #[doc = "YAML key `table`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table: Option<String>,
-    #[doc = "Query/model only; ignored at ingest.\n\nYAML key `schema`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<String>,
-}
-
-#[pymethods]
-impl PySchemaSinkMotherduck {
-    #[new]
-    #[doc = "Args:\n    motherduck_token: YAML key `motherduck_token`.\n    database: YAML key `database`.\n    table: YAML key `table`.\n    schema: Query/model only; ignored at ingest."]
-    #[pyo3(signature = (*, motherduck_token, database = None, table = None, schema = None))]
-    fn new(
-        motherduck_token: PyEnvRef,
-        database: Option<String>,
-        table: Option<String>,
-        schema: Option<String>,
-    ) -> Self {
-        Self {
-            motherduck_token,
-            database,
-            table,
-            schema,
-        }
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
-        config_repr("SchemaSinkMotherduck", self)
-    }
-}
-
-#[doc = "Runtime / pipeline config for the Postgres data sink."]
-#[pyclass(from_py_object, name = "SchemaSinkPostgres", module = "skippr")]
-#[derive(Clone, Serialize)]
-pub struct PySchemaSinkPostgres {
-    #[doc = "YAML key `user`."]
-    #[pyo3(get, set)]
-    pub user: String,
-    #[doc = "YAML key `database`."]
-    #[pyo3(get, set)]
-    pub database: String,
-    #[doc = "YAML key `host`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
-    #[doc = "YAML key `port`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub port: Option<u16>,
-    #[doc = "YAML key `password`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub password: Option<PyEnvRef>,
-    #[doc = "YAML key `schema`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<String>,
-    #[doc = "YAML key `sslmode`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sslmode: Option<String>,
-}
-
-#[pymethods]
-impl PySchemaSinkPostgres {
-    #[new]
-    #[doc = "Runtime / pipeline config for the Postgres data sink.\n\nArgs:\n    user: YAML key `user`.\n    database: YAML key `database`.\n    host: YAML key `host`.\n    port: YAML key `port`.\n    password: YAML key `password`.\n    schema: YAML key `schema`.\n    sslmode: YAML key `sslmode`."]
-    #[pyo3(signature = (*, user, database, host = None, port = None, password = None, schema = None, sslmode = None))]
-    fn new(
-        user: String,
-        database: String,
-        host: Option<String>,
-        port: Option<u16>,
-        password: Option<PyEnvRef>,
-        schema: Option<String>,
-        sslmode: Option<String>,
-    ) -> Self {
-        Self {
-            user,
-            database,
-            host,
-            port,
-            password,
-            schema,
-            sslmode,
-        }
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
-        config_repr("SchemaSinkPostgres", self)
-    }
-}
-
-#[pyclass(from_py_object, name = "SchemaSinkRedshift", module = "skippr")]
-#[derive(Clone, Serialize)]
-pub struct PySchemaSinkRedshift {
-    #[doc = "YAML key `database`."]
-    #[pyo3(get, set)]
-    pub database: String,
-    #[doc = "YAML key `cluster_identifier`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cluster_identifier: Option<String>,
-    #[doc = "YAML key `workgroup_name`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workgroup_name: Option<String>,
-    #[doc = "YAML key `db_user`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub db_user: Option<String>,
-    #[doc = "YAML key `table`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table: Option<String>,
-    #[doc = "YAML key `region`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
-    #[doc = "YAML key `staging_s3_bucket`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub staging_s3_bucket: Option<String>,
-    #[doc = "YAML key `staging_s3_prefix`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub staging_s3_prefix: Option<String>,
-    #[doc = "YAML key `iam_role_arn`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub iam_role_arn: Option<String>,
-    #[doc = "Query/model only; ignored at ingest.\n\nYAML key `schema`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<String>,
-}
-
-#[pymethods]
-impl PySchemaSinkRedshift {
-    #[new]
-    #[doc = "Args:\n    database: YAML key `database`.\n    cluster_identifier: YAML key `cluster_identifier`.\n    workgroup_name: YAML key `workgroup_name`.\n    db_user: YAML key `db_user`.\n    table: YAML key `table`.\n    region: YAML key `region`.\n    staging_s3_bucket: YAML key `staging_s3_bucket`.\n    staging_s3_prefix: YAML key `staging_s3_prefix`.\n    iam_role_arn: YAML key `iam_role_arn`.\n    schema: Query/model only; ignored at ingest."]
-    #[pyo3(signature = (*, database, cluster_identifier = None, workgroup_name = None, db_user = None, table = None, region = None, staging_s3_bucket = None, staging_s3_prefix = None, iam_role_arn = None, schema = None))]
-    fn new(
-        database: String,
-        cluster_identifier: Option<String>,
-        workgroup_name: Option<String>,
-        db_user: Option<String>,
-        table: Option<String>,
-        region: Option<String>,
-        staging_s3_bucket: Option<String>,
-        staging_s3_prefix: Option<String>,
-        iam_role_arn: Option<String>,
-        schema: Option<String>,
-    ) -> Self {
-        Self {
-            database,
-            cluster_identifier,
-            workgroup_name,
-            db_user,
-            table,
-            region,
-            staging_s3_bucket,
-            staging_s3_prefix,
-            iam_role_arn,
-            schema,
-        }
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
-        config_repr("SchemaSinkRedshift", self)
-    }
-}
-
-#[pyclass(from_py_object, name = "SchemaSinkSnowflake", module = "skippr")]
-#[derive(Clone, Serialize)]
-pub struct PySchemaSinkSnowflake {
-    #[doc = "YAML key `account`."]
-    #[pyo3(get, set)]
-    pub account: String,
-    #[doc = "YAML key `user`."]
-    #[pyo3(get, set)]
-    pub user: String,
-    #[doc = "YAML key `warehouse`."]
-    #[pyo3(get, set)]
-    pub warehouse: String,
-    #[doc = "YAML key `database`."]
-    #[pyo3(get, set)]
-    pub database: String,
-    #[doc = "YAML key `schema`."]
-    #[pyo3(get, set)]
-    pub schema: String,
-    #[doc = "YAML key `password`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub password: Option<PyEnvRef>,
-    #[doc = "YAML key `role`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    #[doc = "YAML key `stage`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stage: Option<String>,
-    #[doc = "YAML key `private_key_path`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub private_key_path: Option<String>,
-    #[doc = "YAML key `staging_uri`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub staging_uri: Option<String>,
-    #[doc = "YAML key `staging_storage_integration`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub staging_storage_integration: Option<String>,
-    #[doc = "YAML key `staging_azure_sas_token`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub staging_azure_sas_token: Option<PyEnvRef>,
-    #[doc = "YAML key `staging_azure_account_key`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub staging_azure_account_key: Option<PyEnvRef>,
-    #[doc = "YAML key `staging_gcs_service_account_key_path`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub staging_gcs_service_account_key_path: Option<String>,
-    #[doc = "Query/model only; ignored at ingest.\n\nYAML key `max_concurrency`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_concurrency: Option<usize>,
-    #[doc = "Query/model only; ignored at ingest.\n\nYAML key `discovery_cache_ttl_secs`."]
-    #[pyo3(get, set)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discovery_cache_ttl_secs: Option<u64>,
-}
-
-#[pymethods]
-impl PySchemaSinkSnowflake {
-    #[new]
-    #[doc = "Args:\n    account: YAML key `account`.\n    user: YAML key `user`.\n    warehouse: YAML key `warehouse`.\n    database: YAML key `database`.\n    schema: YAML key `schema`.\n    password: YAML key `password`.\n    role: YAML key `role`.\n    stage: YAML key `stage`.\n    private_key_path: YAML key `private_key_path`.\n    staging_uri: YAML key `staging_uri`.\n    staging_storage_integration: YAML key `staging_storage_integration`.\n    staging_azure_sas_token: YAML key `staging_azure_sas_token`.\n    staging_azure_account_key: YAML key `staging_azure_account_key`.\n    staging_gcs_service_account_key_path: YAML key `staging_gcs_service_account_key_path`.\n    max_concurrency: Query/model only; ignored at ingest.\n    discovery_cache_ttl_secs: Query/model only; ignored at ingest."]
-    #[pyo3(signature = (*, account, user, warehouse, database, schema, password = None, role = None, stage = None, private_key_path = None, staging_uri = None, staging_storage_integration = None, staging_azure_sas_token = None, staging_azure_account_key = None, staging_gcs_service_account_key_path = None, max_concurrency = None, discovery_cache_ttl_secs = None))]
-    fn new(
-        account: String,
-        user: String,
-        warehouse: String,
-        database: String,
-        schema: String,
-        password: Option<PyEnvRef>,
-        role: Option<String>,
-        stage: Option<String>,
-        private_key_path: Option<String>,
-        staging_uri: Option<String>,
-        staging_storage_integration: Option<String>,
-        staging_azure_sas_token: Option<PyEnvRef>,
-        staging_azure_account_key: Option<PyEnvRef>,
-        staging_gcs_service_account_key_path: Option<String>,
-        max_concurrency: Option<usize>,
-        discovery_cache_ttl_secs: Option<u64>,
-    ) -> Self {
-        Self {
-            account,
-            user,
-            warehouse,
-            database,
-            schema,
-            password,
-            role,
-            stage,
-            private_key_path,
-            staging_uri,
-            staging_storage_integration,
-            staging_azure_sas_token,
-            staging_azure_account_key,
-            staging_gcs_service_account_key_path,
-            max_concurrency,
-            discovery_cache_ttl_secs,
-        }
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
-        config_repr("SchemaSinkSnowflake", self)
-    }
-}
-
 pub fn extract_data_source_config(obj: &Bound<'_, PyAny>) -> PyResult<PluginConfigEntry> {
     if let Ok(config) = obj.cast::<PyDataSourceAdRollAds>() {
         return plugin_entry("AdRollAds", &*config.borrow());
@@ -6822,90 +6342,65 @@ pub fn extract_data_source_config(obj: &Bound<'_, PyAny>) -> PyResult<PluginConf
     Err(wrong_config_kind("DataSource", obj))
 }
 
-pub fn extract_data_sink_config(obj: &Bound<'_, PyAny>) -> PyResult<SinkConfig> {
+pub fn extract_data_sink_config(obj: &Bound<'_, PyAny>) -> PyResult<PluginConfigEntry> {
     if let Ok(config) = obj.cast::<PyDataSinkAmqp>() {
-        return plugin_entry("Amqp", &*config.borrow()).map(SinkConfig::Unpaired);
+        return plugin_entry("Amqp", &*config.borrow());
     }
     if let Ok(config) = obj.cast::<PyDataSinkAthena>() {
-        return plugin_entry("Athena", &*config.borrow()).map(SinkConfig::Unpaired);
+        return plugin_entry("Athena", &*config.borrow());
     }
     if let Ok(config) = obj.cast::<PyDataSinkAthenaIceberg>() {
-        return plugin_entry("AthenaIceberg", &*config.borrow()).map(SinkConfig::Paired);
+        return plugin_entry("AthenaIceberg", &*config.borrow());
     }
     if let Ok(config) = obj.cast::<PyDataSinkAzureBlob>() {
-        return plugin_entry("AzureBlob", &*config.borrow()).map(SinkConfig::Unpaired);
+        return plugin_entry("AzureBlob", &*config.borrow());
     }
     if let Ok(config) = obj.cast::<PyDataSinkBigquery>() {
-        return plugin_entry("Bigquery", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkClickhouse>() {
-        return plugin_entry("Clickhouse", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkDatabricks>() {
-        return plugin_entry("Databricks", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkDuckdb>() {
-        return plugin_entry("Duckdb", &*config.borrow()).map(SinkConfig::Paired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkFile>() {
-        return plugin_entry("File", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkGcs>() {
-        return plugin_entry("Gcs", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkMotherduck>() {
-        return plugin_entry("Motherduck", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkPostgres>() {
-        return plugin_entry("Postgres", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkRedshift>() {
-        return plugin_entry("Redshift", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkS3>() {
-        return plugin_entry("S3", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkSftp>() {
-        return plugin_entry("Sftp", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkSkipprLake>() {
-        return plugin_entry("SkipprLake", &*config.borrow()).map(SinkConfig::Paired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkSnowflake>() {
-        return plugin_entry("Snowflake", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkStdout>() {
-        return plugin_entry("Stdout", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    if let Ok(config) = obj.cast::<PyDataSinkSynapse>() {
-        return plugin_entry("Synapse", &*config.borrow()).map(SinkConfig::Unpaired);
-    }
-    Err(wrong_config_kind("DataSink", obj))
-}
-
-pub fn extract_schema_sink_config(obj: &Bound<'_, PyAny>) -> PyResult<PluginConfigEntry> {
-    if let Ok(config) = obj.cast::<PySchemaSinkBigquery>() {
         return plugin_entry("Bigquery", &*config.borrow());
     }
-    if let Ok(config) = obj.cast::<PySchemaSinkClickhouse>() {
+    if let Ok(config) = obj.cast::<PyDataSinkClickhouse>() {
         return plugin_entry("Clickhouse", &*config.borrow());
     }
-    if let Ok(config) = obj.cast::<PySchemaSinkGlue>() {
-        return plugin_entry("Glue", &*config.borrow());
+    if let Ok(config) = obj.cast::<PyDataSinkDatabricks>() {
+        return plugin_entry("Databricks", &*config.borrow());
     }
-    if let Ok(config) = obj.cast::<PySchemaSinkMotherduck>() {
+    if let Ok(config) = obj.cast::<PyDataSinkDuckdb>() {
+        return plugin_entry("Duckdb", &*config.borrow());
+    }
+    if let Ok(config) = obj.cast::<PyDataSinkFile>() {
+        return plugin_entry("File", &*config.borrow());
+    }
+    if let Ok(config) = obj.cast::<PyDataSinkGcs>() {
+        return plugin_entry("Gcs", &*config.borrow());
+    }
+    if let Ok(config) = obj.cast::<PyDataSinkMotherduck>() {
         return plugin_entry("Motherduck", &*config.borrow());
     }
-    if let Ok(config) = obj.cast::<PySchemaSinkPostgres>() {
+    if let Ok(config) = obj.cast::<PyDataSinkPostgres>() {
         return plugin_entry("Postgres", &*config.borrow());
     }
-    if let Ok(config) = obj.cast::<PySchemaSinkRedshift>() {
+    if let Ok(config) = obj.cast::<PyDataSinkRedshift>() {
         return plugin_entry("Redshift", &*config.borrow());
     }
-    if let Ok(config) = obj.cast::<PySchemaSinkSnowflake>() {
+    if let Ok(config) = obj.cast::<PyDataSinkS3>() {
+        return plugin_entry("S3", &*config.borrow());
+    }
+    if let Ok(config) = obj.cast::<PyDataSinkSftp>() {
+        return plugin_entry("Sftp", &*config.borrow());
+    }
+    if let Ok(config) = obj.cast::<PyDataSinkSkipprLake>() {
+        return plugin_entry("SkipprLake", &*config.borrow());
+    }
+    if let Ok(config) = obj.cast::<PyDataSinkSnowflake>() {
         return plugin_entry("Snowflake", &*config.borrow());
     }
-    Err(wrong_config_kind("SchemaSink", obj))
+    if let Ok(config) = obj.cast::<PyDataSinkStdout>() {
+        return plugin_entry("Stdout", &*config.borrow());
+    }
+    if let Ok(config) = obj.cast::<PyDataSinkSynapse>() {
+        return plugin_entry("Synapse", &*config.borrow());
+    }
+    Err(wrong_config_kind("DataSink", obj))
 }
 
 pub fn register_generated_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -7000,13 +6495,6 @@ pub fn register_generated_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataSinkSnowflake>()?;
     m.add_class::<PyDataSinkStdout>()?;
     m.add_class::<PyDataSinkSynapse>()?;
-    m.add_class::<PySchemaSinkBigquery>()?;
-    m.add_class::<PySchemaSinkClickhouse>()?;
-    m.add_class::<PySchemaSinkGlue>()?;
-    m.add_class::<PySchemaSinkMotherduck>()?;
-    m.add_class::<PySchemaSinkPostgres>()?;
-    m.add_class::<PySchemaSinkRedshift>()?;
-    m.add_class::<PySchemaSinkSnowflake>()?;
     m.add_class::<PyDataSourceAdRollAdsStreamProfile>()?;
     m.add_class::<PyDataSourceAppleSearchAdsStreamProfile>()?;
     m.add_class::<PyDataSourceBingWebmasterToolsStreamProfile>()?;
@@ -7113,35 +6601,6 @@ pub fn register_generated_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ])?,
     )?;
     m.add(
-        "PairedDataSinkConfig",
-        union_alias([
-            m.py().get_type::<PyDataSinkAthenaIceberg>().into_any(),
-            m.py().get_type::<PyDataSinkDuckdb>().into_any(),
-            m.py().get_type::<PyDataSinkSkipprLake>().into_any(),
-        ])?,
-    )?;
-    m.add(
-        "UnpairedDataSinkConfig",
-        union_alias([
-            m.py().get_type::<PyDataSinkAmqp>().into_any(),
-            m.py().get_type::<PyDataSinkAthena>().into_any(),
-            m.py().get_type::<PyDataSinkAzureBlob>().into_any(),
-            m.py().get_type::<PyDataSinkBigquery>().into_any(),
-            m.py().get_type::<PyDataSinkClickhouse>().into_any(),
-            m.py().get_type::<PyDataSinkDatabricks>().into_any(),
-            m.py().get_type::<PyDataSinkFile>().into_any(),
-            m.py().get_type::<PyDataSinkGcs>().into_any(),
-            m.py().get_type::<PyDataSinkMotherduck>().into_any(),
-            m.py().get_type::<PyDataSinkPostgres>().into_any(),
-            m.py().get_type::<PyDataSinkRedshift>().into_any(),
-            m.py().get_type::<PyDataSinkS3>().into_any(),
-            m.py().get_type::<PyDataSinkSftp>().into_any(),
-            m.py().get_type::<PyDataSinkSnowflake>().into_any(),
-            m.py().get_type::<PyDataSinkStdout>().into_any(),
-            m.py().get_type::<PyDataSinkSynapse>().into_any(),
-        ])?,
-    )?;
-    m.add(
         "DataSinkConfig",
         union_alias([
             m.py().get_type::<PyDataSinkAmqp>().into_any(),
@@ -7163,18 +6622,6 @@ pub fn register_generated_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.py().get_type::<PyDataSinkSnowflake>().into_any(),
             m.py().get_type::<PyDataSinkStdout>().into_any(),
             m.py().get_type::<PyDataSinkSynapse>().into_any(),
-        ])?,
-    )?;
-    m.add(
-        "SchemaSinkConfig",
-        union_alias([
-            m.py().get_type::<PySchemaSinkBigquery>().into_any(),
-            m.py().get_type::<PySchemaSinkClickhouse>().into_any(),
-            m.py().get_type::<PySchemaSinkGlue>().into_any(),
-            m.py().get_type::<PySchemaSinkMotherduck>().into_any(),
-            m.py().get_type::<PySchemaSinkPostgres>().into_any(),
-            m.py().get_type::<PySchemaSinkRedshift>().into_any(),
-            m.py().get_type::<PySchemaSinkSnowflake>().into_any(),
         ])?,
     )?;
     Ok(())

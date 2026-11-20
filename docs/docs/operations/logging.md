@@ -86,9 +86,8 @@ Use this as a quick lookup: **log event -> what it means -> what to do**.
 | `Deadlettered ... records into WAL` | Failed records written to the deadletter sink | Inspect the deadletter table |
 | `Discarded ... deadletter records because no deadletter sink is configured` | Failed records dropped | Add a `deadletter_sink` if you need to inspect them |
 | `CDC update rejected: no before-image` | CDC update had no before-image; no WAL row | Fix source image settings (`REPLICA IDENTITY FULL` / `binlog_row_image=FULL`) |
-| `Schema sync: published output for ...` | Destination schema could not be built | Treat catalog DDL as failed |
 | `Skippr could not find a published runtime` | Connector download/name/version failed | See [Troubleshooting](/operations/troubleshooting) |
-| `TABLE_NOT_FOUND` | Destination table missing | Discover succeeded? Re-run sync so the sink can create the table |
+| `TABLE_NOT_FOUND` | Destination table missing | Tables exist after the first compact, not during ingest |
 | `Pipeline '<name>' not found` | No schema for that pipeline (query/SQL) | Run `skipprd discover --pipeline <name>` first |
 | `Pipeline '<name>' disabled, skipping.` | Pipeline is toggled off | Expected; not a failure |
 

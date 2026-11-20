@@ -2190,8 +2190,8 @@ mod tests {
             "data_sink/athena_iceberg must exist"
         );
         assert!(
-            root.join("plugins/schema_sink/athena_iceberg").exists(),
-            "schema_sink/athena_iceberg must exist"
+            !root.join("plugins/schema_sink").exists(),
+            "schema_sink plugins must be deleted"
         );
     }
 
@@ -2248,8 +2248,6 @@ mod tests {
         assert!(toml.contains("supports_replace_partition = false"));
         assert!(toml.contains("supports_replace_table = true"));
         assert!(toml.contains("grouping_support = \"FinalStateBatches\""));
-        let schema = include_str!("../../plugins/schema_sink/duckdb/Cargo.toml");
-        assert!(schema.contains("plugin_name = \"Duckdb\""));
     }
 
     #[test]

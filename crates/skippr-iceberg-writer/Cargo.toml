@@ -3,7 +3,7 @@ name = "skippr-iceberg-writer"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Shared Iceberg data and schema sink writer. The catalog is injected; plugins own config and catalog construction."
+description = "Shared Iceberg data-sink writer. Dest schema is the data plugin. The catalog is injected; plugins own config and catalog construction."
 
 [dependencies]
 async-trait.workspace = true

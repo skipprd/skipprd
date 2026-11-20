@@ -5,9 +5,7 @@ description: Land Skipprd pipelines as Iceberg tables in your object store, with
 
 # SkipprLake
 
-SkipprLake is Skipprd's Iceberg destination. Files go to a warehouse URI you name. Catalog pointers live in a DynamoDB table you name (`catalog_table`). That lake catalog is not [Skippr Store](/configuration/skippr-store): never set `skippr.store.type` to select it.
-
-Pair it with the [SkipprLake schema sink](/connectors/schema_sinks/skipprlake).
+SkipprLake is Skipprd's Iceberg destination. Files go to a warehouse URI you name. Catalog pointers live in a DynamoDB table you name (`catalog_table`). That lake catalog is not [Skippr Store](/configuration/skippr-store): never set `skippr.store.type` to select it. The destination publishes the Iceberg table on the first compact.
 
 ## Before you begin
 
@@ -37,7 +35,6 @@ lake = cfg.data_sink(
         region="us-east-1",
         table_namespace="bronze",
     ),
-    schema_sink="lake_schema",
 )
 cfg.pipeline("reports", Pipeline(data_source=cfg.get_data_source("sample"), data_sink=lake))
 cfg.save()
@@ -51,24 +48,11 @@ skipprd connect data-sink skipprlake \
   --catalog-table my-iceberg-catalog \
   --region us-east-1 \
   --table-namespace bronze
-
-skipprd connect schema-sink skipprlake \
-  --pipeline reports \
-  --name lake_schema
 ```
 
 ```yaml [YAML]
 data_sinks:
   lake:
-    SkipprLake:
-      warehouse: s3://my-iceberg-warehouse/
-      catalog_table: my-iceberg-catalog
-      region: us-east-1
-      table_namespace: bronze
-    schema_sink: schema_sinks.lake_schema
-
-schema_sinks:
-  lake_schema:
     SkipprLake:
       warehouse: s3://my-iceberg-warehouse/
       catalog_table: my-iceberg-catalog
@@ -129,6 +113,5 @@ With `transform.batch_time_fields` and `transform.batch_time_unit`, Skipprd adds
 ## Next steps
 
 - [ALTER operations](/operations/alter) — rename, merge, drop, and widen columns after the table exists
-- [SkipprLake schema sink](/connectors/schema_sinks/skipprlake)
 - [Streamhouse](/concepts/datalake)
 - [How sources land](/concepts/source-landing-semantics)

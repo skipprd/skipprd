@@ -70,7 +70,7 @@ pub async fn apply_namespace_field_rows(
     pipeline_metadata.enabled = true;
 
     METADATA.store(Arc::new(pipeline_metadata.clone()));
-    config.set_metadata(&pipeline_metadata, evolved).await;
+    config.set_metadata(&pipeline_metadata, evolved).await?;
 
     Ok(fields_written)
 }
