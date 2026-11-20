@@ -18,6 +18,98 @@ pub struct Evolution {
 }
 
 impl Evolution {
+    pub(crate) fn score_published_sibling(
+        &self,
+        value: &Value,
+        metadata: &HashMap<String, Metadata>,
+    ) -> i32 {
+        let mut s: i32 = 0;
+        match &self.type_string {
+            SkipprDataType::TimestampMilli => {
+                if let Some(i) = value.as_i64() {
+                    if i >= 1_000_000_000_000 {
+                        s += 70;
+                    } else {
+                        s += 10;
+                    }
+                } else {
+                    s += 30;
+                }
+            }
+            SkipprDataType::Timestamp => {
+                if let Some(i) = value.as_i64() {
+                    if i < 1_000_000_000_000 {
+                        s += 70;
+                    } else {
+                        s += 10;
+                    }
+                } else {
+                    s += 30;
+                }
+            }
+            SkipprDataType::Double => {
+                s += 25;
+                if value.is_f64() {
+                    s += 10;
+                }
+            }
+            SkipprDataType::Long => {
+                s += 18;
+                if value.is_i64() {
+                    s += 5;
+                }
+            }
+            SkipprDataType::Integer => {
+                s += 16;
+                if value.is_i64() {
+                    s += 4;
+                }
+            }
+            SkipprDataType::Map => {
+                s += 12;
+                if value.is_object() {
+                    s += 5;
+                }
+                if let Some(m) = metadata.get(&self.new_field) {
+                    if m.determined_type_values.is_some() {
+                        if m.determined_type_values == Some(SkipprDataType::Double) {
+                            s += 12;
+                        } else if m.determined_type_values == Some(SkipprDataType::Long) {
+                            s += 8;
+                        } else {
+                            s += 4;
+                        }
+                    }
+                }
+            }
+            SkipprDataType::Array => {
+                s += 12;
+                if value.is_array() {
+                    s += 5;
+                }
+                if let Some(m) = metadata.get(&self.new_field) {
+                    if m.determined_type_values.is_some() {
+                        if m.determined_type_values == Some(SkipprDataType::Double) {
+                            s += 12;
+                        } else if m.determined_type_values == Some(SkipprDataType::Long) {
+                            s += 8;
+                        } else {
+                            s += 4;
+                        }
+                    }
+                }
+            }
+            SkipprDataType::Record => {
+                s += 14;
+                if value.is_object() {
+                    s += 4;
+                }
+            }
+            _ => {}
+        }
+        s
+    }
+
     pub fn evolve_array_field(
         config: &Config,
         field: &String,
@@ -225,7 +317,7 @@ impl Evolution {
                         &new_field,
                         value,
                         metadata,
-                        Some(false),
+                        true,
                         flatten,
                     ) {
                         Ok(v) => {
@@ -257,7 +349,7 @@ impl Evolution {
                                 &new_field,
                                 value,
                                 metadata,
-                                Some(false),
+                                true,
                                 flatten,
                             ) {
                                 if !metadata.contains_key(&new_field) {
@@ -292,107 +384,9 @@ impl Evolution {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
 
-                // Rank evolutions by how specific/appropriate they are for the given value
-                fn score_evolution(
-                    config: &Config,
-                    value: &Value,
-                    evolution: &Evolution,
-                    metadata: &HashMap<String, Metadata>,
-                ) -> i32 {
-                    let mut s: i32 = 0;
-                    match &evolution.type_string {
-                        SkipprDataType::TimestampMilli => {
-                            // Prefer millis when the numeric magnitude suggests ms (>= 1e12)
-                            if let Some(i) = value.as_i64() {
-                                if i >= 1_000_000_000_000 {
-                                    s += 70;
-                                } else {
-                                    s += 10;
-                                }
-                            } else {
-                                s += 30;
-                            }
-                        }
-                        SkipprDataType::Timestamp => {
-                            // Prefer seconds when the numeric magnitude suggests seconds (< 1e12)
-                            if let Some(i) = value.as_i64() {
-                                if i < 1_000_000_000_000 {
-                                    s += 70;
-                                } else {
-                                    s += 10;
-                                }
-                            } else {
-                                s += 30;
-                            }
-                        }
-                        SkipprDataType::Double => {
-                            s += 25;
-                            if value.is_f64() {
-                                s += 10;
-                            }
-                        }
-                        SkipprDataType::Long => {
-                            s += 18;
-                            if value.is_i64() {
-                                s += 5;
-                            }
-                        }
-                        SkipprDataType::Integer => {
-                            s += 16;
-                            if value.is_i64() {
-                                s += 4;
-                            }
-                        }
-                        SkipprDataType::Map => {
-                            s += 12;
-                            if value.is_object() {
-                                s += 5;
-                            }
-                            if let Some(m) = metadata.get(&evolution.new_field) {
-                                if m.determined_type_values.is_some() {
-                                    if m.determined_type_values == Some(SkipprDataType::Double) {
-                                        s += 12;
-                                    } else if m.determined_type_values == Some(SkipprDataType::Long)
-                                    {
-                                        s += 8;
-                                    } else {
-                                        s += 4;
-                                    }
-                                }
-                            }
-                        }
-                        SkipprDataType::Array => {
-                            s += 12;
-                            if value.is_array() {
-                                s += 5;
-                            }
-                            if let Some(m) = metadata.get(&evolution.new_field) {
-                                if m.determined_type_values.is_some() {
-                                    if m.determined_type_values == Some(SkipprDataType::Double) {
-                                        s += 12;
-                                    } else if m.determined_type_values == Some(SkipprDataType::Long)
-                                    {
-                                        s += 8;
-                                    } else {
-                                        s += 4;
-                                    }
-                                }
-                            }
-                        }
-                        SkipprDataType::Record => {
-                            s += 14;
-                            if value.is_object() {
-                                s += 4;
-                            }
-                        }
-                        _ => {}
-                    }
-                    s
-                }
-
                 let mut ranked: Vec<(i32, (String, Evolution))> = evolutions
                     .into_iter()
-                    .map(|(k, e)| (score_evolution(config, value, &e, metadata), (k, e)))
+                    .map(|(k, e)| (e.score_published_sibling(value, metadata), (k, e)))
                     .collect();
                 ranked.sort_by(|a, b| b.0.cmp(&a.0));
 
@@ -404,7 +398,7 @@ impl Evolution {
                         &evolution.new_field,
                         value,
                         metadata,
-                        Some(false),
+                        true,
                         flatten,
                     ) {
                         Ok(v) => {
@@ -442,7 +436,7 @@ impl Evolution {
                                 &evolution.new_field,
                                 value,
                                 metadata,
-                                Some(false),
+                                true,
                                 flatten,
                             ) {
                                 Ok(v2) => {
