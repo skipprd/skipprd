@@ -22,6 +22,15 @@ from botocore.exceptions import ClientError
 
 ACTION = Path(__file__).resolve().parent
 REPO = ACTION.parents[3]
+sys.path.insert(0, str(REPO / "tests"))
+sys.path.insert(0, str(REPO / "tests" / "perf"))
+
+from ddb_cdc import (  # noqa: E402
+    DDB_SEED_SNAPSHOT_ROW_COUNT,
+    ICEBERG_SNAPSHOT_COUNT_SQL,
+    wait_iceberg_snapshot_row_count,
+)
+from e2e_support import dynamodb_local as ddb_local  # noqa: E402
 DDB_PORT = 18013
 DDB_ENDPOINT = f"http://127.0.0.1:{DDB_PORT}"
 SOURCE_TABLE = "skippr_dynamo_cdc"
@@ -54,16 +63,6 @@ def ddb_client():
     )
 
 
-def wait_ddb(client, deadline: float) -> None:
-    while time.time() < deadline:
-        try:
-            client.list_tables()
-            return
-        except Exception:
-            time.sleep(0.5)
-    fail("DynamoDB Local did not become ready")
-
-
 def recreate_table(client, name: str, attrs: list[dict], keys: list[dict], stream: bool) -> None:
     try:
         client.delete_table(TableName=name)
@@ -86,25 +85,8 @@ def recreate_table(client, name: str, attrs: list[dict], keys: list[dict], strea
 
 
 def start_dynamodb(*, seed_event_ts: bool) -> None:
-    subprocess.run(["docker", "rm", "-f", CONTAINER], check=False, capture_output=True)
-    run(
-        [
-            "docker",
-            "run",
-            "-d",
-            "--name",
-            CONTAINER,
-            "-p",
-            f"{DDB_PORT}:8000",
-            "amazon/dynamodb-local",
-            "-jar",
-            "DynamoDBLocal.jar",
-            "-sharedDb",
-            "-inMemory",
-        ]
-    )
+    ddb_local.start(port=DDB_PORT, tables=[], container=CONTAINER)
     client = ddb_client()
-    wait_ddb(client, time.time() + 30)
     recreate_table(
         client,
         CATALOG_TABLE,
@@ -282,10 +264,14 @@ def csv_data_rows(scan_out: str) -> list[str]:
 
 
 def spawn_sync(
-    bin_path: str, config: Path, pipeline: str, data_dir: Path
+    bin_path: str,
+    config: Path,
+    pipeline: str,
+    data_dir: Path,
 ) -> tuple[subprocess.Popen[str], list[str]]:
+    cmd = [bin_path, "--config", str(config), "sync", "--log", "--pipeline", pipeline]
     proc = subprocess.Popen(
-        [bin_path, "--config", str(config), "sync", "--log", "--pipeline", pipeline, "--once"],
+        cmd,
         cwd=REPO,
         env=skipprd_env(data_dir),
         stdout=subprocess.PIPE,
@@ -305,24 +291,14 @@ def spawn_sync(
     return proc, lines
 
 
-def wait_sync_log(proc: subprocess.Popen[str], lines: list[str], needle: str, deadline: float) -> None:
-    while time.time() < deadline:
-        if any(needle in line for line in lines):
-            return
-        if proc.poll() is not None:
-            fail(f"sync exited {proc.returncode} before {needle!r}")
-        time.sleep(0.05)
-    fail(f"did not see {needle!r} in skipprd log")
-
-
-def wait_sync(proc: subprocess.Popen[str], label: str) -> None:
+def stop_sync(proc: subprocess.Popen[str]) -> None:
+    if proc.poll() is not None:
+        return
+    proc.kill()
     try:
-        code = proc.wait(timeout=120)
+        proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        fail(f"{label} timed out")
-    if code != 0:
-        fail(f"{label} exited {code}")
+        pass
 
 
 def put_stream_items(*, with_event_ts: bool) -> None:
@@ -352,12 +328,95 @@ def put_stream_items(*, with_event_ts: bool) -> None:
 
 
 def assert_synthetic_event_time_absent(warehouse: Path, ns: str) -> None:
-    sql = "SELECT skippr_event_time FROM iceberg_scan('{scan}') LIMIT 1"
+    out = iceberg_scan(
+        warehouse,
+        ns,
+        "SELECT * FROM iceberg_scan('{scan}') WHERE id = '1' LIMIT 1",
+    )
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if not lines:
+        fail("no Iceberg header row from SkipprLake")
+    cols = [c.strip().lower() for c in lines[0].split(",")]
+    if "event_ts" not in cols:
+        fail("SkipprLake partition leg missing user event_ts column")
+    if "skippr_event_time" in cols:
+        fail("SkipprLake still exposes skippr_event_time after synthetic field removal")
+
+
+def wait_snapshot_rows_in_lake(warehouse: Path, ns: str, deadline: float) -> None:
+    def scan_fn(sql: str) -> str:
+        return iceberg_scan(warehouse, ns, sql)
+
+    wait_iceberg_snapshot_row_count(
+        scan_fn,
+        ICEBERG_SNAPSHOT_COUNT_SQL,
+        expected=DDB_SEED_SNAPSHOT_ROW_COUNT,
+        deadline=deadline,
+        fail=fail,
+    )
+
+
+def wait_bronze_namespace(warehouse: Path, deadline: float) -> str:
+    while time.time() < deadline:
+        try:
+            return bronze_namespace(warehouse)
+        except RuntimeError:
+            time.sleep(0.25)
+    fail("SkipprLake bronze namespace did not appear")
+
+
+def follow_cdc(
+    bin_path: str,
+    config: Path,
+    pipeline: str,
+    data_dir: Path,
+    warehouse: Path,
+    *,
+    with_event_ts: bool,
+    require_day_partitions: bool = False,
+) -> str:
+    stream, _ = spawn_sync(bin_path, config, pipeline, data_dir)
     try:
-        iceberg_scan(warehouse, ns, sql)
-    except subprocess.CalledProcessError:
-        return
-    fail("SkipprLake still exposes skippr_event_time after synthetic field removal")
+        wait_iceberg_parquet(warehouse, time.time() + 120)
+        ns = wait_bronze_namespace(warehouse, time.time() + 120)
+        wait_snapshot_rows_in_lake(warehouse, ns, time.time() + 120)
+        if require_day_partitions:
+            assert_snapshot_day_partitions(warehouse)
+        put_stream_items(with_event_ts=with_event_ts)
+        poll_stream_lake(warehouse, ns, time.time() + 120)
+        return ns
+    finally:
+        stop_sync(stream)
+
+
+def poll_stream_lake(
+    warehouse: Path,
+    ns: str,
+    deadline: float,
+    *,
+    expect_distinct: str = "2",
+    check_deleted_id: str = "2",
+) -> None:
+    while time.time() < deadline:
+        try:
+            count = iceberg_scan(
+                warehouse,
+                ns,
+                "SELECT count(DISTINCT id) FROM iceberg_scan('{scan}')",
+            )
+            if count.splitlines()[-1].strip() != expect_distinct:
+                raise ValueError("distinct count mismatch")
+            deleted = iceberg_scan(
+                warehouse,
+                ns,
+                f"SELECT count(*) FROM iceberg_scan('{{scan}}') WHERE id = '{check_deleted_id}'",
+            )
+            if deleted.splitlines()[-1].strip() != "0":
+                raise ValueError("deleted id still present")
+            return
+        except (subprocess.CalledProcessError, ValueError, IndexError):
+            time.sleep(0.25)
+    fail("SkipprLake stream CDC did not converge before deadline")
 
 
 def run_skipprlake(work: Path) -> None:
@@ -375,25 +434,15 @@ def run_skipprlake(work: Path) -> None:
     pipeline = "dynamodb_skipprlake_cdc"
     stage_plugins(config, pipeline, manifests)
     bin_path = skipprd_bin()
-    snapshot, _ = spawn_sync(bin_path, config, pipeline, data_dir)
-    try:
-        wait_sync(snapshot, "SkipprLake snapshot sync")
-    except Exception:
-        snapshot.kill()
-        raise
-    wait_iceberg_parquet(warehouse, time.time() + 60)
-    assert_snapshot_day_partitions(warehouse)
-    stream, logs = spawn_sync(bin_path, config, pipeline, data_dir)
-    try:
-        wait_sync_log(stream, logs, "Starting with", time.time() + 60)
-        time.sleep(0.5)
-        put_stream_items(with_event_ts=True)
-        wait_sync(stream, "SkipprLake stream sync")
-    except Exception:
-        stream.kill()
-        raise
-
-    ns = bronze_namespace(warehouse)
+    ns = follow_cdc(
+        bin_path,
+        config,
+        pipeline,
+        data_dir,
+        warehouse,
+        with_event_ts=True,
+        require_day_partitions=True,
+    )
     count = iceberg_scan(
         warehouse,
         ns,
@@ -443,24 +492,14 @@ def run_skipprlake_unpartitioned(work: Path) -> None:
     pipeline = "dynamodb_skipprlake_cdc_unpartitioned"
     stage_plugins(config, pipeline, manifests)
     bin_path = skipprd_bin()
-    snapshot, _ = spawn_sync(bin_path, config, pipeline, data_dir)
-    try:
-        wait_sync(snapshot, "SkipprLake unpartitioned snapshot sync")
-    except Exception:
-        snapshot.kill()
-        raise
-    wait_iceberg_parquet(warehouse, time.time() + 60)
-    stream, logs = spawn_sync(bin_path, config, pipeline, data_dir)
-    try:
-        wait_sync_log(stream, logs, "Starting with", time.time() + 60)
-        time.sleep(0.5)
-        put_stream_items(with_event_ts=False)
-        wait_sync(stream, "SkipprLake unpartitioned stream sync")
-    except Exception:
-        stream.kill()
-        raise
-
-    ns = bronze_namespace(warehouse)
+    ns = follow_cdc(
+        bin_path,
+        config,
+        pipeline,
+        data_dir,
+        warehouse,
+        with_event_ts=False,
+    )
     count = iceberg_scan(
         warehouse,
         ns,
@@ -498,25 +537,18 @@ def run_duckdb(work: Path) -> None:
     pipeline = "dynamodb_duckdb_cdc"
     stage_plugins(config, pipeline, manifests)
     bin_path = skipprd_bin()
-    snapshot, _ = spawn_sync(bin_path, config, pipeline, data_dir)
-    try:
-        wait_sync(snapshot, "DuckDB snapshot sync")
-    except Exception:
-        snapshot.kill()
-        raise
-    stream, logs = spawn_sync(bin_path, config, pipeline, data_dir)
-    try:
-        wait_sync_log(stream, logs, "Starting with", time.time() + 60)
-        time.sleep(0.5)
-        put_stream_items(with_event_ts=False)
-        wait_sync(stream, "DuckDB stream sync")
-    except Exception:
-        stream.kill()
-        raise
+    ns = follow_cdc(
+        bin_path,
+        config,
+        pipeline,
+        data_dir,
+        warehouse,
+        with_event_ts=False,
+    )
     token_sql = (
         "SELECT _skippr_order_token, name FROM iceberg_scan('{scan}') WHERE id = '1'"
     )
-    scan_out = iceberg_scan(warehouse, bronze_namespace(warehouse), token_sql)
+    scan_out = iceberg_scan(warehouse, ns, token_sql)
     data = csv_data_rows(scan_out)
     if not data:
         fail(f"DuckDB iceberg_scan had no rows: {scan_out!r}")
@@ -538,7 +570,7 @@ def main() -> None:
         run_skipprlake_unpartitioned(work)
         run_duckdb(work)
     finally:
-        subprocess.run(["docker", "rm", "-f", CONTAINER], check=False, capture_output=True)
+        ddb_local.stop(port=DDB_PORT, container=CONTAINER)
 
 
 if __name__ == "__main__":

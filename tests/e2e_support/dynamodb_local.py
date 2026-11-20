@@ -135,8 +135,16 @@ def start(
     endpoint = f"http://127.0.0.1:{port}"
     docker = shutil.which("docker")
     if docker is not None:
-        probe = subprocess.run([docker, "info"], capture_output=True, text=True)
-        if probe.returncode == 0:
+        try:
+            probe = subprocess.run(
+                [docker, "info"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            probe = None
+        if probe is not None and probe.returncode == 0:
             subprocess.run([docker, "rm", "-f", container], check=False, capture_output=True)
             subprocess.run(
                 [
@@ -195,7 +203,15 @@ def stop(*, port: int, container: str) -> None:
             proc.send_signal(signal.SIGKILL)
             proc.wait(timeout=5)
     if shutil.which("docker"):
-        subprocess.run(["docker", "rm", "-f", container], check=False, capture_output=True)
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", container],
+                check=False,
+                capture_output=True,
+                timeout=8,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
     lsof = shutil.which("lsof")
     if lsof:
         probe = subprocess.run(

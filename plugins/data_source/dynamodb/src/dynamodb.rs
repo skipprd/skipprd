@@ -654,13 +654,16 @@ impl DataSourceDynamodbPlugin {
 
                     let image: &HashMap<String, aws_sdk_dynamodbstreams::types::AttributeValue> =
                         match mutation {
-                            MutationKind::Delete => match stream_record.keys() {
-                                Some(keys) if !keys.is_empty() => keys,
-                                _ => {
-                                    return Err(io::Error::other(
-                                        "DynamoDB CDC Remove is missing keys",
-                                    ));
-                                }
+                            MutationKind::Delete => match stream_record.old_image() {
+                                Some(img) if !img.is_empty() => img,
+                                _ => match stream_record.keys() {
+                                    Some(keys) if !keys.is_empty() => keys,
+                                    _ => {
+                                        return Err(io::Error::other(
+                                            "DynamoDB CDC Remove is missing old_image and keys",
+                                        ));
+                                    }
+                                },
                             },
                             MutationKind::Update | MutationKind::Insert => {
                                 match stream_record.new_image() {
@@ -961,21 +964,18 @@ mod tests {
     }
 
     #[test]
-    fn consume_shard_logs_polling_after_iterator_before_get_records() {
-        let src = include_str!("dynamodb.rs");
-        let consume = src
-            .split("async fn consume_shard")
-            .nth(1)
-            .unwrap()
-            .split("async fn")
-            .next()
-            .unwrap();
-        let log_at = consume.find("polling shard").expect("polling log");
-        let get_at = consume.find("get_records()").expect("get_records");
-        assert!(
-            log_at < get_at,
-            "LATEST iterator must exist before the harness applies CDC mutations"
-        );
+    fn open_shard_pin_tip_is_no_op_without_ending_sequence() {
+        use aws_sdk_dynamodbstreams::types::SequenceNumberRange;
+        use aws_sdk_dynamodbstreams::types::Shard;
+        let shard = Shard::builder()
+            .shard_id("s1")
+            .sequence_number_range(
+                SequenceNumberRange::builder()
+                    .starting_sequence_number("1")
+                    .build(),
+            )
+            .build();
+        assert!(shard_tip_sequence(&shard).is_none());
     }
 
     #[test]
@@ -1146,13 +1146,15 @@ mod tests {
         keys.insert("rmc".into(), SAV::S("us".into()));
         let mut old = keys.clone();
         old.insert("name".into(), SAV::S("beta".into()));
+        old.insert("event_ts".into(), SAV::N("1700086400".into()));
         let before =
             DataSourceDynamodbPlugin::stream_before_image(Some(&keys), Some(&old)).unwrap();
+        let row_json = DataSourceDynamodbPlugin::streams_item_to_json(&old);
         let batch = DataSourceDynamodbPlugin::cdc_stream_batch(
             OffsetKey::new("table", "shard"),
             "orders",
             "shard-1",
-            r#"{"id":"2","rmc":"us"}"#.into(),
+            row_json,
             MutationKind::Delete,
             "10",
             Some(before.clone()),
@@ -1162,8 +1164,15 @@ mod tests {
         assert_eq!(meta.mutation, MutationKind::Delete);
         let stamped = meta.before.as_ref().expect("Remove stamps before");
         assert_eq!(stamped.key, before.key);
-        let row: Value = serde_json::from_slice(&stamped.row).unwrap();
-        assert_eq!(row["name"], "beta");
+        let before_row: Value = serde_json::from_slice(&stamped.row).unwrap();
+        assert_eq!(before_row["name"], "beta");
+        let payload: Value = serde_json::from_str(
+            std::str::from_utf8(&batch.data).expect("delete row json is utf-8"),
+        )
+        .unwrap();
+        assert_eq!(payload["name"], "beta");
+        assert_eq!(payload["event_ts"], 1_700_086_400);
+        assert_eq!(payload["id"], "2");
     }
 
     #[test]

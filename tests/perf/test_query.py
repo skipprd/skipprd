@@ -368,8 +368,23 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("arm_compaction_hold", text)
         self.assertIn("OVERLAP_WAIT_SECONDS", text)
         self.assertIn("never reached the expected query result", text)
-        peek = text.split("def peek_until")[1].split("def wait_log_contains")[0]
+        peek = text.split("def peek_until")[1].split("def wait_ddb_snapshot_rows")[0]
         self.assertIn("last_peek", peek)
+        self.assertIn("query_plain_quiet", peek)
+        self.assertNotIn("run_skipprd", peek)
+        quiet = text.split("def query_plain_quiet")[1].split("def peek_until")[0]
+        self.assertIn("os.killpg", quiet)
+        self.assertIn("timeout=15", quiet)
+        wait_snap = text.split("def wait_ddb_snapshot_rows")[1].split("def wait_log_contains")[0]
+        self.assertIn("wait_iceberg_snapshot_row_count", wait_snap)
+        self.assertIn("ICEBERG_SNAPSHOT_COUNT_SQL", wait_snap)
+        self.assertIn("capture_output=True", wait_snap)
+        self.assertNotIn("peek_until", wait_snap)
+        self.assertNotIn("duckdb_scan", wait_snap)
+        self.assertNotIn("wait_ddb_iceberg_newer", text)
+        docker_probe = text.split("def docker_available")[1].split("def ")[0]
+        self.assertIn("timeout=8", docker_probe)
+        self.assertNotIn("range(5)", docker_probe)
         self.assertIn("follow ingest exited rc=", text)
         self.assertNotIn("CLUSTER_TENANT", text)
         self.assertIn("seconds=90", ingest)
@@ -517,15 +532,88 @@ class PerfDbRunnerContractTests(unittest.TestCase):
 
     def test_cdc_ddb_follows_the_stream_before_the_mutation(self) -> None:
         text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
-        cdc = text.split("def run_query_after_cdc")[1]
-        ddb = cdc.split('source == "ddb" and case')[1].split("else:")[0]
-        self.assertIn("once=False", ddb)
-        self.assertIn("wait_log_contains", ddb)
-        self.assertIn("Syncing pipeline", ddb)
-        self.assertLess(ddb.find("wait_log_contains"), ddb.find("apply_cdc_case"))
-        self.assertLess(ddb.find("apply_cdc_case"), ddb.find("peek_until"))
+        run_cdc = text.split("def run_query_after_cdc")[1].split("def ", 1)[0]
+        self.assertIn('source != "ddb"', run_cdc)
+        follow = run_cdc.split('if source == "ddb" and case:')[-1].split("\n        else:\n")[0]
+        self.assertIn("once=False", follow)
+        self.assertIn("stop_logged_ingest", follow)
+        self.assertIn("wait_ddb_snapshot_rows", follow)
+        self.assertIn("handshake ack plugin=Dynamodb", follow)
+        self.assertLess(follow.find("wait_ddb_snapshot_rows"), follow.find("apply_cdc_case"))
+        self.assertLess(follow.find("handshake ack plugin=Dynamodb"), follow.find("apply_cdc_case"))
+        self.assertLess(follow.find("apply_cdc_case"), follow.find("peek_until"))
+        self.assertLess(
+            follow.find("wait_ddb_snapshot_rows"),
+            follow.find("arm_compaction_hold"),
+        )
+        self.assertNotIn("write_migration_sql", follow)
+        self.assertGreater(run_cdc.find("write_migration_sql"), run_cdc.find("run_cdc_once"))
+        self.assertIn('case and not scenario.get("alter")', run_cdc)
+        stop = text.split("def stop_logged_ingest")[1].split("def ")[0]
+        self.assertIn("os.killpg", stop)
+        self.assertNotIn("polling shard", follow)
+        self.assertNotIn("SKIPPR_RUNTIME_LOG_LEVEL", follow)
+        self.assertNotIn("run_cdc_once", follow.split("wait_ddb_snapshot_rows")[0])
+        self.assertIn('wal_pin") == "drained"', follow)
+        self.assertIn("run_cdc_once", follow.split("wait_ddb_snapshot_rows")[1])
+        self.assertIn("with_sync_perf", follow)
+        self.assertGreater(
+            follow.find("logs = with_sync_perf"),
+            follow.find("require_hold_engaged"),
+        )
+        start = text.split("def start_cdc_ddb")[1].split("def stop_cdc_ddb")[0]
+        self.assertIn("ddb_local.start", start)
+        self.assertNotIn("amazon/dynamodb-local", start)
+        self.assertIn("Docker required on GitHub", run_cdc)
+        self.assertIn("_java_ddb_local_available", run_cdc)
         self.assertIn("query_sum", text.split("def cdc_query_done")[1].split("def parse_plain_query")[0])
-        self.assertGreater(ddb.find("run_cdc_once"), ddb.find("peek_until"))
+
+    def test_wait_log_contains_misses_plugin_info_at_warn(self) -> None:
+        run = perf_db_run()
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                suffix=".log",
+                delete=False,
+            ) as handle:
+                handle.write("host --log perf line\nWARN skippr-plugin: idle\n")
+                log = Path(handle.name)
+            with self.assertRaisesRegex(run.perf_run.PerfError, "never logged 'polling shard'"):
+                run.wait_log_contains(
+                    log,
+                    "polling shard",
+                    proc,
+                    seconds=1,
+                    scenario_id="probe",
+                )
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+            try:
+                log.unlink()
+            except OSError:
+                pass
+
+    def test_perf_base_env_keeps_runtime_plugins_at_warn(self) -> None:
+        run_text = (HARNESS_DIR / "run.py").read_text(encoding="utf-8")
+        helper = run_text.split("def base_env")[1].split("def ")[0]
+        self.assertIn('"SKIPPR_RUNTIME_LOG_LEVEL": "warn"', helper)
+
+    def test_ddb_cdc_helpers_wait_on_snapshot_count(self) -> None:
+        from ddb_cdc import ddb_snapshot_rows_ready, snapshot_count_from_doc
+
+        self.assertEqual(snapshot_count_from_doc({"rows": [["2"]]}), 2)
+        self.assertTrue(ddb_snapshot_rows_ready(2)({"rows": [["2"]]}))
+        self.assertFalse(ddb_snapshot_rows_ready(2)({"rows": [["1"]]}))
+
+    def test_ddb_default_cdc_yaml_has_no_transform_block(self) -> None:
+        text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
+        writer = text.split("def write_cdc_skippr_yml")[1].split("def _cdc_postgres_failed")[0]
+        ddb = writer.split('elif source == "ddb":')[1].split("else:")[0]
+        self.assertIn('extra_transform = ""', ddb)
+        self.assertNotIn("transform:", ddb.split("if partition_day:")[0])
 
     def test_query_count_one_is_not_boolean_true(self) -> None:
         run = perf_db_run()
@@ -566,22 +654,6 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("_cdc_postgres_failed", start)
         self.assertIn("REPLICA IDENTITY FULL", start)
 
-    def test_cdc_ddb_follow_waits_for_stream_poll_before_mutations(self) -> None:
-        text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
-        follow = text.split("if source == \"ddb\" and case:")[1].split("else:")[0]
-        self.assertIn('wait_log_contains(', follow)
-        self.assertIn('"polling shard"', follow)
-        self.assertIn('follow_env["SKIPPR_RUNTIME_LOG_LEVEL"] = "info"', follow)
-        ingest_at = follow.find("start_logged_ingest")
-        self.assertLess(
-            follow.find('follow_env["SKIPPR_RUNTIME_LOG_LEVEL"] = "info"'),
-            ingest_at,
-        )
-        self.assertIn("follow_env", follow[ingest_at : follow.find("wait_log_contains")])
-        poll_at = follow.find('"polling shard"')
-        apply_at = follow.find("apply_cdc_case")
-        self.assertGreater(apply_at, poll_at)
-
     def test_cdc_ddb_partition_yaml_uses_user_event_ts_not_synthetic(self) -> None:
         text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         writer = text.split("def write_cdc_skippr_yml")[1].split("def _cdc_postgres_failed")[0]
@@ -591,6 +663,12 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("q-cdc-partition-day-ddb", scenarios)
         spec = scenarios["q-cdc-partition-day-ddb"]
         self.assertTrue(spec.get("cdc_partition_day"))
+        self.assertEqual(spec.get("cdc_case"), "count")
+        self.assertNotIn("skippr_event_time", spec["sql"])
+        self.assertIn("SELECT *", spec["sql"])
+        asserts = spec.get("asserts") or {}
+        self.assertIn("event_ts", asserts.get("query_has"))
+        self.assertIn("skippr_event_time", asserts.get("query_missing"))
 
     def test_download_accepts_perf_db_workflow(self) -> None:
         download = (

@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -24,6 +25,12 @@ from fixtures import write_ndjson  # noqa: E402
 from matrix import CDC_CASE_SQL, CDC_PIPELINES, CDC_TABLES  # noqa: E402
 from parse import parse_perf_events  # noqa: E402
 from skipprd_cli import log_args  # noqa: E402
+
+from ddb_cdc import (  # noqa: E402
+    DDB_SEED_SNAPSHOT_ROW_COUNT,
+    ICEBERG_SNAPSHOT_COUNT_SQL,
+    wait_iceberg_snapshot_row_count,
+)
 
 _run_spec = importlib.util.spec_from_file_location("skippr_perf_run", HARNESS_DIR / "run.py")
 if _run_spec is None or _run_spec.loader is None:
@@ -115,6 +122,47 @@ def first_cell(doc: dict[str, Any]) -> str:
     return str((rows[0] or [""])[0])
 
 
+def query_plain_quiet(
+    skipprd: Path,
+    config: Path,
+    env: dict[str, str],
+    sql: str,
+) -> str:
+    """Peek query: no /usr/bin/time, no stdout dump. Store-lock misses stay in last_peek."""
+    cmd = [
+        str(skipprd),
+        *log_args(env),
+        "--config",
+        str(config),
+        "query",
+        "--plain",
+        "--sql",
+        sql,
+    ]
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
+        proc.wait()
+        raise perf_run.PerfError("peek query timed out") from None
+    text = (stdout or "") + "\n" + (stderr or "")
+    if proc.returncode != 0:
+        raise perf_run.PerfError(f"peek query failed ({proc.returncode}): {text[-1500:]}")
+    return text
+
+
 def peek_until(
     skipprd: Path,
     config: Path,
@@ -128,17 +176,12 @@ def peek_until(
     scenario_id: str,
 ) -> None:
     """Poll `sql` while the held ingest runs; the caller asserts the hold afterwards."""
+    del work  # kept so callers stay on one signature
     deadline = time.time() + seconds
     last_peek = ""
     while time.time() < deadline and ingest.poll() is None:
         try:
-            peek = perf_run.run_skipprd(
-                skipprd,
-                ["--config", str(config), "query", "--plain", "--sql", sql],
-                env=env,
-                work=work,
-                profile="none",
-            )
+            peek = query_plain_quiet(skipprd, config, env, sql)
             last_peek = peek[-2000:]
             if done(parse_plain_query(peek)):
                 return
@@ -154,6 +197,55 @@ def peek_until(
     raise perf_run.PerfError(
         f"{scenario_id}: held ingest never reached the expected query result{detail}"
     )
+
+
+def wait_ddb_snapshot_rows(
+    warehouse: Path,
+    ingest: subprocess.Popen,
+    *,
+    seconds: int,
+    scenario_id: str,
+    row_count: int = DDB_SEED_SNAPSHOT_ROW_COUNT,
+) -> None:
+    """Wait on Iceberg parquet rows, not skipprd query (follow holds writer.lock)."""
+    table = CDC_TABLES["ddb"].split(".")[-1]
+
+    def scan(sql: str) -> str:
+        scan_path = warehouse / "bronze" / table
+        cmd = [
+            perf_run.duckdb_bin(),
+            "-csv",
+            "-c",
+            (
+                "SET unsafe_enable_version_guessing=true; INSTALL iceberg; LOAD iceberg; "
+                + sql.format(scan=scan_path)
+            ),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(
+                proc.returncode, cmd, proc.stdout, proc.stderr
+            )
+        lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+        if not lines:
+            raise ValueError("empty iceberg scan")
+        return lines[-1]
+
+    def fail(message: str) -> None:
+        raise perf_run.PerfError(f"{scenario_id}: {message}")
+
+    wait_iceberg_snapshot_row_count(
+        scan,
+        ICEBERG_SNAPSHOT_COUNT_SQL,
+        expected=row_count,
+        deadline=time.time() + seconds,
+        fail=fail,
+    )
+    code = ingest.poll()
+    if code is not None:
+        raise perf_run.PerfError(
+            f"{scenario_id}: follow ingest exited rc={code} before snapshot rows landed"
+        )
 
 
 def wait_log_contains(
@@ -184,6 +276,29 @@ def start_logged_ingest(
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+
+
+def stop_logged_ingest(proc: subprocess.Popen | None, log_path: Path) -> str:
+    if proc is None:
+        return ""
+    if proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
+        try:
+            proc.wait(timeout=30)
+        except Exception:
+            pass
+    handle = proc.stdout
+    if handle is not None and hasattr(handle, "close"):
+        try:
+            handle.close()
+        except Exception:
+            pass
+    if log_path.is_file():
+        return log_path.read_text(encoding="utf-8")
+    return ""
 
 
 def numeric_query_count(value: object) -> int | None:
@@ -613,19 +728,27 @@ DDB_CDC_SOURCE_TABLE = "skippr_dynamo_cdc"
 DDB_CDC_CATALOG_TABLE = "skippr-perf-db-ddb-cdc"
 
 
+def _java_ddb_local_available() -> bool:
+    try:
+        from e2e_support.dynamodb_local import java_bin
+
+        java_bin()
+        return True
+    except Exception:
+        return False
+
+
 def docker_available() -> bool:
-    for _ in range(5):
-        try:
-            subprocess.run(
-                ["docker", "info"],
-                capture_output=True,
-                check=True,
-                timeout=10,
-            )
-            return True
-        except Exception:
-            time.sleep(1)
-    return False
+    try:
+        subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            check=True,
+            timeout=8,
+        )
+        return True
+    except Exception:
+        return False
 
 
 DDB_EVENT_TS_DAY_A = 1_700_000_000
@@ -927,35 +1050,10 @@ def ddb_cdc_client():
 
 def start_cdc_ddb(*, partition_day: bool = False) -> None:
     from botocore.exceptions import ClientError
+    from e2e_support import dynamodb_local as ddb_local
 
-    subprocess.run(["docker", "rm", "-f", DDB_CDC_CONTAINER], capture_output=True, check=False)
-    subprocess.run(
-        [
-            "docker",
-            "run",
-            "-d",
-            "--name",
-            DDB_CDC_CONTAINER,
-            "-p",
-            f"{DDB_CDC_PORT}:8000",
-            "amazon/dynamodb-local",
-            "-jar",
-            "DynamoDBLocal.jar",
-            "-sharedDb",
-            "-inMemory",
-        ],
-        check=True,
-    )
+    ddb_local.start(port=DDB_CDC_PORT, tables=[], container=DDB_CDC_CONTAINER)
     client = ddb_cdc_client()
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            client.list_tables()
-            break
-        except Exception:
-            time.sleep(0.5)
-    else:
-        raise perf_run.PerfError("dynamodb CDC Local did not become ready")
     for name, stream in (
         (DDB_CDC_CATALOG_TABLE, False),
         (DDB_CDC_SOURCE_TABLE, True),
@@ -1013,7 +1111,9 @@ def start_cdc_ddb(*, partition_day: bool = False) -> None:
 
 
 def stop_cdc_ddb() -> None:
-    subprocess.run(["docker", "rm", "-f", DDB_CDC_CONTAINER], capture_output=True, check=False)
+    from e2e_support import dynamodb_local as ddb_local
+
+    ddb_local.stop(port=DDB_CDC_PORT, container=DDB_CDC_CONTAINER)
 
 
 def apply_cdc_case(source: str, case: str, *, partition_day: bool = False) -> None:
@@ -1152,7 +1252,7 @@ def cdc_sync_cmd(
 
 
 def with_sync_perf(captured: str, wall_ms: int, rows: int = 0) -> str:
-    """CDC `sync --once` is KILL-wrapped; skipprd may never emit phase sync."""
+    """CDC follow is KILL-wrapped; skipprd may never emit phase sync."""
     if any(ev.get("phase") == "sync" for ev in parse_perf_events(captured)):
         return captured
     return (
@@ -1182,14 +1282,16 @@ def run_query_after_cdc(
     work: Path,
     profile: str,
 ) -> dict[str, Any]:
-    if not docker_available():
-        if os.environ.get("GITHUB_ACTIONS"):
-            raise perf_run.PerfError(f"{scenario_id}: Docker required on GitHub")
+    source = str(scenario.get("cdc_source") or "pg")
+    java_ddb = source == "ddb" and _java_ddb_local_available()
+    docker = True if java_ddb and not os.environ.get("GITHUB_ACTIONS") else docker_available()
+    if os.environ.get("GITHUB_ACTIONS") and not docker:
+        raise perf_run.PerfError(f"{scenario_id}: Docker required on GitHub")
+    if not docker and not java_ddb:
         log(f"{scenario_id} SKIP (Docker not running)")
         payload = {"scenario": scenario_id, "skipped": True, "reason": "docker-down"}
         (work / "perf-report.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return payload
-    source = str(scenario.get("cdc_source") or "pg")
     pipeline = CDC_PIPELINES[source]
     table = CDC_TABLES[source]
     warehouse = work / "warehouse"
@@ -1233,7 +1335,12 @@ def run_query_after_cdc(
         env.update(perf_run.ddb_local_env(catalog_port, catalog_tables[0]))
         skipprd = perf_run.skipprd_bin()
         sql = str(scenario["sql"])
-        logs = run_cdc_once(skipprd, config, env, pipeline)
+        case = str(scenario.get("cdc_case") or "")
+        follow_log = work / "cdc-follow.log"
+        if source == "ddb" and case and not scenario.get("alter"):
+            logs = ""
+        else:
+            logs = run_cdc_once(skipprd, config, env, pipeline)
         if scenario.get("alter") or scenario.get("continue_ingest"):
             if not scenario.get("alter"):
                 raise perf_run.PerfError(
@@ -1248,33 +1355,30 @@ def run_query_after_cdc(
                 work=work,
                 profile="none",
             )
-        case = str(scenario.get("cdc_case") or "")
-        follow_log = work / "cdc-follow.log"
         if source == "ddb" and case:
-            if scenario.get("overlap"):
-                hold = arm_compaction_hold(data_dir, CDC_WORKSPACE, pipeline)
-            follow_env = dict(env)
-            follow_env["SKIPPR_RUNTIME_LOG_LEVEL"] = "info"
+            follow_started = time.perf_counter()
             overlap_proc = start_logged_ingest(
                 cdc_sync_cmd(skipprd, config, env, pipeline, once=False),
-                follow_env,
+                env,
                 follow_log,
             )
-            wait_log_contains(
-                follow_log,
-                "Syncing pipeline",
-                overlap_proc,
-                seconds=60,
-                scenario_id=scenario_id,
-            )
-            if source == "ddb":
+            if scenario.get("alter"):
                 wait_log_contains(
                     follow_log,
-                    "polling shard",
+                    "handshake ack plugin=Dynamodb",
                     overlap_proc,
-                    seconds=60,
+                    seconds=OVERLAP_WAIT_SECONDS,
                     scenario_id=scenario_id,
                 )
+            else:
+                wait_ddb_snapshot_rows(
+                    warehouse,
+                    overlap_proc,
+                    seconds=OVERLAP_WAIT_SECONDS,
+                    scenario_id=scenario_id,
+                )
+            if scenario.get("overlap"):
+                hold = arm_compaction_hold(data_dir, CDC_WORKSPACE, pipeline)
             apply_cdc_case(source, case, partition_day=partition_day)
             peek_until(
                 skipprd,
@@ -1289,22 +1393,14 @@ def run_query_after_cdc(
             )
             if hold is not None:
                 require_hold_engaged(scenario_id, overlap_proc, hold)
-            elif overlap_proc is not None:
-                overlap_proc.kill()
-                try:
-                    overlap_proc.wait(timeout=30)
-                except Exception:
-                    pass
-                handle = overlap_proc.stdout
-                if handle is not None and hasattr(handle, "close"):
-                    try:
-                        handle.close()
-                    except Exception:
-                        pass
-                if follow_log.is_file():
-                    logs += follow_log.read_text(encoding="utf-8")
+            else:
+                logs += stop_logged_ingest(overlap_proc, follow_log)
                 overlap_proc = None
-                logs += run_cdc_once(skipprd, config, env, pipeline)
+                if (scenario.get("asserts") or {}).get("wal_pin") == "drained":
+                    logs += run_cdc_once(skipprd, config, env, pipeline)
+            logs = with_sync_perf(
+                logs, int((time.perf_counter() - follow_started) * 1000)
+            )
         else:
             if case:
                 apply_cdc_case(source, case, partition_day=partition_day)
@@ -1338,19 +1434,7 @@ def run_query_after_cdc(
         disarm_compaction_hold(hold)
         hold = None
         if overlap_proc is not None:
-            overlap_proc.kill()
-            try:
-                overlap_proc.wait(timeout=30)
-            except Exception:
-                pass
-            handle = overlap_proc.stdout
-            if handle is not None and hasattr(handle, "close"):
-                try:
-                    handle.close()
-                except Exception:
-                    pass
-            if follow_log.is_file():
-                logs += follow_log.read_text(encoding="utf-8")
+            logs += stop_logged_ingest(overlap_proc, follow_log)
             overlap_proc = None
         perf_run.convert_flamegraph(work)
         perf_run.require_profile_outputs(work, profile)

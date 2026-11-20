@@ -25,6 +25,9 @@ class SkipprLakeE2eHarnessTests(unittest.TestCase):
         self.assertNotIn("import boto3", header)
         self.assertIn("import boto3", src)
         self.assertIn("/usr/lib/jvm", src)
+        start = src.split("def start(")[1].split("def stop(")[0]
+        self.assertIn("timeout=8", start)
+        self.assertIn("TimeoutExpired", start)
 
     def test_expected_gold_matches_twelve_shop_rows(self) -> None:
         expected = json.loads(

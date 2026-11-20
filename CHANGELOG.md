@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 
 - Dest schema is the data plugin. `schema_sinks` YAML, `schema_sink` on a data sink, SchemaSink plugins, and `skipprd connect schema-sink` are deleted. Runtime protocol 28. Tables are created on first compact from published output metadata.
 - Runtime plugin crate patches (immutable CDN version paths) after the 16.0.9 host event-time filter changed the linked plugin binaries.
+- DynamoDB CDC regression and tag e2e use one continuous `sync` and wait for snapshot rows (not plugin log substrings). Stream Remove rows encode `OldImage`. Plugin crate **0.1.20**.
 
 ### Removed
 

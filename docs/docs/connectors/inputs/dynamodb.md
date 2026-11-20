@@ -73,7 +73,9 @@ data_sources:
 
 Each item becomes a row. Snapshot copies the table once. CDC modes apply inserts, updates, and deletes. See [Change data capture](/cdc/).
 
-`snapshot_then_cdc` writes a 16-byte `_skippr_order_token` (zeros for the snapshot, then the stream sequence) so a warehouse that upserts on business keys can treat the snapshot as the baseline. Skipprd does **not** add an event-time column to items. When you want day partitioning on Iceberg, store a timestamp on each item (for example `event_ts` as a Number) and set `transform.batch_time_fields` to that attribute name.
+`snapshot_then_cdc` writes a 16-byte `_skippr_order_token` (zeros for the snapshot, then the stream sequence) so a warehouse that upserts on business keys can treat the snapshot as the baseline. Skipprd does **not** add an event-time column to items. When you want day partitioning on Iceberg, store a timestamp on each item (for example `event_ts` as a Number) and set `transform.batch_time_fields` to that attribute name. The attribute must be present on **every** streamed row you partition on, including **deletes**: Remove events encode the stream `OldImage` as the row payload (not keys only).
+
+After the snapshot, CDC on an open shard starts the stream at **Latest** (records written before that iterator are not replayed). Keep **one** continuous `skipprd sync` for snapshot plus follow, or restart only after you accept that in-flight writes may be missed.
 
 ## Troubleshooting
 

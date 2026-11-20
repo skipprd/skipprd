@@ -863,7 +863,7 @@ scenarios:
     cdc_source: ddb
     cdc_partition_day: true
     cdc_case: count
-    sql: "SELECT event_ts, skippr_event_time FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '1'"
+    sql: "SELECT * FROM dynamodb_skipprlake_cdc.dynamodb_skippr_dynamo_cdc WHERE id = '1'"
     required_perf: [sync, query_collect, query_pin, query_reconcile]
     asserts:
       query_has: event_ts
