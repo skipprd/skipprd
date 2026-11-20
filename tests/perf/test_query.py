@@ -571,6 +571,13 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         follow = text.split("if source == \"ddb\" and case:")[1].split("else:")[0]
         self.assertIn('wait_log_contains(', follow)
         self.assertIn('"polling shard"', follow)
+        self.assertIn('follow_env["SKIPPR_RUNTIME_LOG_LEVEL"] = "info"', follow)
+        ingest_at = follow.find("start_logged_ingest")
+        self.assertLess(
+            follow.find('follow_env["SKIPPR_RUNTIME_LOG_LEVEL"] = "info"'),
+            ingest_at,
+        )
+        self.assertIn("follow_env", follow[ingest_at : follow.find("wait_log_contains")])
         poll_at = follow.find('"polling shard"')
         apply_at = follow.find("apply_cdc_case")
         self.assertGreater(apply_at, poll_at)

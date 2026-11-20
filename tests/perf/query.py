@@ -1210,9 +1210,11 @@ def run_query_after_cdc(
         if source == "ddb" and case:
             if scenario.get("overlap"):
                 hold = arm_compaction_hold(data_dir, CDC_WORKSPACE, pipeline)
+            follow_env = dict(env)
+            follow_env["SKIPPR_RUNTIME_LOG_LEVEL"] = "info"
             overlap_proc = start_logged_ingest(
                 cdc_sync_cmd(skipprd, config, env, pipeline, once=False),
-                env,
+                follow_env,
                 follow_log,
             )
             wait_log_contains(
