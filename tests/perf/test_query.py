@@ -566,6 +566,15 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         self.assertIn("_cdc_postgres_failed", start)
         self.assertIn("REPLICA IDENTITY FULL", start)
 
+    def test_cdc_ddb_follow_waits_for_stream_poll_before_mutations(self) -> None:
+        text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
+        follow = text.split("if source == \"ddb\" and case:")[1].split("else:")[0]
+        self.assertIn('wait_log_contains(', follow)
+        self.assertIn('"polling shard"', follow)
+        poll_at = follow.find('"polling shard"')
+        apply_at = follow.find("apply_cdc_case")
+        self.assertGreater(apply_at, poll_at)
+
     def test_cdc_ddb_partitions_on_the_event_time_column_the_plugin_writes(self) -> None:
         text = (HARNESS_DIR / "query.py").read_text(encoding="utf-8")
         writer = text.split("def write_cdc_skippr_yml")[1].split("def _cdc_postgres_failed")[0]

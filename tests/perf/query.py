@@ -1222,6 +1222,14 @@ def run_query_after_cdc(
                 seconds=60,
                 scenario_id=scenario_id,
             )
+            if source == "ddb":
+                wait_log_contains(
+                    follow_log,
+                    "polling shard",
+                    overlap_proc,
+                    seconds=60,
+                    scenario_id=scenario_id,
+                )
             apply_cdc_case(source, case)
             peek_until(
                 skipprd,

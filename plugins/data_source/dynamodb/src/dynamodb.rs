@@ -623,6 +623,7 @@ impl DataSourceDynamodbPlugin {
         let mut empty_polls = 0u32;
         let mut last_seq: Option<String> = None;
 
+        info!("DynamoDB CDC: polling shard {shard_id} for stream records");
         loop {
             let records_resp = self
                 .streams_client
@@ -982,6 +983,24 @@ mod tests {
     fn continuous_sync_does_not_stop_on_empty_getrecords() {
         assert!(!stream_idle_should_stop(false, 5));
         assert!(!stream_idle_should_stop(false, 500));
+    }
+
+    #[test]
+    fn consume_shard_logs_polling_after_iterator_before_get_records() {
+        let src = include_str!("dynamodb.rs");
+        let consume = src
+            .split("async fn consume_shard")
+            .nth(1)
+            .unwrap()
+            .split("async fn")
+            .next()
+            .unwrap();
+        let log_at = consume.find("polling shard").expect("polling log");
+        let get_at = consume.find("get_records()").expect("get_records");
+        assert!(
+            log_at < get_at,
+            "LATEST iterator must exist before the harness applies CDC mutations"
+        );
     }
 
     #[test]
