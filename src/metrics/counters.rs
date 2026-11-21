@@ -127,8 +127,6 @@ pub static ATHENA_GLUE_CP_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
 /// Compatibility metrics for the authoritative `FlushBudgetSnapshot`.
 pub static FLUSH_BUDGET_GENERATION: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
 pub static FLUSH_BUDGET_REASON_CODE: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
-pub static FLUSH_BUDGET_INGEST_RESERVED_CORES: Lazy<AtomicUsize> =
-    Lazy::new(|| AtomicUsize::new(1));
 pub static FLUSH_BUDGET_PRESSURE_CLASS: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(1));
 pub static FLUSH_BUDGET_QUIET_STREAK: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
 pub static FLUSH_BUDGET_GROWTH_COOLDOWN: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));

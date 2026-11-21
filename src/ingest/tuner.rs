@@ -1,7 +1,7 @@
 use crate::helpers::configuration::Config;
 use once_cell::sync::Lazy;
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -82,9 +82,9 @@ const HIGH_SINK_WAIT_MS: u64 = 1_000;
 const HIGH_SINK_WRITE_AGE_MS: u64 = 120_000;
 const HIGH_WAL_ACK_MS: u64 = 250;
 const HIGH_WAL_PERSIST_MS: u64 = 500;
-/// Consecutive quiet one-second samples required before Ingest-mode growth.
+/// Consecutive Quiet samples (telemetry). Does not gate leftover compact width.
 const QUIET_SAMPLES_BEFORE_GROWTH: u32 = 5;
-/// Samples to hold before growing again after an ingest-pressure or safeguard backoff.
+/// Samples to hold leftover width after a safeguard backoff.
 const GROWTH_COOLDOWN_SAMPLES: u32 = 10;
 /// Keep treating compaction as backlogged after a transient empty ready queue.
 const BACKLOG_GRACE_SAMPLES: u32 = 15;
@@ -96,17 +96,38 @@ pub enum FlushMode {
     Drain,
 }
 
+pub fn flush_mode(paused: bool, drain: bool) -> FlushMode {
+    if paused {
+        FlushMode::Paused
+    } else if drain {
+        FlushMode::Drain
+    } else {
+        FlushMode::Ingest
+    }
+}
+
+static FLUSH_DRAIN: AtomicBool = AtomicBool::new(false);
+
+pub fn set_flush_drain(drain: bool) {
+    FLUSH_DRAIN.store(drain, Ordering::Relaxed);
+}
+
+pub fn current_flush_mode() -> FlushMode {
+    flush_mode(
+        crate::data_dir_ingest_paused(),
+        FLUSH_DRAIN.load(Ordering::Relaxed),
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BudgetReason {
     Initial,
     EnvironmentCaps,
-    IngestReserve,
     Idle,
     HealthyDrain,
     HighRss,
     LowAvailableMemory,
     HighRunQueue,
-    CpuSaturated,
     S3Retry,
     GlueThrottle,
     UploadLatency,
@@ -122,13 +143,11 @@ impl BudgetReason {
         match self {
             Self::Initial => "initial",
             Self::EnvironmentCaps => "environment_caps",
-            Self::IngestReserve => "ingest_reserve",
             Self::Idle => "idle",
             Self::HealthyDrain => "healthy_drain",
             Self::HighRss => "high_rss",
             Self::LowAvailableMemory => "low_available_memory",
             Self::HighRunQueue => "high_run_queue",
-            Self::CpuSaturated => "cpu_saturated",
             Self::S3Retry => "s3_retry",
             Self::GlueThrottle => "glue_throttle",
             Self::UploadLatency => "upload_latency",
@@ -144,13 +163,11 @@ impl BudgetReason {
         match self {
             Self::Initial => 0,
             Self::EnvironmentCaps => 1,
-            Self::IngestReserve => 2,
             Self::Idle => 3,
             Self::HealthyDrain => 4,
             Self::HighRss => 5,
             Self::LowAvailableMemory => 6,
             Self::HighRunQueue => 7,
-            Self::CpuSaturated => 8,
             Self::S3Retry => 9,
             Self::GlueThrottle => 10,
             Self::UploadLatency => 11,
@@ -193,10 +210,10 @@ pub struct FlushBudgetPolicyState {
 }
 
 impl FlushBudgetPolicyState {
-    /// Primed past the quiet-streak gate so a single Ingest sample may grow.
+    /// Zero cooldown so a single sample may take leftover / machine width.
     pub fn primed_for_growth() -> Self {
         Self {
-            quiet_streak: QUIET_SAMPLES_BEFORE_GROWTH,
+            quiet_streak: 0,
             growth_cooldown_remaining: 0,
             backlog_grace_remaining: 0,
         }
@@ -215,7 +232,6 @@ pub struct FlushBudgetSnapshot {
     pub upload_sessions: usize,
     pub multipart_parts: usize,
     pub catalog_operations: usize,
-    pub ingest_reserved_cores: usize,
     pub generation: u64,
     pub reason: BudgetReason,
 }
@@ -229,7 +245,6 @@ impl Default for FlushBudgetSnapshot {
             upload_sessions: 1,
             multipart_parts: 1,
             catalog_operations: 1,
-            ingest_reserved_cores: 1,
             generation: 0,
             reason: BudgetReason::Initial,
         }
@@ -245,7 +260,6 @@ pub struct FlushBudgetCaps {
     pub upload_sessions: usize,
     pub multipart_parts: usize,
     pub catalog_operations: usize,
-    pub ingest_reserved_cores: usize,
 }
 
 impl FlushBudgetCaps {
@@ -271,7 +285,6 @@ impl FlushBudgetCaps {
             .unwrap_or(2)
             .min((num_cpus / 8).clamp(2, 8));
         let catalog_operations = (num_cpus / 8).clamp(2, 16);
-        let ingest_reserved_cores = (num_cpus / 4).max(1);
 
         Self {
             num_cpus,
@@ -281,7 +294,6 @@ impl FlushBudgetCaps {
             upload_sessions: upload_sessions.max(1),
             multipart_parts: multipart_parts.max(1),
             catalog_operations,
-            ingest_reserved_cores,
         }
     }
 }
@@ -348,7 +360,6 @@ fn with_compact_width(
             upload_sessions: caps.upload_sessions.max(1),
             multipart_parts: caps.multipart_parts.max(1),
             catalog_operations: caps.catalog_operations.max(1),
-            ingest_reserved_cores: caps.ingest_reserved_cores,
             generation: current.generation,
             reason: current.reason,
         },
@@ -369,7 +380,6 @@ fn cap_snapshot(mut snapshot: FlushBudgetSnapshot, caps: FlushBudgetCaps) -> Flu
     snapshot.catalog_operations = snapshot
         .catalog_operations
         .clamp(1, caps.catalog_operations.max(1));
-    snapshot.ingest_reserved_cores = caps.ingest_reserved_cores;
     snapshot
 }
 
@@ -471,7 +481,7 @@ fn load_healthy(signals: FlushBudgetSignals, caps: FlushBudgetCaps) -> bool {
     signals
         .run_queue
         .map(|load| load <= caps.num_cpus as f64 * 0.90)
-        .unwrap_or_else(|| signals.cpu_active_tasks < caps.num_cpus.saturating_mul(3) / 4)
+        .unwrap_or(true)
 }
 
 fn retries_healthy(signals: FlushBudgetSignals) -> bool {
@@ -558,12 +568,6 @@ pub fn compute_flush_budget(
         return finish_with_policy(current, env_capped, BudgetReason::EnvironmentCaps, policy);
     }
 
-    if pressured {
-        let cpu = leftover_compact_jobs(signals, caps);
-        let next = with_compact_width(current, caps, (cpu / 2).max(1));
-        return finish_with_policy(current, next, BudgetReason::IngestPressure, policy);
-    }
-
     if let (Some(rss), Some(total)) = (signals.process_rss_bytes, signals.total_memory_bytes) {
         if ratio_at_least(rss, total, 75) {
             mark_backoff_cooldown(&mut policy);
@@ -597,15 +601,6 @@ pub fn compute_flush_budget(
             current,
             multiplicative_backoff(current),
             BudgetReason::HighRunQueue,
-            policy,
-        );
-    }
-    if signals.run_queue.is_none() && signals.cpu_active_tasks >= caps.num_cpus {
-        mark_backoff_cooldown(&mut policy);
-        return finish_with_policy(
-            current,
-            multiplicative_backoff(current),
-            BudgetReason::CpuSaturated,
             policy,
         );
     }
@@ -668,7 +663,7 @@ pub fn compute_flush_budget(
         );
     }
 
-    if !effective_backlog {
+    if !effective_backlog && matches!(signals.mode(), FlushMode::Ingest) {
         return finish_with_policy(
             current,
             additive_idle_decrease(current),
@@ -687,13 +682,10 @@ pub fn compute_flush_budget(
         return (current, policy);
     }
 
-    if !(memory_healthy(signals) && load_healthy(signals, caps) && retries_healthy(signals)) {
-        if using_backlog_grace && current.reason != BudgetReason::BacklogGrace {
-            let mut held = current;
-            held.reason = BudgetReason::BacklogGrace;
-            return (held, policy);
-        }
-        return (current, policy);
+    if pressured {
+        let cpu = leftover_compact_jobs(signals, caps);
+        let next = with_compact_width(current, caps, (cpu / 2).max(1));
+        return finish_with_policy(current, next, BudgetReason::IngestPressure, policy);
     }
 
     let cpu = leftover_compact_jobs(signals, caps);
@@ -858,20 +850,26 @@ fn caps_from_env(
 }
 
 fn seed_budget(caps: FlushBudgetCaps) -> FlushBudgetSnapshot {
-    cap_snapshot(
-        FlushBudgetSnapshot {
-            scheduler_jobs: 2,
-            decode_jobs: 2,
-            sink_sessions: 2,
-            upload_sessions: 4,
-            multipart_parts: 2,
-            catalog_operations: 2,
-            ingest_reserved_cores: caps.ingest_reserved_cores,
-            generation: 1,
-            reason: BudgetReason::EnvironmentCaps,
-        },
+    let mut snapshot = FlushBudgetSnapshot {
+        generation: 1,
+        reason: BudgetReason::EnvironmentCaps,
+        ..FlushBudgetSnapshot::default()
+    };
+    snapshot = with_compact_width(
+        snapshot,
         caps,
-    )
+        leftover_compact_jobs(
+            FlushBudgetSignals {
+                mode: Some(FlushMode::Ingest),
+                active_ingest: 0,
+                ..FlushBudgetSignals::default()
+            },
+            caps,
+        ),
+    );
+    snapshot.generation = 1;
+    snapshot.reason = BudgetReason::EnvironmentCaps;
+    snapshot
 }
 
 fn publish_compatibility_mirrors(
@@ -890,8 +888,6 @@ fn publish_compatibility_mirrors(
     counters::ATHENA_GLUE_CP_TARGET.store(snapshot.catalog_operations, Ordering::Relaxed);
     counters::FLUSH_BUDGET_GENERATION.store(snapshot.generation as usize, Ordering::Relaxed);
     counters::FLUSH_BUDGET_REASON_CODE.store(snapshot.reason.code(), Ordering::Relaxed);
-    counters::FLUSH_BUDGET_INGEST_RESERVED_CORES
-        .store(snapshot.ingest_reserved_cores, Ordering::Relaxed);
     counters::FLUSH_BUDGET_PRESSURE_CLASS.store(pressure.code(), Ordering::Relaxed);
     counters::FLUSH_BUDGET_QUIET_STREAK.store(policy.quiet_streak as usize, Ordering::Relaxed);
     counters::FLUSH_BUDGET_GROWTH_COOLDOWN
@@ -1005,7 +1001,7 @@ pub fn apply_env_caps() {
     state.initialized = true;
     publish_compatibility_mirrors(state.current, state.policy, state.last_pressure, 0, 0);
     info!(
-        "flush_budget generation={} reason={} scheduler={} decode={} sink_sessions={} upload_sessions={} multipart_parts={} catalog={} ingest_reserved_cores={}",
+        "flush_budget generation={} reason={} scheduler={} decode={} sink_sessions={} upload_sessions={} multipart_parts={} catalog={} leftover_cores={}",
         state.current.generation,
         state.current.reason.as_str(),
         state.current.scheduler_jobs,
@@ -1014,7 +1010,14 @@ pub fn apply_env_caps() {
         state.current.upload_sessions,
         state.current.multipart_parts,
         state.current.catalog_operations,
-        state.current.ingest_reserved_cores,
+        leftover_compact_jobs(
+            FlushBudgetSignals {
+                mode: Some(FlushMode::Ingest),
+                active_ingest: 0,
+                ..FlushBudgetSignals::default()
+            },
+            state.caps,
+        ),
     );
 
     if let Ok(v) = Config::getenv("S3_DOWNLOAD_CONCURRENCY", "").parse::<usize>() {
@@ -1038,10 +1041,10 @@ pub fn current_flush_budget() -> FlushBudgetSnapshot {
 /// promptly. Compact CPU width is leftover cores (or the whole machine when
 /// ingest is idle / Drain / Paused), not an AIMD ramp.
 pub fn update_flush_budget(
-    mode: FlushMode,
     has_backlog: bool,
     ingest_sample: Option<(usize, usize)>,
 ) -> FlushBudgetSnapshot {
+    let mode = current_flush_mode();
     apply_env_caps();
     let totals = TelemetryTotals::capture();
     let now = Instant::now();
@@ -1175,7 +1178,7 @@ pub fn update_flush_budget(
             wal_write_bytes_per_sec,
         );
         info!(
-            "flush_budget generation={} reason={} pressure={} mode={:?} scheduler={}->{} decode={}->{} sink_sessions={}->{} upload_sessions={}->{} multipart_parts={}->{} catalog={}->{} leftover_cores={} ingest_reserved_cores={} quiet_streak={} cooldown={} backlog_grace={} active_ingest={} queued_ingest={} ready={} cpu_active_tasks={} run_queue={:?} rss_bytes={:?} total_memory_bytes={:?} available_memory_bytes={:?} decode_wait_ms={:?} sink_wait_ms={:?} upload_latency_ms={:?} sink_commit_ms={:?} oldest_sink_write_ms={:?} wal_pending={} wal_ack_ms={:?} source_bps={} wal_write_bps={} s3_retries={} s3_retry_ema_x100={} glue_retries={} glue_retry_ema_x100={}",
+            "flush_budget generation={} reason={} pressure={} mode={:?} scheduler={}->{} decode={}->{} sink_sessions={}->{} upload_sessions={}->{} multipart_parts={}->{} catalog={}->{} leftover_cores={} quiet_streak={} cooldown={} backlog_grace={} active_ingest={} queued_ingest={} ready={} cpu_active_tasks={} run_queue={:?} rss_bytes={:?} total_memory_bytes={:?} available_memory_bytes={:?} decode_wait_ms={:?} sink_wait_ms={:?} upload_latency_ms={:?} sink_commit_ms={:?} oldest_sink_write_ms={:?} wal_pending={} wal_ack_ms={:?} source_bps={} wal_write_bps={} s3_retries={} s3_retry_ema_x100={} glue_retries={} glue_retry_ema_x100={}",
             next.generation,
             next.reason.as_str(),
             pressure.as_str(),
@@ -1193,7 +1196,6 @@ pub fn update_flush_budget(
             previous.catalog_operations,
             next.catalog_operations,
             leftover_compact_jobs(signals, state.caps),
-            next.ingest_reserved_cores,
             state.policy.quiet_streak,
             state.policy.growth_cooldown_remaining,
             state.policy.backlog_grace_remaining,
@@ -1441,7 +1443,6 @@ mod tuning_tests {
             upload_sessions: 8,
             multipart_parts: 4,
             catalog_operations: 4,
-            ingest_reserved_cores: 16,
             generation: 10,
             reason: BudgetReason::Initial,
         }
@@ -1455,7 +1456,6 @@ mod tuning_tests {
             upload_sessions: 8,
             multipart_parts: 2,
             catalog_operations: 2,
-            ingest_reserved_cores: 4,
             generation: 10,
             reason: BudgetReason::Initial,
         }
@@ -1567,7 +1567,6 @@ mod tuning_tests {
             upload_sessions: 4,
             multipart_parts: 2,
             catalog_operations: 2,
-            ingest_reserved_cores: 16,
             generation: 1,
             reason: BudgetReason::EnvironmentCaps,
         }
@@ -1703,17 +1702,96 @@ mod tuning_tests {
         );
         assert_eq!(next.upload_sessions, caps.upload_sessions);
         assert_eq!(next.multipart_parts, caps.multipart_parts);
+        assert_eq!(next.sink_sessions, caps.sink_sessions);
+        assert_eq!(next.catalog_operations, caps.catalog_operations);
     }
 
     #[test]
-    fn drain_in_rss_dead_band_holds_scheduler() {
+    fn s3_retry_beats_wal_pressure_and_does_not_restore_dest_caps() {
         let before = current();
+        let mut signals = quiet_ingest();
+        signals.wal_writer_capacity = 8;
+        signals.wal_writer_pending = 8;
+        signals.s3_retries = 1;
+        let next = decide(before, caps(), signals);
+        assert_eq!(next.reason, BudgetReason::S3Retry);
+        assert_eq!(next.scheduler_jobs, (before.scheduler_jobs / 2).max(1));
+        assert_eq!(next.upload_sessions, (before.upload_sessions / 2).max(1));
+        assert_ne!(next.upload_sessions, caps().upload_sessions);
+    }
+
+    #[test]
+    fn cooldown_after_s3_holds_dest_even_when_wal_is_pressured() {
+        let caps = caps();
+        let quiet = quiet_ingest();
+        let mut retried = quiet;
+        retried.s3_retries = 1;
+        let (backed, policy) =
+            compute_flush_budget(current(), caps, retried, FlushBudgetPolicyState::default());
+        assert_eq!(backed.reason, BudgetReason::S3Retry);
+        let mut wal = quiet;
+        wal.wal_writer_capacity = 8;
+        wal.wal_writer_pending = 8;
+        let (held, _) = compute_flush_budget(backed, caps, wal, policy);
+        assert_eq!(held.upload_sessions, backed.upload_sessions);
+        assert_eq!(held.scheduler_jobs, backed.scheduler_jobs);
+        assert_ne!(held.reason, BudgetReason::IngestPressure);
+    }
+
+    #[test]
+    fn drain_without_backlog_takes_the_machine_not_idle() {
+        let caps = caps();
+        let mut signals = healthy_drain();
+        signals.has_backlog = false;
+        signals.scheduler_ready_depth = 0;
+        let next = decide(current(), caps, signals);
+        assert_eq!(next.scheduler_jobs, caps.scheduler_jobs);
+        assert_eq!(next.reason, BudgetReason::HealthyDrain);
+        assert_ne!(next.reason, BudgetReason::Idle);
+    }
+
+    #[test]
+    fn paused_takes_the_machine_in_one_tick() {
+        let caps = caps();
+        let mut signals = healthy_drain();
+        signals.mode = Some(FlushMode::Paused);
+        signals.active_ingest = 8;
+        let next = decide(current(), caps, signals);
+        assert_eq!(next.scheduler_jobs, caps.scheduler_jobs);
+        assert_eq!(next.decode_jobs, caps.decode_jobs);
+        assert_eq!(next.reason, BudgetReason::HealthyDrain);
+    }
+
+    #[test]
+    fn leftover_occupancy_without_run_queue_keeps_leftover_width() {
+        let caps = caps16();
+        let signals = FlushBudgetSignals {
+            mode: Some(FlushMode::Ingest),
+            has_backlog: true,
+            active_ingest: 2,
+            scheduler_ready_depth: 2490,
+            cpu_active_tasks: 16,
+            run_queue: None,
+            process_rss_bytes: Some(24 * GIB),
+            total_memory_bytes: Some(128 * GIB),
+            available_memory_bytes: Some(96 * GIB),
+            ..FlushBudgetSignals::default()
+        };
+        let next = decide(current16(), caps, signals);
+        assert_eq!(next.scheduler_jobs, 14);
+        assert_eq!(next.decode_jobs, 14);
+        assert_eq!(next.reason, BudgetReason::OpportunisticHeadroom);
+    }
+
+    #[test]
+    fn drain_in_rss_dead_band_still_takes_leftover_width() {
+        let caps = caps();
         let mut signals = healthy_drain();
         signals.process_rss_bytes = Some(90 * GIB);
         signals.available_memory_bytes = Some(38 * GIB);
-        let next = decide(before, caps(), signals);
-        assert_eq!(next.scheduler_jobs, before.scheduler_jobs);
-        assert_ne!(next.reason, BudgetReason::HealthyDrain);
+        let next = decide(current(), caps, signals);
+        assert_eq!(next.scheduler_jobs, caps.scheduler_jobs);
+        assert_eq!(next.reason, BudgetReason::HealthyDrain);
         assert_ne!(next.reason, BudgetReason::HighRss);
     }
 
@@ -1751,13 +1829,34 @@ mod tuning_tests {
     }
 
     #[test]
-    fn high_task_count_without_run_queue_uses_conservative_backoff() {
+    fn high_task_count_without_run_queue_takes_machine_on_drain() {
         let mut signals = healthy_drain();
         signals.cpu_active_tasks = 64;
         signals.run_queue = None;
-        let next = decide(current(), caps(), signals);
-        assert_eq!(next.scheduler_jobs, 4);
-        assert_eq!(next.reason, BudgetReason::CpuSaturated);
+        let caps = caps();
+        let next = decide(current(), caps, signals);
+        assert_eq!(next.scheduler_jobs, caps.scheduler_jobs);
+        assert_eq!(next.reason, BudgetReason::HealthyDrain);
+    }
+
+    #[test]
+    fn flush_mode_paused_wins_over_drain() {
+        assert_eq!(super::flush_mode(true, true), FlushMode::Paused);
+        assert_eq!(super::flush_mode(true, false), FlushMode::Paused);
+        assert_eq!(super::flush_mode(false, true), FlushMode::Drain);
+        assert_eq!(super::flush_mode(false, false), FlushMode::Ingest);
+    }
+
+    #[test]
+    #[serial]
+    fn current_flush_mode_follows_drain_flag() {
+        super::set_flush_drain(false);
+        crate::set_data_dir_ingest_paused(false);
+        assert_eq!(super::current_flush_mode(), FlushMode::Ingest);
+        super::set_flush_drain(true);
+        assert_eq!(super::current_flush_mode(), FlushMode::Drain);
+        super::set_flush_drain(false);
+        assert_eq!(super::current_flush_mode(), FlushMode::Ingest);
     }
 
     #[test]
@@ -1992,6 +2091,15 @@ mod tuning_tests {
         assert_eq!(caps.upload_sessions, 128);
         assert_eq!(caps.multipart_parts, 8);
         assert_eq!(caps.catalog_operations, 8);
-        assert_eq!(caps.ingest_reserved_cores, 16);
+    }
+
+    #[test]
+    fn seed_budget_starts_at_machine_width() {
+        let caps = caps();
+        let seed = super::seed_budget(caps);
+        assert_eq!(seed.scheduler_jobs, caps.scheduler_jobs);
+        assert_eq!(seed.decode_jobs, caps.decode_jobs);
+        assert_eq!(seed.upload_sessions, caps.upload_sessions);
+        assert_eq!(seed.reason, BudgetReason::EnvironmentCaps);
     }
 }

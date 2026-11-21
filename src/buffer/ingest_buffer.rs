@@ -8,8 +8,8 @@ use crate::buffer::compaction_progress::{
     GroupedCompactionTracker, WalCompactionCounterSnapshot,
 };
 use crate::buffer::compaction_scheduler::{
-    drive_work_conserving, CompactionCycleControl, CompactionPlanBatch, CompactorCommand,
-    SchedulableCompactionWork, BUDGET_RETUNE_INTERVAL,
+    accept_drain_and_stop, drive_work_conserving, CompactionCycleControl, CompactionPlanBatch,
+    CompactorCommand, SchedulableCompactionWork, BUDGET_RETUNE_INTERVAL,
 };
 use crate::buffer::compaction_transaction::{
     CompactionTransaction, CompactionTransactionState, SegmentSourceDescriptor, SinkRetrySemantics,
@@ -1667,7 +1667,7 @@ impl Buffers {
                     match cmd {
                         Some(CompactorCommand::Wake) => {}
                         Some(CompactorCommand::DrainAndStop(reply)) => {
-                            drain_reply = Some(reply);
+                            accept_drain_and_stop(reply, &mut drain_reply);
                         }
                         None => break,
                     }
@@ -1704,28 +1704,12 @@ impl Buffers {
         let ingest_paused = crate::data_dir_ingest_paused();
         let drain_requested = force;
         let force = force || ingest_paused;
-        let mode = if ingest_paused {
-            crate::ingest::tuner::FlushMode::Paused
-        } else if drain_requested {
-            crate::ingest::tuner::FlushMode::Drain
-        } else {
-            crate::ingest::tuner::FlushMode::Ingest
-        };
+        crate::ingest::tuner::set_flush_drain(drain_requested);
         let ready_work = compaction_index().reclaimable_slice_count(force, Self::now_secs());
         metrics_hot::set_compaction_planner_ready_work_count(ready_work);
-        let measured_backlog = force
-            || ready_work > 0
-            || crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
-                .load(std::sync::atomic::Ordering::Relaxed)
-                > 0
-            || crate::metrics::counters::COMPACTION_ACTIVE_JOBS
-                .load(std::sync::atomic::Ordering::Relaxed)
-                > 0
-            || crate::metrics::counters::COMPACTION_INFLIGHT_SLICE_COUNT
-                .load(std::sync::atomic::Ordering::Relaxed)
-                > 0;
+        let measured_backlog = force || Self::ingest_tick_has_flush_backlog();
         let capability = shared_output.capability();
-        let snapshot = crate::ingest::tuner::update_flush_budget(mode, measured_backlog, None);
+        let snapshot = crate::ingest::tuner::update_flush_budget(measured_backlog, None);
         let slot = FlushBudgetSlot::new(Arc::new(FlushExecutionBudget::from_snapshot(
             snapshot, capability,
         )));
@@ -1782,7 +1766,10 @@ impl Buffers {
             control.as_deref_mut(),
             BUDGET_RETUNE_INTERVAL,
             move || {
-                let snapshot = crate::ingest::tuner::update_flush_budget(mode, true, None);
+                let snapshot = crate::ingest::tuner::update_flush_budget(
+                    force || Self::ingest_tick_has_flush_backlog(),
+                    None,
+                );
                 let budget = Arc::new(FlushExecutionBudget::from_snapshot(snapshot, capability));
                 let limit = budget.scheduler_limit();
                 retune_slot.store(budget);

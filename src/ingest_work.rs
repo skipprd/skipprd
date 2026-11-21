@@ -3151,7 +3151,6 @@ impl Ingest {
                 let has_flush_backlog =
                     crate::buffer::ingest_buffer::Buffers::ingest_tick_has_flush_backlog();
                 crate::ingest::tuner::update_flush_budget(
-                    crate::ingest::tuner::FlushMode::Ingest,
                     has_flush_backlog,
                     Some((active, queued)),
                 );

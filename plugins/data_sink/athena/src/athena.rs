@@ -209,19 +209,6 @@ async fn acquire_glue_cp_permit() -> tokio::sync::OwnedSemaphorePermit {
 
 fn note_glue_transient_retry() {
     metrics_counters::add_glue_retry(1);
-    skippr_runtime_sdk::ingest::tuner::update_flush_budget(
-        skippr_runtime_sdk::ingest::tuner::FlushMode::Drain,
-        true,
-        None,
-    );
-}
-
-fn maybe_restore_glue_cp_target() {
-    skippr_runtime_sdk::ingest::tuner::update_flush_budget(
-        skippr_runtime_sdk::ingest::tuner::FlushMode::Drain,
-        true,
-        None,
-    );
 }
 
 #[derive(Debug, Deserialize, SkipprConfig, Clone, PartialEq, Eq)]
@@ -1787,7 +1774,6 @@ impl AwsAthena {
         loop {
             match op().await {
                 Ok(v) => {
-                    maybe_restore_glue_cp_target();
                     return Ok(v);
                 }
                 Err(e) => {

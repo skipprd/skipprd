@@ -435,7 +435,6 @@ impl Metrics {
             "upload_sessions": flush_budget.upload_sessions,
             "multipart_parts": flush_budget.multipart_parts,
             "catalog_operations": flush_budget.catalog_operations,
-            "ingest_reserved_cores": flush_budget.ingest_reserved_cores,
             "pressure_class": match counters::FLUSH_BUDGET_PRESSURE_CLASS.load(Ordering::Relaxed) {
                 0 => "quiet",
                 2 => "pressured",

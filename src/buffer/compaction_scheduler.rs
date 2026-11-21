@@ -14,6 +14,18 @@ pub(crate) enum CompactorCommand {
     DrainAndStop(tokio::sync::oneshot::Sender<bool>),
 }
 
+pub(crate) fn accept_drain_and_stop(
+    reply: tokio::sync::oneshot::Sender<bool>,
+    drain_reply: &mut Option<tokio::sync::oneshot::Sender<bool>>,
+) {
+    crate::ingest::tuner::set_flush_drain(true);
+    if drain_reply.is_none() {
+        *drain_reply = Some(reply);
+    } else {
+        let _ = reply.send(false);
+    }
+}
+
 pub(crate) trait SchedulableCompactionWork {
     fn lane(&self) -> CompactionLaneKey;
 }
@@ -34,11 +46,7 @@ impl CompactionCycleControl<'_> {
         match command {
             Some(CompactorCommand::Wake) => {}
             Some(CompactorCommand::DrainAndStop(reply)) => {
-                if self.drain_reply.is_none() {
-                    *self.drain_reply = Some(reply);
-                } else {
-                    let _ = reply.send(false);
-                }
+                accept_drain_and_stop(reply, self.drain_reply);
             }
             None => *self.stop_requested = true,
         }

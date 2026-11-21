@@ -209,7 +209,7 @@ While a minimum is stored, compaction must not remove or compact a WAL segment u
 
 There is exactly one data source plugin and one data sync at a time. Batches are integer batches from that plugin.
 
-The compactor runs many threads inside that one sync. `scheduler_jobs` is `2 × CPUs`, clamped from 2 to 128. While ingest is running the safe cap starts at 2. Sink sessions are about 2 to 16.
+The compactor runs many threads inside that one sync. `scheduler_jobs` is leftover cores while ingest is busy (`max(1, CPUs − active_ingest)`), or `2 × CPUs` (clamped 2 to 128) when ingest is idle, Drain, or Paused. Dest upload and multipart stay at machine caps unless a safeguard fires. Sink sessions are about 2 to 16.
 
 A lane is `(sink, namespace)`. A second job on that lane is not refused. `blocked_lanes` is only set after a failure. Two slices of one namespace can compact at the same time. The side file is 256 shards by key hash, so two keys, or the same key in two slices, can hit one shard. They share it by version, in [Side-file versions](#side-file-versions).
 

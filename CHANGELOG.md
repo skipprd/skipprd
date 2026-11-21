@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- Flush compact width is leftover cores (or the whole machine when ingest is idle, Drain, or `--once`). Dest upload/multipart stay at cap while ingest is busy. A full COPY queue is not ingest pressure.
+- Flush compact width is leftover cores (or the whole machine when ingest is idle, Drain, or `--once`) on that tick. Dest upload/multipart stay at cap while ingest is busy. A full COPY queue is not ingest pressure. RSS / run-queue / S3-retry still half the current budget; leftover occupancy is not CPU saturation.
 
 ## [16.0.10] - 2026-11-20
 
