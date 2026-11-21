@@ -739,16 +739,18 @@ def _java_ddb_local_available() -> bool:
 
 
 def docker_available() -> bool:
-    try:
-        subprocess.run(
-            ["docker", "info"],
-            capture_output=True,
-            check=True,
-            timeout=8,
-        )
-        return True
-    except Exception:
-        return False
+    for _attempt in range(3):
+        try:
+            subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                check=True,
+                timeout=8,
+            )
+            return True
+        except Exception:
+            continue
+    return False
 
 
 DDB_EVENT_TS_DAY_A = 1_700_000_000

@@ -385,6 +385,7 @@ class PerfDbRunnerContractTests(unittest.TestCase):
         docker_probe = text.split("def docker_available")[1].split("def ")[0]
         self.assertIn("timeout=8", docker_probe)
         self.assertNotIn("range(5)", docker_probe)
+        self.assertIn("range(3)", docker_probe)
         self.assertIn("follow ingest exited rc=", text)
         self.assertNotIn("CLUSTER_TENANT", text)
         self.assertIn("seconds=90", ingest)
