@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Flush compact width is leftover cores (or the whole machine when ingest is idle, Drain, or `--once`). Dest upload/multipart stay at cap while ingest is busy. A full COPY queue is not ingest pressure.
+
 ## [16.0.10] - 2026-11-20
 
 ### Changed
